@@ -1,0 +1,14 @@
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Python / Env
+.venv/
+__pycache__/
+
+# Large media testing files
+*.dng
+*.arw
+node_modules
