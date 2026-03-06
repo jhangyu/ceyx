@@ -48,12 +48,38 @@ add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
 target_include_directories(dng_decoder_native PUBLIC ${INC_DIR})
 target_link_libraries(dng_decoder_native dng_sdk)
 
-# Halide setup — link the full Halide library for JIT
 set(HALIDE_DIR ${THIRD_PARTY_DIR}/halide)
 list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
 find_package(Halide REQUIRED)
+
+# AOT Generator for Halide Pipeline
+add_executable(dng_generator ${SRC_DIR}/DngHalideGenerator.cpp)
+target_include_directories(dng_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_generator PRIVATE Halide::Generator)
+
+set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
+file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
+
+if(APPLE)
+    set(AOT_TARGET "host-metal")
+else()
+    set(AOT_TARGET "host")
+endif()
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_pipeline.h
+    COMMAND dng_generator -g dng_pipeline -f dng_pipeline -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
+    DEPENDS dng_generator
+    COMMENT "Generating Halide AOT Pipeline..."
+)
+add_custom_target(dng_halide_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_pipeline.a)
+
+target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
+add_dependencies(dng_decoder_native dng_halide_aot_target)
+
+# Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
-target_link_libraries(dng_decoder_native Halide::Halide)
+target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a)
 
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
@@ -63,8 +89,8 @@ if(APPLE)
     target_link_libraries(dng_decoder_native
         ${COREFOUNDATION_LIBRARY}
         ${CORESERVICES_LIBRARY}
-        ${METAL_LIBRARY}        # Phase 6.3: Required for Halide Metal GPU backend
-        ${FOUNDATION_LIBRARY}  # Phase 6.3: Required for Halide Metal GPU backend
+        ${METAL_LIBRARY}        # Required for Halide Metal GPU backend
+        ${FOUNDATION_LIBRARY}   # Required for Halide Metal GPU backend
     )
 
     set_target_properties(dng_decoder_native PROPERTIES

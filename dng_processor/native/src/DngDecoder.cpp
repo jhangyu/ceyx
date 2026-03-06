@@ -17,6 +17,22 @@
 #include <dng_xmp.h>
 #include <iostream>
 
+/*
+---
+file_summary: "Native DNG 檔案解析核心，使用 Adobe DNG SDK 進行解壓縮與 Metadata
+提取" modules:
+  - name: "Helper Functions"
+    description: "XMP 參數解析與 HubSatMap 結構轉換"
+    lines: "20-104"
+  - name: "DngDecoder::Impl"
+    description: "核心解碼類別，執行 C++ DNG SDK API 讀取"
+    lines: "106-345"
+  - name: "DngDecoder (Public API)"
+    description: "DngDecoder 共用介面定義"
+    lines: "347-362"
+---
+*/
+
 // ---------------------------------------------------------------------------
 // Phase 5.1: Parse a float crs:Key value from raw XMP string.
 // Handles two XMP serialisation formats:

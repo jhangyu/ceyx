@@ -1,0 +1,459 @@
+#include "Halide.h"
+#include <algorithm>
+#include <cmath>
+
+using namespace Halide;
+
+class DngPipeline : public Halide::Generator<DngPipeline> {
+public:
+  Input<Buffer<uint16_t>> rawParam{"rawParam", 2}; // 16-bit CFA array
+  Input<float> pBl{"pBl"};
+  Input<float> pRange{"pRange"};
+  Input<float> pM00{"pM00"}, pM01{"pM01"}, pM02{"pM02"};
+  Input<float> pM10{"pM10"}, pM11{"pM11"}, pM12{"pM12"};
+  Input<float> pM20{"pM20"}, pM21{"pM21"}, pM22{"pM22"};
+  Input<float> pExpGain{"pExpGain"};
+
+  // Phase 6.2 Option 2 Inputs
+  Input<bool> hasHSM{"hasHSM"};
+  Input<bool> hasLT{"hasLT"};
+  Input<bool> hasTC{"hasTC"};
+  Input<bool> hasLR{"hasLR"};
+
+  Input<Buffer<float>> hsmParam{"hsmParam", 4}; // [c, s, h, v]
+  Input<Buffer<float>> ltParam{"ltParam", 4};   // [c, s, h, v]
+  Input<Buffer<float>> tcParam{"tcParam", 1};   // [x]
+
+  Input<int> hsmHD{"hsmHD"}, hsmSD{"hsmSD"}, hsmVD{"hsmVD"};
+  Input<int> ltHD{"ltHD"}, ltSD{"ltSD"}, ltVD{"ltVD"};
+
+  Input<float> lrExpGain{"lrExpGain"};
+  Input<float> lrContrastFactor{"lrContrastFactor"};
+  Input<float> lrSat{"lrSat"};
+  Input<float> lrVib{"lrVib"};
+
+  Output<Buffer<uint8_t>> exposed{"exposed", 3};
+
+  // Internal Funcs
+  Func linearised, clamped;
+  Func g_h, g_v, r_h, b_h, r_v, b_v;
+  Func lum_h, lum_v, homo_h, homo_v, sum_homo_h, sum_homo_v;
+  Func demosaic, diff_r, diff_b, refined_r, refined_b;
+  Func color_corrected, exp_gain_applied;
+  Func hsm_applied, lt_applied, tc_applied, lr_applied;
+
+  void emit_rgb2hsv(Expr r, Expr g, Expr b, Expr &h, Expr &s, Expr &v) {
+    Expr max_c = max(r, max(g, b));
+    Expr min_c = min(r, min(g, b));
+    Expr d = max_c - min_c;
+    v = max_c;
+    s = select(max_c < 1e-6f, 0.0f, d / max_c);
+
+    Expr h_expr = select(d < 1e-6f, 0.0f, max_c == r,
+                         (g - b) / d + select(g < b, 6.0f, 0.0f), max_c == g,
+                         (b - r) / d + 2.0f, (r - g) / d + 4.0f) /
+                  6.0f;
+    h = h_expr;
+  }
+
+  void emit_hsv2rgb(Expr h, Expr s, Expr v, Expr &r, Expr &g, Expr &b) {
+    Expr i = cast<int>(floor(h * 6.0f));
+    Expr f = h * 6.0f - floor(h * 6.0f);
+    Expr p = v * (1.0f - s);
+    Expr q = v * (1.0f - f * s);
+    Expr t = v * (1.0f - (1.0f - f) * s);
+
+    Expr i_mod = i % 6;
+    r = select(i_mod == 0, v, i_mod == 1, q, i_mod == 2, p, i_mod == 3, p,
+               i_mod == 4, t, v);
+    g = select(i_mod == 0, t, i_mod == 1, v, i_mod == 2, v, i_mod == 3, q,
+               i_mod == 4, p, p);
+    b = select(i_mod == 0, p, i_mod == 1, p, i_mod == 2, t, i_mod == 3, v,
+               i_mod == 4, v, q);
+  }
+
+  Func apply_3dlut(Func input, Input<Buffer<float>> &lut, Expr hD, Expr sD,
+                   Expr vD, Expr has_lut, std::string name) {
+    Var x("x"), y("y"), c("c");
+    Func out(name);
+
+    Expr r = input(x, y, 0);
+    Expr g = input(x, y, 1);
+    Expr b = input(x, y, 2);
+
+    Expr h, s, v;
+    emit_rgb2hsv(r, g, b, h, s, v);
+
+    Expr h_max = lut.dim(2).extent() - 1;
+    Expr s_max = lut.dim(1).extent() - 1;
+    Expr v_max = lut.dim(3).extent() - 1;
+
+    Expr hScale = cast<float>(h_max + 1);
+    Expr sScale = cast<float>(s_max);
+    Expr vScale = cast<float>(v_max);
+
+    Expr hf_raw = h * hScale;
+    Expr hf = hf_raw - floor(hf_raw / hScale) * hScale;
+    Expr sf = clamp(s * sScale, 0.0f, sScale);
+    Expr vf = clamp(v * vScale, 0.0f, vScale);
+
+    Expr h0 = clamp(cast<int>(hf), 0, h_max);
+    Expr h1 = clamp((h0 + 1) % (h_max + 1), 0, h_max);
+    Expr s0 = clamp(cast<int>(sf), 0, s_max);
+    Expr s1 = clamp(s0 + 1, 0, s_max);
+    Expr v0 = clamp(cast<int>(vf), 0, v_max);
+    Expr v1 = clamp(v0 + 1, 0, v_max);
+
+    Expr hfrac = hf - cast<float>(h0);
+    Expr sfrac = sf - cast<float>(s0);
+    Expr vfrac = vf - cast<float>(v0);
+
+    auto lerp_lut = [&](Expr c_idx_in) {
+      Expr c_idx = clamp(c_idx_in, 0, lut.dim(0).extent() - 1);
+      Expr c000 = lut(c_idx, s0, h0, v0), c001 = lut(c_idx, s1, h0, v0);
+      Expr c010 = lut(c_idx, s0, h1, v0), c011 = lut(c_idx, s1, h1, v0);
+      Expr c100 = lut(c_idx, s0, h0, v1), c101 = lut(c_idx, s1, h0, v1);
+      Expr c110 = lut(c_idx, s0, h1, v1), c111 = lut(c_idx, s1, h1, v1);
+
+      Expr c00 = c000 + vfrac * (c100 - c000);
+      Expr c01 = c001 + vfrac * (c101 - c001);
+      Expr c10 = c010 + vfrac * (c110 - c010);
+      Expr c11 = c011 + vfrac * (c111 - c011);
+
+      Expr c0 = c00 + hfrac * (c10 - c00);
+      Expr c1 = c01 + hfrac * (c11 - c01);
+
+      return c0 + sfrac * (c1 - c0);
+    };
+
+    Expr hShift = lerp_lut(0);
+    Expr sScaleV = lerp_lut(1);
+    Expr vScaleV = lerp_lut(2);
+
+    Expr newH = h + hShift / 360.0f;
+    newH = newH - floor(newH);
+    Expr newS = clamp(s * sScaleV, 0.0f, 1.0f);
+    Expr newV = clamp(v * vScaleV, 0.0f, 1.0f);
+
+    Expr r_out, g_out, b_out;
+    emit_hsv2rgb(newH, newS, newV, r_out, g_out, b_out);
+
+    Expr s_is_zero = (s < 1e-6f);
+    out(x, y, c) = select(!has_lut || s_is_zero, input(x, y, c), c == 0, r_out,
+                          c == 1, g_out, b_out);
+    return out;
+  }
+
+  Func apply_tone_curve(Func input, Input<Buffer<float>> &tc, Expr hasTC,
+                        std::string name) {
+    Var x("x"), y("y"), c("c");
+    Func out(name);
+    Expr val = input(x, y, c);
+    Expr index = clamp(cast<int>(val * 4095.0f), 0, 4095);
+    Expr safe_index = clamp(index, 0, tc.dim(0).extent() - 1);
+    out(x, y, c) = select(hasTC, tc(safe_index), val);
+    return out;
+  }
+
+  Func apply_lr_params(Func input, Expr hasLR, Expr lrExpGain,
+                       Expr lrContrastFactor, Expr lrSat, Expr lrVib,
+                       std::string name) {
+    Var x("x"), y("y"), c("c");
+    Func out(name);
+
+    Expr r = input(x, y, 0);
+    Expr g = input(x, y, 1);
+    Expr b = input(x, y, 2);
+
+    Expr h, s, v;
+    emit_rgb2hsv(r, g, b, h, s, v);
+
+    // Exposure
+    Expr v_exp = clamp(v * lrExpGain, 0.0f, 1.0f);
+
+    // Saturation and Vibrance
+    Expr s_valid = (s > 1e-6f);
+    Expr s_sat = select(lrSat > 0.0f, min(s + lrSat * s * (1.0f - s), 1.0f),
+                        max(s * (1.0f + lrSat), 0.0f));
+    Expr boost = lrVib * (1.0f - s_sat * s_sat);
+    Expr s_vib = clamp(s_sat + boost, 0.0f, 1.0f);
+    Expr s_final = select(s_valid, s_vib, s);
+
+    Expr r_out, g_out, b_out;
+    emit_hsv2rgb(h, s_final, v_exp, r_out, g_out, b_out);
+
+    // Contrast
+    auto apply_contrast = [&](Expr val) -> Expr {
+      return clamp(0.5f + (val - 0.5f) * lrContrastFactor, 0.0f, 1.0f);
+    };
+
+    r_out = apply_contrast(r_out);
+    g_out = apply_contrast(g_out);
+    b_out = apply_contrast(b_out);
+
+    out(x, y, c) = select(hasLR, select(c == 0, r_out, c == 1, g_out, b_out),
+                          input(x, y, c));
+    return out;
+  }
+
+  Func apply_gamma(Func input, std::string name) {
+    Var x("x"), y("y"), c("c");
+    Func out(name);
+    Expr val = input(x, y, c);
+    Expr gamma = select(val < 0.0031308f, 12.92f * val,
+                        1.055f * pow(val, 1.0f / 2.4f) - 0.055f);
+    Expr final_val = clamp(gamma * 255.0f + 0.5f, 0.0f, 255.0f);
+    out(x, y, c) = cast<uint8_t>(final_val);
+    return out;
+  }
+
+  void generate() {
+    Var x("x"), y("y"), c("c");
+
+    linearised = Func("linearised");
+    Expr raw_f = cast<float>(rawParam(x, y));
+    linearised(x, y) = clamp((raw_f - pBl) / pRange, 0.0f, 1.0f);
+
+    clamped = BoundaryConditions::repeat_edge(
+        linearised, {{0, rawParam.width()}, {0, rawParam.height()}});
+
+    Expr px = x % 2;
+    Expr py = y % 2;
+
+    g_h = Func("g_h");
+    Expr is_G = ((px + py) == 1);
+    Expr g_horiz =
+        (clamped(x - 1, y) + clamped(x + 1, y)) / 2.0f +
+        (clamped(x, y) - (clamped(x - 2, y) + clamped(x + 2, y)) / 2.0f) / 2.0f;
+    g_h(x, y) = select(is_G, clamped(x, y), clamp(g_horiz, 0.0f, 1.0f));
+
+    g_v = Func("g_v");
+    Expr g_vert =
+        (clamped(x, y - 1) + clamped(x, y + 1)) / 2.0f +
+        (clamped(x, y) - (clamped(x, y - 2) + clamped(x, y + 2)) / 2.0f) / 2.0f;
+    g_v(x, y) = select(is_G, clamped(x, y), clamp(g_vert, 0.0f, 1.0f));
+
+    r_h = Func("r_h");
+    b_h = Func("b_h");
+    Expr r_at_R = clamped(x, y);
+    Expr r_at_Gr_h = (clamped(x - 1, y) + clamped(x + 1, y)) / 2.0f +
+                     (g_h(x, y) - (g_h(x - 1, y) + g_h(x + 1, y)) / 2.0f);
+    Expr r_at_Gb_h = (clamped(x, y - 1) + clamped(x, y + 1)) / 2.0f +
+                     (g_h(x, y) - (g_h(x, y - 1) + g_h(x, y + 1)) / 2.0f);
+    Expr r_at_B_h = (clamped(x - 1, y - 1) + clamped(x + 1, y - 1) +
+                     clamped(x - 1, y + 1) + clamped(x + 1, y + 1)) /
+                        4.0f +
+                    (g_h(x, y) - (g_h(x - 1, y - 1) + g_h(x + 1, y - 1) +
+                                  g_h(x - 1, y + 1) + g_h(x + 1, y + 1)) /
+                                     4.0f);
+    r_h(x, y) =
+        clamp(select(px == 0 && py == 0, r_at_R, px == 1 && py == 0, r_at_Gr_h,
+                     px == 0 && py == 1, r_at_Gb_h, r_at_B_h),
+              0.0f, 1.0f);
+
+    Expr b_at_B = clamped(x, y);
+    Expr b_at_Gb_h = (clamped(x - 1, y) + clamped(x + 1, y)) / 2.0f +
+                     (g_h(x, y) - (g_h(x - 1, y) + g_h(x + 1, y)) / 2.0f);
+    Expr b_at_Gr_h = (clamped(x, y - 1) + clamped(x, y + 1)) / 2.0f +
+                     (g_h(x, y) - (g_h(x, y - 1) + g_h(x, y + 1)) / 2.0f);
+    Expr b_at_R_h = (clamped(x - 1, y - 1) + clamped(x + 1, y - 1) +
+                     clamped(x - 1, y + 1) + clamped(x + 1, y + 1)) /
+                        4.0f +
+                    (g_h(x, y) - (g_h(x - 1, y - 1) + g_h(x + 1, y - 1) +
+                                  g_h(x - 1, y + 1) + g_h(x + 1, y + 1)) /
+                                     4.0f);
+    b_h(x, y) =
+        clamp(select(px == 1 && py == 1, b_at_B, px == 0 && py == 1, b_at_Gb_h,
+                     px == 1 && py == 0, b_at_Gr_h, b_at_R_h),
+              0.0f, 1.0f);
+
+    r_v = Func("r_v");
+    b_v = Func("b_v");
+    Expr r_at_Gr_v = (clamped(x, y - 1) + clamped(x, y + 1)) / 2.0f +
+                     (g_v(x, y) - (g_v(x, y - 1) + g_v(x, y + 1)) / 2.0f);
+    Expr r_at_Gb_v = (clamped(x - 1, y) + clamped(x + 1, y)) / 2.0f +
+                     (g_v(x, y) - (g_v(x - 1, y) + g_v(x + 1, y)) / 2.0f);
+    Expr r_at_B_v = (clamped(x - 1, y - 1) + clamped(x + 1, y - 1) +
+                     clamped(x - 1, y + 1) + clamped(x + 1, y + 1)) /
+                        4.0f +
+                    (g_v(x, y) - (g_v(x - 1, y - 1) + g_v(x + 1, y - 1) +
+                                  g_v(x - 1, y + 1) + g_v(x + 1, y + 1)) /
+                                     4.0f);
+    r_v(x, y) =
+        clamp(select(px == 0 && py == 0, r_at_R, px == 1 && py == 0, r_at_Gr_v,
+                     px == 0 && py == 1, r_at_Gb_v, r_at_B_v),
+              0.0f, 1.0f);
+
+    Expr b_at_Gb_v = (clamped(x, y - 1) + clamped(x, y + 1)) / 2.0f +
+                     (g_v(x, y) - (g_v(x, y - 1) + g_v(x, y + 1)) / 2.0f);
+    Expr b_at_Gr_v = (clamped(x - 1, y) + clamped(x + 1, y)) / 2.0f +
+                     (g_v(x, y) - (g_v(x - 1, y) + g_v(x + 1, y)) / 2.0f);
+    Expr b_at_R_v = (clamped(x - 1, y - 1) + clamped(x + 1, y - 1) +
+                     clamped(x - 1, y + 1) + clamped(x + 1, y + 1)) /
+                        4.0f +
+                    (g_v(x, y) - (g_v(x - 1, y - 1) + g_v(x + 1, y - 1) +
+                                  g_v(x - 1, y + 1) + g_v(x + 1, y + 1)) /
+                                     4.0f);
+    b_v(x, y) =
+        clamp(select(px == 1 && py == 1, b_at_B, px == 0 && py == 1, b_at_Gb_v,
+                     px == 1 && py == 0, b_at_Gr_v, b_at_R_v),
+              0.0f, 1.0f);
+
+    lum_h = Func("lum_h");
+    lum_v = Func("lum_v");
+    lum_h(x, y) = 0.299f * r_h(x, y) + 0.587f * g_h(x, y) + 0.114f * b_h(x, y);
+    lum_v(x, y) = 0.299f * r_v(x, y) + 0.587f * g_v(x, y) + 0.114f * b_v(x, y);
+
+    homo_h = Func("homo_h");
+    homo_v = Func("homo_v");
+    Expr lh_c = lum_h(x, y);
+    Expr lv_c = lum_v(x, y);
+    auto countH = [&](int dx, int dy) -> Expr {
+      return cast<float>(abs(lh_c - lum_h(x + dx, y + dy)) <
+                         abs(lv_c - lum_v(x + dx, y + dy)));
+    };
+    auto countV = [&](int dx, int dy) -> Expr {
+      return cast<float>(abs(lv_c - lum_v(x + dx, y + dy)) <
+                         abs(lh_c - lum_h(x + dx, y + dy)));
+    };
+    homo_h(x, y) = countH(-1, 0) + countH(1, 0) + countH(0, -1) + countH(0, 1) +
+                   countH(-1, -1) + countH(1, -1) + countH(-1, 1) +
+                   countH(1, 1);
+    homo_v(x, y) = countV(-1, 0) + countV(1, 0) + countV(0, -1) + countV(0, 1) +
+                   countV(-1, -1) + countV(1, -1) + countV(-1, 1) +
+                   countV(1, 1);
+
+    sum_homo_h = Func("sum_homo_h");
+    sum_homo_v = Func("sum_homo_v");
+    Expr sh = cast<float>(0), sv = cast<float>(0);
+    for (int dy = -1; dy <= 1; dy++)
+      for (int dx = -1; dx <= 1; dx++) {
+        sh += homo_h(x + dx, y + dy);
+        sv += homo_v(x + dx, y + dy);
+      }
+    sum_homo_h(x, y) = sh;
+    sum_homo_v(x, y) = sv;
+
+    demosaic = Func("demosaic");
+    demosaic(x, y, c) =
+        select(sum_homo_h(x, y) > sum_homo_v(x, y),
+               select(c == 0, r_h(x, y), c == 1, g_h(x, y), b_h(x, y)),
+               select(c == 0, r_v(x, y), c == 1, g_v(x, y), b_v(x, y)));
+
+    diff_r = Func("diff_r");
+    diff_b = Func("diff_b");
+    diff_r(x, y) = demosaic(x, y, 0) - demosaic(x, y, 1);
+    diff_b(x, y) = demosaic(x, y, 2) - demosaic(x, y, 1);
+
+    auto med3 = [](Expr a, Expr b, Expr c) {
+      return max(min(a, b), min(max(a, b), c));
+    };
+    auto med5 = [&](Expr a, Expr b, Expr c, Expr d, Expr e) {
+      return med3(max(min(a, b), min(c, d)), min(max(a, b), max(c, d)), e);
+    };
+
+    refined_r = Func("refined_r");
+    refined_b = Func("refined_b");
+    refined_r(x, y) =
+        clamp(med5(diff_r(x, y), diff_r(x - 1, y), diff_r(x + 1, y),
+                   diff_r(x, y - 1), diff_r(x, y + 1)) +
+                  demosaic(x, y, 1),
+              0.0f, 1.0f);
+    refined_b(x, y) =
+        clamp(med5(diff_b(x, y), diff_b(x - 1, y), diff_b(x + 1, y),
+                   diff_b(x, y - 1), diff_b(x, y + 1)) +
+                  demosaic(x, y, 1),
+              0.0f, 1.0f);
+
+    color_corrected = Func("color_corrected");
+    Expr dr = refined_r(x, y);
+    Expr dg = demosaic(x, y, 1);
+    Expr db = refined_b(x, y);
+    color_corrected(x, y, c) =
+        clamp(select(c == 0, dr * pM00 + dg * pM01 + db * pM02, c == 1,
+                     dr * pM10 + dg * pM11 + db * pM12,
+                     dr * pM20 + dg * pM21 + db * pM22),
+              0.0f, 1.0f);
+
+    exp_gain_applied = Func("exp_gain_applied");
+    exp_gain_applied(x, y, c) =
+        clamp(color_corrected(x, y, c) * pExpGain, 0.0f, 1.0f);
+
+    hsm_applied = apply_3dlut(exp_gain_applied, hsmParam, hsmHD, hsmSD, hsmVD,
+                              hasHSM, "hsm_applied");
+    lt_applied = apply_3dlut(hsm_applied, ltParam, ltHD, ltSD, ltVD, hasLT,
+                             "lt_applied");
+    tc_applied = apply_tone_curve(lt_applied, tcParam, hasTC, "tc_applied");
+    lr_applied = apply_lr_params(tc_applied, hasLR, lrExpGain, lrContrastFactor,
+                                 lrSat, lrVib, "lr_applied");
+
+    exposed = apply_gamma(lr_applied, "exposed");
+  }
+
+  void schedule() {
+    Var x("x"), y("y"), c("c");
+
+    exposed.dim(0).set_stride(4);
+    exposed.dim(2).set_stride(1);
+
+    if (get_target().has_gpu_feature()) {
+      Var xo("xo"), xi("xi"), yo("yo"), yi("yi");
+
+      exposed.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+
+      lr_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      tc_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      lt_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      hsm_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      exp_gain_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+
+      color_corrected.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+
+      linearised.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      g_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      g_v.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      r_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      b_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      r_v.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      b_v.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      demosaic.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      refined_r.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      refined_b.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+    } else {
+      Var yo("yo"), yi("yi");
+      exposed.split(y, yo, yi, 64).parallel(yo).vectorize(x, 8);
+
+      exp_gain_applied.compute_at(exposed, yo).vectorize(x, 8);
+      hsm_applied.compute_at(exposed, yo).vectorize(x, 8);
+      lt_applied.compute_at(exposed, yo).vectorize(x, 8);
+      tc_applied.compute_at(exposed, yo).vectorize(x, 8);
+      lr_applied.compute_at(exposed, yo).vectorize(x, 8);
+
+      refined_r.compute_at(exposed, yo).vectorize(x, 8);
+      refined_b.compute_at(exposed, yo).vectorize(x, 8);
+      diff_r.compute_at(exposed, yo).vectorize(x, 8);
+      diff_b.compute_at(exposed, yo).vectorize(x, 8);
+
+      demosaic.compute_at(exposed, yo).vectorize(x, 8);
+
+      sum_homo_h.compute_at(exposed, yo).vectorize(x, 8);
+      sum_homo_v.compute_at(exposed, yo).vectorize(x, 8);
+      homo_h.compute_at(exposed, yo).vectorize(x, 8);
+      homo_v.compute_at(exposed, yo).vectorize(x, 8);
+
+      lum_h.compute_at(exposed, yo).vectorize(x, 8);
+      lum_v.compute_at(exposed, yo).vectorize(x, 8);
+      r_h.compute_at(exposed, yo).vectorize(x, 8);
+      b_h.compute_at(exposed, yo).vectorize(x, 8);
+      r_v.compute_at(exposed, yo).vectorize(x, 8);
+      b_v.compute_at(exposed, yo).vectorize(x, 8);
+      g_h.compute_at(exposed, yo).vectorize(x, 8);
+      g_v.compute_at(exposed, yo).vectorize(x, 8);
+
+      color_corrected.compute_at(exposed, yo).vectorize(x, 8);
+      linearised.compute_at(exposed, yo).vectorize(x, 8);
+    }
+  }
+};
+
+HALIDE_REGISTER_GENERATOR(DngPipeline, dng_pipeline)

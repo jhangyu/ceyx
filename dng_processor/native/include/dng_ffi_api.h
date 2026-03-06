@@ -24,6 +24,10 @@ DngResult *dng_decode_and_process(const char *file_path);
 /// Free a DngResult previously returned by dng_decode_and_process.
 void dng_free_result(DngResult *result);
 
+/// Free a standalone memory buffer allocated by Halide / Native pipeline.
+/// Used for zero-copy memory management from Dart via NativeFinalizer.
+void dng_free_halide_buffer(void *ptr);
+
 #ifdef __cplusplus
 }
 #endif

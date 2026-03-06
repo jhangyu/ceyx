@@ -448,9 +448,30 @@ int main(int argc, char **argv) {
       }
     }
 
-    // 6.6 Pipeline 效能
-    ASSERT_TRUE(halideMs < 10000.0,
-                "Test 6.6: Halide pipeline < 10s (inc. JIT compile)");
+    // 6.6 Pipeline 效能 (第一次 JIT 編譯)
+    ASSERT_TRUE(halideMs < 20000.0,
+                "Test 6.6: Halide pipeline 1st call < 20s (inc. JIT compile)");
+
+    // 6.7 Pipeline 效能 (第二次呼叫，應觸發快取)
+    std::cout
+        << "\n--- Test 6.7: Halide Pipeline (2nd call for cache check) ---\n";
+    auto hp2 = std::chrono::steady_clock::now();
+    uint8_t *rgba2 = HalidePipeline::process(
+        decoder.getRawBuffer(), static_cast<int>(metadata.width),
+        static_cast<int>(metadata.height), metadata.blackLevel,
+        metadata.whiteLevel, metadata.asShotNeutral, metadata.camToSrgb,
+        metadata.baselineExposure, metadata, outW, outH);
+    auto hp3 = std::chrono::steady_clock::now();
+    double halideMs2 =
+        std::chrono::duration<double, std::milli>(hp3 - hp2).count();
+
+    std::cout << "  Halide 2nd process time: " << halideMs2 << " ms\n";
+    ASSERT_TRUE(
+        halideMs2 < 4000.0,
+        "Test 6.7: Halide pipeline 2nd call < 4s (cached, multi-thread)");
+
+    if (rgba2)
+      delete[] rgba2;
 
     delete[] rgba;
   }

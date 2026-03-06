@@ -63,11 +63,20 @@ DngResult *dng_decode_and_process(const char *file_path) {
 void dng_free_result(DngResult *result) {
   if (!result)
     return;
+  // NOTE: If rgba_data is transferred to zero-copy in Dart, it might be null
+  // here
   if (result->rgba_data) {
     delete[] result->rgba_data;
     result->rgba_data = nullptr;
   }
   std::free(result);
+}
+
+void dng_free_halide_buffer(void *ptr) {
+  if (!ptr)
+    return;
+  // The buffer was allocated via `new uint8_t[]` in HalidePipeline::process
+  delete[] static_cast<uint8_t *>(ptr);
 }
 
 } // extern "C"
