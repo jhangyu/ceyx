@@ -58,13 +58,21 @@ target_link_libraries(dng_decoder_native Halide::Halide)
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
     find_library(CORESERVICES_LIBRARY CoreServices)
-    target_link_libraries(dng_decoder_native ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+    find_library(METAL_LIBRARY Metal)
+    find_library(FOUNDATION_LIBRARY Foundation)
+    target_link_libraries(dng_decoder_native
+        ${COREFOUNDATION_LIBRARY}
+        ${CORESERVICES_LIBRARY}
+        ${METAL_LIBRARY}        # Phase 6.3: Required for Halide Metal GPU backend
+        ${FOUNDATION_LIBRARY}  # Phase 6.3: Required for Halide Metal GPU backend
+    )
 
     set_target_properties(dng_decoder_native PROPERTIES
         FRAMEWORK FALSE
         MACOSX_RPATH TRUE
     )
 endif()
+
 
 # Test application
 add_executable(test_dng_decoder tests/test_main.cpp)
