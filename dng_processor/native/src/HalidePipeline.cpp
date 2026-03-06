@@ -4,8 +4,27 @@
 #include <cmath>
 #include <iostream>
 
+/*
+---
+file_summary: "基於 Halide 的影像處理管線，負責去馬賽克、曝光補償與色彩校正"
+modules:
+  - name: "Color Space Helpers"
+    description: "RGB 與 HSV 轉換函式 (rgb2hsv, hsv2rgb)"
+    lines: "23-108"
+  - name: "applyHueSatMap"
+    description: "CPU 端 3D LUT 三線性插值實作"
+    lines: "110-192"
+  - name: "ToneCurve Helpers"
+    description: "ToneCurve 分段線性插值與 ACR3 預設 LUT"
+    lines: "194-398"
+  - name: "HalidePipeline::process"
+    description: "主要的管線入口；包含 Halide 運算 + CPU 後處理
+(HueSatMap/LookTable/ToneCurve/Contrast/Sat/Vib)" lines: "402-762"
+---
+*/
+
 // ============================================================================
-// HalidePipeline::process — Phase 3+5a pipeline
+// HalidePipeline::process — Phase 3+5 pipeline
 //
 // Pipeline stages:
 //  1. Black-level subtraction & linearisation [0,1]
@@ -16,7 +35,12 @@
 //  [Halide realize -> float RGB buffer]
 //  5a. HueSatMap 3D LUT apply (CPU trilinear interp in HSV space)
 //  5b. LookTable 3D LUT apply (CPU trilinear interp in HSV space)
-//  5d. ProfileToneCurve (ACR3 default 513-LUT or profile curve)
+//  5d. ProfileToneCurve (ACR3 default 1025-LUT or profile curve)
+//  5c. Lightroom XMP params:
+//      - Exposure2012 (EV gain on V channel)
+//      - Contrast2012 (midpoint-pivot scaling on RGB, Phase 5.3)
+//      - Saturation    (non-linear on S channel, Phase 5.3 refined)
+//      - Vibrance      (quadratic-decay boost on S, Phase 5.3 refined)
 //  6. sRGB gamma correction + pack to uint8 RGBA
 // ============================================================================
 
@@ -640,25 +664,42 @@ uint8_t *HalidePipeline::process(
   }
 
   // ------------------------------------------------------------------
-  // 5c. Lightroom Exposure2012 + Saturation / Vibrance (Phase 5.1)
-  // Applied after DCP-profile LUTs, in HSV space for Sat/Vibrance.
-  // crs:Saturation is percent [-100,+100] relative shift of saturation.
-  // crs:Vibrance is a smart saturation boost that protects high-sat pixels.
-  // crs:Exposure2012 is an EV gain applied multiplicatively to value.
+  // 5c. Lightroom XMP: Exposure2012 + Contrast2012 + Saturation + Vibrance
+  //
+  // Applied after DCP-profile LUTs (HueSatMap -> LookTable -> ToneCurve).
+  //
+  // Order within this block (Phase 5.3):
+  //  a. Exposure2012  — EV gain applied to V channel (HSV space)
+  //  b. Contrast2012  — midpoint-pivot linear scaling on each RGB channel
+  //                     (RGB space; pivot = 0.5 in [0,1])
+  //  c. Saturation    — refined non-linear model matching Lightroom:
+  //                     positive: s += lrSat * s * (1-s)  [diminishing returns]
+  //                     negative: s *= (1 + lrSat)        [linear reduction]
+  //  d. Vibrance      — quadratic-decay boost: lrVib * (1 - s^2)
+  //                     protects high-saturation pixels more than linear model
   // ------------------------------------------------------------------
   if (metadata.lrParams.parsed) {
     const float lrExpGain =
         static_cast<float>(std::pow(2.0, metadata.lrParams.exposure2012));
+    const float lrContrast =
+        static_cast<float>(metadata.lrParams.contrast2012 / 100.0);
     const float lrSat =
         static_cast<float>(metadata.lrParams.saturation / 100.0);
     const float lrVib = static_cast<float>(metadata.lrParams.vibrance / 100.0);
     const bool hasExp = std::abs(lrExpGain - 1.0f) > 1e-4f;
+    const bool hasContrast = std::abs(lrContrast) > 1e-4f;
     const bool hasSat = std::abs(lrSat) > 1e-4f;
     const bool hasVib = std::abs(lrVib) > 1e-4f;
 
-    if (hasExp || hasSat || hasVib) {
-      std::cerr << "[CPU] Applying LR params: ExpGain=" << lrExpGain
-                << " Sat=" << lrSat << " Vib=" << lrVib << "\n";
+    std::cerr << "[CPU] LR params: ExpGain=" << lrExpGain
+              << " Contrast=" << lrContrast << " Sat=" << lrSat
+              << " Vib=" << lrVib << "\n";
+
+    if (hasExp || hasContrast || hasSat || hasVib) {
+      // contrast_factor: Contrast2012 in [-100,+100] → scale factor.
+      // +100 → 2x stretch, -100 → 0x (flat). Clamp to reasonable range.
+      const float contrastFactor = 1.0f + lrContrast; // linear approx
+
       for (int py = 0; py < height; ++py) {
         for (int px = 0; px < width; ++px) {
           int base = (py * width + px) * 3;
@@ -666,32 +707,55 @@ uint8_t *HalidePipeline::process(
           float g = rgbFlat[base + 1];
           float b = rgbFlat[base + 2];
 
-          float h, s, v;
-          rgb2hsv(r, g, b, h, s, v);
-
-          // Exposure2012: multiplicative on value channel
+          // ---- a. Exposure2012: EV gain on V channel (HSV) ----
           if (hasExp) {
+            float h, s, v;
+            rgb2hsv(r, g, b, h, s, v);
             v = std::min(v * lrExpGain, 1.0f);
+            hsv2rgb(h, s, v, r, g, b);
           }
 
-          // Saturation: percentage adjustment (Lightroom linear model)
-          // sat_new = clamp(s + s * lrSat, 0, 1)  i.e. s*(1+lrSat)
-          if (hasSat && s > 1e-6f) {
-            s = std::min(std::max(s * (1.0f + lrSat), 0.0f), 1.0f);
+          // ---- b. Contrast2012: midpoint-pivot in RGB space ----
+          // output = clamp(0.5 + (input - 0.5) * contrastFactor, 0, 1)
+          if (hasContrast) {
+            r = std::min(std::max(0.5f + (r - 0.5f) * contrastFactor, 0.0f),
+                         1.0f);
+            g = std::min(std::max(0.5f + (g - 0.5f) * contrastFactor, 0.0f),
+                         1.0f);
+            b = std::min(std::max(0.5f + (b - 0.5f) * contrastFactor, 0.0f),
+                         1.0f);
           }
 
-          // Vibrance: protects already-saturated colors
-          // boost = lrVib * (1 - s)  — fades to zero as sat approaches 1
-          if (hasVib && s > 1e-6f) {
-            float boost = lrVib * (1.0f - s);
-            s = std::min(std::max(s + boost, 0.0f), 1.0f);
+          // ---- c. Saturation + d. Vibrance (HSV space) ----
+          if (hasSat || hasVib) {
+            float h, s, v;
+            rgb2hsv(r, g, b, h, s, v);
+
+            // c. Saturation — Phase 5.3 refined non-linear model
+            // Positive: diminishing returns as s approaches 1 (prevents
+            // clipping) Negative: simple linear reduction
+            if (hasSat && s > 1e-6f) {
+              if (lrSat > 0.0f) {
+                // s += lrSat * s * (1 - s)  → logistic-style boost
+                s = std::min(s + lrSat * s * (1.0f - s), 1.0f);
+              } else {
+                s = std::max(s * (1.0f + lrSat), 0.0f);
+              }
+            }
+
+            // d. Vibrance — Phase 5.3 refined: quadratic decay (1 - s^2)
+            // Low-sat pixels get larger boost; high-sat pixels protected.
+            if (hasVib && s > 1e-6f) {
+              float boost = lrVib * (1.0f - s * s);
+              s = std::min(std::max(s + boost, 0.0f), 1.0f);
+            }
+
+            hsv2rgb(h, s, v, r, g, b);
           }
 
-          float nr, ng, nb;
-          hsv2rgb(h, s, v, nr, ng, nb);
-          rgbFlat[base + 0] = nr;
-          rgbFlat[base + 1] = ng;
-          rgbFlat[base + 2] = nb;
+          rgbFlat[base + 0] = r;
+          rgbFlat[base + 1] = g;
+          rgbFlat[base + 2] = b;
         }
       }
     } else {
