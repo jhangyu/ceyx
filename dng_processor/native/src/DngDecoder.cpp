@@ -295,9 +295,19 @@ public:
         dng_matrix camToSrgb =
             dng_space_sRGB::Get().MatrixFromPCS() * spec->CameraToPCS();
 
-        for (int i = 0; i < 3; ++i)
-          for (int j = 0; j < 3; ++j)
+        // Phase 6.6: Compute Camera -> ProPhoto and ProPhoto -> sRGB
+        dng_matrix cameraToProPhoto =
+            dng_space_ProPhoto::Get().MatrixFromPCS() * spec->CameraToPCS();
+        dng_matrix proPhotoToSrgb =
+            dng_space_sRGB::Get().MatrixFromPCS() * dng_space_ProPhoto::Get().MatrixToPCS();
+
+        for (int i = 0; i < 3; ++i) {
+          for (int j = 0; j < 3; ++j) {
             outMetadata.camToSrgb[i * 3 + j] = camToSrgb[i][j];
+            outMetadata.cameraToProPhoto[i * 3 + j] = cameraToProPhoto[i][j];
+            outMetadata.proPhotoToSrgb[i * 3 + j] = proPhotoToSrgb[i][j];
+          }
+        }
 
         std::cerr << "[DBG] cam_to_srgb matrix:\n";
         for (int r = 0; r < 3; r++) {

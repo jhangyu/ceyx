@@ -49,6 +49,10 @@ struct DngMetadata {
   // Computed as: sRGB_from_XYZ x ForwardMatrix x diag(1/AsShotNeutral)
   double camToSrgb[9];
 
+  // Phase 6.6: ProPhoto RGB Space Transformation Matrices
+  double cameraToProPhoto[9];
+  double proPhotoToSrgb[9];
+
   // ProfileToneCurve: interleaved (input, output) pairs, [0..1] range
   // Max 128 control points = 256 doubles
   // (Kept for future Phase 5 color curve work)
