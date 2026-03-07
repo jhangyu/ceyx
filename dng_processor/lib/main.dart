@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'src/dng_decoder_service.dart';
 import 'src/dng_image_widget.dart';
@@ -116,6 +118,37 @@ class _DngHomePageState extends State<DngHomePage> {
     }
   }
 
+  Future<void> _saveScreenshot() async {
+    if (_image == null) return;
+
+    setState(() => _decoding = true);
+    try {
+      final uiImage = await dngImageToUiImage(_image!);
+      final byteData = await uiImage.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData != null) {
+        final bytes = byteData.buffer.asUint8List();
+        final dir = await getApplicationDocumentsDirectory();
+        final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+        final file = File('${dir.path}/dng_screenshot_$timestamp.png');
+        await file.writeAsBytes(bytes);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Screenshot saved to ${file.path}')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save screenshot: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _decoding = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -123,6 +156,12 @@ class _DngHomePageState extends State<DngHomePage> {
         title: const Text('DNG Processor'),
         centerTitle: true,
         actions: [
+          if (_image != null)
+            IconButton(
+              icon: const Icon(Icons.save_alt),
+              tooltip: 'Save Screenshot',
+              onPressed: _decoding ? null : _saveScreenshot,
+            ),
           IconButton(
             icon: const Icon(Icons.folder_open),
             tooltip: 'Open DNG file',
@@ -172,12 +211,13 @@ class _DngHomePageState extends State<DngHomePage> {
             ),
             const SizedBox(width: 8),
             // Decode time
-            _infoChip(Icons.timer_outlined,
-                'Decode: ${_decodeMs.toStringAsFixed(0)}ms'),
+            _infoChip(
+              Icons.timer_outlined,
+              'Decode: ${_decodeMs.toStringAsFixed(0)}ms',
+            ),
             const SizedBox(width: 8),
             // Halide time
-            _infoChip(Icons.bolt,
-                'Halide: ${_processMs.toStringAsFixed(0)}ms'),
+            _infoChip(Icons.bolt, 'Halide: ${_processMs.toStringAsFixed(0)}ms'),
             const SizedBox(width: 8),
             // Total time
             _infoChip(
@@ -222,8 +262,11 @@ class _DngHomePageState extends State<DngHomePage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.error_outline,
-                  size: 48, color: Theme.of(context).colorScheme.error),
+              Icon(
+                Icons.error_outline,
+                size: 48,
+                color: Theme.of(context).colorScheme.error,
+              ),
               const SizedBox(height: 16),
               Text(
                 _error!,
@@ -240,10 +283,7 @@ class _DngHomePageState extends State<DngHomePage> {
       return InteractiveViewer(
         maxScale: 10.0,
         child: Center(
-          child: DngImageWidget(
-            dngImage: _image!,
-            fit: BoxFit.contain,
-          ),
+          child: DngImageWidget(dngImage: _image!, fit: BoxFit.contain),
         ),
       );
     }
@@ -253,16 +293,17 @@ class _DngHomePageState extends State<DngHomePage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.camera,
-              size: 64,
-              color: Theme.of(context).colorScheme.onSurface.withAlpha(80)),
+          Icon(
+            Icons.camera,
+            size: 64,
+            color: Theme.of(context).colorScheme.onSurface.withAlpha(80),
+          ),
           const SizedBox(height: 16),
           Text(
             'Select a DNG file to decode',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color:
-                      Theme.of(context).colorScheme.onSurface.withAlpha(128),
-                ),
+              color: Theme.of(context).colorScheme.onSurface.withAlpha(128),
+            ),
           ),
         ],
       ),

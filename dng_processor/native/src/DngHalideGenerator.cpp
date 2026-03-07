@@ -39,6 +39,9 @@ public:
   Input<float> lrContrastFactor{"lrContrastFactor"};
   Input<float> lrSat{"lrSat"};
   Input<float> lrVib{"lrVib"};
+  // Phase 5.1/5.4: HSL 8-Channel LUT (pre-interpolated to 360 degrees on CPU)
+  Input<bool> hasHSL{"hasHSL"};
+  Input<Buffer<float>> hslLUT{"hslLUT", 2}; // dim0: channel (0=hue shift, 1=sat scale, 2=lum scale), dim1: 360 hue degrees
 
   Output<Buffer<uint8_t>> exposed{"exposed", 3};
 
@@ -48,7 +51,7 @@ public:
   Func lum_h, lum_v, homo_h, homo_v, sum_homo_h, sum_homo_v;
   Func demosaic, diff_r, diff_b, refined_r, refined_b;
     Func prophoto_rgb, exp_gain_applied;
-    Func hsm_applied, lt_applied, tc_applied, lr_applied, final_srgb;
+    Func hsm_applied, lt_applied, tc_applied, lr_applied, hsl_applied, final_srgb;
 
   void emit_rgb2hsv(Expr r, Expr g, Expr b, Expr &h, Expr &s, Expr &v) {
     Expr max_c = max(r, max(g, b));
@@ -201,6 +204,41 @@ public:
 
     out(x, y, c) = select(hasLR, select(c == 0, r_out, c == 1, g_out, b_out),
                           input(x, y, c));
+    return out;
+  }
+
+  Func apply_hsl_lut(Func input, Input<Buffer<float>> &lut, Expr has_hsl,
+                     std::string name) {
+    Var x("x"), y("y"), c("c");
+    Func out(name);
+
+    Expr r = input(x, y, 0);
+    Expr g = input(x, y, 1);
+    Expr b = input(x, y, 2);
+
+    Expr h, s, v;
+    emit_rgb2hsv(r, g, b, h, s, v);
+
+    Expr hue_deg = h * 360.0f;
+    Expr h0 = clamp(cast<int>(hue_deg), 0, 359);
+    Expr h1 = (h0 + 1) % 360;
+    Expr frac = hue_deg - cast<float>(h0);
+
+    Expr hue_shift = lerp(lut(0, h0), lut(0, h1), frac);
+    Expr sat_scale = lerp(lut(1, h0), lut(1, h1), frac);
+    Expr lum_scale = lerp(lut(2, h0), lut(2, h1), frac);
+
+    Expr h_new = h + hue_shift / 360.0f;
+    h_new = h_new - floor(h_new);
+    Expr s_new = clamp(s * sat_scale, 0.0f, 1.0f);
+    Expr v_new = clamp(v * lum_scale, 0.0f, 1.0f);
+
+    Expr r_new, g_new, b_new;
+    emit_hsv2rgb(h_new, s_new, v_new, r_new, g_new, b_new);
+
+    Expr s_is_zero = (s < 1e-6f);
+    out(x, y, c) = select(!has_hsl || s_is_zero, input(x, y, c),
+                          c == 0, r_new, c == 1, g_new, b_new);
     return out;
   }
 
@@ -383,22 +421,26 @@ public:
                      dr * pC2P20 + dg * pC2P21 + db * pC2P22),
               0.0f, 1.0f);
 
+    // Sequence must match DNG SDK: HueSatMap -> Exposure -> LookTable -> ToneCurve -> RGBtoFinal
+    hsm_applied = apply_3dlut(prophoto_rgb, hsmParam, hsmHD, hsmSD, hsmVD,
+                              hasHSM, "hsm_applied");
+
     exp_gain_applied = Func("exp_gain_applied");
     exp_gain_applied(x, y, c) =
-        clamp(prophoto_rgb(x, y, c) * pExpGain, 0.0f, 1.0f);
+        clamp(hsm_applied(x, y, c) * pExpGain, 0.0f, 1.0f);
 
-    hsm_applied = apply_3dlut(exp_gain_applied, hsmParam, hsmHD, hsmSD, hsmVD,
-                              hasHSM, "hsm_applied");
-    lt_applied = apply_3dlut(hsm_applied, ltParam, ltHD, ltSD, ltVD, hasLT,
+    lt_applied = apply_3dlut(exp_gain_applied, ltParam, ltHD, ltSD, ltVD, hasLT,
                              "lt_applied");
     tc_applied = apply_tone_curve(lt_applied, tcParam, hasTC, "tc_applied");
     lr_applied = apply_lr_params(tc_applied, hasLR, lrExpGain, lrContrastFactor,
                                  lrSat, lrVib, "lr_applied");
 
+    hsl_applied = apply_hsl_lut(lr_applied, hslLUT, hasHSL, "hsl_applied");
+
     final_srgb = Func("final_srgb");
-    Expr pr = lr_applied(x, y, 0);
-    Expr pg = lr_applied(x, y, 1);
-    Expr pb = lr_applied(x, y, 2);
+    Expr pr = hsl_applied(x, y, 0);
+    Expr pg = hsl_applied(x, y, 1);
+    Expr pb = hsl_applied(x, y, 2);
     final_srgb(x, y, c) =
         clamp(select(c == 0, pr * pP2S00 + pg * pP2S01 + pb * pP2S02,
                      c == 1, pr * pP2S10 + pg * pP2S11 + pb * pP2S12,
@@ -417,17 +459,13 @@ public:
     if (get_target().has_gpu_feature()) {
       Var xo("xo"), xi("xi"), yo("yo"), yi("yi");
 
-      exposed.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      exposed.bound(c, 0, 3).reorder(c, x, y).gpu_tile(x, y, xo, yo, xi, yi, 16, 16).unroll(c);
 
-      lr_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-      tc_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-      lt_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-      hsm_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-      exp_gain_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      // Point-wise color operations are left as compute_inline() to fuse into `exposed`
+      // This saves massive VRAM bandwidth and kernel launch overhead on Metal.
 
-      prophoto_rgb.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-
-      final_srgb.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      // AHD Intermediate stages - keeping demosaic and refined stages in global memory
+      // to avoid combinatorial explosion of math during Halide bounds inference.
       g_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
       g_v.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
       r_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
@@ -446,6 +484,7 @@ public:
       lt_applied.compute_at(exposed, yo).vectorize(x, 8);
       tc_applied.compute_at(exposed, yo).vectorize(x, 8);
       lr_applied.compute_at(exposed, yo).vectorize(x, 8);
+      hsl_applied.compute_inline();
 
       refined_r.compute_at(exposed, yo).vectorize(x, 8);
       refined_b.compute_at(exposed, yo).vectorize(x, 8);

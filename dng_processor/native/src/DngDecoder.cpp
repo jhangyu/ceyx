@@ -82,10 +82,19 @@ parseLightroomParams(const std::string &xmp) {
   p.contrast2012 = parseCrsFloat(xmp, "crs:Contrast2012");
   p.saturation = parseCrsFloat(xmp, "crs:Saturation");
   p.vibrance = parseCrsFloat(xmp, "crs:Vibrance");
+  
+  const char* colors[] = {"Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"};
+  for (int i = 0; i < 8; ++i) {
+    p.hslHue[i] = parseCrsFloat(xmp, std::string("crs:HueAdjustment") + colors[i]);
+    p.hslSat[i] = parseCrsFloat(xmp, std::string("crs:SaturationAdjustment") + colors[i]);
+    p.hslLum[i] = parseCrsFloat(xmp, std::string("crs:LuminanceAdjustment") + colors[i]);
+  }
+  
   p.parsed = true;
   std::cerr << "[DBG] LR Params: Exposure2012=" << p.exposure2012
             << " Contrast2012=" << p.contrast2012
             << " Saturation=" << p.saturation << " Vibrance=" << p.vibrance
+            << " HSL_Red=(" << p.hslHue[0] << "," << p.hslSat[0] << "," << p.hslLum[0] << ")"
             << "\n";
   return p;
 }

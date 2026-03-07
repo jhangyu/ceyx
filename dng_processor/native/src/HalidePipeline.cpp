@@ -496,7 +496,72 @@ uint8_t *HalidePipeline::process(
   }
   tcBuf.set_host_dirty();
 
+  // Phase 5.1/5.4: Create HSL LUT buffer (dim0: 3 for H/S/L, dim1: 360 for hues)
+  Halide::Runtime::Buffer<float> hslBuf(3, 360);
+
+  // Base hue angles for the 8 Lightroom HSL channels
+  const float baseHues[8] = {0.0f, 30.0f, 60.0f, 120.0f, 180.0f, 240.0f, 270.0f, 300.0f};
+
+  // Fill the 360-degree LUT using linear interpolation between the 8 points
+  for (int h = 0; h < 360; ++h) {
+    float h_deg = static_cast<float>(h);
+    // Find surrounding hue anchor points
+    int i0 = 7, i1 = 0; // Default to wrap-around (Magenta to Red)
+    for (int i = 0; i < 7; ++i) {
+      if (h_deg >= baseHues[i] && h_deg < baseHues[i + 1]) {
+        i0 = i;
+        i1 = i + 1;
+        break;
+      }
+    }
+
+    float h0 = baseHues[i0];
+    float h1 = baseHues[i1];
+    float t = 0.0f;
+
+    if (i0 == 7 && i1 == 0) {
+      // Wrap-around case
+      if (h_deg >= baseHues[7]) {
+        t = (h_deg - baseHues[7]) / (360.0f - baseHues[7]);
+      } else {
+        t = (h_deg + 360.0f - baseHues[7]) / (360.0f - baseHues[7]);
+      }
+    } else {
+      t = (h_deg - h0) / (h1 - h0);
+    }
+
+    // Interpolate values
+    // hslHue is direct delta in degrees [-100, 100] maps to [-100, 100] hue shift
+    float hueShift = metadata.lrParams.hslHue[i0] + t * (metadata.lrParams.hslHue[i1] - metadata.lrParams.hslHue[i0]);
+
+    // Saturation and Luminance are scales [-100, 100] maps to [0, 2] where 0 is -100, 1 is 0, 2 is +100
+    auto mapScale = [](double val) { return static_cast<float>((val + 100.0) / 100.0); };
+    float sat0 = mapScale(metadata.lrParams.hslSat[i0]);
+    float sat1 = mapScale(metadata.lrParams.hslSat[i1]);
+    float satScale = sat0 + t * (sat1 - sat0);
+
+    float lum0 = mapScale(metadata.lrParams.hslLum[i0]);
+    float lum1 = mapScale(metadata.lrParams.hslLum[i1]);
+    float lumScale = lum0 + t * (lum1 - lum0);
+
+    hslBuf(0, h) = hueShift;
+    hslBuf(1, h) = satScale;
+    hslBuf(2, h) = lumScale;
+  }
+  hslBuf.set_host_dirty();
+
   const bool hasLR = metadata.lrParams.parsed;
+  bool hasHSL = false;
+  if (hasLR) {
+    for (int i = 0; i < 8; ++i) {
+      if (metadata.lrParams.hslHue[i] != 0.0 ||
+          metadata.lrParams.hslSat[i] != 0.0 ||
+          metadata.lrParams.hslLum[i] != 0.0) {
+        hasHSL = true;
+        break;
+      }
+    }
+  }
   const float lrExpGainVal =
       hasLR ? static_cast<float>(std::pow(2.0, metadata.lrParams.exposure2012))
             : 1.0f;
@@ -564,6 +629,7 @@ uint8_t *HalidePipeline::process(
       std::max((int)metadata.ltSatDivisions, 1),
       std::max((int)metadata.ltValDivisions, 1),
       lrExpGainVal, 1.0f + lrContrastVal, lrSatVal, lrVibVal,
+      hasHSL, hslBuf.raw_buffer(),
       halide_out.raw_buffer()
   );
 

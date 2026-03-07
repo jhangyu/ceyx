@@ -308,6 +308,12 @@ int main(int argc, char **argv) {
   std::cout << "\n";
   ASSERT_TRUE(hasHSM, "Test 6.0: HueSatMap is present in profile");
 
+  // Force LR Params to 0 for strict PSNR comparison against DNG SDK (which doesn't parse them)
+  metadata.lrParams.exposure2012 = 0.0f;
+  metadata.lrParams.contrast2012 = 0.0f;
+  metadata.lrParams.saturation = 0.0f;
+  metadata.lrParams.vibrance = 0.0f;
+
   int outW = 0, outH = 0;
   auto hp0 = std::chrono::steady_clock::now();
   uint8_t *rgba = HalidePipeline::process(

@@ -61,9 +61,9 @@ set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
 file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
 
 if(APPLE)
-    set(AOT_TARGET "host-metal")
+    set(AOT_TARGET "host-metal-no_asserts-no_bounds_query")
 else()
-    set(AOT_TARGET "host")
+    set(AOT_TARGET "host-no_asserts-no_bounds_query")
 endif()
 
 add_custom_command(
@@ -120,3 +120,8 @@ target_link_libraries(test_color_diagnostic dng_decoder_native dng_sdk Halide::H
 if(APPLE)
     target_link_libraries(test_color_diagnostic ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
+
+# Phase 6.5: Edge Cases Test
+add_executable(test_edge_cases tests/test_edge_cases.cpp)
+target_include_directories(test_edge_cases PRIVATE ${INC_DIR})
+target_link_libraries(test_edge_cases dng_decoder_native Halide::Halide)

@@ -38,6 +38,8 @@ dependencies:
   # Phase 4: FFI integration
   ffi: ^2.1.0
   file_picker: ^8.0.0
+  path_provider: ^2.1.5
+  path: ^1.9.1
 
 dev_dependencies:
   flutter_test:

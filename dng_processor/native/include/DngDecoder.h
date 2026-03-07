@@ -95,10 +95,17 @@ struct DngMetadata {
     double contrast2012; // crs:Contrast2012 in % (default 0.0, not yet applied)
     double saturation;   // crs:Saturation in % [-100, +100] (default 0.0)
     double vibrance;     // crs:Vibrance in % [-100, +100] (default 0.0)
+    
+    // Phase 5.1/5.4: HSL 8-Channel Adjustments (Hue, Saturation, Luminance)
+    // Order: Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta
+    double hslHue[8];
+    double hslSat[8];
+    double hslLum[8];
+    
     bool parsed; // true if rawXmp was found and these fields were extracted
     LightroomParams()
         : exposure2012(0.0), contrast2012(0.0), saturation(0.0), vibrance(0.0),
-          parsed(false) {}
+          hslHue{0}, hslSat{0}, hslLum{0}, parsed(false) {}
   };
   LightroomParams lrParams;
 };
