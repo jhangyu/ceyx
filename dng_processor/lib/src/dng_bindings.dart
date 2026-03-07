@@ -3,6 +3,22 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
+/*
+---
+file_summary: "dart:ffi 綁定設定，處理不同平台的動態函式庫載入"
+modules:
+  - name: "DngResult"
+    description: "Native C-API 對應的資料結構"
+    lines: "6-24"
+  - name: "Type Definitions"
+    description: "C 函數簽名綁定"
+    lines: "26-33"
+  - name: "DngBindings"
+    description: "尋找並載入 dll/so/dylib 函式庫"
+    lines: "36-107"
+---
+*/
+
 /// FFI struct matching C `DngResult` from dng_ffi_api.h
 final class DngResult extends Struct {
   external Pointer<Uint8> rgbaData;
@@ -32,15 +48,22 @@ typedef DngDecodeAndProcessDart = Pointer<DngResult> Function(
 typedef DngFreeResultNative = Void Function(Pointer<DngResult> result);
 typedef DngFreeResultDart = void Function(Pointer<DngResult> result);
 
+typedef DngFreeHalideBufferNative = Void Function(Pointer<Void> ptr);
+typedef DngFreeHalideBufferDart = void Function(Pointer<Void> ptr);
+
 /// Bindings to the native dng_decoder_native library
 class DngBindings {
   final DynamicLibrary _lib;
 
   late final DngDecodeAndProcessDart dngDecodeAndProcess;
   late final DngFreeResultDart dngFreeResult;
+  late final DngFreeHalideBufferDart dngFreeHalideBuffer;
 
-  /// Pointer to the C `dng_free_result` function for NativeFinalizer
+  /// Pointer to the C `dng_free_result` function for NativeFinalizer (if we were finalizing the whole result)
   late final Pointer<NativeFunction<DngFreeResultNative>> dngFreeResultPtr;
+
+  /// Pointer to the C `dng_free_halide_buffer` function for NativeFinalizer
+  late final Pointer<NativeFunction<DngFreeHalideBufferNative>> dngFreeHalideBufferPtr;
 
   DngBindings._(this._lib) {
     dngDecodeAndProcess = _lib
@@ -51,8 +74,15 @@ class DngBindings {
         _lib.lookupFunction<DngFreeResultNative, DngFreeResultDart>(
             'dng_free_result');
 
+    dngFreeHalideBuffer =
+        _lib.lookupFunction<DngFreeHalideBufferNative, DngFreeHalideBufferDart>(
+            'dng_free_halide_buffer');
+
     dngFreeResultPtr =
         _lib.lookup<NativeFunction<DngFreeResultNative>>('dng_free_result');
+
+    dngFreeHalideBufferPtr =
+        _lib.lookup<NativeFunction<DngFreeHalideBufferNative>>('dng_free_halide_buffer');
   }
 
   /// Try to open dylib from a list of candidate paths.

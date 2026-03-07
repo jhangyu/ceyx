@@ -4,8 +4,24 @@ import 'package:ffi/ffi.dart';
 
 import 'dng_bindings.dart';
 
+/*
+---
+file_summary: "提供 Flutter 與 Native 之間的 FFI 解碼服務封裝與記憶體管理"
+modules:
+  - name: "DngImage"
+    description: "解碼後的影像資料與耗時紀錄容器"
+    lines: "8-34"
+  - name: "Exceptions"
+    description: "解碼錯誤定義"
+    lines: "37-45"
+  - name: "DngDecoderService"
+    description: "Native 方法調用，處理 Dart 端 ByteBuffer 複製與記憶體釋放"
+    lines: "47-137"
+---
+*/
+
 /// Decoded DNG image result with automatic native memory management.
-class DngImage {
+class DngImage implements Finalizable {
   /// RGBA pixel data (width * height * 4 bytes)
   final Uint8List rgbaData;
 
@@ -113,20 +129,32 @@ class DngDecoderService {
       final height = result.height;
       final bufferSize = width * height * 4;
 
-      // Copy pixel data to Dart-managed memory so we can free native side
-      final rgbaData = Uint8List(bufferSize);
-      final nativeBytes = result.rgbaData.asTypedList(bufferSize);
-      rgbaData.setAll(0, nativeBytes);
+      // Phase 6.4 Zero-copy: Instead of copying, we view the native memory directly.
+      final rgbaData = result.rgbaData.asTypedList(bufferSize);
 
-      return DngImage(
+      // Create the DngImage container which wraps the zero-copy list
+      final image = DngImage(
         rgbaData: rgbaData,
         width: width,
         height: height,
         decodeMs: result.decodeMs,
         processMs: result.processMs,
       );
+
+      // Attach the NativeFinalizer to the Dart list object.
+      // When the `image` object is garbage collected, Dart will automatically
+      // call `dng_free_halide_buffer` with the native pointer.
+      final finalizer = NativeFinalizer(_bindings.dngFreeHalideBufferPtr.cast());
+      finalizer.attach(image, result.rgbaData.cast(), detach: image);
+
+      // Since we handed ownership of `rgbaData` over to the Finalizer,
+      // we must set it to null in the result struct so `dng_free_result`
+      // does not delete it when freeing the struct itself!
+      result.rgbaData = nullptr;
+
+      return image;
     } finally {
-      // Always free the native result
+      // Always free the native result struct (which no longer owns the rgbaData on success)
       if (resultPtr != nullptr) {
         _bindings.dngFreeResult(resultPtr);
       }

@@ -6,6 +6,22 @@ import 'package:file_picker/file_picker.dart';
 import 'src/dng_decoder_service.dart';
 import 'src/dng_image_widget.dart';
 
+/*
+---
+file_summary: "App 進入點與首頁 UI，處理檔案選擇、狀態顯示與影像呈現"
+modules:
+  - name: "App Entry"
+    description: "MaterialApp 與主題配置"
+    lines: "9-31"
+  - name: "DngHomePage"
+    description: "首頁狀態管理、檔案選擇邏輯與解碼服務呼叫"
+    lines: "33-101"
+  - name: "UI Widgets"
+    description: "主要的 Scaffold、狀態列顯示與 ImageViewer"
+    lines: "103-255"
+---
+*/
+
 void main() {
   runApp(const DngProcessorApp());
 }

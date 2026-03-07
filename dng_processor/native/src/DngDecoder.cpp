@@ -185,11 +185,24 @@ public:
             if (profile.HasColorMatrix2())
               outMetadata.colorMatrix2[i * 3 + j] =
                   profile.ColorMatrix2()[i][j];
+
             if (profile.ForwardMatrix1().NotEmpty())
               outMetadata.forwardMatrix[i * 3 + j] =
                   profile.ForwardMatrix1()[i][j];
+
+            if (profile.ForwardMatrix2().NotEmpty())
+              outMetadata.forwardMatrix2[i * 3 + j] =
+                  profile.ForwardMatrix2()[i][j];
+
+            outMetadata.cameraCalibration1[i * 3 + j] =
+                negative->CameraCalibration1()[i][j];
+            outMetadata.cameraCalibration2[i * 3 + j] =
+                negative->CameraCalibration2()[i][j];
           }
         }
+
+        outMetadata.illuminant1 = profile.CalibrationIlluminant1();
+        outMetadata.illuminant2 = profile.CalibrationIlluminant2();
 
         // ProfileToneCurve
         const dng_tone_curve &curve = profile.ToneCurve();
@@ -242,6 +255,13 @@ public:
           extractHueSatMap(profile.LookTable(), outMetadata.ltHueDivisions,
                            outMetadata.ltSatDivisions,
                            outMetadata.ltValDivisions, outMetadata.ltData);
+        }
+      }
+
+      // AnalogBalance
+      {
+        for (int i = 0; i < 3; i++) {
+          outMetadata.analogBalance[i] = negative->AnalogBalance(i);
         }
       }
 

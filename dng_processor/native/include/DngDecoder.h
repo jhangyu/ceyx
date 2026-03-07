@@ -26,6 +26,18 @@ struct DngMetadata {
   double colorMatrix1[9];
   double colorMatrix2[9];
   double forwardMatrix[9];
+  double forwardMatrix2[9];
+
+  // Camera calibration (applied before ColorMatrix)
+  double cameraCalibration1[9];
+  double cameraCalibration2[9];
+
+  // Analog balance (gain applied to each channel)
+  double analogBalance[3];
+
+  // Calibration Illuminants (Light source types)
+  uint32_t illuminant1;
+  uint32_t illuminant2;
 
   // White balance / AsShotNeutral
   double asShotNeutral[3];

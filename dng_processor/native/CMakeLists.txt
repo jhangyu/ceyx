@@ -112,3 +112,11 @@ target_link_libraries(test_color_accuracy dng_sdk)
 if(APPLE)
     target_link_libraries(test_color_accuracy ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
+
+# Color Diagnostic Tool
+add_executable(test_color_diagnostic tests/test_color_diagnostic.cpp)
+target_include_directories(test_color_diagnostic PRIVATE ${INC_DIR} ${DNG_SDK_DIR} ${HALIDE_DIR}/include)
+target_link_libraries(test_color_diagnostic dng_decoder_native dng_sdk Halide::Halide)
+if(APPLE)
+    target_link_libraries(test_color_diagnostic ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
