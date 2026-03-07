@@ -1,4 +1,5 @@
 #include "DngDecoder.h"
+#include "ConcurrentDngHost.h"
 #include <cstdlib>
 #include <dng_camera_profile.h>
 #include <dng_color_space.h>
@@ -16,6 +17,13 @@
 #include <dng_pixel_buffer.h>
 #include <dng_xmp.h>
 #include <iostream>
+#include <thread>
+#include <future>
+#include <vector>
+#include <atomic>
+#include <mutex>
+#include <exception>
+#include <dng_area_task.h>
 
 /*
 ---
@@ -134,7 +142,7 @@ public:
 
   DngErrorCode decode(const std::string &filePath, DngMetadata &outMetadata) {
     try {
-      dng_host host;
+      ConcurrentDngHost host;
       std::cerr << "[DBG] Opening stream...\n";
       dng_file_stream stream(filePath.c_str());
 
@@ -405,6 +413,45 @@ DngDecoder::~DngDecoder() = default;
 DngErrorCode DngDecoder::decodeFile(const std::string &filePath,
                                     DngMetadata &outMetadata) {
   return impl_->decode(filePath, outMetadata);
+}
+
+DngErrorCode DngDecoder::extractPreviewJPEG(const std::string &filePath,
+                                            std::vector<uint8_t> &outJpegData) {
+  try {
+    dng_host host;
+    dng_file_stream stream(filePath.c_str());
+    dng_info info;
+    info.Parse(host, stream);
+    info.PostParse(host);
+
+    int bestPreviewIfd = -1;
+    uint32 bestPreviewWidth = 0;
+
+    for (uint32 i = 0; i < info.fIFDCount; i++) {
+      const dng_ifd &ifd = *info.fIFD[i];
+      if (ifd.fCompression == 7 && ifd.fPhotometricInterpretation == 6 &&
+          ifd.fNewSubFileType == 1) {
+        if (ifd.fImageWidth > bestPreviewWidth) {
+          bestPreviewWidth = ifd.fImageWidth;
+          bestPreviewIfd = i;
+        }
+      }
+    }
+
+    if (bestPreviewIfd != -1) {
+      const dng_ifd &ifd = *info.fIFD[bestPreviewIfd];
+      uint64 offset = ifd.fTileOffset[0];
+      uint32 byteCount = ifd.fTileByteCount[0];
+
+      outJpegData.resize(byteCount);
+      stream.SetReadPosition(offset);
+      stream.Get(outJpegData.data(), byteCount);
+      return DngErrorCode::SUCCESS;
+    }
+    return DngErrorCode::UNSUPPORTED_FORMAT;
+  } catch (...) {
+    return DngErrorCode::PARSE_ERROR;
+  }
 }
 
 const uint16_t *DngDecoder::getRawBuffer() const {

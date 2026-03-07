@@ -1,4 +1,4 @@
-import 'dart:ffi';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
@@ -13,99 +13,139 @@ modules:
   - name: "Type Definitions"
     description: "C 函數簽名綁定"
     lines: "26-33"
-  - name: "DngBindings"
+  - name: "DngNativeBindings"
     description: "尋找並載入 dll/so/dylib 函式庫"
     lines: "36-107"
 ---
 */
 
 /// FFI struct matching C `DngResult` from dng_ffi_api.h
-final class DngResult extends Struct {
-  external Pointer<Uint8> rgbaData;
+final class DngResult extends ffi.Struct {
+  external ffi.Pointer<ffi.Uint8> rgbaData;
 
-  @Int32()
+  @ffi.Int32()
   external int width;
 
-  @Int32()
+  @ffi.Int32()
   external int height;
 
-  @Int32()
+  @ffi.Int32()
   external int errorCode;
 
-  @Double()
+  @ffi.Double()
   external double decodeMs;
 
-  @Double()
+  @ffi.Double()
   external double processMs;
 }
 
 /// C function signatures
-typedef DngDecodeAndProcessNative = Pointer<DngResult> Function(
-    Pointer<Utf8> filePath);
-typedef DngDecodeAndProcessDart = Pointer<DngResult> Function(
-    Pointer<Utf8> filePath);
+typedef DngDecodeAndProcessNative =
+    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath);
+typedef DngDecodeAndProcessDart =
+    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath);
 
-typedef DngFreeResultNative = Void Function(Pointer<DngResult> result);
-typedef DngFreeResultDart = void Function(Pointer<DngResult> result);
+typedef DngFreeResultNative = ffi.Void Function(ffi.Pointer<DngResult> result);
+typedef DngFreeResultDart = void Function(ffi.Pointer<DngResult> result);
 
-typedef DngFreeHalideBufferNative = Void Function(Pointer<Void> ptr);
-typedef DngFreeHalideBufferDart = void Function(Pointer<Void> ptr);
+typedef DngFreeHalideBufferNative =
+    ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
+typedef DngFreeHalideBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
+
+typedef dng_extract_preview_jpeg_func =
+    ffi.Int32 Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Pointer<ffi.Pointer<ffi.Uint8>> outBuffer,
+      ffi.Pointer<ffi.Int32> outSize,
+    );
+typedef DngExtractPreviewJpeg =
+    int Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Pointer<ffi.Pointer<ffi.Uint8>> outBuffer,
+      ffi.Pointer<ffi.Int32> outSize,
+    );
+
+typedef dng_free_buffer_func = ffi.Void Function(ffi.Pointer<ffi.Uint8> buffer);
+typedef DngFreeBuffer = void Function(ffi.Pointer<ffi.Uint8> buffer);
 
 /// Bindings to the native dng_decoder_native library
-class DngBindings {
-  final DynamicLibrary _lib;
+class DngNativeBindings {
+  final ffi.DynamicLibrary _lib;
 
   late final DngDecodeAndProcessDart dngDecodeAndProcess;
   late final DngFreeResultDart dngFreeResult;
   late final DngFreeHalideBufferDart dngFreeHalideBuffer;
 
+  late final DngExtractPreviewJpeg extractPreviewJpeg;
+  late final DngFreeBuffer freeBuffer;
+
   /// Pointer to the C `dng_free_result` function for NativeFinalizer (if we were finalizing the whole result)
-  late final Pointer<NativeFunction<DngFreeResultNative>> dngFreeResultPtr;
+  late final ffi.Pointer<ffi.NativeFunction<DngFreeResultNative>>
+  dngFreeResultPtr;
 
   /// Pointer to the C `dng_free_halide_buffer` function for NativeFinalizer
-  late final Pointer<NativeFunction<DngFreeHalideBufferNative>> dngFreeHalideBufferPtr;
+  late final ffi.Pointer<ffi.NativeFunction<DngFreeHalideBufferNative>>
+  dngFreeHalideBufferPtr;
 
-  DngBindings._(this._lib) {
+  DngNativeBindings._(this._lib) {
     dngDecodeAndProcess = _lib
         .lookupFunction<DngDecodeAndProcessNative, DngDecodeAndProcessDart>(
-            'dng_decode_and_process');
+          'dng_decode_and_process',
+        );
 
-    dngFreeResult =
-        _lib.lookupFunction<DngFreeResultNative, DngFreeResultDart>(
-            'dng_free_result');
+    dngFreeResult = _lib.lookupFunction<DngFreeResultNative, DngFreeResultDart>(
+      'dng_free_result',
+    );
 
-    dngFreeHalideBuffer =
-        _lib.lookupFunction<DngFreeHalideBufferNative, DngFreeHalideBufferDart>(
-            'dng_free_halide_buffer');
+    dngFreeHalideBuffer = _lib
+        .lookupFunction<DngFreeHalideBufferNative, DngFreeHalideBufferDart>(
+          'dng_free_halide_buffer',
+        );
 
-    dngFreeResultPtr =
-        _lib.lookup<NativeFunction<DngFreeResultNative>>('dng_free_result');
+    dngFreeResultPtr = _lib.lookup<ffi.NativeFunction<DngFreeResultNative>>(
+      'dng_free_result',
+    );
 
-    dngFreeHalideBufferPtr =
-        _lib.lookup<NativeFunction<DngFreeHalideBufferNative>>('dng_free_halide_buffer');
+    dngFreeHalideBufferPtr = _lib
+        .lookup<ffi.NativeFunction<DngFreeHalideBufferNative>>(
+          'dng_free_halide_buffer',
+        );
+
+    extractPreviewJpeg = _lib
+        .lookup<ffi.NativeFunction<dng_extract_preview_jpeg_func>>(
+          'dng_extract_preview_jpeg',
+        )
+        .asFunction();
+    freeBuffer = _lib
+        .lookup<ffi.NativeFunction<dng_free_buffer_func>>('dng_free_buffer')
+        .asFunction();
   }
 
   /// Try to open dylib from a list of candidate paths.
   /// Returns the first one that loads successfully, or throws.
-  static DynamicLibrary _openFirst(List<String> paths) {
+  static ffi.DynamicLibrary _openFirst(List<String> paths) {
     Object? lastError;
     for (final path in paths) {
       try {
-        return DynamicLibrary.open(path);
+        return ffi.DynamicLibrary.open(path);
       } catch (e) {
         lastError = e;
         continue;
       }
     }
     throw StateError(
-        'Could not load native library from any of:\n'
-        '  ${paths.join('\n  ')}\n'
-        'Last error: $lastError');
+      'Could not load native library from any of:\n'
+      '  ${paths.join('\n  ')}\n'
+      'Last error: $lastError',
+    );
   }
 
   /// Load the native library based on the current platform
-  factory DngBindings.load() {
-    final DynamicLibrary lib;
+  factory DngNativeBindings() => DngNativeBindings.load();
+
+  /// Load the native library based on the current platform
+  factory DngNativeBindings.load() {
+    final ffi.DynamicLibrary lib;
 
     if (Platform.isMacOS) {
       final execDir = File(Platform.resolvedExecutable).parent.path;
@@ -119,18 +159,19 @@ class DngBindings {
         '$home/Documents/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib',
       ]);
     } else if (Platform.isWindows) {
-      lib = DynamicLibrary.open('dng_decoder_native.dll');
+      lib = ffi.DynamicLibrary.open('dng_decoder_native.dll');
     } else if (Platform.isLinux) {
-      lib = DynamicLibrary.open('libdng_decoder_native.so');
+      lib = ffi.DynamicLibrary.open('libdng_decoder_native.so');
     } else if (Platform.isAndroid) {
-      lib = DynamicLibrary.open('libdng_decoder_native.so');
+      lib = ffi.DynamicLibrary.open('libdng_decoder_native.so');
     } else if (Platform.isIOS) {
-      lib = DynamicLibrary.process();
+      lib = ffi.DynamicLibrary.process();
     } else {
       throw UnsupportedError(
-          'DngBindings: unsupported platform ${Platform.operatingSystem}');
+        'DngNativeBindings: unsupported platform ${Platform.operatingSystem}',
+      );
     }
 
-    return DngBindings._(lib);
+    return DngNativeBindings._(lib);
   }
 }

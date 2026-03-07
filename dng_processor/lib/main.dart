@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -59,6 +60,8 @@ class _DngHomePageState extends State<DngHomePage> {
   final DngDecoderService _decoder = DngDecoderService();
 
   DngImage? _image;
+  Uint8List? _previewBytes;
+  bool _showingPreview = false;
   String? _filePath;
   String? _error;
   bool _decoding = false;
@@ -94,26 +97,48 @@ class _DngHomePageState extends State<DngHomePage> {
       _decoding = true;
       _error = null;
       _image = null;
+      _previewBytes = null;
+      _showingPreview = false;
       _filePath = path;
     });
 
+    // Attempt to extract the fast preview JPEG first
     try {
+      final preview = _decoder.getPreviewJpeg(path);
+      if (preview != null) {
+        setState(() {
+          _previewBytes = preview;
+          _showingPreview = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to extract preview: $e');
+    }
+
+    // Process the full RAW image
+    try {
+      // Use Future.microtask or Future.delayed to allow the UI to render the preview first
+      await Future.delayed(const Duration(milliseconds: 16));
+
       final image = _decoder.decode(path);
       setState(() {
         _image = image;
         _decodeMs = image.decodeMs;
         _processMs = image.processMs;
         _decoding = false;
+        _showingPreview = false;
       });
     } on DngDecodeException catch (e) {
       setState(() {
         _error = e.toString();
         _decoding = false;
+        _showingPreview = false;
       });
     } catch (e) {
       setState(() {
         _error = 'Unexpected error: $e';
         _decoding = false;
+        _showingPreview = false;
       });
     }
   }
@@ -242,21 +267,83 @@ class _DngHomePageState extends State<DngHomePage> {
   }
 
   Widget _buildImageArea() {
+    Widget content;
     if (_decoding) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+      if (_showingPreview && _previewBytes != null) {
+        content = Stack(
+          key: const ValueKey('preview'),
+          fit: StackFit.expand,
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('Decoding DNG...'),
+            InteractiveViewer(
+              maxScale: 10.0,
+              child: Center(
+                child: Image.memory(
+                  _previewBytes!,
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 32,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withAlpha(200),
+                    borderRadius: BorderRadius.circular(32),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withAlpha(50),
+                        blurRadius: 8,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 16),
+                      Text(
+                        'Loading full RAW...',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ],
-        ),
-      );
-    }
-
-    if (_error != null) {
-      return Center(
+        );
+      } else {
+        content = const Center(
+          key: ValueKey('decoding'),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Decoding DNG...'),
+            ],
+          ),
+        );
+      }
+    } else if (_error != null) {
+      content = Center(
+        key: const ValueKey('error'),
         child: Padding(
           padding: const EdgeInsets.all(32),
           child: Column(
@@ -277,36 +364,42 @@ class _DngHomePageState extends State<DngHomePage> {
           ),
         ),
       );
-    }
-
-    if (_image != null) {
-      return InteractiveViewer(
+    } else if (_image != null) {
+      content = InteractiveViewer(
+        key: const ValueKey('full_image'),
         maxScale: 10.0,
         child: Center(
           child: DngImageWidget(dngImage: _image!, fit: BoxFit.contain),
         ),
       );
+    } else {
+      content = Center(
+        key: const ValueKey('empty'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.camera,
+              size: 64,
+              color: Theme.of(context).colorScheme.onSurface.withAlpha(80),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Select a DNG file to decode',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurface.withAlpha(128),
+              ),
+            ),
+          ],
+        ),
+      );
     }
 
-    // Empty state
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.camera,
-            size: 64,
-            color: Theme.of(context).colorScheme.onSurface.withAlpha(80),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'Select a DNG file to decode',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: Theme.of(context).colorScheme.onSurface.withAlpha(128),
-            ),
-          ),
-        ],
-      ),
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      child: content,
     );
   }
 }

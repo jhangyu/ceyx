@@ -6,6 +6,12 @@
 #include <cstring>
 #include <iostream>
 
+#if defined(_WIN32)
+#define FFI_EXPORT __declspec(dllexport)
+#else
+#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
+#endif
+
 extern "C" {
 
 DngResult *dng_decode_and_process(const char *file_path) {
@@ -58,6 +64,29 @@ DngResult *dng_decode_and_process(const char *file_path) {
             << " decode=" << result->decode_ms
             << "ms halide=" << result->process_ms << "ms\n";
   return result;
+}
+
+FFI_EXPORT int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffer,
+                                      int *outSize) {
+  if (!filePath || !outBuffer || !outSize)
+    return 5; // INVALID_ARGUMENT
+
+  DngDecoder decoder;
+  std::vector<uint8_t> jpegData;
+  DngErrorCode code = decoder.extractPreviewJPEG(filePath, jpegData);
+
+  if (code == DngErrorCode::SUCCESS && !jpegData.empty()) {
+    *outSize = static_cast<int>(jpegData.size());
+    *outBuffer = new uint8_t[*outSize];
+    std::memcpy(*outBuffer, jpegData.data(), *outSize);
+    return 0; // SUCCESS
+  }
+  return static_cast<int>(code);
+}
+
+FFI_EXPORT void dng_free_buffer(uint8_t *buffer) {
+  if (buffer)
+    delete[] buffer;
 }
 
 void dng_free_result(DngResult *result) {

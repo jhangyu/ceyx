@@ -119,6 +119,10 @@ public:
   DngErrorCode decodeFile(const std::string &filePath,
                           DngMetadata &outMetadata);
 
+  // Extract preview JPEG if available
+  DngErrorCode extractPreviewJPEG(const std::string &filePath,
+                                  std::vector<uint8_t> &outJpegData);
+
   // Get the extracted 16-bit Bayer raw data
   const uint16_t *getRawBuffer() const;
   size_t getRawBufferSize() const;

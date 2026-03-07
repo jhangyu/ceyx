@@ -66,7 +66,7 @@ class DngDecodeException implements Exception {
 /// Memory is managed via Dart-side copy of the RGBA buffer, with the
 /// native result freed immediately after copy.
 class DngDecoderService {
-  late final DngBindings _bindings;
+  late final DngNativeBindings _bindings;
   bool _initialized = false;
 
   DngDecoderService();
@@ -74,8 +74,46 @@ class DngDecoderService {
   /// Initialize the service by loading the native library.
   void initialize() {
     if (_initialized) return;
-    _bindings = DngBindings.load();
+    _bindings = DngNativeBindings.load();
     _initialized = true;
+  }
+
+  /// Extracts the embedded JPEG preview from the DNG file.
+  /// Returns null if extraction fails.
+  Uint8List? getPreviewJpeg(String filePath) {
+    if (!_initialized) {
+      initialize();
+    }
+
+    final pathPtr = filePath.toNativeUtf8();
+    final outBuffer = calloc<Pointer<Uint8>>();
+    final outSize = calloc<Int32>();
+
+    try {
+      final result = _bindings.extractPreviewJpeg(
+        pathPtr.cast(),
+        outBuffer.cast(),
+        outSize.cast(),
+      );
+
+      if (result == 0 && outBuffer.value != nullptr && outSize.value > 0) {
+        final bufferPtr = outBuffer.value;
+        final size = outSize.value;
+
+        // Copy bytes to a Dart Uint8List
+        final bytes = Uint8List.fromList(bufferPtr.asTypedList(size));
+
+        // Free the native buffer
+        _bindings.freeBuffer(bufferPtr.cast());
+
+        return bytes;
+      }
+      return null;
+    } finally {
+      malloc.free(pathPtr);
+      calloc.free(outBuffer);
+      calloc.free(outSize);
+    }
   }
 
   /// Decode a DNG file and return the processed RGBA image.
@@ -122,7 +160,10 @@ class DngDecoderService {
       }
 
       if (result.rgbaData == nullptr) {
-        throw DngDecodeException(-1, 'RGBA buffer is null despite success code');
+        throw DngDecodeException(
+          -1,
+          'RGBA buffer is null despite success code',
+        );
       }
 
       final width = result.width;
@@ -144,7 +185,9 @@ class DngDecoderService {
       // Attach the NativeFinalizer to the Dart list object.
       // When the `image` object is garbage collected, Dart will automatically
       // call `dng_free_halide_buffer` with the native pointer.
-      final finalizer = NativeFinalizer(_bindings.dngFreeHalideBufferPtr.cast());
+      final finalizer = NativeFinalizer(
+        _bindings.dngFreeHalideBufferPtr.cast(),
+      );
       finalizer.attach(image, result.rgbaData.cast(), detach: image);
 
       // Since we handed ownership of `rgbaData` over to the Finalizer,

@@ -125,3 +125,26 @@ endif()
 add_executable(test_edge_cases tests/test_edge_cases.cpp)
 target_include_directories(test_edge_cases PRIVATE ${INC_DIR})
 target_link_libraries(test_edge_cases dng_decoder_native Halide::Halide)
+
+add_executable(test_dng_layout tests/test_dng_layout.cpp)
+target_include_directories(test_dng_layout PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_dng_layout dng_sdk)
+if(APPLE)
+    target_link_libraries(test_dng_layout ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# Tile testing tool
+add_executable(test_dng_tiles tests/test_dng_tiles.cpp)
+target_include_directories(test_dng_tiles PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_dng_tiles dng_sdk)
+if(APPLE)
+    target_link_libraries(test_dng_tiles ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+
+add_executable(test_dng_preview tests/test_dng_preview.cpp)
+target_include_directories(test_dng_preview PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_dng_preview dng_sdk)
+if(APPLE)
+    target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
