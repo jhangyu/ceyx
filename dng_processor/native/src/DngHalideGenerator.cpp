@@ -9,9 +9,17 @@ public:
   Input<Buffer<uint16_t>> rawParam{"rawParam", 2}; // 16-bit CFA array
   Input<float> pBl{"pBl"};
   Input<float> pRange{"pRange"};
-  Input<float> pM00{"pM00"}, pM01{"pM01"}, pM02{"pM02"};
-  Input<float> pM10{"pM10"}, pM11{"pM11"}, pM12{"pM12"};
-  Input<float> pM20{"pM20"}, pM21{"pM21"}, pM22{"pM22"};
+  
+  // Phase 6.6: Camera to ProPhoto RGB Matrix
+  Input<float> pC2P00{"pC2P00"}, pC2P01{"pC2P01"}, pC2P02{"pC2P02"};
+  Input<float> pC2P10{"pC2P10"}, pC2P11{"pC2P11"}, pC2P12{"pC2P12"};
+  Input<float> pC2P20{"pC2P20"}, pC2P21{"pC2P21"}, pC2P22{"pC2P22"};
+  
+  // Phase 6.6: ProPhoto RGB to sRGB Matrix
+  Input<float> pP2S00{"pP2S00"}, pP2S01{"pP2S01"}, pP2S02{"pP2S02"};
+  Input<float> pP2S10{"pP2S10"}, pP2S11{"pP2S11"}, pP2S12{"pP2S12"};
+  Input<float> pP2S20{"pP2S20"}, pP2S21{"pP2S21"}, pP2S22{"pP2S22"};
+
   Input<float> pExpGain{"pExpGain"};
 
   // Phase 6.2 Option 2 Inputs
@@ -39,8 +47,8 @@ public:
   Func g_h, g_v, r_h, b_h, r_v, b_v;
   Func lum_h, lum_v, homo_h, homo_v, sum_homo_h, sum_homo_v;
   Func demosaic, diff_r, diff_b, refined_r, refined_b;
-  Func color_corrected, exp_gain_applied;
-  Func hsm_applied, lt_applied, tc_applied, lr_applied;
+    Func prophoto_rgb, exp_gain_applied;
+    Func hsm_applied, lt_applied, tc_applied, lr_applied, final_srgb;
 
   void emit_rgb2hsv(Expr r, Expr g, Expr b, Expr &h, Expr &s, Expr &v) {
     Expr max_c = max(r, max(g, b));
@@ -365,19 +373,19 @@ public:
                   demosaic(x, y, 1),
               0.0f, 1.0f);
 
-    color_corrected = Func("color_corrected");
+    prophoto_rgb = Func("prophoto_rgb");
     Expr dr = refined_r(x, y);
     Expr dg = demosaic(x, y, 1);
     Expr db = refined_b(x, y);
-    color_corrected(x, y, c) =
-        clamp(select(c == 0, dr * pM00 + dg * pM01 + db * pM02, c == 1,
-                     dr * pM10 + dg * pM11 + db * pM12,
-                     dr * pM20 + dg * pM21 + db * pM22),
+    prophoto_rgb(x, y, c) =
+        clamp(select(c == 0, dr * pC2P00 + dg * pC2P01 + db * pC2P02,
+                     c == 1, dr * pC2P10 + dg * pC2P11 + db * pC2P12,
+                     dr * pC2P20 + dg * pC2P21 + db * pC2P22),
               0.0f, 1.0f);
 
     exp_gain_applied = Func("exp_gain_applied");
     exp_gain_applied(x, y, c) =
-        clamp(color_corrected(x, y, c) * pExpGain, 0.0f, 1.0f);
+        clamp(prophoto_rgb(x, y, c) * pExpGain, 0.0f, 1.0f);
 
     hsm_applied = apply_3dlut(exp_gain_applied, hsmParam, hsmHD, hsmSD, hsmVD,
                               hasHSM, "hsm_applied");
@@ -387,7 +395,17 @@ public:
     lr_applied = apply_lr_params(tc_applied, hasLR, lrExpGain, lrContrastFactor,
                                  lrSat, lrVib, "lr_applied");
 
-    exposed = apply_gamma(lr_applied, "exposed");
+    final_srgb = Func("final_srgb");
+    Expr pr = lr_applied(x, y, 0);
+    Expr pg = lr_applied(x, y, 1);
+    Expr pb = lr_applied(x, y, 2);
+    final_srgb(x, y, c) =
+        clamp(select(c == 0, pr * pP2S00 + pg * pP2S01 + pb * pP2S02,
+                     c == 1, pr * pP2S10 + pg * pP2S11 + pb * pP2S12,
+                     pr * pP2S20 + pg * pP2S21 + pb * pP2S22),
+              0.0f, 1.0f);
+
+    exposed = apply_gamma(final_srgb, "exposed");
   }
 
   void schedule() {
@@ -407,9 +425,9 @@ public:
       hsm_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
       exp_gain_applied.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
 
-      color_corrected.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      prophoto_rgb.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
 
-      linearised.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+      final_srgb.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
       g_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
       g_v.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
       r_h.compute_root().gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
@@ -450,7 +468,8 @@ public:
       g_h.compute_at(exposed, yo).vectorize(x, 8);
       g_v.compute_at(exposed, yo).vectorize(x, 8);
 
-      color_corrected.compute_at(exposed, yo).vectorize(x, 8);
+      prophoto_rgb.compute_at(exposed, yo).vectorize(x, 8);
+      final_srgb.compute_at(exposed, yo).vectorize(x, 8);
       linearised.compute_at(exposed, yo).vectorize(x, 8);
     }
   }
