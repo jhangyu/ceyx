@@ -121,8 +121,6 @@ int main(int argc, char** argv) {
         negative->SynchronizeMetadata();
 
         std::cout << "\nNegative Summary:" << std::endl;
-        std::cout << "  Negative Default Crop Width: " << negative->DefaultCropSize().h << std::endl;
-        std::cout << "  Negative Default Crop Height: " << negative->DefaultCropSize().v << std::endl;
         std::cout << "  Negative Raw Image Width: " << negative->RawImage().Bounds().W() << std::endl;
         std::cout << "  Negative Raw Image Height: " << negative->RawImage().Bounds().H() << std::endl;
 
