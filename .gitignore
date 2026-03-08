@@ -12,3 +12,16 @@ __pycache__/
 *.dng
 *.arw
 node_modules
+
+# Build artifacts
+dng_processor/native/build/
+dng_processor/native/*.o
+dng_processor/native/*.a
+dng_processor/native/*.dylib
+dng_processor/native/test_*
+*.o
+*.a
+preview_out.jpg
+
+# Ralph loop
+.sisyphus/
