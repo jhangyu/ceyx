@@ -291,6 +291,10 @@ int main(int argc, char **argv) {
   // ================================================================
   std::cout << "\n--- Test 6: Halide Pipeline (Phase 3 + HueSatMap) ---\n";
 
+  // Phase 10.5: Check if we're in YCbCr mode (Lossy DNG)
+  bool isYCbCr = decoder.isYCbCrMode();
+  std::cout << "  YCbCr mode: " << (isYCbCr ? "YES" : "NO") << "\n";
+
   // Print HueSatMap status
   bool hasHSM = metadata.hsmHueDivisions > 0 && metadata.hsmSatDivisions > 1;
   bool hasLT = metadata.ltHueDivisions > 0 && metadata.ltSatDivisions > 1;
@@ -306,24 +310,49 @@ int main(int argc, char **argv) {
               << metadata.ltSatDivisions << "x" << metadata.ltValDivisions
               << ", " << metadata.ltData.size() << " entries)";
   std::cout << "\n";
-  ASSERT_TRUE(hasHSM, "Test 6.0: HueSatMap is present in profile");
 
-  // Force LR Params to 0 for strict PSNR comparison against DNG SDK (which doesn't parse them)
-  metadata.lrParams.exposure2012 = 0.0f;
-  metadata.lrParams.contrast2012 = 0.0f;
-  metadata.lrParams.saturation = 0.0f;
-  metadata.lrParams.vibrance = 0.0f;
-
+  // Declare variables outside the if/else block
+  uint8_t *rgba = nullptr;
   int outW = 0, outH = 0;
-  auto hp0 = std::chrono::steady_clock::now();
-  uint8_t *rgba = HalidePipeline::process(
-      decoder.getRawBuffer(), static_cast<int>(metadata.width),
-      static_cast<int>(metadata.height), metadata.blackLevel,
-      metadata.whiteLevel, metadata.asShotNeutral, metadata.camToSrgb,
-      metadata.baselineExposure, metadata, outW, outH);
-  auto hp1 = std::chrono::steady_clock::now();
-  double halideMs =
-      std::chrono::duration<double, std::milli>(hp1 - hp0).count();
+  double halideMs = 0.0;
+
+  // Phase 10.5: Skip Halide pipeline tests for YCbCr mode
+  // In YCbCr mode, RGBA is already computed by processYCbCr() during decode
+  if (isYCbCr) {
+    std::cout << "  [YCbCr mode] Skipping Bayer Halide pipeline tests\n";
+
+    // For YCbCr mode, get the pre-computed RGBA directly
+    const uint8_t *ycbcrRgba = decoder.getRGBABuffer();
+    size_t rgbaSize = decoder.getRGBABufferSize();
+
+    if (ycbcrRgba && rgbaSize > 0) {
+      rgba = new uint8_t[rgbaSize];
+      std::memcpy(rgba, ycbcrRgba, rgbaSize);
+      outW = metadata.width;
+      outH = metadata.height;
+      std::cout << "  Using pre-computed RGBA: " << rgbaSize << " bytes\n";
+    } else {
+      std::cerr << "  [YCbCr mode] ERROR: No RGBA data available\n";
+      return 1;
+    }
+  } else {
+    ASSERT_TRUE(hasHSM, "Test 6.0: HueSatMap is present in profile");
+
+    // Force LR Params to 0 for strict PSNR comparison against DNG SDK (which doesn't parse them)
+    metadata.lrParams.exposure2012 = 0.0f;
+    metadata.lrParams.contrast2012 = 0.0f;
+    metadata.lrParams.saturation = 0.0f;
+    metadata.lrParams.vibrance = 0.0f;
+
+    auto hp0 = std::chrono::steady_clock::now();
+    rgba = HalidePipeline::process(
+        decoder.getRawBuffer(), static_cast<int>(metadata.width),
+        static_cast<int>(metadata.height), metadata.blackLevel,
+        metadata.whiteLevel, metadata.asShotNeutral, metadata.camToSrgb,
+        metadata.baselineExposure, metadata, outW, outH);
+    auto hp1 = std::chrono::steady_clock::now();
+    halideMs = std::chrono::duration<double, std::milli>(hp1 - hp0).count();
+  }
 
   // 6.1 非 null
   ASSERT_TRUE(rgba != nullptr, "Test 6.1: Halide output is not null");
@@ -383,15 +412,38 @@ int main(int argc, char **argv) {
         AutoPtr<dng_negative> refNeg(refHost.Make_dng_negative());
         refNeg->Parse(refHost, refStream, refInfo);
         refNeg->PostParse(refHost, refStream, refInfo);
-        refNeg->ReadStage1Image(refHost, refStream, refInfo);
-        refNeg->BuildStage2Image(refHost);
-        refNeg->BuildStage3Image(refHost);
 
+        // Phase 10.6: Timing for each pipeline stage
+        auto t_s1 = std::chrono::steady_clock::now();
+        refNeg->ReadStage1Image(refHost, refStream, refInfo);
+        auto t_s1e = std::chrono::steady_clock::now();
+        double ms_s1 = std::chrono::duration<double, std::milli>(t_s1e - t_s1).count();
+
+        auto t_s2 = std::chrono::steady_clock::now();
+        refNeg->BuildStage2Image(refHost);
+        auto t_s2e = std::chrono::steady_clock::now();
+        double ms_s2 = std::chrono::duration<double, std::milli>(t_s2e - t_s2).count();
+
+        auto t_s3 = std::chrono::steady_clock::now();
+        refNeg->BuildStage3Image(refHost);
+        auto t_s3e = std::chrono::steady_clock::now();
+        double ms_s3 = std::chrono::duration<double, std::milli>(t_s3e - t_s3).count();
+
+        auto t_render = std::chrono::steady_clock::now();
         dng_render render(refHost, *refNeg);
         render.SetFinalSpace(dng_space_sRGB::Get());
         render.SetFinalPixelType(ttByte);
         render.SetMaximumSize(0);
         AutoPtr<dng_image> refImg(render.Render());
+        auto t_rendere = std::chrono::steady_clock::now();
+        double ms_render = std::chrono::duration<double, std::milli>(t_rendere - t_render).count();
+
+        std::cout << "  [DNG SDK Timing]\n";
+        std::cout << "    ReadStage1Image: " << ms_s1 << " ms\n";
+        std::cout << "    BuildStage2Image: " << ms_s2 << " ms\n";
+        std::cout << "    BuildStage3Image: " << ms_s3 << " ms\n";
+        std::cout << "    Render (tone curve + gamma + color space): " << ms_render << " ms\n";
+        std::cout << "    TOTAL DNG SDK: " << (ms_s1 + ms_s2 + ms_s3 + ms_render) << " ms\n";
 
         if (refImg.Get()) {
           uint32 rw = refImg->Width();

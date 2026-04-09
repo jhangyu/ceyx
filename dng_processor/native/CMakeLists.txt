@@ -20,12 +20,26 @@ elseif(UNIX)
 endif()
 
 find_package(ZLIB REQUIRED)
-find_package(JPEG REQUIRED)
+
+# Use libjpeg-turbo for SIMD-accelerated JPEG decoding
+find_library(TURBOJPEG_LIBRARY NAMES turbojpeg PATHS /opt/homebrew/opt/jpeg-turbo/lib NO_DEFAULT_PATH)
+if(TURBOJPEG_LIBRARY)
+    message(STATUS "Found TurboJPEG: ${TURBOJPEG_LIBRARY}")
+    set(TURBOJPEG_INCLUDE_DIRS "/opt/homebrew/opt/jpeg-turbo/include")
+    add_compile_definitions(USE_LIBJPEG_TURBO=1)
+else()
+    find_package(JPEG REQUIRED)
+    message(WARNING "TurboJPEG not found, lossless JPEG acceleration disabled")
+endif()
 
 # Adobe DNG SDK
 set(DNG_SDK_DIR ${THIRD_PARTY_DIR}/dng_sdk/source)
 file(GLOB_RECURSE DNG_SOURCES "${DNG_SDK_DIR}/*.cpp")
 list(REMOVE_ITEM DNG_SOURCES "${DNG_SDK_DIR}/dng_xmp_sdk.cpp" "${DNG_SDK_DIR}/dng_xmp.cpp")
+
+# DNG SDK custom implementations (Halide-accelerated)
+# Note: dng_mosaic_halide.cpp is built separately as it requires Halide JIT compilation
+# It should be compiled as part of the test_decode or a dedicated target
 
 # Inject our XMP stubs into the base DNG SDK library so its internal references resolve
 list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
@@ -34,7 +48,12 @@ add_library(dng_sdk STATIC ${DNG_SOURCES})
 target_include_directories(dng_sdk PUBLIC ${DNG_SDK_DIR})
 target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=1)
 target_include_directories(dng_sdk PUBLIC ${JPEG_INCLUDE_DIRS})
-target_link_libraries(dng_sdk ZLIB::ZLIB ${JPEG_LIBRARIES})
+if(TURBOJPEG_LIBRARY)
+    target_include_directories(dng_sdk PUBLIC ${TURBOJPEG_INCLUDE_DIRS})
+    target_link_libraries(dng_sdk ZLIB::ZLIB ${TURBOJPEG_LIBRARY})
+else()
+    target_link_libraries(dng_sdk ZLIB::ZLIB ${JPEG_LIBRARIES})
+endif()
 
 # Native library
 file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
@@ -46,7 +65,12 @@ endif()
 
 add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
 target_include_directories(dng_decoder_native PUBLIC ${INC_DIR})
-target_link_libraries(dng_decoder_native dng_sdk)
+if(TURBOJPEG_LIBRARY)
+    target_include_directories(dng_decoder_native PUBLIC ${TURBOJPEG_INCLUDE_DIRS})
+    target_link_libraries(dng_decoder_native dng_sdk ${TURBOJPEG_LIBRARY})
+else()
+    target_link_libraries(dng_decoder_native dng_sdk ${JPEG_LIBRARIES})
+endif()
 
 set(HALIDE_DIR ${THIRD_PARTY_DIR}/halide)
 list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
@@ -147,4 +171,53 @@ target_include_directories(test_dng_preview PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
 target_link_libraries(test_dng_preview dng_sdk)
 if(APPLE)
     target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# DNG SDK Decode Pipeline Test Tool
+add_executable(test_decode tests/test_decode.cpp)
+target_include_directories(test_decode PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+if(TURBOJPEG_LIBRARY)
+    target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
+    target_link_libraries(test_decode dng_sdk ${TURBOJPEG_LIBRARY})
+else()
+    target_link_libraries(test_decode dng_sdk ${JPEG_LIBRARIES})
+endif()
+if(APPLE)
+    target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# Phase 5.3: Halide Demosaic PSNR Test
+add_executable(test_mosaic_halide tests/test_mosaic_halide.cpp
+    dng_sdk_custom/source/dng_mosaic_halide.cpp)
+target_include_directories(test_mosaic_halide PRIVATE
+    ${INC_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+    ${DNG_SDK_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide)
+if(APPLE)
+    target_link_libraries(test_mosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# Debug demosaic test
+add_executable(test_mosaic_debug tests/test_mosaic_debug.cpp
+    dng_sdk_custom/source/dng_mosaic_halide.cpp)
+target_include_directories(test_mosaic_debug PRIVATE
+    ${INC_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+    ${DNG_SDK_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide)
+if(APPLE)
+    target_link_libraries(test_mosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# Phase 5.1: Halide Render PSNR Test (placeholder - needs DNG SDK data)
+add_executable(test_render_halide tests/test_render_halide.cpp)
+target_include_directories(test_render_halide PRIVATE
+    ${INC_DIR}
+    ${DNG_SDK_DIR})
+target_link_libraries(test_render_halide dng_sdk)
+if(APPLE)
+    target_link_libraries(test_render_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()

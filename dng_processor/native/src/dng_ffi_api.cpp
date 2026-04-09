@@ -39,11 +39,29 @@ DngResult *dng_decode_and_process(const char *file_path) {
   // --- Phase 3+5a: Halide pipeline (now includes HueSatMap/LookTable) ---
   int outW = 0, outH = 0;
   auto t2 = std::chrono::steady_clock::now();
-  uint8_t *rgba = HalidePipeline::process(
-      decoder.getRawBuffer(), static_cast<int>(metadata.width),
-      static_cast<int>(metadata.height), metadata.blackLevel,
-      metadata.whiteLevel, metadata.asShotNeutral, metadata.camToSrgb,
-      metadata.baselineExposure, metadata, outW, outH);
+
+  uint8_t *rgba = nullptr;
+
+  if (decoder.isYCbCrMode()) {
+    // Phase 10: YCbCr DNG - RGBA is already computed, use it directly
+    std::cerr << "[FFI] YCbCr mode detected, using pre-computed RGBA\n";
+    const uint8_t *ycbcrRgba = decoder.getRGBABuffer();
+    size_t rgbaSize = decoder.getRGBABufferSize();
+
+    if (ycbcrRgba && rgbaSize > 0) {
+      rgba = new uint8_t[rgbaSize];
+      std::memcpy(rgba, ycbcrRgba, rgbaSize);
+      outW = metadata.width;
+      outH = metadata.height;
+    }
+  } else {
+    // Standard Bayer DNG - run through Halide pipeline
+    rgba = HalidePipeline::process(
+        decoder.getRawBuffer(), static_cast<int>(metadata.width),
+        static_cast<int>(metadata.height), metadata.blackLevel,
+        metadata.whiteLevel, metadata.asShotNeutral, metadata.camToSrgb,
+        metadata.baselineExposure, metadata, outW, outH);
+  }
 
   auto t3 = std::chrono::steady_clock::now();
   result->process_ms =
