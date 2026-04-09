@@ -173,9 +173,13 @@ if(APPLE)
     target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
 
-# DNG SDK Decode Pipeline Test Tool
-add_executable(test_decode tests/test_decode.cpp)
-target_include_directories(test_decode PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+# DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
+add_executable(test_decode tests/test_decode.cpp
+    dng_sdk_custom/source/dng_mosaic_halide.cpp)
+target_include_directories(test_decode PRIVATE
+    ${INC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_DIR}/include)
 if(TURBOJPEG_LIBRARY)
     target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
     target_link_libraries(test_decode dng_sdk ${TURBOJPEG_LIBRARY})

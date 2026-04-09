@@ -19,17 +19,17 @@
  * - Render: Tone curve + gamma + color space conversion
  */
 
-#include <iostream>
-#include <iomanip>
-#include <fstream>
-#include <vector>
-#include <cmath>
-#include <chrono>
-#include <cstring>
-#include <sstream>
-#include <iomanip>
+#include "stage_contract_checks.h"
 
-// DNG SDK includes
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <vector>
+
 #include <dng_file_stream.h>
 #include <dng_host.h>
 #include <dng_info.h>
@@ -42,8 +42,9 @@
 #include <dng_render.h>
 #include <dng_color_space.h>
 #include <dng_exceptions.h>
+#include <dng_rect.h>
 
-#include "stage_contract_checks.h"
+#include <dng_mosaic_halide.h>
 
 using namespace std;
 using namespace std::chrono;
@@ -53,6 +54,12 @@ struct StageTiming {
     double read_stage1_ms = 0;
     double build_stage2_ms = 0;
     double build_stage3_ms = 0;
+    double stage3_extract_stage2_ms = 0;
+    double stage3_halide_kernel_ms = 0;
+    double stage3_inject_put_ms = 0;
+    double stage3_apply_opcode3_ms = 0;
+    double stage3_extract_stage3_ms = 0;
+    double stage3_sdk_build_ms = 0;
     double render_ms = 0;
     double total_ms = 0;
 };
@@ -292,41 +299,115 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
             }
         }
 
-        // === Stage 3: BuildStage3Image ===
+        // === Stage 3: BuildStage3Image (Halide demosaic for Bayer in TEST mode) ===
         cout << "\n--- Stage 3: BuildStage3Image ---\n";
         auto stage3Start = high_resolution_clock::now();
 
-        negative->BuildStage3Image(host);
+        // For Bayer CFA in TEST mode: use Halide demosaic instead of DNG SDK
+        // For YCbCr (lossy) or BASELINE mode: use DNG SDK directly
+        bool useHalideDemosaic = (decodePath == StageContract::DecodePath::CFA_BAYER) && !generateBaseline;
+
+        vector<uint16_t> stage3Data;
+        uint32_t s3w = 0, s3h = 0, s3p = 0, s3pt = 0;
+        size_t s3ps = 0;
+
+        if (useHalideDemosaic) {
+            // Use Halide AHD demosaic on Stage2 output
+            cout << "  [Halide] Using AHD demosaic on Stage2 (Bayer CFA) + inject Stage3Image...\n";
+
+            // Extract Stage2 data for Halide input
+            auto stage3ExtractStage2Start = high_resolution_clock::now();
+            dng_image* stage2Img = const_cast<dng_image*>(negative->Stage2Image());
+            uint32_t s2w = 0, s2h = 0, s2p = 0, s2pt = 0;
+            size_t s2ps = 0;
+            vector<uint16_t> stage2Data;
+            extractImageData(stage2Img, stage2Data, s2w, s2h, s2p, s2pt, s2ps);
+            auto stage3ExtractStage2End = high_resolution_clock::now();
+            timing.stage3_extract_stage2_ms =
+                duration_cast<microseconds>(stage3ExtractStage2End - stage3ExtractStage2Start).count() / 1000.0;
+
+            // Allocate output buffer for 3-plane RGB
+            size_t outputSize = static_cast<size_t>(s2w) * s2h * 3;
+            stage3Data.resize(outputSize);
+
+            // Run Halide AHD demosaic
+            auto stage3KernelStart = high_resolution_clock::now();
+            demosaic_ahd_halide(stage2Data.data(), s2w, s2h, stage3Data.data());
+            auto stage3KernelEnd = high_resolution_clock::now();
+            timing.stage3_halide_kernel_ms =
+                duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
+
+            // Create DNG image object from Halide output and inject back into negative
+            // so subsequent Render stage uses Halide Stage3 instead of rebuilding via DNG SDK.
+            dng_point stage3Size(static_cast<int32>(s2h), static_cast<int32>(s2w));
+            AutoPtr<dng_image> halideStage3(host.Make_dng_image(dng_rect(stage3Size), 3, ttShort));
+
+            dng_pixel_buffer stage3Buffer;
+            stage3Buffer.fArea = halideStage3->Bounds();
+            stage3Buffer.fPlane = 0;
+            stage3Buffer.fPlanes = 3;
+            stage3Buffer.fPixelType = ttShort;
+            stage3Buffer.fPixelSize = 2;
+            stage3Buffer.fData = stage3Data.data();
+            stage3Buffer.fRowStep = static_cast<int32>(s2w * 3);
+            stage3Buffer.fColStep = 3;
+            stage3Buffer.fPlaneStep = 1;
+            auto stage3InjectStart = high_resolution_clock::now();
+            halideStage3->Put(stage3Buffer);
+            auto stage3InjectEnd = high_resolution_clock::now();
+            timing.stage3_inject_put_ms =
+                duration_cast<microseconds>(stage3InjectEnd - stage3InjectStart).count() / 1000.0;
+
+            // Match BuildStage3Image behavior by applying OpcodeList3 before render/compare.
+            auto stage3OpcodeStart = high_resolution_clock::now();
+            host.ApplyOpcodeList(negative->OpcodeList3(), *negative, halideStage3);
+            auto stage3OpcodeEnd = high_resolution_clock::now();
+            timing.stage3_apply_opcode3_ms =
+                duration_cast<microseconds>(stage3OpcodeEnd - stage3OpcodeStart).count() / 1000.0;
+            negative->SetStage3Image(halideStage3);
+
+            // Re-extract Stage3 data from injected image (after opcode processing),
+            // so Stage3 PSNR compares the exact data used by Render.
+            auto stage3ExtractStage3Start = high_resolution_clock::now();
+            dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
+            extractImageData(stage3Img, stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+            auto stage3ExtractStage3End = high_resolution_clock::now();
+            timing.stage3_extract_stage3_ms =
+                duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+        } else {
+            // Use DNG SDK BuildStage3Image
+            auto stage3SdkBuildStart = high_resolution_clock::now();
+            negative->BuildStage3Image(host);
+            auto stage3SdkBuildEnd = high_resolution_clock::now();
+            timing.stage3_sdk_build_ms =
+                duration_cast<microseconds>(stage3SdkBuildEnd - stage3SdkBuildStart).count() / 1000.0;
+
+            dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
+            extractImageData(stage3Img, stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+        }
 
         auto stage3End = high_resolution_clock::now();
         timing.build_stage3_ms = duration_cast<microseconds>(stage3End - stage3Start).count() / 1000.0;
         cout << "  Time: " << fixed << setprecision(2) << timing.build_stage3_ms << " ms\n";
 
-        // Extract Stage 3 image data
-        {
-            uint32_t w, h, p, pt;
-            size_t ps;
-            dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
-            vector<uint16_t> stage3Data;
-            extractImageData(stage3Img, stage3Data, w, h, p, pt, ps);
-            if (!StageContract::validateStageContract16("Stage3", decodePath, w, h, p, pt, ps, stage3Data.size())) {
-                cerr << "ERROR: Stage3 contract check failed\n";
-                return;
-            }
+        // Validate contract
+        if (!StageContract::validateStageContract16("Stage3", decodePath, s3w, s3h, s3p, s3pt, s3ps, stage3Data.size())) {
+            cerr << "ERROR: Stage3 contract check failed\n";
+            return;
+        }
 
-            string filename = prefix + "_stage3_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
-            if (generateBaseline) {
-                saveRawFile(filename, stage3Data.data(), stage3Data.size() * sizeof(uint16_t));
-                cout << "  Saved baseline: " << filename << " (" << stage3Data.size() * 2 << " bytes)\n";
+        string filename = prefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
+        if (generateBaseline) {
+            saveRawFile(filename, stage3Data.data(), stage3Data.size() * sizeof(uint16_t));
+            cout << "  Saved baseline: " << filename << " (" << stage3Data.size() * 2 << " bytes)\n";
+        } else {
+            vector<uint16_t> refData(stage3Data.size());
+            string refFilename = prefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
+            if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
+                psnr.stage3_psnr = computePSNR_16bit(refData.data(), stage3Data.data(), stage3Data.size());
+                cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage3_psnr << " dB\n";
             } else {
-                vector<uint16_t> refData(stage3Data.size());
-                string refFilename = prefix + "_stage3_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
-                if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
-                    psnr.stage3_psnr = computePSNR_16bit(refData.data(), stage3Data.data(), stage3Data.size());
-                    cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage3_psnr << " dB\n";
-                } else {
-                    cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
-                }
+                cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
             }
         }
 
@@ -410,6 +491,18 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
              << (timing.build_stage2_ms / timing.total_ms * 100) << "%)\n";
         cout << "  BuildStage3Image: " << fixed << setprecision(2) << timing.build_stage3_ms << " ms ("
              << (timing.build_stage3_ms / timing.total_ms * 100) << "%)\n";
+        if (timing.stage3_halide_kernel_ms > 0 || timing.stage3_sdk_build_ms > 0) {
+            cout << "    Stage3 detail:\n";
+            if (timing.stage3_halide_kernel_ms > 0) {
+                cout << "      Extract Stage2: " << fixed << setprecision(2) << timing.stage3_extract_stage2_ms << " ms\n";
+                cout << "      Halide kernel:  " << fixed << setprecision(2) << timing.stage3_halide_kernel_ms << " ms\n";
+                cout << "      Put Stage3:     " << fixed << setprecision(2) << timing.stage3_inject_put_ms << " ms\n";
+                cout << "      Apply Opcode3:  " << fixed << setprecision(2) << timing.stage3_apply_opcode3_ms << " ms\n";
+                cout << "      Extract Stage3: " << fixed << setprecision(2) << timing.stage3_extract_stage3_ms << " ms\n";
+            } else {
+                cout << "      SDK build:      " << fixed << setprecision(2) << timing.stage3_sdk_build_ms << " ms\n";
+            }
+        }
         cout << "  Render:           " << fixed << setprecision(2) << timing.render_ms << " ms ("
              << (timing.render_ms / timing.total_ms * 100) << "%)\n";
         cout << "  TOTAL:            " << fixed << setprecision(2) << timing.total_ms << " ms\n";
