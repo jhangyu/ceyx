@@ -42,15 +42,23 @@
 #include <dng_render.h>
 #include <dng_color_space.h>
 #include <dng_exceptions.h>
+#include <dng_lens_correction.h>
+#include <dng_opcodes.h>
 #include <dng_rect.h>
 
 #include <dng_mosaic_halide.h>
+#include <dng_render_halide.h>
+#include <dng_warp_halide.h>
+
+#include "ConcurrentDngHost.h"
 
 using namespace std;
 using namespace std::chrono;
 
 // Global timing and PSNR data
 struct StageTiming {
+    double parse_info_ms = 0;
+    double parse_negative_ms = 0;
     double read_stage1_ms = 0;
     double build_stage2_ms = 0;
     double build_stage3_ms = 0;
@@ -61,7 +69,17 @@ struct StageTiming {
     double stage3_extract_stage3_ms = 0;
     double stage3_sdk_build_ms = 0;
     double render_ms = 0;
+    double decode_total_ms = 0;
+    double wall_total_ms = 0;
     double total_ms = 0;
+};
+
+struct OpcodeTimingEntry {
+    uint32_t index = 0;
+    uint32_t opcode_id = 0;
+    string opcode_name;
+    bool applied = false;
+    double elapsed_ms = 0;
 };
 
 struct StagePSNR {
@@ -98,6 +116,164 @@ string photometricName(uint32 photometric) {
         case 34892: return "LinearRaw";
         default: return "Unknown";
     }
+}
+
+string opcodeName(uint32 opcodeID) {
+    switch (opcodeID) {
+        case dngOpcode_Private: return "Private";
+        case dngOpcode_WarpRectilinear: return "WarpRectilinear";
+        case dngOpcode_WarpFisheye: return "WarpFisheye";
+        case dngOpcode_FixVignetteRadial: return "FixVignetteRadial";
+        case dngOpcode_FixBadPixelsConstant: return "FixBadPixelsConstant";
+        case dngOpcode_FixBadPixelsList: return "FixBadPixelsList";
+        case dngOpcode_TrimBounds: return "TrimBounds";
+        case dngOpcode_MapTable: return "MapTable";
+        case dngOpcode_MapPolynomial: return "MapPolynomial";
+        case dngOpcode_GainMap: return "GainMap";
+        case dngOpcode_DeltaPerRow: return "DeltaPerRow";
+        case dngOpcode_DeltaPerColumn: return "DeltaPerColumn";
+        case dngOpcode_ScalePerRow: return "ScalePerRow";
+        case dngOpcode_ScalePerColumn: return "ScalePerColumn";
+        default: return "Unknown";
+    }
+}
+
+WarpRectilinearMode parseWarpMode(const string& mode) {
+    if (mode == "sdk") return WarpRectilinearMode::SDK;
+    if (mode == "halide-cpu") return WarpRectilinearMode::HALIDE_CPU;
+    if (mode == "halide-metal") return WarpRectilinearMode::HALIDE_METAL;
+    return WarpRectilinearMode::AUTO;
+}
+
+RenderHalideMode parseRenderMode(const string& mode) {
+    if (mode == "sdk") return RenderHalideMode::SDK;
+    if (mode == "halide-metal") return RenderHalideMode::HALIDE_METAL;
+    return RenderHalideMode::AUTO;
+}
+
+AutoPtr<dng_image> makeImageFromInterleaved(dng_host& host,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            uint32_t planes,
+                                            const vector<uint16_t>& data) {
+    dng_point size(static_cast<int32>(height), static_cast<int32>(width));
+    AutoPtr<dng_image> image(host.Make_dng_image(dng_rect(size), planes, ttShort));
+
+    dng_pixel_buffer buffer;
+    buffer.fArea = image->Bounds();
+    buffer.fPlane = 0;
+    buffer.fPlanes = planes;
+    buffer.fPixelType = ttShort;
+    buffer.fPixelSize = sizeof(uint16_t);
+    buffer.fData = const_cast<uint16_t*>(data.data());
+    buffer.fRowStep = static_cast<int32>(width * planes);
+    buffer.fColStep = static_cast<int32>(planes);
+    buffer.fPlaneStep = 1;
+    image->Put(buffer);
+
+    return AutoPtr<dng_image>(image.Release());
+}
+
+bool applyOpcodeList3Custom(dng_host& host,
+                            dng_negative& negative,
+                            const dng_opcode_list& opcodeList3,
+                            WarpRectilinearMode warpMode,
+                            AutoPtr<dng_image>& image,
+                            vector<OpcodeTimingEntry>& opcodeTimings) {
+    opcodeTimings.clear();
+    opcodeTimings.reserve(opcodeList3.Count());
+
+    for (uint32_t opcodeIndex = 0; opcodeIndex < opcodeList3.Count(); ++opcodeIndex) {
+        dng_opcode& opcode = const_cast<dng_opcode&>(opcodeList3.Entry(opcodeIndex));
+        OpcodeTimingEntry timingEntry;
+        timingEntry.index = opcodeIndex;
+        timingEntry.opcode_id = opcode.OpcodeID();
+        timingEntry.opcode_name = opcodeName(opcode.OpcodeID());
+
+        auto opcodeStart = high_resolution_clock::now();
+        if (opcode.AboutToApply(host, negative)) {
+            bool applied = false;
+            if (opcode.OpcodeID() == dngOpcode_WarpRectilinear && warpMode != WarpRectilinearMode::SDK) {
+                const auto& warpOpcode = static_cast<const dng_opcode_WarpRectilinear&>(opcode);
+                applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image, warpMode);
+                if (!applied && warpMode == WarpRectilinearMode::AUTO) {
+                    applied = apply_warp_rectilinear_to_image(host,
+                                                              negative,
+                                                              warpOpcode,
+                                                              image,
+                                                              WarpRectilinearMode::HALIDE_CPU);
+                }
+                if (!applied && warpMode != WarpRectilinearMode::AUTO) {
+                    cerr << "ERROR: WarpRectilinear " << warpRectilinearModeName(warpMode)
+                         << " failed; refusing fallback to SDK in explicit mode\n";
+                    return false;
+                }
+            }
+
+            if (!applied) {
+                opcode.Apply(host, negative, image);
+                applied = true;
+            }
+            timingEntry.applied = applied;
+        }
+        auto opcodeEnd = high_resolution_clock::now();
+        timingEntry.elapsed_ms =
+            duration_cast<microseconds>(opcodeEnd - opcodeStart).count() / 1000.0;
+        opcodeTimings.push_back(timingEntry);
+    }
+
+    return true;
+}
+
+bool applySingleWarpRectilinearInterleaved(dng_negative& negative,
+                                           const dng_opcode_WarpRectilinear& warpOpcode,
+                                           WarpRectilinearMode warpMode,
+                                           uint32_t width,
+                                           uint32_t height,
+                                           uint32_t planes,
+                                           vector<uint16_t>& interleavedData) {
+    if (warpMode == WarpRectilinearMode::SDK) {
+        return false;
+    }
+    if (interleavedData.empty()) {
+        return false;
+    }
+    if (interleavedData.size() != static_cast<size_t>(width) * height * planes) {
+        return false;
+    }
+
+    WarpRectilinearParams params;
+    if (!extractWarpRectilinearParams(warpOpcode,
+                                      static_cast<float>(negative.PixelAspectRatio()),
+                                      params)) {
+        return false;
+    }
+
+    thread_local vector<uint16_t> warped;
+    warped.assign(interleavedData.size(), 0);
+    if (!warp_rectilinear_halide(interleavedData.data(),
+                                 static_cast<int>(width),
+                                 static_cast<int>(height),
+                                 static_cast<int>(planes),
+                                 params,
+                                 warpMode,
+                                 warped.data())) {
+        if (warpMode == WarpRectilinearMode::AUTO &&
+            warp_rectilinear_halide(interleavedData.data(),
+                                    static_cast<int>(width),
+                                    static_cast<int>(height),
+                                    static_cast<int>(planes),
+                                    params,
+                                    WarpRectilinearMode::HALIDE_CPU,
+                                    warped.data())) {
+            interleavedData.swap(warped);
+            return true;
+        }
+        return false;
+    }
+
+    interleavedData.swap(warped);
+    return true;
 }
 
 // Save raw image data to file
@@ -180,7 +356,12 @@ void extractImageData(dng_image* image, vector<uint16_t>& data, uint32_t& width,
 }
 
 // Stage-by-stage test for one DNG file
-void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool generateBaseline) {
+void testDNG(dng_host& host,
+             const string& dngPath,
+             const string& prefix,
+             bool generateBaseline,
+             WarpRectilinearMode warpMode,
+             RenderHalideMode renderMode) {
     printBanner(prefix + " DNG Decoding Test");
 
     StageTiming timing;
@@ -192,9 +373,12 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
         dng_file_stream stream(dngPath.c_str());
 
         // Parse DNG info
+        auto parseInfoStart = high_resolution_clock::now();
         dng_info info;
         info.Parse(host, stream);
         info.PostParse(host);
+        auto parseInfoEnd = high_resolution_clock::now();
+        timing.parse_info_ms = duration_cast<microseconds>(parseInfoEnd - parseInfoStart).count() / 1000.0;
 
         if (!info.IsValidDNG()) {
             cerr << "ERROR: Not a valid DNG file\n";
@@ -210,13 +394,24 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
         cout << "Photometric: " << photometricName(rawIFD.fPhotometricInterpretation)
              << " (" << rawIFD.fPhotometricInterpretation << ")"
              << " (" << StageContract::decodePathName(decodePath) << ")\n";
-        cout << "Mode: " << (generateBaseline ? "BASELINE (generate)" : "TEST (compare)") << "\n\n";
+        cout << "Mode: " << (generateBaseline ? "BASELINE (generate)" : "TEST (compare)") << "\n";
+        if (!generateBaseline && decodePath == StageContract::DecodePath::CFA_BAYER) {
+            cout << "WarpRectilinear mode: " << warpRectilinearModeName(warpMode) << "\n";
+        }
+        if (!generateBaseline) {
+            cout << "Render mode: " << renderHalideModeName(renderMode) << "\n";
+        }
+        cout << "\n";
 
         // Parse negative
+        auto parseNegativeStart = high_resolution_clock::now();
         dng_negative* negativeTemplate = host.Make_dng_negative();
         AutoPtr<dng_negative> negative(negativeTemplate);
         negative->Parse(host, stream, info);
         negative->PostParse(host, stream, info);
+        auto parseNegativeEnd = high_resolution_clock::now();
+        timing.parse_negative_ms =
+            duration_cast<microseconds>(parseNegativeEnd - parseNegativeStart).count() / 1000.0;
 
         // Baseline storage for PSNR comparison
         vector<uint16_t> baseline_stage1, baseline_stage2, baseline_stage3;
@@ -337,6 +532,44 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
             timing.stage3_halide_kernel_ms =
                 duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
 
+            // Match BuildStage3Image behavior by applying OpcodeList3 before render/compare.
+            const dng_opcode_list& opcodeList3 = negative->OpcodeList3();
+            vector<OpcodeTimingEntry> opcodeTimings;
+            opcodeTimings.reserve(opcodeList3.Count());
+
+            bool fastWarpApplied = false;
+            if (opcodeList3.Count() == 1 &&
+                opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear &&
+                warpMode != WarpRectilinearMode::SDK) {
+                const auto& warpOpcode =
+                    static_cast<const dng_opcode_WarpRectilinear&>(opcodeList3.Entry(0));
+                OpcodeTimingEntry timingEntry;
+                timingEntry.index = 0;
+                timingEntry.opcode_id = dngOpcode_WarpRectilinear;
+                timingEntry.opcode_name = opcodeName(dngOpcode_WarpRectilinear);
+                auto opcodeStart = high_resolution_clock::now();
+                const bool applied = applySingleWarpRectilinearInterleaved(*negative,
+                                                                           warpOpcode,
+                                                                           warpMode,
+                                                                           s2w,
+                                                                           s2h,
+                                                                           3,
+                                                                           stage3Data);
+                auto opcodeEnd = high_resolution_clock::now();
+                timingEntry.applied = applied;
+                timingEntry.elapsed_ms =
+                    duration_cast<microseconds>(opcodeEnd - opcodeStart).count() / 1000.0;
+                opcodeTimings.push_back(timingEntry);
+                timing.stage3_apply_opcode3_ms = timingEntry.elapsed_ms;
+
+                if (!applied && warpMode != WarpRectilinearMode::AUTO) {
+                    cerr << "ERROR: WarpRectilinear " << warpRectilinearModeName(warpMode)
+                         << " failed; refusing fallback to SDK in explicit mode\n";
+                    return;
+                }
+                fastWarpApplied = applied;
+            }
+
             // Create DNG image object from Halide output and inject back into negative
             // so subsequent Render stage uses Halide Stage3 instead of rebuilding via DNG SDK.
             dng_point stage3Size(static_cast<int32>(s2h), static_cast<int32>(s2w));
@@ -358,22 +591,57 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
             timing.stage3_inject_put_ms =
                 duration_cast<microseconds>(stage3InjectEnd - stage3InjectStart).count() / 1000.0;
 
-            // Match BuildStage3Image behavior by applying OpcodeList3 before render/compare.
-            auto stage3OpcodeStart = high_resolution_clock::now();
-            host.ApplyOpcodeList(negative->OpcodeList3(), *negative, halideStage3);
-            auto stage3OpcodeEnd = high_resolution_clock::now();
-            timing.stage3_apply_opcode3_ms =
-                duration_cast<microseconds>(stage3OpcodeEnd - stage3OpcodeStart).count() / 1000.0;
+            if (!fastWarpApplied) {
+                if (!opcodeTimings.empty()) {
+                    opcodeTimings.clear();
+                }
+                auto stage3OpcodeStart = high_resolution_clock::now();
+                if (!applyOpcodeList3Custom(host, *negative, opcodeList3, warpMode, halideStage3, opcodeTimings)) {
+                    cerr << "ERROR: applyOpcodeList3Custom failed\n";
+                    return;
+                }
+                auto stage3OpcodeEnd = high_resolution_clock::now();
+                timing.stage3_apply_opcode3_ms =
+                    duration_cast<microseconds>(stage3OpcodeEnd - stage3OpcodeStart).count() / 1000.0;
+
+                auto stage3ExtractStage3Start = high_resolution_clock::now();
+                extractImageData(halideStage3.Get(), stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+                auto stage3ExtractStage3End = high_resolution_clock::now();
+                timing.stage3_extract_stage3_ms =
+                    duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+            } else {
+                s3w = s2w;
+                s3h = s2h;
+                s3p = 3;
+                s3pt = ttShort;
+                s3ps = sizeof(uint16_t);
+            }
+
             negative->SetStage3Image(halideStage3);
 
-            // Re-extract Stage3 data from injected image (after opcode processing),
-            // so Stage3 PSNR compares the exact data used by Render.
-            auto stage3ExtractStage3Start = high_resolution_clock::now();
-            dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
-            extractImageData(stage3Img, stage3Data, s3w, s3h, s3p, s3pt, s3ps);
-            auto stage3ExtractStage3End = high_resolution_clock::now();
-            timing.stage3_extract_stage3_ms =
-                duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+            if (opcodeTimings.empty()) {
+                cout << "  [OpcodeList3] No opcodes\n";
+            } else {
+                cout << "  [OpcodeList3] " << opcodeTimings.size() << " opcode(s)\n";
+                double slowestMs = -1.0;
+                size_t slowestIndex = 0;
+                for (size_t i = 0; i < opcodeTimings.size(); ++i) {
+                    const auto& entry = opcodeTimings[i];
+                    cout << "    [" << entry.index << "] id=" << entry.opcode_id
+                         << " " << entry.opcode_name
+                         << " applied=" << (entry.applied ? "yes" : "no")
+                         << " time=" << fixed << setprecision(2) << entry.elapsed_ms << " ms\n";
+                    if (entry.elapsed_ms > slowestMs) {
+                        slowestMs = entry.elapsed_ms;
+                        slowestIndex = i;
+                    }
+                }
+                const auto& slowest = opcodeTimings[slowestIndex];
+                cout << "  [OpcodeList3] Slowest opcode: "
+                     << "[" << slowest.index << "] id=" << slowest.opcode_id
+                     << " " << slowest.opcode_name
+                     << " time=" << fixed << setprecision(2) << slowest.elapsed_ms << " ms\n";
+            }
         } else {
             // Use DNG SDK BuildStage3Image
             auto stage3SdkBuildStart = high_resolution_clock::now();
@@ -419,21 +687,32 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
         renderer.SetMaximumSize(max(width, height));
         renderer.SetFinalPixelType(ttByte);
         renderer.SetFinalSpace(dng_space_sRGB::Get());
+        vector<uint8_t> rgbData;
+        uint32_t outW = 0;
+        uint32_t outH = 0;
+        bool renderOk = false;
 
-        AutoPtr<dng_image> finalImage(renderer.Render());
+        const bool tryHalideRender = !generateBaseline && (renderMode != RenderHalideMode::SDK);
+        if (tryHalideRender) {
+            renderOk = render_stage4_halide(host, *negative, renderer, renderMode, rgbData, outW, outH);
+            if (!renderOk && renderMode == RenderHalideMode::AUTO) {
+                cout << "  [Render] Halide AUTO failed, falling back to SDK render\n";
+            } else if (!renderOk) {
+                cerr << "ERROR: Stage4 Halide render failed in explicit mode\n";
+                return;
+            }
+        }
 
-        auto renderEnd = high_resolution_clock::now();
-        timing.render_ms = duration_cast<microseconds>(renderEnd - renderStart).count() / 1000.0;
-        cout << "  Time: " << fixed << setprecision(2) << timing.render_ms << " ms\n";
+        if (!renderOk) {
+            AutoPtr<dng_image> finalImage(renderer.Render());
+            if (!finalImage.Get()) {
+                cerr << "ERROR: Stage4 SDK render failed\n";
+                return;
+            }
 
-        if (finalImage.Get()) {
-            cout << "  Output: " << finalImage->Width() << "x" << finalImage->Height()
-                 << " (" << finalImage->PixelType() << ")\n";
-
-            // Extract buffer (8-bit RGB)
-            uint32_t outW = finalImage->Width();
-            uint32_t outH = finalImage->Height();
-            vector<uint8_t> rgbData(static_cast<size_t>(outW) * outH * 3);
+            outW = finalImage->Width();
+            outH = finalImage->Height();
+            rgbData.resize(static_cast<size_t>(outW) * outH * 3);
             dng_pixel_buffer buffer;
             buffer.fArea = finalImage->Bounds();
             buffer.fPlane = 0;
@@ -445,52 +724,64 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
             buffer.fColStep = 3;
             buffer.fPlaneStep = 1;
             finalImage->Get(buffer);
-            if (!StageContract::validateRenderImageContract("Stage4",
-                                                            outW,
-                                                            outH,
-                                                            finalImage->Planes(),
-                                                            finalImage->PixelType(),
-                                                            finalImage->PixelSize(),
-                                                            rgbData.size())) {
-                cerr << "ERROR: Stage4 contract check failed\n";
-                return;
-            }
+        }
 
-            // Save PPM
-            string ppmFilename = "output_" + prefix + "_" + to_string(outW) + "x" + to_string(outH) + ".ppm";
-            ofstream fout(ppmFilename, ios::binary);
-            fout << "P6\n" << outW << " " << outH << "\n255\n";
-            fout.write(reinterpret_cast<const char*>(rgbData.data()), rgbData.size());
-            cout << "  Saved PPM: " << ppmFilename << "\n";
+        auto renderEnd = high_resolution_clock::now();
+        timing.render_ms = duration_cast<microseconds>(renderEnd - renderStart).count() / 1000.0;
+        cout << "  Time: " << fixed << setprecision(2) << timing.render_ms << " ms\n";
+        cout << "  Output: " << outW << "x" << outH << " (" << ttByte << ")\n";
 
-            // PSNR for Render stage (8-bit)
-            string filename = prefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
-            if (generateBaseline) {
-                saveRawFile(filename, rgbData.data(), rgbData.size());
-                cout << "  Saved baseline: " << filename << " (" << rgbData.size() << " bytes)\n";
+        if (!StageContract::validateRenderImageContract("Stage4",
+                                                        outW,
+                                                        outH,
+                                                        3,
+                                                        ttByte,
+                                                        1,
+                                                        rgbData.size())) {
+            cerr << "ERROR: Stage4 contract check failed\n";
+            return;
+        }
+
+        // Save PPM
+        string ppmFilename = "output_" + prefix + "_" + to_string(outW) + "x" + to_string(outH) + ".ppm";
+        ofstream fout(ppmFilename, ios::binary);
+        fout << "P6\n" << outW << " " << outH << "\n255\n";
+        fout.write(reinterpret_cast<const char*>(rgbData.data()), rgbData.size());
+        cout << "  Saved PPM: " << ppmFilename << "\n";
+
+        // PSNR for Render stage (8-bit)
+        string renderFilename = prefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
+        if (generateBaseline) {
+            saveRawFile(renderFilename, rgbData.data(), rgbData.size());
+            cout << "  Saved baseline: " << renderFilename << " (" << rgbData.size() << " bytes)\n";
+        } else {
+            vector<uint8_t> refData(rgbData.size());
+            string refFilename = prefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
+            if (loadRawFile(refFilename, refData.data(), refData.size())) {
+                psnr.render_psnr = computePSNR_8bit(refData.data(), rgbData.data(), rgbData.size());
+                cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.render_psnr << " dB\n";
             } else {
-                vector<uint8_t> refData(rgbData.size());
-                string refFilename = prefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
-                if (loadRawFile(refFilename, refData.data(), refData.size())) {
-                    psnr.render_psnr = computePSNR_8bit(refData.data(), rgbData.data(), rgbData.size());
-                    cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.render_psnr << " dB\n";
-                } else {
-                    cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
-                }
+                cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
             }
         }
 
         auto totalEnd = high_resolution_clock::now();
-        timing.total_ms = duration_cast<microseconds>(totalEnd - totalStart).count() / 1000.0;
+        timing.wall_total_ms = duration_cast<microseconds>(totalEnd - totalStart).count() / 1000.0;
+        timing.decode_total_ms =
+            timing.read_stage1_ms + timing.build_stage2_ms + timing.build_stage3_ms + timing.render_ms;
+        timing.total_ms = timing.decode_total_ms;
 
         // Summary
         cout << "\n--- Timing Summary ---\n";
+        auto pct = [&](double v) {
+            return timing.decode_total_ms > 0.0 ? (v / timing.decode_total_ms * 100.0) : 0.0;
+        };
         cout << "  ReadStage1Image:  " << fixed << setprecision(2) << timing.read_stage1_ms << " ms ("
-             << (timing.read_stage1_ms / timing.total_ms * 100) << "%)\n";
+             << pct(timing.read_stage1_ms) << "%)\n";
         cout << "  BuildStage2Image: " << fixed << setprecision(2) << timing.build_stage2_ms << " ms ("
-             << (timing.build_stage2_ms / timing.total_ms * 100) << "%)\n";
+             << pct(timing.build_stage2_ms) << "%)\n";
         cout << "  BuildStage3Image: " << fixed << setprecision(2) << timing.build_stage3_ms << " ms ("
-             << (timing.build_stage3_ms / timing.total_ms * 100) << "%)\n";
+             << pct(timing.build_stage3_ms) << "%)\n";
         if (timing.stage3_halide_kernel_ms > 0 || timing.stage3_sdk_build_ms > 0) {
             cout << "    Stage3 detail:\n";
             if (timing.stage3_halide_kernel_ms > 0) {
@@ -504,8 +795,12 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
             }
         }
         cout << "  Render:           " << fixed << setprecision(2) << timing.render_ms << " ms ("
-             << (timing.render_ms / timing.total_ms * 100) << "%)\n";
-        cout << "  TOTAL:            " << fixed << setprecision(2) << timing.total_ms << " ms\n";
+             << pct(timing.render_ms) << "%)\n";
+        cout << "  DECODE TOTAL:     " << fixed << setprecision(2) << timing.decode_total_ms << " ms\n";
+        cout << "  ParseInfo+Post:   " << fixed << setprecision(2) << timing.parse_info_ms << " ms\n";
+        cout << "  ParseNeg+Post:    " << fixed << setprecision(2) << timing.parse_negative_ms << " ms\n";
+        cout << "  WALL TOTAL:       " << fixed << setprecision(2) << timing.wall_total_ms << " ms\n";
+        cout << "  TOTAL:            " << fixed << setprecision(2) << timing.decode_total_ms << " ms\n";
 
         if (!generateBaseline) {
             cout << "\n--- PSNR Summary ---\n";
@@ -523,9 +818,11 @@ void testDNG(dng_host& host, const string& dngPath, const string& prefix, bool g
 }
 
 void printUsage(const char* programName) {
-    cerr << "Usage: " << programName << " <dng_path> <mode>\n";
+    cerr << "Usage: " << programName << " <dng_path> <mode> [warp_mode] [render_mode]\n";
     cerr << "  dng_path: Path to DNG file (lossless or lossy)\n";
     cerr << "  mode: 'baseline' or 'test'\n";
+    cerr << "  warp_mode: 'auto', 'sdk', 'halide-cpu', or 'halide-metal' (test mode only)\n";
+    cerr << "  render_mode: 'sdk', 'halide-metal', or 'auto' (test mode only)\n";
     cerr << "\nExamples:\n";
     cerr << "  # Generate baseline reference outputs:\n";
     cerr << "  " << programName << " image_samples/lossless_dng_sample.dng baseline\n";
@@ -533,6 +830,7 @@ void printUsage(const char* programName) {
     cerr << "\n  # Test custom implementation against baseline:\n";
     cerr << "  " << programName << " image_samples/lossless_dng_sample.dng test\n";
     cerr << "  " << programName << " image_samples/lossy_dng_sample.dng test\n";
+    cerr << "  " << programName << " image_samples/lossless_dng_sample.dng test halide-metal halide-metal\n";
 }
 
 int main(int argc, char** argv) {
@@ -543,10 +841,14 @@ int main(int argc, char** argv) {
 
     string dngPath = argv[1];
     string mode = argv[2];
+    string warpModeArg = argc >= 4 ? argv[3] : "auto";
+    string renderModeArg = argc >= 5 ? argv[4] : "sdk";
 
     bool generateBaseline = (mode == "baseline");
     bool isLossless = dngPath.find("lossless") != string::npos;
     string prefix = isLossless ? "lossless" : "lossy";
+    WarpRectilinearMode warpMode = parseWarpMode(warpModeArg);
+    RenderHalideMode renderMode = parseRenderMode(renderModeArg);
 
     cout << string(70, '=') << "\n";
     cout << "  DNG SDK Decode Pipeline Test Tool\n";
@@ -554,10 +856,16 @@ int main(int argc, char** argv) {
     cout << string(70, '=') << "\n";
     cout << "\nDNG: " << dngPath << "\n";
     cout << "Mode: " << (generateBaseline ? "BASELINE (generate reference)" : "TEST (compare to baseline)") << "\n";
+    if (!generateBaseline) {
+        cout << "WarpRectilinear mode: " << warpRectilinearModeName(warpMode) << "\n";
+        cout << "Render mode: " << renderHalideModeName(renderMode) << "\n";
+    }
 
     try {
-        dng_host host;
-        testDNG(host, dngPath, prefix, generateBaseline);
+        constexpr uint32_t kOptimizedAreaThreads = 20;
+        ConcurrentDngHost host(kOptimizedAreaThreads);
+        cout << "Area task threads: " << host.PerformAreaTaskThreads() << "\n";
+        testDNG(host, dngPath, prefix, generateBaseline, warpMode, renderMode);
     } catch (const dng_exception& e) {
         cerr << "\nDNG Exception: " << e.ErrorCode() << "\n";
         return 1;

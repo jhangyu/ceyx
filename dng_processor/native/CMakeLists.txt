@@ -81,6 +81,30 @@ add_executable(dng_generator ${SRC_DIR}/DngHalideGenerator.cpp)
 target_include_directories(dng_generator PRIVATE ${INC_DIR})
 target_link_libraries(dng_generator PRIVATE Halide::Generator)
 
+add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
+target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_warp_generator PRIVATE Halide::Generator)
+
+add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
+target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
+
+add_executable(dng_render_nomap_generator ${SRC_DIR}/DngRenderNoMapGenerator.cpp)
+target_include_directories(dng_render_nomap_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_render_nomap_generator PRIVATE Halide::Generator)
+
+add_executable(dng_render_maps_noencode_generator ${SRC_DIR}/DngRenderMapsNoEncodingGenerator.cpp)
+target_include_directories(dng_render_maps_noencode_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_render_maps_noencode_generator PRIVATE Halide::Generator)
+
+add_executable(dng_render_tail_generator ${SRC_DIR}/DngRenderTailGenerator.cpp)
+target_include_directories(dng_render_tail_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_render_tail_generator PRIVATE Halide::Generator)
+
+add_executable(dng_render_tonetail_generator ${SRC_DIR}/DngRenderToneTailGenerator.cpp)
+target_include_directories(dng_render_tonetail_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_render_tonetail_generator PRIVATE Halide::Generator)
+
 set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
 file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
 
@@ -98,12 +122,66 @@ add_custom_command(
 )
 add_custom_target(dng_halide_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_pipeline.a)
 
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.h
+    COMMAND dng_warp_generator -g rectilinear_warp -f rectilinear_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
+    DEPENDS dng_warp_generator
+    COMMENT "Generating Halide AOT Rectilinear Warp..."
+)
+add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.h
+    COMMAND dng_render_generator -g dng_render_stage4 -f dng_render_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_render_generator
+    COMMENT "Generating Halide AOT Stage4 Render..."
+)
+add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a)
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.h
+    COMMAND dng_render_nomap_generator -g dng_render_nomap_stage4 -f dng_render_nomap_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_render_nomap_generator
+    COMMENT "Generating Halide AOT Stage4 No-Map Render..."
+)
+add_custom_target(dng_render_nomap_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a)
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.h
+    COMMAND dng_render_maps_noencode_generator -g dng_render_maps_noencode_stage4 -f dng_render_maps_noencode_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_render_maps_noencode_generator
+    COMMENT "Generating Halide AOT Stage4 Maps-NoEncoding Render..."
+)
+add_custom_target(dng_render_maps_noencode_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a)
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.h
+    COMMAND dng_render_tail_generator -g dng_render_tail_stage4 -f dng_render_tail_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_render_tail_generator
+    COMMENT "Generating Halide AOT Stage4 Tail Render..."
+)
+add_custom_target(dng_render_tail_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a)
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.h
+    COMMAND dng_render_tonetail_generator -g dng_render_tonetail_stage4 -f dng_render_tonetail_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_render_tonetail_generator
+    COMMENT "Generating Halide AOT Stage4 Tone+Tail Render..."
+)
+add_custom_target(dng_render_tonetail_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a)
+
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
 add_dependencies(dng_decoder_native dng_halide_aot_target)
+add_dependencies(dng_decoder_native dng_warp_aot_target)
+add_dependencies(dng_decoder_native dng_render_aot_target)
+add_dependencies(dng_decoder_native dng_render_nomap_aot_target)
+add_dependencies(dng_decoder_native dng_render_maps_noencode_aot_target)
+add_dependencies(dng_decoder_native dng_render_tail_aot_target)
+add_dependencies(dng_decoder_native dng_render_tonetail_aot_target)
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
-target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a)
+target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a)
 
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
@@ -175,19 +253,30 @@ endif()
 
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
-    dng_sdk_custom/source/dng_mosaic_halide.cpp)
+    dng_sdk_custom/source/dng_mosaic_halide.cpp
+    dng_sdk_custom/source/dng_warp_halide.cpp
+    dng_sdk_custom/source/dng_render_halide.cpp)
 target_include_directories(test_decode PRIVATE
     ${INC_DIR}
+    ${SRC_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 if(TURBOJPEG_LIBRARY)
     target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(test_decode dng_sdk ${TURBOJPEG_LIBRARY})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${TURBOJPEG_LIBRARY})
 else()
-    target_link_libraries(test_decode dng_sdk ${JPEG_LIBRARIES})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${JPEG_LIBRARIES})
 endif()
+add_dependencies(test_decode dng_warp_aot_target)
+add_dependencies(test_decode dng_render_aot_target)
+add_dependencies(test_decode dng_render_nomap_aot_target)
+add_dependencies(test_decode dng_render_maps_noencode_aot_target)
+add_dependencies(test_decode dng_render_tail_aot_target)
+add_dependencies(test_decode dng_render_tonetail_aot_target)
 if(APPLE)
-    target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+    target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # Phase 5.3: Halide Demosaic PSNR Test
@@ -224,4 +313,24 @@ target_include_directories(test_render_halide PRIVATE
 target_link_libraries(test_render_halide dng_sdk)
 if(APPLE)
     target_link_libraries(test_render_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+add_executable(test_warp_rectilinear_halide
+    tests/test_warp_rectilinear_halide.cpp
+    dng_sdk_custom/source/dng_mosaic_halide.cpp
+    dng_sdk_custom/source/dng_warp_halide.cpp)
+target_include_directories(test_warp_rectilinear_halide PRIVATE
+    ${INC_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_warp_rectilinear_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
+add_dependencies(test_warp_rectilinear_halide dng_warp_aot_target)
+if(APPLE)
+    target_link_libraries(test_warp_rectilinear_halide
+        ${COREFOUNDATION_LIBRARY}
+        ${CORESERVICES_LIBRARY}
+        ${METAL_LIBRARY}
+        ${FOUNDATION_LIBRARY})
 endif()

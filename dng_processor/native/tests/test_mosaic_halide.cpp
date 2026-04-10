@@ -18,6 +18,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstring>
+#include <limits>
 
 // DNG SDK includes
 #include <dng_file_stream.h>
@@ -51,6 +52,45 @@ double computePSNR_16bit(const uint16_t* img1, const uint16_t* img2, size_t pixe
     if (mse < 1e-10) return 999.0;
     double psnr = 10.0 * log10((maxValue * maxValue) / mse);
     return psnr;
+}
+
+struct ChannelDiffStats {
+    double mae = 0.0;
+    uint16_t maxAbs = 0;
+    int maxX = 0;
+    int maxY = 0;
+};
+
+void computeInterleavedRgbDiffStats(const std::vector<uint16_t>& ref,
+                                    const std::vector<uint16_t>& test,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    ChannelDiffStats out[3]) {
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    if (pixelCount == 0 || ref.size() != test.size() || ref.size() != pixelCount * 3) {
+        return;
+    }
+
+    double sumAbs[3] = {0.0, 0.0, 0.0};
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const size_t base = (static_cast<size_t>(y) * width + x) * 3;
+            for (int c = 0; c < 3; ++c) {
+                const int diff = static_cast<int>(test[base + c]) - static_cast<int>(ref[base + c]);
+                const uint16_t absDiff = static_cast<uint16_t>(std::abs(diff));
+                sumAbs[c] += static_cast<double>(absDiff);
+                if (absDiff > out[c].maxAbs) {
+                    out[c].maxAbs = absDiff;
+                    out[c].maxX = static_cast<int>(x);
+                    out[c].maxY = static_cast<int>(y);
+                }
+            }
+        }
+    }
+
+    for (int c = 0; c < 3; ++c) {
+        out[c].mae = sumAbs[c] / static_cast<double>(pixelCount);
+    }
 }
 
 bool saveRawFile(const std::string& filename, const void* data, size_t byteSize) {
@@ -231,6 +271,16 @@ int main(int argc, char** argv) {
     std::cout << "\n======================================================================\n";
     std::cout << "  PSNR Result: " << std::fixed << std::setprecision(2) << psnr << " dB\n";
     std::cout << "======================================================================\n";
+
+    ChannelDiffStats stats[3];
+    computeInterleavedRgbDiffStats(stage3Ref, stage3Test, width, height, stats);
+    std::cout << "  Diff stats (test - ref):\n";
+    std::cout << "    R: MAE=" << stats[0].mae << " maxAbs=" << stats[0].maxAbs
+              << " @(" << stats[0].maxX << "," << stats[0].maxY << ")\n";
+    std::cout << "    G: MAE=" << stats[1].mae << " maxAbs=" << stats[1].maxAbs
+              << " @(" << stats[1].maxX << "," << stats[1].maxY << ")\n";
+    std::cout << "    B: MAE=" << stats[2].mae << " maxAbs=" << stats[2].maxAbs
+              << " @(" << stats[2].maxX << "," << stats[2].maxY << ")\n";
 
     if (psnr > 36.0) {
         std::cout << "PASS: PSNR > 36 dB threshold met!\n";

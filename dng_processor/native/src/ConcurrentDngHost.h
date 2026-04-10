@@ -10,13 +10,25 @@
 #include <iostream>
 #include <mutex>
 #include <algorithm>
+#include <cstdlib>
 
 class ConcurrentDngHost : public dng_host {
 public:
-    ConcurrentDngHost() : dng_host() {}
+    explicit ConcurrentDngHost(uint32_t requestedThreads = 0)
+        : dng_host(), requestedThreads_(requestedThreads) {}
     virtual ~ConcurrentDngHost() {}
 
     virtual uint32 PerformAreaTaskThreads() override {
+        // Priority: explicit constructor override > env var > hardware concurrency.
+        if (requestedThreads_ > 0) {
+            return requestedThreads_;
+        }
+        if (const char* env = std::getenv("DNG_AREA_THREADS")) {
+            int v = std::atoi(env);
+            if (v > 0) {
+                return static_cast<uint32>(v);
+            }
+        }
         uint32 threads = std::thread::hardware_concurrency();
         return threads > 1 ? threads : 1;
     }
@@ -99,4 +111,7 @@ public:
             std::rethrow_exception(caughtException);
         }
     }
+
+private:
+    uint32_t requestedThreads_ = 0;
 };

@@ -476,6 +476,11 @@ class dng_opcode_WarpRectilinear: public dng_opcode
 							dng_negative &negative,
 							AutoPtr<dng_image> &image);
 
+		const dng_warp_params_rectilinear & WarpParams () const
+			{
+			return fWarpParams;
+			}
+
 	protected:
 
 		static uint32 ParamBytes (uint32 planes);
