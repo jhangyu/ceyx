@@ -1429,111 +1429,17 @@ bool renderHalideBitExactModeEnabled() {
     return warp_exact && warp_exact[0] && warp_exact[0] != '0';
 }
 
-}  // namespace
-
-const char* renderHalideModeName(RenderHalideMode mode) {
-    switch (mode) {
-        case RenderHalideMode::SDK: return "sdk";
-        case RenderHalideMode::HALIDE_METAL: return "halide-metal";
-        case RenderHalideMode::AUTO: return "auto";
-    }
-    return "unknown";
-}
-
-bool render_stage4_halide(dng_host& host,
-                          dng_negative& negative,
-                          const dng_render& renderer,
-                          RenderHalideMode mode,
-                          std::vector<uint8_t>& out_rgb,
-                          uint32_t& out_w,
-                          uint32_t& out_h) {
-    if (mode == RenderHalideMode::SDK) {
-        return false;
-    }
-
-    dng_image* stage3 = const_cast<dng_image*>(negative.Stage3Image());
-    if (!stage3 || stage3->Planes() < 3) {
-        return false;
-    }
-
-    const bool timing_enabled = renderHalideTimingEnabled();
+bool runHalideFullOrSdkFallback(dng_host& host,
+                                dng_negative& negative,
+                                dng_image* stage3,
+                                const dng_render& renderer,
+                                bool timing_enabled,
+                                std::vector<uint8_t>& out_rgb,
+                                uint32_t& out_w,
+                                uint32_t& out_h) {
     auto ms = [](const auto& start, const auto& end) {
         return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
     };
-
-    if (renderHalideBitExactModeEnabled()) {
-        const uint32_t decode_threads = host.PerformAreaTaskThreads();
-        const uint32_t render_threads_override = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
-        dng_host* quality_lock_host = &host;
-        std::unique_ptr<dng_render> quality_lock_renderer;
-        if (render_threads_override > 0 && render_threads_override != decode_threads) {
-            if (dng_host* override_host = qualityLockRenderHostCache().acquire(render_threads_override)) {
-                quality_lock_host = override_host;
-                quality_lock_renderer = std::make_unique<dng_render>(*quality_lock_host, negative);
-                copyRenderSettings(renderer, *quality_lock_renderer);
-            }
-        }
-        dng_render& quality_renderer =
-            quality_lock_renderer ? *quality_lock_renderer : const_cast<dng_render&>(renderer);
-        const uint32_t render_threads = quality_lock_host->PerformAreaTaskThreads();
-
-        const auto sdk_render_start = std::chrono::high_resolution_clock::now();
-        AutoPtr<dng_image> final_image(quality_renderer.Render());
-        const auto sdk_render_end = std::chrono::high_resolution_clock::now();
-        if (!final_image.Get()) {
-            return false;
-        }
-        out_w = final_image->Width();
-        out_h = final_image->Height();
-        out_rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
-
-        const auto extract_start = std::chrono::high_resolution_clock::now();
-        bool extracted = false;
-        std::unique_ptr<dng_const_tile_buffer> borrowed_tile;
-        const uint8_t* borrowed_ptr = nullptr;
-        uint32_t bw = 0, bh = 0, bp = 0;
-        int32_t brow = 0, bcol = 0, bplane = 0;
-        const dng_rect bounds = final_image->Bounds();
-        if (borrowImageInterleaved8(final_image.Get(),
-                                    bounds,
-                                    borrowed_tile,
-                                    borrowed_ptr,
-                                    bw,
-                                    bh,
-                                    bp,
-                                    brow,
-                                    bcol,
-                                    bplane)) {
-            if (bw == out_w && bh == out_h && bp == 3) {
-                packBorrowedInterleaved8(borrowed_ptr, bw, bh, bp, brow, bcol, bplane, out_rgb);
-                extracted = true;
-            }
-        }
-
-        if (!extracted) {
-            dng_pixel_buffer buffer;
-            buffer.fArea = final_image->Bounds();
-            buffer.fPlane = 0;
-            buffer.fPlanes = 3;
-            buffer.fPixelType = ttByte;
-            buffer.fPixelSize = 1;
-            buffer.fData = out_rgb.data();
-            buffer.fRowStep = static_cast<int32>(out_w * 3);
-            buffer.fColStep = 3;
-            buffer.fPlaneStep = 1;
-            final_image->Get(buffer);
-        }
-        const auto extract_end = std::chrono::high_resolution_clock::now();
-        if (timing_enabled) {
-            std::cerr << "[RenderHalideTiming] qualityLockSDKRender="
-                      << ms(sdk_render_start, sdk_render_end)
-                      << " ms qualityLockExtract="
-                      << ms(extract_start, extract_end)
-                      << " ms [RenderHalideInfo] qualityLockRenderThreads="
-                      << render_threads << "\n";
-        }
-        return true;
-    }
 
     dng_point dst_size;
     dst_size.h = negative.DefaultFinalWidth();
@@ -1691,4 +1597,120 @@ bool render_stage4_halide(dng_host& host,
     buffer.fPlaneStep = 1;
     final_image->Get(buffer);
     return true;
+}
+
+}  // namespace
+
+const char* renderHalideModeName(RenderHalideMode mode) {
+    switch (mode) {
+        case RenderHalideMode::SDK: return "sdk";
+        case RenderHalideMode::HALIDE_METAL: return "halide-metal";
+        case RenderHalideMode::AUTO: return "auto";
+    }
+    return "unknown";
+}
+
+bool render_stage4_halide(dng_host& host,
+                          dng_negative& negative,
+                          const dng_render& renderer,
+                          RenderHalideMode mode,
+                          std::vector<uint8_t>& out_rgb,
+                          uint32_t& out_w,
+                          uint32_t& out_h) {
+    if (mode == RenderHalideMode::SDK) {
+        return false;
+    }
+
+    dng_image* stage3 = const_cast<dng_image*>(negative.Stage3Image());
+    if (!stage3 || stage3->Planes() < 3) {
+        return false;
+    }
+
+    const bool timing_enabled = renderHalideTimingEnabled();
+    auto ms = [](const auto& start, const auto& end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+
+    if (renderHalideBitExactModeEnabled()) {
+        const uint32_t decode_threads = host.PerformAreaTaskThreads();
+        const uint32_t render_threads_override = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
+        dng_host* quality_lock_host = &host;
+        std::unique_ptr<dng_render> quality_lock_renderer;
+        if (render_threads_override > 0 && render_threads_override != decode_threads) {
+            if (dng_host* override_host = qualityLockRenderHostCache().acquire(render_threads_override)) {
+                quality_lock_host = override_host;
+                quality_lock_renderer = std::make_unique<dng_render>(*quality_lock_host, negative);
+                copyRenderSettings(renderer, *quality_lock_renderer);
+            }
+        }
+        dng_render& quality_renderer =
+            quality_lock_renderer ? *quality_lock_renderer : const_cast<dng_render&>(renderer);
+        const uint32_t render_threads = quality_lock_host->PerformAreaTaskThreads();
+
+        const auto sdk_render_start = std::chrono::high_resolution_clock::now();
+        AutoPtr<dng_image> final_image(quality_renderer.Render());
+        const auto sdk_render_end = std::chrono::high_resolution_clock::now();
+        if (!final_image.Get()) {
+            return false;
+        }
+        out_w = final_image->Width();
+        out_h = final_image->Height();
+        out_rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
+
+        const auto extract_start = std::chrono::high_resolution_clock::now();
+        bool extracted = false;
+        std::unique_ptr<dng_const_tile_buffer> borrowed_tile;
+        const uint8_t* borrowed_ptr = nullptr;
+        uint32_t bw = 0, bh = 0, bp = 0;
+        int32_t brow = 0, bcol = 0, bplane = 0;
+        const dng_rect bounds = final_image->Bounds();
+        if (borrowImageInterleaved8(final_image.Get(),
+                                    bounds,
+                                    borrowed_tile,
+                                    borrowed_ptr,
+                                    bw,
+                                    bh,
+                                    bp,
+                                    brow,
+                                    bcol,
+                                    bplane)) {
+            if (bw == out_w && bh == out_h && bp == 3) {
+                packBorrowedInterleaved8(borrowed_ptr, bw, bh, bp, brow, bcol, bplane, out_rgb);
+                extracted = true;
+            }
+        }
+
+        if (!extracted) {
+            dng_pixel_buffer buffer;
+            buffer.fArea = final_image->Bounds();
+            buffer.fPlane = 0;
+            buffer.fPlanes = 3;
+            buffer.fPixelType = ttByte;
+            buffer.fPixelSize = 1;
+            buffer.fData = out_rgb.data();
+            buffer.fRowStep = static_cast<int32>(out_w * 3);
+            buffer.fColStep = 3;
+            buffer.fPlaneStep = 1;
+            final_image->Get(buffer);
+        }
+        const auto extract_end = std::chrono::high_resolution_clock::now();
+        if (timing_enabled) {
+            std::cerr << "[RenderHalideTiming] qualityLockSDKRender="
+                      << ms(sdk_render_start, sdk_render_end)
+                      << " ms qualityLockExtract="
+                      << ms(extract_start, extract_end)
+                      << " ms [RenderHalideInfo] qualityLockRenderThreads="
+                      << render_threads << "\n";
+        }
+        return true;
+    }
+
+    return runHalideFullOrSdkFallback(host,
+                                      negative,
+                                      stage3,
+                                      renderer,
+                                      timing_enabled,
+                                      out_rgb,
+                                      out_w,
+                                      out_h);
 }
