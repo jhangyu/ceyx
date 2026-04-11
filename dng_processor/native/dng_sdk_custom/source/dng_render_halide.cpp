@@ -753,6 +753,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: dispatch converged to Halide Full + SDK fallback")]]
 bool runRenderStage4NoMapHalideAot(const uint16_t* src,
                                    int src_w,
                                    int src_h,
@@ -813,6 +814,7 @@ bool runRenderStage4NoMapHalideAot(const uint16_t* src,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: dispatch converged to Halide Full + SDK fallback")]]
 bool runRenderStage4MapsNoEncodingHalideAot(const uint16_t* src,
                                             int src_w,
                                             int src_h,
@@ -887,6 +889,7 @@ bool runRenderStage4MapsNoEncodingHalideAot(const uint16_t* src,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: legacy tail path")]]
 bool runRenderTailHalideAot(const float* src,
                             int src_w,
                             int src_h,
@@ -922,6 +925,7 @@ bool runRenderTailHalideAot(const float* src,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: legacy tone-tail path")]]
 bool runRenderToneTailHalideAot(const float* src,
                                 int src_w,
                                 int src_h,
@@ -1064,6 +1068,7 @@ bool runRenderStage4Reference(const float* src,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: legacy prefix path")]]
 bool runRenderPrefix(const float* src,
                      int src_w,
                      int src_h,
@@ -1193,6 +1198,7 @@ bool runRenderPrefix(const float* src,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: legacy prefix path")]]
 bool runRenderPrefixToTone(const float* src,
                            int src_w,
                            int src_h,
@@ -1202,6 +1208,7 @@ bool runRenderPrefixToTone(const float* src,
     return runRenderPrefix(src, src_w, src_h, src_p, params, true, tone_rgb);
 }
 
+[[deprecated("Phase 6.4.3: legacy prefix path")]]
 bool runRenderPrefixToPreTone(const float* src,
                               int src_w,
                               int src_h,
@@ -1211,6 +1218,7 @@ bool runRenderPrefixToPreTone(const float* src,
     return runRenderPrefix(src, src_w, src_h, src_p, params, false, pre_tone_rgb);
 }
 
+[[deprecated("Phase 6.4.3: reference-only legacy path")]]
 bool runRenderTailReference(const float* src_tone,
                             int src_w,
                             int src_h,
@@ -1254,6 +1262,7 @@ bool runRenderTailReference(const float* src_tone,
     return true;
 }
 
+[[deprecated("Phase 6.4.3: reference-only legacy path")]]
 bool runRenderTailScalar(const float* src_tone,
                          int src_w,
                          int src_h,
