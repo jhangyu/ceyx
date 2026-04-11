@@ -1,3 +1,131 @@
+/*
+---
+file_summary: >
+  Stage4 render 橋接層。負責把 DNG SDK 的 Stage3 `dng_image` 與 color/tone/profile
+  參數整理成 Halide AOT kernel 可用的 Buffer，並在 full / no-map / maps-no-encode /
+  tone-tail / reference / SDK quality-lock 路徑間 dispatch，同時提供 debug 與 timing。
+
+notes:
+  - `render_stage4_halide()` 是唯一正式入口；其餘多為資料萃取、參數建構、AOT 包裝與 reference/debug helper。
+  - `DNG_RENDER_BIT_EXACT` 或 `DNG_WARP_BIT_EXACT` 啟用時，會走 SDK render quality-lock 路徑。
+  - 目前仍保留 prefix/tail/reference 路徑作為除錯與 fallback，後續 Phase 6.4.3 預計收斂。
+
+structs:
+  - name: "RenderParams"
+    description: "Stage4 所需矩陣、1D/3D table、encoding table 與 SDK reference 物件快取。"
+    lines: "156-194"
+  - name: "DiffChannelStats"
+    description: "debug 模式下每個 RGB channel 的差異統計與 sample 座標。"
+    lines: "1239-1250"
+
+functions:
+  - name: "parsePositiveEnvU32"
+    description: "解析正整數環境變數（≤0 視為未設定）。"
+    lines: "198-208"
+  - name: "copyRenderSettings"
+    description: "把既有 `dng_render` 參數複製到另一個 renderer（供 host 分離時重建）。"
+    lines: "210-219"
+  - name: "qualityLockRenderHostCache"
+    description: "回傳 quality-lock SDK Render 專用的快取 host。"
+    lines: "240-243"
+  - name: "extractStage3Interleaved"
+    description: "把 Stage3 `dng_image` 抽成 float interleaved buffer。"
+    lines: "245-267"
+  - name: "extractStage3Interleaved16"
+    description: "把 Stage3 `dng_image` 抽成 uint16 interleaved buffer。"
+    lines: "220-242"
+  - name: "borrowStage3Interleaved16"
+    description: "嘗試直接借用 Stage3 tile buffer，避免額外拷貝。"
+    lines: "244-283"
+  - name: "packBorrowedStage3Interleaved16"
+    description: "將 borrowed Stage3 tile 重新整理成緊密 interleaved 版面。"
+    lines: "285-318"
+  - name: "borrowImageInterleaved8"
+    description: "嘗試直接借用最終 8-bit image tile buffer。"
+    lines: "320-358"
+  - name: "packBorrowedInterleaved8"
+    description: "將 borrowed 8-bit tile 重新整理成緊密 interleaved 輸出。"
+    lines: "360-393"
+  - name: "matrixToRowMajor3x3"
+    description: "將 `dng_matrix` 轉成 Halide 端使用的 row-major 3x3 array。"
+    lines: "395-401"
+  - name: "toIdentityHueSat"
+    description: "建立 identity HueSat / Look table。"
+    lines: "403-409"
+  - name: "toIdentityCurve"
+    description: "建立 identity 1D curve。"
+    lines: "411-418"
+  - name: "copyHueSatMap"
+    description: "將 SDK HueSatMap 轉成 Halide 期望的 planar layout。"
+    lines: "420-446"
+  - name: "buildRenderParams"
+    description: "從 `dng_negative`/`dng_render` 萃取 Stage4 所需矩陣、tone/gamma/table 與 profile map。"
+    lines: "448-602"
+  - name: "runRenderStage4HalideAot"
+    description: "呼叫 full Stage4 Halide AOT kernel。"
+    lines: "604-688"
+  - name: "runRenderStage4NoMapHalideAot"
+    description: "呼叫無 HueSat/Look map 的簡化 Stage4 kernel。"
+    lines: "690-740"
+  - name: "runRenderStage4MapsNoEncodingHalideAot"
+    description: "呼叫有 map 但無 encoding table 的 Stage4 kernel。"
+    lines: "742-806"
+  - name: "runRenderTailHalideAot"
+    description: "只做 RGB-to-final + gamma 的 tail AOT kernel。"
+    lines: "808-841"
+  - name: "runRenderToneTailHalideAot"
+    description: "做 tone curve + RGB-to-final + gamma 的 tail AOT kernel。"
+    lines: "843-882"
+  - name: "runRenderStage4Reference"
+    description: "逐 scanline 呼叫 SDK reference helper，產生完整 Stage4 參考輸出。"
+    lines: "884-983"
+  - name: "runRenderPrefix"
+    description: "在 CPU 上先做 ABC->RGB / HueSat / Exposure / Look / optional Tone，供 tail fallback 使用。"
+    lines: "985-1112"
+  - name: "runRenderPrefixToTone"
+    description: "包裝 `runRenderPrefix(..., apply_tone=true)`。"
+    lines: "1114-1121"
+  - name: "runRenderPrefixToPreTone"
+    description: "包裝 `runRenderPrefix(..., apply_tone=false)`。"
+    lines: "1123-1130"
+  - name: "runRenderTailReference"
+    description: "用 SDK reference helper 完成 tail 端 RGB-to-final + gamma。"
+    lines: "1132-1173"
+  - name: "runRenderTailScalar"
+    description: "純 CPU scalar tail 實作，用於矩陣/encoding 行為比對。"
+    lines: "1175-1221"
+  - name: "computePSNR8"
+    description: "計算 8-bit RGB buffer PSNR。"
+    lines: "1223-1237"
+  - name: "printRgbDiffStats"
+    description: "輸出 RGB channel 的 MAE / maxAbs / sample mismatch。"
+    lines: "1252-1305"
+  - name: "renderHalideDebugEnabled"
+    description: "讀取 `DNG_RENDER_HALIDE_DEBUG`。"
+    lines: "1307-1310"
+  - name: "renderHalideTimingEnabled"
+    description: "讀取 `DNG_RENDER_HALIDE_TIMING`。"
+    lines: "1312-1315"
+  - name: "renderHalideTryToneTailEnabled"
+    description: "讀取 `DNG_RENDER_HALIDE_TRY_TONETAIL`。"
+    lines: "1317-1320"
+  - name: "renderHalideTryFullEnabled"
+    description: "判斷 full kernel 是否允許啟用。"
+    lines: "1322-1325"
+  - name: "renderHalideForceFullKernelEnabled"
+    description: "讀取 `DNG_RENDER_HALIDE_FORCE_FULL`。"
+    lines: "1327-1330"
+  - name: "renderHalideBitExactModeEnabled"
+    description: "判斷是否進入 SDK quality-lock / bit-exact 模式。"
+    lines: "1332-1339"
+  - name: "renderHalideModeName"
+    description: "列舉值轉字串。"
+    lines: "1343-1350"
+  - name: "render_stage4_halide"
+    description: "Stage4 正式入口；處理 quality-lock、resample、borrow/copy、kernel dispatch、fallback 與 debug/timing。"
+    lines: "1401-1749"
+---
+*/
 #include "dng_render_halide.h"
 
 #include <algorithm>
@@ -5,12 +133,16 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <array>
 #include <limits>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
 #include "HalideBuffer.h"
+#include "ConcurrentDngHost.h"
 #include "dng_1d_function.h"
 #include "dng_1d_table.h"
 #include "dng_camera_profile.h"
@@ -72,6 +204,53 @@ struct RenderParams {
     int32_t look_has_encoding = 0;
 };
 
+uint32_t parsePositiveEnvU32(const char* key) {
+    const char* v = std::getenv(key);
+    if (!v || !v[0]) {
+        return 0;
+    }
+    const long parsed = std::strtol(v, nullptr, 10);
+    if (parsed <= 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
+void copyRenderSettings(const dng_render& src, dng_render& dst) {
+    dst.SetWhiteXY(src.WhiteXY());
+    dst.SetExposure(src.Exposure());
+    dst.SetShadows(src.Shadows());
+    dst.SetToneCurve(src.ToneCurve());
+    dst.SetFinalSpace(src.FinalSpace());
+    dst.SetFinalPixelType(src.FinalPixelType());
+    dst.SetMaximumSize(src.MaximumSize());
+}
+
+class CachedRenderHost {
+public:
+    dng_host* acquire(uint32_t requested_threads) {
+        if (requested_threads == 0) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!host_ || threads_ != requested_threads) {
+            host_ = std::make_unique<ConcurrentDngHost>(requested_threads);
+            threads_ = requested_threads;
+        }
+        return host_.get();
+    }
+
+private:
+    std::mutex mutex_;
+    std::unique_ptr<ConcurrentDngHost> host_;
+    uint32_t threads_ = 0;
+};
+
+CachedRenderHost& qualityLockRenderHostCache() {
+    static CachedRenderHost cache;
+    return cache;
+}
+
 void extractStage3Interleaved(dng_image* image,
                               const dng_rect& area,
                               std::vector<float>& out,
@@ -118,6 +297,157 @@ void extractStage3Interleaved16(dng_image* image,
     buffer.fColStep = static_cast<int32>(p);
     buffer.fPlaneStep = 1;
     image->Get(buffer);
+}
+
+bool borrowStage3Interleaved16(dng_image* image,
+                               const dng_rect& area,
+                               std::unique_ptr<dng_const_tile_buffer>& borrowedTile,
+                               const uint16_t*& borrowedPtr,
+                               uint32_t& w,
+                               uint32_t& h,
+                               uint32_t& p,
+                               int32_t& rowStep,
+                               int32_t& colStep,
+                               int32_t& planeStep) {
+    borrowedTile.reset();
+    borrowedPtr = nullptr;
+    rowStep = 0;
+    colStep = 0;
+    planeStep = 0;
+
+    if (!image || area.IsEmpty() || image->PixelType() != ttShort) {
+        return false;
+    }
+
+    w = area.W();
+    h = area.H();
+    p = image->Planes();
+    auto tile = std::make_unique<dng_const_tile_buffer>(*image, area);
+
+    if (tile->fPixelType != ttShort || tile->fPlanes != static_cast<int32>(p)) {
+        return false;
+    }
+
+    borrowedPtr = tile->ConstPixel_uint16(area.t, area.l, 0);
+    if (!borrowedPtr) {
+        return false;
+    }
+
+    rowStep = tile->fRowStep;
+    colStep = tile->fColStep;
+    planeStep = tile->fPlaneStep;
+    borrowedTile = std::move(tile);
+    return true;
+}
+
+void packBorrowedStage3Interleaved16(const uint16_t* srcBase,
+                                     uint32_t w,
+                                     uint32_t h,
+                                     uint32_t p,
+                                     int32_t rowStep,
+                                     int32_t colStep,
+                                     int32_t planeStep,
+                                     std::vector<uint16_t>& out) {
+    out.resize(static_cast<size_t>(w) * h * p);
+    if (!srcBase) {
+        return;
+    }
+
+    const size_t rowElements = static_cast<size_t>(w) * p;
+    if (colStep == static_cast<int32>(p) && planeStep == 1) {
+        for (uint32_t y = 0; y < h; ++y) {
+            const uint16_t* srcRow = srcBase + static_cast<int64_t>(y) * rowStep;
+            uint16_t* dstRow = out.data() + static_cast<size_t>(y) * rowElements;
+            std::memcpy(dstRow, srcRow, rowElements * sizeof(uint16_t));
+        }
+        return;
+    }
+
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const size_t dstBase = (static_cast<size_t>(y) * w + x) * p;
+            const int64_t srcBaseIdx = static_cast<int64_t>(y) * rowStep +
+                                       static_cast<int64_t>(x) * colStep;
+            for (uint32_t c = 0; c < p; ++c) {
+                out[dstBase + c] = srcBase[srcBaseIdx + static_cast<int64_t>(c) * planeStep];
+            }
+        }
+    }
+}
+
+bool borrowImageInterleaved8(dng_image* image,
+                             const dng_rect& area,
+                             std::unique_ptr<dng_const_tile_buffer>& borrowedTile,
+                             const uint8_t*& borrowedPtr,
+                             uint32_t& w,
+                             uint32_t& h,
+                             uint32_t& p,
+                             int32_t& rowStep,
+                             int32_t& colStep,
+                             int32_t& planeStep) {
+    borrowedTile.reset();
+    borrowedPtr = nullptr;
+    rowStep = 0;
+    colStep = 0;
+    planeStep = 0;
+
+    if (!image || area.IsEmpty() || image->PixelType() != ttByte) {
+        return false;
+    }
+
+    w = area.W();
+    h = area.H();
+    p = image->Planes();
+    auto tile = std::make_unique<dng_const_tile_buffer>(*image, area);
+    if (tile->fPixelType != ttByte || tile->fPlanes != static_cast<int32>(p)) {
+        return false;
+    }
+
+    borrowedPtr = tile->ConstPixel_uint8(area.t, area.l, 0);
+    if (!borrowedPtr) {
+        return false;
+    }
+
+    rowStep = tile->fRowStep;
+    colStep = tile->fColStep;
+    planeStep = tile->fPlaneStep;
+    borrowedTile = std::move(tile);
+    return true;
+}
+
+void packBorrowedInterleaved8(const uint8_t* srcBase,
+                              uint32_t w,
+                              uint32_t h,
+                              uint32_t p,
+                              int32_t rowStep,
+                              int32_t colStep,
+                              int32_t planeStep,
+                              std::vector<uint8_t>& out) {
+    out.resize(static_cast<size_t>(w) * h * p);
+    if (!srcBase) {
+        return;
+    }
+
+    const size_t rowElements = static_cast<size_t>(w) * p;
+    if (colStep == static_cast<int32_t>(p) && planeStep == 1) {
+        for (uint32_t y = 0; y < h; ++y) {
+            const uint8_t* srcRow = srcBase + static_cast<int64_t>(y) * rowStep;
+            uint8_t* dstRow = out.data() + static_cast<size_t>(y) * rowElements;
+            std::memcpy(dstRow, srcRow, rowElements * sizeof(uint8_t));
+        }
+        return;
+    }
+
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const size_t dstBase = (static_cast<size_t>(y) * w + x) * p;
+            const int64_t srcBaseIdx = static_cast<int64_t>(y) * rowStep +
+                                       static_cast<int64_t>(x) * colStep;
+            for (uint32_t c = 0; c < p; ++c) {
+                out[dstBase + c] = srcBase[srcBaseIdx + static_cast<int64_t>(c) * planeStep];
+            }
+        }
+    }
 }
 
 void matrixToRowMajor3x3(const dng_matrix& m, float out9[9]) {
@@ -333,6 +663,9 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int src_w,
                               int src_h,
                               int src_p,
+                              int src_row_step,
+                              int src_col_step,
+                              int src_plane_step,
                               float src_scale,
                               int dst_w,
                               int dst_h,
@@ -342,7 +675,12 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         return false;
     }
 
-    Buffer<uint16_t> src_buf = Buffer<uint16_t>::make_interleaved(const_cast<uint16_t*>(src), src_w, src_h, src_p);
+    halide_dimension_t src_shape[3] = {
+        {0, src_w, src_col_step, 0},
+        {0, src_h, src_row_step, 0},
+        {0, src_p, src_plane_step, 0},
+    };
+    Buffer<uint16_t> src_buf(const_cast<uint16_t*>(src), 3, src_shape);
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
     Buffer<float> tone_buf(const_cast<float*>(params.tone_curve.data()),
@@ -419,6 +757,9 @@ bool runRenderStage4NoMapHalideAot(const uint16_t* src,
                                    int src_w,
                                    int src_h,
                                    int src_p,
+                                   int src_row_step,
+                                   int src_col_step,
+                                   int src_plane_step,
                                    float src_scale,
                                    int dst_w,
                                    int dst_h,
@@ -428,7 +769,12 @@ bool runRenderStage4NoMapHalideAot(const uint16_t* src,
         return false;
     }
 
-    Buffer<uint16_t> src_buf = Buffer<uint16_t>::make_interleaved(const_cast<uint16_t*>(src), src_w, src_h, src_p);
+    halide_dimension_t src_shape[3] = {
+        {0, src_w, src_col_step, 0},
+        {0, src_h, src_row_step, 0},
+        {0, src_p, src_plane_step, 0},
+    };
+    Buffer<uint16_t> src_buf(const_cast<uint16_t*>(src), 3, src_shape);
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
     Buffer<float> tone_buf(const_cast<float*>(params.tone_curve.data()),
@@ -471,6 +817,9 @@ bool runRenderStage4MapsNoEncodingHalideAot(const uint16_t* src,
                                             int src_w,
                                             int src_h,
                                             int src_p,
+                                            int src_row_step,
+                                            int src_col_step,
+                                            int src_plane_step,
                                             float src_scale,
                                             int dst_w,
                                             int dst_h,
@@ -480,7 +829,12 @@ bool runRenderStage4MapsNoEncodingHalideAot(const uint16_t* src,
         return false;
     }
 
-    Buffer<uint16_t> src_buf = Buffer<uint16_t>::make_interleaved(const_cast<uint16_t*>(src), src_w, src_h, src_p);
+    halide_dimension_t src_shape[3] = {
+        {0, src_w, src_col_step, 0},
+        {0, src_h, src_row_step, 0},
+        {0, src_p, src_plane_step, 0},
+    };
+    Buffer<uint16_t> src_buf(const_cast<uint16_t*>(src), 3, src_shape);
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
     Buffer<float> tone_buf(const_cast<float*>(params.tone_curve.data()),
@@ -964,6 +1318,74 @@ double computePSNR8(const std::vector<uint8_t>& ref, const std::vector<uint8_t>&
     return 10.0 * std::log10((255.0 * 255.0) / static_cast<double>(mse));
 }
 
+struct DiffChannelStats {
+    double mae = 0.0;
+    uint8_t max_abs = 0;
+    uint32_t max_x = 0;
+    uint32_t max_y = 0;
+    uint32_t non_zero = 0;
+    std::array<uint32_t, 8> sample_x{};
+    std::array<uint32_t, 8> sample_y{};
+    std::array<uint8_t, 8> sample_ref{};
+    std::array<uint8_t, 8> sample_test{};
+    uint32_t sample_count = 0;
+};
+
+void printRgbDiffStats(const std::vector<uint8_t>& ref,
+                       const std::vector<uint8_t>& test,
+                       uint32_t width,
+                       uint32_t height) {
+    if (ref.size() != test.size() || ref.empty() || width == 0 || height == 0) {
+        std::cerr << "[RenderHalideDiff] skipped (invalid input sizes)\n";
+        return;
+    }
+
+    DiffChannelStats stats[3];
+    const size_t pixels = static_cast<size_t>(width) * height;
+    for (size_t i = 0; i < pixels; ++i) {
+        const uint32_t x = static_cast<uint32_t>(i % width);
+        const uint32_t y = static_cast<uint32_t>(i / width);
+        const size_t base = i * 3;
+        for (uint32_t c = 0; c < 3; ++c) {
+            const int diff = static_cast<int>(test[base + c]) - static_cast<int>(ref[base + c]);
+            const uint8_t abs_diff = static_cast<uint8_t>(std::abs(diff));
+            stats[c].mae += static_cast<double>(abs_diff);
+            if (abs_diff != 0) {
+                stats[c].non_zero++;
+                if (stats[c].sample_count < stats[c].sample_x.size()) {
+                    const uint32_t s = stats[c].sample_count++;
+                    stats[c].sample_x[s] = x;
+                    stats[c].sample_y[s] = y;
+                    stats[c].sample_ref[s] = ref[base + c];
+                    stats[c].sample_test[s] = test[base + c];
+                }
+            }
+            if (abs_diff > stats[c].max_abs) {
+                stats[c].max_abs = abs_diff;
+                stats[c].max_x = x;
+                stats[c].max_y = y;
+            }
+        }
+    }
+
+    const char* names[3] = {"R", "G", "B"};
+    for (uint32_t c = 0; c < 3; ++c) {
+        stats[c].mae /= static_cast<double>(pixels);
+        std::cerr << "[RenderHalideDiff] " << names[c]
+                  << " mae=" << stats[c].mae
+                  << " maxAbs=" << static_cast<int>(stats[c].max_abs)
+                  << " at=(" << stats[c].max_x << "," << stats[c].max_y << ")"
+                  << " nonZero=" << stats[c].non_zero
+                  << "/" << pixels << "\n";
+        for (uint32_t i = 0; i < stats[c].sample_count; ++i) {
+            std::cerr << "  [RenderHalideDiffSample] " << names[c]
+                      << " (" << stats[c].sample_x[i] << "," << stats[c].sample_y[i] << ")"
+                      << " ref=" << static_cast<int>(stats[c].sample_ref[i])
+                      << " test=" << static_cast<int>(stats[c].sample_test[i]) << "\n";
+        }
+    }
+}
+
 bool renderHalideDebugEnabled() {
     const char* v = std::getenv("DNG_RENDER_HALIDE_DEBUG");
     return v && v[0] && v[0] != '0';
@@ -982,6 +1404,20 @@ bool renderHalideTryToneTailEnabled() {
 bool renderHalideTryFullEnabled() {
     const char* disable = std::getenv("DNG_RENDER_HALIDE_DISABLE_FULL");
     return !(disable && disable[0] && disable[0] != '0');
+}
+
+bool renderHalideForceFullKernelEnabled() {
+    const char* v = std::getenv("DNG_RENDER_HALIDE_FORCE_FULL");
+    return v && v[0] && v[0] != '0';
+}
+
+bool renderHalideBitExactModeEnabled() {
+    const char* render_exact = std::getenv("DNG_RENDER_BIT_EXACT");
+    if (render_exact) {
+        return render_exact[0] && render_exact[0] != '0';
+    }
+    const char* warp_exact = std::getenv("DNG_WARP_BIT_EXACT");
+    return warp_exact && warp_exact[0] && warp_exact[0] != '0';
 }
 
 }  // namespace
@@ -1011,25 +1447,113 @@ bool render_stage4_halide(dng_host& host,
         return false;
     }
 
-    out_w = negative.DefaultFinalWidth();
-    out_h = negative.DefaultFinalHeight();
+    const bool timing_enabled = renderHalideTimingEnabled();
+    auto ms = [](const auto& start, const auto& end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+
+    if (renderHalideBitExactModeEnabled()) {
+        const uint32_t decode_threads = host.PerformAreaTaskThreads();
+        const uint32_t render_threads_override = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
+        dng_host* quality_lock_host = &host;
+        std::unique_ptr<dng_render> quality_lock_renderer;
+        if (render_threads_override > 0 && render_threads_override != decode_threads) {
+            if (dng_host* override_host = qualityLockRenderHostCache().acquire(render_threads_override)) {
+                quality_lock_host = override_host;
+                quality_lock_renderer = std::make_unique<dng_render>(*quality_lock_host, negative);
+                copyRenderSettings(renderer, *quality_lock_renderer);
+            }
+        }
+        dng_render& quality_renderer =
+            quality_lock_renderer ? *quality_lock_renderer : const_cast<dng_render&>(renderer);
+        const uint32_t render_threads = quality_lock_host->PerformAreaTaskThreads();
+
+        const auto sdk_render_start = std::chrono::high_resolution_clock::now();
+        AutoPtr<dng_image> final_image(quality_renderer.Render());
+        const auto sdk_render_end = std::chrono::high_resolution_clock::now();
+        if (!final_image.Get()) {
+            return false;
+        }
+        out_w = final_image->Width();
+        out_h = final_image->Height();
+        out_rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
+
+        const auto extract_start = std::chrono::high_resolution_clock::now();
+        bool extracted = false;
+        std::unique_ptr<dng_const_tile_buffer> borrowed_tile;
+        const uint8_t* borrowed_ptr = nullptr;
+        uint32_t bw = 0, bh = 0, bp = 0;
+        int32_t brow = 0, bcol = 0, bplane = 0;
+        const dng_rect bounds = final_image->Bounds();
+        if (borrowImageInterleaved8(final_image.Get(),
+                                    bounds,
+                                    borrowed_tile,
+                                    borrowed_ptr,
+                                    bw,
+                                    bh,
+                                    bp,
+                                    brow,
+                                    bcol,
+                                    bplane)) {
+            if (bw == out_w && bh == out_h && bp == 3) {
+                packBorrowedInterleaved8(borrowed_ptr, bw, bh, bp, brow, bcol, bplane, out_rgb);
+                extracted = true;
+            }
+        }
+
+        if (!extracted) {
+            dng_pixel_buffer buffer;
+            buffer.fArea = final_image->Bounds();
+            buffer.fPlane = 0;
+            buffer.fPlanes = 3;
+            buffer.fPixelType = ttByte;
+            buffer.fPixelSize = 1;
+            buffer.fData = out_rgb.data();
+            buffer.fRowStep = static_cast<int32>(out_w * 3);
+            buffer.fColStep = 3;
+            buffer.fPlaneStep = 1;
+            final_image->Get(buffer);
+        }
+        const auto extract_end = std::chrono::high_resolution_clock::now();
+        if (timing_enabled) {
+            std::cerr << "[RenderHalideTiming] qualityLockSDKRender="
+                      << ms(sdk_render_start, sdk_render_end)
+                      << " ms qualityLockExtract="
+                      << ms(extract_start, extract_end)
+                      << " ms [RenderHalideInfo] qualityLockRenderThreads="
+                      << render_threads << "\n";
+        }
+        return true;
+    }
+
+    dng_point dst_size;
+    dst_size.h = negative.DefaultFinalWidth();
+    dst_size.v = negative.DefaultFinalHeight();
+    if (renderer.MaximumSize()) {
+        if (Max_uint32(static_cast<uint32>(dst_size.h), static_cast<uint32>(dst_size.v)) >
+            renderer.MaximumSize()) {
+            const real64 ratio = negative.AspectRatio();
+            if (ratio >= 1.0) {
+                dst_size.h = renderer.MaximumSize();
+                dst_size.v = Max_uint32(1, Round_uint32(dst_size.h / ratio));
+            } else {
+                dst_size.v = renderer.MaximumSize();
+                dst_size.h = Max_uint32(1, Round_uint32(dst_size.v * ratio));
+            }
+        }
+    }
+    out_w = static_cast<uint32_t>(dst_size.h);
+    out_h = static_cast<uint32_t>(dst_size.v);
     out_rgb.assign(static_cast<size_t>(out_w) * out_h * 3, 0);
 
     dng_rect src_area = negative.DefaultCropArea();
-    src_area = src_area & stage3->Bounds();
-    if (src_area.IsEmpty()) {
-        src_area = stage3->Bounds();
-    }
 
     dng_image* source_image = stage3;
     dng_rect source_area = src_area;
     AutoPtr<dng_image> resized_stage3;
     const auto resample_start = std::chrono::high_resolution_clock::now();
-    const bool need_resample = (src_area.W() != out_w) || (src_area.H() != out_h);
+    const bool need_resample = src_area.Size() != dst_size;
     if (need_resample) {
-        dng_point dst_size;
-        dst_size.h = static_cast<int32>(out_w);
-        dst_size.v = static_cast<int32>(out_h);
         resized_stage3.Reset(host.Make_dng_image(dst_size, stage3->Planes(), stage3->PixelType()));
         if (!resized_stage3.Get()) {
             return false;
@@ -1067,113 +1591,58 @@ bool render_stage4_halide(dng_host& host,
     }
     const auto params_end = std::chrono::high_resolution_clock::now();
 
-    const bool timing_enabled = renderHalideTimingEnabled();
-    auto ms = [](const auto& start, const auto& end) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    };
-
-    if (renderHalideTryFullEnabled()) {
-        const bool can_use_u16_stage3 = source_image->PixelType() == ttShort &&
-                                        source_image->PixelRange() != 0;
-        if (can_use_u16_stage3) {
-            const auto extract_start = std::chrono::high_resolution_clock::now();
+    const bool can_use_u16_stage3 = source_image->PixelType() == ttShort &&
+                                    source_image->PixelRange() != 0;
+    if (renderHalideTryFullEnabled() && can_use_u16_stage3) {
+        const auto extract_start = std::chrono::high_resolution_clock::now();
+        const uint16_t* stage3_u16_ptr = nullptr;
+        std::unique_ptr<dng_const_tile_buffer> stage3_borrowed_tile;
+        int32_t stage3_row_step = static_cast<int32_t>(src_w * src_p);
+        int32_t stage3_col_step = static_cast<int32_t>(src_p);
+        int32_t stage3_plane_step = 1;
+        if (borrowStage3Interleaved16(source_image,
+                                      source_area,
+                                      stage3_borrowed_tile,
+                                      stage3_u16_ptr,
+                                      src_w,
+                                      src_h,
+                                      src_p,
+                                      stage3_row_step,
+                                      stage3_col_step,
+                                      stage3_plane_step)) {
+            // Borrowed path keeps source strides and avoids O(WxH) repack.
+        } else {
             extractStage3Interleaved16(source_image, source_area, stage3_data16, src_w, src_h, src_p);
-            const auto extract_end = std::chrono::high_resolution_clock::now();
-            const float src_scale = 1.0f / static_cast<float>(source_image->PixelRange());
-            const auto halide_start = std::chrono::high_resolution_clock::now();
-            const bool use_nomap_kernel = params.huesat_has_table == 0 && params.look_has_table == 0;
-            const bool use_maps_noencode_kernel = params.huesat_has_table != 0 &&
-                                                  params.look_has_table != 0 &&
-                                                  params.huesat_has_encoding == 0 &&
-                                                  params.look_has_encoding == 0;
-            bool render_ok = false;
-            if (use_nomap_kernel) {
-                render_ok = runRenderStage4NoMapHalideAot(stage3_data16.data(),
-                                                          static_cast<int>(src_w),
-                                                          static_cast<int>(src_h),
-                                                          static_cast<int>(src_p),
-                                                          src_scale,
-                                                          static_cast<int>(out_w),
-                                                          static_cast<int>(out_h),
-                                                          params,
-                                                          out_rgb.data());
-            } else if (use_maps_noencode_kernel) {
-                render_ok = runRenderStage4MapsNoEncodingHalideAot(stage3_data16.data(),
-                                                                    static_cast<int>(src_w),
-                                                                    static_cast<int>(src_h),
-                                                                    static_cast<int>(src_p),
-                                                                    src_scale,
-                                                                    static_cast<int>(out_w),
-                                                                    static_cast<int>(out_h),
-                                                                    params,
-                                                                    out_rgb.data());
-            } else {
-                render_ok = runRenderStage4HalideAot(stage3_data16.data(),
-                                                     static_cast<int>(src_w),
-                                                     static_cast<int>(src_h),
-                                                     static_cast<int>(src_p),
-                                                     src_scale,
-                                                     static_cast<int>(out_w),
-                                                     static_cast<int>(out_h),
-                                                     params,
-                                                     out_rgb.data());
-            }
-            if (render_ok) {
-                const auto halide_end = std::chrono::high_resolution_clock::now();
-                if (timing_enabled) {
-                    std::cerr << "[RenderHalideTiming] resample=" << ms(resample_start, resample_end)
-                              << " ms extractStage3U16=" << ms(extract_start, extract_end)
-                              << " ms buildParams=" << ms(params_start, params_end)
-                              << (use_nomap_kernel ? " ms halideNoMap=" :
-                                  use_maps_noencode_kernel ? " ms halideMapsNoEncode=" :
-                                                             " ms halideFull=")
-                              << ms(halide_start, halide_end)
-                              << " ms\n";
-                }
-                if (renderHalideDebugEnabled()) {
-                    if (!have_stage3_float) {
-                        extract_float_stage3();
-                    }
-                    std::vector<uint8_t> ref_full(static_cast<size_t>(src_w) * src_h * 3u, 0);
-                    if (runRenderStage4Reference(stage3_data.data(),
-                                                 static_cast<int>(src_w),
-                                                 static_cast<int>(src_h),
-                                                 static_cast<int>(src_p),
-                                                 params,
-                                                 ref_full.data())) {
-                        const double psnr = computePSNR8(ref_full, out_rgb);
-                        std::cerr << "[RenderHalide] full-stage PSNR vs full-reference: "
-                                  << psnr << " dB\n";
-                    }
-                }
-                return true;
-            }
+            stage3_u16_ptr = stage3_data16.data();
         }
-    }
-
-    const auto extract_start = std::chrono::high_resolution_clock::now();
-    if (!have_stage3_float) {
-        extract_float_stage3();
-    }
-    const auto extract_end = std::chrono::high_resolution_clock::now();
-
-    if (renderHalideTryToneTailEnabled()) {
-        std::vector<float> pre_tone_rgb;
-        if (runRenderPrefixToPreTone(stage3_data.data(),
-                                     static_cast<int>(src_w),
-                                     static_cast<int>(src_h),
-                                     static_cast<int>(src_p),
-                                     params,
-                                     pre_tone_rgb) &&
-            runRenderToneTailHalideAot(pre_tone_rgb.data(),
-                                       static_cast<int>(src_w),
-                                       static_cast<int>(src_h),
-                                       3,
-                                       params.tone_curve,
-                                       params.rgb_to_final,
-                                       params.encode_gamma,
-                                       out_rgb.data())) {
+        const auto extract_end = std::chrono::high_resolution_clock::now();
+        const float src_scale = 1.0f / static_cast<float>(source_image->PixelRange());
+        const auto halide_start = std::chrono::high_resolution_clock::now();
+        const bool render_ok = runRenderStage4HalideAot(stage3_u16_ptr,
+                                                         static_cast<int>(src_w),
+                                                         static_cast<int>(src_h),
+                                                         static_cast<int>(src_p),
+                                                         stage3_row_step,
+                                                         stage3_col_step,
+                                                         stage3_plane_step,
+                                                         src_scale,
+                                                         static_cast<int>(out_w),
+                                                         static_cast<int>(out_h),
+                                                         params,
+                                                         out_rgb.data());
+        if (render_ok) {
+            const auto halide_end = std::chrono::high_resolution_clock::now();
+            if (timing_enabled) {
+                std::cerr << "[RenderHalideTiming] resample=" << ms(resample_start, resample_end)
+                          << " ms extractStage3U16=" << ms(extract_start, extract_end)
+                          << " ms buildParams=" << ms(params_start, params_end)
+                          << " ms halideFull=" << ms(halide_start, halide_end)
+                          << " ms\n";
+            }
             if (renderHalideDebugEnabled()) {
+                if (!have_stage3_float) {
+                    extract_float_stage3();
+                }
                 std::vector<uint8_t> ref_full(static_cast<size_t>(src_w) * src_h * 3u, 0);
                 if (runRenderStage4Reference(stage3_data.data(),
                                              static_cast<int>(src_w),
@@ -1182,43 +1651,35 @@ bool render_stage4_halide(dng_host& host,
                                              params,
                                              ref_full.data())) {
                     const double psnr = computePSNR8(ref_full, out_rgb);
-                    std::cerr << "[RenderHalide] tone-tail PSNR vs full-reference: "
+                    std::cerr << "[RenderHalide] full-stage PSNR vs full-reference: "
                               << psnr << " dB\n";
+                    printRgbDiffStats(ref_full, out_rgb, src_w, src_h);
                 }
             }
             return true;
         }
     }
 
-    // Fallback to the previous cutback level: prefix-to-tone + Halide tail.
-    std::vector<float> tone_rgb;
-    if (runRenderPrefixToTone(stage3_data.data(),
-                              static_cast<int>(src_w),
-                              static_cast<int>(src_h),
-                              static_cast<int>(src_p),
-                              params,
-                              tone_rgb) &&
-        runRenderTailHalideAot(tone_rgb.data(),
-                               static_cast<int>(src_w),
-                               static_cast<int>(src_h),
-                               3,
-                               params.rgb_to_final,
-                               params.encode_gamma,
-                               out_rgb.data())) {
-        return true;
+    if (renderHalideDebugEnabled()) {
+        std::cerr << "[RenderHalide] halideFull failed, fallback to SDK render\n";
     }
-
-    if (mode == RenderHalideMode::HALIDE_METAL) {
+    AutoPtr<dng_image> final_image(const_cast<dng_render&>(renderer).Render());
+    if (!final_image.Get()) {
         return false;
     }
-
-    if (renderHalideDebugEnabled()) {
-        std::cerr << "[RenderHalide] halide tone-tail/tail failed, fallback to full reference\n";
-    }
-    return runRenderStage4Reference(stage3_data.data(),
-                                    static_cast<int>(src_w),
-                                    static_cast<int>(src_h),
-                                    static_cast<int>(src_p),
-                                    params,
-                                    out_rgb.data());
+    out_w = final_image->Width();
+    out_h = final_image->Height();
+    out_rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
+    dng_pixel_buffer buffer;
+    buffer.fArea = final_image->Bounds();
+    buffer.fPlane = 0;
+    buffer.fPlanes = 3;
+    buffer.fPixelType = ttByte;
+    buffer.fPixelSize = 1;
+    buffer.fData = out_rgb.data();
+    buffer.fRowStep = static_cast<int32>(out_w * 3);
+    buffer.fColStep = 3;
+    buffer.fPlaneStep = 1;
+    final_image->Get(buffer);
+    return true;
 }

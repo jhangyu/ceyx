@@ -30,36 +30,37 @@
 # classes:
 #   - name: "StageResult"
 #     description: "單一 stage 的 time_ms + psnr_db（Optional）"
-#     lines: "84-94"
+#     lines: "86-96"
 #   - name: "CaseResult"
 #     description: "單次執行的四個 stage 結果 + render_timing_ms + raw_output"
-#     lines: "102-116"
+#     lines: "104-118"
 #   - name: "RepeatedCaseResult"
 #     description: "多次重複執行的平均；含 render_bottleneck_hint 計算"
-#     lines: "117-198"
+#     lines: "119-200"
 #
 # functions:
 #   - name: "mean_optional"
 #     description: "過濾 None 後計算平均值"
-#     lines: "95-101"
+#     lines: "97-103"
 #   - name: "parse_render_timing"
 #     description: "解析 [RenderHalideTiming] 行，回傳 {key: ms} dict"
-#     lines: "209-215"
+#     lines: "210-216"
 #   - name: "render_timing_keys"
 #     description: "依 RENDER_TIMING_ORDER 排序所有出現過的 timing key"
-#     lines: "216-226"
+#     lines: "217-227"
 #   - name: "run_case"
 #     description: "執行單一 test_decode 命令，解析 stdout，回傳 CaseResult"
-#     lines: "228-287"
+#     lines: "229-291"
 #   - name: "build_markdown"
 #     description: "將 RepeatedCaseResult 列表格式化為 Markdown 表格字串"
-#     lines: "288-355"
+#     lines: "292-367"
 #   - name: "main"
 #     description: "CLI 入口：解析參數，執行 4 cases × repeat，輸出 Markdown"
-#     lines: "356-436"
+#     lines: "368-486"
 # ---
 import argparse
 import datetime as dt
+import os
 import re
 import statistics
 import subprocess
@@ -225,13 +226,16 @@ def render_timing_keys(results: list[RepeatedCaseResult]) -> list[str]:
     return ordered
 
 
-def run_case(cwd: Path, cmd: list[str], case_name: str) -> CaseResult:
+def run_case(cwd: Path, cmd: list[str], case_name: str, env_overrides: dict[str, str]) -> CaseResult:
+    merged_env = os.environ.copy()
+    merged_env.update(env_overrides)
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=merged_env,
         check=False,
     )
     output = proc.stdout
@@ -285,12 +289,20 @@ def run_case(cwd: Path, cmd: list[str], case_name: str) -> CaseResult:
     )
 
 
-def build_markdown(results: list[RepeatedCaseResult], generated_at: str, repeat: int) -> str:
+def build_markdown(
+    results: list[RepeatedCaseResult],
+    generated_at: str,
+    repeat: int,
+    env_overrides: dict[str, str],
+) -> str:
     lines = []
     lines.append("# Decode 4-Case Performance/PSNR Matrix")
     lines.append("")
     lines.append(f"_Generated at: {generated_at}_")
     lines.append(f"_Repeat count: {repeat}; table values are arithmetic means._")
+    if env_overrides:
+        env_text = ", ".join(f"{k}={v}" for k, v in sorted(env_overrides.items()))
+        lines.append(f"_Environment overrides: {env_text}_")
     lines.append("")
 
     # Performance table (time only)
@@ -392,14 +404,51 @@ def main() -> int:
         default=1,
         help="Number of times to run each case and average the parsed values (default: 1)",
     )
+    parser.add_argument(
+        "--decode-area-threads",
+        type=int,
+        default=0,
+        help="Set DNG_AREA_THREADS for all runs when > 0 (default: keep existing env)",
+    )
+    parser.add_argument(
+        "--render-area-threads",
+        type=int,
+        default=0,
+        help="Set DNG_RENDER_AREA_THREADS for all runs when > 0 (default: keep existing env)",
+    )
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra environment variable override, repeatable",
+    )
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be >= 1")
+    if args.decode_area_threads < 0:
+        parser.error("--decode-area-threads must be >= 0")
+    if args.render_area_threads < 0:
+        parser.error("--render-area-threads must be >= 0")
 
     repo_root = Path(args.repo_root).resolve()
     test_decode = str((repo_root / args.test_decode).resolve()) if not Path(args.test_decode).is_absolute() else args.test_decode
     lossless = str((repo_root / args.lossless).resolve()) if not Path(args.lossless).is_absolute() else args.lossless
     lossy = str((repo_root / args.lossy).resolve()) if not Path(args.lossy).is_absolute() else args.lossy
+
+    env_overrides: dict[str, str] = {}
+    if args.decode_area_threads > 0:
+        env_overrides["DNG_AREA_THREADS"] = str(args.decode_area_threads)
+    if args.render_area_threads > 0:
+        env_overrides["DNG_RENDER_AREA_THREADS"] = str(args.render_area_threads)
+    for item in args.env:
+        if "=" not in item:
+            parser.error(f"--env must be KEY=VALUE, got: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            parser.error(f"--env key cannot be empty: {item}")
+        env_overrides[key] = value
 
     cases = [
         ("Lossless Baseline (SDK)", [test_decode, lossless, "baseline"]),
@@ -413,11 +462,11 @@ def main() -> int:
         runs = []
         for i in range(args.repeat):
             print(f"[RUN] {case_name} ({i + 1}/{args.repeat})")
-            runs.append(run_case(repo_root, cmd, case_name))
+            runs.append(run_case(repo_root, cmd, case_name, env_overrides))
         results.append(RepeatedCaseResult(case_name=case_name, runs=runs))
 
     generated_at = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    markdown = build_markdown(results, generated_at, args.repeat)
+    markdown = build_markdown(results, generated_at, args.repeat, env_overrides)
 
     if args.output:
         out_path = Path(args.output)
