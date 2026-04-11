@@ -25,10 +25,18 @@ public:
     Input<Buffer<uint16_t>> src{"src", 3};      // x, y, c
     Input<Buffer<float>> rad{"rad", 2};         // coeff, plane
     Input<Buffer<float>> tan{"tan", 2};         // coeff, plane
+    Input<Buffer<int32_t>> tile_bounds{"tile_bounds", 3};  // bound(4), tile_x, tile_y
     Input<int32_t> planes{"planes"};
-    Input<float> center_h{"center_h"};
-    Input<float> center_v{"center_v"};
-    Input<float> pixel_aspect_ratio{"pixel_aspect_ratio"};
+    Input<float> center_x{"center_x"};
+    Input<float> center_y{"center_y"};
+    Input<float> norm_radius{"norm_radius"};
+    Input<float> inv_norm_radius{"inv_norm_radius"};
+    Input<float> pixel_scale_v{"pixel_scale_v"};
+    Input<float> pixel_scale_v_inv{"pixel_scale_v_inv"};
+    Input<int32_t> is_rad_nop_all{"is_rad_nop_all"};
+    Input<int32_t> is_tan_nop_all{"is_tan_nop_all"};
+    Input<int32_t> tile_width{"tile_width"};
+    Input<int32_t> tile_height{"tile_height"};
 
     Output<Buffer<uint16_t>> dst{"dst", 3};
     Func src_clamped{"src_clamped"};
@@ -40,31 +48,13 @@ public:
         src.dim(0).set_stride(3);
         src.dim(2).set_bounds(0, 3);
         src.dim(2).set_stride(1);
+        tile_bounds.dim(0).set_bounds(0, 4);
         dst.dim(0).set_stride(3);
         dst.dim(2).set_bounds(0, 3);
         dst.dim(2).set_stride(1);
 
-        Expr width = cast<float>(src.dim(0).extent());
-        Expr height = cast<float>(src.dim(1).extent());
-        Expr pixel_scale_v = 1.0f / pixel_aspect_ratio;
-        Expr pixel_scale_v_inv = pixel_aspect_ratio;
-
-        Expr center_x = center_h * width;
-        Expr center_y = center_v * height;
-        Expr square_height = floor(pixel_scale_v * height + 0.5f);
-        Expr square_center_x = center_h * width;
-        Expr square_center_y = center_v * square_height;
-
-        Expr dx0 = square_center_x;
-        Expr dx1 = width - square_center_x;
-        Expr dy0 = square_center_y;
-        Expr dy1 = square_height - square_center_y;
-        Expr max_dx = max(dx0, dx1);
-        Expr max_dy = max(dy0, dy1);
-        Expr norm_radius = sqrt(max_dx * max_dx + max_dy * max_dy);
-        Expr inv_norm_radius = 1.0f / norm_radius;
-
-        Expr plane = clamp(select(planes == 1, 0, c), 0, rad.dim(1).extent() - 1);
+        Expr plane = select(planes <= 1, 0, select(c < planes, c, 0));
+        plane = clamp(plane, 0, rad.dim(1).extent() - 1);
 
         Expr diff_x = cast<float>(x) - center_x;
         Expr diff_y = cast<float>(y) - center_y;
@@ -90,8 +80,23 @@ public:
         Expr tan_h = kt1 * (rr + 2.0f * diff_scaled_x * diff_scaled_x) +
                      (2.0f * kt0 * diff_scaled_x * diff_scaled_y);
 
-        Expr src_x = center_x + norm_radius * (diff_norm_x * ratio + tan_h);
-        Expr src_y = center_y + norm_radius * (diff_norm_y * ratio + tan_v * pixel_scale_v_inv);
+        Expr src_x_rad = center_x + diff_x * ratio;
+        Expr src_y_rad = center_y + diff_y * ratio;
+        Expr src_x_tan = cast<float>(x) + norm_radius * tan_h;
+        Expr src_y_tan = cast<float>(y) + norm_radius * tan_v * pixel_scale_v_inv;
+        Expr src_x_both = center_x + norm_radius * (diff_norm_x * ratio + tan_h);
+        Expr src_y_both = center_y + norm_radius * (diff_norm_y * ratio + tan_v * pixel_scale_v_inv);
+
+        Expr src_x = select(is_tan_nop_all != 0,
+                            src_x_rad,
+                            is_rad_nop_all != 0,
+                            src_x_tan,
+                            src_x_both);
+        Expr src_y = select(is_tan_nop_all != 0,
+                            src_y_rad,
+                            is_rad_nop_all != 0,
+                            src_y_tan,
+                            src_y_both);
 
         Expr src_x_floor = floor(src_x);
         Expr src_y_floor = floor(src_y);
@@ -106,10 +111,15 @@ public:
         Expr base_x = cast<int>(src_x_floor) - 1;
         Expr base_y = cast<int>(src_y_floor) - 1;
 
-        Expr min_base_x = -1;
-        Expr min_base_y = -1;
-        Expr max_base_x = src.dim(0).extent() - 2;
-        Expr max_base_y = src.dim(1).extent() - 2;
+        Expr safe_tile_w = max(tile_width, 1);
+        Expr safe_tile_h = max(tile_height, 1);
+        Expr tile_x = clamp(x / safe_tile_w, 0, tile_bounds.dim(1).extent() - 1);
+        Expr tile_y = clamp(y / safe_tile_h, 0, tile_bounds.dim(2).extent() - 1);
+
+        Expr min_base_x = tile_bounds(0, tile_x, tile_y);
+        Expr max_base_x = tile_bounds(1, tile_x, tile_y);
+        Expr min_base_y = tile_bounds(2, tile_x, tile_y);
+        Expr max_base_y = tile_bounds(3, tile_x, tile_y);
 
         Expr clipped_x = base_x < min_base_x || base_x > max_base_x;
         Expr clipped_y = base_y < min_base_y || base_y > max_base_y;

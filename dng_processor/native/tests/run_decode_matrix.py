@@ -1,4 +1,63 @@
 #!/usr/bin/env python3
+# ---
+# file_summary: >
+#   4-case pipeline 回歸矩陣工具（rule.md Appendix D 強制工具）。
+#   呼叫 test_decode binary 執行 Lossless/Lossy × Baseline/Custom 四組組合，
+#   解析 stdout 的 Stage1-4 時間與 PSNR，支援 repeat 平均，輸出 Markdown 表格。
+#
+# constraints:
+#   - 需要 test_decode binary 已編譯（dng_processor/native/build/test_decode）
+#   - 環境變數 DNG_RENDER_HALIDE_TIMING=1 可啟用 Stage4 Halide 細項計時
+#   - 固定 4 組 case：Lossless Baseline / Lossless Custom / Lossy Baseline / Lossy Custom
+#   - --render-mode-custom 控制 Custom case 的 render mode（sdk/halide-metal/auto）
+#   - 解析格式依賴 test_decode stdout（"--- Stage N:" / "Time:" / "PSNR vs baseline:"）
+#   - DECODE TOTAL 優先解析；若不存在則 fallback 解析 TOTAL
+#
+# usage: |
+#   DNG_RENDER_HALIDE_TIMING=1 python3 run_decode_matrix.py \
+#     --repo-root . \
+#     --test-decode dng_processor/native/build/test_decode \
+#     --lossless image_samples/lossless_dng_sample.dng \
+#     --lossy   image_samples/lossy_dng_sample.dng \
+#     --render-mode-custom halide-metal \
+#     --repeat 2 \
+#     --output docs/logs/YYYY-MM-DD/decode_matrix.md
+#
+# output_sections: >
+#   Performance(ms) / PSNR(dB) / Stage4 Raw Runs /
+#   Stage4 Halide Timing Breakdown（僅在 DNG_RENDER_HALIDE_TIMING=1 時出現）
+#
+# classes:
+#   - name: "StageResult"
+#     description: "單一 stage 的 time_ms + psnr_db（Optional）"
+#     lines: "84-94"
+#   - name: "CaseResult"
+#     description: "單次執行的四個 stage 結果 + render_timing_ms + raw_output"
+#     lines: "102-116"
+#   - name: "RepeatedCaseResult"
+#     description: "多次重複執行的平均；含 render_bottleneck_hint 計算"
+#     lines: "117-198"
+#
+# functions:
+#   - name: "mean_optional"
+#     description: "過濾 None 後計算平均值"
+#     lines: "95-101"
+#   - name: "parse_render_timing"
+#     description: "解析 [RenderHalideTiming] 行，回傳 {key: ms} dict"
+#     lines: "209-215"
+#   - name: "render_timing_keys"
+#     description: "依 RENDER_TIMING_ORDER 排序所有出現過的 timing key"
+#     lines: "216-226"
+#   - name: "run_case"
+#     description: "執行單一 test_decode 命令，解析 stdout，回傳 CaseResult"
+#     lines: "228-287"
+#   - name: "build_markdown"
+#     description: "將 RepeatedCaseResult 列表格式化為 Markdown 表格字串"
+#     lines: "288-355"
+#   - name: "main"
+#     description: "CLI 入口：解析參數，執行 4 cases × repeat，輸出 Markdown"
+#     lines: "356-436"
+# ---
 import argparse
 import datetime as dt
 import re
@@ -233,17 +292,35 @@ def build_markdown(results: list[RepeatedCaseResult], generated_at: str, repeat:
     lines.append(f"_Generated at: {generated_at}_")
     lines.append(f"_Repeat count: {repeat}; table values are arithmetic means._")
     lines.append("")
-    lines.append(
-        "| Case | Stage1 performance/PSNR | Stage2 performance/PSNR | "
-        "Stage3 performance/PSNR | Stage4(Render) performance/PSNR | Total |"
-    )
+
+    # Performance table (time only)
+    lines.append("## Performance (ms)")
+    lines.append("")
+    lines.append("| Case | Stage1 | Stage2 | Stage3 | Stage4(Render) | Total |")
     lines.append("|---|---|---|---|---|---|")
     for r in results:
+        def fmt_time(s: StageResult) -> str:
+            return f"{s.time_ms:.2f} ms" if s.time_ms is not None else "N/A"
         lines.append(
-            f"| {r.case_name} | {r.stage1.as_cell()} | {r.stage2.as_cell()} | "
-            f"{r.stage3.as_cell()} | {r.stage4.as_cell()} | {r.total_cell()} |"
+            f"| {r.case_name} | {fmt_time(r.stage1)} | {fmt_time(r.stage2)} | "
+            f"{fmt_time(r.stage3)} | {fmt_time(r.stage4)} | {r.total_cell()} |"
         )
     lines.append("")
+
+    # PSNR table
+    lines.append("## PSNR vs Baseline (dB)")
+    lines.append("")
+    lines.append("| Case | Stage1 | Stage2 | Stage3 | Stage4(Render) |")
+    lines.append("|---|---|---|---|---|")
+    for r in results:
+        def fmt_psnr(s: StageResult) -> str:
+            return f"{s.psnr_db:.2f} dB" if s.psnr_db is not None else "N/A"
+        lines.append(
+            f"| {r.case_name} | {fmt_psnr(r.stage1)} | {fmt_psnr(r.stage2)} | "
+            f"{fmt_psnr(r.stage3)} | {fmt_psnr(r.stage4)} |"
+        )
+    lines.append("")
+
     lines.append("## Stage4 Raw Runs")
     lines.append("")
     lines.append("| Case | Stage4 runs (ms) |")

@@ -18,6 +18,13 @@ struct WarpRectilinearParams {
     float center_h = 0.5f;
     float center_v = 0.5f;
     float pixel_aspect_ratio = 1.0f;
+    double rad_params64[4][4] = {};
+    double tan_params64[4][2] = {};
+    double center_h64 = 0.5;
+    double center_v64 = 0.5;
+    double pixel_aspect_ratio64 = 1.0;
+    bool is_rad_nop_all = false;
+    bool is_tan_nop_all = false;
 };
 
 enum class WarpRectilinearMode {
@@ -28,7 +35,7 @@ enum class WarpRectilinearMode {
 };
 
 bool extractWarpRectilinearParams(const dng_opcode_WarpRectilinear& opcode,
-                                  float pixelAspectRatio,
+                                  double pixelAspectRatio,
                                   WarpRectilinearParams& params);
 
 bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,

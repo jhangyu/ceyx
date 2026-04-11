@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 #include "HalideBuffer.h"
@@ -15,6 +16,7 @@
 #include <dng_negative.h>
 #include <dng_pixel_buffer.h>
 #include <dng_rect.h>
+#include <dng_utils.h>
 
 namespace {
 
@@ -30,6 +32,18 @@ float cubicWeight(float x) {
         return (((a * x - 5.0f * a) * x + 8.0f * a) * x - 4.0f * a);
     }
     return (((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f);
+}
+
+double cubicWeightReal64(double x) {
+    const double a = -0.75;
+    x = std::fabs(x);
+    if (x >= 2.0) {
+        return 0.0;
+    }
+    if (x >= 1.0) {
+        return (((a * x - 5.0 * a) * x + 8.0 * a) * x - 4.0 * a);
+    }
+    return (((a + 2.0) * x - (a + 3.0)) * x * x + 1.0);
 }
 
 void normalize4(float* w) {
@@ -84,6 +98,44 @@ const float* bicubicWeightsForSubsample(int subsampleIndex) {
     return table[clamped];
 }
 
+const float* bicubicWeights2dSdkForSubsample(int subsampleX, int subsampleY) {
+    static float table[kResampleSubsampleCount2D][kResampleSubsampleCount2D][16];
+    static bool initialized = false;
+
+    if (!initialized) {
+        for (int y = 0; y < kResampleSubsampleCount2D; ++y) {
+            const double y_fract = y * (1.0 / static_cast<double>(kResampleSubsampleCount2D));
+            for (int x = 0; x < kResampleSubsampleCount2D; ++x) {
+                const double x_fract = x * (1.0 / static_cast<double>(kResampleSubsampleCount2D));
+                double t32 = 0.0;
+                int idx = 0;
+                for (int i = 0; i < 4; ++i) {
+                    const int y_int = i - 1;
+                    const double y_pos = static_cast<double>(y_int) - y_fract;
+                    const float y_w = static_cast<float>(cubicWeightReal64(y_pos));
+                    for (int j = 0; j < 4; ++j) {
+                        const int x_int = j - 1;
+                        const double x_pos = static_cast<double>(x_int) - x_fract;
+                        const float x_w = static_cast<float>(cubicWeightReal64(x_pos));
+                        const float w = x_w * y_w;
+                        table[y][x][idx++] = w;
+                        t32 += static_cast<double>(w);
+                    }
+                }
+                const float s32 = static_cast<float>(1.0 / t32);
+                for (int k = 0; k < 16; ++k) {
+                    table[y][x][k] *= s32;
+                }
+            }
+        }
+        initialized = true;
+    }
+
+    const int clamped_x = std::max(0, std::min(kResampleSubsampleCount2D - 1, subsampleX));
+    const int clamped_y = std::max(0, std::min(kResampleSubsampleCount2D - 1, subsampleY));
+    return table[clamped_y][clamped_x];
+}
+
 struct WarpRuntimeParams {
     double center_x = 0.0;
     double center_y = 0.0;
@@ -93,21 +145,188 @@ struct WarpRuntimeParams {
     double pixel_scale_v_inv = 1.0;
 };
 
+struct TileClippingGrid {
+    int tile_width = 1;
+    int tile_height = 1;
+    int tiles_x = 1;
+    int tiles_y = 1;
+    std::vector<int32_t> bounds;  // [kind(4), tile_x, tile_y]
+
+    int32_t get(int kind, int tx, int ty) const {
+        const size_t idx = static_cast<size_t>(kind) +
+                           4u * (static_cast<size_t>(tx) + static_cast<size_t>(tiles_x) * ty);
+        return bounds[idx];
+    }
+};
+
 WarpRuntimeParams buildRuntimeParams(int width, int height, const WarpRectilinearParams& params) {
     WarpRuntimeParams runtime;
-    runtime.pixel_scale_v = 1.0 / static_cast<double>(params.pixel_aspect_ratio);
-    runtime.pixel_scale_v_inv = params.pixel_aspect_ratio;
-    runtime.center_x = static_cast<double>(params.center_h) * static_cast<double>(width);
-    runtime.center_y = static_cast<double>(params.center_v) * static_cast<double>(height);
 
-    const double square_height = std::floor(runtime.pixel_scale_v * static_cast<double>(height) + 0.5);
-    const double square_center_x = static_cast<double>(params.center_h) * static_cast<double>(width);
-    const double square_center_y = static_cast<double>(params.center_v) * square_height;
-    const double max_dx = std::max(square_center_x, static_cast<double>(width) - square_center_x);
-    const double max_dy = std::max(square_center_y, square_height - square_center_y);
-    runtime.norm_radius = std::sqrt(max_dx * max_dx + max_dy * max_dy);
+    const dng_rect bounds(0, 0, height, width);
+    runtime.center_x = Lerp_real64(static_cast<double>(bounds.l),
+                                   static_cast<double>(bounds.r),
+                                   params.center_h64);
+    runtime.center_y = Lerp_real64(static_cast<double>(bounds.t),
+                                   static_cast<double>(bounds.b),
+                                   params.center_v64);
+
+    runtime.pixel_scale_v = 1.0 / params.pixel_aspect_ratio64;
+    runtime.pixel_scale_v_inv = params.pixel_aspect_ratio64;
+
+    dng_rect square_bounds(bounds);
+    square_bounds.b = square_bounds.t +
+                      Round_int32(runtime.pixel_scale_v * static_cast<double>(square_bounds.H()));
+
+    const dng_point_real64 square_center(
+        Lerp_real64(static_cast<double>(square_bounds.t),
+                    static_cast<double>(square_bounds.b),
+                    params.center_v64),
+        Lerp_real64(static_cast<double>(square_bounds.l),
+                    static_cast<double>(square_bounds.r),
+                    params.center_h64));
+
+    runtime.norm_radius = MaxDistancePointToRect(square_center, square_bounds);
     runtime.inv_norm_radius = 1.0 / runtime.norm_radius;
     return runtime;
+}
+
+int computeSdkTileExtent(int extent) {
+    if (extent <= 0) {
+        return 1;
+    }
+    constexpr int kMaxTileExtent = 256;
+    const int count = (extent + kMaxTileExtent - 1) / kMaxTileExtent;
+    return std::max(1, (extent + count - 1) / count);
+}
+
+inline int warpPlaneIndex(int channel, const WarpRectilinearParams& params) {
+    if (params.planes == 0 || params.planes == 1) {
+        return 0;
+    }
+    if (channel >= 0 && channel < static_cast<int>(params.planes)) {
+        return channel;
+    }
+    return 0;
+}
+
+void getSrcPixelPosition(double dst_x,
+                         double dst_y,
+                         int plane,
+                         const WarpRuntimeParams& runtime,
+                         const WarpRectilinearParams& params,
+                         double& src_x,
+                         double& src_y) {
+    const double* rad = params.rad_params64[plane];
+    const double* tan = params.tan_params64[plane];
+    const double diff_x = dst_x - runtime.center_x;
+    const double diff_y = dst_y - runtime.center_y;
+    const double diff_norm_x = diff_x * runtime.inv_norm_radius;
+    const double diff_norm_y = diff_y * runtime.inv_norm_radius;
+    const double diff_scaled_x = diff_norm_x;
+    const double diff_scaled_y = diff_norm_y * runtime.pixel_scale_v;
+    const double rr = std::min(diff_scaled_x * diff_scaled_x + diff_scaled_y * diff_scaled_y, 1.0);
+
+    const double ratio = rad[0] + rr * (rad[1] + rr * (rad[2] + rr * rad[3]));
+
+    const double tan_v = tan[0] * (rr + 2.0 * diff_scaled_y * diff_scaled_y) +
+                         2.0 * tan[1] * diff_scaled_x * diff_scaled_y;
+    const double tan_h = tan[1] * (rr + 2.0 * diff_scaled_x * diff_scaled_x) +
+                         2.0 * tan[0] * diff_scaled_x * diff_scaled_y;
+
+    if (params.is_tan_nop_all) {
+        src_x = runtime.center_x + (dst_x - runtime.center_x) * ratio;
+        src_y = runtime.center_y + (dst_y - runtime.center_y) * ratio;
+        return;
+    }
+
+    if (params.is_rad_nop_all) {
+        src_x = dst_x + runtime.norm_radius * tan_h;
+        src_y = dst_y + runtime.norm_radius * tan_v * runtime.pixel_scale_v_inv;
+        return;
+    }
+
+    src_x = runtime.center_x + runtime.norm_radius * (diff_norm_x * ratio + tan_h);
+    src_y = runtime.center_y +
+            runtime.norm_radius * (diff_norm_y * ratio + tan_v * runtime.pixel_scale_v_inv);
+}
+
+TileClippingGrid buildTileClippingGrid(int width,
+                                       int height,
+                                       int dst_planes,
+                                       const WarpRuntimeParams& runtime,
+                                       const WarpRectilinearParams& params) {
+    TileClippingGrid grid;
+    grid.tile_width = computeSdkTileExtent(width);
+    grid.tile_height = computeSdkTileExtent(height);
+    grid.tiles_x = std::max(1, (width + grid.tile_width - 1) / grid.tile_width);
+    grid.tiles_y = std::max(1, (height + grid.tile_height - 1) / grid.tile_height);
+    grid.bounds.assign(static_cast<size_t>(4 * grid.tiles_x * grid.tiles_y), 0);
+
+    constexpr int kKernelRadius = 2;
+    constexpr int kBicubicWidth = 4;
+
+    for (int ty = 0; ty < grid.tiles_y; ++ty) {
+        const int t = ty * grid.tile_height;
+        const int b = std::min(height, t + grid.tile_height);
+        for (int tx = 0; tx < grid.tiles_x; ++tx) {
+            const int l = tx * grid.tile_width;
+            const int r = std::min(width, l + grid.tile_width);
+
+            int32_t xMin = std::numeric_limits<int32_t>::max();
+            int32_t xMax = std::numeric_limits<int32_t>::min();
+            int32_t yMin = std::numeric_limits<int32_t>::max();
+            int32_t yMax = std::numeric_limits<int32_t>::min();
+
+            for (int plane = 0; plane < dst_planes; ++plane) {
+                const int p = warpPlaneIndex(plane, params);
+
+                for (int c = l; c < r; ++c) {
+                    double sx = 0.0;
+                    double sy = 0.0;
+                    getSrcPixelPosition(static_cast<double>(c), static_cast<double>(t), p, runtime, params, sx, sy);
+                    yMin = std::min(yMin, static_cast<int32_t>(std::floor(sy)));
+
+                    getSrcPixelPosition(static_cast<double>(c),
+                                        static_cast<double>(b - 1),
+                                        p,
+                                        runtime,
+                                        params,
+                                        sx,
+                                        sy);
+                    yMax = std::max(yMax, static_cast<int32_t>(std::ceil(sy)));
+                }
+
+                for (int rr = t; rr < b; ++rr) {
+                    double sx = 0.0;
+                    double sy = 0.0;
+                    getSrcPixelPosition(static_cast<double>(l), static_cast<double>(rr), p, runtime, params, sx, sy);
+                    xMin = std::min(xMin, static_cast<int32_t>(std::floor(sx)));
+
+                    getSrcPixelPosition(static_cast<double>(r - 1),
+                                        static_cast<double>(rr),
+                                        p,
+                                        runtime,
+                                        params,
+                                        sx,
+                                        sy);
+                    xMax = std::max(xMax, static_cast<int32_t>(std::ceil(sx)));
+                }
+            }
+
+            const int32_t hMin = xMin - kKernelRadius;
+            const int32_t vMin = yMin - kKernelRadius;
+            const int32_t hMax = xMax + kKernelRadius - kBicubicWidth;
+            const int32_t vMax = yMax + kKernelRadius - kBicubicWidth;
+
+            const size_t base = 4u * (static_cast<size_t>(tx) + static_cast<size_t>(grid.tiles_x) * ty);
+            grid.bounds[base + 0] = hMin;
+            grid.bounds[base + 1] = hMax;
+            grid.bounds[base + 2] = vMin;
+            grid.bounds[base + 3] = vMax;
+        }
+    }
+
+    return grid;
 }
 
 void warpRectilinearCpu(const uint16_t* src,
@@ -115,6 +334,7 @@ void warpRectilinearCpu(const uint16_t* src,
                         int height,
                         int planes,
                         const WarpRectilinearParams& params,
+                        const TileClippingGrid& tile_grid,
                         uint16_t* dst) {
     const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
 
@@ -127,35 +347,24 @@ void warpRectilinearCpu(const uint16_t* src,
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            const double diff_x = static_cast<double>(x) - runtime.center_x;
-            const double diff_y = static_cast<double>(y) - runtime.center_y;
-            const double diff_norm_x = diff_x * runtime.inv_norm_radius;
-            const double diff_norm_y = diff_y * runtime.inv_norm_radius;
-            const double diff_scaled_x = diff_norm_x;
-            const double diff_scaled_y = diff_norm_y * runtime.pixel_scale_v;
-            const double rr = std::min(diff_scaled_x * diff_scaled_x + diff_scaled_y * diff_scaled_y, 1.0);
+            const int tile_x = std::min(x / tile_grid.tile_width, tile_grid.tiles_x - 1);
+            const int tile_y = std::min(y / tile_grid.tile_height, tile_grid.tiles_y - 1);
+            const int min_base_x = tile_grid.get(0, tile_x, tile_y);
+            const int max_base_x = tile_grid.get(1, tile_x, tile_y);
+            const int min_base_y = tile_grid.get(2, tile_x, tile_y);
+            const int max_base_y = tile_grid.get(3, tile_x, tile_y);
 
             for (int c = 0; c < planes; ++c) {
-                const int plane = std::min<int>(params.planes == 1 ? 0 : c, params.planes - 1);
-                const float* rad = params.rad_params[plane];
-                const float* tan = params.tan_params[plane];
-                const double ratio = static_cast<double>(rad[0]) +
-                                     rr * (static_cast<double>(rad[1]) +
-                                           rr * (static_cast<double>(rad[2]) +
-                                                 rr * static_cast<double>(rad[3])));
-
-                const double tan_v =
-                    static_cast<double>(tan[0]) * (rr + 2.0 * diff_scaled_y * diff_scaled_y) +
-                    2.0 * static_cast<double>(tan[1]) * diff_scaled_x * diff_scaled_y;
-                const double tan_h =
-                    static_cast<double>(tan[1]) * (rr + 2.0 * diff_scaled_x * diff_scaled_x) +
-                    2.0 * static_cast<double>(tan[0]) * diff_scaled_x * diff_scaled_y;
-
-                const double src_x = runtime.center_x +
-                                    runtime.norm_radius * (diff_norm_x * ratio + tan_h);
-                const double src_y = runtime.center_y +
-                                    runtime.norm_radius *
-                                        (diff_norm_y * ratio + tan_v * runtime.pixel_scale_v_inv);
+                const int plane = warpPlaneIndex(c, params);
+                double src_x = 0.0;
+                double src_y = 0.0;
+                getSrcPixelPosition(static_cast<double>(x),
+                                    static_cast<double>(y),
+                                    plane,
+                                    runtime,
+                                    params,
+                                    src_x,
+                                    src_y);
 
                 const double src_x_floor = std::floor(src_x);
                 const double src_y_floor = std::floor(src_y);
@@ -164,11 +373,6 @@ void warpRectilinearCpu(const uint16_t* src,
                 int base_y = static_cast<int>(src_y_floor) - 1;
                 int frac_x_idx = quantizeSubsampleIndex(src_x - src_x_floor);
                 int frac_y_idx = quantizeSubsampleIndex(src_y - src_y_floor);
-
-                const int min_base_x = -1;
-                const int min_base_y = -1;
-                const int max_base_x = width - 2;
-                const int max_base_y = height - 2;
 
                 if (base_x < min_base_x) {
                     base_x = min_base_x;
@@ -201,6 +405,88 @@ void warpRectilinearCpu(const uint16_t* src,
 
                 const uint16_t out = static_cast<uint16_t>(
                     std::max(0.0f, std::min(65535.0f, total + 0.5f)));
+                dst[(static_cast<size_t>(y) * width + x) * planes + c] = out;
+            }
+        }
+    }
+}
+
+void warpRectilinearCpuBitExact(const uint16_t* src,
+                                int width,
+                                int height,
+                                int planes,
+                                const WarpRectilinearParams& params,
+                                const TileClippingGrid& tile_grid,
+                                uint16_t* dst) {
+    const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
+    constexpr float kInvU16Range = 1.0f / 65535.0f;
+    constexpr float kU16Range = 65535.0f;
+
+    auto sample_normalized = [&](int x, int y, int c) -> float {
+        const int clamped_x = std::max(0, std::min(width - 1, x));
+        const int clamped_y = std::max(0, std::min(height - 1, y));
+        const size_t idx = (static_cast<size_t>(clamped_y) * width + clamped_x) * planes + c;
+        return kInvU16Range * static_cast<float>(src[idx]);
+    };
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int tile_x = std::min(x / tile_grid.tile_width, tile_grid.tiles_x - 1);
+            const int tile_y = std::min(y / tile_grid.tile_height, tile_grid.tiles_y - 1);
+            const int min_base_x = tile_grid.get(0, tile_x, tile_y);
+            const int max_base_x = tile_grid.get(1, tile_x, tile_y);
+            const int min_base_y = tile_grid.get(2, tile_x, tile_y);
+            const int max_base_y = tile_grid.get(3, tile_x, tile_y);
+
+            for (int c = 0; c < planes; ++c) {
+                const int plane = warpPlaneIndex(c, params);
+                double src_x = 0.0;
+                double src_y = 0.0;
+                getSrcPixelPosition(static_cast<double>(x),
+                                    static_cast<double>(y),
+                                    plane,
+                                    runtime,
+                                    params,
+                                    src_x,
+                                    src_y);
+
+                const double src_x_floor = std::floor(src_x);
+                const double src_y_floor = std::floor(src_y);
+
+                int base_x = static_cast<int>(src_x_floor) - 1;
+                int base_y = static_cast<int>(src_y_floor) - 1;
+                int frac_x_idx = quantizeSubsampleIndex(src_x - src_x_floor);
+                int frac_y_idx = quantizeSubsampleIndex(src_y - src_y_floor);
+
+                if (base_x < min_base_x) {
+                    base_x = min_base_x;
+                    frac_x_idx = 0;
+                } else if (base_x > max_base_x) {
+                    base_x = max_base_x;
+                    frac_x_idx = 0;
+                }
+
+                if (base_y < min_base_y) {
+                    base_y = min_base_y;
+                    frac_y_idx = 0;
+                } else if (base_y > max_base_y) {
+                    base_y = max_base_y;
+                    frac_y_idx = 0;
+                }
+
+                const float* weights = bicubicWeights2dSdkForSubsample(frac_x_idx, frac_y_idx);
+
+                float total = 0.0f;
+                int widx = 0;
+                for (int ky = 0; ky < 4; ++ky) {
+                    const int sy = base_y + ky;
+                    for (int kx = 0; kx < 4; ++kx) {
+                        total += weights[widx++] * sample_normalized(base_x + kx, sy, c);
+                    }
+                }
+
+                const float pinned = Pin_Overrange(total);
+                const uint16_t out = static_cast<uint16_t>(pinned * kU16Range + 0.5f);
                 dst[(static_cast<size_t>(y) * width + x) * planes + c] = out;
             }
         }
@@ -261,7 +547,9 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                       int width,
                       int height,
                       int planes,
+                      const WarpRuntimeParams& runtime,
                       const WarpRectilinearParams& params,
+                      const TileClippingGrid& tile_grid,
                       uint16_t* dst_interleaved_rgb) {
     if (!src_interleaved_rgb || !dst_interleaved_rgb || width <= 0 || height <= 0 || planes <= 0) {
         return false;
@@ -296,22 +584,35 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
 
     Buffer<float> rad_buf(rad_storage.data(), 4, plane_count);
     Buffer<float> tan_buf(tan_storage.data(), 2, plane_count);
+    Buffer<int32_t> tile_bounds_buf(const_cast<int32_t*>(tile_grid.bounds.data()),
+                                    4,
+                                    tile_grid.tiles_x,
+                                    tile_grid.tiles_y);
 
     // Be explicit for GPU backends: inputs are host-authored, output host is stale
     // until we copy back after kernel execution.
     src_buf.set_host_dirty();
     rad_buf.set_host_dirty();
     tan_buf.set_host_dirty();
+    tile_bounds_buf.set_host_dirty();
     dst_buf.set_host_dirty(false);
 
     const auto t1 = std::chrono::high_resolution_clock::now();
     const int result = rectilinear_warp(src_buf.raw_buffer(),
                                         rad_buf.raw_buffer(),
                                         tan_buf.raw_buffer(),
+                                        tile_bounds_buf.raw_buffer(),
                                         static_cast<int32_t>(params.planes),
-                                        params.center_h,
-                                        params.center_v,
-                                        params.pixel_aspect_ratio,
+                                        static_cast<float>(runtime.center_x),
+                                        static_cast<float>(runtime.center_y),
+                                        static_cast<float>(runtime.norm_radius),
+                                        static_cast<float>(runtime.inv_norm_radius),
+                                        static_cast<float>(runtime.pixel_scale_v),
+                                        static_cast<float>(runtime.pixel_scale_v_inv),
+                                        params.is_rad_nop_all ? 1 : 0,
+                                        params.is_tan_nop_all ? 1 : 0,
+                                        static_cast<int32_t>(tile_grid.tile_width),
+                                        static_cast<int32_t>(tile_grid.tile_height),
                                         dst_buf.raw_buffer());
     if (result != 0) {
         return false;
@@ -348,7 +649,7 @@ const char* warpRectilinearModeName(WarpRectilinearMode mode) {
 }
 
 bool extractWarpRectilinearParams(const dng_opcode_WarpRectilinear& opcode,
-                                  float pixelAspectRatio,
+                                  double pixelAspectRatio,
                                   WarpRectilinearParams& params) {
     const dng_warp_params_rectilinear& warp = opcode.WarpParams();
     if (warp.fPlanes == 0 || warp.fPlanes > 4) {
@@ -359,15 +660,33 @@ bool extractWarpRectilinearParams(const dng_opcode_WarpRectilinear& opcode,
     params.planes = warp.fPlanes;
     params.center_h = static_cast<float>(warp.fCenter.h);
     params.center_v = static_cast<float>(warp.fCenter.v);
-    params.pixel_aspect_ratio = pixelAspectRatio;
+    params.pixel_aspect_ratio = static_cast<float>(pixelAspectRatio);
+    params.center_h64 = warp.fCenter.h;
+    params.center_v64 = warp.fCenter.v;
+    params.pixel_aspect_ratio64 = pixelAspectRatio;
+    params.is_rad_nop_all = true;
+    params.is_tan_nop_all = true;
 
     for (uint32_t plane = 0; plane < warp.fPlanes; ++plane) {
         for (int i = 0; i < 4; ++i) {
             params.rad_params[plane][i] = static_cast<float>(warp.fRadParams[plane][i]);
+            params.rad_params64[plane][i] = warp.fRadParams[plane][i];
         }
         for (int i = 0; i < 2; ++i) {
             params.tan_params[plane][i] = static_cast<float>(warp.fTanParams[plane][i]);
+            params.tan_params64[plane][i] = warp.fTanParams[plane][i];
         }
+
+        const bool is_rad_nop =
+            (warp.fRadParams[plane][0] == 1.0 &&
+             warp.fRadParams[plane][1] == 0.0 &&
+             warp.fRadParams[plane][2] == 0.0 &&
+             warp.fRadParams[plane][3] == 0.0);
+        const bool is_tan_nop =
+            (warp.fTanParams[plane][0] == 0.0 &&
+             warp.fTanParams[plane][1] == 0.0);
+        params.is_rad_nop_all = params.is_rad_nop_all && is_rad_nop;
+        params.is_tan_nop_all = params.is_tan_nop_all && is_tan_nop;
     }
     return true;
 }
@@ -387,8 +706,33 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
         return false;
     }
 
+    const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
+    const TileClippingGrid tile_grid = buildTileClippingGrid(width, height, planes, runtime, params);
+    const bool bit_exact_mode = []() {
+        const char* v = std::getenv("DNG_WARP_BIT_EXACT");
+        return v && v[0] && v[0] != '0';
+    }();
+
+    if (bit_exact_mode) {
+        warpRectilinearCpuBitExact(src_interleaved_rgb,
+                                   width,
+                                   height,
+                                   planes,
+                                   params,
+                                   tile_grid,
+                                   dst_interleaved_rgb);
+        return true;
+    }
+
     if (mode == WarpRectilinearMode::HALIDE_METAL || mode == WarpRectilinearMode::AUTO) {
-        if (runWarpHalideAot(src_interleaved_rgb, width, height, planes, params, dst_interleaved_rgb)) {
+        if (runWarpHalideAot(src_interleaved_rgb,
+                             width,
+                             height,
+                             planes,
+                             runtime,
+                             params,
+                             tile_grid,
+                             dst_interleaved_rgb)) {
             return true;
         }
         if (mode == WarpRectilinearMode::HALIDE_METAL) {
@@ -396,7 +740,13 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
         }
     }
 
-    warpRectilinearCpu(src_interleaved_rgb, width, height, planes, params, dst_interleaved_rgb);
+    warpRectilinearCpu(src_interleaved_rgb,
+                       width,
+                       height,
+                       planes,
+                       params,
+                       tile_grid,
+                       dst_interleaved_rgb);
     return true;
 }
 
@@ -430,7 +780,7 @@ bool apply_warp_rectilinear_to_image(dng_host& host,
 
     WarpRectilinearParams params;
     if (!extractWarpRectilinearParams(opcode,
-                                      static_cast<float>(negative.PixelAspectRatio()),
+                                      negative.PixelAspectRatio(),
                                       params)) {
         return false;
     }

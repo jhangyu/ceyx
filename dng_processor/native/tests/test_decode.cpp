@@ -244,7 +244,7 @@ bool applySingleWarpRectilinearInterleaved(dng_negative& negative,
 
     WarpRectilinearParams params;
     if (!extractWarpRectilinearParams(warpOpcode,
-                                      static_cast<float>(negative.PixelAspectRatio()),
+                                      negative.PixelAspectRatio(),
                                       params)) {
         return false;
     }

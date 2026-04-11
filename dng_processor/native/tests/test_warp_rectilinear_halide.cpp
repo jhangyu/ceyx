@@ -243,7 +243,7 @@ int main(int argc, char** argv) {
 
         WarpRectilinearParams params;
         if (!extractWarpRectilinearParams(*warpOpcode,
-                                          static_cast<float>(negative->PixelAspectRatio()),
+                                          negative->PixelAspectRatio(),
                                           params)) {
             cerr << "ERROR: Failed to extract warp params\n";
             return 1;
