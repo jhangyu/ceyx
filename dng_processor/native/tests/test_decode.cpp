@@ -23,10 +23,12 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -151,6 +153,19 @@ RenderHalideMode parseRenderMode(const string& mode) {
     return RenderHalideMode::AUTO;
 }
 
+bool isWarpBitExactModeEnabled() {
+    const char* v = std::getenv("DNG_WARP_BIT_EXACT");
+    return v && v[0] && v[0] != '0';
+}
+
+uint32_t parsePositiveEnvU32(const char* key) {
+    const char* v = std::getenv(key);
+    if (!v || !v[0]) return 0;
+    const long parsed = std::strtol(v, nullptr, 10);
+    if (parsed <= 0) return 0;
+    return static_cast<uint32_t>(parsed);
+}
+
 AutoPtr<dng_image> makeImageFromInterleaved(dng_host& host,
                                             uint32_t width,
                                             uint32_t height,
@@ -225,7 +240,8 @@ bool applyOpcodeList3Custom(dng_host& host,
     return true;
 }
 
-bool applySingleWarpRectilinearInterleaved(dng_negative& negative,
+bool applySingleWarpRectilinearInterleaved(dng_host& host,
+                                           dng_negative& negative,
                                            const dng_opcode_WarpRectilinear& warpOpcode,
                                            WarpRectilinearMode warpMode,
                                            uint32_t width,
@@ -242,6 +258,28 @@ bool applySingleWarpRectilinearInterleaved(dng_negative& negative,
         return false;
     }
 
+    thread_local vector<uint16_t> warped;
+    if (isWarpBitExactModeEnabled()) {
+        AutoPtr<dng_image> sdkImage = makeImageFromInterleaved(host, width, height, planes, interleavedData);
+        const_cast<dng_opcode_WarpRectilinear&>(warpOpcode).Apply(host, negative, sdkImage);
+
+        warped.assign(interleavedData.size(), 0);
+        dng_pixel_buffer buffer;
+        buffer.fArea = sdkImage->Bounds();
+        buffer.fPlane = 0;
+        buffer.fPlanes = planes;
+        buffer.fPixelType = ttShort;
+        buffer.fPixelSize = sizeof(uint16_t);
+        buffer.fData = warped.data();
+        buffer.fRowStep = static_cast<int32>(width * planes);
+        buffer.fColStep = static_cast<int32>(planes);
+        buffer.fPlaneStep = 1;
+        sdkImage->Get(buffer);
+
+        interleavedData.swap(warped);
+        return true;
+    }
+
     WarpRectilinearParams params;
     if (!extractWarpRectilinearParams(warpOpcode,
                                       negative.PixelAspectRatio(),
@@ -249,7 +287,6 @@ bool applySingleWarpRectilinearInterleaved(dng_negative& negative,
         return false;
     }
 
-    thread_local vector<uint16_t> warped;
     warped.assign(interleavedData.size(), 0);
     if (!warp_rectilinear_halide(interleavedData.data(),
                                  static_cast<int>(width),
@@ -309,6 +346,60 @@ double computePSNR_16bit(const uint16_t* img1, const uint16_t* img2, size_t pixe
 
     double psnr = 10.0 * log10((maxValue * maxValue) / mse);
     return psnr;
+}
+
+double computePSNR_16bit_strided(const uint16_t* refInterleaved,
+                                 const uint16_t* testBase,
+                                 uint32_t width,
+                                 uint32_t height,
+                                 uint32_t planes,
+                                 int32_t rowStep,
+                                 int32_t colStep,
+                                 int32_t planeStep) {
+    if (!refInterleaved || !testBase || width == 0 || height == 0 || planes == 0) return 0.0;
+
+    double mse = 0.0;
+    const uint32_t maxValue = 65535;
+    size_t total = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const size_t refBase = (static_cast<size_t>(y) * width + x) * planes;
+            const int64_t testBaseIdx = static_cast<int64_t>(y) * rowStep + static_cast<int64_t>(x) * colStep;
+            for (uint32_t p = 0; p < planes; ++p) {
+                const uint16_t refV = refInterleaved[refBase + p];
+                const uint16_t testV = testBase[testBaseIdx + static_cast<int64_t>(p) * planeStep];
+                const double diff = static_cast<double>(refV) - static_cast<double>(testV);
+                mse += diff * diff;
+                ++total;
+            }
+        }
+    }
+    if (total == 0) return 0.0;
+    mse /= static_cast<double>(total);
+    if (mse < 1e-10) return 999.0;
+    return 10.0 * log10((maxValue * maxValue) / mse);
+}
+
+void copyFromStridedInterleaved16(const uint16_t* srcBase,
+                                  uint32_t width,
+                                  uint32_t height,
+                                  uint32_t planes,
+                                  int32_t rowStep,
+                                  int32_t colStep,
+                                  int32_t planeStep,
+                                  vector<uint16_t>& dstInterleaved) {
+    dstInterleaved.resize(static_cast<size_t>(width) * height * planes);
+    if (!srcBase) return;
+
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const size_t dstBase = (static_cast<size_t>(y) * width + x) * planes;
+            const int64_t srcBaseIdx = static_cast<int64_t>(y) * rowStep + static_cast<int64_t>(x) * colStep;
+            for (uint32_t p = 0; p < planes; ++p) {
+                dstInterleaved[dstBase + p] = srcBase[srcBaseIdx + static_cast<int64_t>(p) * planeStep];
+            }
+        }
+    }
 }
 
 // Compute PSNR between two buffers (8-bit data)
@@ -503,6 +594,13 @@ void testDNG(dng_host& host,
         bool useHalideDemosaic = (decodePath == StageContract::DecodePath::CFA_BAYER) && !generateBaseline;
 
         vector<uint16_t> stage3Data;
+        const uint16_t* stage3View = nullptr;
+        size_t stage3Elements = 0;
+        std::unique_ptr<dng_const_tile_buffer> stage3BorrowedTile;
+        const uint16_t* stage3StridedBase = nullptr;
+        int32_t stage3RowStep = 0;
+        int32_t stage3ColStep = 0;
+        int32_t stage3PlaneStep = 0;
         uint32_t s3w = 0, s3h = 0, s3p = 0, s3pt = 0;
         size_t s3ps = 0;
 
@@ -516,21 +614,104 @@ void testDNG(dng_host& host,
             uint32_t s2w = 0, s2h = 0, s2p = 0, s2pt = 0;
             size_t s2ps = 0;
             vector<uint16_t> stage2Data;
-            extractImageData(stage2Img, stage2Data, s2w, s2h, s2p, s2pt, s2ps);
+            const uint16_t* stage2View = nullptr;
+            std::unique_ptr<dng_const_tile_buffer> stage2BorrowedTile;
+
+            s2w = stage2Img->Width();
+            s2h = stage2Img->Height();
+            s2p = stage2Img->Planes();
+            s2pt = stage2Img->PixelType();
+            s2ps = stage2Img->PixelSize();
+
+            bool stage2Borrowed = false;
+            if (s2pt == ttShort && s2p == 1) {
+                auto borrowed = std::make_unique<dng_const_tile_buffer>(*stage2Img, stage2Img->Bounds());
+                const bool layoutOk =
+                    borrowed->fPixelType == ttShort &&
+                    borrowed->fPlanes == 1 &&
+                    borrowed->fRowStep == static_cast<int32>(s2w) &&
+                    borrowed->fColStep == 1 &&
+                    borrowed->fPlaneStep == 1;
+                if (layoutOk) {
+                    const uint16_t* borrowedPtr =
+                        borrowed->ConstPixel_uint16(borrowed->fArea.t, borrowed->fArea.l, 0);
+                    if (borrowedPtr) {
+                        stage2View = borrowedPtr;
+                        stage2BorrowedTile = std::move(borrowed);
+                        stage2Borrowed = true;
+                    }
+                }
+            }
+
+            if (!stage2Borrowed) {
+                extractImageData(stage2Img, stage2Data, s2w, s2h, s2p, s2pt, s2ps);
+                stage2View = stage2Data.data();
+            }
             auto stage3ExtractStage2End = high_resolution_clock::now();
             timing.stage3_extract_stage2_ms =
                 duration_cast<microseconds>(stage3ExtractStage2End - stage3ExtractStage2Start).count() / 1000.0;
 
-            // Allocate output buffer for 3-plane RGB
-            size_t outputSize = static_cast<size_t>(s2w) * s2h * 3;
-            stage3Data.resize(outputSize);
+            // Create DNG image object from Halide output and inject back into negative
+            // so subsequent Render stage uses Halide Stage3 instead of rebuilding via DNG SDK.
+            dng_point stage3Size(static_cast<int32>(s2h), static_cast<int32>(s2w));
+            AutoPtr<dng_image> halideStage3(host.Make_dng_image(dng_rect(stage3Size), 3, ttShort));
 
-            // Run Halide AHD demosaic
-            auto stage3KernelStart = high_resolution_clock::now();
-            demosaic_ahd_halide(stage2Data.data(), s2w, s2h, stage3Data.data());
-            auto stage3KernelEnd = high_resolution_clock::now();
-            timing.stage3_halide_kernel_ms =
-                duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
+            const bool bitExactWarp = isWarpBitExactModeEnabled();
+            bool demosaicDirectToImage = false;
+            if (bitExactWarp) {
+                dng_dirty_tile_buffer tileBuffer(*halideStage3, halideStage3->Bounds());
+                const bool layoutOk =
+                    tileBuffer.fPixelType == ttShort &&
+                    tileBuffer.fPlanes == 3 &&
+                    tileBuffer.fRowStep == static_cast<int32>(s2w * 3) &&
+                    tileBuffer.fColStep == 3 &&
+                    tileBuffer.fPlaneStep == 1;
+                if (layoutOk) {
+                    uint16_t* stage3DirectPtr = tileBuffer.DirtyPixel_uint16(tileBuffer.fArea.t,
+                                                                              tileBuffer.fArea.l,
+                                                                              0);
+                    if (stage3DirectPtr) {
+                        auto stage3KernelStart = high_resolution_clock::now();
+                        demosaic_ahd_halide(stage2View, s2w, s2h, stage3DirectPtr);
+                        auto stage3KernelEnd = high_resolution_clock::now();
+                        timing.stage3_halide_kernel_ms =
+                            duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
+                        timing.stage3_inject_put_ms = 0.0;
+                        demosaicDirectToImage = true;
+                    }
+                }
+            }
+
+            if (!demosaicDirectToImage) {
+                // Allocate output buffer for 3-plane RGB
+                size_t outputSize = static_cast<size_t>(s2w) * s2h * 3;
+                stage3Data.resize(outputSize);
+
+                // Run Halide AHD demosaic
+                auto stage3KernelStart = high_resolution_clock::now();
+                demosaic_ahd_halide(stage2View, s2w, s2h, stage3Data.data());
+                auto stage3KernelEnd = high_resolution_clock::now();
+                timing.stage3_halide_kernel_ms =
+                    duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
+
+                dng_pixel_buffer stage3Buffer;
+                stage3Buffer.fArea = halideStage3->Bounds();
+                stage3Buffer.fPlane = 0;
+                stage3Buffer.fPlanes = 3;
+                stage3Buffer.fPixelType = ttShort;
+                stage3Buffer.fPixelSize = 2;
+                stage3Buffer.fData = stage3Data.data();
+                stage3Buffer.fRowStep = static_cast<int32>(s2w * 3);
+                stage3Buffer.fColStep = 3;
+                stage3Buffer.fPlaneStep = 1;
+                auto stage3InjectStart = high_resolution_clock::now();
+                halideStage3->Put(stage3Buffer);
+                auto stage3InjectEnd = high_resolution_clock::now();
+                timing.stage3_inject_put_ms =
+                    duration_cast<microseconds>(stage3InjectEnd - stage3InjectStart).count() / 1000.0;
+            } else {
+                cout << "  [Halide] Stage3 direct buffer path enabled (bit-exact)\n";
+            }
 
             // Match BuildStage3Image behavior by applying OpcodeList3 before render/compare.
             const dng_opcode_list& opcodeList3 = negative->OpcodeList3();
@@ -538,9 +719,11 @@ void testDNG(dng_host& host,
             opcodeTimings.reserve(opcodeList3.Count());
 
             bool fastWarpApplied = false;
-            if (opcodeList3.Count() == 1 &&
+            if (!demosaicDirectToImage &&
+                opcodeList3.Count() == 1 &&
                 opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear &&
-                warpMode != WarpRectilinearMode::SDK) {
+                warpMode != WarpRectilinearMode::SDK &&
+                !bitExactWarp) {
                 const auto& warpOpcode =
                     static_cast<const dng_opcode_WarpRectilinear&>(opcodeList3.Entry(0));
                 OpcodeTimingEntry timingEntry;
@@ -548,7 +731,8 @@ void testDNG(dng_host& host,
                 timingEntry.opcode_id = dngOpcode_WarpRectilinear;
                 timingEntry.opcode_name = opcodeName(dngOpcode_WarpRectilinear);
                 auto opcodeStart = high_resolution_clock::now();
-                const bool applied = applySingleWarpRectilinearInterleaved(*negative,
+                const bool applied = applySingleWarpRectilinearInterleaved(host,
+                                                                           *negative,
                                                                            warpOpcode,
                                                                            warpMode,
                                                                            s2w,
@@ -570,27 +754,6 @@ void testDNG(dng_host& host,
                 fastWarpApplied = applied;
             }
 
-            // Create DNG image object from Halide output and inject back into negative
-            // so subsequent Render stage uses Halide Stage3 instead of rebuilding via DNG SDK.
-            dng_point stage3Size(static_cast<int32>(s2h), static_cast<int32>(s2w));
-            AutoPtr<dng_image> halideStage3(host.Make_dng_image(dng_rect(stage3Size), 3, ttShort));
-
-            dng_pixel_buffer stage3Buffer;
-            stage3Buffer.fArea = halideStage3->Bounds();
-            stage3Buffer.fPlane = 0;
-            stage3Buffer.fPlanes = 3;
-            stage3Buffer.fPixelType = ttShort;
-            stage3Buffer.fPixelSize = 2;
-            stage3Buffer.fData = stage3Data.data();
-            stage3Buffer.fRowStep = static_cast<int32>(s2w * 3);
-            stage3Buffer.fColStep = 3;
-            stage3Buffer.fPlaneStep = 1;
-            auto stage3InjectStart = high_resolution_clock::now();
-            halideStage3->Put(stage3Buffer);
-            auto stage3InjectEnd = high_resolution_clock::now();
-            timing.stage3_inject_put_ms =
-                duration_cast<microseconds>(stage3InjectEnd - stage3InjectStart).count() / 1000.0;
-
             if (!fastWarpApplied) {
                 if (!opcodeTimings.empty()) {
                     opcodeTimings.clear();
@@ -604,17 +767,55 @@ void testDNG(dng_host& host,
                 timing.stage3_apply_opcode3_ms =
                     duration_cast<microseconds>(stage3OpcodeEnd - stage3OpcodeStart).count() / 1000.0;
 
-                auto stage3ExtractStage3Start = high_resolution_clock::now();
-                extractImageData(halideStage3.Get(), stage3Data, s3w, s3h, s3p, s3pt, s3ps);
-                auto stage3ExtractStage3End = high_resolution_clock::now();
-                timing.stage3_extract_stage3_ms =
-                    duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+                bool borrowedStage3View = false;
+                if (bitExactWarp && !generateBaseline) {
+                    auto borrowed = std::make_unique<dng_const_tile_buffer>(*halideStage3, halideStage3->Bounds());
+                    const bool typeOk =
+                        borrowed->fPixelType == ttShort &&
+                        borrowed->fPlanes == 3;
+                    if (typeOk) {
+                        const uint16_t* borrowedPtr =
+                            borrowed->ConstPixel_uint16(borrowed->fArea.t, borrowed->fArea.l, 0);
+                        if (borrowedPtr) {
+                            stage3BorrowedTile = std::move(borrowed);
+                            stage3StridedBase = borrowedPtr;
+                            stage3RowStep = stage3BorrowedTile->fRowStep;
+                            stage3ColStep = stage3BorrowedTile->fColStep;
+                            stage3PlaneStep = stage3BorrowedTile->fPlaneStep;
+                            if (stage3RowStep == static_cast<int32>(s2w * 3) &&
+                                stage3ColStep == 3 &&
+                                stage3PlaneStep == 1) {
+                                stage3View = stage3StridedBase;
+                            }
+                            s3w = s2w;
+                            s3h = s2h;
+                            s3p = 3;
+                            s3pt = ttShort;
+                            s3ps = sizeof(uint16_t);
+                            stage3Elements = static_cast<size_t>(s3w) * s3h * s3p;
+                            timing.stage3_extract_stage3_ms = 0.0;
+                            borrowedStage3View = true;
+                        }
+                    }
+                }
+
+                if (!borrowedStage3View) {
+                    auto stage3ExtractStage3Start = high_resolution_clock::now();
+                    extractImageData(halideStage3.Get(), stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+                    auto stage3ExtractStage3End = high_resolution_clock::now();
+                    timing.stage3_extract_stage3_ms =
+                        duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+                    stage3View = stage3Data.data();
+                    stage3Elements = stage3Data.size();
+                }
             } else {
                 s3w = s2w;
                 s3h = s2h;
                 s3p = 3;
                 s3pt = ttShort;
                 s3ps = sizeof(uint16_t);
+                stage3View = stage3Data.data();
+                stage3Elements = stage3Data.size();
             }
 
             negative->SetStage3Image(halideStage3);
@@ -652,6 +853,8 @@ void testDNG(dng_host& host,
 
             dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
             extractImageData(stage3Img, stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+            stage3View = stage3Data.data();
+            stage3Elements = stage3Data.size();
         }
 
         auto stage3End = high_resolution_clock::now();
@@ -659,20 +862,49 @@ void testDNG(dng_host& host,
         cout << "  Time: " << fixed << setprecision(2) << timing.build_stage3_ms << " ms\n";
 
         // Validate contract
-        if (!StageContract::validateStageContract16("Stage3", decodePath, s3w, s3h, s3p, s3pt, s3ps, stage3Data.size())) {
+        if (!stage3View && stage3Elements == 0) {
+            stage3View = stage3Data.data();
+            stage3Elements = stage3Data.size();
+        }
+
+        if (!StageContract::validateStageContract16("Stage3", decodePath, s3w, s3h, s3p, s3pt, s3ps, stage3Elements)) {
             cerr << "ERROR: Stage3 contract check failed\n";
             return;
         }
 
         string filename = prefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
         if (generateBaseline) {
-            saveRawFile(filename, stage3Data.data(), stage3Data.size() * sizeof(uint16_t));
-            cout << "  Saved baseline: " << filename << " (" << stage3Data.size() * 2 << " bytes)\n";
+            if (!stage3View && stage3StridedBase) {
+                copyFromStridedInterleaved16(stage3StridedBase,
+                                             s3w,
+                                             s3h,
+                                             s3p,
+                                             stage3RowStep,
+                                             stage3ColStep,
+                                             stage3PlaneStep,
+                                             stage3Data);
+                stage3View = stage3Data.data();
+            }
+            saveRawFile(filename, stage3View, stage3Elements * sizeof(uint16_t));
+            cout << "  Saved baseline: " << filename << " (" << stage3Elements * 2 << " bytes)\n";
         } else {
-            vector<uint16_t> refData(stage3Data.size());
+            vector<uint16_t> refData(stage3Elements);
             string refFilename = prefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
             if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
-                psnr.stage3_psnr = computePSNR_16bit(refData.data(), stage3Data.data(), stage3Data.size());
+                if (stage3View) {
+                    psnr.stage3_psnr = computePSNR_16bit(refData.data(), stage3View, stage3Elements);
+                } else if (stage3StridedBase) {
+                    psnr.stage3_psnr = computePSNR_16bit_strided(refData.data(),
+                                                                 stage3StridedBase,
+                                                                 s3w,
+                                                                 s3h,
+                                                                 s3p,
+                                                                 stage3RowStep,
+                                                                 stage3ColStep,
+                                                                 stage3PlaneStep);
+                } else {
+                    cout << "  WARNING: Stage3 output buffer unavailable for PSNR compare\n";
+                }
                 cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage3_psnr << " dB\n";
             } else {
                 cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
@@ -683,7 +915,18 @@ void testDNG(dng_host& host,
         cout << "\n--- Stage 4: Render (Tone Curve + Gamma + Color Space) ---\n";
         auto renderStart = high_resolution_clock::now();
 
-        dng_render renderer(host, *negative);
+        dng_host* renderHost = &host;
+        std::unique_ptr<ConcurrentDngHost> renderHostOverride;
+        const uint32_t decodeAreaThreads = host.PerformAreaTaskThreads();
+        uint32_t renderAreaThreads = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
+        if (renderAreaThreads > 0 && renderAreaThreads != decodeAreaThreads) {
+            renderHostOverride = std::make_unique<ConcurrentDngHost>(renderAreaThreads);
+            renderHost = renderHostOverride.get();
+            cout << "  [Render] Area task threads override: " << renderAreaThreads
+                 << " (decode uses " << decodeAreaThreads << ")\n";
+        }
+
+        dng_render renderer(*renderHost, *negative);
         renderer.SetMaximumSize(max(width, height));
         renderer.SetFinalPixelType(ttByte);
         renderer.SetFinalSpace(dng_space_sRGB::Get());
@@ -694,7 +937,13 @@ void testDNG(dng_host& host,
 
         const bool tryHalideRender = !generateBaseline && (renderMode != RenderHalideMode::SDK);
         if (tryHalideRender) {
-            renderOk = render_stage4_halide(host, *negative, renderer, renderMode, rgbData, outW, outH);
+            renderOk = render_stage4_halide(*renderHost,
+                                            *negative,
+                                            renderer,
+                                            renderMode,
+                                            rgbData,
+                                            outW,
+                                            outH);
             if (!renderOk && renderMode == RenderHalideMode::AUTO) {
                 cout << "  [Render] Halide AUTO failed, falling back to SDK render\n";
             } else if (!renderOk) {
