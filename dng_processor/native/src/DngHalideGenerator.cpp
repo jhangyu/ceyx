@@ -1,3 +1,50 @@
+/*
+---
+file_summary: >
+  舊版端到端 Halide Generator。從 16-bit Bayer CFA 輸入一路完成線性化、
+  AHD-like demosaic、ProPhoto/sRGB 色彩轉換、HueSat/Look/Tone/LR/HSL 調整，
+  最後輸出 8-bit RGB；由 CMake AOT 產生 dng_pipeline。
+
+notes:
+  - `generate()` 定義完整數值鏈；`schedule()` 定義 CPU/GPU 排程。
+  - GPU 路徑保留 AHD 中間節點 `compute_root()`，避免 bounds inference 組合爆炸。
+  - 點對點色彩處理盡量 inline/fuse 到輸出，減少 VRAM/記憶體頻寬。
+
+classes:
+  - name: "DngPipeline"
+    description: "Halide::Generator 主體；宣告所有輸入、輸出與中間 Func。"
+    lines: "54-562"
+
+functions:
+  - name: "DngPipeline::emit_rgb2hsv"
+    description: "RGB -> HSV helper，供 3D LUT / LR / HSL 調整共用。"
+    lines: "103-115"
+  - name: "DngPipeline::emit_hsv2rgb"
+    description: "HSV -> RGB helper，將調整後色彩轉回 RGB。"
+    lines: "117-131"
+  - name: "DngPipeline::apply_3dlut"
+    description: "套用 HueSatMap / LookTable 的 3D LUT 與 HSV 插值。"
+    lines: "133-203"
+  - name: "DngPipeline::apply_tone_curve"
+    description: "套用 1D tone curve。"
+    lines: "205-214"
+  - name: "DngPipeline::apply_lr_params"
+    description: "套用 Lightroom-style exposure / contrast / saturation / vibrance。"
+    lines: "216-255"
+  - name: "DngPipeline::apply_hsl_lut"
+    description: "套用 CPU 預插值的 360-degree HSL LUT。"
+    lines: "257-290"
+  - name: "DngPipeline::apply_gamma"
+    description: "sRGB gamma encode 並量化成 uint8。"
+    lines: "292-300"
+  - name: "DngPipeline::generate"
+    description: "建立完整 Bayer -> RGB 管線與所有中間 Func。"
+    lines: "303-498"
+  - name: "DngPipeline::schedule"
+    description: "設定 GPU tile / CPU vectorize / parallel 與 compute_at/root 策略。"
+    lines: "500-561"
+---
+*/
 #include "Halide.h"
 #include <algorithm>
 #include <cmath>
