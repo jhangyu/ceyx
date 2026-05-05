@@ -1,62 +1,33 @@
 #!/usr/bin/env python3
 # ---
 # file_summary: >
-#   4-case pipeline 回歸矩陣工具（rule.md Appendix D 強制工具）。
-#   呼叫 test_decode binary 執行 Lossless/Lossy × Baseline/Custom 四組組合，
+#   SDK vs Halide Metal pipeline 比較矩陣工具。
+#   執行 Lossless/Lossy × SDK/Halide Metal 四組 case，
 #   解析 stdout 的 Stage1-4 時間與 PSNR，支援 repeat 平均，輸出 Markdown 表格。
 #
-# constraints:
-#   - 需要 test_decode binary 已編譯（dng_processor/native/build/test_decode）
-#   - 環境變數 DNG_RENDER_HALIDE_TIMING=1 可啟用 Stage4 Halide 細項計時
-#   - 固定 4 組 case：Lossless Baseline / Lossless Custom / Lossy Baseline / Lossy Custom
-#   - --render-mode-custom 控制 Custom case 的 render mode（sdk/halide-metal/auto）
-#   - 解析格式依賴 test_decode stdout（"--- Stage N:" / "Time:" / "PSNR vs baseline:"）
-#   - DECODE TOTAL 優先解析；若不存在則 fallback 解析 TOTAL
+# cases:
+#   Lossless / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
+#   Lossless / Halide:   DNG_WARP_BIT_EXACT=0，Halide AHD demosaic + Halide Metal warp + Halide Metal render
+#   Lossy    / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
+#   Lossy    / Halide:   SDK YCbCr Stage3（passthrough）+ Halide Metal render
+#
+# psnr_semantics:
+#   SDK cases:          無 PSNR（本身即為 baseline）
+#   Lossless Halide:
+#     Stage1/2 PSNR:    999 dB（同 DNG parse）
+#     Stage3 PSNR:      Halide AHD+Metal warp vs SDK demosaic+SDK warp（end-to-end Stage3 品質）
+#     Stage4 PSNR:      最終影像 end-to-end 差（含 Stage3 差異，反映整體管線品質）
+#   Lossy Halide:
+#     Stage1/2/3 PSNR:  999 dB（Stage3 走同一 SDK YCbCr 路徑）
+#     Stage4 PSNR:      Halide Metal render vs SDK render（Stage4 單獨品質，已排除 Stage3 差異）
+#
+# stage4_timing_note: >
+#   Stage4 time 包含 dng_render() 建構器時間（兩條路徑共有，約 250-260ms）。
+#   啟用 --timing 後，[halideFull] 欄位為 Halide GPU kernel 實際執行時間（不含建構器）。
 #
 # usage: |
-#   DNG_RENDER_HALIDE_TIMING=1 python3 run_decode_matrix.py \
-#     --repo-root . \
-#     --test-decode dng_processor/native/build/test_decode \
-#     --lossless image_samples/lossless_dng_sample.dng \
-#     --lossy   image_samples/lossy_dng_sample.dng \
-#     --render-mode-custom halide-metal \
-#     --repeat 2 \
-#     --output docs/logs/YYYY-MM-DD/decode_matrix.md
-#
-# output_sections: >
-#   Performance(ms) / PSNR(dB) / Stage4 Raw Runs /
-#   Stage4 Halide Timing Breakdown（僅在 DNG_RENDER_HALIDE_TIMING=1 時出現）
-#
-# classes:
-#   - name: "StageResult"
-#     description: "單一 stage 的 time_ms + psnr_db（Optional）"
-#     lines: "86-96"
-#   - name: "CaseResult"
-#     description: "單次執行的四個 stage 結果 + render_timing_ms + raw_output"
-#     lines: "104-118"
-#   - name: "RepeatedCaseResult"
-#     description: "多次重複執行的平均；含 render_bottleneck_hint 計算"
-#     lines: "119-200"
-#
-# functions:
-#   - name: "mean_optional"
-#     description: "過濾 None 後計算平均值"
-#     lines: "97-103"
-#   - name: "parse_render_timing"
-#     description: "解析 [RenderHalideTiming] 行，回傳 {key: ms} dict"
-#     lines: "210-216"
-#   - name: "render_timing_keys"
-#     description: "依 RENDER_TIMING_ORDER 排序所有出現過的 timing key"
-#     lines: "217-227"
-#   - name: "run_case"
-#     description: "執行單一 test_decode 命令，解析 stdout，回傳 CaseResult"
-#     lines: "229-291"
-#   - name: "build_markdown"
-#     description: "將 RepeatedCaseResult 列表格式化為 Markdown 表格字串"
-#     lines: "292-367"
-#   - name: "main"
-#     description: "CLI 入口：解析參數，執行 4 cases × repeat，輸出 Markdown"
-#     lines: "368-486"
+#   python3 run_decode_matrix.py --repo-root . --repeat 2 --timing
+#   python3 run_decode_matrix.py --repo-root . --repeat 3 --output docs/logs/YYYY-MM-DD/matrix.md
 # ---
 import argparse
 import datetime as dt
@@ -69,58 +40,41 @@ from pathlib import Path
 from typing import Optional
 
 
-RENDER_TIMING_ORDER = [
-    "resample",
-    "extractStage3U16",
-    "extractStage3",
-    "buildParams",
-    "halideNoMap",
-    "halideMapsNoEncode",
-    "halideFull",
-]
-COPY_SIDE_TIMING_KEYS = {"resample", "extractStage3U16", "extractStage3", "buildParams"}
-KERNEL_SIDE_TIMING_KEYS = {"halideNoMap", "halideMapsNoEncode", "halideFull"}
-
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
 
 @dataclass
 class StageResult:
     time_ms: Optional[float] = None
     psnr_db: Optional[float] = None
 
-    def as_cell(self) -> str:
-        t = f"{self.time_ms:.2f} ms" if self.time_ms is not None else "N/A"
-        p = f"{self.psnr_db:.2f} dB" if self.psnr_db is not None else "N/A"
-        return f"{t} / {p}"
-
 
 def mean_optional(values: list[Optional[float]]) -> Optional[float]:
     present = [v for v in values if v is not None]
-    if not present:
-        return None
-    return statistics.fmean(present)
+    return statistics.fmean(present) if present else None
 
 
 @dataclass
-class CaseResult:
+class RunResult:
+    """Single run of one test case."""
     case_name: str
     stage1: StageResult
     stage2: StageResult
     stage3: StageResult
     stage4: StageResult
     total_ms: Optional[float]
-    render_timing_ms: dict[str, float]
+    halide_full_ms: Optional[float]   # from [RenderHalideTiming] halideFull=X
     raw_output: str
-
-    def total_cell(self) -> str:
-        return f"{self.total_ms:.2f} ms" if self.total_ms is not None else "N/A"
 
 
 @dataclass
-class RepeatedCaseResult:
+class AggResult:
+    """Averaged result across N repeats."""
     case_name: str
-    runs: list[CaseResult]
+    runs: list[RunResult]
 
-    def _stage(self, attr: str) -> StageResult:
+    def _avg(self, attr: str) -> StageResult:
         stages = [getattr(r, attr) for r in self.runs]
         return StageResult(
             time_ms=mean_optional([s.time_ms for s in stages]),
@@ -128,355 +82,341 @@ class RepeatedCaseResult:
         )
 
     @property
-    def stage1(self) -> StageResult:
-        return self._stage("stage1")
+    def stage1(self) -> StageResult: return self._avg("stage1")
+    @property
+    def stage2(self) -> StageResult: return self._avg("stage2")
+    @property
+    def stage3(self) -> StageResult: return self._avg("stage3")
+    @property
+    def stage4(self) -> StageResult: return self._avg("stage4")
 
     @property
-    def stage2(self) -> StageResult:
-        return self._stage("stage2")
+    def total_ms(self) -> Optional[float]:
+        return mean_optional([r.total_ms for r in self.runs])
 
     @property
-    def stage3(self) -> StageResult:
-        return self._stage("stage3")
+    def halide_full_ms(self) -> Optional[float]:
+        return mean_optional([r.halide_full_ms for r in self.runs])
 
-    @property
-    def stage4(self) -> StageResult:
-        return self._stage("stage4")
+    def stage4_runs_str(self) -> str:
+        vals = [r.stage4.time_ms for r in self.runs if r.stage4.time_ms is not None]
+        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
 
-    def total_cell(self) -> str:
-        total_ms = mean_optional([r.total_ms for r in self.runs])
-        return f"{total_ms:.2f} ms" if total_ms is not None else "N/A"
-
-    def stage4_runs_cell(self) -> str:
-        values = [r.stage4.time_ms for r in self.runs if r.stage4.time_ms is not None]
-        if not values:
-            return "N/A"
-        return ", ".join(f"{v:.2f}" for v in values)
-
-    def has_render_timing(self) -> bool:
-        return any(r.render_timing_ms for r in self.runs)
-
-    def render_timing_avg(self, key: str) -> Optional[float]:
-        return mean_optional([r.render_timing_ms.get(key) for r in self.runs])
-
-    def render_timing_avg_cell(self, key: str) -> str:
-        value = self.render_timing_avg(key)
-        return f"{value:.2f}" if value is not None else "N/A"
-
-    def render_timing_runs_cell(self, key: str) -> str:
-        values = [r.render_timing_ms.get(key) for r in self.runs if key in r.render_timing_ms]
-        if not values:
-            return "N/A"
-        return ", ".join(f"{v:.2f}" for v in values)
-
-    def render_bottleneck_hint(self) -> str:
-        if not self.has_render_timing():
-            return "N/A"
-
-        copy_ms = sum(
-            v for k in COPY_SIDE_TIMING_KEYS if (v := self.render_timing_avg(k)) is not None
-        )
-        kernel_ms = sum(
-            v for k in KERNEL_SIDE_TIMING_KEYS if (v := self.render_timing_avg(k)) is not None
-        )
-        if copy_ms <= 0.0 and kernel_ms <= 0.0:
-            return "N/A"
-
-        stage4_ms = self.stage4.time_ms
-        copy_pct = f"{(copy_ms / stage4_ms) * 100.0:.1f}%" if stage4_ms else "N/A"
-        kernel_pct = f"{(kernel_ms / stage4_ms) * 100.0:.1f}%" if stage4_ms else "N/A"
-
-        if copy_ms > kernel_ms * 1.15:
-            dominant = "wrapper/copy-side"
-        elif kernel_ms > copy_ms * 1.15:
-            dominant = "kernel-side"
-        else:
-            dominant = "mixed"
-        return (
-            f"{dominant}; copy {copy_ms:.2f} ms ({copy_pct} of Stage4), "
-            f"kernel {kernel_ms:.2f} ms ({kernel_pct} of Stage4)"
-        )
+    def halide_full_runs_str(self) -> str:
+        vals = [r.halide_full_ms for r in self.runs if r.halide_full_ms is not None]
+        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
 
 
-STAGE_HEADER_RE = re.compile(r"^--- Stage (\d+):")
-TIME_RE = re.compile(r"^\s*Time:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
-PSNR_RE = re.compile(r"^\s*PSNR vs baseline:\s*([0-9]+(?:\.[0-9]+)?)\s*dB")
-DECODE_TOTAL_RE = re.compile(r"^\s*DECODE TOTAL:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
-TOTAL_RE = re.compile(r"^\s*TOTAL:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
-RENDER_HALIDE_TIMING_RE = re.compile(r"^\[RenderHalideTiming\]\s+(.*)$")
-RENDER_TIMING_PAIR_RE = re.compile(r"([A-Za-z0-9_]+)=([0-9]+(?:\.[0-9]+)?)\s*ms")
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+_STAGE_RE = re.compile(r"^--- Stage (\d+):")
+_TIME_RE = re.compile(r"^\s*Time:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
+_PSNR_RE = re.compile(r"^\s*PSNR vs baseline:\s*([0-9]+(?:\.[0-9]+)?)\s*dB")
+_TOTAL_RE = re.compile(r"^\s*(?:DECODE )?TOTAL:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
+_HALIDE_TIMING_RE = re.compile(r"^\[RenderHalideTiming\].*\bhalideFull=([0-9]+(?:\.[0-9]+)?)\s*ms")
 
 
-def parse_render_timing(line: str) -> dict[str, float]:
-    match = RENDER_HALIDE_TIMING_RE.match(line)
-    if not match:
-        return {}
-    return {key: float(value) for key, value in RENDER_TIMING_PAIR_RE.findall(match.group(1))}
-
-
-def render_timing_keys(results: list[RepeatedCaseResult]) -> list[str]:
-    found = {
-        key
-        for result in results
-        for run in result.runs
-        for key in run.render_timing_ms
-    }
-    ordered = [key for key in RENDER_TIMING_ORDER if key in found]
-    ordered.extend(sorted(found.difference(ordered)))
-    return ordered
-
-
-def run_case(cwd: Path, cmd: list[str], case_name: str, env_overrides: dict[str, str]) -> CaseResult:
-    merged_env = os.environ.copy()
-    merged_env.update(env_overrides)
+def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
+    merged = os.environ.copy()
+    merged.update(env)
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=merged_env,
+        env=merged,
         check=False,
     )
     output = proc.stdout
     if proc.returncode != 0:
-        raise RuntimeError(f"[{case_name}] failed (exit={proc.returncode})\n{output}")
+        raise RuntimeError(f"[{case_name}] exit={proc.returncode}\n{output}")
 
-    stage_map = {
-        "1": StageResult(),
-        "2": StageResult(),
-        "3": StageResult(),
-        "4": StageResult(),
-    }
-    current_stage = None
-    total_ms = None
-    render_timing_ms: dict[str, float] = {}
+    stages: dict[str, StageResult] = {str(i): StageResult() for i in range(1, 5)}
+    cur: Optional[str] = None
+    total_ms: Optional[float] = None
+    halide_full_ms: Optional[float] = None
 
     for line in output.splitlines():
-        parsed_render_timing = parse_render_timing(line)
-        if parsed_render_timing:
-            render_timing_ms.update(parsed_render_timing)
-            continue
-        m = STAGE_HEADER_RE.match(line)
+        m = _STAGE_RE.match(line)
         if m:
-            current_stage = m.group(1)
+            cur = m.group(1)
             continue
-        m = TIME_RE.match(line)
-        if m and current_stage in stage_map:
-            stage_map[current_stage].time_ms = float(m.group(1))
+        m = _TIME_RE.match(line)
+        if m and cur in stages:
+            stages[cur].time_ms = float(m.group(1))
             continue
-        m = PSNR_RE.match(line)
-        if m and current_stage in stage_map:
-            stage_map[current_stage].psnr_db = float(m.group(1))
+        m = _PSNR_RE.match(line)
+        if m and cur in stages:
+            stages[cur].psnr_db = float(m.group(1))
             continue
-        m = DECODE_TOTAL_RE.match(line)
+        m = _TOTAL_RE.match(line)
         if m:
             total_ms = float(m.group(1))
             continue
-        m = TOTAL_RE.match(line)
+        m = _HALIDE_TIMING_RE.match(line)
         if m:
-            total_ms = float(m.group(1))
+            halide_full_ms = float(m.group(1))
 
-    return CaseResult(
+    return RunResult(
         case_name=case_name,
-        stage1=stage_map["1"],
-        stage2=stage_map["2"],
-        stage3=stage_map["3"],
-        stage4=stage_map["4"],
+        stage1=stages["1"],
+        stage2=stages["2"],
+        stage3=stages["3"],
+        stage4=stages["4"],
         total_ms=total_ms,
-        render_timing_ms=render_timing_ms,
+        halide_full_ms=halide_full_ms,
         raw_output=output,
     )
 
 
-def build_markdown(
-    results: list[RepeatedCaseResult],
+# ---------------------------------------------------------------------------
+# Markdown output
+# ---------------------------------------------------------------------------
+
+def _fmt_ms(v: Optional[float]) -> str:
+    return f"{v:.1f}" if v is not None else "N/A"
+
+
+def _fmt_db(v: Optional[float]) -> str:
+    if v is None:
+        return "—"
+    if v >= 998.0:
+        return "999.00 ✓"
+    return f"{v:.2f}"
+
+
+def _build_markdown(
+    results: list[AggResult],
     generated_at: str,
     repeat: int,
-    env_overrides: dict[str, str],
+    show_halide_timing: bool,
 ) -> str:
-    lines = []
-    lines.append("# Decode 4-Case Performance/PSNR Matrix")
-    lines.append("")
-    lines.append(f"_Generated at: {generated_at}_")
-    lines.append(f"_Repeat count: {repeat}; table values are arithmetic means._")
-    if env_overrides:
-        env_text = ", ".join(f"{k}={v}" for k, v in sorted(env_overrides.items()))
-        lines.append(f"_Environment overrides: {env_text}_")
-    lines.append("")
+    L: list[str] = []
 
-    # Performance table (time only)
-    lines.append("## Performance (ms)")
-    lines.append("")
-    lines.append("| Case | Stage1 | Stage2 | Stage3 | Stage4(Render) | Total |")
-    lines.append("|---|---|---|---|---|---|")
+    L.append("# DNG Pipeline Matrix — SDK vs Halide Metal")
+    L.append("")
+    L.append(f"_Generated: {generated_at} | Repeat: {repeat} (arithmetic mean)_")
+    L.append("")
+    L.append("> **PSNR semantics**")
+    L.append("> - SDK cases: no PSNR (they are the baseline reference)")
+    L.append("> - Lossless Halide: Stage3 PSNR = Halide AHD+Metal vs SDK demosaic+SDK warp; "
+             "Stage4 PSNR = end-to-end final image diff (includes Stage3 differences)")
+    L.append("> - Lossy Halide: Stage3 PSNR = 999 dB (same SDK YCbCr path); "
+             "Stage4 PSNR = Stage4-isolated rendering quality")
+    L.append(">")
+    L.append("> **Stage4 timing note**: includes `dng_render()` constructor overhead (~250 ms, "
+             "shared by both SDK and Halide paths). "
+             "Use `halideFull` column for GPU kernel time only.")
+    L.append("")
+
+    # --- Timing table ---
+    L.append("## Timing (ms, mean of N runs)")
+    L.append("")
+    L.append("| Case | Stage1 | Stage2 | Stage3 | Stage4 (total) | DECODE TOTAL |")
+    L.append("|---|---|---|---|---|---|")
     for r in results:
-        def fmt_time(s: StageResult) -> str:
-            return f"{s.time_ms:.2f} ms" if s.time_ms is not None else "N/A"
-        lines.append(
-            f"| {r.case_name} | {fmt_time(r.stage1)} | {fmt_time(r.stage2)} | "
-            f"{fmt_time(r.stage3)} | {fmt_time(r.stage4)} | {r.total_cell()} |"
+        L.append(
+            f"| {r.case_name} "
+            f"| {_fmt_ms(r.stage1.time_ms)} "
+            f"| {_fmt_ms(r.stage2.time_ms)} "
+            f"| {_fmt_ms(r.stage3.time_ms)} "
+            f"| {_fmt_ms(r.stage4.time_ms)} "
+            f"| {_fmt_ms(r.total_ms)} |"
         )
-    lines.append("")
+    L.append("")
 
-    # PSNR table
-    lines.append("## PSNR vs Baseline (dB)")
-    lines.append("")
-    lines.append("| Case | Stage1 | Stage2 | Stage3 | Stage4(Render) |")
-    lines.append("|---|---|---|---|---|")
+    # --- PSNR table ---
+    L.append("## PSNR vs SDK Baseline (dB)")
+    L.append("")
+    L.append("| Case | Stage1 | Stage2 | Stage3 | Stage4 |")
+    L.append("|---|---|---|---|---|")
     for r in results:
-        def fmt_psnr(s: StageResult) -> str:
-            return f"{s.psnr_db:.2f} dB" if s.psnr_db is not None else "N/A"
-        lines.append(
-            f"| {r.case_name} | {fmt_psnr(r.stage1)} | {fmt_psnr(r.stage2)} | "
-            f"{fmt_psnr(r.stage3)} | {fmt_psnr(r.stage4)} |"
+        L.append(
+            f"| {r.case_name} "
+            f"| {_fmt_db(r.stage1.psnr_db)} "
+            f"| {_fmt_db(r.stage2.psnr_db)} "
+            f"| {_fmt_db(r.stage3.psnr_db)} "
+            f"| {_fmt_db(r.stage4.psnr_db)} |"
         )
-    lines.append("")
+    L.append("")
 
-    lines.append("## Stage4 Raw Runs")
-    lines.append("")
-    lines.append("| Case | Stage4 runs (ms) |")
-    lines.append("|---|---|")
+    # --- Halide timing breakdown ---
+    if show_halide_timing:
+        has_any = any(r.halide_full_ms is not None for r in results)
+        if has_any:
+            L.append("## Stage4 Halide GPU Kernel Time (ms)")
+            L.append("")
+            L.append("_`halideFull` = actual GPU kernel time, excluding `dng_render()` constructor._")
+            L.append("")
+            L.append("| Case | halideFull avg (ms) | runs (ms) | Stage4 total (ms) |")
+            L.append("|---|---|---|---|")
+            for r in results:
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.halide_full_ms)} "
+                    f"| {r.halide_full_runs_str()} "
+                    f"| {_fmt_ms(r.stage4.time_ms)} |"
+                )
+            L.append("")
+
+    # --- Raw run data ---
+    L.append("## Stage4 Raw Runs (ms)")
+    L.append("")
+    L.append("| Case | Stage4 total runs (ms) |")
+    L.append("|---|---|")
     for r in results:
-        lines.append(f"| {r.case_name} | {r.stage4_runs_cell()} |")
-    lines.append("")
+        L.append(f"| {r.case_name} | {r.stage4_runs_str()} |")
+    L.append("")
 
-    timing_keys = render_timing_keys(results)
-    if timing_keys:
-        lines.append("## Stage4 Halide Timing Breakdown")
-        lines.append("")
-        lines.append(
-            "| Case | " + " | ".join(f"{key} avg (ms)" for key in timing_keys) + " | Bottleneck hint |"
-        )
-        lines.append("|---" + "|---" * (len(timing_keys) + 1) + "|")
-        for r in results:
-            cells = [r.render_timing_avg_cell(key) for key in timing_keys]
-            lines.append(f"| {r.case_name} | " + " | ".join(cells) + f" | {r.render_bottleneck_hint()} |")
-        lines.append("")
+    return "\n".join(L)
 
-        lines.append("## Stage4 Halide Timing Raw Runs")
-        lines.append("")
-        lines.append("| Case | " + " | ".join(timing_keys) + " |")
-        lines.append("|---" + "|---" * len(timing_keys) + "|")
-        for r in results:
-            cells = [r.render_timing_runs_cell(key) for key in timing_keys]
-            lines.append(f"| {r.case_name} | " + " | ".join(cells) + " |")
-        lines.append("")
-    return "\n".join(lines)
 
+# ---------------------------------------------------------------------------
+# Case definitions
+# ---------------------------------------------------------------------------
+
+def _build_cases(
+    test_decode: str,
+    lossless: str,
+    lossy: str,
+    extra_env: dict[str, str],
+    enable_timing: bool,
+) -> list[tuple[str, list[str], dict[str, str]]]:
+    """Returns [(case_name, cmd, env), ...]."""
+
+    timing_env = {"DNG_RENDER_HALIDE_TIMING": "1"} if enable_timing else {}
+
+    sdk_env = dict(extra_env)
+    halide_env_lossless = {**extra_env, **timing_env, "DNG_WARP_BIT_EXACT": "0"}
+    halide_env_lossy = {**extra_env, **timing_env}
+
+    return [
+        (
+            "Lossless / SDK",
+            [test_decode, lossless, "baseline"],
+            sdk_env,
+        ),
+        (
+            "Lossless / Halide Metal",
+            [test_decode, lossless, "test", "halide-metal", "halide-metal"],
+            halide_env_lossless,
+        ),
+        (
+            "Lossy / SDK",
+            [test_decode, lossy, "baseline"],
+            sdk_env,
+        ),
+        (
+            "Lossy / Halide Metal",
+            [test_decode, lossy, "test", "auto", "halide-metal"],
+            halide_env_lossy,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run 4 fixed test_decode cases and output Markdown table")
-    parser.add_argument(
-        "--repo-root",
-        default=".",
-        help="Repository root path (default: current directory)",
+    ap = argparse.ArgumentParser(
+        description="Run SDK vs Halide Metal pipeline matrix and output Markdown table."
     )
-    parser.add_argument(
-        "--output",
-        default="",
-        help="Optional markdown output file path",
-    )
-    parser.add_argument(
+    ap.add_argument("--repo-root", default=".", help="Repository root (default: .)")
+    ap.add_argument(
         "--test-decode",
         default="dng_processor/native/build/test_decode",
-        help="Path to test_decode executable (relative to repo root by default)",
+        help="Path to test_decode binary (relative to repo-root)",
     )
-    parser.add_argument(
+    ap.add_argument(
         "--lossless",
         default="image_samples/lossless_dng_sample.dng",
-        help="Path to lossless DNG sample",
+        help="Lossless DNG sample path (relative to repo-root)",
     )
-    parser.add_argument(
+    ap.add_argument(
         "--lossy",
         default="image_samples/lossy_dng_sample.dng",
-        help="Path to lossy DNG sample",
+        help="Lossy DNG sample path (relative to repo-root)",
     )
-    parser.add_argument(
-        "--render-mode-custom",
-        default="sdk",
-        choices=["sdk", "halide-metal", "auto"],
-        help="Render mode for custom test cases (default: sdk)",
+    ap.add_argument("--repeat", type=int, default=1, help="Runs per case (default: 1)")
+    ap.add_argument(
+        "--timing",
+        action="store_true",
+        default=False,
+        help="Enable DNG_RENDER_HALIDE_TIMING=1 and show halideFull breakdown table",
     )
-    parser.add_argument(
-        "--repeat",
-        type=int,
-        default=1,
-        help="Number of times to run each case and average the parsed values (default: 1)",
-    )
-    parser.add_argument(
-        "--decode-area-threads",
-        type=int,
-        default=0,
-        help="Set DNG_AREA_THREADS for all runs when > 0 (default: keep existing env)",
-    )
-    parser.add_argument(
-        "--render-area-threads",
-        type=int,
-        default=0,
-        help="Set DNG_RENDER_AREA_THREADS for all runs when > 0 (default: keep existing env)",
-    )
-    parser.add_argument(
+    ap.add_argument("--output", default="", help="Optional Markdown output file path")
+    ap.add_argument(
         "--env",
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Extra environment variable override, repeatable",
+        help="Extra env var override, repeatable (applies to all cases)",
     )
-    args = parser.parse_args()
+    args = ap.parse_args()
+
     if args.repeat < 1:
-        parser.error("--repeat must be >= 1")
-    if args.decode_area_threads < 0:
-        parser.error("--decode-area-threads must be >= 0")
-    if args.render_area_threads < 0:
-        parser.error("--render-area-threads must be >= 0")
+        ap.error("--repeat must be >= 1")
 
-    repo_root = Path(args.repo_root).resolve()
-    test_decode = str((repo_root / args.test_decode).resolve()) if not Path(args.test_decode).is_absolute() else args.test_decode
-    lossless = str((repo_root / args.lossless).resolve()) if not Path(args.lossless).is_absolute() else args.lossless
-    lossy = str((repo_root / args.lossy).resolve()) if not Path(args.lossy).is_absolute() else args.lossy
+    root = Path(args.repo_root).resolve()
+    bin_path = (root / args.test_decode).resolve()
+    if not bin_path.exists():
+        ap.error(f"test_decode binary not found: {bin_path}")
 
-    env_overrides: dict[str, str] = {}
-    if args.decode_area_threads > 0:
-        env_overrides["DNG_AREA_THREADS"] = str(args.decode_area_threads)
-    if args.render_area_threads > 0:
-        env_overrides["DNG_RENDER_AREA_THREADS"] = str(args.render_area_threads)
+    lossless = str((root / args.lossless).resolve())
+    lossy = str((root / args.lossy).resolve())
+    for p in (lossless, lossy):
+        if not Path(p).exists():
+            ap.error(f"DNG sample not found: {p}")
+
+    extra_env: dict[str, str] = {}
     for item in args.env:
         if "=" not in item:
-            parser.error(f"--env must be KEY=VALUE, got: {item}")
-        key, value = item.split("=", 1)
-        key = key.strip()
-        if not key:
-            parser.error(f"--env key cannot be empty: {item}")
-        env_overrides[key] = value
+            ap.error(f"--env must be KEY=VALUE, got: {item!r}")
+        k, v = item.split("=", 1)
+        k = k.strip()
+        if not k:
+            ap.error(f"--env key empty: {item!r}")
+        extra_env[k] = v
 
-    cases = [
-        ("Lossless Baseline (SDK)", [test_decode, lossless, "baseline"]),
-        ("Lossless Custom (Halide + halide-metal warp)", [test_decode, lossless, "test", "halide-metal", args.render_mode_custom]),
-        ("Lossy Baseline (SDK)", [test_decode, lossy, "baseline"]),
-        ("Lossy Custom (test)", [test_decode, lossy, "test", "auto", args.render_mode_custom]),
-    ]
+    cases = _build_cases(
+        str(bin_path), lossless, lossy, extra_env, enable_timing=args.timing
+    )
 
-    results = []
-    for case_name, cmd in cases:
-        runs = []
+    agg_results: list[AggResult] = []
+    for case_name, cmd, env in cases:
+        runs: list[RunResult] = []
         for i in range(args.repeat):
-            print(f"[RUN] {case_name} ({i + 1}/{args.repeat})")
-            runs.append(run_case(repo_root, cmd, case_name, env_overrides))
-        results.append(RepeatedCaseResult(case_name=case_name, runs=runs))
+            label = f"[RUN {i+1}/{args.repeat}] {case_name}"
+            print(label)
+            try:
+                run = _run_case(root, cmd, case_name, env)
+                runs.append(run)
+            except RuntimeError as exc:
+                print(f"  ERROR: {exc}")
+                raise SystemExit(1)
+        agg_results.append(AggResult(case_name=case_name, runs=runs))
 
     generated_at = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    markdown = build_markdown(results, generated_at, args.repeat, env_overrides)
+    md = _build_markdown(
+        agg_results,
+        generated_at=generated_at,
+        repeat=args.repeat,
+        show_halide_timing=args.timing,
+    )
 
     if args.output:
-        out_path = Path(args.output)
-        if not out_path.is_absolute():
-            out_path = (repo_root / out_path).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(markdown, encoding="utf-8")
-        print(f"[OK] Markdown written to: {out_path}")
+        out = Path(args.output)
+        if not out.is_absolute():
+            out = (root / out).resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(md, encoding="utf-8")
+        print(f"[OK] written: {out}")
     else:
-        print(markdown)
+        print(md)
 
     return 0
 

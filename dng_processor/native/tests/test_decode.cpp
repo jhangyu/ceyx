@@ -694,21 +694,6 @@ void testDNG(dng_host& host,
                 timing.stage3_halide_kernel_ms =
                     duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
 
-                dng_pixel_buffer stage3Buffer;
-                stage3Buffer.fArea = halideStage3->Bounds();
-                stage3Buffer.fPlane = 0;
-                stage3Buffer.fPlanes = 3;
-                stage3Buffer.fPixelType = ttShort;
-                stage3Buffer.fPixelSize = 2;
-                stage3Buffer.fData = stage3Data.data();
-                stage3Buffer.fRowStep = static_cast<int32>(s2w * 3);
-                stage3Buffer.fColStep = 3;
-                stage3Buffer.fPlaneStep = 1;
-                auto stage3InjectStart = high_resolution_clock::now();
-                halideStage3->Put(stage3Buffer);
-                auto stage3InjectEnd = high_resolution_clock::now();
-                timing.stage3_inject_put_ms =
-                    duration_cast<microseconds>(stage3InjectEnd - stage3InjectStart).count() / 1000.0;
             } else {
                 cout << "  [Halide] Stage3 direct buffer path enabled (bit-exact)\n";
             }
@@ -752,6 +737,26 @@ void testDNG(dng_host& host,
                     return;
                 }
                 fastWarpApplied = applied;
+            }
+
+            // Put stage3Data (warped if fastWarpApplied, pre-warp otherwise) into halideStage3.
+            // Must happen after the fast warp so halideStage3 receives correct pixel data.
+            if (!demosaicDirectToImage) {
+                dng_pixel_buffer stage3Buffer;
+                stage3Buffer.fArea = halideStage3->Bounds();
+                stage3Buffer.fPlane = 0;
+                stage3Buffer.fPlanes = 3;
+                stage3Buffer.fPixelType = ttShort;
+                stage3Buffer.fPixelSize = 2;
+                stage3Buffer.fData = stage3Data.data();
+                stage3Buffer.fRowStep = static_cast<int32>(s2w * 3);
+                stage3Buffer.fColStep = 3;
+                stage3Buffer.fPlaneStep = 1;
+                auto stage3InjectStart = high_resolution_clock::now();
+                halideStage3->Put(stage3Buffer);
+                auto stage3InjectEnd = high_resolution_clock::now();
+                timing.stage3_inject_put_ms =
+                    duration_cast<microseconds>(stage3InjectEnd - stage3InjectStart).count() / 1000.0;
             }
 
             if (!fastWarpApplied) {
