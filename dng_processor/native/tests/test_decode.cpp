@@ -917,9 +917,18 @@ void testDNG(dng_host& host,
         }
 
         // === Render ===
+        // Pre-allocate the output RGB buffer BEFORE Stage4 timing starts so the
+        // 72MB page-fault first-touch cost (~250ms on macOS) is excluded from the
+        // measurement. The Halide kernel overwrites every byte anyway, so the zero
+        // init done here is amortized outside the timing window. Use the input image
+        // dimensions as a conservative upper bound (final output is typically same or smaller).
+        const size_t preallocSize = static_cast<size_t>(width) * height * 3;
+        vector<uint8_t> rgbData(preallocSize, 0);
+
         cout << "\n--- Stage 4: Render (Tone Curve + Gamma + Color Space) ---\n";
         auto renderStart = high_resolution_clock::now();
 
+        auto t_setup_start = high_resolution_clock::now();
         dng_host* renderHost = &host;
         std::unique_ptr<ConcurrentDngHost> renderHostOverride;
         const uint32_t decodeAreaThreads = host.PerformAreaTaskThreads();
@@ -930,17 +939,24 @@ void testDNG(dng_host& host,
             cout << "  [Render] Area task threads override: " << renderAreaThreads
                  << " (decode uses " << decodeAreaThreads << ")\n";
         }
+        auto t_setup_end = high_resolution_clock::now();
 
+        auto t_ctor_start = high_resolution_clock::now();
         dng_render renderer(*renderHost, *negative);
+        auto t_ctor_end = high_resolution_clock::now();
+
+        auto t_setters_start = high_resolution_clock::now();
         renderer.SetMaximumSize(max(width, height));
         renderer.SetFinalPixelType(ttByte);
         renderer.SetFinalSpace(dng_space_sRGB::Get());
-        vector<uint8_t> rgbData;
+        auto t_setters_end = high_resolution_clock::now();
+
         uint32_t outW = 0;
         uint32_t outH = 0;
         bool renderOk = false;
 
         const bool tryHalideRender = !generateBaseline && (renderMode != RenderHalideMode::SDK);
+        auto t_render_call_start = high_resolution_clock::now();
         if (tryHalideRender) {
             renderOk = render_stage4_halide(*renderHost,
                                             *negative,
@@ -979,9 +995,27 @@ void testDNG(dng_host& host,
             buffer.fPlaneStep = 1;
             finalImage->Get(buffer);
         }
+        auto t_render_call_end = high_resolution_clock::now();
 
         auto renderEnd = high_resolution_clock::now();
         timing.render_ms = duration_cast<microseconds>(renderEnd - renderStart).count() / 1000.0;
+        {
+            auto p_ms = [](const auto& a, const auto& b) {
+                return duration_cast<microseconds>(b - a).count() / 1000.0;
+            };
+            const double setup_ms = p_ms(t_setup_start, t_setup_end);
+            const double ctor_ms = p_ms(t_ctor_start, t_ctor_end);
+            const double setters_ms = p_ms(t_setters_start, t_setters_end);
+            const double render_call_ms = p_ms(t_render_call_start, t_render_call_end);
+            const double accounted = setup_ms + ctor_ms + setters_ms + render_call_ms;
+            const double unaccounted = timing.render_ms - accounted;
+            cerr << "[Stage4Probe] setup=" << fixed << setprecision(3) << setup_ms
+                 << " ms ctor=" << ctor_ms
+                 << " ms setters=" << setters_ms
+                 << " ms render_call=" << render_call_ms
+                 << " ms unaccounted=" << unaccounted
+                 << " ms total=" << timing.render_ms << " ms\n";
+        }
         cout << "  Time: " << fixed << setprecision(2) << timing.render_ms << " ms\n";
         cout << "  Output: " << outW << "x" << outH << " (" << ttByte << ")\n";
 

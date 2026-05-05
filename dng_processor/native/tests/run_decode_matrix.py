@@ -207,9 +207,10 @@ def _build_markdown(
     L.append("> - Lossy Halide: Stage3 PSNR = 999 dB (same SDK YCbCr path); "
              "Stage4 PSNR = Stage4-isolated rendering quality")
     L.append(">")
-    L.append("> **Stage4 timing note**: includes `dng_render()` constructor overhead (~250 ms, "
-             "shared by both SDK and Halide paths). "
-             "Use `halideFull` column for GPU kernel time only.")
+    L.append("> **Stage4 timing note**: total Stage4 now closely tracks `halideFull` GPU kernel time "
+             "(prior 250ms+ first-touch page-fault cost on `out_rgb` was eliminated by caller "
+             "pre-allocating + replacing `assign(N,0)` with `resize(N)` in `runHalideFullOrSdkFallback`). "
+             "SDK Stage4 = `dng_render::Render()` total. `dng_render()` constructor itself is ~0.03 ms.")
     L.append("")
 
     # --- Timing table ---

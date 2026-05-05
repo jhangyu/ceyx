@@ -2456,6 +2456,8 @@ bool runHalideFullOrSdkFallback(dng_host& host,
         return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
     };
 
+    const auto t_fn_start = std::chrono::high_resolution_clock::now();
+
     dng_point dst_size;
     dst_size.h = negative.DefaultFinalWidth();
     dst_size.v = negative.DefaultFinalHeight();
@@ -2474,7 +2476,17 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     }
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
-    out_rgb.assign(static_cast<size_t>(out_w) * out_h * 3, 0);
+    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
+
+    // Use resize instead of assign(N, 0): the Halide kernel overwrites every byte,
+    // so the zero-fill is wasted work. resize() is a no-op when out_rgb is already sized
+    // by the caller (which avoids the 250ms first-touch page-fault cost on a 72MB buffer).
+    const auto t_assign_start = std::chrono::high_resolution_clock::now();
+    const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
+    if (out_rgb.size() != needed_out_size) {
+        out_rgb.resize(needed_out_size);
+    }
+    const auto t_assign_end = std::chrono::high_resolution_clock::now();
 
     dng_rect src_area = negative.DefaultCropArea();
 
@@ -2563,11 +2575,24 @@ bool runHalideFullOrSdkFallback(dng_host& host,
         if (render_ok) {
             const auto halide_end = std::chrono::high_resolution_clock::now();
             if (timing_enabled) {
-                std::cerr << "[RenderHalideTiming] resample=" << ms(resample_start, resample_end)
-                          << " ms extractStage3U16=" << ms(extract_start, extract_end)
-                          << " ms buildParams=" << ms(params_start, params_end)
-                          << " ms halideFull=" << ms(halide_start, halide_end)
-                          << " ms\n";
+                const auto t_fn_end = halide_end;
+                const double total_fn_ms = ms(t_fn_start, t_fn_end);
+                const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
+                const double assign_ms = ms(t_assign_start, t_assign_end);
+                const double resample_ms = ms(resample_start, resample_end);
+                const double extract_ms = ms(extract_start, extract_end);
+                const double params_ms = ms(params_start, params_end);
+                const double halide_ms = ms(halide_start, halide_end);
+                const double accounted = dst_size_ms + assign_ms + resample_ms + extract_ms + params_ms + halide_ms;
+                const double untimed = total_fn_ms - accounted;
+                std::cerr << "[RenderHalideTiming] dst_size=" << dst_size_ms
+                          << " ms out_rgb_assign=" << assign_ms
+                          << " ms resample=" << resample_ms
+                          << " ms extractStage3U16=" << extract_ms
+                          << " ms buildParams=" << params_ms
+                          << " ms halideFull=" << halide_ms
+                          << " ms untimed=" << untimed
+                          << " ms total_fn=" << total_fn_ms << " ms\n";
             }
             if (renderHalideDebugEnabled()) {
                 if (!have_stage3_float) {
