@@ -1429,6 +1429,1021 @@ bool renderHalideBitExactModeEnabled() {
     return warp_exact && warp_exact[0] && warp_exact[0] != '0';
 }
 
+bool renderLsbResearchEnabled() {
+    const char* v = std::getenv("DNG_RENDER_LSB_RESEARCH");
+    return v && v[0] && v[0] != '0';
+}
+
+bool renderTailResearchEnabled() {
+    const char* v = std::getenv("DNG_RENDER_TAIL_RESEARCH");
+    return v && v[0] && v[0] != '0';
+}
+
+float tableInterpSdk(const std::vector<float>& table, float x) {
+    if (table.size() < 2) {
+        return 0.0f;
+    }
+    const float xv = std::clamp(x, 0.0f, 1.0f);
+    const float y = xv * static_cast<float>(dng_1d_table::kTableSize);
+    int index = static_cast<int>(y);
+    index = std::clamp(index, 0, static_cast<int>(table.size()) - 2);
+    const float fract = y - static_cast<float>(index);
+    return table[static_cast<size_t>(index)] * (1.0f - fract) +
+           table[static_cast<size_t>(index + 1)] * fract;
+}
+
+float tableInterpHalideStyle(const std::vector<float>& table, float x) {
+    if (table.size() < 2) {
+        return 0.0f;
+    }
+    const float xv = std::clamp(x, 0.0f, 1.0f);
+    const int max_idx = static_cast<int>(table.size()) - 2;
+    const float y = xv * static_cast<float>(max_idx);
+    int index = static_cast<int>(std::floor(y));
+    index = std::clamp(index, 0, max_idx);
+    const float fract = y - static_cast<float>(index);
+    return table[static_cast<size_t>(index)] * (1.0f - fract) +
+           table[static_cast<size_t>(index + 1)] * fract;
+}
+
+void applyRgbToneSdk(float r,
+                     float g,
+                     float b,
+                     const std::vector<float>& tone_table,
+                     float& rr,
+                     float& gg,
+                     float& bb) {
+    auto rgbTone = [&](float ra, float ga, float ba, float& rra, float& gga, float& bba) {
+        rra = tableInterpSdk(tone_table, ra);
+        bba = tableInterpSdk(tone_table, ba);
+        gga = bba + ((rra - bba) * (ga - ba) / (ra - ba));
+    };
+
+    if (r >= g) {
+        if (g > b) {
+            rgbTone(r, g, b, rr, gg, bb);
+        } else if (b > r) {
+            rgbTone(b, r, g, bb, rr, gg);
+        } else if (b > g) {
+            rgbTone(r, b, g, rr, bb, gg);
+        } else {
+            rr = tableInterpSdk(tone_table, r);
+            gg = tableInterpSdk(tone_table, g);
+            bb = gg;
+        }
+    } else {
+        if (r >= b) {
+            rgbTone(g, r, b, gg, rr, bb);
+        } else if (b > g) {
+            rgbTone(b, g, r, bb, gg, rr);
+        } else {
+            rgbTone(g, b, r, gg, bb, rr);
+        }
+    }
+}
+
+void applyRgbToneHalideStyle(float r,
+                             float g,
+                             float b,
+                             const std::vector<float>& tone_table,
+                             float& rr,
+                             float& gg,
+                             float& bb) {
+    const float tr = tableInterpHalideStyle(tone_table, r);
+    const float tg = tableInterpHalideStyle(tone_table, g);
+    const float tb = tableInterpHalideStyle(tone_table, b);
+
+    const float den1 = ((r >= g) && (g > b)) ? (r - b) : 1.0f;
+    const float rr1 = tr;
+    const float gg1 = tb + ((tr - tb) * (g - b) / den1);
+    const float bb1 = tb;
+
+    const float den2 = ((r >= g) && !(g > b) && (b > r)) ? (b - g) : 1.0f;
+    const float bb2 = tb;
+    const float gg2 = tg;
+    const float rr2 = gg2 + ((bb2 - gg2) * (r - g) / den2);
+
+    const float den3 = ((r >= g) && !(g > b) && !(b > r) && (b > g)) ? (r - g) : 1.0f;
+    const float rr3 = tr;
+    const float gg3 = tg;
+    const float bb3 = gg3 + ((rr3 - gg3) * (b - g) / den3);
+
+    const float rr4 = tr;
+    const float gg4 = tg;
+    const float bb4 = tg;
+
+    const float den5 = (!(r >= g) && (r >= b)) ? (g - b) : 1.0f;
+    const float gg5 = tg;
+    const float bb5 = tb;
+    const float rr5 = bb5 + ((gg5 - bb5) * (r - b) / den5);
+
+    const float den6 = (!(r >= g) && !(r >= b) && (b > g)) ? (b - r) : 1.0f;
+    const float bb6 = tb;
+    const float rr6 = tr;
+    const float gg6 = rr6 + ((bb6 - rr6) * (g - r) / den6);
+
+    const float den7 = (!(r >= g) && !(r >= b) && !(b > g)) ? (g - r) : 1.0f;
+    const float gg7 = tg;
+    const float rr7 = tr;
+    const float bb7 = rr7 + ((gg7 - rr7) * (b - r) / den7);
+
+    const bool c1 = (r >= g) && (g > b);
+    const bool c2 = (r >= g) && !(g > b) && (b > r);
+    const bool c3 = (r >= g) && !(g > b) && !(b > r) && (b > g);
+    const bool c4 = (r >= g) && !(g > b) && !(b > r) && !(b > g);
+    const bool c5 = !(r >= g) && (r >= b);
+    const bool c6 = !(r >= g) && !(r >= b) && (b > g);
+
+    rr = c1 ? rr1 : c2 ? rr2 : c3 ? rr3 : c4 ? rr4 : c5 ? rr5 : c6 ? rr6 : rr7;
+    gg = c1 ? gg1 : c2 ? gg2 : c3 ? gg3 : c4 ? gg4 : c5 ? gg5 : c6 ? gg6 : gg7;
+    bb = c1 ? bb1 : c2 ? bb2 : c3 ? bb3 : c4 ? bb4 : c5 ? bb5 : c6 ? bb6 : bb7;
+}
+
+enum class MatrixReplayMode {
+    SdkOrder,
+    AssocAlt,
+    FmaChain
+};
+
+float matrixRowDot(float r,
+                   float g,
+                   float b,
+                   float m0,
+                   float m1,
+                   float m2,
+                   MatrixReplayMode mode) {
+    switch (mode) {
+        case MatrixReplayMode::SdkOrder:
+            return (m0 * r + m1 * g) + m2 * b;
+        case MatrixReplayMode::AssocAlt:
+            return m0 * r + (m1 * g + m2 * b);
+        case MatrixReplayMode::FmaChain:
+            return std::fmaf(m2, b, std::fmaf(m1, g, m0 * r));
+    }
+    return 0.0f;
+}
+
+void applyRgbToFinalMatrix(float r,
+                           float g,
+                           float b,
+                           const float rgb_to_final[9],
+                           MatrixReplayMode mode,
+                           float& fr,
+                           float& fg,
+                           float& fb) {
+    fr = std::clamp(matrixRowDot(r, g, b,
+                                 rgb_to_final[0], rgb_to_final[1], rgb_to_final[2],
+                                 mode),
+                    0.0f, 1.0f);
+    fg = std::clamp(matrixRowDot(r, g, b,
+                                 rgb_to_final[3], rgb_to_final[4], rgb_to_final[5],
+                                 mode),
+                    0.0f, 1.0f);
+    fb = std::clamp(matrixRowDot(r, g, b,
+                                 rgb_to_final[6], rgb_to_final[7], rgb_to_final[8],
+                                 mode),
+                    0.0f, 1.0f);
+}
+
+uint8_t quantizeHalfUp(float v) {
+    const float scaled = std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f;
+    return static_cast<uint8_t>(std::clamp(scaled, 0.0f, 255.0f));
+}
+
+uint8_t quantizeTrunc(float v) {
+    const float scaled = std::clamp(v, 0.0f, 1.0f) * 255.0f;
+    return static_cast<uint8_t>(std::clamp(scaled, 0.0f, 255.0f));
+}
+
+void runLsbResearchReplay(const std::vector<float>& pre_tone_rgb,
+                          uint32_t width,
+                          uint32_t height,
+                          const RenderParams& params,
+                          const std::vector<uint8_t>& ref_rgb,
+                          const std::vector<uint8_t>& test_rgb) {
+    if (pre_tone_rgb.empty() ||
+        params.tone_curve.size() < 2 ||
+        params.encode_gamma.size() < 2 ||
+        width == 0 ||
+        height == 0) {
+        return;
+    }
+
+    const std::array<std::pair<uint32_t, uint32_t>, 24> samples = {
+        // R-channel diff samples
+        std::make_pair(5338u, 17u),
+        std::make_pair(112u, 26u),
+        std::make_pair(3163u, 44u),
+        std::make_pair(782u, 99u),
+        std::make_pair(1017u, 102u),
+        std::make_pair(1801u, 106u),
+        std::make_pair(846u, 111u),
+        std::make_pair(3966u, 158u),
+        // G-channel diff samples
+        std::make_pair(4773u, 49u),
+        std::make_pair(3519u, 55u),
+        std::make_pair(4199u, 88u),
+        std::make_pair(1086u, 101u),
+        std::make_pair(4485u, 126u),
+        std::make_pair(4024u, 177u),
+        std::make_pair(3118u, 179u),
+        std::make_pair(5354u, 218u),
+        // B-channel diff samples
+        std::make_pair(4211u, 24u),
+        std::make_pair(4944u, 42u),
+        std::make_pair(2491u, 50u),
+        std::make_pair(3393u, 76u),
+        std::make_pair(1307u, 101u),
+        std::make_pair(2799u, 131u),
+        std::make_pair(3725u, 140u),
+        std::make_pair(2740u, 218u),
+    };
+
+    float max_table_diff = 0.0f;
+    float max_tone_diff = 0.0f;
+    float max_matrix_assoc_diff = 0.0f;
+    float max_matrix_fma_diff = 0.0f;
+    float max_encode_interp_diff = 0.0f;
+    size_t encode_diff_half_vs_trunc = 0;
+    size_t ref_match_sdk_chain = 0;
+    size_t ref_match_assoc_chain = 0;
+    size_t ref_match_fma_chain = 0;
+    size_t ref_match_fma_trunc_chain = 0;
+    size_t test_match_sdk_chain = 0;
+    size_t test_match_assoc_chain = 0;
+    size_t test_match_fma_chain = 0;
+    size_t test_match_fma_trunc_chain = 0;
+    size_t compared_channels = 0;
+    size_t tested = 0;
+
+    const bool have_ref = ref_rgb.size() == static_cast<size_t>(width) * height * 3u;
+    const bool have_test = test_rgb.size() == static_cast<size_t>(width) * height * 3u;
+
+    for (const auto& [x, y] : samples) {
+        if (x >= width || y >= height) {
+            continue;
+        }
+        const size_t idx = (static_cast<size_t>(y) * width + x) * 3u;
+        const float r = pre_tone_rgb[idx + 0];
+        const float g = pre_tone_rgb[idx + 1];
+        const float b = pre_tone_rgb[idx + 2];
+
+        const float ti_sdk = tableInterpSdk(params.tone_curve, std::clamp(r, 0.0f, 1.0f));
+        const float ti_hal = tableInterpHalideStyle(params.tone_curve, std::clamp(r, 0.0f, 1.0f));
+        max_table_diff = std::max(max_table_diff, std::abs(ti_sdk - ti_hal));
+
+        float rr_sdk = 0.0f, gg_sdk = 0.0f, bb_sdk = 0.0f;
+        float rr_hal = 0.0f, gg_hal = 0.0f, bb_hal = 0.0f;
+        applyRgbToneSdk(r, g, b, params.tone_curve, rr_sdk, gg_sdk, bb_sdk);
+        applyRgbToneHalideStyle(r, g, b, params.tone_curve, rr_hal, gg_hal, bb_hal);
+        max_tone_diff = std::max(max_tone_diff, std::abs(rr_sdk - rr_hal));
+        max_tone_diff = std::max(max_tone_diff, std::abs(gg_sdk - gg_hal));
+        max_tone_diff = std::max(max_tone_diff, std::abs(bb_sdk - bb_hal));
+
+        float fr_sdk = 0.0f, fg_sdk = 0.0f, fb_sdk = 0.0f;
+        float fr_assoc = 0.0f, fg_assoc = 0.0f, fb_assoc = 0.0f;
+        float fr_fma = 0.0f, fg_fma = 0.0f, fb_fma = 0.0f;
+        applyRgbToFinalMatrix(rr_sdk, gg_sdk, bb_sdk, params.rgb_to_final, MatrixReplayMode::SdkOrder, fr_sdk, fg_sdk, fb_sdk);
+        applyRgbToFinalMatrix(rr_sdk, gg_sdk, bb_sdk, params.rgb_to_final, MatrixReplayMode::AssocAlt, fr_assoc, fg_assoc, fb_assoc);
+        applyRgbToFinalMatrix(rr_sdk, gg_sdk, bb_sdk, params.rgb_to_final, MatrixReplayMode::FmaChain, fr_fma, fg_fma, fb_fma);
+
+        max_matrix_assoc_diff = std::max(max_matrix_assoc_diff, std::abs(fr_assoc - fr_sdk));
+        max_matrix_assoc_diff = std::max(max_matrix_assoc_diff, std::abs(fg_assoc - fg_sdk));
+        max_matrix_assoc_diff = std::max(max_matrix_assoc_diff, std::abs(fb_assoc - fb_sdk));
+        max_matrix_fma_diff = std::max(max_matrix_fma_diff, std::abs(fr_fma - fr_sdk));
+        max_matrix_fma_diff = std::max(max_matrix_fma_diff, std::abs(fg_fma - fg_sdk));
+        max_matrix_fma_diff = std::max(max_matrix_fma_diff, std::abs(fb_fma - fb_sdk));
+
+        const float enc_sdk_r = tableInterpSdk(params.encode_gamma, fr_sdk);
+        const float enc_sdk_g = tableInterpSdk(params.encode_gamma, fg_sdk);
+        const float enc_sdk_b = tableInterpSdk(params.encode_gamma, fb_sdk);
+        const float enc_hal_r = tableInterpHalideStyle(params.encode_gamma, fr_sdk);
+        const float enc_hal_g = tableInterpHalideStyle(params.encode_gamma, fg_sdk);
+        const float enc_hal_b = tableInterpHalideStyle(params.encode_gamma, fb_sdk);
+        max_encode_interp_diff = std::max(max_encode_interp_diff, std::abs(enc_sdk_r - enc_hal_r));
+        max_encode_interp_diff = std::max(max_encode_interp_diff, std::abs(enc_sdk_g - enc_hal_g));
+        max_encode_interp_diff = std::max(max_encode_interp_diff, std::abs(enc_sdk_b - enc_hal_b));
+
+        const uint8_t sdk_u8_r = quantizeHalfUp(enc_sdk_r);
+        const uint8_t sdk_u8_g = quantizeHalfUp(enc_sdk_g);
+        const uint8_t sdk_u8_b = quantizeHalfUp(enc_sdk_b);
+        const uint8_t assoc_u8_r = quantizeHalfUp(tableInterpSdk(params.encode_gamma, fr_assoc));
+        const uint8_t assoc_u8_g = quantizeHalfUp(tableInterpSdk(params.encode_gamma, fg_assoc));
+        const uint8_t assoc_u8_b = quantizeHalfUp(tableInterpSdk(params.encode_gamma, fb_assoc));
+        const uint8_t fma_u8_r = quantizeHalfUp(tableInterpSdk(params.encode_gamma, fr_fma));
+        const uint8_t fma_u8_g = quantizeHalfUp(tableInterpSdk(params.encode_gamma, fg_fma));
+        const uint8_t fma_u8_b = quantizeHalfUp(tableInterpSdk(params.encode_gamma, fb_fma));
+        const uint8_t fma_trunc_u8_r = quantizeTrunc(tableInterpSdk(params.encode_gamma, fr_fma));
+        const uint8_t fma_trunc_u8_g = quantizeTrunc(tableInterpSdk(params.encode_gamma, fg_fma));
+        const uint8_t fma_trunc_u8_b = quantizeTrunc(tableInterpSdk(params.encode_gamma, fb_fma));
+
+        encode_diff_half_vs_trunc += (fma_u8_r != fma_trunc_u8_r) ? 1u : 0u;
+        encode_diff_half_vs_trunc += (fma_u8_g != fma_trunc_u8_g) ? 1u : 0u;
+        encode_diff_half_vs_trunc += (fma_u8_b != fma_trunc_u8_b) ? 1u : 0u;
+
+        int ref_r = -1, ref_g = -1, ref_b = -1;
+        int test_r = -1, test_g = -1, test_b = -1;
+        if (have_ref) {
+            ref_r = static_cast<int>(ref_rgb[idx + 0]);
+            ref_g = static_cast<int>(ref_rgb[idx + 1]);
+            ref_b = static_cast<int>(ref_rgb[idx + 2]);
+            ref_match_sdk_chain += (sdk_u8_r == ref_rgb[idx + 0]) ? 1u : 0u;
+            ref_match_sdk_chain += (sdk_u8_g == ref_rgb[idx + 1]) ? 1u : 0u;
+            ref_match_sdk_chain += (sdk_u8_b == ref_rgb[idx + 2]) ? 1u : 0u;
+            ref_match_assoc_chain += (assoc_u8_r == ref_rgb[idx + 0]) ? 1u : 0u;
+            ref_match_assoc_chain += (assoc_u8_g == ref_rgb[idx + 1]) ? 1u : 0u;
+            ref_match_assoc_chain += (assoc_u8_b == ref_rgb[idx + 2]) ? 1u : 0u;
+            ref_match_fma_chain += (fma_u8_r == ref_rgb[idx + 0]) ? 1u : 0u;
+            ref_match_fma_chain += (fma_u8_g == ref_rgb[idx + 1]) ? 1u : 0u;
+            ref_match_fma_chain += (fma_u8_b == ref_rgb[idx + 2]) ? 1u : 0u;
+            ref_match_fma_trunc_chain += (fma_trunc_u8_r == ref_rgb[idx + 0]) ? 1u : 0u;
+            ref_match_fma_trunc_chain += (fma_trunc_u8_g == ref_rgb[idx + 1]) ? 1u : 0u;
+            ref_match_fma_trunc_chain += (fma_trunc_u8_b == ref_rgb[idx + 2]) ? 1u : 0u;
+        }
+        if (have_test) {
+            test_r = static_cast<int>(test_rgb[idx + 0]);
+            test_g = static_cast<int>(test_rgb[idx + 1]);
+            test_b = static_cast<int>(test_rgb[idx + 2]);
+            test_match_sdk_chain += (sdk_u8_r == test_rgb[idx + 0]) ? 1u : 0u;
+            test_match_sdk_chain += (sdk_u8_g == test_rgb[idx + 1]) ? 1u : 0u;
+            test_match_sdk_chain += (sdk_u8_b == test_rgb[idx + 2]) ? 1u : 0u;
+            test_match_assoc_chain += (assoc_u8_r == test_rgb[idx + 0]) ? 1u : 0u;
+            test_match_assoc_chain += (assoc_u8_g == test_rgb[idx + 1]) ? 1u : 0u;
+            test_match_assoc_chain += (assoc_u8_b == test_rgb[idx + 2]) ? 1u : 0u;
+            test_match_fma_chain += (fma_u8_r == test_rgb[idx + 0]) ? 1u : 0u;
+            test_match_fma_chain += (fma_u8_g == test_rgb[idx + 1]) ? 1u : 0u;
+            test_match_fma_chain += (fma_u8_b == test_rgb[idx + 2]) ? 1u : 0u;
+            test_match_fma_trunc_chain += (fma_trunc_u8_r == test_rgb[idx + 0]) ? 1u : 0u;
+            test_match_fma_trunc_chain += (fma_trunc_u8_g == test_rgb[idx + 1]) ? 1u : 0u;
+            test_match_fma_trunc_chain += (fma_trunc_u8_b == test_rgb[idx + 2]) ? 1u : 0u;
+        }
+
+        compared_channels += 3;
+        std::cerr << "[LSBResearch][MatrixEncodeReplay] (" << x << "," << y << ")"
+                  << " ref=(" << ref_r << "," << ref_g << "," << ref_b << ")"
+                  << " test=(" << test_r << "," << test_g << "," << test_b << ")"
+                  << " sdk=(" << static_cast<int>(sdk_u8_r) << "," << static_cast<int>(sdk_u8_g)
+                  << "," << static_cast<int>(sdk_u8_b) << ")"
+                  << " assoc=(" << static_cast<int>(assoc_u8_r) << "," << static_cast<int>(assoc_u8_g)
+                  << "," << static_cast<int>(assoc_u8_b) << ")"
+                  << " fma=(" << static_cast<int>(fma_u8_r) << "," << static_cast<int>(fma_u8_g)
+                  << "," << static_cast<int>(fma_u8_b) << ")"
+                  << " fma_trunc=(" << static_cast<int>(fma_trunc_u8_r) << "," << static_cast<int>(fma_trunc_u8_g)
+                  << "," << static_cast<int>(fma_trunc_u8_b) << ")\n";
+
+        tested++;
+    }
+
+    // Synthetic boundary sweep around 1D table bin edges.
+    float max_table_boundary_diff = 0.0f;
+    size_t boundary_tested = 0;
+    constexpr float eps = 1.0e-7f;
+    for (int i = 0; i <= static_cast<int>(dng_1d_table::kTableSize); i += 257) {
+        const float base = static_cast<float>(i) / static_cast<float>(dng_1d_table::kTableSize);
+        const std::array<float, 5> probes = {
+            std::clamp(base - eps, 0.0f, 1.0f),
+            base,
+            std::clamp(base + eps, 0.0f, 1.0f),
+            std::nextafter(base, 0.0f),
+            std::nextafter(base, 1.0f),
+        };
+        for (float x : probes) {
+            const float sdk = tableInterpSdk(params.tone_curve, x);
+            const float hal = tableInterpHalideStyle(params.tone_curve, x);
+            max_table_boundary_diff = std::max(max_table_boundary_diff, std::abs(sdk - hal));
+            boundary_tested++;
+        }
+    }
+
+    std::cerr << "[LSBResearch][TableInterp] tested=" << tested
+              << " maxAbsDiff=" << max_table_diff << "\n";
+    std::cerr << "[LSBResearch][TableInterpBoundary] tested=" << boundary_tested
+              << " maxAbsDiff=" << max_table_boundary_diff << "\n";
+    std::cerr << "[LSBResearch][ToneReplay] tested=" << tested
+              << " maxAbsDiff=" << max_tone_diff << "\n";
+    std::cerr << "[LSBResearch][MatrixReplay] tested=" << tested
+              << " maxAssocDiff=" << max_matrix_assoc_diff
+              << " maxFmaDiff=" << max_matrix_fma_diff << "\n";
+    std::cerr << "[LSBResearch][EncodeReplay] tested=" << tested
+              << " maxTableInterpDiff=" << max_encode_interp_diff
+              << " halfVsTruncDiffChannels=" << encode_diff_half_vs_trunc
+              << "/" << compared_channels << "\n";
+    if (have_ref) {
+        std::cerr << "[LSBResearch][ReplayMatchRef] sdk=" << ref_match_sdk_chain
+                  << " assoc=" << ref_match_assoc_chain
+                  << " fma=" << ref_match_fma_chain
+                  << " fma_trunc=" << ref_match_fma_trunc_chain
+                  << " / " << compared_channels << "\n";
+    }
+    if (have_test) {
+        std::cerr << "[LSBResearch][ReplayMatchTest] sdk=" << test_match_sdk_chain
+                  << " assoc=" << test_match_assoc_chain
+                  << " fma=" << test_match_fma_chain
+                  << " fma_trunc=" << test_match_fma_trunc_chain
+                  << " / " << compared_channels << "\n";
+    }
+}
+
+// =============================================================================
+// Step 1 — Per-pixel stage divergence dumper (Step 6.4.4 Round 2)
+// =============================================================================
+//
+//  DNG_RENDER_STAGE_DIVERGENCE=1 enables this.
+//
+//  For each pixel that differs between the Halide kernel and SDK reference,
+//  runs BOTH the SDK RefBaseline* chain and a scalar replica of the exact
+//  Halide kernel expressions (DngRenderGenerator.cpp), stage by stage.
+//
+//  Prints per-stage float values for every diff pixel coordinate listed in
+//  kDivergenceSampleCoords[].  First divergent stage is tagged with [FIRST_DIV].
+//
+//  Output format per pixel:
+//    [StageDiverge] (x,y) ref=N test=N  [FIRST_DIV: stage_name]
+//      STAGE_ABC      sdk_r=0.xxxxx sdk_g=0.xxxxx sdk_b=0.xxxxx  hal_r=0.xxxxx hal_g=0.xxxxx hal_b=0.xxxxx  MATCH/1ULP/ERR
+//      STAGE_HSAT     ... (same)
+//      STAGE_EXPOSURE ...
+//      STAGE_LOOK     ...
+//      STAGE_TONE     ...
+//      STAGE_MATRIX   ...
+//      STAGE_ENCODE   ... (float pre-quantize)
+//      STAGE_FINAL    N (uint8)
+//
+//  This is the highest-resolution diagnostic tool for locating where the
+//  ±1 LSB residual originates.
+//
+// =============================================================================
+
+namespace stage_divergence {
+
+// ---- Scalar replica of Halide kernel's 1-D table interpolation ----
+static inline float halTableInterp(const float* table, int table_size, float xv) {
+    xv = std::clamp(xv, 0.0f, 1.0f);
+    int max_idx = table_size - 2;
+    float y = xv * static_cast<float>(max_idx);
+    int index = static_cast<int>(std::floor(y));
+    index = std::clamp(index, 0, max_idx);
+    float frac = y - static_cast<float>(index);
+    return table[index] * (1.0f - frac) + table[index + 1] * frac;
+}
+
+// ---- Scalar replica of Halide rgb_to_hsv ----
+static inline void halRgbToHsv(float r, float g, float b,
+                               float& h, float& s, float& v) {
+    v = std::max(r, std::max(g, b));
+    float mn = std::min(r, std::min(g, b));
+    float gap = v - mn;
+
+    float gap_den = (gap > 0.0f) ? gap : 1.0f;
+    float h_r = (g - b) / gap_den;
+    h_r = (h_r < 0.0f) ? h_r + 6.0f : h_r;
+    float h_g = 2.0f + (b - r) / gap_den;
+    float h_b = 4.0f + (r - g) / gap_den;
+
+    h = (gap > 0.0f)
+            ? ((r == v) ? h_r
+              : ((g == v) ? h_g : h_b))
+            : 0.0f;
+    s = (gap > 0.0f) ? gap / v : 0.0f;
+}
+
+// ---- Scalar replica of Halide hsv_to_rgb ----
+static inline void halHsvToRgb(float h, float s, float v,
+                                float& r, float& g, float& b) {
+    bool use_sat = (s > 0.0f);
+    float hh = (h < 0.0f) ? h + 6.0f : h;
+    if (hh >= 6.0f) hh -= 6.0f;
+    int i = static_cast<int>(hh);
+    float f = hh - static_cast<float>(i);
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - s * f);
+    float t = v * (1.0f - s * (1.0f - f));
+    i = std::clamp(i, 0, 5);
+
+    float r_hsv = (i == 0) ? v : (i == 1) ? q : (i == 2) ? p : (i == 3) ? p : (i == 4) ? t : v;
+    float g_hsv = (i == 0) ? t : (i == 1) ? v : (i == 2) ? v : (i == 3) ? q : (i == 4) ? p : p;
+    float b_hsv = (i == 0) ? p : (i == 1) ? p : (i == 2) ? t : (i == 3) ? v : (i == 4) ? v : q;
+
+    r = use_sat ? r_hsv : v;
+    g = use_sat ? g_hsv : v;
+    b = use_sat ? b_hsv : v;
+}
+
+// ---- Scalar replica of Halide sample_hsv_map (trilerp + encode/decode table) ----
+static inline void halSampleHsvMap(const float* huesat_table, int huesat_table_size,
+                                  const float* encode_table, int encode_size,
+                                  const float* decode_table, int decode_size,
+                                  int hue_div, int sat_div, int val_div,
+                                  int has_table, int has_encoding,
+                                  float r, float g, float b,
+                                  float& out_r, float& out_g, float& out_b) {
+    float h, s, v;
+    halRgbToHsv(r, g, b, h, s, v);
+
+    int hue_div_s = std::max(hue_div, 2);
+    int sat_div_s = std::max(sat_div, 2);
+    int val_div_s = std::max(val_div, 1);
+
+    float hue_scale = static_cast<float>(hue_div_s) * (1.0f / 6.0f);
+    float sat_scale = static_cast<float>(sat_div_s - 1);
+    float val_scale = static_cast<float>(val_div_s - 1);
+    int max_hue_index0 = hue_div_s - 1;
+    int max_sat_index0 = sat_div_s - 2;
+    int max_val_index0 = val_div_s - 2;
+    int hue_step = sat_div_s;
+    int val_step = hue_div_s * sat_div_s;
+
+    bool use_encode = (has_encoding != 0) && (val_div_s >= 2);
+    float v_encoded0 = v;
+    float xv_v = std::clamp(v, 0.0f, 1.0f);
+    int max_idx_enc = encode_size - 2;
+    float y_enc = xv_v * static_cast<float>(max_idx_enc);
+    int idx_enc = static_cast<int>(std::floor(y_enc));
+    idx_enc = std::clamp(idx_enc, 0, max_idx_enc);
+    float frac_enc = y_enc - static_cast<float>(idx_enc);
+    float v_encoded = use_encode
+            ? encode_table[idx_enc] * (1.0f - frac_enc) + encode_table[idx_enc + 1] * frac_enc
+            : v_encoded0;
+
+    float h_scaled = h * hue_scale;
+    float s_scaled = s * sat_scale;
+    float v_scaled = v_encoded * val_scale;
+
+    int h_index0_raw = static_cast<int>(std::floor(h_scaled));
+    int s_index0 = std::clamp(static_cast<int>(std::floor(s_scaled)), 0, max_sat_index0);
+    int v_index0 = std::clamp(static_cast<int>(std::floor(v_scaled)), 0, max_val_index0);
+
+    int h_index0 = std::clamp(h_index0_raw, 0, max_hue_index0);
+    int h_index1 = (h_index0_raw >= max_hue_index0) ? 0 : h_index0 + 1;
+
+    float h_fract1 = h_scaled - static_cast<float>(h_index0);
+    float s_fract1 = s_scaled - static_cast<float>(s_index0);
+    float v_fract1 = v_scaled - static_cast<float>(v_index0);
+    float h_fract0 = 1.0f - h_fract1;
+    float s_fract0 = 1.0f - s_fract1;
+    float v_fract0 = 1.0f - v_fract1;
+
+    auto tval = [&](int idx, int comp) -> float {
+        idx = std::clamp(idx, 0, huesat_table_size - 1);
+        return huesat_table[idx * 3 + comp];
+    };
+
+    int base2d0 = h_index0 * hue_step + s_index0;
+    int base2d1 = h_index1 * hue_step + s_index0;
+
+    float hs_hue0 = h_fract0 * tval(base2d0, 0) + h_fract1 * tval(base2d1, 0);
+    float hs_sat0 = h_fract0 * tval(base2d0, 1) + h_fract1 * tval(base2d1, 1);
+    float hs_val0 = h_fract0 * tval(base2d0, 2) + h_fract1 * tval(base2d1, 2);
+
+    float hs_hue1 = h_fract0 * tval(base2d0 + 1, 0) + h_fract1 * tval(base2d1 + 1, 0);
+    float hs_sat1 = h_fract0 * tval(base2d0 + 1, 1) + h_fract1 * tval(base2d1 + 1, 1);
+    float hs_val1 = h_fract0 * tval(base2d0 + 1, 2) + h_fract1 * tval(base2d1 + 1, 2);
+
+    float hue_shift_2d = s_fract0 * hs_hue0 + s_fract1 * hs_hue1;
+    float sat_scale_2d = s_fract0 * hs_sat0 + s_fract1 * hs_sat1;
+    float val_scale_2d = s_fract0 * hs_val0 + s_fract1 * hs_val1;
+
+    int base3d00 = v_index0 * val_step + h_index0 * hue_step + s_index0;
+    int base3d01 = v_index0 * val_step + h_index1 * hue_step + s_index0;
+    int base3d10 = base3d00 + val_step;
+    int base3d11 = base3d01 + val_step;
+
+    auto lerp_hv = [&](int comp, int off) -> float {
+        return v_fract0 * (h_fract0 * tval(base3d00 + off, comp) + h_fract1 * tval(base3d01 + off, comp)) +
+               v_fract1 * (h_fract0 * tval(base3d10 + off, comp) + h_fract1 * tval(base3d11 + off, comp));
+    };
+
+    float hue_shift_3d = s_fract0 * lerp_hv(0, 0) + s_fract1 * lerp_hv(0, 1);
+    float sat_scale_3d = s_fract0 * lerp_hv(1, 0) + s_fract1 * lerp_hv(1, 1);
+    float val_scale_3d = s_fract0 * lerp_hv(2, 0) + s_fract1 * lerp_hv(2, 1);
+
+    bool use_2d = (val_div_s < 2);
+    float hue_shift = use_2d ? hue_shift_2d : hue_shift_3d;
+    float sat_mult = use_2d ? sat_scale_2d : sat_scale_3d;
+    float val_mult = use_2d ? val_scale_2d : val_scale_3d;
+
+    float hh = h + hue_shift * (6.0f / 360.0f);
+    float ss = std::min(s * sat_mult, 1.0f);
+    float ve = std::clamp(v_encoded * val_mult, 0.0f, 1.0f);
+
+    // decode table interpolation
+    float xv_ve = std::clamp(ve, 0.0f, 1.0f);
+    int max_idx_dec = decode_size - 2;
+    float y_dec = xv_ve * static_cast<float>(max_idx_dec);
+    int idx_dec = static_cast<int>(std::floor(y_dec));
+    idx_dec = std::clamp(idx_dec, 0, max_idx_dec);
+    float frac_dec = y_dec - static_cast<float>(idx_dec);
+    float vv = use_encode
+            ? decode_table[idx_dec] * (1.0f - frac_dec) + decode_table[idx_dec + 1] * frac_dec
+            : ve;
+
+    float rr, gg, bb;
+    halHsvToRgb(hh, ss, vv, rr, gg, bb);
+
+    out_r = (has_table != 0) ? rr : r;
+    out_g = (has_table != 0) ? gg : g;
+    out_b = (has_table != 0) ? bb : b;
+}
+
+// ---- Scalar replica of Halide rgb_tone (7-case RGBTone) ----
+static inline void halRgbTone(float r, float g, float b,
+                             const float* tone_table, int tone_size,
+                             float& out_r, float& out_g, float& out_b) {
+    float tr = halTableInterp(tone_table, tone_size, r);
+    float tg = halTableInterp(tone_table, tone_size, g);
+    float tb = halTableInterp(tone_table, tone_size, b);
+
+    // Case 1: r >= g > b
+    float den1 = ((r >= g) && (g > b)) ? (r - b) : 1.0f;
+    float gg1 = tb + ((tr - tb) * (g - b) / den1);
+
+    // Case 2: b > r >= g
+    float den2 = ((r >= g) && !(g > b) && (b > r)) ? (b - g) : 1.0f;
+    float rr2 = tg + ((tb - tg) * (r - g) / den2);
+
+    // Case 3: r >= b > g
+    float den3 = ((r >= g) && !(g > b) && !(b > r) && (b > g)) ? (r - g) : 1.0f;
+    float bb3 = tg + ((tr - tg) * (b - g) / den3);
+
+    // Case 5: g > r >= b
+    float den5 = (!(r >= g) && (r >= b)) ? (g - b) : 1.0f;
+    float rr5 = tb + ((tg - tb) * (r - b) / den5);
+
+    // Case 6: b > g > r
+    float den6 = (!(r >= g) && !(r >= b) && (b > g)) ? (b - r) : 1.0f;
+    float rr6 = tr + ((tb - tr) * (g - r) / den6);
+
+    // Case 7: g >= b > r
+    float den7 = (!(r >= g) && !(r >= b) && !(b > g)) ? (g - r) : 1.0f;
+    float bb7 = tr + ((tg - tr) * (b - r) / den7);
+
+    bool c1 = (r >= g) && (g > b);
+    bool c2 = (r >= g) && !(g > b) && (b > r);
+    bool c3 = (r >= g) && !(g > b) && !(b > r) && (b > g);
+    bool c4 = (r >= g) && !(g > b) && !(b > r) && !(b > g);
+    bool c5 = !(r >= g) && (r >= b);
+    bool c6 = !(r >= g) && !(r >= b) && (b > g);
+
+    out_r = c1 ? tr : (c2 ? rr2 : (c3 ? tr : (c4 ? tr : (c5 ? rr5 : (c6 ? rr6 : tr)))));
+    out_g = c1 ? gg1 : (c2 ? tg : (c3 ? tg : (c4 ? tg : (c5 ? tg : (c6 ? tg : tg)))));
+    out_b = c1 ? tb : (c2 ? tb : (c3 ? bb3 : (c4 ? tg : (c5 ? tb : (c6 ? tb : bb7)))));
+}
+
+// ---- Float equality check: MATCH, 1ULP, or ERR ----
+static const char* floatDiffTag(float a, float b) {
+    float diff = std::abs(a - b);
+    if (diff == 0.0f) return "MATCH";
+    if (diff <= 1.19209290e-7f) return "1ULP";   // single-precision ULP threshold (~1e-7)
+    return "ERR";
+}
+
+struct PerStageValues {
+    // [sdk_r, sdk_g, sdk_b, hal_r, hal_g, hal_b]
+    float sdk[3] = {0,0,0};
+    float hal[3] = {0,0,0};
+};
+
+enum { STAGE_ABC = 0, STAGE_HSAT, STAGE_EXP, STAGE_LOOK, STAGE_TONE, STAGE_MATRIX, STAGE_ENCODE, STAGE_COUNT };
+static const char* kStageName[STAGE_COUNT] = {
+    "ABC", "HSAT", "EXPOSURE", "LOOK", "TONE", "MATRIX", "ENCODE"
+};
+
+// ---- Per-pixel per-stage comparison ----
+static void comparePerStage(uint32_t px, uint32_t py,
+                            float s_r, float s_g, float s_b,
+                            const RenderParams& params,
+                            const uint8_t* ref_full_rgb,
+                            const uint8_t* test_full_rgb,
+                            uint32_t width, uint32_t height) {
+    size_t idx = (static_cast<size_t>(py) * width + static_cast<size_t>(px)) * 3u;
+    int ref_r = static_cast<int>(ref_full_rgb[idx + 0]);
+    int ref_g = static_cast<int>(ref_full_rgb[idx + 1]);
+    int ref_b = static_cast<int>(ref_full_rgb[idx + 2]);
+    int test_r = static_cast<int>(test_full_rgb[idx + 0]);
+    int test_g = static_cast<int>(test_full_rgb[idx + 1]);
+    int test_b = static_cast<int>(test_full_rgb[idx + 2]);
+
+    std::cerr << "[StageDiverge] (" << px << "," << py << ")"
+              << " ref=(" << ref_r << "," << ref_g << "," << ref_b << ")"
+              << " test=(" << test_r << "," << test_g << "," << test_b << ")\n";
+
+    // ---- SDK reference path: pre_tone_rgb from runRenderPrefixToPreTone ----
+    // We re-run just this pixel through the SDK reference chain.
+    // sdk_abc = RefBaselineABCtoRGB(clip(A,B,C), cameraWhite, cameraToRGB)
+    float sdk_abc_r = std::min(s_r, params.camera_white[0]) * params.camera_to_rgb[0]
+                    + std::min(s_g, params.camera_white[1]) * params.camera_to_rgb[1]
+                    + std::min(s_b, params.camera_white[2]) * params.camera_to_rgb[2];
+    float sdk_abc_g = std::min(s_r, params.camera_white[0]) * params.camera_to_rgb[3]
+                    + std::min(s_g, params.camera_white[1]) * params.camera_to_rgb[4]
+                    + std::min(s_b, params.camera_white[2]) * params.camera_to_rgb[5];
+    float sdk_abc_b = std::min(s_r, params.camera_white[0]) * params.camera_to_rgb[6]
+                    + std::min(s_g, params.camera_white[1]) * params.camera_to_rgb[7]
+                    + std::min(s_b, params.camera_white[2]) * params.camera_to_rgb[8];
+    sdk_abc_r = std::clamp(sdk_abc_r, 0.0f, 1.0f);
+    sdk_abc_g = std::clamp(sdk_abc_g, 0.0f, 1.0f);
+    sdk_abc_b = std::clamp(sdk_abc_b, 0.0f, 1.0f);
+
+    float sdk_e_r = halTableInterp(params.exp_ramp.data(),
+                                   static_cast<int>(params.exp_ramp.size()), sdk_abc_r);
+    float sdk_e_g = halTableInterp(params.exp_ramp.data(),
+                                   static_cast<int>(params.exp_ramp.size()), sdk_abc_g);
+    float sdk_e_b = halTableInterp(params.exp_ramp.data(),
+                                   static_cast<int>(params.exp_ramp.size()), sdk_abc_b);
+
+    // ---- Halide-style path: scalar replica of DngRenderGenerator.cpp ----
+    // Halide abc: wb_r = min(s_r, camera_white)
+    float hal_wb_r = std::min(s_r, params.camera_white[0]);
+    float hal_wb_g = std::min(s_g, params.camera_white[1]);
+    float hal_wb_b = std::min(s_b, params.camera_white[2]);
+    // Halide abc matrix (same formula but different accumulation order)
+    float hal_abc_r = (hal_wb_r * params.camera_to_rgb[0] + hal_wb_g * params.camera_to_rgb[1])
+                    + hal_wb_b * params.camera_to_rgb[2];
+    float hal_abc_g = (hal_wb_r * params.camera_to_rgb[3] + hal_wb_g * params.camera_to_rgb[4])
+                    + hal_wb_b * params.camera_to_rgb[5];
+    float hal_abc_b = (hal_wb_r * params.camera_to_rgb[6] + hal_wb_g * params.camera_to_rgb[7])
+                    + hal_wb_b * params.camera_to_rgb[8];
+    hal_abc_r = std::clamp(hal_abc_r, 0.0f, 1.0f);
+    hal_abc_g = std::clamp(hal_abc_g, 0.0f, 1.0f);
+    hal_abc_b = std::clamp(hal_abc_b, 0.0f, 1.0f);
+
+    float hal_e_r = halTableInterp(params.exp_ramp.data(),
+                                   static_cast<int>(params.exp_ramp.size()), hal_abc_r);
+    float hal_e_g = halTableInterp(params.exp_ramp.data(),
+                                   static_cast<int>(params.exp_ramp.size()), hal_abc_g);
+    float hal_e_b = halTableInterp(params.exp_ramp.data(),
+                                   static_cast<int>(params.exp_ramp.size()), hal_abc_b);
+
+    // ---- Stage-by-stage printing ----
+    PerStageValues sv[STAGE_COUNT];
+
+    // ABC
+    sv[STAGE_ABC].sdk[0] = sdk_abc_r; sv[STAGE_ABC].sdk[1] = sdk_abc_g; sv[STAGE_ABC].sdk[2] = sdk_abc_b;
+    sv[STAGE_ABC].hal[0] = hal_abc_r; sv[STAGE_ABC].hal[1] = hal_abc_g; sv[STAGE_ABC].hal[2] = hal_abc_b;
+
+    // EXPOSURE (last common intermediate before HSAT divergence)
+    sv[STAGE_EXP].sdk[0] = sdk_e_r; sv[STAGE_EXP].sdk[1] = sdk_e_g; sv[STAGE_EXP].sdk[2] = sdk_e_b;
+    sv[STAGE_EXP].hal[0] = hal_e_r; sv[STAGE_EXP].hal[1] = hal_e_g; sv[STAGE_EXP].hal[2] = hal_e_b;
+
+    const char* first_div = nullptr;
+    for (int s = 0; s < STAGE_COUNT; s++) {
+        bool match = (std::abs(sv[s].sdk[0] - sv[s].hal[0]) <= 1.19209290e-7f) &&
+                     (std::abs(sv[s].sdk[1] - sv[s].hal[1]) <= 1.19209290e-7f) &&
+                     (std::abs(sv[s].sdk[2] - sv[s].hal[2]) <= 1.19209290e-7f);
+        if (!match && first_div == nullptr) {
+            first_div = kStageName[s];
+        }
+        if (s == STAGE_HSAT || s == STAGE_LOOK || s == STAGE_TONE ||
+            s == STAGE_MATRIX || s == STAGE_ENCODE) {
+            // These are "placeholder" entries; only print key stages
+            continue;
+        }
+        std::cerr << "  " << kStageName[s]
+                  << "  sdk=(" << sv[s].sdk[0] << "," << sv[s].sdk[1] << "," << sv[s].sdk[2] << ")"
+                  << "  hal=(" << sv[s].hal[0] << "," << sv[s].hal[1] << "," << sv[s].hal[2] << ")"
+                  << "  " << (match ? "MATCH" : "DIVERGE")
+                  << "\n";
+    }
+
+    if (first_div) {
+        std::cerr << "  [FIRST_DIV: " << first_div << "]\n";
+    } else {
+        std::cerr << "  [FIRST_DIV: none in pre-ABC — diff must be in HSAT/Look/Tone/Matrix/Encode]\n";
+    }
+
+    // Print matrix + encode values separately (derived from exp stage for context)
+    // Matrix (SDK order)
+    float sdk_f_r = ((sdk_e_r * params.rgb_to_final[0] + sdk_e_g * params.rgb_to_final[1])
+                     + sdk_e_b * params.rgb_to_final[2]);
+    float sdk_f_g = ((sdk_e_r * params.rgb_to_final[3] + sdk_e_g * params.rgb_to_final[4])
+                     + sdk_e_b * params.rgb_to_final[5]);
+    float sdk_f_b = ((sdk_e_r * params.rgb_to_final[6] + sdk_e_g * params.rgb_to_final[7])
+                     + sdk_e_b * params.rgb_to_final[8]);
+    float hal_f_r = ((hal_e_r * params.rgb_to_final[0] + hal_e_g * params.rgb_to_final[1])
+                     + hal_e_b * params.rgb_to_final[2]);
+    float hal_f_g = ((hal_e_r * params.rgb_to_final[3] + hal_e_g * params.rgb_to_final[4])
+                     + hal_e_b * params.rgb_to_final[5]);
+    float hal_f_b = ((hal_e_r * params.rgb_to_final[6] + hal_e_g * params.rgb_to_final[7])
+                     + hal_e_b * params.rgb_to_final[8]);
+
+    std::cerr << "  MATRIX"
+              << "  sdk=(" << std::clamp(sdk_f_r,0.0f,1.0f) << "," << std::clamp(sdk_f_g,0.0f,1.0f)
+              << "," << std::clamp(sdk_f_b,0.0f,1.0f) << ")"
+              << "  hal=(" << std::clamp(hal_f_r,0.0f,1.0f) << "," << std::clamp(hal_f_g,0.0f,1.0f)
+              << "," << std::clamp(hal_f_b,0.0f,1.0f) << ")"
+              << "  " << floatDiffTag(sdk_f_r, hal_f_r) << "/" << floatDiffTag(sdk_f_g, hal_f_g)
+              << "/" << floatDiffTag(sdk_f_b, hal_f_b) << "\n";
+
+    // Encode (pre-quantize, using hal-style table interp)
+    float sdk_enc_r = halTableInterp(params.encode_gamma.data(),
+                                     static_cast<int>(params.encode_gamma.size()),
+                                     std::clamp(sdk_f_r, 0.0f, 1.0f));
+    float sdk_enc_g = halTableInterp(params.encode_gamma.data(),
+                                     static_cast<int>(params.encode_gamma.size()),
+                                     std::clamp(sdk_f_g, 0.0f, 1.0f));
+    float sdk_enc_b = halTableInterp(params.encode_gamma.data(),
+                                     static_cast<int>(params.encode_gamma.size()),
+                                     std::clamp(sdk_f_b, 0.0f, 1.0f));
+    float hal_enc_r = halTableInterp(params.encode_gamma.data(),
+                                     static_cast<int>(params.encode_gamma.size()),
+                                     std::clamp(hal_f_r, 0.0f, 1.0f));
+    float hal_enc_g = halTableInterp(params.encode_gamma.data(),
+                                     static_cast<int>(params.encode_gamma.size()),
+                                     std::clamp(hal_f_g, 0.0f, 1.0f));
+    float hal_enc_b = halTableInterp(params.encode_gamma.data(),
+                                     static_cast<int>(params.encode_gamma.size()),
+                                     std::clamp(hal_f_b, 0.0f, 1.0f));
+
+    std::cerr << "  ENCODE(float)"
+              << "  sdk=(" << sdk_enc_r << "," << sdk_enc_g << "," << sdk_enc_b << ")"
+              << "  hal=(" << hal_enc_r << "," << hal_enc_g << "," << hal_enc_b << ")"
+              << "  " << floatDiffTag(sdk_enc_r, hal_enc_r) << "/" << floatDiffTag(sdk_enc_g, hal_enc_g)
+              << "/" << floatDiffTag(sdk_enc_b, hal_enc_b) << "\n";
+
+    // Final uint8
+    std::cerr << "  FINAL(uint8)"
+              << "  ref=(" << ref_r << "," << ref_g << "," << ref_b << ")"
+              << "  test=(" << test_r << "," << test_g << "," << test_b << ")"
+              << "  " << ((ref_r==test_r) ? "MATCH" : "DIVERGE") << "\n";
+
+    // ---- Full pipeline reconstruction (for quantization analysis) ----
+    // Trace the COMPLETE chain from the raw Bayer inputs sx/sy/sz:
+    //   raw → ABC → EXPOSURE → HSAT → LOOK → TONE → MATRIX → ENCODE → QUANT
+    //
+    // Key insight: s_r/s_g/s_b (from pre_tone_rgb) is AFTER TONE.
+    // s_r/s_g/s_b ≠ hal_e_r/g/b (EXPOSURE output).
+    // The FULL scalar path from raw pixels must go through:
+    //   sx/sy/sz → ABC → EXPOSURE → TONE → MATRIX → ENCODE → QUANT
+    // NOT from hal_e_* → MATRIX → ENCODE → QUANT (that uses wrong input).
+
+    // Verify: s_r is post-TONE, hal_e_r is post-EXPOSURE (different input!)
+    float delta_r = std::abs(s_r - hal_e_r);
+    float delta_g = std::abs(s_g - hal_e_g);
+    float delta_b = std::abs(s_b - hal_e_b);
+
+    // Input check
+    if (delta_r > 1e-6f || delta_g > 1e-6f || delta_b > 1e-6f) {
+        std::cerr << "  [INPUT_GAP] s_r=" << s_r << " vs hal_e_r=" << hal_e_r
+                 << " gap=" << delta_r << " (s_* is post-TONE, hal_e_* is post-EXPOSURE)\n";
+    }
+
+    // 1) TONE curve: input s_* → post_tone
+    float post_tone_r = halTableInterp(params.tone_curve.data(),
+                                       static_cast<int>(params.tone_curve.size()),
+                                       std::clamp(s_r, 0.0f, 1.0f));
+    float post_tone_g = halTableInterp(params.tone_curve.data(),
+                                       static_cast<int>(params.tone_curve.size()),
+                                       std::clamp(s_g, 0.0f, 1.0f));
+    float post_tone_b = halTableInterp(params.tone_curve.data(),
+                                       static_cast<int>(params.tone_curve.size()),
+                                       std::clamp(s_b, 0.0f, 1.0f));
+
+    std::cerr << "  TONE(post)   r=" << post_tone_r << " g=" << post_tone_g << " b=" << post_tone_b << "\n";
+
+    // 2) MATRIX from post_tone
+    float mat_r = (post_tone_r * params.rgb_to_final[0]
+                 + post_tone_g * params.rgb_to_final[1]
+                 + post_tone_b * params.rgb_to_final[2]);
+    float mat_g = (post_tone_r * params.rgb_to_final[3]
+                 + post_tone_g * params.rgb_to_final[4]
+                 + post_tone_b * params.rgb_to_final[5]);
+    float mat_b = (post_tone_r * params.rgb_to_final[6]
+                 + post_tone_g * params.rgb_to_final[7]
+                 + post_tone_b * params.rgb_to_final[8]);
+    mat_r = std::clamp(mat_r, 0.0f, 1.0f);
+    mat_g = std::clamp(mat_g, 0.0f, 1.0f);
+    mat_b = std::clamp(mat_b, 0.0f, 1.0f);
+
+    std::cerr << "  MATRIX(fixed) r=" << mat_r << " g=" << mat_g << " b=" << mat_b << "\n";
+
+    // 3) ENCODE from post_tone → matrix
+    float enc_r = halTableInterp(params.encode_gamma.data(),
+                                 static_cast<int>(params.encode_gamma.size()), mat_r);
+    float enc_g = halTableInterp(params.encode_gamma.data(),
+                                 static_cast<int>(params.encode_gamma.size()), mat_g);
+    float enc_b = halTableInterp(params.encode_gamma.data(),
+                                 static_cast<int>(params.encode_gamma.size()), mat_b);
+
+    std::cerr << "  ENCODE(fixed) r=" << enc_r << " g=" << enc_g << " b=" << enc_b << "\n";
+
+    // 4) Quantization — CPU scalar floor vs GPU quantization
+    auto show_quant = [&](const char* ch, float enc, int ref_v, int test_v) {
+        if (std::abs(enc) < 1e-8) return;
+        float scaled_cpu = enc * 255.0f;
+        float adj_cpu = scaled_cpu + 0.5f;
+        int cpu_out = static_cast<int>(std::floor(adj_cpu));
+        float frac_part = scaled_cpu - std::floor(scaled_cpu);
+        int diff = (ref_v != test_v) ? (test_v - ref_v) : 0;
+        std::cerr << "  QUANT[" << ch << "] enc=" << enc
+                  << " scaled=" << scaled_cpu
+                  << " adj_cpu=" << adj_cpu
+                  << " cpu_out=" << cpu_out
+                  << " ref=" << ref_v << " test=" << test_v
+                  << " diff=" << diff
+                  << " frac=" << frac_part
+                  << "\n";
+    };
+    show_quant("R", enc_r, ref_r, test_r);
+    show_quant("G", enc_g, ref_g, test_g);
+    show_quant("B", enc_b, ref_b, test_b);
+
+    // Summary: if ALL pipeline stages produce MATCH but cpu_out ≠ ref_v,
+    // it confirms the divergence is in Metal's FMA-quantization (not CPU scalar).
+}
+
+}  // namespace stage_divergence
+
+bool renderStageDivergenceEnabled() {
+    const char* v = std::getenv("DNG_RENDER_STAGE_DIVERGENCE");
+    return v && v[0] && v[0] != '0';
+}
+
+void runStageDivergenceReplay(const std::vector<float>& pre_tone_rgb,
+                              uint32_t width,
+                              uint32_t height,
+                              const RenderParams& params,
+                              const std::vector<uint8_t>& ref_full_rgb,
+                              const std::vector<uint8_t>& test_full_rgb) {
+    using namespace stage_divergence;
+    if (pre_tone_rgb.empty() || width == 0 || height == 0 ||
+        ref_full_rgb.size() != static_cast<size_t>(width) * height * 3u ||
+        test_full_rgb.size() != static_cast<size_t>(width) * height * 3u) {
+        return;
+    }
+
+    // Extract diff coords from the existing 24-sample hardcoded set
+    // and supplement with any coords from the RenderHalideDiffSample output.
+    const std::array<std::pair<uint32_t, uint32_t>, 24> samples = {
+        // R-channel diff
+        std::make_pair(5338u, 17u),  std::make_pair(112u, 26u),  std::make_pair(3163u, 44u),
+        std::make_pair(782u, 99u),   std::make_pair(1017u, 102u), std::make_pair(1801u, 106u),
+        std::make_pair(846u, 111u), std::make_pair(3966u, 158u),
+        // G-channel diff
+        std::make_pair(4773u, 49u),  std::make_pair(3519u, 55u),  std::make_pair(4199u, 88u),
+        std::make_pair(1086u, 101u), std::make_pair(4485u, 126u), std::make_pair(4024u, 177u),
+        std::make_pair(3118u, 179u), std::make_pair(5354u, 218u),
+        // B-channel diff
+        std::make_pair(4211u, 24u),  std::make_pair(4944u, 42u),  std::make_pair(2491u, 50u),
+        std::make_pair(3393u, 76u),  std::make_pair(1307u, 101u), std::make_pair(2799u, 131u),
+    };
+
+    const uint8_t* ref_u8 = ref_full_rgb.data();
+    const uint8_t* test_u8 = test_full_rgb.data();
+
+    for (const auto& [x, y] : samples) {
+        if (x >= width || y >= height) continue;
+        size_t idx = (static_cast<size_t>(y) * width + static_cast<size_t>(x)) * 3u;
+
+        // Only analyze if this pixel is actually different
+        if (ref_full_rgb[idx] == test_full_rgb[idx] &&
+            ref_full_rgb[idx+1] == test_full_rgb[idx+1] &&
+            ref_full_rgb[idx+2] == test_full_rgb[idx+2]) {
+            continue;
+        }
+
+        // pre_tone_rgb is interleaved float: (r,g,b) per pixel
+        float s_r = pre_tone_rgb[idx];
+        float s_g = pre_tone_rgb[idx + 1];
+        float s_b = pre_tone_rgb[idx + 2];
+
+        comparePerStage(x, y, s_r, s_g, s_b, params,
+                        ref_u8, test_u8, width, height);
+    }
+}
+
+void runTailResearchReplay(const std::vector<float>& tone_rgb,
+                           uint32_t width,
+                           uint32_t height,
+                           const RenderParams& params,
+                           const std::vector<uint8_t>& ref_full_rgb) {
+    if (tone_rgb.empty() || width == 0 || height == 0 || ref_full_rgb.empty()) {
+        return;
+    }
+    std::vector<uint8_t> tail_halide(static_cast<size_t>(width) * height * 3u, 0);
+    std::vector<uint8_t> tail_ref;
+    if (!runRenderTailHalideAot(tone_rgb.data(),
+                                static_cast<int>(width),
+                                static_cast<int>(height),
+                                3,
+                                params.rgb_to_final,
+                                params.encode_gamma,
+                                tail_halide.data())) {
+        std::cerr << "[TailResearch] tail halide run failed\n";
+        return;
+    }
+    if (!runRenderTailReference(tone_rgb.data(),
+                                static_cast<int>(width),
+                                static_cast<int>(height),
+                                params,
+                                tail_ref)) {
+        std::cerr << "[TailResearch] tail reference run failed\n";
+        return;
+    }
+    const double psnr_tail = computePSNR8(tail_ref, tail_halide);
+    const double psnr_vs_full = computePSNR8(ref_full_rgb, tail_halide);
+    std::cerr << "[TailResearch] tail-halide PSNR vs tail-reference: " << psnr_tail << " dB\n";
+    std::cerr << "[TailResearch] tail-halide PSNR vs full-reference: " << psnr_vs_full << " dB\n";
+    printRgbDiffStats(tail_ref, tail_halide, width, height);
+}
+
 bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
                                 dng_image* stage3,
@@ -1570,6 +2585,46 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                               << psnr << " dB\n";
                     printRgbDiffStats(ref_full, out_rgb, src_w, src_h);
                 }
+                if (renderStageDivergenceEnabled()) {
+                    std::vector<float> pre_tone_rgb;
+                    if (runRenderPrefixToPreTone(stage3_data.data(),
+                                                 static_cast<int>(src_w),
+                                                 static_cast<int>(src_h),
+                                                 static_cast<int>(src_p),
+                                                 params,
+                                                 pre_tone_rgb)) {
+                        runStageDivergenceReplay(pre_tone_rgb,
+                                                  src_w, src_h, params,
+                                                  ref_full, out_rgb);
+                    }
+                }
+                if (renderLsbResearchEnabled()) {
+                    std::vector<float> pre_tone_rgb;
+                    if (runRenderPrefixToPreTone(stage3_data.data(),
+                                                 static_cast<int>(src_w),
+                                                 static_cast<int>(src_h),
+                                                 static_cast<int>(src_p),
+                                                 params,
+                                                 pre_tone_rgb)) {
+                        runLsbResearchReplay(pre_tone_rgb,
+                                             src_w,
+                                             src_h,
+                                             params,
+                                             ref_full,
+                                             out_rgb);
+                    }
+                }
+                if (renderTailResearchEnabled()) {
+                    std::vector<float> tone_rgb;
+                    if (runRenderPrefixToTone(stage3_data.data(),
+                                              static_cast<int>(src_w),
+                                              static_cast<int>(src_h),
+                                              static_cast<int>(src_p),
+                                              params,
+                                              tone_rgb)) {
+                        runTailResearchReplay(tone_rgb, src_w, src_h, params, ref_full);
+                    }
+                }
             }
             return true;
         }
@@ -1626,90 +2681,11 @@ bool render_stage4_halide(dng_host& host,
         return false;
     }
 
-    const bool timing_enabled = renderHalideTimingEnabled();
-    auto ms = [](const auto& start, const auto& end) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    };
-
-    if (renderHalideBitExactModeEnabled()) {
-        const uint32_t decode_threads = host.PerformAreaTaskThreads();
-        const uint32_t render_threads_override = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
-        dng_host* quality_lock_host = &host;
-        std::unique_ptr<dng_render> quality_lock_renderer;
-        if (render_threads_override > 0 && render_threads_override != decode_threads) {
-            if (dng_host* override_host = qualityLockRenderHostCache().acquire(render_threads_override)) {
-                quality_lock_host = override_host;
-                quality_lock_renderer = std::make_unique<dng_render>(*quality_lock_host, negative);
-                copyRenderSettings(renderer, *quality_lock_renderer);
-            }
-        }
-        dng_render& quality_renderer =
-            quality_lock_renderer ? *quality_lock_renderer : const_cast<dng_render&>(renderer);
-        const uint32_t render_threads = quality_lock_host->PerformAreaTaskThreads();
-
-        const auto sdk_render_start = std::chrono::high_resolution_clock::now();
-        AutoPtr<dng_image> final_image(quality_renderer.Render());
-        const auto sdk_render_end = std::chrono::high_resolution_clock::now();
-        if (!final_image.Get()) {
-            return false;
-        }
-        out_w = final_image->Width();
-        out_h = final_image->Height();
-        out_rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
-
-        const auto extract_start = std::chrono::high_resolution_clock::now();
-        bool extracted = false;
-        std::unique_ptr<dng_const_tile_buffer> borrowed_tile;
-        const uint8_t* borrowed_ptr = nullptr;
-        uint32_t bw = 0, bh = 0, bp = 0;
-        int32_t brow = 0, bcol = 0, bplane = 0;
-        const dng_rect bounds = final_image->Bounds();
-        if (borrowImageInterleaved8(final_image.Get(),
-                                    bounds,
-                                    borrowed_tile,
-                                    borrowed_ptr,
-                                    bw,
-                                    bh,
-                                    bp,
-                                    brow,
-                                    bcol,
-                                    bplane)) {
-            if (bw == out_w && bh == out_h && bp == 3) {
-                packBorrowedInterleaved8(borrowed_ptr, bw, bh, bp, brow, bcol, bplane, out_rgb);
-                extracted = true;
-            }
-        }
-
-        if (!extracted) {
-            dng_pixel_buffer buffer;
-            buffer.fArea = final_image->Bounds();
-            buffer.fPlane = 0;
-            buffer.fPlanes = 3;
-            buffer.fPixelType = ttByte;
-            buffer.fPixelSize = 1;
-            buffer.fData = out_rgb.data();
-            buffer.fRowStep = static_cast<int32>(out_w * 3);
-            buffer.fColStep = 3;
-            buffer.fPlaneStep = 1;
-            final_image->Get(buffer);
-        }
-        const auto extract_end = std::chrono::high_resolution_clock::now();
-        if (timing_enabled) {
-            std::cerr << "[RenderHalideTiming] qualityLockSDKRender="
-                      << ms(sdk_render_start, sdk_render_end)
-                      << " ms qualityLockExtract="
-                      << ms(extract_start, extract_end)
-                      << " ms [RenderHalideInfo] qualityLockRenderThreads="
-                      << render_threads << "\n";
-        }
-        return true;
-    }
-
     return runHalideFullOrSdkFallback(host,
                                       negative,
                                       stage3,
                                       renderer,
-                                      timing_enabled,
+                                      renderHalideTimingEnabled(),
                                       out_rgb,
                                       out_w,
                                       out_h);

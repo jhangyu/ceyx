@@ -100,6 +100,24 @@ target_link_libraries(dng_render_maps_noencode_generator PRIVATE Halide::Generat
 add_executable(dng_render_tail_generator ${SRC_DIR}/DngRenderTailGenerator.cpp)
 target_include_directories(dng_render_tail_generator PRIVATE ${INC_DIR})
 target_link_libraries(dng_render_tail_generator PRIVATE Halide::Generator)
+option(DNG_RENDER_TAIL_STRICT_R
+       "Apply strict_float to tail rgb_to_final R-channel sum only"
+       OFF)
+option(DNG_RENDER_TAIL_STRICT_G
+       "Apply strict_float to tail rgb_to_final G-channel sum only"
+       OFF)
+option(DNG_RENDER_TAIL_STRICT_B
+       "Apply strict_float to tail rgb_to_final B-channel sum only"
+       OFF)
+if(DNG_RENDER_TAIL_STRICT_R)
+    target_compile_definitions(dng_render_tail_generator PRIVATE DNG_RENDER_TAIL_STRICT_R=1)
+endif()
+if(DNG_RENDER_TAIL_STRICT_G)
+    target_compile_definitions(dng_render_tail_generator PRIVATE DNG_RENDER_TAIL_STRICT_G=1)
+endif()
+if(DNG_RENDER_TAIL_STRICT_B)
+    target_compile_definitions(dng_render_tail_generator PRIVATE DNG_RENDER_TAIL_STRICT_B=1)
+endif()
 
 add_executable(dng_render_tonetail_generator ${SRC_DIR}/DngRenderToneTailGenerator.cpp)
 target_include_directories(dng_render_tonetail_generator PRIVATE ${INC_DIR})
@@ -113,6 +131,109 @@ if(APPLE)
 else()
     set(AOT_TARGET "host-no_asserts-no_bounds_query")
 endif()
+
+option(DNG_RENDER_STAGE4_STRICT_FLOAT
+       "Enable strict_float target feature for dng_render_stage4 AOT only"
+       OFF)
+option(DNG_RENDER_TAIL_STRICT_FLOAT
+       "Enable strict_float target feature for dng_render_tail_stage4 AOT only"
+       OFF)
+option(DNG_RENDER_STAGE4_USE_METAL_TARGET
+       "Use metal feature in dng_render_stage4 AOT target (APPLE only)"
+       ON)
+option(DNG_RENDER_STAGE4_MATRIX_STRICT_EXPR
+       "Enable strict_float intrinsic on rgb_to_final matrix expression in DngRenderGenerator"
+       OFF)
+option(DNG_RENDER_STAGE4_ENCODE_TRUNCATE
+       "Use truncation (no +0.5) in Stage4 encode8 quantization"
+       OFF)
+option(DNG_RENDER_STAGE4_MATRIX_ASSOC_ALT
+       "Use alternative association order for rgb_to_final accumulation"
+       OFF)
+option(DNG_RENDER_STAGE4_MATRIX_STRICT_R
+       "Apply strict_float to rgb_to_final R-channel sum only"
+       OFF)
+option(DNG_RENDER_STAGE4_MATRIX_STRICT_G
+       "Apply strict_float to rgb_to_final G-channel sum only"
+       OFF)
+option(DNG_RENDER_STAGE4_MATRIX_STRICT_B
+       "Apply strict_float to rgb_to_final B-channel sum only"
+       OFF)
+option(DNG_RENDER_STAGE4_ABC_ASSOC_ALT
+       "Use alternative association order for camera_to_rgb accumulation"
+       OFF)
+option(DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC
+       "Materialize ABC output as an explicit stage (fusion boundary experiment)"
+       OFF)
+option(DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE
+       "Materialize tone output as an explicit stage (fusion boundary experiment)"
+       OFF)
+option(DNG_RENDER_STAGE4_ABC_SPLIT_MULADD
+       "Force camera_to_rgb matrix into split mul/add sequence"
+       OFF)
+option(DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD
+       "Force rgb_to_final matrix into split mul/add sequence"
+       OFF)
+option(DNG_RENDER_STAGE4_NO_VECTORIZE
+       "Disable Halide vectorize/unroll on CPU schedule for Stage4 (FMA/SIMD-reorder bisection)"
+       OFF)
+if(DNG_RENDER_STAGE4_MATRIX_STRICT_EXPR)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_MATRIX_STRICT_EXPR=1)
+endif()
+if(DNG_RENDER_STAGE4_ENCODE_TRUNCATE)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_ENCODE_TRUNCATE=1)
+endif()
+if(DNG_RENDER_STAGE4_MATRIX_ASSOC_ALT)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_MATRIX_ASSOC_ALT=1)
+endif()
+if(DNG_RENDER_STAGE4_MATRIX_STRICT_R)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_MATRIX_STRICT_R=1)
+endif()
+if(DNG_RENDER_STAGE4_MATRIX_STRICT_G)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_MATRIX_STRICT_G=1)
+endif()
+if(DNG_RENDER_STAGE4_MATRIX_STRICT_B)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_MATRIX_STRICT_B=1)
+endif()
+if(DNG_RENDER_STAGE4_ABC_ASSOC_ALT)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_ABC_ASSOC_ALT=1)
+endif()
+if(DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC=1)
+endif()
+if(DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE=1)
+endif()
+if(DNG_RENDER_STAGE4_ABC_SPLIT_MULADD)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_ABC_SPLIT_MULADD=1)
+endif()
+if(DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD=1)
+endif()
+if(DNG_RENDER_STAGE4_NO_VECTORIZE)
+    target_compile_definitions(dng_render_generator PRIVATE DNG_RENDER_STAGE4_NO_VECTORIZE=1)
+endif()
+if(APPLE AND DNG_RENDER_STAGE4_USE_METAL_TARGET)
+    set(DNG_RENDER_STAGE4_AOT_BASE_TARGET "host-metal-no_asserts-no_bounds_query")
+else()
+    set(DNG_RENDER_STAGE4_AOT_BASE_TARGET "host-no_asserts-no_bounds_query")
+endif()
+set(DNG_RENDER_STAGE4_AOT_TARGET "${DNG_RENDER_STAGE4_AOT_BASE_TARGET}-no_runtime")
+if(DNG_RENDER_STAGE4_STRICT_FLOAT)
+    set(DNG_RENDER_STAGE4_AOT_TARGET "${DNG_RENDER_STAGE4_AOT_BASE_TARGET}-strict_float-no_runtime")
+endif()
+message(STATUS "dng_render_stage4 AOT target: ${DNG_RENDER_STAGE4_AOT_TARGET}")
+message(STATUS "dng_render_stage4 metal target: ${DNG_RENDER_STAGE4_USE_METAL_TARGET}")
+message(STATUS "dng_render_stage4 matrix strict expr: ${DNG_RENDER_STAGE4_MATRIX_STRICT_EXPR}")
+message(STATUS "dng_render_stage4 encode truncate: ${DNG_RENDER_STAGE4_ENCODE_TRUNCATE}")
+message(STATUS "dng_render_stage4 matrix assoc alt: ${DNG_RENDER_STAGE4_MATRIX_ASSOC_ALT}")
+message(STATUS "dng_render_stage4 matrix strict R/G/B: ${DNG_RENDER_STAGE4_MATRIX_STRICT_R}/${DNG_RENDER_STAGE4_MATRIX_STRICT_G}/${DNG_RENDER_STAGE4_MATRIX_STRICT_B}")
+message(STATUS "dng_render_stage4 abc assoc alt: ${DNG_RENDER_STAGE4_ABC_ASSOC_ALT}")
+message(STATUS "dng_render_stage4 frontend split abc/tone: ${DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC}/${DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE}")
+message(STATUS "dng_render_stage4 split muladd abc/final: ${DNG_RENDER_STAGE4_ABC_SPLIT_MULADD}/${DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD}")
+message(STATUS "dng_render_stage4 no vectorize: ${DNG_RENDER_STAGE4_NO_VECTORIZE}")
+message(STATUS "dng_render_tail strict float: ${DNG_RENDER_TAIL_STRICT_FLOAT}")
+message(STATUS "dng_render_tail strict R/G/B: ${DNG_RENDER_TAIL_STRICT_R}/${DNG_RENDER_TAIL_STRICT_G}/${DNG_RENDER_TAIL_STRICT_B}")
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_pipeline.h
@@ -132,7 +253,7 @@ add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_w
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.h
-    COMMAND dng_render_generator -g dng_render_stage4 -f dng_render_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    COMMAND dng_render_generator -g dng_render_stage4 -f dng_render_stage4 -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
     DEPENDS dng_render_generator
     COMMENT "Generating Halide AOT Stage4 Render..."
 )
@@ -156,7 +277,7 @@ add_custom_target(dng_render_maps_noencode_aot_target DEPENDS ${HALIDE_OUTPUT_DI
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.h
-    COMMAND dng_render_tail_generator -g dng_render_tail_stage4 -f dng_render_tail_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    COMMAND dng_render_tail_generator -g dng_render_tail_stage4 -f dng_render_tail_stage4 -o ${HALIDE_OUTPUT_DIR} target=$<IF:$<BOOL:${DNG_RENDER_TAIL_STRICT_FLOAT}>,${AOT_TARGET}-strict_float-no_runtime,${AOT_TARGET}-no_runtime>
     DEPENDS dng_render_tail_generator
     COMMENT "Generating Halide AOT Stage4 Tail Render..."
 )
