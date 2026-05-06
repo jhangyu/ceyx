@@ -1,22 +1,43 @@
-/**
- * dng_mosaic_halide.cpp
- *
- * Phase 5.3 - Bilinear demosaic aligned with DNG SDK Stage3 layout.
- *
- * Notes:
- * - Uses RGGB Bayer pattern expected by current sample set.
- * - Uses edge-clamp boundary behavior.
- * - Writes interleaved RGB output: RGBRGB...
- */
+/*
+---
+file_summary: "Stage3 bilinear demosaic bridge; uses Halide AOT Metal by default, with an explicit CPU reference path for disabled AOT."
+functions:
+  - name: "runDemosaicBilinearAot"
+    description: "Wraps the dng_demosaic_bilinear Halide AOT kernel and copies output back to host."
+    lines: "87-124"
+  - name: "demosaic_pattern_bilinear"
+    description: "CPU multithreaded RGGB bilinear demosaic fallback/reference implementation."
+    lines: "147-242"
+  - name: "demosaic_bilinear_halide_aot"
+    description: "C ABI for the Halide AOT demosaic path."
+    lines: "244-249"
+  - name: "demosaic_bilinear_halide"
+    description: "Default demosaic entry; tries AOT unless disabled, then CPU reference if the AOT wrapper returns failure."
+    lines: "251-259"
+  - name: "demosaic_ahd_halide"
+    description: "Historical compatibility entry that currently dispatches to bilinear demosaic."
+    lines: "261-266"
+  - name: "get_cfa_pattern"
+    description: "Returns the fixed RGGB CFA pattern used by current samples."
+    lines: "268-273"
+---
+*/
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <thread>
 #include <vector>
 
+#include "HalideBuffer.h"
+#include "dng_demosaic_bilinear.h"
+
 namespace {
+
+using Halide::Runtime::Buffer;
 
 inline int clampCoord(int v, int lo, int hi) {
     return std::min(std::max(v, lo), hi);
@@ -60,6 +81,55 @@ inline uint16_t avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
     const uint32_t total = static_cast<uint32_t>(a) + static_cast<uint32_t>(b) +
                            static_cast<uint32_t>(c) + static_cast<uint32_t>(d);
     return static_cast<uint16_t>((total + 2u) >> 2);
+}
+
+bool demosaicAotDisabled() {
+    const char* v = std::getenv("DNG_DEMOSAIC_AOT");
+    return v && v[0] == '0';
+}
+
+bool demosaicTimingEnabled() {
+    const char* v = std::getenv("DNG_DEMOSAIC_HALIDE_TIMING");
+    return v && v[0] && v[0] != '0';
+}
+
+bool runDemosaicBilinearAot(const uint16_t* input,
+                            int width,
+                            int height,
+                            uint16_t* output) {
+    if (!input || !output || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    Buffer<uint16_t> src_buf(const_cast<uint16_t*>(input), width, height);
+    Buffer<uint16_t> dst_buf =
+        Buffer<uint16_t>::make_interleaved(output, width, height, 3);
+    src_buf.set_host_dirty();
+    dst_buf.set_host_dirty(false);
+
+    const auto t1 = std::chrono::high_resolution_clock::now();
+    const int result = dng_demosaic_bilinear(src_buf.raw_buffer(), dst_buf.raw_buffer());
+    const auto t2 = std::chrono::high_resolution_clock::now();
+    if (result != 0) {
+        return false;
+    }
+    if (dst_buf.copy_to_host() != 0) {
+        return false;
+    }
+    const auto t3 = std::chrono::high_resolution_clock::now();
+
+    if (demosaicTimingEnabled()) {
+        auto ms = [](const auto& a, const auto& b) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
+        };
+        std::cerr << "[DemosaicHalideTiming] prep=" << ms(t0, t1)
+                  << " ms kernel=" << ms(t1, t2)
+                  << " ms copy_to_host=" << ms(t2, t3)
+                  << " ms\n";
+    }
+
+    return true;
 }
 
 }  // namespace
@@ -161,10 +231,20 @@ extern "C" void demosaic_pattern_bilinear(const uint16_t* input,
     }
 }
 
+extern "C" int demosaic_bilinear_halide_aot(const uint16_t* input,
+                                             int width,
+                                             int height,
+                                             uint16_t* output) {
+    return runDemosaicBilinearAot(input, width, height, output) ? 1 : 0;
+}
+
 extern "C" void demosaic_bilinear_halide(const uint16_t* input,
                                           int width,
                                           int height,
                                           uint16_t* output) {
+    if (!demosaicAotDisabled() && demosaic_bilinear_halide_aot(input, width, height, output)) {
+        return;
+    }
     demosaic_pattern_bilinear(input, width, height, output);
 }
 
@@ -172,7 +252,7 @@ extern "C" void demosaic_ahd_halide(const uint16_t* input,
                                      int width,
                                      int height,
                                      uint16_t* output) {
-    demosaic_pattern_bilinear(input, width, height, output);
+    demosaic_bilinear_halide(input, width, height, output);
 }
 
 extern "C" void get_cfa_pattern(int pattern[4]) {

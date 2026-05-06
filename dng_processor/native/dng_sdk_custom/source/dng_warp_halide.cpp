@@ -1,3 +1,82 @@
+/*
+---
+file_summary: >
+  Stage3 WarpRectilinear 橋接層。負責從 DNG SDK opcode 取出 warp 參數、建立 tile clipping grid，
+  dispatch 到 Halide AOT 或明確指定的 CPU reference-compatible 路徑，並在 bit-exact 模式下退回 SDK Apply。
+
+notes:
+  - `warp_rectilinear_halide()` 是純 buffer 入口；`apply_warp_rectilinear_to_image()` 是 `dng_image` 入口。
+  - Halide kernel 依賴 tile clipping grid 來對齊 SDK resample 邊界與減少無效取樣。
+  - `DNG_WARP_BIT_EXACT` 啟用時，直接改走 SDK opcode `Apply()`。
+
+structs:
+  - name: "WarpRuntimeParams"
+    description: "每次 warp 執行時計算的中心點、半徑與像素比例快取。"
+    lines: "168-175"
+  - name: "TileClippingGrid"
+    description: "每個 tile 的 source sampling 範圍快取，供 CPU/Halide 共用。"
+    lines: "177-189"
+
+functions:
+  - name: "cubicWeight"
+    description: "Bicubic kernel 權重函式。"
+    lines: "104-114"
+  - name: "normalize4"
+    description: "將 4-tap 權重正規化。"
+    lines: "116-128"
+  - name: "computeBicubicWeights"
+    description: "預先計算單一 subsample phase 的 bicubic 權重。"
+    lines: "130-136"
+  - name: "quantizeSubsampleIndex"
+    description: "將小數位移量量化成 SDK 相容的 subsample index。"
+    lines: "141-149"
+  - name: "bicubicWeightsForSubsample"
+    description: "回傳指定 subsample phase 的 4-tap 權重表。"
+    lines: "151-166"
+  - name: "isWarpBitExactModeEnabled"
+    description: "讀取 `DNG_WARP_BIT_EXACT`。"
+    lines: "191-194"
+  - name: "buildRuntimeParams"
+    description: "由影像尺寸與 opcode 參數推導 warp 執行期幾何參數。"
+    lines: "196-225"
+  - name: "computeSdkTileExtent"
+    description: "推導接近 SDK 行為的 tile size。"
+    lines: "227-234"
+  - name: "warpPlaneIndex"
+    description: "將輸出 channel 映射到 warp plane index。"
+    lines: "236-244"
+  - name: "getSrcPixelPosition"
+    description: "把目標座標反算回 source 座標，套用 radial/tangential distortion。"
+    lines: "246-285"
+  - name: "buildTileClippingGrid"
+    description: "預估每個 tile 所需的 source sampling bounds。"
+    lines: "287-364"
+  - name: "warpRectilinearCpu"
+    description: "CPU fallback；用 clipping grid + bicubic resample 執行 warp。"
+    lines: "366-446"
+  - name: "imageToInterleaved"
+    description: "把 `dng_image` 讀成 uint16 interleaved buffer。"
+    lines: "448-473"
+  - name: "writeInterleavedToImage"
+    description: "把 interleaved buffer 寫回 `dng_image`。"
+    lines: "475-496"
+  - name: "runWarpHalideAot"
+    description: "建立 Halide Buffer 與 tile bounds，呼叫 rectilinear_warp AOT kernel。"
+    lines: "498-589"
+  - name: "warpRectilinearModeName"
+    description: "列舉值轉字串。"
+    lines: "593-601"
+  - name: "extractWarpRectilinearParams"
+    description: "從 SDK opcode 取出 plane/radial/tangential 參數並填入 runtime struct。"
+    lines: "603-644"
+  - name: "warp_rectilinear_halide"
+    description: "buffer 入口；依 mode dispatch Halide Metal / Halide CPU / AUTO 路徑。"
+    lines: "646-687"
+  - name: "apply_warp_rectilinear_to_image"
+    description: "Stage3 正式入口；處理 bit-exact SDK fallback、image <-> buffer 轉換與 timing。"
+    lines: "689-751"
+---
+*/
 #include "dng_warp_halide.h"
 
 #include <algorithm>
@@ -9,6 +88,7 @@
 #include <vector>
 
 #include "HalideBuffer.h"
+#include "dng_demosaic_warp.h"
 #include "rectilinear_warp.h"
 
 #include <dng_host.h>
@@ -32,18 +112,6 @@ float cubicWeight(float x) {
         return (((a * x - 5.0f * a) * x + 8.0f * a) * x - 4.0f * a);
     }
     return (((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f);
-}
-
-double cubicWeightReal64(double x) {
-    const double a = -0.75;
-    x = std::fabs(x);
-    if (x >= 2.0) {
-        return 0.0;
-    }
-    if (x >= 1.0) {
-        return (((a * x - 5.0 * a) * x + 8.0 * a) * x - 4.0 * a);
-    }
-    return (((a + 2.0) * x - (a + 3.0)) * x * x + 1.0);
 }
 
 void normalize4(float* w) {
@@ -98,44 +166,6 @@ const float* bicubicWeightsForSubsample(int subsampleIndex) {
     return table[clamped];
 }
 
-const float* bicubicWeights2dSdkForSubsample(int subsampleX, int subsampleY) {
-    static float table[kResampleSubsampleCount2D][kResampleSubsampleCount2D][16];
-    static bool initialized = false;
-
-    if (!initialized) {
-        for (int y = 0; y < kResampleSubsampleCount2D; ++y) {
-            const double y_fract = y * (1.0 / static_cast<double>(kResampleSubsampleCount2D));
-            for (int x = 0; x < kResampleSubsampleCount2D; ++x) {
-                const double x_fract = x * (1.0 / static_cast<double>(kResampleSubsampleCount2D));
-                double t32 = 0.0;
-                int idx = 0;
-                for (int i = 0; i < 4; ++i) {
-                    const int y_int = i - 1;
-                    const double y_pos = static_cast<double>(y_int) - y_fract;
-                    const float y_w = static_cast<float>(cubicWeightReal64(y_pos));
-                    for (int j = 0; j < 4; ++j) {
-                        const int x_int = j - 1;
-                        const double x_pos = static_cast<double>(x_int) - x_fract;
-                        const float x_w = static_cast<float>(cubicWeightReal64(x_pos));
-                        const float w = x_w * y_w;
-                        table[y][x][idx++] = w;
-                        t32 += static_cast<double>(w);
-                    }
-                }
-                const float s32 = static_cast<float>(1.0 / t32);
-                for (int k = 0; k < 16; ++k) {
-                    table[y][x][k] *= s32;
-                }
-            }
-        }
-        initialized = true;
-    }
-
-    const int clamped_x = std::max(0, std::min(kResampleSubsampleCount2D - 1, subsampleX));
-    const int clamped_y = std::max(0, std::min(kResampleSubsampleCount2D - 1, subsampleY));
-    return table[clamped_y][clamped_x];
-}
-
 struct WarpRuntimeParams {
     double center_x = 0.0;
     double center_y = 0.0;
@@ -158,6 +188,11 @@ struct TileClippingGrid {
         return bounds[idx];
     }
 };
+
+bool isWarpBitExactModeEnabled() {
+    const char* v = std::getenv("DNG_WARP_BIT_EXACT");
+    return v && v[0] && v[0] != '0';
+}
 
 WarpRuntimeParams buildRuntimeParams(int width, int height, const WarpRectilinearParams& params) {
     WarpRuntimeParams runtime;
@@ -411,88 +446,6 @@ void warpRectilinearCpu(const uint16_t* src,
     }
 }
 
-void warpRectilinearCpuBitExact(const uint16_t* src,
-                                int width,
-                                int height,
-                                int planes,
-                                const WarpRectilinearParams& params,
-                                const TileClippingGrid& tile_grid,
-                                uint16_t* dst) {
-    const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
-    constexpr float kInvU16Range = 1.0f / 65535.0f;
-    constexpr float kU16Range = 65535.0f;
-
-    auto sample_normalized = [&](int x, int y, int c) -> float {
-        const int clamped_x = std::max(0, std::min(width - 1, x));
-        const int clamped_y = std::max(0, std::min(height - 1, y));
-        const size_t idx = (static_cast<size_t>(clamped_y) * width + clamped_x) * planes + c;
-        return kInvU16Range * static_cast<float>(src[idx]);
-    };
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const int tile_x = std::min(x / tile_grid.tile_width, tile_grid.tiles_x - 1);
-            const int tile_y = std::min(y / tile_grid.tile_height, tile_grid.tiles_y - 1);
-            const int min_base_x = tile_grid.get(0, tile_x, tile_y);
-            const int max_base_x = tile_grid.get(1, tile_x, tile_y);
-            const int min_base_y = tile_grid.get(2, tile_x, tile_y);
-            const int max_base_y = tile_grid.get(3, tile_x, tile_y);
-
-            for (int c = 0; c < planes; ++c) {
-                const int plane = warpPlaneIndex(c, params);
-                double src_x = 0.0;
-                double src_y = 0.0;
-                getSrcPixelPosition(static_cast<double>(x),
-                                    static_cast<double>(y),
-                                    plane,
-                                    runtime,
-                                    params,
-                                    src_x,
-                                    src_y);
-
-                const double src_x_floor = std::floor(src_x);
-                const double src_y_floor = std::floor(src_y);
-
-                int base_x = static_cast<int>(src_x_floor) - 1;
-                int base_y = static_cast<int>(src_y_floor) - 1;
-                int frac_x_idx = quantizeSubsampleIndex(src_x - src_x_floor);
-                int frac_y_idx = quantizeSubsampleIndex(src_y - src_y_floor);
-
-                if (base_x < min_base_x) {
-                    base_x = min_base_x;
-                    frac_x_idx = 0;
-                } else if (base_x > max_base_x) {
-                    base_x = max_base_x;
-                    frac_x_idx = 0;
-                }
-
-                if (base_y < min_base_y) {
-                    base_y = min_base_y;
-                    frac_y_idx = 0;
-                } else if (base_y > max_base_y) {
-                    base_y = max_base_y;
-                    frac_y_idx = 0;
-                }
-
-                const float* weights = bicubicWeights2dSdkForSubsample(frac_x_idx, frac_y_idx);
-
-                float total = 0.0f;
-                int widx = 0;
-                for (int ky = 0; ky < 4; ++ky) {
-                    const int sy = base_y + ky;
-                    for (int kx = 0; kx < 4; ++kx) {
-                        total += weights[widx++] * sample_normalized(base_x + kx, sy, c);
-                    }
-                }
-
-                const float pinned = Pin_Overrange(total);
-                const uint16_t out = static_cast<uint16_t>(pinned * kU16Range + 0.5f);
-                dst[(static_cast<size_t>(y) * width + x) * planes + c] = out;
-            }
-        }
-    }
-}
-
 bool imageToInterleaved(dng_image* image,
                         std::vector<uint16_t>& data,
                         uint32_t& width,
@@ -636,6 +589,94 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     return true;
 }
 
+bool runDemosaicWarpHalideAot(const uint16_t* src_bayer,
+                              int width,
+                              int height,
+                              const WarpRuntimeParams& runtime,
+                              const WarpRectilinearParams& params,
+                              const TileClippingGrid& tile_grid,
+                              uint16_t* dst_interleaved_rgb) {
+    if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    const bool timing_enabled = []() {
+        const char* v = std::getenv("DNG_DEMOSAIC_WARP_HALIDE_TIMING");
+        return v && v[0] && v[0] != '0';
+    }();
+    const auto t0 = std::chrono::high_resolution_clock::now();
+
+    Buffer<uint16_t> src_buf(const_cast<uint16_t*>(src_bayer), width, height);
+    Buffer<uint16_t> dst_buf =
+        Buffer<uint16_t>::make_interleaved(dst_interleaved_rgb, width, height, 3);
+
+    const int plane_count = static_cast<int>(std::max<uint32_t>(1, params.planes));
+    thread_local std::vector<float> rad_storage;
+    thread_local std::vector<float> tan_storage;
+    rad_storage.resize(static_cast<size_t>(4 * plane_count));
+    tan_storage.resize(static_cast<size_t>(2 * plane_count));
+
+    for (int plane = 0; plane < plane_count; ++plane) {
+        for (int i = 0; i < 4; ++i) {
+            rad_storage[static_cast<size_t>(plane * 4 + i)] = params.rad_params[plane][i];
+        }
+        for (int i = 0; i < 2; ++i) {
+            tan_storage[static_cast<size_t>(plane * 2 + i)] = params.tan_params[plane][i];
+        }
+    }
+
+    Buffer<float> rad_buf(rad_storage.data(), 4, plane_count);
+    Buffer<float> tan_buf(tan_storage.data(), 2, plane_count);
+    Buffer<int32_t> tile_bounds_buf(const_cast<int32_t*>(tile_grid.bounds.data()),
+                                    4,
+                                    tile_grid.tiles_x,
+                                    tile_grid.tiles_y);
+
+    src_buf.set_host_dirty();
+    rad_buf.set_host_dirty();
+    tan_buf.set_host_dirty();
+    tile_bounds_buf.set_host_dirty();
+    dst_buf.set_host_dirty(false);
+
+    const auto t1 = std::chrono::high_resolution_clock::now();
+    const int result = dng_demosaic_warp(src_buf.raw_buffer(),
+                                         rad_buf.raw_buffer(),
+                                         tan_buf.raw_buffer(),
+                                         tile_bounds_buf.raw_buffer(),
+                                         static_cast<int32_t>(params.planes),
+                                         static_cast<float>(runtime.center_x),
+                                         static_cast<float>(runtime.center_y),
+                                         static_cast<float>(runtime.norm_radius),
+                                         static_cast<float>(runtime.inv_norm_radius),
+                                         static_cast<float>(runtime.pixel_scale_v),
+                                         static_cast<float>(runtime.pixel_scale_v_inv),
+                                         params.is_rad_nop_all ? 1 : 0,
+                                         params.is_tan_nop_all ? 1 : 0,
+                                         static_cast<int32_t>(tile_grid.tile_width),
+                                         static_cast<int32_t>(tile_grid.tile_height),
+                                         dst_buf.raw_buffer());
+    if (result != 0) {
+        return false;
+    }
+    const auto t2 = std::chrono::high_resolution_clock::now();
+    if (dst_buf.copy_to_host() != 0) {
+        return false;
+    }
+    const auto t3 = std::chrono::high_resolution_clock::now();
+
+    if (timing_enabled) {
+        auto ms = [](const auto& a, const auto& b) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
+        };
+        std::cerr << "[DemosaicWarpHalideTiming] prep=" << ms(t0, t1)
+                  << " ms kernel=" << ms(t1, t2)
+                  << " ms copy_to_host=" << ms(t2, t3)
+                  << " ms\n";
+    }
+
+    return true;
+}
+
 }  // namespace
 
 const char* warpRectilinearModeName(WarpRectilinearMode mode) {
@@ -708,22 +749,6 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
 
     const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
     const TileClippingGrid tile_grid = buildTileClippingGrid(width, height, planes, runtime, params);
-    const bool bit_exact_mode = []() {
-        const char* v = std::getenv("DNG_WARP_BIT_EXACT");
-        return v && v[0] && v[0] != '0';
-    }();
-
-    if (bit_exact_mode) {
-        warpRectilinearCpuBitExact(src_interleaved_rgb,
-                                   width,
-                                   height,
-                                   planes,
-                                   params,
-                                   tile_grid,
-                                   dst_interleaved_rgb);
-        return true;
-    }
-
     if (mode == WarpRectilinearMode::HALIDE_METAL || mode == WarpRectilinearMode::AUTO) {
         if (runWarpHalideAot(src_interleaved_rgb,
                              width,
@@ -750,14 +775,51 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
     return true;
 }
 
+bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
+                                      int width,
+                                      int height,
+                                      const WarpRectilinearParams& params,
+                                      WarpRectilinearMode mode,
+                                      uint16_t* dst_interleaved_rgb) {
+    if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
+        return false;
+    }
+    if (mode == WarpRectilinearMode::SDK || isWarpBitExactModeEnabled()) {
+        return false;
+    }
+
+    const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
+    const TileClippingGrid tile_grid = buildTileClippingGrid(width, height, 3, runtime, params);
+    if (mode == WarpRectilinearMode::HALIDE_METAL || mode == WarpRectilinearMode::AUTO) {
+        if (runDemosaicWarpHalideAot(src_bayer,
+                                     width,
+                                     height,
+                                     runtime,
+                                     params,
+                                     tile_grid,
+                                     dst_interleaved_rgb)) {
+            return true;
+        }
+        if (mode == WarpRectilinearMode::HALIDE_METAL) {
+            return false;
+        }
+    }
+
+    return false;
+}
+
 bool apply_warp_rectilinear_to_image(dng_host& host,
                                      dng_negative& negative,
                                      const dng_opcode_WarpRectilinear& opcode,
                                      AutoPtr<dng_image>& image,
                                      WarpRectilinearMode mode) {
-    (void) host;
     if (mode == WarpRectilinearMode::SDK) {
         return false;
+    }
+
+    if (isWarpBitExactModeEnabled()) {
+        const_cast<dng_opcode_WarpRectilinear&>(opcode).Apply(host, negative, image);
+        return true;
     }
 
     const bool timing_enabled = []() {

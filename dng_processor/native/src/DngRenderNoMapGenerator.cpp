@@ -63,16 +63,19 @@ public:
             Expr tb = table_interp(tone_curve, b0);
 
             Expr rr1 = tr;
-            Expr gg1 = tb + ((tr - tb) * (g0 - b0) / max(r0 - b0, 1e-8f));
+            Expr den1 = select((r0 >= g0) && (g0 > b0), r0 - b0, 1.0f);
+            Expr gg1 = tb + ((tr - tb) * (g0 - b0) / den1);
             Expr bb1 = tb;
 
             Expr bb2 = tb;
             Expr gg2 = tg;
-            Expr rr2 = gg2 + ((bb2 - gg2) * (r0 - g0) / max(b0 - g0, 1e-8f));
+            Expr den2 = select((r0 >= g0) && !(g0 > b0) && (b0 > r0), b0 - g0, 1.0f);
+            Expr rr2 = gg2 + ((bb2 - gg2) * (r0 - g0) / den2);
 
             Expr rr3 = tr;
             Expr gg3 = tg;
-            Expr bb3 = gg3 + ((rr3 - gg3) * (b0 - g0) / max(r0 - g0, 1e-8f));
+            Expr den3 = select((r0 >= g0) && !(g0 > b0) && !(b0 > r0) && (b0 > g0), r0 - g0, 1.0f);
+            Expr bb3 = gg3 + ((rr3 - gg3) * (b0 - g0) / den3);
 
             Expr rr4 = tr;
             Expr gg4 = tg;
@@ -80,15 +83,18 @@ public:
 
             Expr gg5 = tg;
             Expr bb5 = tb;
-            Expr rr5 = bb5 + ((gg5 - bb5) * (r0 - b0) / max(g0 - b0, 1e-8f));
+            Expr den5 = select(!(r0 >= g0) && (r0 >= b0), g0 - b0, 1.0f);
+            Expr rr5 = bb5 + ((gg5 - bb5) * (r0 - b0) / den5);
 
             Expr bb6 = tb;
             Expr rr6 = tr;
-            Expr gg6 = rr6 + ((bb6 - rr6) * (g0 - r0) / max(b0 - r0, 1e-8f));
+            Expr den6 = select(!(r0 >= g0) && !(r0 >= b0) && (b0 > g0), b0 - r0, 1.0f);
+            Expr gg6 = rr6 + ((bb6 - rr6) * (g0 - r0) / den6);
 
             Expr gg7 = tg;
             Expr rr7 = tr;
-            Expr bb7 = rr7 + ((gg7 - rr7) * (b0 - r0) / max(g0 - r0, 1e-8f));
+            Expr den7 = select(!(r0 >= g0) && !(r0 >= b0) && !(b0 > g0), g0 - r0, 1.0f);
+            Expr bb7 = rr7 + ((gg7 - rr7) * (b0 - r0) / den7);
 
             Expr c1 = (r0 >= g0) && (g0 > b0);
             Expr c2 = (r0 >= g0) && !(g0 > b0) && (b0 > r0);

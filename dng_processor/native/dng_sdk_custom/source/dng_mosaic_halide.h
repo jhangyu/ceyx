@@ -29,14 +29,36 @@ void demosaic_bilinear_halide(const uint16_t* input,
                               uint16_t* output);
 
 /**
- * AHD (Adaptive Homogeneity-Directed) demosaic.
+ * CPU reference bilinear demosaic for Bayer CFA pattern.
  *
- * Higher quality than bilinear but slower.
+ * This is retained as a deterministic fallback/reference path. The default
+ * demosaic_bilinear_halide entry uses Halide AOT unless DNG_DEMOSAIC_AOT=0.
+ */
+void demosaic_pattern_bilinear(const uint16_t* input,
+                               int width,
+                               int height,
+                               uint16_t* output);
+
+/**
+ * Halide AOT bilinear demosaic entry.
+ *
+ * @return 1 on success, 0 on failure.
+ */
+int demosaic_bilinear_halide_aot(const uint16_t* input,
+                                 int width,
+                                 int height,
+                                 uint16_t* output);
+
+/**
+ * Compatibility entry for the historical Stage3 demosaic call site.
  *
  * @param input: 16-bit grayscale CFA image
  * @param width: image width
  * @param height: image height
  * @param output: 16-bit RGB output buffer
+ *
+ * Note: despite the legacy name, this currently dispatches to the bilinear
+ * Halide AOT implementation. True AHD/MHC quality upgrades are Phase 7.5 work.
  */
 void demosaic_ahd_halide(const uint16_t* input,
                          int width,

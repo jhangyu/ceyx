@@ -46,6 +46,13 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
                              WarpRectilinearMode mode,
                              uint16_t* dst_interleaved_rgb);
 
+bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
+                                      int width,
+                                      int height,
+                                      const WarpRectilinearParams& params,
+                                      WarpRectilinearMode mode,
+                                      uint16_t* dst_interleaved_rgb);
+
 bool apply_warp_rectilinear_to_image(dng_host& host,
                                      dng_negative& negative,
                                      const dng_opcode_WarpRectilinear& opcode,

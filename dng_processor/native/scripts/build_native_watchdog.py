@@ -149,6 +149,12 @@ def main() -> int:
         action="store_true",
         help="Skip cmake configure step",
     )
+    parser.add_argument(
+        "--cmake-arg",
+        action="append",
+        default=[],
+        help="Extra argument passed to cmake configure step; repeatable",
+    )
     args = parser.parse_args()
 
     native_dir = Path(args.native_dir).resolve()
@@ -164,9 +170,11 @@ def main() -> int:
     print(f"[INFO] Using max cores: {cores}")
     print(f"[INFO] Idle timeout: {args.idle_timeout_sec}s")
     print(f"[INFO] Target: {args.target}")
+    if args.cmake_arg:
+        print(f"[INFO] Extra cmake args: {args.cmake_arg}")
 
     if not args.skip_configure:
-        configure_cmd = ["cmake", "-S", str(native_dir), "-B", str(build_dir)]
+        configure_cmd = ["cmake", "-S", str(native_dir), "-B", str(build_dir), *args.cmake_arg]
         code = run_with_watchdog(
             configure_cmd,
             cwd=native_dir.parent,

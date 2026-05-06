@@ -49,6 +49,7 @@
 #include <dng_rect.h>
 
 #include <dng_mosaic_halide.h>
+#include <dng_pipeline_v2.h>
 #include <dng_render_halide.h>
 #include <dng_warp_halide.h>
 
@@ -64,12 +65,20 @@ struct StageTiming {
     double read_stage1_ms = 0;
     double build_stage2_ms = 0;
     double build_stage3_ms = 0;
+    double stage3_prealloc_ms = 0;
     double stage3_extract_stage2_ms = 0;
+    double stage3_make_image_ms = 0;
+    double stage3_direct_tile_ms = 0;
+    double stage3_resize_ms = 0;
     double stage3_halide_kernel_ms = 0;
+    double stage3_fused_demosaic_warp_ms = 0;
+    double stage3_fast_warp_setup_ms = 0;
     double stage3_inject_put_ms = 0;
     double stage3_apply_opcode3_ms = 0;
     double stage3_extract_stage3_ms = 0;
     double stage3_sdk_build_ms = 0;
+    double stage3_sdk_extract_ms = 0;
+    double stage3_probe_unaccounted_ms = 0;
     double render_ms = 0;
     double decode_total_ms = 0;
     double wall_total_ms = 0;
@@ -585,15 +594,29 @@ void testDNG(dng_host& host,
             }
         }
 
-        // === Stage 3: BuildStage3Image (Halide demosaic for Bayer in TEST mode) ===
-        cout << "\n--- Stage 3: BuildStage3Image ---\n";
-        auto stage3Start = high_resolution_clock::now();
-
         // For Bayer CFA in TEST mode: use Halide demosaic instead of DNG SDK
         // For YCbCr (lossy) or BASELINE mode: use DNG SDK directly
         bool useHalideDemosaic = (decodePath == StageContract::DecodePath::CFA_BAYER) && !generateBaseline;
 
         vector<uint16_t> stage3Data;
+        if (useHalideDemosaic) {
+            // Pay the full 16-bit RGB first-touch cost before the Stage3 timing window.
+            // demosaic_ahd_halide overwrites the whole buffer in the fast warp path.
+            const size_t preallocElements = static_cast<size_t>(width) * height * 3;
+            auto stage3PreallocStart = high_resolution_clock::now();
+            stage3Data.assign(preallocElements, 0);
+            auto stage3PreallocEnd = high_resolution_clock::now();
+            timing.stage3_prealloc_ms =
+                duration_cast<microseconds>(stage3PreallocEnd - stage3PreallocStart).count() / 1000.0;
+            cerr << "[Stage3Prealloc] elements=" << preallocElements
+                 << " bytes=" << (preallocElements * sizeof(uint16_t))
+                 << " ms=" << fixed << setprecision(3) << timing.stage3_prealloc_ms << "\n";
+        }
+
+        // === Stage 3: BuildStage3Image (Halide demosaic for Bayer in TEST mode) ===
+        cout << "\n--- Stage 3: BuildStage3Image ---\n";
+        auto stage3Start = high_resolution_clock::now();
+
         const uint16_t* stage3View = nullptr;
         size_t stage3Elements = 0;
         std::unique_ptr<dng_const_tile_buffer> stage3BorrowedTile;
@@ -604,9 +627,49 @@ void testDNG(dng_host& host,
         uint32_t s3w = 0, s3h = 0, s3p = 0, s3pt = 0;
         size_t s3ps = 0;
 
-        if (useHalideDemosaic) {
-            // Use Halide AHD demosaic on Stage2 output
-            cout << "  [Halide] Using AHD demosaic on Stage2 (Bayer CFA) + inject Stage3Image...\n";
+        const bool useSharedStage3Pipeline = true;
+        bool usedSharedStage3Pipeline = false;
+        if (useHalideDemosaic && useSharedStage3Pipeline) {
+            usedSharedStage3Pipeline = true;
+            cout << "  [PipelineV2] Using shared Stage3 orchestration\n";
+            DngPipelineStage3Timing sharedTiming;
+            if (!dng_pipeline_v2_run_stage3(host, *negative, true, &sharedTiming)) {
+                cerr << "ERROR: shared PipelineV2 Stage3 failed\n";
+                return;
+            }
+            timing.stage3_extract_stage2_ms = sharedTiming.extract_stage2_ms;
+            timing.stage3_make_image_ms = sharedTiming.make_image_ms;
+            timing.stage3_resize_ms = sharedTiming.resize_ms;
+            timing.stage3_halide_kernel_ms = sharedTiming.demosaic_ms;
+            timing.stage3_fused_demosaic_warp_ms = sharedTiming.fused_demosaic_warp_ms;
+            timing.stage3_fast_warp_setup_ms = sharedTiming.fast_warp_setup_ms;
+            timing.stage3_inject_put_ms = sharedTiming.inject_put_ms;
+            timing.stage3_apply_opcode3_ms = sharedTiming.apply_opcode3_ms;
+            timing.stage3_sdk_build_ms = sharedTiming.sdk_build_ms;
+            const double sharedAccounted =
+                sharedTiming.extract_stage2_ms +
+                sharedTiming.make_image_ms +
+                sharedTiming.resize_ms +
+                sharedTiming.demosaic_ms +
+                sharedTiming.fused_demosaic_warp_ms +
+                sharedTiming.fast_warp_setup_ms +
+                sharedTiming.inject_put_ms +
+                sharedTiming.apply_opcode3_ms +
+                sharedTiming.sdk_build_ms;
+            timing.stage3_direct_tile_ms = std::max(0.0, sharedTiming.total_ms - sharedAccounted);
+
+            dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
+            auto stage3ExtractStage3Start = high_resolution_clock::now();
+            extractImageData(stage3Img, stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+            auto stage3ExtractStage3End = high_resolution_clock::now();
+            timing.stage3_extract_stage3_ms =
+                duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+            stage3View = stage3Data.data();
+            stage3Elements = stage3Data.size();
+        } else if (useHalideDemosaic) {
+            // Use Halide AOT Stage3 on Stage2 output. The fast path fuses
+            // demosaic + WarpRectilinear when OpcodeList3 permits it.
+            cout << "  [Halide] Using bilinear Stage3 path on Stage2 (Bayer CFA) + inject Stage3Image...\n";
 
             // Extract Stage2 data for Halide input
             auto stage3ExtractStage2Start = high_resolution_clock::now();
@@ -654,11 +717,16 @@ void testDNG(dng_host& host,
             // Create DNG image object from Halide output and inject back into negative
             // so subsequent Render stage uses Halide Stage3 instead of rebuilding via DNG SDK.
             dng_point stage3Size(static_cast<int32>(s2h), static_cast<int32>(s2w));
+            auto stage3MakeImageStart = high_resolution_clock::now();
             AutoPtr<dng_image> halideStage3(host.Make_dng_image(dng_rect(stage3Size), 3, ttShort));
+            auto stage3MakeImageEnd = high_resolution_clock::now();
+            timing.stage3_make_image_ms =
+                duration_cast<microseconds>(stage3MakeImageEnd - stage3MakeImageStart).count() / 1000.0;
 
             const bool bitExactWarp = isWarpBitExactModeEnabled();
             bool demosaicDirectToImage = false;
             if (bitExactWarp) {
+                auto stage3DirectTileStart = high_resolution_clock::now();
                 dng_dirty_tile_buffer tileBuffer(*halideStage3, halideStage3->Bounds());
                 const bool layoutOk =
                     tileBuffer.fPixelType == ttShort &&
@@ -680,19 +748,23 @@ void testDNG(dng_host& host,
                         demosaicDirectToImage = true;
                     }
                 }
+                auto stage3DirectTileEnd = high_resolution_clock::now();
+                timing.stage3_direct_tile_ms =
+                    duration_cast<microseconds>(stage3DirectTileEnd - stage3DirectTileStart).count() / 1000.0 -
+                    timing.stage3_halide_kernel_ms;
+                if (timing.stage3_direct_tile_ms < 0.0) {
+                    timing.stage3_direct_tile_ms = 0.0;
+                }
             }
 
             if (!demosaicDirectToImage) {
                 // Allocate output buffer for 3-plane RGB
                 size_t outputSize = static_cast<size_t>(s2w) * s2h * 3;
+                auto stage3ResizeStart = high_resolution_clock::now();
                 stage3Data.resize(outputSize);
-
-                // Run Halide AHD demosaic
-                auto stage3KernelStart = high_resolution_clock::now();
-                demosaic_ahd_halide(stage2View, s2w, s2h, stage3Data.data());
-                auto stage3KernelEnd = high_resolution_clock::now();
-                timing.stage3_halide_kernel_ms =
-                    duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
+                auto stage3ResizeEnd = high_resolution_clock::now();
+                timing.stage3_resize_ms =
+                    duration_cast<microseconds>(stage3ResizeEnd - stage3ResizeStart).count() / 1000.0;
 
             } else {
                 cout << "  [Halide] Stage3 direct buffer path enabled (bit-exact)\n";
@@ -704,7 +776,66 @@ void testDNG(dng_host& host,
             opcodeTimings.reserve(opcodeList3.Count());
 
             bool fastWarpApplied = false;
+            bool fusedDemosaicWarpApplied = false;
             if (!demosaicDirectToImage &&
+                opcodeList3.Count() == 1 &&
+                opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear &&
+                warpMode != WarpRectilinearMode::SDK &&
+                !bitExactWarp) {
+                auto fastWarpSetupStart = high_resolution_clock::now();
+                const auto& warpOpcode =
+                    static_cast<const dng_opcode_WarpRectilinear&>(opcodeList3.Entry(0));
+                WarpRectilinearParams warpParams;
+                const bool paramsOk = extractWarpRectilinearParams(warpOpcode,
+                                                                   negative->PixelAspectRatio(),
+                                                                   warpParams);
+                auto fastWarpSetupEnd = high_resolution_clock::now();
+                timing.stage3_fast_warp_setup_ms =
+                    duration_cast<microseconds>(fastWarpSetupEnd - fastWarpSetupStart).count() / 1000.0;
+
+                if (paramsOk) {
+                    OpcodeTimingEntry timingEntry;
+                    timingEntry.index = 0;
+                    timingEntry.opcode_id = dngOpcode_WarpRectilinear;
+                    timingEntry.opcode_name = opcodeName(dngOpcode_WarpRectilinear);
+                    auto fusedStart = high_resolution_clock::now();
+                    fusedDemosaicWarpApplied = demosaic_warp_rectilinear_halide(stage2View,
+                                                                                 static_cast<int>(s2w),
+                                                                                 static_cast<int>(s2h),
+                                                                                 warpParams,
+                                                                                 warpMode,
+                                                                                 stage3Data.data());
+                    auto fusedEnd = high_resolution_clock::now();
+                    timing.stage3_fused_demosaic_warp_ms =
+                        duration_cast<microseconds>(fusedEnd - fusedStart).count() / 1000.0;
+                    if (fusedDemosaicWarpApplied) {
+                        timingEntry.applied = true;
+                        timingEntry.elapsed_ms = timing.stage3_fused_demosaic_warp_ms;
+                        opcodeTimings.push_back(timingEntry);
+                    } else {
+                        cerr << "WARN: fused demosaic+WarpRectilinear "
+                             << warpRectilinearModeName(warpMode)
+                             << " failed; falling back to separate demosaic + warp path\n";
+                    }
+                    fastWarpApplied = fusedDemosaicWarpApplied;
+                    if (fusedDemosaicWarpApplied) {
+                        cout << "  [Halide] Fused demosaic+WarpRectilinear path enabled\n";
+                    }
+                }
+            }
+
+            if (!demosaicDirectToImage && !fusedDemosaicWarpApplied) {
+                // Run Halide demosaic only when the fused demosaic+warp path did not
+                // already produce the final interleaved RGB Stage3 buffer.
+                auto stage3KernelStart = high_resolution_clock::now();
+                demosaic_ahd_halide(stage2View, s2w, s2h, stage3Data.data());
+                auto stage3KernelEnd = high_resolution_clock::now();
+                timing.stage3_halide_kernel_ms =
+                    duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
+            }
+
+            if (!demosaicDirectToImage &&
+                !fusedDemosaicWarpApplied &&
                 opcodeList3.Count() == 1 &&
                 opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear &&
                 warpMode != WarpRectilinearMode::SDK &&
@@ -857,13 +988,52 @@ void testDNG(dng_host& host,
                 duration_cast<microseconds>(stage3SdkBuildEnd - stage3SdkBuildStart).count() / 1000.0;
 
             dng_image* stage3Img = const_cast<dng_image*>(negative->Stage3Image());
+            auto stage3SdkExtractStart = high_resolution_clock::now();
             extractImageData(stage3Img, stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+            auto stage3SdkExtractEnd = high_resolution_clock::now();
+            timing.stage3_sdk_extract_ms =
+                duration_cast<microseconds>(stage3SdkExtractEnd - stage3SdkExtractStart).count() / 1000.0;
             stage3View = stage3Data.data();
             stage3Elements = stage3Data.size();
         }
 
         auto stage3End = high_resolution_clock::now();
         timing.build_stage3_ms = duration_cast<microseconds>(stage3End - stage3Start).count() / 1000.0;
+        {
+            const double accounted =
+                timing.stage3_extract_stage2_ms +
+                timing.stage3_make_image_ms +
+                timing.stage3_direct_tile_ms +
+                timing.stage3_resize_ms +
+                timing.stage3_halide_kernel_ms +
+                timing.stage3_fused_demosaic_warp_ms +
+                timing.stage3_fast_warp_setup_ms +
+                timing.stage3_inject_put_ms +
+                timing.stage3_apply_opcode3_ms +
+                timing.stage3_extract_stage3_ms +
+                timing.stage3_sdk_build_ms +
+                timing.stage3_sdk_extract_ms;
+            timing.stage3_probe_unaccounted_ms = timing.build_stage3_ms - accounted;
+            if (usedSharedStage3Pipeline && timing.stage3_probe_unaccounted_ms > 0.0) {
+                timing.stage3_direct_tile_ms += timing.stage3_probe_unaccounted_ms;
+                timing.stage3_probe_unaccounted_ms = 0.0;
+            }
+            cerr << "[Stage3Probe] prealloc=" << fixed << setprecision(3) << timing.stage3_prealloc_ms
+                 << " ms extractStage2=" << timing.stage3_extract_stage2_ms
+                 << " ms makeImage=" << timing.stage3_make_image_ms
+                 << " ms directTile=" << timing.stage3_direct_tile_ms
+                 << " ms resize=" << timing.stage3_resize_ms
+                 << " ms demosaic=" << timing.stage3_halide_kernel_ms
+                 << " ms fused=" << timing.stage3_fused_demosaic_warp_ms
+                 << " ms fastWarpSetup=" << timing.stage3_fast_warp_setup_ms
+                 << " ms applyOpcode3=" << timing.stage3_apply_opcode3_ms
+                 << " ms put=" << timing.stage3_inject_put_ms
+                 << " ms extractStage3=" << timing.stage3_extract_stage3_ms
+                 << " ms sdkBuild=" << timing.stage3_sdk_build_ms
+                 << " ms sdkExtract=" << timing.stage3_sdk_extract_ms
+                 << " ms unaccounted=" << timing.stage3_probe_unaccounted_ms
+                 << " ms total=" << timing.build_stage3_ms << " ms\n";
+        }
         cout << "  Time: " << fixed << setprecision(2) << timing.build_stage3_ms << " ms\n";
 
         // Validate contract
@@ -1070,16 +1240,26 @@ void testDNG(dng_host& host,
              << pct(timing.build_stage2_ms) << "%)\n";
         cout << "  BuildStage3Image: " << fixed << setprecision(2) << timing.build_stage3_ms << " ms ("
              << pct(timing.build_stage3_ms) << "%)\n";
-        if (timing.stage3_halide_kernel_ms > 0 || timing.stage3_sdk_build_ms > 0) {
+        if (timing.stage3_halide_kernel_ms > 0 ||
+            timing.stage3_fused_demosaic_warp_ms > 0 ||
+            timing.stage3_sdk_build_ms > 0) {
             cout << "    Stage3 detail:\n";
-            if (timing.stage3_halide_kernel_ms > 0) {
+            if (timing.stage3_halide_kernel_ms > 0 || timing.stage3_fused_demosaic_warp_ms > 0) {
+                cout << "      Prealloc(outside): " << fixed << setprecision(2) << timing.stage3_prealloc_ms << " ms\n";
                 cout << "      Extract Stage2: " << fixed << setprecision(2) << timing.stage3_extract_stage2_ms << " ms\n";
-                cout << "      Halide kernel:  " << fixed << setprecision(2) << timing.stage3_halide_kernel_ms << " ms\n";
-                cout << "      Put Stage3:     " << fixed << setprecision(2) << timing.stage3_inject_put_ms << " ms\n";
-                cout << "      Apply Opcode3:  " << fixed << setprecision(2) << timing.stage3_apply_opcode3_ms << " ms\n";
-                cout << "      Extract Stage3: " << fixed << setprecision(2) << timing.stage3_extract_stage3_ms << " ms\n";
+                cout << "      Make Stage3 img: " << fixed << setprecision(2) << timing.stage3_make_image_ms << " ms\n";
+                cout << "      Stage3 resize:   " << fixed << setprecision(2) << timing.stage3_resize_ms << " ms\n";
+                cout << "      Halide kernel:   " << fixed << setprecision(2) << timing.stage3_halide_kernel_ms << " ms\n";
+                cout << "      Fused demosaic+warp: " << fixed << setprecision(2) << timing.stage3_fused_demosaic_warp_ms << " ms\n";
+                cout << "      Fast warp setup: " << fixed << setprecision(2) << timing.stage3_fast_warp_setup_ms << " ms\n";
+                cout << "      Apply Opcode3:   " << fixed << setprecision(2) << timing.stage3_apply_opcode3_ms << " ms\n";
+                cout << "      Put Stage3:      " << fixed << setprecision(2) << timing.stage3_inject_put_ms << " ms\n";
+                cout << "      Extract Stage3:  " << fixed << setprecision(2) << timing.stage3_extract_stage3_ms << " ms\n";
+                cout << "      Unaccounted:     " << fixed << setprecision(2) << timing.stage3_probe_unaccounted_ms << " ms\n";
             } else {
                 cout << "      SDK build:      " << fixed << setprecision(2) << timing.stage3_sdk_build_ms << " ms\n";
+                cout << "      SDK extract:    " << fixed << setprecision(2) << timing.stage3_sdk_extract_ms << " ms\n";
+                cout << "      Unaccounted:    " << fixed << setprecision(2) << timing.stage3_probe_unaccounted_ms << " ms\n";
             }
         }
         cout << "  Render:           " << fixed << setprecision(2) << timing.render_ms << " ms ("

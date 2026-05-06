@@ -7,7 +7,7 @@
 #
 # cases:
 #   Lossless / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
-#   Lossless / Halide:   DNG_WARP_BIT_EXACT=0，Halide AHD demosaic + Halide Metal warp + Halide Metal render
+#   Lossless / Halide:   DNG_WARP_BIT_EXACT=0，Halide bilinear/fused Stage3 + Halide Metal render
 #   Lossy    / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
 #   Lossy    / Halide:   SDK YCbCr Stage3（passthrough）+ Halide Metal render
 #
@@ -15,7 +15,7 @@
 #   SDK cases:          無 PSNR（本身即為 baseline）
 #   Lossless Halide:
 #     Stage1/2 PSNR:    999 dB（同 DNG parse）
-#     Stage3 PSNR:      Halide AHD+Metal warp vs SDK demosaic+SDK warp（end-to-end Stage3 品質）
+#     Stage3 PSNR:      Halide bilinear/fused Stage3 vs SDK demosaic+SDK warp（end-to-end Stage3 品質）
 #     Stage4 PSNR:      最終影像 end-to-end 差（含 Stage3 差異，反映整體管線品質）
 #   Lossy Halide:
 #     Stage1/2/3 PSNR:  999 dB（Stage3 走同一 SDK YCbCr 路徑）
@@ -35,7 +35,7 @@ import os
 import re
 import statistics
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -65,7 +65,12 @@ class RunResult:
     stage4: StageResult
     total_ms: Optional[float]
     halide_full_ms: Optional[float]   # from [RenderHalideTiming] halideFull=X
+    demosaic_kernel_ms: Optional[float]
+    demosaic_copy_ms: Optional[float]
+    demosaic_warp_kernel_ms: Optional[float]
+    demosaic_warp_copy_ms: Optional[float]
     raw_output: str
+    stage3_probe: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -106,6 +111,37 @@ class AggResult:
         vals = [r.halide_full_ms for r in self.runs if r.halide_full_ms is not None]
         return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
 
+    @property
+    def demosaic_kernel_ms(self) -> Optional[float]:
+        return mean_optional([r.demosaic_kernel_ms for r in self.runs])
+
+    @property
+    def demosaic_copy_ms(self) -> Optional[float]:
+        return mean_optional([r.demosaic_copy_ms for r in self.runs])
+
+    def demosaic_kernel_runs_str(self) -> str:
+        vals = [r.demosaic_kernel_ms for r in self.runs if r.demosaic_kernel_ms is not None]
+        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
+
+    @property
+    def demosaic_warp_kernel_ms(self) -> Optional[float]:
+        return mean_optional([r.demosaic_warp_kernel_ms for r in self.runs])
+
+    @property
+    def demosaic_warp_copy_ms(self) -> Optional[float]:
+        return mean_optional([r.demosaic_warp_copy_ms for r in self.runs])
+
+    def demosaic_warp_kernel_runs_str(self) -> str:
+        vals = [r.demosaic_warp_kernel_ms for r in self.runs if r.demosaic_warp_kernel_ms is not None]
+        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
+
+    def stage3_probe_avg(self, key: str) -> Optional[float]:
+        return mean_optional([r.stage3_probe.get(key) for r in self.runs])
+
+    def stage3_probe_runs_str(self, key: str) -> str:
+        vals = [r.stage3_probe.get(key) for r in self.runs if key in r.stage3_probe]
+        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
+
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -116,6 +152,10 @@ _TIME_RE = re.compile(r"^\s*Time:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
 _PSNR_RE = re.compile(r"^\s*PSNR vs baseline:\s*([0-9]+(?:\.[0-9]+)?)\s*dB")
 _TOTAL_RE = re.compile(r"^\s*(?:DECODE )?TOTAL:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
 _HALIDE_TIMING_RE = re.compile(r"^\[RenderHalideTiming\].*\bhalideFull=([0-9]+(?:\.[0-9]+)?)\s*ms")
+_DEMOSAIC_TIMING_RE = re.compile(r"^\[DemosaicHalideTiming\].*\bkernel=([0-9]+(?:\.[0-9]+)?)\s*ms\b.*\bcopy_to_host=([0-9]+(?:\.[0-9]+)?)\s*ms")
+_DEMOSAIC_WARP_TIMING_RE = re.compile(r"^\[DemosaicWarpHalideTiming\].*\bkernel=([0-9]+(?:\.[0-9]+)?)\s*ms\b.*\bcopy_to_host=([0-9]+(?:\.[0-9]+)?)\s*ms")
+_STAGE3_PROBE_RE = re.compile(r"^\[Stage3Probe\]\s*(.*)$")
+_KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
 
 
 def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
@@ -138,6 +178,11 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
     cur: Optional[str] = None
     total_ms: Optional[float] = None
     halide_full_ms: Optional[float] = None
+    demosaic_kernel_ms: Optional[float] = None
+    demosaic_copy_ms: Optional[float] = None
+    demosaic_warp_kernel_ms: Optional[float] = None
+    demosaic_warp_copy_ms: Optional[float] = None
+    stage3_probe: dict[str, float] = {}
 
     for line in output.splitlines():
         m = _STAGE_RE.match(line)
@@ -159,6 +204,20 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         m = _HALIDE_TIMING_RE.match(line)
         if m:
             halide_full_ms = float(m.group(1))
+            continue
+        m = _DEMOSAIC_TIMING_RE.match(line)
+        if m:
+            demosaic_kernel_ms = float(m.group(1))
+            demosaic_copy_ms = float(m.group(2))
+            continue
+        m = _DEMOSAIC_WARP_TIMING_RE.match(line)
+        if m:
+            demosaic_warp_kernel_ms = float(m.group(1))
+            demosaic_warp_copy_ms = float(m.group(2))
+            continue
+        m = _STAGE3_PROBE_RE.match(line)
+        if m:
+            stage3_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
 
     return RunResult(
         case_name=case_name,
@@ -168,7 +227,12 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         stage4=stages["4"],
         total_ms=total_ms,
         halide_full_ms=halide_full_ms,
+        demosaic_kernel_ms=demosaic_kernel_ms,
+        demosaic_copy_ms=demosaic_copy_ms,
+        demosaic_warp_kernel_ms=demosaic_warp_kernel_ms,
+        demosaic_warp_copy_ms=demosaic_warp_copy_ms,
         raw_output=output,
+        stage3_probe=stage3_probe,
     )
 
 
@@ -202,7 +266,7 @@ def _build_markdown(
     L.append("")
     L.append("> **PSNR semantics**")
     L.append("> - SDK cases: no PSNR (they are the baseline reference)")
-    L.append("> - Lossless Halide: Stage3 PSNR = Halide AHD+Metal vs SDK demosaic+SDK warp; "
+    L.append("> - Lossless Halide: Stage3 PSNR = Halide bilinear/fused Stage3 vs SDK demosaic+SDK warp; "
              "Stage4 PSNR = end-to-end final image diff (includes Stage3 differences)")
     L.append("> - Lossy Halide: Stage3 PSNR = 999 dB (same SDK YCbCr path); "
              "Stage4 PSNR = Stage4-isolated rendering quality")
@@ -247,6 +311,66 @@ def _build_markdown(
     # --- Halide timing breakdown ---
     if show_halide_timing:
         has_any = any(r.halide_full_ms is not None for r in results)
+        has_stage3_probe = any(r.stage3_probe_avg("total") is not None for r in results)
+        if has_stage3_probe:
+            L.append("## Stage3 Probe Breakdown (ms)")
+            L.append("")
+            L.append("_`prealloc` is intentionally outside Stage3 timing; `unaccounted` should stay below 30ms for Step 7.1._")
+            L.append("")
+            L.append("| Case | prealloc | resize | makeImage | demosaic | fused | applyOpcode3 | put | extractStage3 | unaccounted | total |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+            for r in results:
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('prealloc'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('resize'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('makeImage'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('demosaic'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('fused'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('applyOpcode3'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('put'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('extractStage3'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('unaccounted'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('total'))} |"
+                )
+            L.append("")
+
+        has_demosaic_warp_timing = any(r.demosaic_warp_kernel_ms is not None for r in results)
+        if has_demosaic_warp_timing:
+            L.append("## Stage3 Fused Demosaic+Warp AOT Time (ms)")
+            L.append("")
+            L.append("_`kernel` is the fused Halide Metal demosaic+WarpRectilinear kernel. `copy_to_host` is the final Stage3 host readback, not the old intermediate demosaic readback._")
+            L.append("")
+            L.append("| Case | kernel avg | kernel runs | copy_to_host avg | Stage3 total |")
+            L.append("|---|---|---|---|---|")
+            for r in results:
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.demosaic_warp_kernel_ms)} "
+                    f"| {r.demosaic_warp_kernel_runs_str()} "
+                    f"| {_fmt_ms(r.demosaic_warp_copy_ms)} "
+                    f"| {_fmt_ms(r.stage3.time_ms)} |"
+                )
+            L.append("")
+
+        has_demosaic_timing = any(r.demosaic_kernel_ms is not None for r in results)
+        if has_demosaic_timing:
+            L.append("## Stage3 Demosaic AOT Time (ms)")
+            L.append("")
+            L.append("_`kernel` is the Halide Metal demosaic kernel. `copy_to_host` is still paid before the current warp step; Step 7.4 should remove that round-trip._")
+            L.append("")
+            L.append("| Case | kernel avg | kernel runs | copy_to_host avg | Stage3 total |")
+            L.append("|---|---|---|---|---|")
+            for r in results:
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.demosaic_kernel_ms)} "
+                    f"| {r.demosaic_kernel_runs_str()} "
+                    f"| {_fmt_ms(r.demosaic_copy_ms)} "
+                    f"| {_fmt_ms(r.stage3.time_ms)} |"
+                )
+            L.append("")
+
         if has_any:
             L.append("## Stage4 Halide GPU Kernel Time (ms)")
             L.append("")
@@ -288,7 +412,12 @@ def _build_cases(
 ) -> list[tuple[str, list[str], dict[str, str]]]:
     """Returns [(case_name, cmd, env), ...]."""
 
-    timing_env = {"DNG_RENDER_HALIDE_TIMING": "1"} if enable_timing else {}
+    timing_env = {
+        "DNG_RENDER_HALIDE_TIMING": "1",
+        "DNG_DEMOSAIC_HALIDE_TIMING": "1",
+        "DNG_DEMOSAIC_WARP_HALIDE_TIMING": "1",
+        "DNG_WARP_HALIDE_TIMING": "1",
+    } if enable_timing else {}
 
     sdk_env = dict(extra_env)
     halide_env_lossless = {**extra_env, **timing_env, "DNG_WARP_BIT_EXACT": "0"}

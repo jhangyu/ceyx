@@ -11,6 +11,55 @@
 /* $Change: 832332 $ */
 /* $Author: tknoll $ */
 
+/*
+---
+file_summary: >
+  DNG SDK 原生鏡頭校正實作，含三種 OPCODE：WarpRectilinear、WarpFisheye、FixVignetteRadial。
+  核心 warp 演算法封裝在 `dng_filter_warp` 類別，透過 `dng_filter_task` 框架以 bicubic
+  resample + 多執行緒執行；vignette 校正則使用徑向多項式 gain table。
+
+notes:
+  - `dng_warp_params` 是所有 warp 參數的 abstract base，virtual Evaluate/EvaluateTangential/EvaluateRatio/IsRadNOP/IsTanNOP。
+  - `dng_warp_params_rectilinear` 實作：徑向 K[4] + 切向 T[2]；Evaluate() = x*(K0+x²*(K1+x²*(K2+x²*K3)))，MaxSrcRadiusGap 閉式求解。
+  - `dng_warp_params_fisheye` 實作：徑向 atan-based，無切向；Evaluate() = atan(r)*(K0+t²*(K1+t²*K2))，MaxSrcRadiusGap 採 128 點數值搜尋。
+  - `dng_filter_warp::GetSrcPixelPosition()` 依 IsRadNOP/IsTanNOP 選 pure radial / pure tangential / combined 三種映射路徑。
+  - `dng_filter_warp::SrcTileSize()` 分別以 MaxSrcRadiusGap() 與 MaxSrcTanGap() 估算徑向與切向膨脹量。
+  - `dng_vignette_radial_function` 以 reverse Horner 法計算 gain = 1 + Σ(r²ⁿ * v_n)，用於建 uint16 gain table。
+  - 所有 OPCODE 均支援序列化（stream read/write）和 IsNOP() 偵測以跳過無效校正。
+
+classes:
+  - name: "dng_warp_params"
+    description: "Abstract base：fPlanes + fCenter，含 virtual Evaluate / EvaluateTangential2/3 / EvaluateInverse / IsNOP / IsValid。"
+    lines: "34-293"
+  - name: "dng_warp_params_rectilinear"
+    description: "Rectilinear：fRadParams[plane][4] + fTanParams[plane][2]，實作 Evaluate / EvaluateRatio / EvaluateTangential / MaxSrcRadiusGap / MaxSrcTanGap。"
+    lines: "296-712"
+  - name: "dng_warp_params_fisheye"
+    description: "Fisheye：fRadParams[plane][4]，Evaluate 為 atan-based，MaxSrcRadiusGap 採 128 點數值搜尋，IsTanNOP 固定回傳 true。"
+    lines: "716-951"
+  - name: "dng_filter_warp"
+    description: "dng_filter_task 子類；含 fParams/fCenter/fWeights/fNormRadius/fPixelScaleV，ProcessArea 做 bicubic 2D resample。"
+    lines: "955-1494"
+  - name: "dng_vignette_radial_function"
+    description: "dng_1d_function 子類；Evaluate 以 reverse Horner 法計算 gain = 1 + Σ(r²ⁿ * v_n)。"
+    lines: "1972-2014"
+
+opcodes:
+  - name: "dng_opcode_WarpRectilinear"
+    description: "WarpRectilinear OPCODE；Apply() 分配 dstImage，new dng_filter_warp 執行 bicubic warp，ParamBytes = 4+48*planes。"
+    lines: "1498-1684"
+  - name: "dng_opcode_WarpFisheye"
+    description: "WarpFisheye OPCODE；結構同 WarpRectilinear，但無切向參數，ParamBytes = 4+32*planes。"
+    lines: "1688-1874"
+  - name: "dng_vignette_radial_params"
+    description: "Vignette 參數：fParams vector[kNumTerms] + fCenter，含 IsNOP / IsValid / Dump。"
+    lines: "1878-1968"
+  - name: "dng_opcode_FixVignetteRadial"
+    description: "FixVignetteRadial OPCODE；Prepare() 建 uint16 gain table；ProcessArea() 以 DoVignetteMask16 + DoVignette32 套用於 float buffer。"
+    lines: "2018-2372"
+---
+*/
+
 /*****************************************************************************/
 
 #include <cfloat>

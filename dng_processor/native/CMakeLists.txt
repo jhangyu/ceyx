@@ -38,8 +38,8 @@ file(GLOB_RECURSE DNG_SOURCES "${DNG_SDK_DIR}/*.cpp")
 list(REMOVE_ITEM DNG_SOURCES "${DNG_SDK_DIR}/dng_xmp_sdk.cpp" "${DNG_SDK_DIR}/dng_xmp.cpp")
 
 # DNG SDK custom implementations (Halide-accelerated)
-# Note: dng_mosaic_halide.cpp is built separately as it requires Halide JIT compilation
-# It should be compiled as part of the test_decode or a dedicated target
+# Note: dng_mosaic_halide.cpp is built into test targets that need Stage3 demosaic.
+# Its default path uses the dng_demosaic_bilinear AOT kernel with CPU fallback.
 
 # Inject our XMP stubs into the base DNG SDK library so its internal references resolve
 list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
@@ -57,6 +57,11 @@ endif()
 
 # Native library
 file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
+list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z]*Generator\\.cpp$")
+list(APPEND NATIVE_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_mosaic_halide.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_warp_halide.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_render_halide.cpp")
 # Only add target if there are sources, dummy for now to avoid target creation error
 if (NOT NATIVE_SOURCES)
     file(WRITE ${SRC_DIR}/dummy.cpp "void dummy(){}")
@@ -64,7 +69,11 @@ if (NOT NATIVE_SOURCES)
 endif()
 
 add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
-target_include_directories(dng_decoder_native PUBLIC ${INC_DIR})
+target_include_directories(dng_decoder_native PUBLIC
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+    ${DNG_SDK_DIR})
 if(TURBOJPEG_LIBRARY)
     target_include_directories(dng_decoder_native PUBLIC ${TURBOJPEG_INCLUDE_DIRS})
     target_link_libraries(dng_decoder_native dng_sdk ${TURBOJPEG_LIBRARY})
@@ -84,6 +93,14 @@ target_link_libraries(dng_generator PRIVATE Halide::Generator)
 add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
 target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
 target_link_libraries(dng_warp_generator PRIVATE Halide::Generator)
+
+add_executable(dng_demosaic_generator ${SRC_DIR}/DngDemosaicGenerator.cpp)
+target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator)
+
+add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
+target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
+target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator)
 
 add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
 target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
@@ -252,6 +269,22 @@ add_custom_command(
 add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
 
 add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.h
+    COMMAND dng_demosaic_generator -g dng_demosaic_bilinear -f dng_demosaic_bilinear -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_demosaic_generator
+    COMMENT "Generating Halide AOT Stage3 Demosaic..."
+)
+add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
+    COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_demosaic_warp_generator
+    COMMENT "Generating Halide AOT Stage3 Demosaic+Warp..."
+)
+add_custom_target(dng_demosaic_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a)
+
+add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.h
     COMMAND dng_render_generator -g dng_render_stage4 -f dng_render_stage4 -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
     DEPENDS dng_render_generator
@@ -293,6 +326,8 @@ add_custom_target(dng_render_tonetail_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dn
 
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
 add_dependencies(dng_decoder_native dng_halide_aot_target)
+add_dependencies(dng_decoder_native dng_demosaic_aot_target)
+add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
 add_dependencies(dng_decoder_native dng_warp_aot_target)
 add_dependencies(dng_decoder_native dng_render_aot_target)
 add_dependencies(dng_decoder_native dng_render_nomap_aot_target)
@@ -302,7 +337,7 @@ add_dependencies(dng_decoder_native dng_render_tonetail_aot_target)
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
-target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a)
+target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a)
 
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
@@ -374,6 +409,7 @@ endif()
 
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
+    src/dng_pipeline_v2.cpp
     dng_sdk_custom/source/dng_mosaic_halide.cpp
     dng_sdk_custom/source/dng_warp_halide.cpp
     dng_sdk_custom/source/dng_render_halide.cpp)
@@ -386,10 +422,12 @@ target_include_directories(test_decode PRIVATE
     ${HALIDE_DIR}/include)
 if(TURBOJPEG_LIBRARY)
     target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${TURBOJPEG_LIBRARY})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${TURBOJPEG_LIBRARY})
 else()
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${JPEG_LIBRARIES})
 endif()
+add_dependencies(test_decode dng_demosaic_aot_target)
+add_dependencies(test_decode dng_demosaic_warp_aot_target)
 add_dependencies(test_decode dng_warp_aot_target)
 add_dependencies(test_decode dng_render_aot_target)
 add_dependencies(test_decode dng_render_nomap_aot_target)
@@ -407,10 +445,13 @@ target_include_directories(test_mosaic_halide PRIVATE
     ${INC_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide)
+target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_mosaic_halide dng_warp_aot_target)
+add_dependencies(test_mosaic_halide dng_demosaic_aot_target)
 if(APPLE)
-    target_link_libraries(test_mosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+    target_link_libraries(test_mosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # Debug demosaic test
@@ -420,10 +461,13 @@ target_include_directories(test_mosaic_debug PRIVATE
     ${INC_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide)
+target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_mosaic_debug dng_warp_aot_target)
+add_dependencies(test_mosaic_debug dng_demosaic_aot_target)
 if(APPLE)
-    target_link_libraries(test_mosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+    target_link_libraries(test_mosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # Phase 5.1: Halide Render PSNR Test (placeholder - needs DNG SDK data)
@@ -446,7 +490,9 @@ target_include_directories(test_warp_rectilinear_halide PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-target_link_libraries(test_warp_rectilinear_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
+target_link_libraries(test_warp_rectilinear_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
+add_dependencies(test_warp_rectilinear_halide dng_demosaic_aot_target)
+add_dependencies(test_warp_rectilinear_halide dng_demosaic_warp_aot_target)
 add_dependencies(test_warp_rectilinear_halide dng_warp_aot_target)
 if(APPLE)
     target_link_libraries(test_warp_rectilinear_halide

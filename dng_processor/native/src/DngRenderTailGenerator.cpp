@@ -24,15 +24,21 @@ public:
         Expr s_g = src(x, y, 1);
         Expr s_b = src(x, y, 2);
 
-        Expr f_r = clamp(
-            s_r * rgb_to_final(0, 0) + s_g * rgb_to_final(1, 0) + s_b * rgb_to_final(2, 0),
-            0.0f, 1.0f);
-        Expr f_g = clamp(
-            s_r * rgb_to_final(0, 1) + s_g * rgb_to_final(1, 1) + s_b * rgb_to_final(2, 1),
-            0.0f, 1.0f);
-        Expr f_b = clamp(
-            s_r * rgb_to_final(0, 2) + s_g * rgb_to_final(1, 2) + s_b * rgb_to_final(2, 2),
-            0.0f, 1.0f);
+        Expr f_r_sum = s_r * rgb_to_final(0, 0) + s_g * rgb_to_final(1, 0) + s_b * rgb_to_final(2, 0);
+        Expr f_g_sum = s_r * rgb_to_final(0, 1) + s_g * rgb_to_final(1, 1) + s_b * rgb_to_final(2, 1);
+        Expr f_b_sum = s_r * rgb_to_final(0, 2) + s_g * rgb_to_final(1, 2) + s_b * rgb_to_final(2, 2);
+#if DNG_RENDER_TAIL_STRICT_R
+        f_r_sum = strict_float(f_r_sum);
+#endif
+#if DNG_RENDER_TAIL_STRICT_G
+        f_g_sum = strict_float(f_g_sum);
+#endif
+#if DNG_RENDER_TAIL_STRICT_B
+        f_b_sum = strict_float(f_b_sum);
+#endif
+        Expr f_r = clamp(f_r_sum, 0.0f, 1.0f);
+        Expr f_g = clamp(f_g_sum, 0.0f, 1.0f);
+        Expr f_b = clamp(f_b_sum, 0.0f, 1.0f);
 
         auto table_interp = [&](Expr v) {
             Expr xv = clamp(v, 0.0f, 1.0f);
