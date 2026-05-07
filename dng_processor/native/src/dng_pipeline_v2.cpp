@@ -2,42 +2,29 @@
 ---
 file_summary: "Production DNG pipeline v2 entry used by Flutter FFI; runs SDK Stage1/2, Halide Stage3/4 where applicable, and returns RGB8."
 functions:
-  - name: "parsePositiveEnvU32"
-    description: "Parse positive integer environment variables for optional render thread override."
-    lines: "67-73"
-  - name: "warpBitExactEnabled"
-    description: "Check whether Stage3 must use SDK OpcodeList3 bit-exact behavior."
-    lines: "75-78"
-  - name: "copyImageToInterleaved16"
-    description: "Read a DNG SDK image into a tightly packed uint16 interleaved vector."
-    lines: "80-104"
-  - name: "makeImageFromInterleaved16"
-    description: "Create a DNG SDK image from a tightly packed uint16 interleaved vector."
-    lines: "106-124"
+  - name: "copyImageToInterleaved16 / makeImageFromInterleaved16 / allocStage3Image / putStage3Data"
+    description: "Stage3 image <-> uint16 interleaved buffer helpers; alloc/put are split so latency hiding can pre-allocate while GPU runs."
+    lines: "63-130"
   - name: "applyOpcodeList3"
-    description: "Apply OpcodeList3 to a Stage3 image, using Halide WarpRectilinear when allowed."
-    lines: "126-151"
+    description: "Apply OpcodeList3 to a Stage3 image, using Halide WarpRectilinear when config allows."
+    lines: "132-160"
+  - name: "prepareStage3Workspace"
+    description: "Reuse caller-owned Stage3 output storage, preserving the prealloc contract across shared orchestration."
+    lines: "162-177"
   - name: "runHalideStage3ForBayer"
-    description: "Run production Bayer Stage3 with fused demosaic+WarpRectilinear fast path and SDK-compatible fallbacks."
-    lines: "153-252"
-  - name: "runSdkStage3"
-    description: "Run SDK BuildStage3Image and record timing."
-    lines: "254-265"
-  - name: "runStage4ToRgb"
-    description: "Run Stage4 render through Halide Metal unless disabled by mode/fallback."
-    lines: "267-310"
-  - name: "dng_pipeline_v2_run_stage3"
-    description: "Shared production/test Stage3 orchestration entry."
-    lines: "314-328"
-  - name: "dng_pipeline_v2_decode_to_rgb"
-    description: "Top-level production decode entry: parse DNG, run stages, and return RGB output/timing."
-    lines: "330-400"
+    description: "Run production Bayer Stage3 with fused demosaic+WarpRectilinear fast path; Phase 8.2.1 Path D — async dispatch + Make_dng_image overlap to hide GPU sync_wait."
+    lines: "179-310"
+  - name: "runSdkStage3 / runStage4ToRgb"
+    description: "SDK Stage3 fallback and Stage4 render through Halide Metal."
+    lines: "312-370"
+  - name: "dng_pipeline_v2_run_stage3 / dng_pipeline_v2_decode_to_rgb"
+    description: "Shared Stage3 orchestration + top-level decode entry returning RGB and timing."
+    lines: "372-470"
 ---
 */
 #include "dng_pipeline_v2.h"
 
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -63,19 +50,6 @@ functions:
 namespace {
 
 using Clock = std::chrono::high_resolution_clock;
-
-uint32_t parsePositiveEnvU32(const char *key) {
-  const char *v = std::getenv(key);
-  if (!v || !v[0])
-    return 0;
-  const long parsed = std::strtol(v, nullptr, 10);
-  return parsed > 0 ? static_cast<uint32_t>(parsed) : 0;
-}
-
-bool warpBitExactEnabled() {
-  const char *v = std::getenv("DNG_WARP_BIT_EXACT");
-  return v && v[0] && v[0] != '0';
-}
 
 bool copyImageToInterleaved16(const dng_image *image, std::vector<uint16_t> &out,
                               uint32_t &width, uint32_t &height,
@@ -123,8 +97,32 @@ AutoPtr<dng_image> makeImageFromInterleaved16(dng_host &host, uint32_t width,
   return AutoPtr<dng_image>(image.Release());
 }
 
+AutoPtr<dng_image> allocStage3Image(dng_host &host, uint32_t width,
+                                    uint32_t height, uint32_t planes) {
+  dng_point size(static_cast<int32>(height), static_cast<int32>(width));
+  return AutoPtr<dng_image>(
+      host.Make_dng_image(dng_rect(size), planes, ttShort));
+}
+
+void putStage3Data(dng_image &image, const std::vector<uint16_t> &data,
+                   uint32_t width, uint32_t height, uint32_t planes) {
+  (void)height;
+  dng_pixel_buffer buffer;
+  buffer.fArea = image.Bounds();
+  buffer.fPlane = 0;
+  buffer.fPlanes = planes;
+  buffer.fPixelType = ttShort;
+  buffer.fPixelSize = sizeof(uint16_t);
+  buffer.fData = const_cast<uint16_t *>(data.data());
+  buffer.fRowStep = static_cast<int32>(width * planes);
+  buffer.fColStep = static_cast<int32>(planes);
+  buffer.fPlaneStep = 1;
+  image.Put(buffer);
+}
+
 bool applyOpcodeList3(dng_host &host, dng_negative &negative,
                       const dng_opcode_list &opcodeList3,
+                      const PipelineConfig &config,
                       AutoPtr<dng_image> &image) {
   for (uint32_t i = 0; i < opcodeList3.Count(); ++i) {
     dng_opcode &opcode = const_cast<dng_opcode &>(opcodeList3.Entry(i));
@@ -132,7 +130,8 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
       continue;
 
     bool applied = false;
-    if (opcode.OpcodeID() == dngOpcode_WarpRectilinear && !warpBitExactEnabled()) {
+    if (opcode.OpcodeID() == dngOpcode_WarpRectilinear &&
+        !config.debug.warp_bit_exact) {
       const auto &warpOpcode =
           static_cast<const dng_opcode_WarpRectilinear &>(opcode);
       applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
@@ -150,9 +149,28 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
   return true;
 }
 
+std::vector<uint16_t> &prepareStage3Workspace(std::vector<uint16_t> &fallback,
+                                              std::vector<uint16_t> *callerWorkspace,
+                                              size_t elements,
+                                              DngPipelineStage3Timing *timing) {
+  std::vector<uint16_t> &workspace = callerWorkspace ? *callerWorkspace : fallback;
+  const auto resizeStart = Clock::now();
+  if (workspace.size() != elements) {
+    workspace.resize(elements);
+  }
+  const auto resizeEnd = Clock::now();
+  if (timing) {
+    timing->resize_ms =
+        std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count();
+  }
+  return workspace;
+}
+
 bool runHalideStage3ForBayer(dng_host &host,
                              dng_negative &negative,
-                             DngPipelineStage3Timing *timing) {
+                             const PipelineConfig &config,
+                             DngPipelineStage3Timing *timing,
+                             std::vector<uint16_t> *stage3Workspace) {
   const auto totalStart = Clock::now();
   dng_image *stage2 = const_cast<dng_image *>(negative.Stage2Image());
   uint32_t width = 0;
@@ -171,16 +189,16 @@ bool runHalideStage3ForBayer(dng_host &host,
   }
 
   const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
-  const auto resizeStart = Clock::now();
-  std::vector<uint16_t> stage3Data(static_cast<size_t>(width) * height * 3);
-  const auto resizeEnd = Clock::now();
-  if (timing) {
-    timing->resize_ms =
-        std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count();
-  }
+  std::vector<uint16_t> localStage3Data;
+  std::vector<uint16_t> &stage3Data =
+      prepareStage3Workspace(localStage3Data, stage3Workspace,
+                             static_cast<size_t>(width) * height * 3, timing);
   bool fused = false;
+  AutoPtr<dng_image> stage3;
+  bool stage3Allocated = false;
 
-  if (!warpBitExactEnabled() && opcodeList3.Count() == 1 &&
+  if (!config.debug.warp_bit_exact && config.debug.fused_demosaic_warp &&
+      opcodeList3.Count() == 1 &&
       opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear) {
     const auto setupStart = Clock::now();
     const auto &warpOpcode =
@@ -193,14 +211,45 @@ bool runHalideStage3ForBayer(dng_host &host,
         timing->fast_warp_setup_ms =
             std::chrono::duration<double, std::milli>(setupEnd - setupStart).count();
       }
+
+      // Path D — async dispatch the fused Metal kernel, then run
+      // CPU-only Make_dng_image while the GPU is in flight, then sync+copy.
       const auto fusedStart = Clock::now();
-      fused = demosaic_warp_rectilinear_halide(
-          stage2Data.data(), static_cast<int>(width), static_cast<int>(height),
-          params, WarpRectilinearMode::HALIDE_METAL, stage3Data.data());
-      if (!fused) {
-        fused = demosaic_warp_rectilinear_halide(
-            stage2Data.data(), static_cast<int>(width), static_cast<int>(height),
-            params, WarpRectilinearMode::HALIDE_CPU, stage3Data.data());
+      DemosaicWarpHalideHandle *handle =
+          demosaic_warp_rectilinear_halide_dispatch(
+              stage2Data.data(), static_cast<int>(width),
+              static_cast<int>(height), params,
+              WarpRectilinearMode::HALIDE_METAL, stage3Data.data());
+      if (!handle) {
+        handle = demosaic_warp_rectilinear_halide_dispatch(
+            stage2Data.data(), static_cast<int>(width),
+            static_cast<int>(height), params,
+            WarpRectilinearMode::HALIDE_CPU, stage3Data.data());
+      }
+
+      if (handle) {
+        // Latency hiding: allocate the dng_image container while the GPU
+        // kernel runs. Make_dng_image is a CPU-side malloc that does not
+        // depend on Stage3 pixel data.
+        const auto makeStart = Clock::now();
+        stage3.Reset(
+            allocStage3Image(host, width, height, 3).Release());
+        const auto makeEnd = Clock::now();
+        if (timing) {
+          timing->make_image_ms =
+              std::chrono::duration<double, std::milli>(makeEnd - makeStart)
+                  .count();
+        }
+        stage3Allocated = true;
+
+        fused = demosaic_warp_rectilinear_halide_finish(handle);
+        if (!fused) {
+          // finish destroys the handle on both success and failure; nothing
+          // to clean up here. Drop the prematurely-allocated stage3 so the
+          // non-fused fallback below can re-build it normally.
+          stage3.Reset();
+          stage3Allocated = false;
+        }
       }
       const auto fusedEnd = Clock::now();
       if (timing) {
@@ -221,17 +270,29 @@ bool runHalideStage3ForBayer(dng_host &host,
     }
   }
 
-  const auto makeStart = Clock::now();
-  AutoPtr<dng_image> stage3 =
-      makeImageFromInterleaved16(host, width, height, 3, stage3Data);
-  const auto makeEnd = Clock::now();
-  if (timing) {
-    timing->make_image_ms =
-        std::chrono::duration<double, std::milli>(makeEnd - makeStart).count();
+  if (fused && stage3Allocated) {
+    // Stage3 image was pre-allocated during latency hiding; copy pixels in.
+    const auto putStart = Clock::now();
+    putStage3Data(*stage3.Get(), stage3Data, width, height, 3);
+    const auto putEnd = Clock::now();
+    if (timing) {
+      timing->make_image_ms +=
+          std::chrono::duration<double, std::milli>(putEnd - putStart).count();
+    }
+  } else {
+    const auto makeStart = Clock::now();
+    stage3.Reset(
+        makeImageFromInterleaved16(host, width, height, 3, stage3Data)
+            .Release());
+    const auto makeEnd = Clock::now();
+    if (timing) {
+      timing->make_image_ms =
+          std::chrono::duration<double, std::milli>(makeEnd - makeStart).count();
+    }
   }
   if (!fused) {
     const auto opcodeStart = Clock::now();
-    if (!applyOpcodeList3(host, negative, opcodeList3, stage3))
+    if (!applyOpcodeList3(host, negative, opcodeList3, config, stage3))
       return false;
     const auto opcodeEnd = Clock::now();
     if (timing) {
@@ -251,6 +312,139 @@ bool runHalideStage3ForBayer(dng_host &host,
   return true;
 }
 
+// Forward declaration needed because runHalideStage3And4Fused is defined before
+// runStage4ToRgb but may call it in its fallback path.
+bool runStage4ToRgb(dng_host &host, dng_negative &negative,
+                    const PipelineConfig &config,
+                    uint32_t inputWidth, uint32_t inputHeight,
+                    std::vector<uint8_t> &rgb, uint32_t &outW, uint32_t &outH);
+
+// Phase 8.2.2 — Stage3→Stage4 GPU device handoff.
+// Dispatches Stage3 (async), does Stage4 CPU prep while GPU runs, then calls
+// Stage4 directly from the device buffer (no Stage3 copy_to_host).
+// Returns true when BOTH Stage3 and Stage4 completed (via device path or
+// finish()+Stage4 fallback).  Returns false only when pre-conditions are not
+// met and no work was started — caller should run the normal Stage3+Stage4.
+bool runHalideStage3And4Fused(dng_host &host,
+                               dng_negative &negative,
+                               const PipelineConfig &config,
+                               uint32_t inputWidth,
+                               uint32_t inputHeight,
+                               DngPipelineStage3Timing *timing,
+                               std::vector<uint16_t> *stage3Workspace,
+                               std::vector<uint8_t> &rgb,
+                               uint32_t &outW,
+                               uint32_t &outH) {
+  if (config.debug.warp_bit_exact || config.debug.demosaic_bit_exact)
+    return false;
+  if (!config.debug.fused_demosaic_warp || !config.debug.stage3_stage4_device_handoff)
+    return false;
+
+  const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
+  if (opcodeList3.Count() != 1 ||
+      opcodeList3.Entry(0).OpcodeID() != dngOpcode_WarpRectilinear)
+    return false;
+
+  dng_image *stage2 = const_cast<dng_image *>(negative.Stage2Image());
+  uint32_t width = 0, height = 0, planes = 0;
+  std::vector<uint16_t> stage2Data;
+  const auto extractStart = Clock::now();
+  if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
+      planes != 1) {
+    return false;
+  }
+  const auto extractEnd = Clock::now();
+  if (timing) {
+    timing->extract_stage2_ms =
+        std::chrono::duration<double, std::milli>(extractEnd - extractStart).count();
+  }
+
+  const auto &warpOpcode =
+      static_cast<const dng_opcode_WarpRectilinear &>(opcodeList3.Entry(0));
+  WarpRectilinearParams warpParams;
+  if (!extractWarpRectilinearParams(warpOpcode, negative.PixelAspectRatio(),
+                                    warpParams))
+    return false;
+
+  std::vector<uint16_t> localStage3Data;
+  std::vector<uint16_t> &stage3Data = prepareStage3Workspace(
+      localStage3Data, stage3Workspace,
+      static_cast<size_t>(width) * height * 3, timing);
+
+  const auto fusedStart = Clock::now();
+
+  DemosaicWarpHalideHandle *handle = demosaic_warp_rectilinear_halide_dispatch(
+      stage2Data.data(), static_cast<int>(width), static_cast<int>(height),
+      warpParams, WarpRectilinearMode::HALIDE_METAL, stage3Data.data());
+  if (!handle)
+    return false;
+
+  // CPU work while GPU runs Stage3 (latency hiding):
+  // 1. Pre-alloc Stage4 output buffer (avoids first-touch page fault)
+  const size_t stage4OutSize = static_cast<size_t>(inputWidth) * inputHeight * 3;
+  if (rgb.size() != stage4OutSize)
+    rgb.resize(stage4OutSize);
+
+  // 2. Allocate stub Stage3 image for negative.SetStage3Image() integrity
+  AutoPtr<dng_image> stage3Stub;
+  stage3Stub.Reset(allocStage3Image(host, width, height, 3).Release());
+
+  // 3. Setup Stage4 renderer
+  dng_render renderer(host, negative);
+  renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
+  renderer.SetFinalPixelType(ttByte);
+  renderer.SetFinalSpace(dng_space_sRGB::Get());
+
+  // Try Stage4 from device buffer.  Stage3 GPU may still be running; the Metal
+  // serial command queue guarantees Stage4 won't read until Stage3 finishes.
+  halide_buffer_t *deviceBuf = demosaic_warp_halide_get_device_buffer(handle);
+  const float srcScale = 1.0f / 65535.0f;
+  bool stage4Ok = false;
+  if (deviceBuf) {
+    stage4Ok = render_stage4_halide_from_device_buffer(
+        host, negative, renderer, deviceBuf, srcScale, rgb, outW, outH);
+  }
+
+  const auto fusedEnd = Clock::now();
+  if (timing) {
+    timing->fused_demosaic_warp_ms =
+        std::chrono::duration<double, std::milli>(fusedEnd - fusedStart).count();
+  }
+
+  if (stage4Ok) {
+    negative.SetStage3Image(stage3Stub);
+    demosaic_warp_rectilinear_halide_cancel(handle);
+    if (timing) {
+      timing->total_ms = timing->extract_stage2_ms + timing->fused_demosaic_warp_ms;
+    }
+    return true;
+  }
+
+  // Stage4 device handoff failed (e.g. resample needed or params error).
+  // Fall back: finish Stage3 → build Stage3 image → run Stage4 normally.
+  std::cerr << "[PipelineV2] 8.2.2 device handoff Stage4 failed; "
+               "falling back to finish()+Stage4\n";
+  bool fused = demosaic_warp_rectilinear_halide_finish(handle);
+  if (fused && stage3Stub.Get()) {
+    putStage3Data(*stage3Stub.Get(), stage3Data, width, height, 3);
+  } else if (!fused) {
+    stage3Stub.Reset(
+        makeImageFromInterleaved16(host, width, height, 3, stage3Data).Release());
+  }
+  if (!stage3Stub.Get())
+    return false;
+  negative.SetStage3Image(stage3Stub);
+
+  if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight, rgb,
+                      outW, outH))
+    return false;
+
+  if (timing) {
+    timing->total_ms = timing->extract_stage2_ms + timing->fused_demosaic_warp_ms;
+  }
+  return true;
+}
+
 bool runSdkStage3(dng_host &host,
                   dng_negative &negative,
                   DngPipelineStage3Timing *timing) {
@@ -265,12 +459,13 @@ bool runSdkStage3(dng_host &host,
 }
 
 bool runStage4ToRgb(dng_host &host, dng_negative &negative,
+                    const PipelineConfig &config,
                     uint32_t inputWidth, uint32_t inputHeight,
                     std::vector<uint8_t> &rgb, uint32_t &outW,
                     uint32_t &outH) {
   dng_host *renderHost = &host;
   std::unique_ptr<ConcurrentDngHost> renderHostOverride;
-  const uint32_t renderThreads = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
+  const uint32_t renderThreads = config.threads.render_area_threads;
   if (renderThreads > 0 && renderThreads != host.PerformAreaTaskThreads()) {
     renderHostOverride = std::make_unique<ConcurrentDngHost>(renderThreads);
     renderHost = renderHostOverride.get();
@@ -314,12 +509,15 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
 bool dng_pipeline_v2_run_stage3(dng_host &host,
                                 dng_negative &negative,
                                 bool use_halide_bayer,
-                                DngPipelineStage3Timing *timing) {
+                                DngPipelineStage3Timing *timing,
+                                std::vector<uint16_t> *stage3_workspace) {
   if (timing) {
     *timing = DngPipelineStage3Timing{};
   }
-  if (use_halide_bayer && !warpBitExactEnabled()) {
-    if (runHalideStage3ForBayer(host, negative, timing)) {
+  const PipelineConfig config = PipelineConfig::loadFromEnv();
+  if (use_halide_bayer && !config.debug.warp_bit_exact &&
+      !config.debug.demosaic_bit_exact) {
+    if (runHalideStage3ForBayer(host, negative, config, timing, stage3_workspace)) {
       return true;
     }
     std::cerr << "[PipelineV2] Halide Stage3 failed; falling back to SDK Stage3\n";
@@ -361,20 +559,43 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     negative->ReadStage1Image(host, stream, info);
     negative->BuildStage2Image(host);
 
+    std::vector<uint16_t> stage3Workspace;
+    if (isBayer) {
+      stage3Workspace.resize(static_cast<size_t>(inputWidth) * inputHeight * 3);
+    }
     DngPipelineStage3Timing stage3Timing;
-    bool stage3Ok =
-        dng_pipeline_v2_run_stage3(host, *negative, isBayer, &stage3Timing);
+    const PipelineConfig config = PipelineConfig::loadFromEnv();
+
+    // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
+    bool allDone = false;
+    if (isBayer) {
+      allDone = runHalideStage3And4Fused(
+          host, *negative, config, inputWidth, inputHeight,
+          &stage3Timing, &stage3Workspace,
+          result.rgb, result.width, result.height);
+    }
+
     const auto decodeEnd = Clock::now();
     result.decode_ms =
         std::chrono::duration<double, std::milli>(decodeEnd - decodeStart).count();
 
+    if (allDone) {
+      result.process_ms = 0;
+      result.error_code = 0;
+      return true;
+    }
+
+    // Normal Stage3 + Stage4 path (fused not applicable or dispatch failed).
+    bool stage3Ok =
+        dng_pipeline_v2_run_stage3(host, *negative, isBayer, &stage3Timing,
+                                   isBayer ? &stage3Workspace : nullptr);
     if (!stage3Ok) {
       result.error_code = -3;
       return false;
     }
 
     const auto processStart = Clock::now();
-    if (!runStage4ToRgb(host, *negative, inputWidth, inputHeight, result.rgb,
+    if (!runStage4ToRgb(host, *negative, config, inputWidth, inputHeight, result.rgb,
                         result.width, result.height)) {
       result.error_code = -4;
       return false;

@@ -62,8 +62,8 @@ functions:
     description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。"
     lines: "599-690"
   - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2 — Stage4 AOT kernel，src 已在 GPU device buffer；crop_l/crop_t 修正 DefaultCropArea origin（12px border）；dst_buf.set_min 對齊座標系。"
-    lines: "697-795"
+    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 已在 GPU device buffer。8.2.3 修正：crop() 後直接 mutate raw_buffer()->dim[i].min = 0（不能用 set_min/translate，會 device_deallocate 殺掉 device handle），讓 src/dst 都在 [0..dst_w-1] 座標系，對齊 generator 寫死的 clamp(x, 0, extent-1)。"
+    lines: "697-805"
   - name: "renderHalideTimingEnabled"
     description: "透過 `PipelineConfig` 讀取 render timing flag。"
     lines: "797-799"
@@ -714,13 +714,24 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);
-    // Crop to DefaultCropArea origin so Metal device_crop shifts the physical
-    // read pointer to the correct sensor crop region (e.g. pixel 12,12 for
-    // a 6048×4024 sensor with a 12-pixel border). Without this, Stage4 reads
-    // from pixel (0,0) instead of (crop_l, crop_t) — a spatial shift bug.
+    // 8.2.3 fix: Halide AOT kernel hard-codes `clamp(x, 0, extent-1)` (see
+    // DngRenderGenerator.cpp:73-74), assuming src logical min == 0. If we
+    // leave src.dim.min at crop_l/crop_t after `crop()`, the kernel iterates
+    // dst in [crop_l..crop_l+dst_w-1] but the clamp upper bound is still
+    // `extent-1 = dst_w-1`, so the rightmost crop_l columns and bottom
+    // crop_t rows read replicated boundary pixels — measured PSNR ≈ 50dB.
+    //
+    // Fix: physically shift the device pointer via crop() (Metal device_crop
+    // adjusts the read offset by crop_l*stride+crop_t*stride1), then mutate
+    // dim[i].min back to 0 directly so the logical coordinate system matches
+    // dst (which we leave at min=0). Cannot use Buffer::set_min/translate
+    // here — both call device_deallocate() and would drop the device handle.
     if (crop_l > 0 || crop_t > 0) {
         src_buf.crop(0, crop_l, dst_w);
         src_buf.crop(1, crop_t, dst_h);
+        halide_buffer_t* raw = src_buf.raw_buffer();
+        raw->dim[0].min = 0;
+        raw->dim[1].min = 0;
     }
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
@@ -744,12 +755,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
-    // Align dst coordinate origin to match src so the kernel iterates the same
-    // (crop_l..crop_l+dst_w-1, crop_t..crop_t+dst_h-1) range for both buffers.
-    // dst has no device allocation yet so device_deallocate() is a no-op here.
-    if (crop_l > 0 || crop_t > 0) {
-        dst_buf.set_min(crop_l, crop_t, 0);
-    }
+    // 8.2.3 fix: dst stays at min=0; src has been logically reset to min=0
+    // above (physical pointer is already shifted via device_crop). Both
+    // buffers now share the [0..dst_w-1] × [0..dst_h-1] logical coordinate
+    // system that the AOT kernel was compiled against.
 
     // src_buf: intentionally NO set_host_dirty — GPU has the authoritative data.
     exp_buf.set_host_dirty();

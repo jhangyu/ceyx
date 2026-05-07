@@ -163,16 +163,14 @@ RenderHalideMode parseRenderMode(const string& mode) {
 }
 
 bool isWarpBitExactModeEnabled() {
-    const char* v = std::getenv("DNG_WARP_BIT_EXACT");
-    return v && v[0] && v[0] != '0';
+    return PipelineConfig::loadFromEnv().debug.warp_bit_exact;
 }
 
 uint32_t parsePositiveEnvU32(const char* key) {
-    const char* v = std::getenv(key);
-    if (!v || !v[0]) return 0;
-    const long parsed = std::strtol(v, nullptr, 10);
-    if (parsed <= 0) return 0;
-    return static_cast<uint32_t>(parsed);
+    if (std::strcmp(key, "DNG_RENDER_AREA_THREADS") == 0) {
+        return PipelineConfig::loadFromEnv().threads.render_area_threads;
+    }
+    return 0;
 }
 
 AutoPtr<dng_image> makeImageFromInterleaved(dng_host& host,
@@ -267,7 +265,7 @@ bool applySingleWarpRectilinearInterleaved(dng_host& host,
         return false;
     }
 
-    thread_local vector<uint16_t> warped;
+    vector<uint16_t> warped;
     if (isWarpBitExactModeEnabled()) {
         AutoPtr<dng_image> sdkImage = makeImageFromInterleaved(host, width, height, planes, interleavedData);
         const_cast<dng_opcode_WarpRectilinear&>(warpOpcode).Apply(host, negative, sdkImage);
@@ -600,11 +598,11 @@ void testDNG(dng_host& host,
 
         vector<uint16_t> stage3Data;
         if (useHalideDemosaic) {
-            // Pay the full 16-bit RGB first-touch cost before the Stage3 timing window.
-            // demosaic_ahd_halide overwrites the whole buffer in the fast warp path.
+            // Pay the reusable 16-bit RGB workspace growth before the Stage3 timing window.
+            // The shared Stage3 entry must reuse this storage instead of allocating again.
             const size_t preallocElements = static_cast<size_t>(width) * height * 3;
             auto stage3PreallocStart = high_resolution_clock::now();
-            stage3Data.assign(preallocElements, 0);
+            stage3Data.resize(preallocElements);
             auto stage3PreallocEnd = high_resolution_clock::now();
             timing.stage3_prealloc_ms =
                 duration_cast<microseconds>(stage3PreallocEnd - stage3PreallocStart).count() / 1000.0;
@@ -633,7 +631,7 @@ void testDNG(dng_host& host,
             usedSharedStage3Pipeline = true;
             cout << "  [PipelineV2] Using shared Stage3 orchestration\n";
             DngPipelineStage3Timing sharedTiming;
-            if (!dng_pipeline_v2_run_stage3(host, *negative, true, &sharedTiming)) {
+            if (!dng_pipeline_v2_run_stage3(host, *negative, true, &sharedTiming, &stage3Data)) {
                 cerr << "ERROR: shared PipelineV2 Stage3 failed\n";
                 return;
             }

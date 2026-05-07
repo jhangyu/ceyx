@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "dng_pipeline_config.h"
+
 class dng_host;
 class dng_negative;
 
@@ -34,4 +36,5 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
 bool dng_pipeline_v2_run_stage3(dng_host &host,
                                 dng_negative &negative,
                                 bool use_halide_bayer,
-                                DngPipelineStage3Timing *timing);
+                                DngPipelineStage3Timing *timing,
+                                std::vector<uint16_t> *stage3_workspace = nullptr);

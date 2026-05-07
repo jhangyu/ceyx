@@ -4,22 +4,22 @@ file_summary: "Stage3 bilinear demosaic bridge; uses Halide AOT Metal by default
 functions:
   - name: "runDemosaicBilinearAot"
     description: "Wraps the dng_demosaic_bilinear Halide AOT kernel and copies output back to host."
-    lines: "87-124"
+    lines: "94-131"
   - name: "demosaic_pattern_bilinear"
     description: "CPU multithreaded RGGB bilinear demosaic fallback/reference implementation."
-    lines: "147-242"
+    lines: "135-227"
   - name: "demosaic_bilinear_halide_aot"
     description: "C ABI for the Halide AOT demosaic path."
-    lines: "244-249"
+    lines: "229-234"
   - name: "demosaic_bilinear_halide"
     description: "Default demosaic entry; tries AOT unless disabled, then CPU reference if the AOT wrapper returns failure."
-    lines: "251-259"
+    lines: "236-244"
   - name: "demosaic_ahd_halide"
     description: "Historical compatibility entry that currently dispatches to bilinear demosaic."
-    lines: "261-266"
+    lines: "246-251"
   - name: "get_cfa_pattern"
     description: "Returns the fixed RGGB CFA pattern used by current samples."
-    lines: "268-273"
+    lines: "253-258"
 ---
 */
 
@@ -27,13 +27,13 @@ functions:
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
 #include <thread>
 #include <vector>
 
 #include "HalideBuffer.h"
 #include "dng_demosaic_bilinear.h"
+#include "dng_pipeline_config.h"
 
 namespace {
 
@@ -84,13 +84,11 @@ inline uint16_t avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
 }
 
 bool demosaicAotDisabled() {
-    const char* v = std::getenv("DNG_DEMOSAIC_AOT");
-    return v && v[0] == '0';
+    return !PipelineConfig::loadFromEnv().debug.demosaic_aot;
 }
 
 bool demosaicTimingEnabled() {
-    const char* v = std::getenv("DNG_DEMOSAIC_HALIDE_TIMING");
-    return v && v[0] && v[0] != '0';
+    return PipelineConfig::loadFromEnv().timing.demosaic_halide;
 }
 
 bool runDemosaicBilinearAot(const uint16_t* input,
@@ -200,12 +198,9 @@ extern "C" void demosaic_pattern_bilinear(const uint16_t* input,
     if (thread_count == 0) {
         thread_count = 4;
     }
-    const char* env = std::getenv("DNG_DEMOSAIC_THREADS");
-    if (env && env[0] != '\0') {
-        const int parsed = std::atoi(env);
-        if (parsed > 0) {
-            thread_count = static_cast<unsigned int>(parsed);
-        }
+    const uint32_t configured_threads = PipelineConfig::loadFromEnv().threads.demosaic_threads;
+    if (configured_threads > 0) {
+        thread_count = static_cast<unsigned int>(configured_threads);
     }
     if (thread_count > static_cast<unsigned int>(height)) {
         thread_count = static_cast<unsigned int>(height);
