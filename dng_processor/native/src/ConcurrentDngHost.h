@@ -10,7 +10,8 @@
 #include <iostream>
 #include <mutex>
 #include <algorithm>
-#include <cstdlib>
+
+#include "dng_pipeline_config.h"
 
 class ConcurrentDngHost : public dng_host {
 public:
@@ -23,11 +24,9 @@ public:
         if (requestedThreads_ > 0) {
             return requestedThreads_;
         }
-        if (const char* env = std::getenv("DNG_AREA_THREADS")) {
-            int v = std::atoi(env);
-            if (v > 0) {
-                return static_cast<uint32>(v);
-            }
+        const uint32_t configuredThreads = PipelineConfig::loadFromEnv().threads.area_threads;
+        if (configuredThreads > 0) {
+            return configuredThreads;
         }
         uint32 threads = std::thread::hardware_concurrency();
         return threads > 1 ? threads : 1;
