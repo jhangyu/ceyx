@@ -50,20 +50,20 @@ int demosaic_bilinear_halide_aot(const uint16_t* input,
                                  uint16_t* output);
 
 /**
- * Compatibility entry for the historical Stage3 demosaic call site.
+ * Compatibility entry for the Stage3 bilinear demosaic call site.
  *
  * @param input: 16-bit grayscale CFA image
  * @param width: image width
  * @param height: image height
  * @param output: 16-bit RGB output buffer
  *
- * Note: despite the legacy name, this currently dispatches to the bilinear
- * Halide AOT implementation. True AHD/MHC quality upgrades are Phase 7.5 work.
+ * This dispatches to the bilinear Halide AOT implementation by default, with
+ * CPU bilinear fallback when AOT is disabled or unavailable.
  */
-void demosaic_ahd_halide(const uint16_t* input,
-                         int width,
-                         int height,
-                         uint16_t* output);
+void demosaic_bilinear_compat(const uint16_t* input,
+                              int width,
+                              int height,
+                              uint16_t* output);
 
 /**
  * Get the CFA pattern from DNG metadata

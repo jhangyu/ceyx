@@ -196,10 +196,10 @@ int main(int argc, char** argv) {
         }
 
         vector<uint16_t> preOpcode3(static_cast<size_t>(s2w) * s2h * 3);
-        demosaic_ahd_halide(stage2Data.data(),
-                            static_cast<int>(s2w),
-                            static_cast<int>(s2h),
-                            preOpcode3.data());
+        demosaic_bilinear_compat(stage2Data.data(),
+                                 static_cast<int>(s2w),
+                                 static_cast<int>(s2h),
+                                 preOpcode3.data());
 
         if (!StageContract::validateStageContract16("WarpRectilinear",
                                                     decodePath,

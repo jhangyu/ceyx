@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
     std::vector<uint16_t> stage3Test(width * height * 3);
 
     auto start = std::chrono::high_resolution_clock::now();
-    demosaic_ahd_halide(stage2Data.data(), width, height, stage3Test.data());
+    demosaic_bilinear_compat(stage2Data.data(), width, height, stage3Test.data());
     auto end = std::chrono::high_resolution_clock::now();
 
     double demosaicMs = std::chrono::duration<double, std::milli>(end - start).count();

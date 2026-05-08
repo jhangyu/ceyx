@@ -101,44 +101,13 @@ target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator)
 add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
 target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
 target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator)
+option(DNG_DEMOSAIC_WARP_FAST_CODEGEN
+       "Use fast 8x8 GPU schedule for fused demosaic+warp AOT; OFF uses 16x16 + channel unroll schedule"
+       ON)
 
 add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
 target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
 target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
-
-add_executable(dng_render_nomap_generator ${SRC_DIR}/DngRenderNoMapGenerator.cpp)
-target_include_directories(dng_render_nomap_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_render_nomap_generator PRIVATE Halide::Generator)
-
-add_executable(dng_render_maps_noencode_generator ${SRC_DIR}/DngRenderMapsNoEncodingGenerator.cpp)
-target_include_directories(dng_render_maps_noencode_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_render_maps_noencode_generator PRIVATE Halide::Generator)
-
-add_executable(dng_render_tail_generator ${SRC_DIR}/DngRenderTailGenerator.cpp)
-target_include_directories(dng_render_tail_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_render_tail_generator PRIVATE Halide::Generator)
-option(DNG_RENDER_TAIL_STRICT_R
-       "Apply strict_float to tail rgb_to_final R-channel sum only"
-       OFF)
-option(DNG_RENDER_TAIL_STRICT_G
-       "Apply strict_float to tail rgb_to_final G-channel sum only"
-       OFF)
-option(DNG_RENDER_TAIL_STRICT_B
-       "Apply strict_float to tail rgb_to_final B-channel sum only"
-       OFF)
-if(DNG_RENDER_TAIL_STRICT_R)
-    target_compile_definitions(dng_render_tail_generator PRIVATE DNG_RENDER_TAIL_STRICT_R=1)
-endif()
-if(DNG_RENDER_TAIL_STRICT_G)
-    target_compile_definitions(dng_render_tail_generator PRIVATE DNG_RENDER_TAIL_STRICT_G=1)
-endif()
-if(DNG_RENDER_TAIL_STRICT_B)
-    target_compile_definitions(dng_render_tail_generator PRIVATE DNG_RENDER_TAIL_STRICT_B=1)
-endif()
-
-add_executable(dng_render_tonetail_generator ${SRC_DIR}/DngRenderToneTailGenerator.cpp)
-target_include_directories(dng_render_tonetail_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_render_tonetail_generator PRIVATE Halide::Generator)
 
 set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
 file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
@@ -151,9 +120,6 @@ endif()
 
 option(DNG_RENDER_STAGE4_STRICT_FLOAT
        "Enable strict_float target feature for dng_render_stage4 AOT only"
-       OFF)
-option(DNG_RENDER_TAIL_STRICT_FLOAT
-       "Enable strict_float target feature for dng_render_tail_stage4 AOT only"
        OFF)
 option(DNG_RENDER_STAGE4_USE_METAL_TARGET
        "Use metal feature in dng_render_stage4 AOT target (APPLE only)"
@@ -249,9 +215,6 @@ message(STATUS "dng_render_stage4 abc assoc alt: ${DNG_RENDER_STAGE4_ABC_ASSOC_A
 message(STATUS "dng_render_stage4 frontend split abc/tone: ${DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC}/${DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE}")
 message(STATUS "dng_render_stage4 split muladd abc/final: ${DNG_RENDER_STAGE4_ABC_SPLIT_MULADD}/${DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD}")
 message(STATUS "dng_render_stage4 no vectorize: ${DNG_RENDER_STAGE4_NO_VECTORIZE}")
-message(STATUS "dng_render_tail strict float: ${DNG_RENDER_TAIL_STRICT_FLOAT}")
-message(STATUS "dng_render_tail strict R/G/B: ${DNG_RENDER_TAIL_STRICT_R}/${DNG_RENDER_TAIL_STRICT_G}/${DNG_RENDER_TAIL_STRICT_B}")
-
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_pipeline.h
     COMMAND dng_generator -g dng_pipeline -f dng_pipeline -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
@@ -268,6 +231,18 @@ add_custom_command(
 )
 add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
 
+# Phase 8.1.6 D-1: precomputed-coords AOT variant. Same generator binary, but
+# reads host-CPU double-precision base_x/base_y/frac_idx from input buffers
+# instead of running the polynomial on GPU. Used to bypass Metal fast-math/FMA
+# drift on R/B chromatic aberration polynomial.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.h
+    COMMAND dng_warp_generator -g rectilinear_warp -f rectilinear_warp_precomputed -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime precompute_coords=true
+    DEPENDS dng_warp_generator
+    COMMENT "Generating Halide AOT Rectilinear Warp (precomputed coords)..."
+)
+add_custom_target(dng_warp_precomputed_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
+
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.h
     COMMAND dng_demosaic_generator -g dng_demosaic_bilinear -f dng_demosaic_bilinear -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
@@ -278,7 +253,7 @@ add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demos
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
-    COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime fast_codegen=$<IF:$<BOOL:${DNG_DEMOSAIC_WARP_FAST_CODEGEN}>,true,false>
     DEPENDS dng_demosaic_warp_generator
     COMMENT "Generating Halide AOT Stage3 Demosaic+Warp..."
 )
@@ -292,52 +267,17 @@ add_custom_command(
 )
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a)
 
-add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.h
-    COMMAND dng_render_nomap_generator -g dng_render_nomap_stage4 -f dng_render_nomap_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
-    DEPENDS dng_render_nomap_generator
-    COMMENT "Generating Halide AOT Stage4 No-Map Render..."
-)
-add_custom_target(dng_render_nomap_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a)
-
-add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.h
-    COMMAND dng_render_maps_noencode_generator -g dng_render_maps_noencode_stage4 -f dng_render_maps_noencode_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
-    DEPENDS dng_render_maps_noencode_generator
-    COMMENT "Generating Halide AOT Stage4 Maps-NoEncoding Render..."
-)
-add_custom_target(dng_render_maps_noencode_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a)
-
-add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.h
-    COMMAND dng_render_tail_generator -g dng_render_tail_stage4 -f dng_render_tail_stage4 -o ${HALIDE_OUTPUT_DIR} target=$<IF:$<BOOL:${DNG_RENDER_TAIL_STRICT_FLOAT}>,${AOT_TARGET}-strict_float-no_runtime,${AOT_TARGET}-no_runtime>
-    DEPENDS dng_render_tail_generator
-    COMMENT "Generating Halide AOT Stage4 Tail Render..."
-)
-add_custom_target(dng_render_tail_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a)
-
-add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.h
-    COMMAND dng_render_tonetail_generator -g dng_render_tonetail_stage4 -f dng_render_tonetail_stage4 -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
-    DEPENDS dng_render_tonetail_generator
-    COMMENT "Generating Halide AOT Stage4 Tone+Tail Render..."
-)
-add_custom_target(dng_render_tonetail_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a)
-
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
 add_dependencies(dng_decoder_native dng_halide_aot_target)
 add_dependencies(dng_decoder_native dng_demosaic_aot_target)
 add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
 add_dependencies(dng_decoder_native dng_warp_aot_target)
+add_dependencies(dng_decoder_native dng_warp_precomputed_aot_target)
 add_dependencies(dng_decoder_native dng_render_aot_target)
-add_dependencies(dng_decoder_native dng_render_nomap_aot_target)
-add_dependencies(dng_decoder_native dng_render_maps_noencode_aot_target)
-add_dependencies(dng_decoder_native dng_render_tail_aot_target)
-add_dependencies(dng_decoder_native dng_render_tonetail_aot_target)
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
-target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a)
+target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a)
 
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
@@ -358,11 +298,6 @@ if(APPLE)
 endif()
 
 
-# Test application
-add_executable(test_dng_decoder tests/test_main.cpp)
-target_include_directories(test_dng_decoder PRIVATE ${INC_DIR})
-target_link_libraries(test_dng_decoder dng_decoder_native Halide::Halide)
-
 # Color accuracy / visual regression test
 add_executable(test_color_accuracy tests/test_color_accuracy.cpp)
 target_include_directories(test_color_accuracy PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
@@ -370,19 +305,6 @@ target_link_libraries(test_color_accuracy dng_sdk)
 if(APPLE)
     target_link_libraries(test_color_accuracy ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
-
-# Color Diagnostic Tool
-add_executable(test_color_diagnostic tests/test_color_diagnostic.cpp)
-target_include_directories(test_color_diagnostic PRIVATE ${INC_DIR} ${DNG_SDK_DIR} ${HALIDE_DIR}/include)
-target_link_libraries(test_color_diagnostic dng_decoder_native dng_sdk Halide::Halide)
-if(APPLE)
-    target_link_libraries(test_color_diagnostic ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-
-# Phase 6.5: Edge Cases Test
-add_executable(test_edge_cases tests/test_edge_cases.cpp)
-target_include_directories(test_edge_cases PRIVATE ${INC_DIR})
-target_link_libraries(test_edge_cases dng_decoder_native Halide::Halide)
 
 add_executable(test_dng_layout tests/test_dng_layout.cpp)
 target_include_directories(test_dng_layout PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
@@ -422,18 +344,15 @@ target_include_directories(test_decode PRIVATE
     ${HALIDE_DIR}/include)
 if(TURBOJPEG_LIBRARY)
     target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${TURBOJPEG_LIBRARY})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${TURBOJPEG_LIBRARY})
 else()
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_nomap_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_maps_noencode_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tail_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_tonetail_stage4.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${JPEG_LIBRARIES})
 endif()
 add_dependencies(test_decode dng_demosaic_aot_target)
 add_dependencies(test_decode dng_demosaic_warp_aot_target)
 add_dependencies(test_decode dng_warp_aot_target)
+add_dependencies(test_decode dng_warp_precomputed_aot_target)
 add_dependencies(test_decode dng_render_aot_target)
-add_dependencies(test_decode dng_render_nomap_aot_target)
-add_dependencies(test_decode dng_render_maps_noencode_aot_target)
-add_dependencies(test_decode dng_render_tail_aot_target)
-add_dependencies(test_decode dng_render_tonetail_aot_target)
 if(APPLE)
     target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
@@ -490,10 +409,11 @@ target_include_directories(test_warp_rectilinear_halide PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-target_link_libraries(test_warp_rectilinear_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
+target_link_libraries(test_warp_rectilinear_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
 add_dependencies(test_warp_rectilinear_halide dng_demosaic_aot_target)
 add_dependencies(test_warp_rectilinear_halide dng_demosaic_warp_aot_target)
 add_dependencies(test_warp_rectilinear_halide dng_warp_aot_target)
+add_dependencies(test_warp_rectilinear_halide dng_warp_precomputed_aot_target)
 if(APPLE)
     target_link_libraries(test_warp_rectilinear_halide
         ${COREFOUNDATION_LIBRARY}

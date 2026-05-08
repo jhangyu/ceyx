@@ -103,6 +103,9 @@ functions:
 #include "dng_pipeline_config.h"
 #include "dng_demosaic_warp.h"
 #include "rectilinear_warp.h"
+#include "rectilinear_warp_precomputed.h"
+#include <cstdlib>
+#include <cstring>
 
 #include <dng_host.h>
 #include <dng_lens_correction.h>
@@ -546,6 +549,88 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf,
     return true;
 }
 
+// Phase 8.1.6 D-1: env-var gated host-CPU double-precision precompute.
+// Reads DNG_WARP_PRECOMPUTED_COORDS=1 to switch standalone warp Metal path
+// to the rectilinear_warp_precomputed AOT variant, feeding base_x/base_y/
+// frac_x_idx/frac_y_idx as input buffers (computed on host with double).
+bool isPrecomputedCoordsEnabled() {
+    const char* v = std::getenv("DNG_WARP_PRECOMPUTED_COORDS");
+    if (!v) return false;
+    return v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' || v[0] == 'Y';
+}
+
+// Compute base_x / base_y / frac_x_idx / frac_y_idx for every (x, y, c) in
+// double precision on the host. Mirrors the generator's "else" branch line for
+// line, but each arithmetic op is double. This eliminates Metal fast-math /
+// FMA contraction drift on the chromatic aberration polynomial for R/B planes.
+void computePrecomputedCoords(int width,
+                              int height,
+                              int dst_planes,
+                              const WarpRuntimeParams& runtime,
+                              const WarpRectilinearParams& params,
+                              std::vector<int32_t>& out_base_x,
+                              std::vector<int32_t>& out_base_y,
+                              std::vector<int32_t>& out_frac_x_idx,
+                              std::vector<int32_t>& out_frac_y_idx) {
+    const size_t total = static_cast<size_t>(width) * height * 3u;
+    out_base_x.assign(total, 0);
+    out_base_y.assign(total, 0);
+    out_frac_x_idx.assign(total, 0);
+    out_frac_y_idx.assign(total, 0);
+
+    // Detect identity per plane (rad=[1,0,0,0] AND tan=[0,0]) — for those we
+    // can fill base_x = x-1, base_y = y-1, frac=0 directly without polynomial.
+    auto plane_is_identity = [&](int plane) -> bool {
+        const double* r = params.rad_params64[plane];
+        const double* t = params.tan_params64[plane];
+        return r[0] == 1.0 && r[1] == 0.0 && r[2] == 0.0 && r[3] == 0.0 &&
+               t[0] == 0.0 && t[1] == 0.0;
+    };
+
+    // We always pack 3 channels (matching the AOT input ABI).
+    for (int c = 0; c < 3; ++c) {
+        const int plane = warpPlaneIndex(c, params);
+        const size_t base_off = static_cast<size_t>(c) * width * height;
+        if (plane_is_identity(plane)) {
+            // src_x = x, src_y = y → base = (x-1, y-1), frac = 0.
+            for (int y = 0; y < height; ++y) {
+                int32_t* bxr = out_base_x.data() + base_off + static_cast<size_t>(y) * width;
+                int32_t* byr = out_base_y.data() + base_off + static_cast<size_t>(y) * width;
+                for (int x = 0; x < width; ++x) {
+                    bxr[x] = x - 1;
+                    byr[x] = y - 1;
+                }
+                // frac arrays already zero-initialized by assign().
+            }
+            continue;
+        }
+
+        for (int y = 0; y < height; ++y) {
+            const size_t row_off = base_off + static_cast<size_t>(y) * width;
+            int32_t* bxr = out_base_x.data() + row_off;
+            int32_t* byr = out_base_y.data() + row_off;
+            int32_t* fxr = out_frac_x_idx.data() + row_off;
+            int32_t* fyr = out_frac_y_idx.data() + row_off;
+            for (int x = 0; x < width; ++x) {
+                double sx = 0.0, sy = 0.0;
+                getSrcPixelPosition(static_cast<double>(x),
+                                    static_cast<double>(y),
+                                    plane,
+                                    runtime,
+                                    params,
+                                    sx, sy);
+                const double sxf = std::floor(sx);
+                const double syf = std::floor(sy);
+                bxr[x] = static_cast<int32_t>(sxf) - 1;
+                byr[x] = static_cast<int32_t>(syf) - 1;
+                fxr[x] = quantizeSubsampleIndex(sx - sxf);
+                fyr[x] = quantizeSubsampleIndex(sy - syf);
+            }
+        }
+    }
+    (void)dst_planes;
+}
+
 bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                       int width,
                       int height,
@@ -559,6 +644,7 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     }
 
     const bool timing_enabled = PipelineConfig::loadFromEnv().timing.warp_halide;
+    const bool use_precomputed = isPrecomputedCoordsEnabled();
     const auto t0 = std::chrono::high_resolution_clock::now();
 
     // Fast path: RGB interleaved input/output (common Stage3 path).
@@ -587,35 +673,104 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                                     tile_grid.tiles_x,
                                     tile_grid.tiles_y);
 
+    // Phase 8.1.6 D-1: optionally precompute coords on host in double.
+    std::vector<int32_t> base_x_storage, base_y_storage, frac_x_storage, frac_y_storage;
+    Buffer<int32_t> base_x_buf, base_y_buf, frac_x_buf, frac_y_buf;
+    auto t_pre0 = std::chrono::high_resolution_clock::now();
+    auto t_pre1 = t_pre0;
+    if (use_precomputed) {
+        t_pre0 = std::chrono::high_resolution_clock::now();
+        computePrecomputedCoords(width, height, planes, runtime, params,
+                                 base_x_storage, base_y_storage,
+                                 frac_x_storage, frac_y_storage);
+        t_pre1 = std::chrono::high_resolution_clock::now();
+        // Halide Buffer with planar layout (x, y, c): width × height × 3.
+        base_x_buf  = Buffer<int32_t>(base_x_storage.data(),  width, height, 3);
+        base_y_buf  = Buffer<int32_t>(base_y_storage.data(),  width, height, 3);
+        frac_x_buf  = Buffer<int32_t>(frac_x_storage.data(),  width, height, 3);
+        frac_y_buf  = Buffer<int32_t>(frac_y_storage.data(),  width, height, 3);
+    } else {
+        // Provide non-empty placeholder to satisfy ABI (kernel will not read).
+        base_x_storage.assign(static_cast<size_t>(width) * height * 3u, 0);
+        base_x_buf  = Buffer<int32_t>(base_x_storage.data(), width, height, 3);
+        base_y_buf  = base_x_buf;
+        frac_x_buf  = base_x_buf;
+        frac_y_buf  = base_x_buf;
+    }
+
     // Be explicit for GPU backends: inputs are host-authored, output host is stale
     // until we copy back after kernel execution.
     src_buf.set_host_dirty();
     rad_buf.set_host_dirty();
     tan_buf.set_host_dirty();
     tile_bounds_buf.set_host_dirty();
+    if (use_precomputed) {
+        base_x_buf.set_host_dirty();
+        base_y_buf.set_host_dirty();
+        frac_x_buf.set_host_dirty();
+        frac_y_buf.set_host_dirty();
+    }
     dst_buf.set_host_dirty(false);
 
     const auto t1 = std::chrono::high_resolution_clock::now();
-    const int result = rectilinear_warp(src_buf.raw_buffer(),
-                                        rad_buf.raw_buffer(),
-                                        tan_buf.raw_buffer(),
-                                        tile_bounds_buf.raw_buffer(),
-                                        static_cast<int32_t>(params.planes),
-                                        static_cast<float>(runtime.center_x),
-                                        static_cast<float>(runtime.center_y),
-                                        static_cast<float>(runtime.norm_radius),
-                                        static_cast<float>(runtime.inv_norm_radius),
-                                        static_cast<float>(runtime.pixel_scale_v),
-                                        static_cast<float>(runtime.pixel_scale_v_inv),
-                                        params.is_rad_nop_all ? 1 : 0,
-                                        params.is_tan_nop_all ? 1 : 0,
-                                        static_cast<int32_t>(tile_grid.tile_width),
-                                        static_cast<int32_t>(tile_grid.tile_height),
-                                        dst_buf.raw_buffer());
+    int result = 0;
+    if (use_precomputed) {
+        result = rectilinear_warp_precomputed(src_buf.raw_buffer(),
+                                              rad_buf.raw_buffer(),
+                                              tan_buf.raw_buffer(),
+                                              tile_bounds_buf.raw_buffer(),
+                                              static_cast<int32_t>(params.planes),
+                                              static_cast<float>(runtime.center_x),
+                                              static_cast<float>(runtime.center_y),
+                                              static_cast<float>(runtime.norm_radius),
+                                              static_cast<float>(runtime.inv_norm_radius),
+                                              static_cast<float>(runtime.pixel_scale_v),
+                                              static_cast<float>(runtime.pixel_scale_v_inv),
+                                              params.is_rad_nop_all ? 1 : 0,
+                                              params.is_tan_nop_all ? 1 : 0,
+                                              static_cast<int32_t>(tile_grid.tile_width),
+                                              static_cast<int32_t>(tile_grid.tile_height),
+                                              base_x_buf.raw_buffer(),
+                                              base_y_buf.raw_buffer(),
+                                              frac_x_buf.raw_buffer(),
+                                              frac_y_buf.raw_buffer(),
+                                              dst_buf.raw_buffer());
+    } else {
+        // Baseline path also expects the 4 precompute buffers in ABI (gen
+        // emits them regardless because they are listed as Inputs); kernel
+        // simply does not read from them when precompute_coords=false.
+        result = rectilinear_warp(src_buf.raw_buffer(),
+                                  rad_buf.raw_buffer(),
+                                  tan_buf.raw_buffer(),
+                                  tile_bounds_buf.raw_buffer(),
+                                  static_cast<int32_t>(params.planes),
+                                  static_cast<float>(runtime.center_x),
+                                  static_cast<float>(runtime.center_y),
+                                  static_cast<float>(runtime.norm_radius),
+                                  static_cast<float>(runtime.inv_norm_radius),
+                                  static_cast<float>(runtime.pixel_scale_v),
+                                  static_cast<float>(runtime.pixel_scale_v_inv),
+                                  params.is_rad_nop_all ? 1 : 0,
+                                  params.is_tan_nop_all ? 1 : 0,
+                                  static_cast<int32_t>(tile_grid.tile_width),
+                                  static_cast<int32_t>(tile_grid.tile_height),
+                                  base_x_buf.raw_buffer(),
+                                  base_y_buf.raw_buffer(),
+                                  frac_x_buf.raw_buffer(),
+                                  frac_y_buf.raw_buffer(),
+                                  dst_buf.raw_buffer());
+    }
     if (result != 0) {
         return false;
     }
     const auto t2 = std::chrono::high_resolution_clock::now();
+    if (timing_enabled && use_precomputed) {
+        auto ms = [](const auto& a, const auto& b) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
+        };
+        std::cerr << "[WarpHalidePrecompute] host_double_precompute=" << ms(t_pre0, t_pre1)
+                  << " ms\n";
+    }
     auto copyEnd = t2;
     if (!copyHalideOutputToHost(dst_buf, timing_enabled, "[WarpHalideReadback]",
                                 t2, copyEnd)) {

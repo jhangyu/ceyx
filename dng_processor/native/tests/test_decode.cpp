@@ -738,7 +738,7 @@ void testDNG(dng_host& host,
                                                                               0);
                     if (stage3DirectPtr) {
                         auto stage3KernelStart = high_resolution_clock::now();
-                        demosaic_ahd_halide(stage2View, s2w, s2h, stage3DirectPtr);
+                        demosaic_bilinear_compat(stage2View, s2w, s2h, stage3DirectPtr);
                         auto stage3KernelEnd = high_resolution_clock::now();
                         timing.stage3_halide_kernel_ms =
                             duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
@@ -826,7 +826,7 @@ void testDNG(dng_host& host,
                 // Run Halide demosaic only when the fused demosaic+warp path did not
                 // already produce the final interleaved RGB Stage3 buffer.
                 auto stage3KernelStart = high_resolution_clock::now();
-                demosaic_ahd_halide(stage2View, s2w, s2h, stage3Data.data());
+                demosaic_bilinear_compat(stage2View, s2w, s2h, stage3Data.data());
                 auto stage3KernelEnd = high_resolution_clock::now();
                 timing.stage3_halide_kernel_ms =
                     duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;

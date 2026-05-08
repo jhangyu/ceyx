@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
     // Run demosaic and compare at same positions
     std::cout << "\n=== Running Halide Demosaic ===\n";
     std::vector<uint16_t> halideOutput(width * height * 3);
-    demosaic_ahd_halide(stage2.data(), width, height, halideOutput.data());
+    demosaic_bilinear_compat(stage2.data(), width, height, halideOutput.data());
     if (!StageContract::validateRawBufferContract("Stage3(Halide)",
                                                   width,
                                                   height,

@@ -261,8 +261,11 @@ bool runHalideStage3ForBayer(dng_host &host,
 
   if (!fused) {
     const auto demosaicStart = Clock::now();
-    demosaic_ahd_halide(stage2Data.data(), static_cast<int>(width),
-                        static_cast<int>(height), stage3Data.data());
+    // Phase 8.1.6 D-1 fix: previously called undefined demosaic_ahd_halide;
+    // replaced with the existing bilinear halide entry point used elsewhere
+    // in the pipeline. Required for separate (non-fused) Stage3 path build.
+    demosaic_bilinear_halide(stage2Data.data(), static_cast<int>(width),
+                             static_cast<int>(height), stage3Data.data());
     const auto demosaicEnd = Clock::now();
     if (timing) {
       timing->demosaic_ms =
