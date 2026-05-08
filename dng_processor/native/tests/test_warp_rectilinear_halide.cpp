@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -79,6 +80,25 @@ bool saveRawFile(const string& filename, const void* data, size_t bytes) {
     if (!out) return false;
     out.write(reinterpret_cast<const char*>(data), bytes);
     return out.good();
+}
+
+static void saveDiffHeatmapPgm(const uint16_t* a, const uint16_t* b,
+                                int width, int height, int channel,
+                                const std::string& path) {
+    std::vector<uint8_t> pgm(width * height);
+    int max_diff = 0;
+    for (int i = 0; i < width * height; ++i) {
+        int idx = i * 3 + channel;
+        int d = std::abs(static_cast<int>(a[idx]) - static_cast<int>(b[idx]));
+        if (d > max_diff) max_diff = d;
+        pgm[i] = static_cast<uint8_t>(std::min(d * 64, 255));
+    }
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;
+    std::fprintf(f, "P5\n%d %d\n255\n", width, height);
+    std::fwrite(pgm.data(), 1, pgm.size(), f);
+    std::fclose(f);
+    std::fprintf(stderr, "[Heatmap] %s max_diff=%d\n", path.c_str(), max_diff);
 }
 
 void extractImageData(dng_image* image,
@@ -328,6 +348,11 @@ int main(int argc, char** argv) {
             saveRawFile("lossless_stage3_post_warprectilinear_halide_metal.raw",
                         metalData.data(),
                         metalData.size() * sizeof(uint16_t));
+            for (int c = 0; c < 3; ++c) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), "/tmp/d3b_heatmap_metal_vs_sdk_c%d.pgm", c);
+                saveDiffHeatmapPgm(sdkData.data(), metalData.data(), s2w, s2h, c, buf);
+            }
         } else {
             cout << "Halide Metal WarpRectilinear: failed\n";
         }
