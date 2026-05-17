@@ -15,6 +15,9 @@
 
 #include "dng_host.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "dng_abort_sniffer.h"
 #include "dng_area_task.h"
 #include "dng_bad_pixels.h"
@@ -231,12 +234,22 @@ bool dng_host::IsTransientError (dng_error_code code)
 void dng_host::PerformAreaTask (dng_area_task &task,
 								const dng_rect &area)
 	{
-	
+
+	{
+		const char *e = std::getenv ("DNG_STAGE1_TIMING");
+		if (e && e[0] && e[0] != '0') {
+			std::fprintf (stderr,
+				"[DngHostBasePerformAreaTask] this=%p area=(t=%d,l=%d,b=%d,r=%d)\n",
+				(void*) this, area.t, area.l, area.b, area.r);
+			std::fflush (stderr);
+		}
+	}
+
 	dng_area_task::Perform (task,
 							area,
 							&Allocator (),
 							Sniffer ());
-	
+
 	}
 		
 /*****************************************************************************/

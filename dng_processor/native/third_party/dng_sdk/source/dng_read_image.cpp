@@ -38,7 +38,66 @@
 #include "jpeglib.h"
 #include "jerror.h"
 #endif
-	
+
+// Phase 10 Sprint A: optional instrumentation for diagnosing why the SDK's
+// built-in multi-thread tile decode path is (or is not) taken. Enabled by
+// setting environment variable DNG_STAGE1_TRACE=1 at runtime.
+#include <cstdio>
+#include <cstdlib>
+
+// Phase 10 Sprint A Round 3: fine-grained per-thread tile decode profiling.
+// Activated by setting DNG_STAGE1_TIMING=1 at runtime. Independent of
+// DNG_STAGE1_TRACE so they can be enabled together.
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <sstream>
+#include <thread>
+
+namespace {
+
+struct Stage1ProfileAgg {
+    std::atomic<uint64_t> sum_lock_wait_ns{0};
+    std::atomic<uint64_t> sum_stream_read_ns{0};
+    std::atomic<uint64_t> sum_decode_ns{0};
+    std::atomic<uint64_t> sum_wall_ns{0};
+    std::atomic<uint64_t> sum_tiles{0};
+    std::atomic<uint32_t> threads_used{0};
+    std::atomic<uint64_t> max_decode_ns{0};
+    std::atomic<uint64_t> min_decode_ns{UINT64_MAX};
+
+    void reset () {
+        sum_lock_wait_ns.store (0);
+        sum_stream_read_ns.store (0);
+        sum_decode_ns.store (0);
+        sum_wall_ns.store (0);
+        sum_tiles.store (0);
+        threads_used.store (0);
+        max_decode_ns.store (0);
+        min_decode_ns.store (UINT64_MAX);
+    }
+};
+
+inline bool Stage1TimingEnabled () {
+    static const bool enabled = []() {
+        const char *e = std::getenv ("DNG_STAGE1_TIMING");
+        return e && e[0] && e[0] != '0';
+    }();
+    return enabled;
+}
+
+inline void atomic_max_u64 (std::atomic<uint64_t> &dst, uint64_t v) {
+    uint64_t cur = dst.load (std::memory_order_relaxed);
+    while (v > cur && !dst.compare_exchange_weak (cur, v, std::memory_order_relaxed)) {}
+}
+
+inline void atomic_min_u64 (std::atomic<uint64_t> &dst, uint64_t v) {
+    uint64_t cur = dst.load (std::memory_order_relaxed);
+    while (v < cur && !dst.compare_exchange_weak (cur, v, std::memory_order_relaxed)) {}
+}
+
+} // namespace
+
 /******************************************************************************/
 
 static void DecodeDelta8 (uint8 *dPtr,
@@ -2738,10 +2797,14 @@ class dng_read_tiles_task : public dng_area_task
 		uint32 fUncompressedSize;
 		
 		dng_mutex fMutex;
-		
+
 		uint32 fNextTileIndex;
-		
+
 	public:
+
+		// Phase 10 Sprint A Round 3 profiling aggregator (Stage1Profile)
+		Stage1ProfileAgg fProfile;
+		std::chrono::steady_clock::time_point fProfileStart;
 	
 		dng_read_tiles_task (dng_read_image &readImage,
 							 dng_host &host,
@@ -2785,61 +2848,94 @@ class dng_read_tiles_task : public dng_area_task
 			
 			}
 	
-		void Process (uint32 /* threadIndex */,
+		void Process (uint32 threadIndex,
 					  const dng_rect & /* tile */,
 					  dng_abort_sniffer *sniffer)
 			{
-			
+
+			const bool timing = Stage1TimingEnabled ();
+			using clock = std::chrono::steady_clock;
+			auto t_thread_start = clock::now ();
+
+			if (timing) {
+				std::ostringstream entry_oss;
+				entry_oss << std::this_thread::get_id ();
+				auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+					t_thread_start.time_since_epoch ()).count ();
+				std::fprintf (stderr,
+					"[Stage1ProcessEntry] threadIdx=%u tid=%s ts_ns=%lld\n",
+					threadIndex, entry_oss.str ().c_str (), (long long) now_ns);
+				std::fflush (stderr);
+			}
+			uint64_t tlocal_lock_wait_ns = 0;
+			uint64_t tlocal_stream_read_ns = 0;
+			uint64_t tlocal_decode_ns = 0;
+			uint32_t tlocal_tiles = 0;
+			uint64_t tlocal_max_decode_ns = 0;
+			uint64_t tlocal_min_decode_ns = UINT64_MAX;
+
 			AutoPtr<dng_memory_block> compressedBuffer;
 			AutoPtr<dng_memory_block> uncompressedBuffer;
 			AutoPtr<dng_memory_block> subTileBlockBuffer;
-			
+
 			if (!fJPEGImage)
 				{
 				compressedBuffer.Reset (fHost.Allocate (fCompressedSize));
 				}
-			
+
 			if (fUncompressedSize)
 				{
 				uncompressedBuffer.Reset (fHost.Allocate (fUncompressedSize));
 				}
-			
+
 			while (true)
 				{
-				
+
 				uint32 tileIndex;
 				uint32 byteCount;
-				
+
 					{
-					
+
+					auto t_lock_begin = timing ? clock::now () : clock::time_point{};
 					dng_lock_mutex lock (&fMutex);
-					
+					auto t_lock_acquired = timing ? clock::now () : clock::time_point{};
+					if (timing) {
+						tlocal_lock_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+							t_lock_acquired - t_lock_begin).count ();
+					}
+
 					if (fNextTileIndex == fOuterSamples * fTilesDown * fTilesAcross)
 						{
-						return;
+						break;
 						}
-						
+
 					tileIndex = fNextTileIndex++;
-					
+
 					TempStreamSniffer noSniffer (fStream, NULL);
 
 					fStream.SetReadPosition (fTileOffset [tileIndex]);
-					
+
 					byteCount = fTileByteCount [tileIndex];
-					
+
 					if (fJPEGImage)
 						{
-						
+
 						fJPEGImage->fJPEGData [tileIndex] . Reset (fHost.Allocate (byteCount));
-						
+
 						}
-					
+
+					auto t_read_begin = timing ? clock::now () : clock::time_point{};
 					fStream.Get (fJPEGImage ? fJPEGImage->fJPEGData [tileIndex]->Buffer ()
 											: compressedBuffer->Buffer (),
 								 byteCount);
-					
+					auto t_read_end = timing ? clock::now () : clock::time_point{};
+					if (timing) {
+						tlocal_stream_read_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+							t_read_end - t_read_begin).count ();
 					}
-					
+
+					}
+
 				dng_abort_sniffer::SniffForAbort (sniffer);
 				
 				if (fJPEGTileDigest)
@@ -2870,7 +2966,8 @@ class dng_read_tiles_task : public dng_area_task
 				
 				dng_host host (&fHost.Allocator (),
 							   sniffer);				// Cannot use sniffer attached to main host
-				
+
+				auto t_decode_begin = timing ? clock::now () : clock::time_point{};
 				fReadImage.ReadTile (host,
 									 fIFD,
 									 tileStream,
@@ -2883,9 +2980,51 @@ class dng_read_tiles_task : public dng_area_task
 												: compressedBuffer,
 									 uncompressedBuffer,
 									 subTileBlockBuffer);
-					
+				if (timing) {
+					auto t_decode_end = clock::now ();
+					uint64_t dt = std::chrono::duration_cast<std::chrono::nanoseconds>(
+						t_decode_end - t_decode_begin).count ();
+					tlocal_decode_ns += dt;
+					tlocal_tiles++;
+					if (dt > tlocal_max_decode_ns) tlocal_max_decode_ns = dt;
+					if (dt < tlocal_min_decode_ns) tlocal_min_decode_ns = dt;
 				}
-			
+
+				}
+
+			if (timing) {
+				auto t_thread_end = clock::now ();
+				uint64_t wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+					t_thread_end - t_thread_start).count ();
+
+				std::ostringstream tid_oss;
+				tid_oss << std::this_thread::get_id ();
+
+				fProfile.sum_lock_wait_ns.fetch_add (tlocal_lock_wait_ns, std::memory_order_relaxed);
+				fProfile.sum_stream_read_ns.fetch_add (tlocal_stream_read_ns, std::memory_order_relaxed);
+				fProfile.sum_decode_ns.fetch_add (tlocal_decode_ns, std::memory_order_relaxed);
+				fProfile.sum_wall_ns.fetch_add (wall_ns, std::memory_order_relaxed);
+				fProfile.sum_tiles.fetch_add (tlocal_tiles, std::memory_order_relaxed);
+				fProfile.threads_used.fetch_add (1, std::memory_order_relaxed);
+				atomic_max_u64 (fProfile.max_decode_ns, tlocal_max_decode_ns);
+				if (tlocal_min_decode_ns != UINT64_MAX) {
+					atomic_min_u64 (fProfile.min_decode_ns, tlocal_min_decode_ns);
+				}
+
+				std::fprintf (stderr,
+					"[Stage1Profile] threadIdx=%u tid=%s tiles=%u wall_ms=%.3f"
+					" lock_wait_ms=%.3f stream_read_ms=%.3f decode_ms=%.3f"
+					" max_tile_decode_ms=%.3f min_tile_decode_ms=%.3f\n",
+					threadIndex, tid_oss.str ().c_str (), tlocal_tiles,
+					wall_ns / 1.0e6,
+					tlocal_lock_wait_ns / 1.0e6,
+					tlocal_stream_read_ns / 1.0e6,
+					tlocal_decode_ns / 1.0e6,
+					tlocal_max_decode_ns / 1.0e6,
+					(tlocal_min_decode_ns == UINT64_MAX ? 0.0 : tlocal_min_decode_ns / 1.0e6));
+				std::fflush (stderr);
+			}
+
 			}
 		
 	private:
@@ -3197,15 +3336,70 @@ void dng_read_image::Read (dng_host &host,
 	// Previously required subTileLength == ifd.fTileLength, which disabled multi-threading
 	// for Lossless JPEG with subtiles. Now we only require at least 2 tiles and
 	// proper tile sizes.
+	//
+	// Phase 10 Sprint A: Raised maxTileByteCount cap from 1 MiB to 32 MiB.
+	// Lossless DNG from modern cameras (e.g. 6048x4024 Bayer) compresses each
+	// LJPEG tile to ~4-8 MiB which previously demoted Stage1 to the serial
+	// per-tile loop. 32 MiB is a safe ceiling for current sensor sizes and
+	// keeps the allocation bounded.
 	bool useMultipleThreads = (outerSamples * tilesDown * tilesAcross >= 2) &&
 							  (host.PerformAreaTaskThreads () > 1) &&
-							  (maxTileByteCount > 0 && maxTileByteCount <= 1024 * 1024) &&
+							  (maxTileByteCount > 0 && maxTileByteCount <= 32 * 1024 * 1024) &&
 							  (ifd.fCompression != ccUncompressed);
-	
+
 #if qImagecore
-	useMultipleThreads = false;	
+	useMultipleThreads = false;
 #endif
-		
+
+	// ------------------------------------------------------------------
+	// Phase 10 Sprint A instrumentation
+	//
+	// Lossless Stage1 LJPEG decode is currently observed at 562-651ms on
+	// M3 Ultra despite ConcurrentDngHost::PerformAreaTaskThreads()>1 and
+	// dng_read_tiles_task being available. We trace the per-condition
+	// inputs so we can identify which clause demotes us to the serial
+	// branch (most likely candidate: maxTileByteCount > 1 MiB for a
+	// 6048x4024 lossless DNG with few large tiles).
+	//
+	// Activation: set DNG_STAGE1_TRACE=1 in the environment. Trace lines
+	// are written to stderr with a stable prefix for grep/parse.
+	// ------------------------------------------------------------------
+		{
+		const char *trace_env = std::getenv ("DNG_STAGE1_TRACE");
+		if (trace_env && trace_env[0] && trace_env[0] != '0')
+			{
+			const uint32 totalTiles = outerSamples * tilesDown * tilesAcross;
+			const uint32 hostThreads = host.PerformAreaTaskThreads ();
+			const uint32 byteLimit = 32u * 1024u * 1024u;
+			std::fprintf (stderr,
+				"[Stage1Trace] dng_read_image::Read"
+				" image=%ux%u"
+				" tileWH=%ux%u"
+				" tilesAcross=%u tilesDown=%u outerSamples=%u innerSamples=%u"
+				" totalTiles=%u"
+				" compression=%u (ccJPEG=%d ccLossyJPEG=%d ccUncompressed=%d)"
+				" maxTileByteCount=%u (limit=%u)"
+				" uncompressedSize=%u subTileLength=%u tileLength=%u"
+				" hostThreads=%u"
+				" condTiles=%d condThreads=%d condByteCount=%d condCompression=%d"
+				" useMultipleThreads=%d\n",
+				ifd.fImageWidth, ifd.fImageLength,
+				ifd.fTileWidth, ifd.fTileLength,
+				tilesAcross, tilesDown, outerSamples, innerSamples,
+				totalTiles,
+				ifd.fCompression, (int) ccJPEG, (int) ccLossyJPEG, (int) ccUncompressed,
+				maxTileByteCount, byteLimit,
+				uncompressedSize, subTileLength, ifd.fTileLength,
+				hostThreads,
+				(int) (totalTiles >= 2),
+				(int) (hostThreads > 1),
+				(int) (maxTileByteCount > 0 && maxTileByteCount <= byteLimit),
+				(int) (ifd.fCompression != ccUncompressed),
+				(int) useMultipleThreads);
+			std::fflush (stderr);
+			}
+		}
+
 	if (useMultipleThreads)
 		{
 		
@@ -3227,10 +3421,53 @@ void dng_read_image::Read (dng_host &host,
 								  tileByteCount,
 								  maxTileByteCount,
 								  uncompressedSize);
-								  
+
+		auto t_perform_start = std::chrono::steady_clock::now ();
 		host.PerformAreaTask (task,
 							  dng_rect (0, 0, 16, 16 * threadCount));
-		
+		auto t_perform_end = std::chrono::steady_clock::now ();
+
+		if (Stage1TimingEnabled ())
+			{
+			uint64_t total_wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+				t_perform_end - t_perform_start).count ();
+			uint64_t sum_decode_ns    = task.fProfile.sum_decode_ns.load ();
+			uint64_t sum_lock_wait_ns = task.fProfile.sum_lock_wait_ns.load ();
+			uint64_t sum_stream_ns    = task.fProfile.sum_stream_read_ns.load ();
+			uint64_t sum_wall_ns      = task.fProfile.sum_wall_ns.load ();
+			uint64_t sum_tiles        = task.fProfile.sum_tiles.load ();
+			uint32_t threads_used     = task.fProfile.threads_used.load ();
+			uint64_t max_decode_ns    = task.fProfile.max_decode_ns.load ();
+			uint64_t min_decode_ns    = task.fProfile.min_decode_ns.load ();
+			double avg_decode_ms = sum_tiles ? (sum_decode_ns / 1.0e6) / (double) sum_tiles : 0.0;
+			double ideal_speedup = threads_used ? (double) threads_used : 1.0;
+			double actual_speedup = total_wall_ns ?
+				(double) sum_decode_ns / (double) total_wall_ns : 0.0;
+			double efficiency = ideal_speedup > 0 ? (actual_speedup / ideal_speedup) * 100.0 : 0.0;
+			double lock_wait_pct = total_wall_ns ?
+				100.0 * (double)(sum_lock_wait_ns / threads_used) / (double) total_wall_ns : 0.0;
+			std::fprintf (stderr,
+				"[Stage1ProfileSummary] total_wall_ms=%.3f sum_decode_ms=%.3f"
+				" sum_lock_wait_ms=%.3f sum_stream_read_ms=%.3f sum_thread_wall_ms=%.3f"
+				" tiles=%llu threads_used=%u avg_tile_decode_ms=%.3f"
+				" max_tile_decode_ms=%.3f min_tile_decode_ms=%.3f"
+				" ideal_parallel_speedup=%.2f actual_speedup=%.2f efficiency=%.1f%%"
+				" avg_lock_wait_pct=%.1f%%\n",
+				total_wall_ns / 1.0e6,
+				sum_decode_ns / 1.0e6,
+				sum_lock_wait_ns / 1.0e6,
+				sum_stream_ns / 1.0e6,
+				sum_wall_ns / 1.0e6,
+				(unsigned long long) sum_tiles,
+				threads_used,
+				avg_decode_ms,
+				max_decode_ns / 1.0e6,
+				(min_decode_ns == UINT64_MAX ? 0.0 : min_decode_ns / 1.0e6),
+				ideal_speedup, actual_speedup, efficiency,
+				lock_wait_pct);
+			std::fflush (stderr);
+			}
+
 		}
 		
 	// Else use a single thread to read all the tiles.
