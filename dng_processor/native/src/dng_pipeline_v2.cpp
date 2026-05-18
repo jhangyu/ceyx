@@ -28,8 +28,12 @@ functions:
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <dng_color_space.h>
+#include <dng_simple_image.h>
 #include <dng_exceptions.h>
 #include <dng_file_stream.h>
 #include <dng_host.h>
@@ -166,6 +170,132 @@ std::vector<uint16_t> &prepareStage3Workspace(std::vector<uint16_t> &fallback,
   return workspace;
 }
 
+// Phase 10 Sprint D-B F1: process-level mmap pool for Stage3 workspace.
+// Avoids ~262ms eager zero-fill in FFI path (dng_pipeline_v2_decode_to_rgb).
+// test_decode harness passes a pre-sized vector; pool is bypassed in that case.
+class Stage3WorkspacePool {
+ public:
+  uint16_t *acquire(size_t elements) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const size_t need_bytes = elements * sizeof(uint16_t);
+    if (need_bytes > capacity_bytes_) {
+      if (ptr_) {
+        munmap(ptr_, capacity_bytes_);
+        ptr_ = nullptr;
+        capacity_bytes_ = 0;
+      }
+      void *p = mmap(nullptr, need_bytes, PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+      if (p == MAP_FAILED) return nullptr;
+      ptr_ = static_cast<uint16_t *>(p);
+      capacity_bytes_ = need_bytes;
+    }
+    return ptr_;
+  }
+ private:
+  std::mutex mutex_;
+  uint16_t *ptr_ = nullptr;
+  size_t capacity_bytes_ = 0;
+};
+
+Stage3WorkspacePool &stage3WorkspacePool() {
+  static Stage3WorkspacePool pool;
+  return pool;
+}
+
+// Returns a raw pointer to Stage3 workspace.
+// If caller supplied a pre-sized vector (harness path), use it directly.
+// If caller supplied an empty/wrong-size vector, resize and use it.
+// Otherwise (FFI path with nullptr or empty), use the process pool (mmap lazy).
+uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
+                                    size_t elements,
+                                    DngPipelineStage3Timing *timing) {
+  const auto resizeStart = Clock::now();
+  uint16_t *ptr = nullptr;
+  if (callerWorkspace && callerWorkspace->size() == elements) {
+    ptr = callerWorkspace->data();
+  } else if (callerWorkspace && !callerWorkspace->empty()) {
+    callerWorkspace->resize(elements);
+    ptr = callerWorkspace->data();
+  } else {
+    ptr = stage3WorkspacePool().acquire(elements);
+  }
+  const auto resizeEnd = Clock::now();
+  if (timing) {
+    timing->resize_ms =
+        std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count();
+  }
+  return ptr;
+}
+
+// Phase 10 Sprint D-B F2: zero-copy Stage2 borrow for contiguous dng_simple_image.
+// Bayer Stage2 images produced by Adobe DNG SDK are row-major contiguous uint16,
+// so we can borrow the pointer directly and skip the 48MB memcpy (84ms).
+bool borrowStage2Bayer16(dng_image *stage2,
+                         uint16_t *&src,
+                         uint32_t &width,
+                         uint32_t &height,
+                         uint32_t &planes) {
+  if (!stage2) return false;
+  if (stage2->PixelType() != ttShort) return false;
+  auto *simple = dynamic_cast<dng_simple_image *>(stage2);
+  if (!simple) return false;
+  dng_pixel_buffer pb;
+  simple->GetPixelBuffer(pb);
+  if (pb.fPixelType != ttShort || pb.fPixelSize != sizeof(uint16_t))
+    return false;
+  if (pb.fPlanes != 1) return false;
+  if (pb.fPlaneStep != 1) return false;
+  const int32 W = static_cast<int32>(pb.fArea.W());
+  const int32 H = static_cast<int32>(pb.fArea.H());
+  if (W <= 0 || H <= 0) return false;
+  if (pb.fRowStep != W) return false;
+  if (pb.fColStep != 1) return false;
+  if (!pb.fData) return false;
+  src = static_cast<uint16_t *>(pb.fData);
+  width = static_cast<uint32_t>(W);
+  height = static_cast<uint32_t>(H);
+  planes = 1;
+  return true;
+}
+
+// Pointer-based overloads — same bodies as makeImageFromInterleaved16 /
+// putStage3Data but accept raw uint16_t* instead of std::vector.
+AutoPtr<dng_image> makeImageFromInterleaved16Ptr(dng_host &host, uint32_t width,
+                                                 uint32_t height, uint32_t planes,
+                                                 const uint16_t *data) {
+  dng_point size(static_cast<int32>(height), static_cast<int32>(width));
+  AutoPtr<dng_image> image(host.Make_dng_image(dng_rect(size), planes, ttShort));
+  dng_pixel_buffer buffer;
+  buffer.fArea = image->Bounds();
+  buffer.fPlane = 0;
+  buffer.fPlanes = planes;
+  buffer.fPixelType = ttShort;
+  buffer.fPixelSize = sizeof(uint16_t);
+  buffer.fData = const_cast<uint16_t *>(data);
+  buffer.fRowStep = static_cast<int32>(width * planes);
+  buffer.fColStep = static_cast<int32>(planes);
+  buffer.fPlaneStep = 1;
+  image->Put(buffer);
+  return AutoPtr<dng_image>(image.Release());
+}
+
+void putStage3DataPtr(dng_image &image, const uint16_t *data,
+                      uint32_t width, uint32_t height, uint32_t planes) {
+  (void)height;
+  dng_pixel_buffer buffer;
+  buffer.fArea = image.Bounds();
+  buffer.fPlane = 0;
+  buffer.fPlanes = planes;
+  buffer.fPixelType = ttShort;
+  buffer.fPixelSize = sizeof(uint16_t);
+  buffer.fData = const_cast<uint16_t *>(data);
+  buffer.fRowStep = static_cast<int32>(width * planes);
+  buffer.fColStep = static_cast<int32>(planes);
+  buffer.fPlaneStep = 1;
+  image.Put(buffer);
+}
+
 bool runHalideStage3ForBayer(dng_host &host,
                              dng_negative &negative,
                              const PipelineConfig &config,
@@ -176,10 +306,20 @@ bool runHalideStage3ForBayer(dng_host &host,
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t planes = 0;
+
+  // Phase 10 Sprint D-B F2: try zero-copy borrow of Stage2 contiguous buffer.
+  uint16_t *stage2Ptr = nullptr;
   std::vector<uint16_t> stage2Data;
   const auto extractStart = Clock::now();
-  if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
-      planes != 1) {
+  bool borrowed = borrowStage2Bayer16(stage2, stage2Ptr, width, height, planes);
+  if (!borrowed) {
+    // Fallback: copy via SDK Get() path (non-contiguous or non-simple_image).
+    if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
+        planes != 1) {
+      return false;
+    }
+    stage2Ptr = stage2Data.data();
+  } else if (planes != 1) {
     return false;
   }
   const auto extractEnd = Clock::now();
@@ -189,10 +329,11 @@ bool runHalideStage3ForBayer(dng_host &host,
   }
 
   const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
-  std::vector<uint16_t> localStage3Data;
-  std::vector<uint16_t> &stage3Data =
-      prepareStage3Workspace(localStage3Data, stage3Workspace,
-                             static_cast<size_t>(width) * height * 3, timing);
+  // Phase 10 Sprint D-B F1: use pool-backed ptr instead of vector resize.
+  const size_t stage3Elements = static_cast<size_t>(width) * height * 3;
+  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3Elements, timing);
+  if (!stage3Ptr) return false;
+
   bool fused = false;
   AutoPtr<dng_image> stage3;
   bool stage3Allocated = false;
@@ -217,14 +358,14 @@ bool runHalideStage3ForBayer(dng_host &host,
       const auto fusedStart = Clock::now();
       DemosaicWarpHalideHandle *handle =
           demosaic_warp_rectilinear_halide_dispatch(
-              stage2Data.data(), static_cast<int>(width),
+              stage2Ptr, static_cast<int>(width),
               static_cast<int>(height), params,
-              WarpRectilinearMode::HALIDE_METAL, stage3Data.data());
+              WarpRectilinearMode::HALIDE_METAL, stage3Ptr);
       if (!handle) {
         handle = demosaic_warp_rectilinear_halide_dispatch(
-            stage2Data.data(), static_cast<int>(width),
+            stage2Ptr, static_cast<int>(width),
             static_cast<int>(height), params,
-            WarpRectilinearMode::HALIDE_CPU, stage3Data.data());
+            WarpRectilinearMode::HALIDE_CPU, stage3Ptr);
       }
 
       if (handle) {
@@ -264,8 +405,8 @@ bool runHalideStage3ForBayer(dng_host &host,
     // Phase 8.1.6 D-1 fix: previously called undefined demosaic_ahd_halide;
     // replaced with the existing bilinear halide entry point used elsewhere
     // in the pipeline. Required for separate (non-fused) Stage3 path build.
-    demosaic_bilinear_halide(stage2Data.data(), static_cast<int>(width),
-                             static_cast<int>(height), stage3Data.data());
+    demosaic_bilinear_halide(stage2Ptr, static_cast<int>(width),
+                             static_cast<int>(height), stage3Ptr);
     const auto demosaicEnd = Clock::now();
     if (timing) {
       timing->demosaic_ms =
@@ -276,7 +417,7 @@ bool runHalideStage3ForBayer(dng_host &host,
   if (fused && stage3Allocated) {
     // Stage3 image was pre-allocated during latency hiding; copy pixels in.
     const auto putStart = Clock::now();
-    putStage3Data(*stage3.Get(), stage3Data, width, height, 3);
+    putStage3DataPtr(*stage3.Get(), stage3Ptr, width, height, 3);
     const auto putEnd = Clock::now();
     if (timing) {
       timing->make_image_ms +=
@@ -285,7 +426,7 @@ bool runHalideStage3ForBayer(dng_host &host,
   } else {
     const auto makeStart = Clock::now();
     stage3.Reset(
-        makeImageFromInterleaved16(host, width, height, 3, stage3Data)
+        makeImageFromInterleaved16Ptr(host, width, height, 3, stage3Ptr)
             .Release());
     const auto makeEnd = Clock::now();
     if (timing) {
@@ -350,10 +491,19 @@ bool runHalideStage3And4Fused(dng_host &host,
 
   dng_image *stage2 = const_cast<dng_image *>(negative.Stage2Image());
   uint32_t width = 0, height = 0, planes = 0;
+
+  // Phase 10 Sprint D-B F2: zero-copy borrow of Stage2 contiguous buffer.
+  uint16_t *stage2Ptr = nullptr;
   std::vector<uint16_t> stage2Data;
   const auto extractStart = Clock::now();
-  if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
-      planes != 1) {
+  bool borrowed = borrowStage2Bayer16(stage2, stage2Ptr, width, height, planes);
+  if (!borrowed) {
+    if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
+        planes != 1) {
+      return false;
+    }
+    stage2Ptr = stage2Data.data();
+  } else if (planes != 1) {
     return false;
   }
   const auto extractEnd = Clock::now();
@@ -369,16 +519,16 @@ bool runHalideStage3And4Fused(dng_host &host,
                                     warpParams))
     return false;
 
-  std::vector<uint16_t> localStage3Data;
-  std::vector<uint16_t> &stage3Data = prepareStage3Workspace(
-      localStage3Data, stage3Workspace,
-      static_cast<size_t>(width) * height * 3, timing);
+  // Phase 10 Sprint D-B F1: use pool-backed ptr instead of vector resize.
+  const size_t stage3Elements = static_cast<size_t>(width) * height * 3;
+  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3Elements, timing);
+  if (!stage3Ptr) return false;
 
   const auto fusedStart = Clock::now();
 
   DemosaicWarpHalideHandle *handle = demosaic_warp_rectilinear_halide_dispatch(
-      stage2Data.data(), static_cast<int>(width), static_cast<int>(height),
-      warpParams, WarpRectilinearMode::HALIDE_METAL, stage3Data.data());
+      stage2Ptr, static_cast<int>(width), static_cast<int>(height),
+      warpParams, WarpRectilinearMode::HALIDE_METAL, stage3Ptr);
   if (!handle)
     return false;
 
@@ -429,10 +579,10 @@ bool runHalideStage3And4Fused(dng_host &host,
                "falling back to finish()+Stage4\n";
   bool fused = demosaic_warp_rectilinear_halide_finish(handle);
   if (fused && stage3Stub.Get()) {
-    putStage3Data(*stage3Stub.Get(), stage3Data, width, height, 3);
+    putStage3DataPtr(*stage3Stub.Get(), stage3Ptr, width, height, 3);
   } else if (!fused) {
     stage3Stub.Reset(
-        makeImageFromInterleaved16(host, width, height, 3, stage3Data).Release());
+        makeImageFromInterleaved16Ptr(host, width, height, 3, stage3Ptr).Release());
   }
   if (!stage3Stub.Get())
     return false;
@@ -562,10 +712,11 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     negative->ReadStage1Image(host, stream, info);
     negative->BuildStage2Image(host);
 
+    // Phase 10 Sprint D-B F1: do NOT eagerly resize stage3Workspace here.
+    // FFI path gets a lazy mmap pool via prepareStage3WorkspacePtr; this
+    // eliminates the ~262ms zero-fill that was inside decodeStart-decodeEnd.
+    // test_decode harness passes its own pre-sized vector so is unaffected.
     std::vector<uint16_t> stage3Workspace;
-    if (isBayer) {
-      stage3Workspace.resize(static_cast<size_t>(inputWidth) * inputHeight * 3);
-    }
     DngPipelineStage3Timing stage3Timing;
     const PipelineConfig config = PipelineConfig::loadFromEnv();
 

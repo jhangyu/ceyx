@@ -113,6 +113,8 @@ functions:
 #include <dng_pixel_buffer.h>
 #include <dng_rect.h>
 #include <dng_utils.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace {
 
@@ -631,6 +633,38 @@ void computePrecomputedCoords(int width,
     (void)dst_planes;
 }
 
+// T4-A: Shared static zero buffer for the baseline (non-precomputed) ABI
+// placeholder. Avoids allocating + zero-filling ~73 MB on every call.
+// Phase 10 Sprint D-B: mmap MAP_ANON lazy zero pages. The Halide kernel
+// never reads these inputs when precompute_coords=false, so committed
+// physical pages stay near zero RSS. Avoids the ~290ms eager zero-fill
+// of a 73M-element int32 buffer (=~292MB) on every first call.
+static std::mutex s_zero_buf_mutex;
+static int32_t*   s_zero_buf_ptr   = nullptr;
+static size_t     s_zero_buf_bytes = 0;
+
+const int32_t* getOrGrowZeroBuf(int width, int height) {
+    const size_t needed_elems = static_cast<size_t>(width) * height * 3u;
+    const size_t needed_bytes = needed_elems * sizeof(int32_t);
+    std::lock_guard<std::mutex> lock(s_zero_buf_mutex);
+    if (needed_bytes > s_zero_buf_bytes) {
+        if (s_zero_buf_ptr) {
+            munmap(s_zero_buf_ptr, s_zero_buf_bytes);
+            s_zero_buf_ptr = nullptr;
+            s_zero_buf_bytes = 0;
+        }
+        void* p = mmap(nullptr, needed_bytes,
+                       PROT_READ | PROT_WRITE,
+                       MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (p == MAP_FAILED) {
+            p = std::calloc(needed_elems, sizeof(int32_t));
+        }
+        s_zero_buf_ptr = static_cast<int32_t*>(p);
+        s_zero_buf_bytes = needed_bytes;
+    }
+    return s_zero_buf_ptr;
+}
+
 bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                       int width,
                       int height,
@@ -690,9 +724,9 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
         frac_x_buf  = Buffer<int32_t>(frac_x_storage.data(),  width, height, 3);
         frac_y_buf  = Buffer<int32_t>(frac_y_storage.data(),  width, height, 3);
     } else {
-        // Provide non-empty placeholder to satisfy ABI (kernel will not read).
-        base_x_storage.assign(static_cast<size_t>(width) * height * 3u, 0);
-        base_x_buf  = Buffer<int32_t>(base_x_storage.data(), width, height, 3);
+        // T4-A: Reuse static mmap lazy-zero buffer; no per-call zero-fill (~73 MB saved).
+        const int32_t* zero_ptr = getOrGrowZeroBuf(width, height);
+        base_x_buf  = Buffer<int32_t>(const_cast<int32_t*>(zero_ptr), width, height, 3);
         base_y_buf  = base_x_buf;
         frac_x_buf  = base_x_buf;
         frac_y_buf  = base_x_buf;

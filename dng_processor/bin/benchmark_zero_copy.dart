@@ -1,11 +1,11 @@
 import 'dart:io';
 import 'package:dng_processor/src/dng_decoder_service.dart';
 
-void main() async {
+void main(List<String> args) async {
   final service = DngDecoderService();
   service.initialize();
 
-  final dngPath = '../sample.dng';
+  final dngPath = args.isNotEmpty ? args[0] : '../sample.dng';
   if (!File(dngPath).existsSync()) {
     print('Error: $dngPath not found');
     exit(1);
