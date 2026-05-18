@@ -21,6 +21,8 @@
 #include "dng_negative.h"
 #include "dng_tag_values.h"
 #include "dng_utils.h"
+// Phase 10 Sprint C3: Halide GPU dispatch bridge for Stage 2 OpcodeList2.
+#include "dng_opcodelist2_halide.h"
 
 #include <algorithm>
 
@@ -120,13 +122,19 @@ void dng_opcode_list::Apply (dng_host &host,
 		
 		if (opcode.AboutToApply (host, negative))
 			{
-						
+			// Phase 10 Sprint C3: try Halide GPU dispatch (currently MapPolynomial).
+			if (fStage == 2 && image.Get () != nullptr &&
+				halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
+				{
+				continue;
+				}
+
 			opcode.Apply (host,
 						  negative,
 						  image);
-			
+
 			}
-		
+
 		}
 
 	}

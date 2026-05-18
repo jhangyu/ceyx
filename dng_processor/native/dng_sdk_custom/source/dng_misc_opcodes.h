@@ -247,7 +247,14 @@ class dng_opcode_MapPolynomial: public dng_inplace_opcode
 								  dng_pixel_buffer &buffer,
 								  const dng_rect &dstArea,
 								  const dng_rect &imageBounds);
-								  
+
+		// Phase 10 Sprint C3: accessors for bridge (dng_opcodelist2_halide.cpp).
+		// Expose private fields without requiring friend access or SDK modifications
+		// beyond this minimal header change (mirrored in dng_sdk_custom).
+		uint32 PolyDegree () const                      { return fDegree; }
+		const real64 * PolyCoefficients () const        { return fCoefficient; }
+		const dng_area_spec & PolyAreaSpec () const     { return fAreaSpec; }
+
 	};
 
 /*****************************************************************************/
