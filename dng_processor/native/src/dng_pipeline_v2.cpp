@@ -204,6 +204,40 @@ Stage3WorkspacePool &stage3WorkspacePool() {
   return pool;
 }
 
+// Phase 10 Sprint E-rgb-pool: process-level mmap pool for RGB output buffer.
+// Eliminates the 247ms zero-fill page-fault cost on every FFI call caused by
+// std::vector<uint8_t>::resize(W*H*3) constructing a fresh 72 MB allocation.
+// Pattern identical to Stage3WorkspacePool (Phase 10 Sprint D-round2).
+class RgbOutputPool {
+ public:
+  uint8_t *acquire(size_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (bytes > capacity_bytes_) {
+      if (ptr_) {
+        munmap(ptr_, capacity_bytes_);
+        ptr_ = nullptr;
+        capacity_bytes_ = 0;
+      }
+      void *p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+      if (p == MAP_FAILED) return nullptr;
+      ptr_ = static_cast<uint8_t *>(p);
+      capacity_bytes_ = bytes;
+    }
+    return ptr_;
+  }
+  size_t capacity() const { return capacity_bytes_; }
+ private:
+  std::mutex mutex_;
+  uint8_t *ptr_ = nullptr;
+  size_t capacity_bytes_ = 0;
+};
+
+RgbOutputPool &rgbOutputPool() {
+  static RgbOutputPool pool;
+  return pool;
+}
+
 class ScopedStage2DeviceHandoff {
  public:
   explicit ScopedStage2DeviceHandoff(bool enabled) {
@@ -471,10 +505,13 @@ bool runHalideStage3ForBayer(dng_host &host,
 
 // Forward declaration needed because runHalideStage3And4Fused is defined before
 // runStage4ToRgb but may call it in its fallback path.
+// rgb_ptr / rgb_size are pool-backed (RgbOutputPool); the function fills them
+// in from the pool and writes pixel data through the render path.
 bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     const PipelineConfig &config,
                     uint32_t inputWidth, uint32_t inputHeight,
-                    std::vector<uint8_t> &rgb, uint32_t &outW, uint32_t &outH);
+                    uint8_t *&rgb_ptr, size_t &rgb_size,
+                    uint32_t &outW, uint32_t &outH);
 
 // Phase 8.2.2 — Stage3→Stage4 GPU device handoff.
 // Dispatches Stage3 (async), does Stage4 CPU prep while GPU runs, then calls
@@ -489,7 +526,8 @@ bool runHalideStage3And4Fused(dng_host &host,
                                uint32_t inputHeight,
                                DngPipelineStage3Timing *timing,
                                std::vector<uint16_t> *stage3Workspace,
-                               std::vector<uint8_t> &rgb,
+                               uint8_t *&rgb_ptr,
+                               size_t &rgb_size,
                                uint32_t &outW,
                                uint32_t &outH) {
   if (config.debug.warp_bit_exact || config.debug.demosaic_bit_exact)
@@ -546,10 +584,11 @@ bool runHalideStage3And4Fused(dng_host &host,
     return false;
 
   // CPU work while GPU runs Stage3 (latency hiding):
-  // 1. Pre-alloc Stage4 output buffer (avoids first-touch page fault)
+  // 1. Pre-alloc Stage4 output buffer via RgbOutputPool (no page fault on warm calls)
   const size_t stage4OutSize = static_cast<size_t>(inputWidth) * inputHeight * 3;
-  if (rgb.size() != stage4OutSize)
-    rgb.resize(stage4OutSize);
+  rgb_ptr = rgbOutputPool().acquire(stage4OutSize);
+  if (!rgb_ptr) return false;
+  rgb_size = stage4OutSize;
 
   // 2. Allocate stub Stage3 image for negative.SetStage3Image() integrity
   AutoPtr<dng_image> stage3Stub;
@@ -568,7 +607,8 @@ bool runHalideStage3And4Fused(dng_host &host,
   bool stage4Ok = false;
   if (deviceBuf) {
     stage4Ok = render_stage4_halide_from_device_buffer(
-        host, negative, renderer, deviceBuf, srcScale, rgb, outW, outH);
+        host, negative, renderer, deviceBuf, srcScale,
+        rgb_ptr, rgb_size, outW, outH);
   }
 
   const auto fusedEnd = Clock::now();
@@ -601,8 +641,8 @@ bool runHalideStage3And4Fused(dng_host &host,
     return false;
   negative.SetStage3Image(stage3Stub);
 
-  if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight, rgb,
-                      outW, outH))
+  if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight,
+                      rgb_ptr, rgb_size, outW, outH))
     return false;
 
   if (timing) {
@@ -627,8 +667,8 @@ bool runSdkStage3(dng_host &host,
 bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     const PipelineConfig &config,
                     uint32_t inputWidth, uint32_t inputHeight,
-                    std::vector<uint8_t> &rgb, uint32_t &outW,
-                    uint32_t &outH) {
+                    uint8_t *&rgb_ptr, size_t &rgb_size,
+                    uint32_t &outW, uint32_t &outH) {
   dng_host *renderHost = &host;
   std::unique_ptr<ConcurrentDngHost> renderHostOverride;
   const uint32_t renderThreads = config.threads.render_area_threads;
@@ -642,19 +682,31 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   renderer.SetFinalPixelType(ttByte);
   renderer.SetFinalSpace(dng_space_sRGB::Get());
 
-  rgb.resize(static_cast<size_t>(inputWidth) * inputHeight * 3);
+  // Acquire pool buffer: mmap pages stay committed across calls → 0ms on warm paths.
+  const size_t needed = static_cast<size_t>(inputWidth) * inputHeight * 3;
+  rgb_ptr = rgbOutputPool().acquire(needed);
+  if (!rgb_ptr) return false;
+  rgb_size = needed;
+
   bool ok = render_stage4_halide(*renderHost, negative, renderer,
-                                 RenderHalideMode::HALIDE_METAL, rgb, outW,
-                                 outH);
+                                 RenderHalideMode::HALIDE_METAL,
+                                 rgb_ptr, rgb_size, outW, outH);
   if (ok)
     return true;
 
+  // SDK fallback: renderer.Render() may produce a different output size.
+  // Acquire a fresh pool buffer at the fallback size if needed.
   AutoPtr<dng_image> finalImage(renderer.Render());
   if (!finalImage.Get())
     return false;
   outW = finalImage->Width();
   outH = finalImage->Height();
-  rgb.resize(static_cast<size_t>(outW) * outH * 3);
+  const size_t fallbackNeeded = static_cast<size_t>(outW) * outH * 3;
+  if (fallbackNeeded > rgb_size) {
+    rgb_ptr = rgbOutputPool().acquire(fallbackNeeded);
+    if (!rgb_ptr) return false;
+    rgb_size = fallbackNeeded;
+  }
 
   dng_pixel_buffer buffer;
   buffer.fArea = finalImage->Bounds();
@@ -662,7 +714,7 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   buffer.fPlanes = 3;
   buffer.fPixelType = ttByte;
   buffer.fPixelSize = 1;
-  buffer.fData = rgb.data();
+  buffer.fData = rgb_ptr;
   buffer.fRowStep = static_cast<int32>(outW * 3);
   buffer.fColStep = 3;
   buffer.fPlaneStep = 1;
@@ -675,7 +727,8 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
                                         const PipelineConfig &config,
                                         uint32_t inputWidth,
                                         uint32_t inputHeight,
-                                        std::vector<uint8_t> &rgb,
+                                        uint8_t *&rgb_ptr,
+                                        size_t &rgb_size,
                                         uint32_t &outW,
                                         uint32_t &outH,
                                         bool &restoreFailed) {
@@ -699,6 +752,12 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
       handoff.planes < 3 || handoff.pixel_range == 0)
     return restoreHostStage2();
 
+  // Acquire pool buffer before calling render to avoid page fault.
+  const size_t needed = static_cast<size_t>(inputWidth) * inputHeight * 3;
+  rgb_ptr = rgbOutputPool().acquire(needed);
+  if (!rgb_ptr) return restoreHostStage2();
+  rgb_size = needed;
+
   dng_render renderer(host, negative);
   renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
   renderer.SetFinalPixelType(ttByte);
@@ -707,7 +766,7 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
   const float srcScale = 1.0f / static_cast<float>(handoff.pixel_range);
   const bool ok = render_stage4_halide_from_device_buffer(
       host, negative, renderer, handoff.device_buffer, srcScale,
-      rgb, outW, outH);
+      rgb_ptr, rgb_size, outW, outH);
   if (ok) {
     halide_stage2_ol2_clear_device_handoff();
     return true;
@@ -804,12 +863,13 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
       allDone = runHalideStage3And4Fused(
           host, *negative, config, inputWidth, inputHeight,
           &stage3Timing, &stage3Workspace,
-          result.rgb, result.width, result.height);
+          result.rgb_ptr, result.rgb_size, result.width, result.height);
     } else {
       bool restoreFailed = false;
       allDone = runLossyStage2Stage4DeviceHandoff(
           host, *negative, config, inputWidth, inputHeight,
-          result.rgb, result.width, result.height, restoreFailed);
+          result.rgb_ptr, result.rgb_size, result.width, result.height,
+          restoreFailed);
       if (restoreFailed) {
         result.error_code = -5;
         return false;
@@ -836,7 +896,8 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     }
 
     const auto processStart = Clock::now();
-    if (!runStage4ToRgb(host, *negative, config, inputWidth, inputHeight, result.rgb,
+    if (!runStage4ToRgb(host, *negative, config, inputWidth, inputHeight,
+                        result.rgb_ptr, result.rgb_size,
                         result.width, result.height)) {
       result.error_code = -4;
       return false;

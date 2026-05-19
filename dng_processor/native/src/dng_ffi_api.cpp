@@ -1,5 +1,4 @@
 #include "dng_ffi_api.h"
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <dng_file_stream.h>
@@ -8,7 +7,6 @@
 #include <dng_info.h>
 #include <dng_exceptions.h>
 #include <iostream>
-#include <vector>
 
 #include "dng_pipeline_v2.h"
 
@@ -38,10 +36,11 @@ DngResult *dng_decode_and_process(const char *file_path) {
   const size_t pixelCount =
       static_cast<size_t>(pipeline.width) * static_cast<size_t>(pipeline.height);
   uint8_t *rgba = new uint8_t[pixelCount * 4];
+  const uint8_t *rgb = pipeline.rgb_ptr;
   for (size_t i = 0; i < pixelCount; ++i) {
-    rgba[i * 4 + 0] = pipeline.rgb[i * 3 + 0];
-    rgba[i * 4 + 1] = pipeline.rgb[i * 3 + 1];
-    rgba[i * 4 + 2] = pipeline.rgb[i * 3 + 2];
+    rgba[i * 4 + 0] = rgb[i * 3 + 0];
+    rgba[i * 4 + 1] = rgb[i * 3 + 1];
+    rgba[i * 4 + 2] = rgb[i * 3 + 2];
     rgba[i * 4 + 3] = 255;
   }
 

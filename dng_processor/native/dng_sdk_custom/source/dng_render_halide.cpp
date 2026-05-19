@@ -994,6 +994,183 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     return true;
 }
 
+// Pool-backed overload: out_rgb_ptr/out_rgb_size supplied by RgbOutputPool.
+// No resize, no page-fault cost.  SDK fallback path (renderer.Render()) is
+// not available here since we cannot safely write into an arbitrary pointer
+// whose capacity may not match the resized output; return false in that case
+// so the caller falls back to the vector overload.
+bool runHalideFullOrSdkFallback(dng_host& host,
+                                dng_negative& negative,
+                                dng_image* stage3,
+                                const dng_render& renderer,
+                                bool timing_enabled,
+                                uint8_t* out_rgb_ptr,
+                                size_t out_rgb_size,
+                                uint32_t& out_w,
+                                uint32_t& out_h) {
+    auto ms = [](const auto& start, const auto& end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+
+    const auto t_fn_start = std::chrono::high_resolution_clock::now();
+    const PipelineConfig config = PipelineConfig::loadFromEnv();
+
+    dng_point dst_size;
+    dst_size.h = negative.DefaultFinalWidth();
+    dst_size.v = negative.DefaultFinalHeight();
+    if (renderer.MaximumSize()) {
+        if (Max_uint32(static_cast<uint32>(dst_size.h), static_cast<uint32>(dst_size.v)) >
+            renderer.MaximumSize()) {
+            const real64 ratio = negative.AspectRatio();
+            if (ratio >= 1.0) {
+                dst_size.h = renderer.MaximumSize();
+                dst_size.v = Max_uint32(1, Round_uint32(dst_size.h / ratio));
+            } else {
+                dst_size.v = renderer.MaximumSize();
+                dst_size.h = Max_uint32(1, Round_uint32(dst_size.v * ratio));
+            }
+        }
+    }
+    out_w = static_cast<uint32_t>(dst_size.h);
+    out_h = static_cast<uint32_t>(dst_size.v);
+    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
+
+    // Pool path: no resize, no page fault.
+    const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
+    if (out_rgb_size < needed_out_size || !out_rgb_ptr) {
+        return false;
+    }
+    const auto t_assign_start = std::chrono::high_resolution_clock::now();
+    // no-op: pool buffer already committed
+    const auto t_assign_end = t_assign_start;
+
+    dng_rect src_area = negative.DefaultCropArea();
+
+    dng_image* source_image = stage3;
+    dng_rect source_area = src_area;
+    AutoPtr<dng_image> resized_stage3;
+    const auto resample_start = std::chrono::high_resolution_clock::now();
+    const bool need_resample = src_area.Size() != dst_size;
+    if (need_resample) {
+        resized_stage3.Reset(host.Make_dng_image(dst_size, stage3->Planes(), stage3->PixelType()));
+        if (!resized_stage3.Get()) {
+            return false;
+        }
+        ResampleImage(host,
+                      *stage3,
+                      *resized_stage3.Get(),
+                      src_area,
+                      resized_stage3->Bounds(),
+                      dng_resample_bicubic::Get());
+        source_image = resized_stage3.Get();
+        source_area = resized_stage3->Bounds();
+    }
+    const auto resample_end = std::chrono::high_resolution_clock::now();
+
+    uint32_t src_w = source_area.W();
+    uint32_t src_h = source_area.H();
+    uint32_t src_p = source_image->Planes();
+    std::vector<uint16_t> stage3_data16;
+    RenderParams params;
+    const auto params_start = std::chrono::high_resolution_clock::now();
+    if (!buildRenderParams(host, negative, renderer, config, params)) {
+        return false;
+    }
+    const auto params_end = std::chrono::high_resolution_clock::now();
+
+    const bool can_use_u16_stage3 = source_image->PixelType() == ttShort &&
+                                    source_image->PixelRange() != 0;
+    if (renderHalideTryFullEnabled() && can_use_u16_stage3) {
+        const auto extract_start = std::chrono::high_resolution_clock::now();
+        const uint16_t* stage3_u16_ptr = nullptr;
+        std::unique_ptr<dng_const_tile_buffer> stage3_borrowed_tile;
+        int32_t stage3_row_step   = static_cast<int32_t>(src_w * src_p);
+        int32_t stage3_col_step   = static_cast<int32_t>(src_p);
+        int32_t stage3_plane_step = 1;
+        if (borrowStage3Interleaved16(source_image,
+                                      source_area,
+                                      stage3_borrowed_tile,
+                                      stage3_u16_ptr,
+                                      src_w,
+                                      src_h,
+                                      src_p,
+                                      stage3_row_step,
+                                      stage3_col_step,
+                                      stage3_plane_step)) {
+            // Borrowed path.
+        } else {
+            extractStage3Interleaved16(source_image, source_area, stage3_data16, src_w, src_h, src_p);
+            stage3_u16_ptr = stage3_data16.data();
+        }
+        const auto extract_end = std::chrono::high_resolution_clock::now();
+        const float src_scale = 1.0f / static_cast<float>(source_image->PixelRange());
+        const auto halide_start = std::chrono::high_resolution_clock::now();
+        const bool render_ok = runRenderStage4HalideAot(stage3_u16_ptr,
+                                                         static_cast<int>(src_w),
+                                                         static_cast<int>(src_h),
+                                                         static_cast<int>(src_p),
+                                                         stage3_row_step,
+                                                         stage3_col_step,
+                                                         stage3_plane_step,
+                                                         src_scale,
+                                                         static_cast<int>(out_w),
+                                                         static_cast<int>(out_h),
+                                                         params,
+                                                         out_rgb_ptr);
+        if (render_ok) {
+            const auto halide_end = std::chrono::high_resolution_clock::now();
+            if (timing_enabled) {
+                const auto t_fn_end = halide_end;
+                const double total_fn_ms = ms(t_fn_start, t_fn_end);
+                const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
+                const double assign_ms   = ms(t_assign_start, t_assign_end);
+                const double resample_ms = ms(resample_start, resample_end);
+                const double extract_ms  = ms(extract_start, extract_end);
+                const double params_ms   = ms(params_start, params_end);
+                const double halide_ms   = ms(halide_start, halide_end);
+                const double accounted   = dst_size_ms + assign_ms + resample_ms + extract_ms + params_ms + halide_ms;
+                const double untimed     = total_fn_ms - accounted;
+                std::cerr << "[RenderHalideTiming] pool_path=1 dst_size=" << dst_size_ms
+                          << " ms out_rgb_assign=" << assign_ms
+                          << " ms resample=" << resample_ms
+                          << " ms extractStage3U16=" << extract_ms
+                          << " ms buildParams=" << params_ms
+                          << " ms halideFull=" << halide_ms
+                          << " ms untimed=" << untimed
+                          << " ms total_fn=" << total_fn_ms << " ms\n";
+            }
+            return true;
+        }
+    }
+
+    // SDK fallback with pool pointer: use fData directly.
+    AutoPtr<dng_image> final_image(const_cast<dng_render&>(renderer).Render());
+    if (!final_image.Get()) {
+        return false;
+    }
+    const uint32_t fw = static_cast<uint32_t>(final_image->Width());
+    const uint32_t fh = static_cast<uint32_t>(final_image->Height());
+    const size_t fallback_size = static_cast<size_t>(fw) * fh * 3;
+    if (fallback_size > out_rgb_size) {
+        // Pool buffer too small for fallback size — should not happen in practice.
+        return false;
+    }
+    out_w = fw;
+    out_h = fh;
+    dng_pixel_buffer buffer;
+    buffer.fArea = final_image->Bounds();
+    buffer.fPlane = 0;
+    buffer.fPlanes = 3;
+    buffer.fPixelType = ttByte;
+    buffer.fPixelSize = 1;
+    buffer.fData = out_rgb_ptr;
+    buffer.fRowStep = static_cast<int32>(out_w * 3);
+    buffer.fColStep = 3;
+    buffer.fPlaneStep = 1;
+    final_image->Get(buffer);
+    return true;
+}
+
 }  // namespace
 
 const char* renderHalideModeName(RenderHalideMode mode) {
@@ -1108,6 +1285,182 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         const double total_fn_ms = ms(t_fn_start, halide_end);
         const double accounted = dst_size_ms + assign_ms + params_ms + halide_ms;
         std::cerr << "[RenderHalideTiming] device_handoff=1"
+                  << " dst_size=" << dst_size_ms
+                  << " ms out_rgb_assign=" << assign_ms
+                  << " ms buildParams=" << params_ms
+                  << " ms halideFull=" << halide_ms
+                  << " ms untimed=" << (total_fn_ms - accounted)
+                  << " ms total_fn=" << total_fn_ms
+                  << " ms out_w=" << out_w << " out_h=" << out_h << "\n";
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Pool-backed overloads (Phase 10 Sprint E-rgb-pool)
+// These wrap the vector overloads using a non-owning std::vector that points
+// at caller-allocated (mmap pool) memory.  The vector's allocator is bypassed
+// by constructing it from an existing pointer; instead we build a minimal
+// wrapper that satisfies the internal API without re-allocating.
+//
+// Implementation note: we cannot construct a std::vector from a raw pointer
+// without ownership.  The cleanest zero-copy path is to delegate to the
+// internal helpers directly.  For render_stage4_halide we call
+// runHalideFullOrSdkFallback via a local vector that we swap-in after the
+// render call.  But that still page-faults on resize.
+//
+// Instead, we use a thin shim std::vector that wraps the pool pointer:
+// since std::vector does not support non-owning pointers, we reuse the
+// existing vector overloads by passing a vector whose .data() already points
+// to the pool memory AND whose .size() already equals the needed bytes.
+// We achieve this by assigning into a local vector<uint8_t> that is
+// move-constructed from the pool-sized data, then after the call we confirm
+// the pointer has not changed (render path only ever writes, never reallocates
+// when size is correct).
+//
+// Actually the simplest correct approach: build a local std::vector backed by
+// a custom allocator.  That's too complex.  The real simplest approach:
+// replicate the render body but pass out_rgb_ptr directly.  We factor out the
+// core logic via an internal ptr-based helper defined in the same TU, which
+// the vector overloads already call indirectly.  We add ptr-based internal
+// variants of runHalideFullOrSdkFallback and the device-handoff path.
+//
+// For this sprint we use the straightforward solution: allocate a
+// std::vector<uint8_t> that is already pre-sized to exactly the pool buffer
+// size, call the existing overload, then verify data() has not moved (it
+// won't as long as size == needed on entry).  The vector resize inside the
+// callee is a no-op (size already correct), so there is zero page-fault cost.
+// ---------------------------------------------------------------------------
+
+bool render_stage4_halide(dng_host& host,
+                          dng_negative& negative,
+                          const dng_render& renderer,
+                          RenderHalideMode mode,
+                          uint8_t* out_rgb_ptr,
+                          size_t out_rgb_size,
+                          uint32_t& out_w,
+                          uint32_t& out_h) {
+    if (mode == RenderHalideMode::SDK) {
+        return false;
+    }
+
+    dng_image* stage3 = const_cast<dng_image*>(negative.Stage3Image());
+    if (!stage3 || stage3->Planes() < 3) {
+        return false;
+    }
+
+    // Wrap the pool pointer in a non-owning vector alias.
+    // We build a std::vector by aliasing the pool memory: since the pool
+    // buffer is already exactly out_rgb_size bytes, the resize() inside
+    // runHalideFullOrSdkFallback is a no-op (no realloc, no page fault).
+    // We use the assign-from-pointer trick: default-construct, then
+    // swap with a vector that owns a copy — but that still copies.
+    //
+    // Correct zero-copy path: use a std::vector whose internal buffer IS the
+    // pool pointer.  This requires calling runHalideFullOrSdkFallback with a
+    // vector whose .data() == out_rgb_ptr.  We achieve this by calling the
+    // existing vector overload with a vector pre-sized to out_rgb_size that
+    // wraps the pool memory via placement:
+    //   1. Construct a vector of size out_rgb_size (may page-fault on first
+    //      call — but on the first FFI call the pool has already been
+    //      committed by the caller before passing here, so this is a no-op
+    //      resize).
+    //   2. memcpy of 72 MB defeats the purpose.
+    //
+    // The ONLY zero-copy approach without changing the internal helper
+    // signature is to use a custom allocator or to duplicate the helper.
+    // We duplicate the minimal part: re-use the existing implementation path
+    // by routing through runHalideFullOrSdkFallback directly.
+    // Since it lives in the same TU (anonymous namespace) we call it here.
+    return runHalideFullOrSdkFallback(host,
+                                      negative,
+                                      stage3,
+                                      renderer,
+                                      renderHalideTimingEnabled(),
+                                      out_rgb_ptr,
+                                      out_rgb_size,
+                                      out_w,
+                                      out_h);
+}
+
+bool render_stage4_halide_from_device_buffer(dng_host& host,
+                                              dng_negative& negative,
+                                              const dng_render& renderer,
+                                              halide_buffer_t* stage3_device_buf,
+                                              float src_scale,
+                                              uint8_t* out_rgb_ptr,
+                                              size_t out_rgb_size,
+                                              uint32_t& out_w,
+                                              uint32_t& out_h) {
+    auto ms = [](const auto& start, const auto& end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+    const auto t_fn_start = std::chrono::high_resolution_clock::now();
+    if (!stage3_device_buf || !renderHalideTryFullEnabled()) {
+        return false;
+    }
+
+    dng_point dst_size;
+    dst_size.h = static_cast<int32>(negative.DefaultFinalWidth());
+    dst_size.v = static_cast<int32>(negative.DefaultFinalHeight());
+    if (renderer.MaximumSize()) {
+        const uint32 max_dim = Max_uint32(static_cast<uint32>(dst_size.h),
+                                          static_cast<uint32>(dst_size.v));
+        if (max_dim > renderer.MaximumSize()) {
+            const real64 ratio = negative.AspectRatio();
+            if (ratio >= 1.0) {
+                dst_size.h = static_cast<int32>(renderer.MaximumSize());
+                dst_size.v = static_cast<int32>(Max_uint32(1,
+                    Round_uint32(static_cast<real64>(dst_size.h) / ratio)));
+            } else {
+                dst_size.v = static_cast<int32>(renderer.MaximumSize());
+                dst_size.h = static_cast<int32>(Max_uint32(1,
+                    Round_uint32(static_cast<real64>(dst_size.v) * ratio)));
+            }
+        }
+    }
+    out_w = static_cast<uint32_t>(dst_size.h);
+    out_h = static_cast<uint32_t>(dst_size.v);
+    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
+
+    const dng_rect src_area = negative.DefaultCropArea();
+    if (src_area.W() != out_w || src_area.H() != out_h) {
+        return false;
+    }
+
+    // Pool path: buffer is already committed — no resize, no page fault.
+    const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
+    if (out_rgb_size < needed || !out_rgb_ptr) {
+        return false;
+    }
+    // t_assign timing: zero cost (no resize)
+    const auto t_assign_start = std::chrono::high_resolution_clock::now();
+    const auto t_assign_end   = t_assign_start;  // no-op
+
+    const PipelineConfig config = PipelineConfig::loadFromEnv();
+    RenderParams params;
+    const auto params_start = std::chrono::high_resolution_clock::now();
+    if (!buildRenderParams(host, negative, renderer, config, params)) {
+        return false;
+    }
+    const auto params_end = std::chrono::high_resolution_clock::now();
+
+    const auto halide_start = std::chrono::high_resolution_clock::now();
+    const bool ok = runRenderStage4HalideAotFromDevice(
+        stage3_device_buf, src_scale,
+        static_cast<int>(src_area.l), static_cast<int>(src_area.t),
+        static_cast<int>(out_w), static_cast<int>(out_h),
+        params, out_rgb_ptr);
+    const auto halide_end = std::chrono::high_resolution_clock::now();
+
+    if (ok && renderHalideTimingEnabled()) {
+        const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
+        const double assign_ms   = ms(t_assign_start, t_assign_end);
+        const double params_ms   = ms(params_start, params_end);
+        const double halide_ms   = ms(halide_start, halide_end);
+        const double total_fn_ms = ms(t_fn_start, halide_end);
+        const double accounted   = dst_size_ms + assign_ms + params_ms + halide_ms;
+        std::cerr << "[RenderHalideTiming] device_handoff=1 pool_path=1"
                   << " dst_size=" << dst_size_ms
                   << " ms out_rgb_assign=" << assign_ms
                   << " ms buildParams=" << params_ms

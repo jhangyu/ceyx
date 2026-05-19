@@ -3,13 +3,14 @@
 #include <cstdint>
 #include <vector>
 
-#include "dng_pipeline_config.h"
-
 class dng_host;
 class dng_negative;
 
 struct DngPipelineV2Result {
-  std::vector<uint8_t> rgb;
+  // Pool-backed RGB buffer. NOT owned by this struct; lifetime is
+  // process-scoped (RgbOutputPool singleton in dng_pipeline_v2.cpp).
+  uint8_t* rgb_ptr = nullptr;
+  size_t   rgb_size = 0;
   uint32_t width = 0;
   uint32_t height = 0;
   double decode_ms = 0.0;
