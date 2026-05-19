@@ -27,7 +27,6 @@ functions:
 #include <chrono>
 #include <cstring>
 #include <iostream>
-#include <memory>
 #include <mutex>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -135,8 +134,7 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
       continue;
 
     bool applied = false;
-    if (opcode.OpcodeID() == dngOpcode_WarpRectilinear &&
-        !config.debug.warp_bit_exact) {
+    if (opcode.OpcodeID() == dngOpcode_WarpRectilinear) {
       const auto &warpOpcode =
           static_cast<const dng_opcode_WarpRectilinear &>(opcode);
       applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
@@ -385,7 +383,7 @@ bool runHalideStage3ForBayer(dng_host &host,
   AutoPtr<dng_image> stage3;
   bool stage3Allocated = false;
 
-  if (!config.debug.warp_bit_exact && config.debug.fused_demosaic_warp &&
+  if (config.debug.fused_demosaic_warp &&
       opcodeList3.Count() == 1 &&
       opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear) {
     const auto setupStart = Clock::now();
@@ -530,8 +528,6 @@ bool runHalideStage3And4Fused(dng_host &host,
                                size_t &rgb_size,
                                uint32_t &outW,
                                uint32_t &outH) {
-  if (config.debug.warp_bit_exact || config.debug.demosaic_bit_exact)
-    return false;
   if (!config.debug.fused_demosaic_warp || !config.debug.stage3_stage4_device_handoff)
     return false;
 
@@ -669,15 +665,7 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     uint32_t inputWidth, uint32_t inputHeight,
                     uint8_t *&rgb_ptr, size_t &rgb_size,
                     uint32_t &outW, uint32_t &outH) {
-  dng_host *renderHost = &host;
-  std::unique_ptr<ConcurrentDngHost> renderHostOverride;
-  const uint32_t renderThreads = config.threads.render_area_threads;
-  if (renderThreads > 0 && renderThreads != host.PerformAreaTaskThreads()) {
-    renderHostOverride = std::make_unique<ConcurrentDngHost>(renderThreads);
-    renderHost = renderHostOverride.get();
-  }
-
-  dng_render renderer(*renderHost, negative);
+  dng_render renderer(host, negative);
   renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
   renderer.SetFinalPixelType(ttByte);
   renderer.SetFinalSpace(dng_space_sRGB::Get());
@@ -688,7 +676,7 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   if (!rgb_ptr) return false;
   rgb_size = needed;
 
-  bool ok = render_stage4_halide(*renderHost, negative, renderer,
+  bool ok = render_stage4_halide(host, negative, renderer,
                                  RenderHalideMode::HALIDE_METAL,
                                  rgb_ptr, rgb_size, outW, outH);
   if (ok)
@@ -786,8 +774,7 @@ bool dng_pipeline_v2_run_stage3(dng_host &host,
     *timing = DngPipelineStage3Timing{};
   }
   const PipelineConfig config = PipelineConfig::loadFromEnv();
-  if (use_halide_bayer && !config.debug.warp_bit_exact &&
-      !config.debug.demosaic_bit_exact) {
+  if (use_halide_bayer) {
     if (runHalideStage3ForBayer(host, negative, config, timing, stage3_workspace)) {
       return true;
     }

@@ -92,9 +92,7 @@ functions:
 #include "dng_warp_halide.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
-#include <iostream>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -206,10 +204,6 @@ struct TileClippingGrid {
         return bounds[idx];
     }
 };
-
-bool isWarpBitExactModeEnabled() {
-    return PipelineConfig::loadFromEnv().debug.warp_bit_exact;
-}
 
 WarpRuntimeParams buildRuntimeParams(int width, int height, const WarpRectilinearParams& params) {
     WarpRuntimeParams runtime;
@@ -513,40 +507,9 @@ bool writeInterleavedToImage(dng_image* image,
     return true;
 }
 
-bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf,
-                            bool timing_enabled,
-                            const char* label,
-                            const std::chrono::high_resolution_clock::time_point& copyStart,
-                            std::chrono::high_resolution_clock::time_point& copyEnd) {
-    const bool split_timing = PipelineConfig::loadFromEnv().timing.halide_readback_split;
-    if (!split_timing) {
-        if (dst_buf.copy_to_host() != 0) {
-            return false;
-        }
-        copyEnd = std::chrono::high_resolution_clock::now();
-        return true;
-    }
-
-    const auto syncStart = copyStart;
-    auto syncEnd = syncStart;
-    if (dst_buf.device_sync() != 0) {
-        return false;
-    }
-    syncEnd = std::chrono::high_resolution_clock::now();
+bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
     if (dst_buf.copy_to_host() != 0) {
         return false;
-    }
-    copyEnd = std::chrono::high_resolution_clock::now();
-
-    if (timing_enabled) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
-        };
-        std::cerr << label
-                  << " sync_wait=" << ms(syncStart, syncEnd)
-                  << " ms host_copy=" << ms(syncEnd, copyEnd)
-                  << " ms copy_to_host=" << ms(copyStart, copyEnd)
-                  << " ms\n";
     }
     return true;
 }
@@ -677,9 +640,7 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
         return false;
     }
 
-    const bool timing_enabled = PipelineConfig::loadFromEnv().timing.warp_halide;
     const bool use_precomputed = isPrecomputedCoordsEnabled();
-    const auto t0 = std::chrono::high_resolution_clock::now();
 
     // Fast path: RGB interleaved input/output (common Stage3 path).
     Buffer<uint16_t> src_buf =
@@ -710,14 +671,10 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     // Phase 8.1.6 D-1: optionally precompute coords on host in double.
     std::vector<int32_t> base_x_storage, base_y_storage, frac_x_storage, frac_y_storage;
     Buffer<int32_t> base_x_buf, base_y_buf, frac_x_buf, frac_y_buf;
-    auto t_pre0 = std::chrono::high_resolution_clock::now();
-    auto t_pre1 = t_pre0;
     if (use_precomputed) {
-        t_pre0 = std::chrono::high_resolution_clock::now();
         computePrecomputedCoords(width, height, planes, runtime, params,
                                  base_x_storage, base_y_storage,
                                  frac_x_storage, frac_y_storage);
-        t_pre1 = std::chrono::high_resolution_clock::now();
         // Halide Buffer with planar layout (x, y, c): width × height × 3.
         base_x_buf  = Buffer<int32_t>(base_x_storage.data(),  width, height, 3);
         base_y_buf  = Buffer<int32_t>(base_y_storage.data(),  width, height, 3);
@@ -746,7 +703,6 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     }
     dst_buf.set_host_dirty(false);
 
-    const auto t1 = std::chrono::high_resolution_clock::now();
     int result = 0;
     if (use_precomputed) {
         result = rectilinear_warp_precomputed(src_buf.raw_buffer(),
@@ -797,29 +753,8 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     if (result != 0) {
         return false;
     }
-    const auto t2 = std::chrono::high_resolution_clock::now();
-    if (timing_enabled && use_precomputed) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
-        };
-        std::cerr << "[WarpHalidePrecompute] host_double_precompute=" << ms(t_pre0, t_pre1)
-                  << " ms\n";
-    }
-    auto copyEnd = t2;
-    if (!copyHalideOutputToHost(dst_buf, timing_enabled, "[WarpHalideReadback]",
-                                t2, copyEnd)) {
+    if (!copyHalideOutputToHost(dst_buf)) {
         return false;
-    }
-    const auto t3 = copyEnd;
-
-    if (timing_enabled) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
-        };
-        std::cerr << "[WarpHalideTiming] prep=" << ms(t0, t1)
-                  << " ms kernel=" << ms(t1, t2)
-                  << " ms copy_to_host=" << ms(t2, t3)
-                  << " ms\n";
     }
 
     return true;
@@ -835,9 +770,6 @@ bool runDemosaicWarpHalideAot(const uint16_t* src_bayer,
     if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
         return false;
     }
-
-    const bool timing_enabled = PipelineConfig::loadFromEnv().timing.demosaic_warp_halide;
-    const auto t0 = std::chrono::high_resolution_clock::now();
 
     Buffer<uint16_t> src_buf(const_cast<uint16_t*>(src_bayer), width, height);
     Buffer<uint16_t> dst_buf =
@@ -869,7 +801,6 @@ bool runDemosaicWarpHalideAot(const uint16_t* src_bayer,
     tile_bounds_buf.set_host_dirty();
     dst_buf.set_host_dirty(false);
 
-    const auto t1 = std::chrono::high_resolution_clock::now();
     const int result = dng_demosaic_warp(src_buf.raw_buffer(),
                                          rad_buf.raw_buffer(),
                                          tan_buf.raw_buffer(),
@@ -889,22 +820,8 @@ bool runDemosaicWarpHalideAot(const uint16_t* src_bayer,
     if (result != 0) {
         return false;
     }
-    const auto t2 = std::chrono::high_resolution_clock::now();
-    auto copyEnd = t2;
-    if (!copyHalideOutputToHost(dst_buf, timing_enabled, "[DemosaicWarpHalideReadback]",
-                                t2, copyEnd)) {
+    if (!copyHalideOutputToHost(dst_buf)) {
         return false;
-    }
-    const auto t3 = copyEnd;
-
-    if (timing_enabled) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
-        };
-        std::cerr << "[DemosaicWarpHalideTiming] prep=" << ms(t0, t1)
-                  << " ms kernel=" << ms(t1, t2)
-                  << " ms copy_to_host=" << ms(t2, t3)
-                  << " ms\n";
     }
 
     return true;
@@ -921,9 +838,6 @@ struct DemosaicWarpHalideAsyncImpl {
     Buffer<float> rad_buf;
     Buffer<float> tan_buf;
     Buffer<int32_t> tile_bounds_buf;
-    bool timing_enabled = false;
-    std::chrono::high_resolution_clock::time_point t0;
-    std::chrono::high_resolution_clock::time_point t1;
 };
 
 }  // namespace
@@ -1038,7 +952,7 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
     if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
         return false;
     }
-    if (mode == WarpRectilinearMode::SDK || isWarpBitExactModeEnabled()) {
+    if (mode == WarpRectilinearMode::SDK) {
         return false;
     }
 
@@ -1071,25 +985,13 @@ bool apply_warp_rectilinear_to_image(dng_host& host,
         return false;
     }
 
-    if (isWarpBitExactModeEnabled()) {
-        const_cast<dng_opcode_WarpRectilinear&>(opcode).Apply(host, negative, image);
-        return true;
-    }
-
-    const bool timing_enabled = PipelineConfig::loadFromEnv().timing.warp_halide;
-    auto ms = [](const auto& a, const auto& b) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
-    };
-
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t planes = 0;
     std::vector<uint16_t> src_data;
-    const auto t0 = std::chrono::high_resolution_clock::now();
     if (!imageToInterleaved(image.Get(), src_data, width, height, planes)) {
         return false;
     }
-    const auto t1 = std::chrono::high_resolution_clock::now();
 
     WarpRectilinearParams params;
     if (!extractWarpRectilinearParams(opcode,
@@ -1108,17 +1010,9 @@ bool apply_warp_rectilinear_to_image(dng_host& host,
                                  dst_data.data())) {
         return false;
     }
-    const auto t2 = std::chrono::high_resolution_clock::now();
 
     if (!writeInterleavedToImage(image.Get(), dst_data, width, height, planes)) {
         return false;
-    }
-    const auto t3 = std::chrono::high_resolution_clock::now();
-    if (timing_enabled) {
-        std::cerr << "[WarpHalideImageTiming] get_interleaved=" << ms(t0, t1)
-                  << " ms warp_apply=" << ms(t1, t2)
-                  << " ms put_image=" << ms(t2, t3)
-                  << " ms\n";
     }
     return true;
 }
@@ -1143,7 +1037,7 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
         return nullptr;
     }
-    if (mode == WarpRectilinearMode::SDK || isWarpBitExactModeEnabled()) {
+    if (mode == WarpRectilinearMode::SDK) {
         return nullptr;
     }
     if (mode != WarpRectilinearMode::HALIDE_METAL &&
@@ -1153,9 +1047,6 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     }
 
     auto impl = std::make_unique<DemosaicWarpHalideAsyncImpl>();
-    impl->timing_enabled =
-        PipelineConfig::loadFromEnv().timing.demosaic_warp_halide;
-    impl->t0 = std::chrono::high_resolution_clock::now();
 
     const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
     impl->tile_grid =
@@ -1193,7 +1084,6 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     impl->tile_bounds_buf.set_host_dirty();
     impl->dst_buf.set_host_dirty(false);
 
-    impl->t1 = std::chrono::high_resolution_clock::now();
     const int result = dng_demosaic_warp(
         impl->src_buf.raw_buffer(),
         impl->rad_buf.raw_buffer(),
@@ -1231,24 +1121,8 @@ bool demosaic_warp_rectilinear_halide_finish(DemosaicWarpHalideHandle* handle) {
         return false;
     }
 
-    const auto t2 = std::chrono::high_resolution_clock::now();
-    auto copyEnd = t2;
-    if (!copyHalideOutputToHost(impl->dst_buf, impl->timing_enabled,
-                                "[DemosaicWarpHalideReadback]", t2, copyEnd)) {
+    if (!copyHalideOutputToHost(impl->dst_buf)) {
         return false;
-    }
-    const auto t3 = copyEnd;
-
-    if (impl->timing_enabled) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration_cast<std::chrono::microseconds>(b - a)
-                       .count() /
-                   1000.0;
-        };
-        std::cerr << "[DemosaicWarpHalideTiming] prep="
-                  << ms(impl->t0, impl->t1) << " ms kernel="
-                  << ms(impl->t1, t2) << " ms copy_to_host="
-                  << ms(t2, t3) << " ms\n";
     }
     return true;
 }

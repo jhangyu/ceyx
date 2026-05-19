@@ -28,9 +28,6 @@ python3 dng_processor/native/scripts/build_native_watchdog.py --target dng_decod
 
 # 跳過 configure 加速迭代
 python3 dng_processor/native/scripts/build_native_watchdog.py --skip-configure --target test_decode
-
-# 傳額外 CMake 參數
-python3 dng_processor/native/scripts/build_native_watchdog.py --cmake-arg -DDNG_RENDER_STAGE4_STRICT_FLOAT=ON
 ```
 
 ### Manual CMake

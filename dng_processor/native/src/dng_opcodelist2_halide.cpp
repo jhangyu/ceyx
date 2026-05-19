@@ -103,14 +103,6 @@ bool stage2_ol2_halide_enabled() {
     return enabled;
 }
 
-bool ol2_timing_enabled() {
-    static const bool enabled = []() {
-        const char *v = std::getenv("DNG_OPCODELIST2_TIMING");
-        return v && v[0] == '1';
-    }();
-    return enabled;
-}
-
 bool ol2_prewarm_enabled() {
     // Default ON; allow disabling for A/B measurement via env.
     static const bool enabled = []() {
@@ -120,23 +112,8 @@ bool ol2_prewarm_enabled() {
     return enabled;
 }
 
-bool ol2_persistent_enabled() {
-    // Default ON; allow disabling for A/B measurement via env.
-    static const bool enabled = []() {
-        const char *v = std::getenv("DNG_STAGE2_OL2_PERSISTENT");
-        return !(v && v[0] == '0');
-    }();
-    return enabled;
-}
-
-bool ol2_batched_enabled() {
-    // Default ON; single-plane bridge remains the fallback path.
-    static const bool enabled = []() {
-        const char *v = std::getenv("DNG_STAGE2_OL2_BATCHED");
-        return !(v && v[0] == '0');
-    }();
-    return enabled;
-}
+// ol2_persistent_enabled: hardcoded true (Phase 10 Sprint E-F cleanup).
+// ol2_batched_enabled: hardcoded true (Phase 10 Sprint E-F cleanup).
 
 struct PolynomialTiming {
     double prewarm_ms = 0.0;
@@ -245,12 +222,6 @@ double prewarm_polynomial3_kernel_once() {
         dst.copy_to_host();
         auto t1 = std::chrono::high_resolution_clock::now();
         prewarm_ms = elapsed_ms(t0, t1);
-
-        if (ol2_timing_enabled()) {
-            std::fprintf(stderr,
-                         "[OpcodeList2Halide] prewarm3 dispatch rc=%d t=%.2fms\n",
-                         rc, prewarm_ms);
-        }
     });
     return prewarm_ms;
 }
@@ -287,14 +258,6 @@ double prewarm_polynomial_kernel_once() {
                                              dst);
         dst.copy_to_host();
         auto t1 = std::chrono::high_resolution_clock::now();
-
-        if (ol2_timing_enabled()) {
-            const double ms =
-                std::chrono::duration<double, std::milli>(t1 - t0).count();
-            std::fprintf(stderr,
-                         "[OpcodeList2Halide] prewarm dispatch rc=%d t=%.2fms\n",
-                         rc, ms);
-        }
         prewarm_ms = elapsed_ms(t0, t1);
     });
     return prewarm_ms;
@@ -385,7 +348,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     Halide::Runtime::Buffer<uint16_t> *dst_buf = nullptr;
 
     const bool use_persistent =
-        ol2_persistent_enabled() && ensure_persistent_scratch(width, height);
+        ensure_persistent_scratch(width, height);
     if (use_persistent) {
         PersistentScratch &s = persistent_scratch();
         src_buf = &s.src;
@@ -645,20 +608,10 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
     Halide::Runtime::Buffer<float> coeff(coeff_f32, 9, 3);
     Halide::Runtime::Buffer<int32_t> degree(degree_i32, 3);
 
-    const auto t0 = std::chrono::high_resolution_clock::now();
     const int rc = dng_opcode_polynomial3(src, coeff, degree,
                                           /*pixel_range=*/65535.0f, dst);
     dst.copy_to_host();
-    const auto t1 = std::chrono::high_resolution_clock::now();
-
-    if (ol2_timing_enabled()) {
-        const double ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
-        std::fprintf(stderr,
-                     "[OpcodeList2Halide] prewarm3_for_size rc=%d "
-                     "size=%dx%d t=%.2fms\n",
-                     rc, width, height, ms);
-    }
+    (void)rc;
 
     // Mark this dimension as warmed regardless of rc — even a failed dispatch
     // means Metal has attempted compilation; we should not retry on every call.
@@ -741,7 +694,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
                                            dng_opcode_list &list,
                                            uint32_t start_index,
                                            dng_image &image) {
-    if (!stage2_ol2_halide_enabled() || !ol2_batched_enabled()) {
+    if (!stage2_ol2_halide_enabled()) {
         return 0;
     }
     halide_stage2_ol2_clear_device_handoff();
@@ -821,7 +774,6 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     const int32_t height = static_cast<int32_t>(first_overlap->H());
     const bool defer_copy_to_host = device_handoff_requested();
     PolynomialTiming detail;
-    const auto t0 = std::chrono::high_resolution_clock::now();
     const bool ok = run_polynomial3_kernel(base,
                                            width,
                                            height,
@@ -834,27 +786,8 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
                                            static_cast<float>(pixel_range),
                                            defer_copy_to_host,
                                            &detail);
-    const auto t1 = std::chrono::high_resolution_clock::now();
     if (!ok) {
         return 0;
-    }
-
-    if (ol2_timing_enabled()) {
-        const double ms = elapsed_ms(t0, t1);
-        std::fprintf(stderr,
-                     "[OpcodeList2Timing] id=8 name=MapPolynomial path=halide_gpu_batched "
-                     "planes=0,1,2 degrees=%u,%u,%u area=%dx%d prewarm=%.2fms "
-                     "gather=0.00ms kernel=%.2fms copy_to_host=%.2fms "
-                     "scatter=0.00ms device_handoff=%s t=%.2fms\n",
-                     static_cast<unsigned>(degrees[0]),
-                     static_cast<unsigned>(degrees[1]),
-                     static_cast<unsigned>(degrees[2]),
-                     width, height,
-                     detail.prewarm_ms,
-                     detail.kernel_ms,
-                     detail.copy_to_host_ms,
-                     defer_copy_to_host ? "yes" : "no",
-                     ms);
     }
     return 3;
 }
@@ -927,7 +860,6 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
         return false;
     }
 
-    auto t0 = std::chrono::high_resolution_clock::now();
     PolynomialTiming detail;
     const bool ok = run_polynomial_kernel(base,
                                           width,
@@ -938,25 +870,6 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
                                           mp->PolyCoefficients(),
                                           static_cast<float>(pixel_range),
                                           &detail);
-    auto t1 = std::chrono::high_resolution_clock::now();
-
-    if (ol2_timing_enabled()) {
-        const double ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
-        std::fprintf(stderr,
-                     "[OpcodeList2Timing] id=8 name=MapPolynomial path=halide_gpu "
-                     "plane=%u degree=%u area=%dx%d prewarm=%.2fms gather=%.2fms "
-                     "kernel=%.2fms copy_to_host=%.2fms scatter=%.2fms t=%.2fms\n",
-                     static_cast<unsigned>(plane),
-                     static_cast<unsigned>(mp->PolyDegree()),
-                     width, height,
-                     detail.prewarm_ms,
-                     detail.gather_ms,
-                     detail.kernel_ms,
-                     detail.copy_to_host_ms,
-                     detail.scatter_ms,
-                     ms);
-    }
 
     return ok;
 }

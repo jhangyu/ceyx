@@ -24,16 +24,13 @@ functions:
 */
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
 #include <thread>
 #include <vector>
 
 #include "HalideBuffer.h"
 #include "dng_demosaic_bilinear.h"
-#include "dng_pipeline_config.h"
 
 namespace {
 
@@ -83,14 +80,6 @@ inline uint16_t avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
     return static_cast<uint16_t>((total + 2u) >> 2);
 }
 
-bool demosaicAotDisabled() {
-    return !PipelineConfig::loadFromEnv().debug.demosaic_aot;
-}
-
-bool demosaicTimingEnabled() {
-    return PipelineConfig::loadFromEnv().timing.demosaic_halide;
-}
-
 bool runDemosaicBilinearAot(const uint16_t* input,
                             int width,
                             int height,
@@ -99,32 +88,18 @@ bool runDemosaicBilinearAot(const uint16_t* input,
         return false;
     }
 
-    const auto t0 = std::chrono::high_resolution_clock::now();
     Buffer<uint16_t> src_buf(const_cast<uint16_t*>(input), width, height);
     Buffer<uint16_t> dst_buf =
         Buffer<uint16_t>::make_interleaved(output, width, height, 3);
     src_buf.set_host_dirty();
     dst_buf.set_host_dirty(false);
 
-    const auto t1 = std::chrono::high_resolution_clock::now();
     const int result = dng_demosaic_bilinear(src_buf.raw_buffer(), dst_buf.raw_buffer());
-    const auto t2 = std::chrono::high_resolution_clock::now();
     if (result != 0) {
         return false;
     }
     if (dst_buf.copy_to_host() != 0) {
         return false;
-    }
-    const auto t3 = std::chrono::high_resolution_clock::now();
-
-    if (demosaicTimingEnabled()) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
-        };
-        std::cerr << "[DemosaicHalideTiming] prep=" << ms(t0, t1)
-                  << " ms kernel=" << ms(t1, t2)
-                  << " ms copy_to_host=" << ms(t2, t3)
-                  << " ms\n";
     }
 
     return true;
@@ -198,10 +173,6 @@ extern "C" void demosaic_pattern_bilinear(const uint16_t* input,
     if (thread_count == 0) {
         thread_count = 4;
     }
-    const uint32_t configured_threads = PipelineConfig::loadFromEnv().threads.demosaic_threads;
-    if (configured_threads > 0) {
-        thread_count = static_cast<unsigned int>(configured_threads);
-    }
     if (thread_count > static_cast<unsigned int>(height)) {
         thread_count = static_cast<unsigned int>(height);
     }
@@ -237,7 +208,7 @@ extern "C" void demosaic_bilinear_halide(const uint16_t* input,
                                           int width,
                                           int height,
                                           uint16_t* output) {
-    if (!demosaicAotDisabled() && demosaic_bilinear_halide_aot(input, width, height, output)) {
+    if (demosaic_bilinear_halide_aot(input, width, height, output)) {
         return;
     }
     demosaic_pattern_bilinear(input, width, height, output);

@@ -2,29 +2,6 @@
 
 using namespace Halide;
 
-#ifndef DNG_RENDER_STAGE4_ABC_ASSOC_ALT
-#define DNG_RENDER_STAGE4_ABC_ASSOC_ALT 0
-#endif
-
-#ifndef DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC
-#define DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC 0
-#endif
-
-#ifndef DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE
-#define DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE 0
-#endif
-
-#ifndef DNG_RENDER_STAGE4_ABC_SPLIT_MULADD
-#define DNG_RENDER_STAGE4_ABC_SPLIT_MULADD 0
-#endif
-
-#ifndef DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD
-#define DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD 0
-#endif
-
-#ifndef DNG_RENDER_STAGE4_NO_VECTORIZE
-#define DNG_RENDER_STAGE4_NO_VECTORIZE 0
-#endif
 
 class DngRenderStage4 : public Halide::Generator<DngRenderStage4> {
 public:
@@ -53,8 +30,6 @@ public:
     Input<int32_t> look_has_table{"look_has_table"};
     Input<int32_t> look_has_encoding{"look_has_encoding"};
     Output<Buffer<uint8_t>> dst{"dst", 3};          // x, y, c
-    Func abc_rgb{"abc_rgb"};
-    Func tone_rgb{"tone_rgb"};
     Func rendered_rgb{"rendered_rgb"};
 
     void generate() {
@@ -80,53 +55,19 @@ public:
         Expr wb_g = min(s_g, camera_white(1));
         Expr wb_b = min(s_b, camera_white(2));
 
-#if DNG_RENDER_STAGE4_ABC_ASSOC_ALT
-        Expr p_r0_sum = wb_r * camera_to_rgb(0, 0) + (wb_g * camera_to_rgb(1, 0) + wb_b * camera_to_rgb(2, 0));
-        Expr p_g0_sum = wb_r * camera_to_rgb(0, 1) + (wb_g * camera_to_rgb(1, 1) + wb_b * camera_to_rgb(2, 1));
-        Expr p_b0_sum = wb_r * camera_to_rgb(0, 2) + (wb_g * camera_to_rgb(1, 2) + wb_b * camera_to_rgb(2, 2));
-#else
-#if DNG_RENDER_STAGE4_ABC_SPLIT_MULADD
-        Expr p_r0_m0 = cast<float>(wb_r * camera_to_rgb(0, 0));
-        Expr p_r0_m1 = cast<float>(wb_g * camera_to_rgb(1, 0));
-        Expr p_r0_m2 = cast<float>(wb_b * camera_to_rgb(2, 0));
-        Expr p_g0_m0 = cast<float>(wb_r * camera_to_rgb(0, 1));
-        Expr p_g0_m1 = cast<float>(wb_g * camera_to_rgb(1, 1));
-        Expr p_g0_m2 = cast<float>(wb_b * camera_to_rgb(2, 1));
-        Expr p_b0_m0 = cast<float>(wb_r * camera_to_rgb(0, 2));
-        Expr p_b0_m1 = cast<float>(wb_g * camera_to_rgb(1, 2));
-        Expr p_b0_m2 = cast<float>(wb_b * camera_to_rgb(2, 2));
-        Expr p_r0_rg = cast<float>(p_r0_m0 + p_r0_m1);
-        Expr p_g0_rg = cast<float>(p_g0_m0 + p_g0_m1);
-        Expr p_b0_rg = cast<float>(p_b0_m0 + p_b0_m1);
-        Expr p_r0_sum = cast<float>(p_r0_rg + p_r0_m2);
-        Expr p_g0_sum = cast<float>(p_g0_rg + p_g0_m2);
-        Expr p_b0_sum = cast<float>(p_b0_rg + p_b0_m2);
-#else
         Expr p_r0_rg = wb_r * camera_to_rgb(0, 0) + wb_g * camera_to_rgb(1, 0);
         Expr p_g0_rg = wb_r * camera_to_rgb(0, 1) + wb_g * camera_to_rgb(1, 1);
         Expr p_b0_rg = wb_r * camera_to_rgb(0, 2) + wb_g * camera_to_rgb(1, 2);
         Expr p_r0_sum = p_r0_rg + wb_b * camera_to_rgb(2, 0);
         Expr p_g0_sum = p_g0_rg + wb_b * camera_to_rgb(2, 1);
         Expr p_b0_sum = p_b0_rg + wb_b * camera_to_rgb(2, 2);
-#endif
-#endif
         Expr p_r0 = clamp(p_r0_sum, 0.0f, 1.0f);
         Expr p_g0 = clamp(p_g0_sum, 0.0f, 1.0f);
         Expr p_b0 = clamp(p_b0_sum, 0.0f, 1.0f);
 
-#if DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC
-        // Force a materialized boundary between ABC and later HSV map stages.
-        abc_rgb(x, y, c) = select(c == 0, p_r0,
-                                  c == 1, p_g0,
-                                          p_b0);
-        Expr abc_r = abc_rgb(x, y, 0);
-        Expr abc_g = abc_rgb(x, y, 1);
-        Expr abc_b = abc_rgb(x, y, 2);
-#else
         Expr abc_r = p_r0;
         Expr abc_g = p_g0;
         Expr abc_b = p_b0;
-#endif
 
         auto table_interp = [&](const auto& table, Expr v) {
             Expr xv = clamp(v, 0.0f, 1.0f);
@@ -419,71 +360,15 @@ public:
         rgb_tone(p_r2, p_g2, p_b2, t_r, t_g, t_b);
 
         // Keep accumulation order deterministic at the matrix stage.
-#if DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE
-        // Force a materialized boundary after tone stage to study fusion effects.
-        tone_rgb(x, y, c) = select(c == 0, t_r,
-                                   c == 1, t_g,
-                                           t_b);
-        Expr tone_r = tone_rgb(x, y, 0);
-        Expr tone_g = tone_rgb(x, y, 1);
-        Expr tone_b = tone_rgb(x, y, 2);
-#else
         Expr tone_r = t_r;
         Expr tone_g = t_g;
         Expr tone_b = t_b;
-#endif
-#if DNG_RENDER_STAGE4_MATRIX_ASSOC_ALT
-        Expr f_r_sum = tone_r * rgb_to_final(0, 0) + (tone_g * rgb_to_final(1, 0) + tone_b * rgb_to_final(2, 0));
-        Expr f_g_sum = tone_r * rgb_to_final(0, 1) + (tone_g * rgb_to_final(1, 1) + tone_b * rgb_to_final(2, 1));
-        Expr f_b_sum = tone_r * rgb_to_final(0, 2) + (tone_g * rgb_to_final(1, 2) + tone_b * rgb_to_final(2, 2));
-#else
-#if DNG_RENDER_STAGE4_MATRIX_SPLIT_MULADD
-        Expr f_r_m0 = cast<float>(tone_r * rgb_to_final(0, 0));
-        Expr f_r_m1 = cast<float>(tone_g * rgb_to_final(1, 0));
-        Expr f_r_m2 = cast<float>(tone_b * rgb_to_final(2, 0));
-        Expr f_g_m0 = cast<float>(tone_r * rgb_to_final(0, 1));
-        Expr f_g_m1 = cast<float>(tone_g * rgb_to_final(1, 1));
-        Expr f_g_m2 = cast<float>(tone_b * rgb_to_final(2, 1));
-        Expr f_b_m0 = cast<float>(tone_r * rgb_to_final(0, 2));
-        Expr f_b_m1 = cast<float>(tone_g * rgb_to_final(1, 2));
-        Expr f_b_m2 = cast<float>(tone_b * rgb_to_final(2, 2));
-        Expr f_r_rg = cast<float>(f_r_m0 + f_r_m1);
-        Expr f_g_rg = cast<float>(f_g_m0 + f_g_m1);
-        Expr f_b_rg = cast<float>(f_b_m0 + f_b_m1);
-#if DNG_RENDER_STAGE4_MATRIX_STRICT_EXPR
-        Expr f_r_sum = strict_float(cast<float>(f_r_rg + f_r_m2));
-        Expr f_g_sum = strict_float(cast<float>(f_g_rg + f_g_m2));
-        Expr f_b_sum = strict_float(cast<float>(f_b_rg + f_b_m2));
-#else
-        Expr f_r_sum = cast<float>(f_r_rg + f_r_m2);
-        Expr f_g_sum = cast<float>(f_g_rg + f_g_m2);
-        Expr f_b_sum = cast<float>(f_b_rg + f_b_m2);
-#endif
-#else
         Expr f_r_rg = tone_r * rgb_to_final(0, 0) + tone_g * rgb_to_final(1, 0);
         Expr f_g_rg = tone_r * rgb_to_final(0, 1) + tone_g * rgb_to_final(1, 1);
         Expr f_b_rg = tone_r * rgb_to_final(0, 2) + tone_g * rgb_to_final(1, 2);
-#if DNG_RENDER_STAGE4_MATRIX_STRICT_EXPR
-        // Round 2 experiment: constrain only rgb_to_final expression semantics.
-        Expr f_r_sum = strict_float(f_r_rg + tone_b * rgb_to_final(2, 0));
-        Expr f_g_sum = strict_float(f_g_rg + tone_b * rgb_to_final(2, 1));
-        Expr f_b_sum = strict_float(f_b_rg + tone_b * rgb_to_final(2, 2));
-#else
         Expr f_r_sum = f_r_rg + tone_b * rgb_to_final(2, 0);
         Expr f_g_sum = f_g_rg + tone_b * rgb_to_final(2, 1);
         Expr f_b_sum = f_b_rg + tone_b * rgb_to_final(2, 2);
-#endif
-#endif
-#endif
-#if DNG_RENDER_STAGE4_MATRIX_STRICT_R
-        f_r_sum = strict_float(f_r_sum);
-#endif
-#if DNG_RENDER_STAGE4_MATRIX_STRICT_G
-        f_g_sum = strict_float(f_g_sum);
-#endif
-#if DNG_RENDER_STAGE4_MATRIX_STRICT_B
-        f_b_sum = strict_float(f_b_sum);
-#endif
 
         Expr f_r = clamp(f_r_sum, 0.0f, 1.0f);
         Expr f_g = clamp(f_g_sum, 0.0f, 1.0f);
@@ -491,11 +376,7 @@ public:
 
         auto encode8 = [&](Expr v) {
             Expr g = table_interp(encode_gamma, v);
-#if DNG_RENDER_STAGE4_ENCODE_TRUNCATE
-            return clamp(g * 255.0f, 0.0f, 255.0f);
-#else
             return clamp(g * 255.0f + 0.5f, 0.0f, 255.0f);
-#endif
         };
 
         rendered_rgb(x, y) = Tuple(cast<uint8_t>(encode8(f_r)),
@@ -511,14 +392,6 @@ public:
         Var x("x"), y("y"), c("c");
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
-#if DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC
-            abc_rgb.compute_root()
-                   .gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-#endif
-#if DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE
-            tone_rgb.compute_root()
-                    .gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-#endif
             rendered_rgb.compute_root()
                         .gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
             dst.bound(c, 0, 3)
@@ -527,39 +400,14 @@ public:
                .unroll(c);
         } else {
             Var yo("yo"), yi("yi");
-#if DNG_RENDER_STAGE4_FRONTEND_SPLIT_ABC
-            abc_rgb.compute_root()
-                   .split(y, yo, yi, 32)
-                   .parallel(yo)
-#if !DNG_RENDER_STAGE4_NO_VECTORIZE
-                   .vectorize(x, 8)
-#endif
-                   ;
-#endif
-#if DNG_RENDER_STAGE4_FRONTEND_SPLIT_TONE
-            tone_rgb.compute_root()
-                    .split(y, yo, yi, 32)
-                    .parallel(yo)
-#if !DNG_RENDER_STAGE4_NO_VECTORIZE
-                    .vectorize(x, 8)
-#endif
-                    ;
-#endif
             dst.bound(c, 0, 3)
                .reorder(c, x, y)
                .split(y, yo, yi, 32)
                .parallel(yo)
-#if !DNG_RENDER_STAGE4_NO_VECTORIZE
                .vectorize(x, 8)
-               .unroll(c)
-#endif
-               ;
-#if DNG_RENDER_STAGE4_NO_VECTORIZE
-            rendered_rgb.compute_at(dst, yo);
-#else
+               .unroll(c);
             rendered_rgb.compute_at(dst, yo)
                         .vectorize(x, 8);
-#endif
         }
     }
 };

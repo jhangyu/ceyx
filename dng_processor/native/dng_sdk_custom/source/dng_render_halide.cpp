@@ -93,10 +93,8 @@ functions:
 #include "dng_render_halide.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstring>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -583,22 +581,6 @@ bool buildRenderParams(dng_host& host,
         }
     }
 
-    if (config.debug.render_disable_huesat) {
-        params.huesat_map_ref.Reset();
-        params.huesat_encode_ref.Reset();
-        params.huesat_decode_ref.Reset();
-        params.huesat_has_table = 0;
-        params.huesat_has_encoding = 0;
-    }
-
-    if (config.debug.render_disable_look) {
-        params.look_map_ref.Reset();
-        params.look_encode_ref.Reset();
-        params.look_decode_ref.Reset();
-        params.look_has_table = 0;
-        params.look_has_encoding = 0;
-    }
-
     return true;
 }
 
@@ -809,39 +791,13 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     return true;
 }
 
-bool renderHalideTimingEnabled() {
-    return PipelineConfig::loadFromEnv().timing.render_halide;
-}
-
-bool renderHalideTryFullEnabled() {
-    return !PipelineConfig::loadFromEnv().debug.render_disable_full;
-}
-
-bool renderHalideForceFullKernelEnabled() {
-    return PipelineConfig::loadFromEnv().debug.render_force_full;
-}
-
-bool renderHalideBitExactModeEnabled() {
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
-    if (config.debug.render_bit_exact_specified) {
-        return config.debug.render_bit_exact;
-    }
-    return config.debug.warp_bit_exact;
-}
-
 bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
                                 dng_image* stage3,
                                 const dng_render& renderer,
-                                bool timing_enabled,
                                 std::vector<uint8_t>& out_rgb,
                                 uint32_t& out_w,
                                 uint32_t& out_h) {
-    auto ms = [](const auto& start, const auto& end) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    };
-
-    const auto t_fn_start = std::chrono::high_resolution_clock::now();
     const PipelineConfig config = PipelineConfig::loadFromEnv();
 
     dng_point dst_size;
@@ -862,24 +818,20 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     }
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
-    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
 
     // Use resize instead of assign(N, 0): the Halide kernel overwrites every byte,
     // so the zero-fill is wasted work. resize() is a no-op when out_rgb is already sized
     // by the caller (which avoids the 250ms first-touch page-fault cost on a 72MB buffer).
-    const auto t_assign_start = std::chrono::high_resolution_clock::now();
     const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb.size() != needed_out_size) {
         out_rgb.resize(needed_out_size);
     }
-    const auto t_assign_end = std::chrono::high_resolution_clock::now();
 
     dng_rect src_area = negative.DefaultCropArea();
 
     dng_image* source_image = stage3;
     dng_rect source_area = src_area;
     AutoPtr<dng_image> resized_stage3;
-    const auto resample_start = std::chrono::high_resolution_clock::now();
     const bool need_resample = src_area.Size() != dst_size;
     if (need_resample) {
         resized_stage3.Reset(host.Make_dng_image(dst_size, stage3->Planes(), stage3->PixelType()));
@@ -895,23 +847,19 @@ bool runHalideFullOrSdkFallback(dng_host& host,
         source_image = resized_stage3.Get();
         source_area = resized_stage3->Bounds();
     }
-    const auto resample_end = std::chrono::high_resolution_clock::now();
 
     uint32_t src_w = source_area.W();
     uint32_t src_h = source_area.H();
     uint32_t src_p = source_image->Planes();
     std::vector<uint16_t> stage3_data16;
     RenderParams params;
-    const auto params_start = std::chrono::high_resolution_clock::now();
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;
     }
-    const auto params_end = std::chrono::high_resolution_clock::now();
 
     const bool can_use_u16_stage3 = source_image->PixelType() == ttShort &&
                                     source_image->PixelRange() != 0;
-    if (renderHalideTryFullEnabled() && can_use_u16_stage3) {
-        const auto extract_start = std::chrono::high_resolution_clock::now();
+    if (can_use_u16_stage3) {
         const uint16_t* stage3_u16_ptr = nullptr;
         std::unique_ptr<dng_const_tile_buffer> stage3_borrowed_tile;
         int32_t stage3_row_step = static_cast<int32_t>(src_w * src_p);
@@ -932,9 +880,7 @@ bool runHalideFullOrSdkFallback(dng_host& host,
             extractStage3Interleaved16(source_image, source_area, stage3_data16, src_w, src_h, src_p);
             stage3_u16_ptr = stage3_data16.data();
         }
-        const auto extract_end = std::chrono::high_resolution_clock::now();
         const float src_scale = 1.0f / static_cast<float>(source_image->PixelRange());
-        const auto halide_start = std::chrono::high_resolution_clock::now();
         const bool render_ok = runRenderStage4HalideAot(stage3_u16_ptr,
                                                          static_cast<int>(src_w),
                                                          static_cast<int>(src_h),
@@ -948,27 +894,6 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          params,
                                                          out_rgb.data());
         if (render_ok) {
-            const auto halide_end = std::chrono::high_resolution_clock::now();
-            if (timing_enabled) {
-                const auto t_fn_end = halide_end;
-                const double total_fn_ms = ms(t_fn_start, t_fn_end);
-                const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
-                const double assign_ms = ms(t_assign_start, t_assign_end);
-                const double resample_ms = ms(resample_start, resample_end);
-                const double extract_ms = ms(extract_start, extract_end);
-                const double params_ms = ms(params_start, params_end);
-                const double halide_ms = ms(halide_start, halide_end);
-                const double accounted = dst_size_ms + assign_ms + resample_ms + extract_ms + params_ms + halide_ms;
-                const double untimed = total_fn_ms - accounted;
-                std::cerr << "[RenderHalideTiming] dst_size=" << dst_size_ms
-                          << " ms out_rgb_assign=" << assign_ms
-                          << " ms resample=" << resample_ms
-                          << " ms extractStage3U16=" << extract_ms
-                          << " ms buildParams=" << params_ms
-                          << " ms halideFull=" << halide_ms
-                          << " ms untimed=" << untimed
-                          << " ms total_fn=" << total_fn_ms << " ms\n";
-            }
             return true;
         }
     }
@@ -1003,16 +928,10 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
                                 dng_image* stage3,
                                 const dng_render& renderer,
-                                bool timing_enabled,
                                 uint8_t* out_rgb_ptr,
                                 size_t out_rgb_size,
                                 uint32_t& out_w,
                                 uint32_t& out_h) {
-    auto ms = [](const auto& start, const auto& end) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    };
-
-    const auto t_fn_start = std::chrono::high_resolution_clock::now();
     const PipelineConfig config = PipelineConfig::loadFromEnv();
 
     dng_point dst_size;
@@ -1033,23 +952,18 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     }
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
-    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
 
     // Pool path: no resize, no page fault.
     const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb_size < needed_out_size || !out_rgb_ptr) {
         return false;
     }
-    const auto t_assign_start = std::chrono::high_resolution_clock::now();
-    // no-op: pool buffer already committed
-    const auto t_assign_end = t_assign_start;
 
     dng_rect src_area = negative.DefaultCropArea();
 
     dng_image* source_image = stage3;
     dng_rect source_area = src_area;
     AutoPtr<dng_image> resized_stage3;
-    const auto resample_start = std::chrono::high_resolution_clock::now();
     const bool need_resample = src_area.Size() != dst_size;
     if (need_resample) {
         resized_stage3.Reset(host.Make_dng_image(dst_size, stage3->Planes(), stage3->PixelType()));
@@ -1065,23 +979,19 @@ bool runHalideFullOrSdkFallback(dng_host& host,
         source_image = resized_stage3.Get();
         source_area = resized_stage3->Bounds();
     }
-    const auto resample_end = std::chrono::high_resolution_clock::now();
 
     uint32_t src_w = source_area.W();
     uint32_t src_h = source_area.H();
     uint32_t src_p = source_image->Planes();
     std::vector<uint16_t> stage3_data16;
     RenderParams params;
-    const auto params_start = std::chrono::high_resolution_clock::now();
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;
     }
-    const auto params_end = std::chrono::high_resolution_clock::now();
 
     const bool can_use_u16_stage3 = source_image->PixelType() == ttShort &&
                                     source_image->PixelRange() != 0;
-    if (renderHalideTryFullEnabled() && can_use_u16_stage3) {
-        const auto extract_start = std::chrono::high_resolution_clock::now();
+    if (can_use_u16_stage3) {
         const uint16_t* stage3_u16_ptr = nullptr;
         std::unique_ptr<dng_const_tile_buffer> stage3_borrowed_tile;
         int32_t stage3_row_step   = static_cast<int32_t>(src_w * src_p);
@@ -1102,9 +1012,7 @@ bool runHalideFullOrSdkFallback(dng_host& host,
             extractStage3Interleaved16(source_image, source_area, stage3_data16, src_w, src_h, src_p);
             stage3_u16_ptr = stage3_data16.data();
         }
-        const auto extract_end = std::chrono::high_resolution_clock::now();
         const float src_scale = 1.0f / static_cast<float>(source_image->PixelRange());
-        const auto halide_start = std::chrono::high_resolution_clock::now();
         const bool render_ok = runRenderStage4HalideAot(stage3_u16_ptr,
                                                          static_cast<int>(src_w),
                                                          static_cast<int>(src_h),
@@ -1118,27 +1026,6 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          params,
                                                          out_rgb_ptr);
         if (render_ok) {
-            const auto halide_end = std::chrono::high_resolution_clock::now();
-            if (timing_enabled) {
-                const auto t_fn_end = halide_end;
-                const double total_fn_ms = ms(t_fn_start, t_fn_end);
-                const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
-                const double assign_ms   = ms(t_assign_start, t_assign_end);
-                const double resample_ms = ms(resample_start, resample_end);
-                const double extract_ms  = ms(extract_start, extract_end);
-                const double params_ms   = ms(params_start, params_end);
-                const double halide_ms   = ms(halide_start, halide_end);
-                const double accounted   = dst_size_ms + assign_ms + resample_ms + extract_ms + params_ms + halide_ms;
-                const double untimed     = total_fn_ms - accounted;
-                std::cerr << "[RenderHalideTiming] pool_path=1 dst_size=" << dst_size_ms
-                          << " ms out_rgb_assign=" << assign_ms
-                          << " ms resample=" << resample_ms
-                          << " ms extractStage3U16=" << extract_ms
-                          << " ms buildParams=" << params_ms
-                          << " ms halideFull=" << halide_ms
-                          << " ms untimed=" << untimed
-                          << " ms total_fn=" << total_fn_ms << " ms\n";
-            }
             return true;
         }
     }
@@ -1202,7 +1089,6 @@ bool render_stage4_halide(dng_host& host,
                                       negative,
                                       stage3,
                                       renderer,
-                                      renderHalideTimingEnabled(),
                                       out_rgb,
                                       out_w,
                                       out_h);
@@ -1216,11 +1102,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               std::vector<uint8_t>& out_rgb,
                                               uint32_t& out_w,
                                               uint32_t& out_h) {
-    auto ms = [](const auto& start, const auto& end) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    };
-    const auto t_fn_start = std::chrono::high_resolution_clock::now();
-    if (!stage3_device_buf || !renderHalideTryFullEnabled()) {
+    if (!stage3_device_buf) {
         return false;
     }
 
@@ -1246,7 +1128,6 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     }
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
-    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
 
     // Device handoff only works without resample.
     const dng_rect src_area = negative.DefaultCropArea();
@@ -1254,46 +1135,22 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
-    const auto t_assign_start = std::chrono::high_resolution_clock::now();
     const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb.size() != needed) {
         out_rgb.resize(needed);
     }
-    const auto t_assign_end = std::chrono::high_resolution_clock::now();
 
     const PipelineConfig config = PipelineConfig::loadFromEnv();
     RenderParams params;
-    const auto params_start = std::chrono::high_resolution_clock::now();
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;
     }
-    const auto params_end = std::chrono::high_resolution_clock::now();
 
-    const auto halide_start = std::chrono::high_resolution_clock::now();
-    const bool ok = runRenderStage4HalideAotFromDevice(
+    return runRenderStage4HalideAotFromDevice(
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb.data());
-    const auto halide_end = std::chrono::high_resolution_clock::now();
-
-    if (ok && renderHalideTimingEnabled()) {
-        const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
-        const double assign_ms = ms(t_assign_start, t_assign_end);
-        const double params_ms = ms(params_start, params_end);
-        const double halide_ms = ms(halide_start, halide_end);
-        const double total_fn_ms = ms(t_fn_start, halide_end);
-        const double accounted = dst_size_ms + assign_ms + params_ms + halide_ms;
-        std::cerr << "[RenderHalideTiming] device_handoff=1"
-                  << " dst_size=" << dst_size_ms
-                  << " ms out_rgb_assign=" << assign_ms
-                  << " ms buildParams=" << params_ms
-                  << " ms halideFull=" << halide_ms
-                  << " ms untimed=" << (total_fn_ms - accounted)
-                  << " ms total_fn=" << total_fn_ms
-                  << " ms out_w=" << out_w << " out_h=" << out_h << "\n";
-    }
-    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,7 +1233,6 @@ bool render_stage4_halide(dng_host& host,
                                       negative,
                                       stage3,
                                       renderer,
-                                      renderHalideTimingEnabled(),
                                       out_rgb_ptr,
                                       out_rgb_size,
                                       out_w,
@@ -1392,11 +1248,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               size_t out_rgb_size,
                                               uint32_t& out_w,
                                               uint32_t& out_h) {
-    auto ms = [](const auto& start, const auto& end) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    };
-    const auto t_fn_start = std::chrono::high_resolution_clock::now();
-    if (!stage3_device_buf || !renderHalideTryFullEnabled()) {
+    if (!stage3_device_buf) {
         return false;
     }
 
@@ -1421,7 +1273,6 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     }
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
-    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
 
     const dng_rect src_area = negative.DefaultCropArea();
     if (src_area.W() != out_w || src_area.H() != out_h) {
@@ -1433,41 +1284,16 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     if (out_rgb_size < needed || !out_rgb_ptr) {
         return false;
     }
-    // t_assign timing: zero cost (no resize)
-    const auto t_assign_start = std::chrono::high_resolution_clock::now();
-    const auto t_assign_end   = t_assign_start;  // no-op
 
     const PipelineConfig config = PipelineConfig::loadFromEnv();
     RenderParams params;
-    const auto params_start = std::chrono::high_resolution_clock::now();
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;
     }
-    const auto params_end = std::chrono::high_resolution_clock::now();
 
-    const auto halide_start = std::chrono::high_resolution_clock::now();
-    const bool ok = runRenderStage4HalideAotFromDevice(
+    return runRenderStage4HalideAotFromDevice(
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb_ptr);
-    const auto halide_end = std::chrono::high_resolution_clock::now();
-
-    if (ok && renderHalideTimingEnabled()) {
-        const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
-        const double assign_ms   = ms(t_assign_start, t_assign_end);
-        const double params_ms   = ms(params_start, params_end);
-        const double halide_ms   = ms(halide_start, halide_end);
-        const double total_fn_ms = ms(t_fn_start, halide_end);
-        const double accounted   = dst_size_ms + assign_ms + params_ms + halide_ms;
-        std::cerr << "[RenderHalideTiming] device_handoff=1 pool_path=1"
-                  << " dst_size=" << dst_size_ms
-                  << " ms out_rgb_assign=" << assign_ms
-                  << " ms buildParams=" << params_ms
-                  << " ms halideFull=" << halide_ms
-                  << " ms untimed=" << (total_fn_ms - accounted)
-                  << " ms total_fn=" << total_fn_ms
-                  << " ms out_w=" << out_w << " out_h=" << out_h << "\n";
-    }
-    return ok;
 }

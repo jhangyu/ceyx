@@ -29,7 +29,6 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
-#include <sstream>
 #include <vector>
 
 #include <dng_file_stream.h>
@@ -162,17 +161,6 @@ RenderHalideMode parseRenderMode(const string& mode) {
     return RenderHalideMode::AUTO;
 }
 
-bool isWarpBitExactModeEnabled() {
-    return PipelineConfig::loadFromEnv().debug.warp_bit_exact;
-}
-
-uint32_t parsePositiveEnvU32(const char* key) {
-    if (std::strcmp(key, "DNG_RENDER_AREA_THREADS") == 0) {
-        return PipelineConfig::loadFromEnv().threads.render_area_threads;
-    }
-    return 0;
-}
-
 AutoPtr<dng_image> makeImageFromInterleaved(dng_host& host,
                                             uint32_t width,
                                             uint32_t height,
@@ -266,27 +254,6 @@ bool applySingleWarpRectilinearInterleaved(dng_host& host,
     }
 
     vector<uint16_t> warped;
-    if (isWarpBitExactModeEnabled()) {
-        AutoPtr<dng_image> sdkImage = makeImageFromInterleaved(host, width, height, planes, interleavedData);
-        const_cast<dng_opcode_WarpRectilinear&>(warpOpcode).Apply(host, negative, sdkImage);
-
-        warped.assign(interleavedData.size(), 0);
-        dng_pixel_buffer buffer;
-        buffer.fArea = sdkImage->Bounds();
-        buffer.fPlane = 0;
-        buffer.fPlanes = planes;
-        buffer.fPixelType = ttShort;
-        buffer.fPixelSize = sizeof(uint16_t);
-        buffer.fData = warped.data();
-        buffer.fRowStep = static_cast<int32>(width * planes);
-        buffer.fColStep = static_cast<int32>(planes);
-        buffer.fPlaneStep = 1;
-        sdkImage->Get(buffer);
-
-        interleavedData.swap(warped);
-        return true;
-    }
-
     WarpRectilinearParams params;
     if (!extractWarpRectilinearParams(warpOpcode,
                                       negative.PixelAspectRatio(),
@@ -721,39 +688,7 @@ void testDNG(dng_host& host,
             timing.stage3_make_image_ms =
                 duration_cast<microseconds>(stage3MakeImageEnd - stage3MakeImageStart).count() / 1000.0;
 
-            const bool bitExactWarp = isWarpBitExactModeEnabled();
             bool demosaicDirectToImage = false;
-            if (bitExactWarp) {
-                auto stage3DirectTileStart = high_resolution_clock::now();
-                dng_dirty_tile_buffer tileBuffer(*halideStage3, halideStage3->Bounds());
-                const bool layoutOk =
-                    tileBuffer.fPixelType == ttShort &&
-                    tileBuffer.fPlanes == 3 &&
-                    tileBuffer.fRowStep == static_cast<int32>(s2w * 3) &&
-                    tileBuffer.fColStep == 3 &&
-                    tileBuffer.fPlaneStep == 1;
-                if (layoutOk) {
-                    uint16_t* stage3DirectPtr = tileBuffer.DirtyPixel_uint16(tileBuffer.fArea.t,
-                                                                              tileBuffer.fArea.l,
-                                                                              0);
-                    if (stage3DirectPtr) {
-                        auto stage3KernelStart = high_resolution_clock::now();
-                        demosaic_bilinear_compat(stage2View, s2w, s2h, stage3DirectPtr);
-                        auto stage3KernelEnd = high_resolution_clock::now();
-                        timing.stage3_halide_kernel_ms =
-                            duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
-                        timing.stage3_inject_put_ms = 0.0;
-                        demosaicDirectToImage = true;
-                    }
-                }
-                auto stage3DirectTileEnd = high_resolution_clock::now();
-                timing.stage3_direct_tile_ms =
-                    duration_cast<microseconds>(stage3DirectTileEnd - stage3DirectTileStart).count() / 1000.0 -
-                    timing.stage3_halide_kernel_ms;
-                if (timing.stage3_direct_tile_ms < 0.0) {
-                    timing.stage3_direct_tile_ms = 0.0;
-                }
-            }
 
             if (!demosaicDirectToImage) {
                 // Allocate output buffer for 3-plane RGB
@@ -778,8 +713,7 @@ void testDNG(dng_host& host,
             if (!demosaicDirectToImage &&
                 opcodeList3.Count() == 1 &&
                 opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear &&
-                warpMode != WarpRectilinearMode::SDK &&
-                !bitExactWarp) {
+                warpMode != WarpRectilinearMode::SDK) {
                 auto fastWarpSetupStart = high_resolution_clock::now();
                 const auto& warpOpcode =
                     static_cast<const dng_opcode_WarpRectilinear&>(opcodeList3.Entry(0));
@@ -836,8 +770,7 @@ void testDNG(dng_host& host,
                 !fusedDemosaicWarpApplied &&
                 opcodeList3.Count() == 1 &&
                 opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear &&
-                warpMode != WarpRectilinearMode::SDK &&
-                !bitExactWarp) {
+                warpMode != WarpRectilinearMode::SDK) {
                 const auto& warpOpcode =
                     static_cast<const dng_opcode_WarpRectilinear&>(opcodeList3.Entry(0));
                 OpcodeTimingEntry timingEntry;
@@ -901,47 +834,13 @@ void testDNG(dng_host& host,
                 timing.stage3_apply_opcode3_ms =
                     duration_cast<microseconds>(stage3OpcodeEnd - stage3OpcodeStart).count() / 1000.0;
 
-                bool borrowedStage3View = false;
-                if (bitExactWarp && !generateBaseline) {
-                    auto borrowed = std::make_unique<dng_const_tile_buffer>(*halideStage3, halideStage3->Bounds());
-                    const bool typeOk =
-                        borrowed->fPixelType == ttShort &&
-                        borrowed->fPlanes == 3;
-                    if (typeOk) {
-                        const uint16_t* borrowedPtr =
-                            borrowed->ConstPixel_uint16(borrowed->fArea.t, borrowed->fArea.l, 0);
-                        if (borrowedPtr) {
-                            stage3BorrowedTile = std::move(borrowed);
-                            stage3StridedBase = borrowedPtr;
-                            stage3RowStep = stage3BorrowedTile->fRowStep;
-                            stage3ColStep = stage3BorrowedTile->fColStep;
-                            stage3PlaneStep = stage3BorrowedTile->fPlaneStep;
-                            if (stage3RowStep == static_cast<int32>(s2w * 3) &&
-                                stage3ColStep == 3 &&
-                                stage3PlaneStep == 1) {
-                                stage3View = stage3StridedBase;
-                            }
-                            s3w = s2w;
-                            s3h = s2h;
-                            s3p = 3;
-                            s3pt = ttShort;
-                            s3ps = sizeof(uint16_t);
-                            stage3Elements = static_cast<size_t>(s3w) * s3h * s3p;
-                            timing.stage3_extract_stage3_ms = 0.0;
-                            borrowedStage3View = true;
-                        }
-                    }
-                }
-
-                if (!borrowedStage3View) {
-                    auto stage3ExtractStage3Start = high_resolution_clock::now();
-                    extractImageData(halideStage3.Get(), stage3Data, s3w, s3h, s3p, s3pt, s3ps);
-                    auto stage3ExtractStage3End = high_resolution_clock::now();
-                    timing.stage3_extract_stage3_ms =
-                        duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
-                    stage3View = stage3Data.data();
-                    stage3Elements = stage3Data.size();
-                }
+                auto stage3ExtractStage3Start = high_resolution_clock::now();
+                extractImageData(halideStage3.Get(), stage3Data, s3w, s3h, s3p, s3pt, s3ps);
+                auto stage3ExtractStage3End = high_resolution_clock::now();
+                timing.stage3_extract_stage3_ms =
+                    duration_cast<microseconds>(stage3ExtractStage3End - stage3ExtractStage3Start).count() / 1000.0;
+                stage3View = stage3Data.data();
+                stage3Elements = stage3Data.size();
             } else {
                 s3w = s2w;
                 s3h = s2h;
@@ -1097,20 +996,10 @@ void testDNG(dng_host& host,
         auto renderStart = high_resolution_clock::now();
 
         auto t_setup_start = high_resolution_clock::now();
-        dng_host* renderHost = &host;
-        std::unique_ptr<ConcurrentDngHost> renderHostOverride;
-        const uint32_t decodeAreaThreads = host.PerformAreaTaskThreads();
-        uint32_t renderAreaThreads = parsePositiveEnvU32("DNG_RENDER_AREA_THREADS");
-        if (renderAreaThreads > 0 && renderAreaThreads != decodeAreaThreads) {
-            renderHostOverride = std::make_unique<ConcurrentDngHost>(renderAreaThreads);
-            renderHost = renderHostOverride.get();
-            cout << "  [Render] Area task threads override: " << renderAreaThreads
-                 << " (decode uses " << decodeAreaThreads << ")\n";
-        }
         auto t_setup_end = high_resolution_clock::now();
 
         auto t_ctor_start = high_resolution_clock::now();
-        dng_render renderer(*renderHost, *negative);
+        dng_render renderer(host, *negative);
         auto t_ctor_end = high_resolution_clock::now();
 
         auto t_setters_start = high_resolution_clock::now();
@@ -1126,7 +1015,7 @@ void testDNG(dng_host& host,
         const bool tryHalideRender = !generateBaseline && (renderMode != RenderHalideMode::SDK);
         auto t_render_call_start = high_resolution_clock::now();
         if (tryHalideRender) {
-            renderOk = render_stage4_halide(*renderHost,
+            renderOk = render_stage4_halide(host,
                                             *negative,
                                             renderer,
                                             renderMode,
