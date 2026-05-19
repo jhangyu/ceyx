@@ -54,3 +54,10 @@ void halide_stage2_ol2_set_device_handoff_enabled(bool enabled);
 void halide_stage2_ol2_clear_device_handoff();
 bool halide_stage2_ol2_get_device_handoff(Stage2Opcode2DeviceHandoff &out);
 bool halide_stage2_ol2_device_handoff_copy_to_host();
+
+// Lazy actual-size prewarm for the batched 3-plane polynomial kernel.
+// Fires a dummy dispatch at (width x height) if that dimension pair has not
+// been warmed yet in this process. Safe to call concurrently; uses an internal
+// mutex-protected set keyed by (width << 32 | height). No-op when
+// DNG_STAGE2_OL2_PREWARM=0 or DNG_STAGE2_OL2_HALIDE=0.
+void halide_prewarm_polynomial3_for_size(int width, int height);

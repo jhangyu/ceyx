@@ -771,6 +771,19 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     const uint32_t inputHeight = rawIFD.fImageLength;
     const auto decodeStart = Clock::now();
     negative->ReadStage1Image(host, stream, info);
+
+    // Lazy actual-size prewarm: fire the batched polynomial3 kernel at the
+    // real image dimensions now that they are known.  This ensures Metal has
+    // compiled and cached the pipeline state for (inputWidth × inputHeight)
+    // before BuildStage2Image triggers the real MapPolynomial dispatch, saving
+    // ~40ms on the first decode of a given resolution.  The call is a no-op on
+    // Bayer images (no MapPolynomial in OpcodeList2) and on repeated decodes of
+    // the same size (per-size cache in halide_prewarm_polynomial3_for_size).
+    if (!isBayer) {
+      halide_prewarm_polynomial3_for_size(
+          static_cast<int>(inputWidth), static_cast<int>(inputHeight));
+    }
+
     {
       const bool enableStage2DeviceHandoff =
           !isBayer && config.debug.stage2_stage4_device_handoff;

@@ -35,6 +35,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 #include <utility>
 
 #include "HalideBuffer.h"
@@ -597,6 +598,75 @@ bool run_polynomial3_kernel(uint16_t *base,
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Process-level per-size prewarm cache for the batched 3-plane polynomial
+// kernel.  Keyed by (width << 32 | height) so each unique image dimension is
+// warmed exactly once per process lifetime.
+// ---------------------------------------------------------------------------
+
+void halide_prewarm_polynomial3_for_size(int width, int height) {
+    if (!ol2_prewarm_enabled() || !stage2_ol2_halide_enabled()) {
+        return;
+    }
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    // Fast path: check cache without the kernel dispatch lock.
+    static std::mutex cache_mu;
+    static std::unordered_set<uint64_t> warmed;
+
+    const uint64_t key = (static_cast<uint64_t>(width) << 32) |
+                         static_cast<uint64_t>(static_cast<uint32_t>(height));
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        if (warmed.count(key)) {
+            return;
+        }
+    }
+
+    // Allocate interleaved src/dst at actual image dimensions so Halide
+    // specialises the Metal pipeline state for this exact size.
+    Halide::Runtime::Buffer<uint16_t> src =
+        Halide::Runtime::Buffer<uint16_t>::make_interleaved(width, height, 3);
+    Halide::Runtime::Buffer<uint16_t> dst =
+        Halide::Runtime::Buffer<uint16_t>::make_interleaved(width, height, 3);
+    std::memset(src.data(), 0, sizeof(uint16_t) * static_cast<size_t>(width) *
+                                   static_cast<size_t>(height) * 3);
+
+    // Identity polynomial (degree=1, c1=1) — correct output but no real work.
+    float coeff_f32[27] = {0};
+    int32_t degree_i32[3] = {1, 1, 1};
+    for (int c = 0; c < 3; ++c) {
+        coeff_f32[static_cast<size_t>(c) * 9 + 1] = 1.0f;
+    }
+    Halide::Runtime::Buffer<float> coeff(coeff_f32, 9, 3);
+    Halide::Runtime::Buffer<int32_t> degree(degree_i32, 3);
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    const int rc = dng_opcode_polynomial3(src, coeff, degree,
+                                          /*pixel_range=*/65535.0f, dst);
+    dst.copy_to_host();
+    const auto t1 = std::chrono::high_resolution_clock::now();
+
+    if (ol2_timing_enabled()) {
+        const double ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr,
+                     "[OpcodeList2Halide] prewarm3_for_size rc=%d "
+                     "size=%dx%d t=%.2fms\n",
+                     rc, width, height, ms);
+    }
+
+    // Mark this dimension as warmed regardless of rc — even a failed dispatch
+    // means Metal has attempted compilation; we should not retry on every call.
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        warmed.insert(key);
+    }
+}
 
 void halide_stage2_ol2_set_device_handoff_enabled(bool enabled) {
     DeviceHandoffState &state = device_handoff_state();
