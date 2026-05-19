@@ -18,8 +18,8 @@ functions:
     description: "SDK Stage3 fallback and Stage4 render through Halide Metal."
     lines: "312-370"
   - name: "dng_pipeline_v2_run_stage3 / dng_pipeline_v2_decode_to_rgb"
-    description: "Shared Stage3 orchestration + top-level decode entry returning RGB and timing."
-    lines: "372-470"
+    description: "Shared Stage3 orchestration + top-level decode entry returning RGB and timing; production FFI uses ConcurrentDngHost so Stage1/2 materialization follows matrix threading."
+    lines: "725-845"
 ---
 */
 #include "dng_pipeline_v2.h"
@@ -48,6 +48,7 @@ functions:
 
 #include "ConcurrentDngHost.h"
 #include "dng_mosaic_halide.h"
+#include "dng_opcodelist2_halide.h"
 #include "dng_render_halide.h"
 #include "dng_warp_halide.h"
 
@@ -202,6 +203,18 @@ Stage3WorkspacePool &stage3WorkspacePool() {
   static Stage3WorkspacePool pool;
   return pool;
 }
+
+class ScopedStage2DeviceHandoff {
+ public:
+  explicit ScopedStage2DeviceHandoff(bool enabled) {
+    halide_stage2_ol2_clear_device_handoff();
+    halide_stage2_ol2_set_device_handoff_enabled(enabled);
+  }
+
+  ~ScopedStage2DeviceHandoff() {
+    halide_stage2_ol2_set_device_handoff_enabled(false);
+  }
+};
 
 // Returns a raw pointer to Stage3 workspace.
 // If caller supplied a pre-sized vector (harness path), use it directly.
@@ -657,6 +670,52 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   return true;
 }
 
+bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
+                                        dng_negative &negative,
+                                        const PipelineConfig &config,
+                                        uint32_t inputWidth,
+                                        uint32_t inputHeight,
+                                        std::vector<uint8_t> &rgb,
+                                        uint32_t &outW,
+                                        uint32_t &outH,
+                                        bool &restoreFailed) {
+  restoreFailed = false;
+  if (!config.debug.stage2_stage4_device_handoff)
+    return false;
+
+  Stage2Opcode2DeviceHandoff handoff;
+  if (!halide_stage2_ol2_get_device_handoff(handoff))
+    return false;
+  auto restoreHostStage2 = [&restoreFailed]() {
+    if (!halide_stage2_ol2_device_handoff_copy_to_host()) {
+      restoreFailed = true;
+    }
+    halide_stage2_ol2_clear_device_handoff();
+    return false;
+  };
+  if (negative.OpcodeList3().Count() != 0)
+    return restoreHostStage2();
+  if (!handoff.device_buffer || handoff.width == 0 || handoff.height == 0 ||
+      handoff.planes < 3 || handoff.pixel_range == 0)
+    return restoreHostStage2();
+
+  dng_render renderer(host, negative);
+  renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
+  renderer.SetFinalPixelType(ttByte);
+  renderer.SetFinalSpace(dng_space_sRGB::Get());
+
+  const float srcScale = 1.0f / static_cast<float>(handoff.pixel_range);
+  const bool ok = render_stage4_halide_from_device_buffer(
+      host, negative, renderer, handoff.device_buffer, srcScale,
+      rgb, outW, outH);
+  if (ok) {
+    halide_stage2_ol2_clear_device_handoff();
+    return true;
+  }
+
+  return restoreHostStage2();
+}
+
 } // namespace
 
 bool dng_pipeline_v2_run_stage3(dng_host &host,
@@ -687,7 +746,10 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
   }
 
   try {
-    dng_host host;
+    const PipelineConfig config = PipelineConfig::loadFromEnv();
+    const uint32_t decodeThreads =
+        config.threads.area_threads > 0 ? config.threads.area_threads : 20;
+    ConcurrentDngHost host(decodeThreads);
     dng_file_stream stream(file_path);
 
     dng_info info;
@@ -707,10 +769,14 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     const bool isBayer = rawIFD.fPhotometricInterpretation == piCFA;
     const uint32_t inputWidth = rawIFD.fImageWidth;
     const uint32_t inputHeight = rawIFD.fImageLength;
-
     const auto decodeStart = Clock::now();
     negative->ReadStage1Image(host, stream, info);
-    negative->BuildStage2Image(host);
+    {
+      const bool enableStage2DeviceHandoff =
+          !isBayer && config.debug.stage2_stage4_device_handoff;
+      ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
+      negative->BuildStage2Image(host);
+    }
 
     // Phase 10 Sprint D-B F1: do NOT eagerly resize stage3Workspace here.
     // FFI path gets a lazy mmap pool via prepareStage3WorkspacePtr; this
@@ -718,7 +784,6 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     // test_decode harness passes its own pre-sized vector so is unaffected.
     std::vector<uint16_t> stage3Workspace;
     DngPipelineStage3Timing stage3Timing;
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
 
     // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
     bool allDone = false;
@@ -727,6 +792,15 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
           host, *negative, config, inputWidth, inputHeight,
           &stage3Timing, &stage3Workspace,
           result.rgb, result.width, result.height);
+    } else {
+      bool restoreFailed = false;
+      allDone = runLossyStage2Stage4DeviceHandoff(
+          host, *negative, config, inputWidth, inputHeight,
+          result.rgb, result.width, result.height, restoreFailed);
+      if (restoreFailed) {
+        result.error_code = -5;
+        return false;
+      }
     }
 
     const auto decodeEnd = Clock::now();

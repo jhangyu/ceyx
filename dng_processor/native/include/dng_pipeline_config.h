@@ -24,6 +24,7 @@ struct PipelineConfig {
     bool demosaic_bit_exact = false;
     bool fused_demosaic_warp = true;
     bool stage3_stage4_device_handoff = true;
+    bool stage2_stage4_device_handoff = true;
     // Phase 10 Sprint C3: enable Halide GPU dispatch for Stage 2 OpcodeList2
     // MapPolynomial. Bridge implementation uses getenv("DNG_STAGE2_OL2_HALIDE")
     // as source-of-truth; this field is provided for future caller access.
@@ -57,6 +58,7 @@ struct PipelineConfig {
     config.debug.demosaic_bit_exact = envFlag("DNG_DEMOSAIC_BIT_EXACT");
     config.debug.fused_demosaic_warp = !envExplicitZero("DNG_FUSED_DEMOSAIC_WARP");
     config.debug.stage3_stage4_device_handoff = !envExplicitZero("DNG_STAGE3_STAGE4_DEVICE_HANDOFF");
+    config.debug.stage2_stage4_device_handoff = !envExplicitZero("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
     config.debug.stage2_ol2_halide = !envExplicitZero("DNG_STAGE2_OL2_HALIDE");
 
     config.threads.area_threads = envPositiveU32("DNG_AREA_THREADS");

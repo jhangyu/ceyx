@@ -5,19 +5,22 @@
 // returns true the caller MUST skip the SDK fallback path because the image
 // has already been updated in-place by the Halide kernel.
 //
-// Stage 2 image is host-resident uint16 (dng_simple_image, ttShort). The
-// kernel does the [0,1] normalize / Horner / [0,1]→uint16 round-trip itself,
-// so no extra pre/post pass is required on the host side. Device handoff is
-// left to Sprint D.
+// Stage 2 image is normally copied back into host-resident uint16
+// (dng_simple_image, ttShort). The production lossy pipeline can opt into a
+// narrow device-resident handoff after the batched RGB MapPolynomial path.
 
 #pragma once
 
 #include <cstdint>
 
+struct halide_buffer_t;
+
 // Forward declarations to avoid pulling DNG SDK headers into bridge clients.
 class dng_host;
 class dng_image;
+class dng_negative;
 class dng_opcode;
+class dng_opcode_list;
 
 // Returns true if the opcode was handled on GPU (host MUST skip SDK Apply).
 // Returns false to fall through to SDK fallback (unsupported opcode, GPU
@@ -25,3 +28,29 @@ class dng_opcode;
 bool halide_try_dispatch_opcode2(dng_host &host,
                                  dng_opcode &opcode,
                                  dng_image &image);
+
+// Returns the number of consecutive Stage2 opcodes handled on GPU. Currently
+// returns 3 for the batched RGB MapPolynomial fast path, or 0 for fallback.
+uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
+                                           dng_negative &negative,
+                                           dng_opcode_list &list,
+                                           uint32_t start_index,
+                                           dng_image &image);
+
+struct Stage2Opcode2DeviceHandoff {
+    halide_buffer_t *device_buffer = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t planes = 0;
+    uint32_t pixel_range = 0;
+};
+
+// Pipeline-only guard: when enabled, the batched MapPolynomial path leaves its
+// output device-resident and records a handoff buffer instead of immediately
+// copying back into the SDK Stage2 image. Callers must either consume the
+// device buffer or call halide_stage2_ol2_device_handoff_copy_to_host() before
+// falling back to SDK Stage3.
+void halide_stage2_ol2_set_device_handoff_enabled(bool enabled);
+void halide_stage2_ol2_clear_device_handoff();
+bool halide_stage2_ol2_get_device_handoff(Stage2Opcode2DeviceHandoff &out);
+bool halide_stage2_ol2_device_handoff_copy_to_host();

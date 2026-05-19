@@ -122,7 +122,17 @@ void dng_opcode_list::Apply (dng_host &host,
 		
 		if (opcode.AboutToApply (host, negative))
 			{
-			// Phase 10 Sprint C3: try Halide GPU dispatch (currently MapPolynomial).
+			// Phase 10 Sprint C3/C4: try Halide GPU dispatch for Stage2
+			// MapPolynomial. The batched path may consume three consecutive
+			// RGB plane opcodes; fallback handles one opcode at a time.
+			if (fStage == 2 && image.Get () != nullptr &&
+				halide_try_dispatch_opcode2_batch (host, negative, *this, index,
+												   *image.Get ()) == 3)
+				{
+				index += 2;
+				continue;
+				}
+
 			if (fStage == 2 && image.Get () != nullptr &&
 				halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
 				{

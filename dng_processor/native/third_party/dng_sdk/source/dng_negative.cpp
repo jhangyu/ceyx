@@ -43,6 +43,37 @@
 #include "dng_utils.h"
 #include "dng_xmp.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
+/*****************************************************************************/
+
+namespace {
+
+bool Stage2SdkTimingEnabled ()
+	{
+
+	static const bool enabled = [] ()
+		{
+		const char *v = std::getenv ("DNG_STAGE2_SDK_TIMING");
+		return v && v [0] == '1';
+		} ();
+
+	return enabled;
+
+	}
+
+double Stage2ElapsedMs (std::chrono::high_resolution_clock::time_point start,
+						std::chrono::high_resolution_clock::time_point end)
+	{
+
+	return std::chrono::duration<double, std::milli> (end - start).count ();
+
+	}
+
+} // namespace
+
 /*****************************************************************************/
 
 dng_noise_profile::dng_noise_profile ()
@@ -3787,6 +3818,23 @@ void dng_negative::DefloatStage2 (dng_host & /* host */)
 
 void dng_negative::BuildStage2Image (dng_host &host)
 	{
+
+	const bool stage2Timing = Stage2SdkTimingEnabled ();
+	const auto stage2TotalStart = std::chrono::high_resolution_clock::now ();
+	double saveDecisionMs = 0.0;
+	double rawPreOpcode1Ms = 0.0;
+	double opcode1Ms = 0.0;
+	double rawPostOpcode1Ms = 0.0;
+	double linearizationPostParseMs = 0.0;
+	double doBuildStage2Ms = 0.0;
+	double releaseStage1Ms = 0.0;
+	double clearLinearizationMs = 0.0;
+	double opcode2Ms = 0.0;
+	double clearOpcode2Ms = 0.0;
+	double postOpcode2Ms = 0.0;
+	double defloatMs = 0.0;
+	double rawPostOpcode2Ms = 0.0;
+	auto stage2SegmentStart = stage2TotalStart;
 	
 	// If reading the negative to save in DNG format, figure out
 	// when to grab a copy of the raw data.
@@ -3868,6 +3916,13 @@ void dng_negative::BuildStage2Image (dng_host &host)
 			}
 			
 		}
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		saveDecisionMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 		
 	// Grab clone of raw image if required.
 	
@@ -3905,10 +3960,24 @@ void dng_negative::BuildStage2Image (dng_host &host)
 		SetRawFloatBitDepth (0);
 		
 		}
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		rawPreOpcode1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 		
 	// Process opcode list 1.
 	
 	host.ApplyOpcodeList (fOpcodeList1, *this, fStage1Image);
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		opcode1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 	
 	// See if we are done with the opcode list 1.
 	
@@ -3933,6 +4002,13 @@ void dng_negative::BuildStage2Image (dng_host &host)
 		
 		}
 
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		rawPostOpcode1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
+
 	// Finalize linearization info.
 	
 		{
@@ -3944,14 +4020,35 @@ void dng_negative::BuildStage2Image (dng_host &host)
 		info.PostParse (host, *this);
 		
 		}
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		linearizationPostParseMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 		
 	// Perform the linearization.
 	
 	DoBuildStage2 (host);
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		doBuildStage2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 		
 	// Delete the stage1 image now that we have computed the stage 2 image.
 	
 	fStage1Image.Reset ();
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		releaseStage1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 	
 	// Are we done with the linearization info.
 	
@@ -3961,10 +4058,24 @@ void dng_negative::BuildStage2Image (dng_host &host)
 		ClearLinearizationInfo ();
 		
 		}
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		clearLinearizationMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 	
 	// Process opcode list 2.
 	
 	host.ApplyOpcodeList (fOpcodeList2, *this, fStage2Image);
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		opcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 	
 	// See if we are done with the opcode list 2.
 	
@@ -3974,10 +4085,24 @@ void dng_negative::BuildStage2Image (dng_host &host)
 		fOpcodeList2.Clear ();
 		
 		}
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		clearOpcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 		
 	// Hook for any required processing just after opcode list 2.
 	
 	DoPostOpcodeList2 (host);
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		postOpcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
+		}
 		
 	// Convert from floating point to integer if required.
 	
@@ -3986,6 +4111,13 @@ void dng_negative::BuildStage2Image (dng_host &host)
 		
 		DefloatStage2 (host);
 		
+		}
+
+	if (stage2Timing)
+		{
+		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
+		defloatMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
 	// Grab clone of raw image if required.
@@ -4000,6 +4132,33 @@ void dng_negative::BuildStage2Image (dng_host &host)
 			fRawTransparencyMask.Reset (fTransparencyMask->Clone ());
 			}
 		
+		}
+
+	if (stage2Timing)
+		{
+		const auto stage2TotalEnd = std::chrono::high_resolution_clock::now ();
+		rawPostOpcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2TotalEnd);
+		const double totalMs = Stage2ElapsedMs (stage2TotalStart, stage2TotalEnd);
+		std::fprintf (stderr,
+					  "[Stage2SdkTiming] saveDecision=%.3f rawPreOpcode1=%.3f "
+					  "opcode1=%.3f rawPostOpcode1=%.3f linearizationPostParse=%.3f "
+					  "doBuildStage2=%.3f releaseStage1=%.3f clearLinearization=%.3f "
+					  "opcode2=%.3f clearOpcode2=%.3f postOpcode2=%.3f "
+					  "defloat=%.3f rawPostOpcode2=%.3f total=%.3f\n",
+					  saveDecisionMs,
+					  rawPreOpcode1Ms,
+					  opcode1Ms,
+					  rawPostOpcode1Ms,
+					  linearizationPostParseMs,
+					  doBuildStage2Ms,
+					  releaseStage1Ms,
+					  clearLinearizationMs,
+					  opcode2Ms,
+					  clearOpcode2Ms,
+					  postOpcode2Ms,
+					  defloatMs,
+					  rawPostOpcode2Ms,
+					  totalMs);
 		}
 	
 	}

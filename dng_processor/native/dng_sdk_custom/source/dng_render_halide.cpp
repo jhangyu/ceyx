@@ -1039,6 +1039,10 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               std::vector<uint8_t>& out_rgb,
                                               uint32_t& out_w,
                                               uint32_t& out_h) {
+    auto ms = [](const auto& start, const auto& end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+    const auto t_fn_start = std::chrono::high_resolution_clock::now();
     if (!stage3_device_buf || !renderHalideTryFullEnabled()) {
         return false;
     }
@@ -1065,6 +1069,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     }
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
+    const auto t_dst_size_end = std::chrono::high_resolution_clock::now();
 
     // Device handoff only works without resample.
     const dng_rect src_area = negative.DefaultCropArea();
@@ -1072,26 +1077,44 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
+    const auto t_assign_start = std::chrono::high_resolution_clock::now();
     const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb.size() != needed) {
         out_rgb.resize(needed);
     }
+    const auto t_assign_end = std::chrono::high_resolution_clock::now();
 
     const PipelineConfig config = PipelineConfig::loadFromEnv();
     RenderParams params;
+    const auto params_start = std::chrono::high_resolution_clock::now();
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;
     }
+    const auto params_end = std::chrono::high_resolution_clock::now();
 
+    const auto halide_start = std::chrono::high_resolution_clock::now();
     const bool ok = runRenderStage4HalideAotFromDevice(
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb.data());
+    const auto halide_end = std::chrono::high_resolution_clock::now();
 
     if (ok && renderHalideTimingEnabled()) {
-        std::cerr << "[RenderHalideTiming] device_handoff Stage4 OK"
-                     " out_w=" << out_w << " out_h=" << out_h << "\n";
+        const double dst_size_ms = ms(t_fn_start, t_dst_size_end);
+        const double assign_ms = ms(t_assign_start, t_assign_end);
+        const double params_ms = ms(params_start, params_end);
+        const double halide_ms = ms(halide_start, halide_end);
+        const double total_fn_ms = ms(t_fn_start, halide_end);
+        const double accounted = dst_size_ms + assign_ms + params_ms + halide_ms;
+        std::cerr << "[RenderHalideTiming] device_handoff=1"
+                  << " dst_size=" << dst_size_ms
+                  << " ms out_rgb_assign=" << assign_ms
+                  << " ms buildParams=" << params_ms
+                  << " ms halideFull=" << halide_ms
+                  << " ms untimed=" << (total_fn_ms - accounted)
+                  << " ms total_fn=" << total_fn_ms
+                  << " ms out_w=" << out_w << " out_h=" << out_h << "\n";
     }
     return ok;
 }

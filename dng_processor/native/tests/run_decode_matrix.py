@@ -71,6 +71,73 @@ class RunResult:
     demosaic_warp_copy_ms: Optional[float]
     raw_output: str
     stage3_probe: dict[str, float] = field(default_factory=dict)
+    stage2_probe: dict[str, float] = field(default_factory=dict)
+    opcode2_probe: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class FfiRunResult:
+    sample_name: str
+    ok: bool
+    width: Optional[int]
+    height: Optional[int]
+    rgb_bytes: Optional[int]
+    decode_ms: Optional[float]
+    process_ms: Optional[float]
+    wall_ms: Optional[float]
+    error_code: Optional[int]
+    stage2_do_build_ms: Optional[float]
+    stage2_opcode2_ms: Optional[float]
+    stage2_total_ms: Optional[float]
+    render_assign_ms: Optional[float]
+    render_halide_full_ms: Optional[float]
+    opcode2_probe: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class FfiAggResult:
+    sample_name: str
+    runs: list[FfiRunResult]
+
+    @property
+    def decode_ms(self) -> Optional[float]:
+        return mean_optional([r.decode_ms for r in self.runs])
+
+    @property
+    def process_ms(self) -> Optional[float]:
+        return mean_optional([r.process_ms for r in self.runs])
+
+    @property
+    def wall_ms(self) -> Optional[float]:
+        return mean_optional([r.wall_ms for r in self.runs])
+
+    @property
+    def render_assign_ms(self) -> Optional[float]:
+        return mean_optional([r.render_assign_ms for r in self.runs])
+
+    @property
+    def render_halide_full_ms(self) -> Optional[float]:
+        return mean_optional([r.render_halide_full_ms for r in self.runs])
+
+    @property
+    def stage2_do_build_ms(self) -> Optional[float]:
+        return mean_optional([r.stage2_do_build_ms for r in self.runs])
+
+    @property
+    def stage2_opcode2_ms(self) -> Optional[float]:
+        return mean_optional([r.stage2_opcode2_ms for r in self.runs])
+
+    @property
+    def stage2_total_ms(self) -> Optional[float]:
+        return mean_optional([r.stage2_total_ms for r in self.runs])
+
+    @property
+    def rgb_bytes(self) -> Optional[int]:
+        vals = [r.rgb_bytes for r in self.runs if r.rgb_bytes is not None]
+        return vals[-1] if vals else None
+
+    def opcode2_probe_avg(self, key: str) -> Optional[float]:
+        return mean_optional([r.opcode2_probe.get(key) for r in self.runs])
 
 
 @dataclass
@@ -142,6 +209,43 @@ class AggResult:
         vals = [r.stage3_probe.get(key) for r in self.runs if key in r.stage3_probe]
         return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
 
+    def stage2_probe_avg(self, key: str) -> Optional[float]:
+        return mean_optional([r.stage2_probe.get(key) for r in self.runs])
+
+    def opcode2_probe_avg(self, key: str) -> Optional[float]:
+        return mean_optional([r.opcode2_probe.get(key) for r in self.runs])
+
+    def stage_validation_extract_ms(self, stage: int) -> Optional[float]:
+        if stage != 3:
+            return None
+        return mean_optional([
+            (r.stage3_probe.get("extractStage3", 0.0) +
+             r.stage3_probe.get("sdkExtract", 0.0))
+            for r in self.runs
+            if r.stage3_probe
+        ])
+
+    def stage_production_ms(self, stage: int) -> Optional[float]:
+        stage_result = getattr(self, f"stage{stage}")
+        total = stage_result.time_ms
+        if total is None:
+            return None
+        validation = self.stage_validation_extract_ms(stage)
+        if validation is None:
+            return total
+        return max(0.0, total - validation)
+
+    @property
+    def production_total_ms(self) -> Optional[float]:
+        vals = [self.stage_production_ms(i) for i in range(1, 5)]
+        return sum(vals) if all(v is not None for v in vals) else None
+
+    @property
+    def validation_extract_total_ms(self) -> Optional[float]:
+        vals = [self.stage_validation_extract_ms(i) for i in range(1, 5)]
+        present = [v for v in vals if v is not None]
+        return sum(present) if present else None
+
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -155,7 +259,22 @@ _HALIDE_TIMING_RE = re.compile(r"^\[RenderHalideTiming\].*\bhalideFull=([0-9]+(?
 _DEMOSAIC_TIMING_RE = re.compile(r"^\[DemosaicHalideTiming\].*\bkernel=([0-9]+(?:\.[0-9]+)?)\s*ms\b.*\bcopy_to_host=([0-9]+(?:\.[0-9]+)?)\s*ms")
 _DEMOSAIC_WARP_TIMING_RE = re.compile(r"^\[DemosaicWarpHalideTiming\].*\bkernel=([0-9]+(?:\.[0-9]+)?)\s*ms\b.*\bcopy_to_host=([0-9]+(?:\.[0-9]+)?)\s*ms")
 _STAGE3_PROBE_RE = re.compile(r"^\[Stage3Probe\]\s*(.*)$")
+_STAGE2_PROBE_RE = re.compile(r"^\[Stage2SdkTiming\]\s*(.*)$")
+_OPCODE2_TIMING_RE = re.compile(r"^\[OpcodeList2Timing\]\s*(.*)$")
+_FFI_RUN_RE = re.compile(
+    r"^\[FFI run \d+\]\s+ok=(\d+)\s+w=(\d+)\s+h=(\d+)\s+rgb_bytes=(\d+)\s+"
+    r"decode_ms=([0-9]+(?:\.[0-9]+)?)\s+process_ms=([0-9]+(?:\.[0-9]+)?)\s+"
+    r"wall_ms=([0-9]+(?:\.[0-9]+)?)\s+err=(-?\d+)"
+)
+_RENDER_ASSIGN_RE = re.compile(r"^\[RenderHalideTiming\].*\bout_rgb_assign=([0-9]+(?:\.[0-9]+)?)\s*ms")
 _KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
+
+
+def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
+    values = {k: float(v) for k, v in _KV_FLOAT_RE.findall(payload)}
+    for key in ("prewarm", "gather", "kernel", "copy_to_host", "scatter", "t"):
+        if key in values:
+            dst[key] = dst.get(key, 0.0) + values[key]
 
 
 def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
@@ -183,6 +302,8 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
     demosaic_warp_kernel_ms: Optional[float] = None
     demosaic_warp_copy_ms: Optional[float] = None
     stage3_probe: dict[str, float] = {}
+    stage2_probe: dict[str, float] = {}
+    opcode2_probe: dict[str, float] = {}
 
     for line in output.splitlines():
         m = _STAGE_RE.match(line)
@@ -218,6 +339,14 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         m = _STAGE3_PROBE_RE.match(line)
         if m:
             stage3_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
+            continue
+        m = _STAGE2_PROBE_RE.match(line)
+        if m:
+            stage2_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
+            continue
+        m = _OPCODE2_TIMING_RE.match(line)
+        if m:
+            _accumulate_opcode2_timing(opcode2_probe, m.group(1))
 
     return RunResult(
         case_name=case_name,
@@ -233,6 +362,64 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         demosaic_warp_copy_ms=demosaic_warp_copy_ms,
         raw_output=output,
         stage3_probe=stage3_probe,
+        stage2_probe=stage2_probe,
+        opcode2_probe=opcode2_probe,
+    )
+
+
+def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
+                  env: dict[str, str]) -> FfiRunResult:
+    merged = os.environ.copy()
+    merged.update(env)
+    proc = subprocess.run(
+        [harness, dng_path, "1"],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=merged,
+        check=False,
+    )
+    output = proc.stdout
+    render_assign_ms: Optional[float] = None
+    render_halide_full_ms: Optional[float] = None
+    stage2_probe: dict[str, float] = {}
+    opcode2_probe: dict[str, float] = {}
+    ffi_match: Optional[re.Match[str]] = None
+    for line in output.splitlines():
+        m = _RENDER_ASSIGN_RE.match(line)
+        if m:
+            render_assign_ms = float(m.group(1))
+        m = _HALIDE_TIMING_RE.match(line)
+        if m:
+            render_halide_full_ms = float(m.group(1))
+        m = _FFI_RUN_RE.match(line)
+        if m:
+            ffi_match = m
+        m = _STAGE2_PROBE_RE.match(line)
+        if m:
+            stage2_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
+        m = _OPCODE2_TIMING_RE.match(line)
+        if m:
+            _accumulate_opcode2_timing(opcode2_probe, m.group(1))
+    if proc.returncode != 0 or not ffi_match:
+        raise RuntimeError(f"[FFI {sample_name}] exit={proc.returncode}\n{output}")
+    return FfiRunResult(
+        sample_name=sample_name,
+        ok=ffi_match.group(1) == "1",
+        width=int(ffi_match.group(2)),
+        height=int(ffi_match.group(3)),
+        rgb_bytes=int(ffi_match.group(4)),
+        decode_ms=float(ffi_match.group(5)),
+        process_ms=float(ffi_match.group(6)),
+        wall_ms=float(ffi_match.group(7)),
+        error_code=int(ffi_match.group(8)),
+        stage2_do_build_ms=stage2_probe.get("doBuildStage2"),
+        stage2_opcode2_ms=stage2_probe.get("opcode2"),
+        stage2_total_ms=stage2_probe.get("total"),
+        render_assign_ms=render_assign_ms,
+        render_halide_full_ms=render_halide_full_ms,
+        opcode2_probe=opcode2_probe,
     )
 
 
@@ -242,6 +429,12 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
 
 def _fmt_ms(v: Optional[float]) -> str:
     return f"{v:.1f}" if v is not None else "N/A"
+
+
+def _fmt_pct(part: Optional[float], total: Optional[float]) -> str:
+    if part is None or total is None or total == 0:
+        return "N/A"
+    return f"{(part / total) * 100.0:.1f}%"
 
 
 def _fmt_db(v: Optional[float]) -> str:
@@ -254,6 +447,7 @@ def _fmt_db(v: Optional[float]) -> str:
 
 def _build_markdown(
     results: list[AggResult],
+    ffi_results: list[FfiAggResult],
     generated_at: str,
     repeat: int,
     show_halide_timing: bool,
@@ -275,23 +469,60 @@ def _build_markdown(
              "(prior 250ms+ first-touch page-fault cost on `out_rgb` was eliminated by caller "
              "pre-allocating + replacing `assign(N,0)` with `resize(N)` in `runHalideFullOrSdkFallback`). "
              "SDK Stage4 = `dng_render::Render()` total. `dng_render()` constructor itself is ~0.03 ms.")
+    L.append(">")
+    L.append("> **Production vs validation timing**: `production` is the stage work that belongs to the "
+             "decode/render pipeline. `validation extract` is extra test-harness work used to materialize "
+             "raw buffers for contract checks / PSNR. Today only Stage3 exposes this split; Stage1/2/4 "
+             "validation extraction is not separately timed by `test_decode` and is shown as `N/A`.")
+    if ffi_results:
+        L.append(">")
+        L.append("> **FFI timing note**: FFI timings are collected from `dng_pipeline_v2_decode_to_rgb()` "
+                 "with a separate harness. They are shown in their own table because FFI includes output "
+                 "buffer ownership costs such as `out_rgb_assign`; these costs are not mixed into the "
+                 "normalized Stage4 matrix columns.")
     L.append("")
 
     # --- Timing table ---
     L.append("## Timing (ms, mean of N runs)")
     L.append("")
-    L.append("| Case | Stage1 | Stage2 | Stage3 | Stage4 (total) | DECODE TOTAL |")
-    L.append("|---|---|---|---|---|---|")
+    L.append("| Case | Stage1 production | Stage1 validation extract | Stage2 production | Stage2 validation extract | Stage3 production | Stage3 validation extract | Stage4 production | Stage4 validation extract | Production total | Legacy total |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in results:
         L.append(
             f"| {r.case_name} "
-            f"| {_fmt_ms(r.stage1.time_ms)} "
-            f"| {_fmt_ms(r.stage2.time_ms)} "
-            f"| {_fmt_ms(r.stage3.time_ms)} "
-            f"| {_fmt_ms(r.stage4.time_ms)} "
+            f"| {_fmt_ms(r.stage_production_ms(1))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(1))} "
+            f"| {_fmt_ms(r.stage_production_ms(2))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(2))} "
+            f"| {_fmt_ms(r.stage_production_ms(3))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(3))} "
+            f"| {_fmt_ms(r.stage_production_ms(4))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(4))} "
+            f"| {_fmt_ms(r.production_total_ms)} "
             f"| {_fmt_ms(r.total_ms)} |"
         )
     L.append("")
+
+    if ffi_results:
+        L.append("## FFI Production Timing (ms, independent from Stage4)")
+        L.append("")
+        L.append("| Sample | decode_ms | process_ms | wall_ms | Stage2 total | Stage2 doBuildStage2 | Stage2 opcode2 | out_rgb_assign | halideFull | rgb_bytes |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        for r in ffi_results:
+            rgb_bytes = str(r.rgb_bytes) if r.rgb_bytes is not None else "N/A"
+            L.append(
+                f"| {r.sample_name} "
+                f"| {_fmt_ms(r.decode_ms)} "
+                f"| {_fmt_ms(r.process_ms)} "
+                f"| {_fmt_ms(r.wall_ms)} "
+                f"| {_fmt_ms(r.stage2_total_ms)} "
+                f"| {_fmt_ms(r.stage2_do_build_ms)} "
+                f"| {_fmt_ms(r.stage2_opcode2_ms)} "
+                f"| {_fmt_ms(r.render_assign_ms)} "
+                f"| {_fmt_ms(r.render_halide_full_ms)} "
+                f"| {rgb_bytes} |"
+            )
+        L.append("")
 
     # --- PSNR table ---
     L.append("## PSNR vs SDK Baseline (dB)")
@@ -311,14 +542,97 @@ def _build_markdown(
     # --- Halide timing breakdown ---
     if show_halide_timing:
         has_any = any(r.halide_full_ms is not None for r in results)
+        has_stage2_probe = any(r.stage2_probe_avg("total") is not None for r in results)
         has_stage3_probe = any(r.stage3_probe_avg("total") is not None for r in results)
+        if has_stage2_probe:
+            L.append("## Stage2 SDK Orchestration Breakdown (ms)")
+            L.append("")
+            L.append("_`opcode2` includes OpcodeList2 dispatch; when Halide MapPolynomial is enabled, see `[OpcodeList2Timing]` for its inner kernel/readback split. `doBuildStage2` is SDK linearization / Stage2 image materialization._")
+            L.append("")
+            L.append("| Case | saveDecision | rawPreOpcode1 | opcode1 | rawPostOpcode1 | linearizationPostParse | doBuildStage2 | releaseStage1 | clearLinearization | opcode2 | postOpcode2 | defloat | rawPostOpcode2 | total |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+            for r in results:
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('saveDecision'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('rawPreOpcode1'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('opcode1'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('rawPostOpcode1'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('linearizationPostParse'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('doBuildStage2'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('releaseStage1'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('clearLinearization'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('opcode2'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('postOpcode2'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('defloat'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('rawPostOpcode2'))} "
+                    f"| {_fmt_ms(r.stage2_probe_avg('total'))} |"
+                )
+            L.append("")
+
+        has_opcode2_probe = any(r.opcode2_probe_avg("t") is not None for r in results)
+        if has_opcode2_probe:
+            L.append("## Stage2 OpcodeList2 MapPolynomial Breakdown (ms)")
+            L.append("")
+            L.append("_`non-MapPolynomial` = Stage2 SDK total minus `[OpcodeList2Timing]` MapPolynomial total. This keeps SDK orchestration / linearization separate from the Halide MapPolynomial kernel path._")
+            L.append("")
+            L.append("| Case | prewarm | gather | kernel | copy_to_host | scatter | MapPolynomial total | MapPolynomial % Stage2 | non-MapPolynomial | non-MapPolynomial % Stage2 |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|")
+            for r in results:
+                map_total = r.opcode2_probe_avg("t")
+                stage2_total = r.stage2_probe_avg("total")
+                non_map = None
+                if map_total is not None and stage2_total is not None:
+                    non_map = max(0.0, stage2_total - map_total)
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('prewarm'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('gather'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('kernel'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('copy_to_host'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('scatter'))} "
+                    f"| {_fmt_ms(map_total)} "
+                    f"| {_fmt_pct(map_total, stage2_total)} "
+                    f"| {_fmt_ms(non_map)} "
+                    f"| {_fmt_pct(non_map, stage2_total)} |"
+                )
+            L.append("")
+
+        has_ffi_opcode2_probe = any(
+            r.opcode2_probe_avg("t") is not None for r in ffi_results
+        )
+        if has_ffi_opcode2_probe:
+            L.append("## FFI Stage2 OpcodeList2 MapPolynomial Breakdown (ms)")
+            L.append("")
+            L.append("| Sample | prewarm | gather | kernel | copy_to_host | scatter | MapPolynomial total | MapPolynomial % Stage2 | non-MapPolynomial | non-MapPolynomial % Stage2 |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|")
+            for r in ffi_results:
+                map_total = r.opcode2_probe_avg("t")
+                stage2_total = r.stage2_total_ms
+                non_map = None
+                if map_total is not None and stage2_total is not None:
+                    non_map = max(0.0, stage2_total - map_total)
+                L.append(
+                    f"| {r.sample_name} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('prewarm'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('gather'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('kernel'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('copy_to_host'))} "
+                    f"| {_fmt_ms(r.opcode2_probe_avg('scatter'))} "
+                    f"| {_fmt_ms(map_total)} "
+                    f"| {_fmt_pct(map_total, stage2_total)} "
+                    f"| {_fmt_ms(non_map)} "
+                    f"| {_fmt_pct(non_map, stage2_total)} |"
+                )
+            L.append("")
+
         if has_stage3_probe:
             L.append("## Stage3 Probe Breakdown (ms)")
             L.append("")
-            L.append("_`prealloc` is intentionally outside Stage3 timing; `unaccounted` should stay below 30ms for Step 7.1._")
+            L.append("_`prealloc` is intentionally outside Stage3 timing; `extractStage3` / `sdkExtract` are validation-only raw-buffer materialization costs._")
             L.append("")
-            L.append("| Case | prealloc | resize | makeImage | demosaic | fused | applyOpcode3 | put | extractStage3 | unaccounted | total |")
-            L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+            L.append("| Case | prealloc | resize | makeImage | demosaic | fused | applyOpcode3 | put | extractStage3 | sdkBuild | sdkExtract | unaccounted | production | validation extract | total |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
             for r in results:
                 L.append(
                     f"| {r.case_name} "
@@ -330,7 +644,11 @@ def _build_markdown(
                     f"| {_fmt_ms(r.stage3_probe_avg('applyOpcode3'))} "
                     f"| {_fmt_ms(r.stage3_probe_avg('put'))} "
                     f"| {_fmt_ms(r.stage3_probe_avg('extractStage3'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('sdkBuild'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('sdkExtract'))} "
                     f"| {_fmt_ms(r.stage3_probe_avg('unaccounted'))} "
+                    f"| {_fmt_ms(r.stage_production_ms(3))} "
+                    f"| {_fmt_ms(r.stage_validation_extract_ms(3))} "
                     f"| {_fmt_ms(r.stage3_probe_avg('total'))} |"
                 )
             L.append("")
@@ -417,9 +735,10 @@ def _build_cases(
         "DNG_DEMOSAIC_HALIDE_TIMING": "1",
         "DNG_DEMOSAIC_WARP_HALIDE_TIMING": "1",
         "DNG_WARP_HALIDE_TIMING": "1",
+        "DNG_STAGE2_SDK_TIMING": "1",
     } if enable_timing else {}
 
-    sdk_env = dict(extra_env)
+    sdk_env = {**extra_env, **timing_env}
     halide_env_lossless = {**extra_env, **timing_env, "DNG_WARP_BIT_EXACT": "0"}
     halide_env_lossy = {**extra_env, **timing_env}
 
@@ -478,6 +797,11 @@ def main() -> int:
         default=False,
         help="Enable DNG_RENDER_HALIDE_TIMING=1 and show halideFull breakdown table",
     )
+    ap.add_argument(
+        "--ffi-harness",
+        default="",
+        help="Optional FFI timing harness path. When set, adds an independent FFI timing table.",
+    )
     ap.add_argument("--output", default="", help="Optional Markdown output file path")
     ap.add_argument(
         "--env",
@@ -530,9 +854,36 @@ def main() -> int:
                 raise SystemExit(1)
         agg_results.append(AggResult(case_name=case_name, runs=runs))
 
+    ffi_results: list[FfiAggResult] = []
+    if args.ffi_harness:
+        ffi_harness = (root / args.ffi_harness).resolve()
+        if not ffi_harness.exists():
+            ap.error(f"FFI harness not found: {ffi_harness}")
+        ffi_env = {
+            **extra_env,
+            "DNG_RENDER_HALIDE_TIMING": "1",
+            "DNG_STAGE2_SDK_TIMING": "1",
+        }
+        ffi_cases = [
+            ("Lossless / FFI", lossless),
+            ("Lossy / FFI", lossy),
+        ]
+        for sample_name, dng_path in ffi_cases:
+            runs: list[FfiRunResult] = []
+            for i in range(args.repeat):
+                print(f"[FFI {i+1}/{args.repeat}] {sample_name}")
+                try:
+                    runs.append(_run_ffi_case(root, str(ffi_harness), sample_name,
+                                              dng_path, ffi_env))
+                except RuntimeError as exc:
+                    print(f"  ERROR: {exc}")
+                    raise SystemExit(1)
+            ffi_results.append(FfiAggResult(sample_name=sample_name, runs=runs))
+
     generated_at = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     md = _build_markdown(
         agg_results,
+        ffi_results,
         generated_at=generated_at,
         repeat=args.repeat,
         show_halide_timing=args.timing,

@@ -57,7 +57,7 @@ endif()
 
 # Native library
 file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
-list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z]*Generator\\.cpp$")
+list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp$")
 list(APPEND NATIVE_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_mosaic_halide.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_warp_halide.cpp"
@@ -113,6 +113,10 @@ target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
 add_executable(dng_opcode_polynomial_generator
     ${SRC_DIR}/DngOpcodePolynomialGenerator.cpp)
 target_link_libraries(dng_opcode_polynomial_generator PRIVATE Halide::Generator)
+
+add_executable(dng_opcode_polynomial3_generator
+    ${SRC_DIR}/DngOpcodePolynomial3Generator.cpp)
+target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator)
 
 set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
 file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
@@ -284,6 +288,17 @@ add_custom_command(
 add_custom_target(dng_opcode_polynomial_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a)
 
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.h
+    COMMAND dng_opcode_polynomial3_generator -g dng_opcode_polynomial3
+        -f dng_opcode_polynomial3 -o ${HALIDE_OUTPUT_DIR}
+        target=${AOT_TARGET}-no_runtime
+    DEPENDS dng_opcode_polynomial3_generator
+    COMMENT "Generating Halide AOT Stage2 OpcodeList2 batched MapPolynomial..."
+)
+add_custom_target(dng_opcode_polynomial3_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
 add_dependencies(dng_decoder_native dng_halide_aot_target)
 add_dependencies(dng_decoder_native dng_demosaic_aot_target)
@@ -292,10 +307,11 @@ add_dependencies(dng_decoder_native dng_warp_aot_target)
 add_dependencies(dng_decoder_native dng_warp_precomputed_aot_target)
 add_dependencies(dng_decoder_native dng_render_aot_target)
 add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
+add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
-target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a)
+target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
@@ -363,9 +379,9 @@ target_include_directories(test_decode PRIVATE
     ${HALIDE_DIR}/include)
 if(TURBOJPEG_LIBRARY)
     target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${TURBOJPEG_LIBRARY})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${TURBOJPEG_LIBRARY})
 else()
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
 endif()
 add_dependencies(test_decode dng_halide_aot_target)
 add_dependencies(test_decode dng_demosaic_aot_target)
@@ -374,6 +390,7 @@ add_dependencies(test_decode dng_warp_aot_target)
 add_dependencies(test_decode dng_warp_precomputed_aot_target)
 add_dependencies(test_decode dng_render_aot_target)
 add_dependencies(test_decode dng_opcode_polynomial_aot_target)
+add_dependencies(test_decode dng_opcode_polynomial3_aot_target)
 if(APPLE)
     target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
