@@ -28,6 +28,7 @@
 
 #include "dng_opcodelist2_halide.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -59,11 +60,11 @@
 // API functions below).
 // ---------------------------------------------------------------------------
 
-// Scatter a dense plane-major scratch buffer back into the interleaved
-// dng_image host memory.
+// Scatter a dense interleaved RGB scratch buffer back into the dng_image host
+// memory.
 //
-// scratch layout : plane-major, dense strides [1, W, W*H]
-//   scratch[c * W * H + y * W + x]
+// scratch layout : interleaved RGB, dense strides [3, W*3, 1]
+//   scratch[(y * W + x) * 3 + c]
 //
 // image layout   : interleaved with arbitrary col_step / row_step / plane_step
 //   image_base[c * plane_step + y * row_step + x * col_step]
@@ -74,18 +75,23 @@ static void scatter_poly3_to_image(const uint16_t *scratch,
                                    int32_t col_step,
                                    int32_t row_step,
                                    int32_t plane_step) {
-    for (int c = 0; c < 3; ++c) {
-        const uint16_t *src_plane =
-            scratch + static_cast<ptrdiff_t>(c) * width * height;
-        uint16_t *dst_plane =
-            image_base + static_cast<ptrdiff_t>(c) * plane_step;
-        for (int32_t y = 0; y < height; ++y) {
-            const uint16_t *src_row =
-                src_plane + static_cast<ptrdiff_t>(y) * width;
-            uint16_t *dst_row =
-                dst_plane + static_cast<ptrdiff_t>(y) * row_step;
-            for (int32_t x = 0; x < width; ++x) {
-                dst_row[static_cast<ptrdiff_t>(x) * col_step] = src_row[x];
+    if (col_step == 3 && row_step == width * 3 && plane_step == 1) {
+        const size_t elems =
+            static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+        std::memcpy(image_base, scratch, elems * sizeof(uint16_t));
+        return;
+    }
+
+    for (int32_t y = 0; y < height; ++y) {
+        const uint16_t *src_row =
+            scratch + static_cast<ptrdiff_t>(y) * width * 3;
+        uint16_t *dst_row =
+            image_base + static_cast<ptrdiff_t>(y) * row_step;
+        for (int32_t x = 0; x < width; ++x) {
+            const uint16_t *src_px = src_row + static_cast<ptrdiff_t>(x) * 3;
+            uint16_t *dst_px = dst_row + static_cast<ptrdiff_t>(x) * col_step;
+            for (int c = 0; c < 3; ++c) {
+                dst_px[static_cast<ptrdiff_t>(c) * plane_step] = src_px[c];
             }
         }
     }
@@ -115,13 +121,41 @@ bool ol2_prewarm_enabled() {
 // ol2_persistent_enabled: hardcoded true (Phase 10 Sprint E-F cleanup).
 // ol2_batched_enabled: hardcoded true (Phase 10 Sprint E-F cleanup).
 
+bool map_poly_timing_enabled() {
+    static const bool enabled = []() {
+        const char *v = std::getenv("DNG_MAP_POLY_TIMING");
+        return v && v[0] != '\0' && v[0] != '0';
+    }();
+    return enabled;
+}
+
 struct PolynomialTiming {
     double prewarm_ms = 0.0;
     double gather_ms = 0.0;
+    double src_upload_ms = 0.0;
+    double param_upload_ms = 0.0;
     double kernel_ms = 0.0;
     double copy_to_host_ms = 0.0;
     double scatter_ms = 0.0;
+    double handoff_publish_ms = 0.0;
+    double dispatch_call_ms = 0.0;
+    // Phase 10 cold-path subdivision: precise timestamps so caller can split
+    // the dispatch_call window into pre_call_setup / kernel_func_entry /
+    // buffer_setup / inner-stage gaps / kernel_func_exit / post_call_destructors.
+    // Only meaningful when DNG_MAP_POLY_TIMING is enabled.
+    std::chrono::high_resolution_clock::time_point t_func_entry{};
+    std::chrono::high_resolution_clock::time_point t_inner_start{};
+    std::chrono::high_resolution_clock::time_point t_after_prewarm{};
+    std::chrono::high_resolution_clock::time_point t_before_src_upload{};
+    std::chrono::high_resolution_clock::time_point t_inner_end{};
+    std::chrono::high_resolution_clock::time_point t_func_exit{};
+    bool first_call = false;
 };
+
+// Process-level marker so the caller can flag the *very first* invocation of
+// each kernel. Useful to separate Halide AOT first-use cost from steady state.
+std::atomic<bool> g_polynomial_first_seen{false};
+std::atomic<bool> g_polynomial3_first_seen{false};
 
 struct DeviceHandoffState {
     std::mutex mu;
@@ -133,10 +167,11 @@ struct DeviceHandoffState {
     uint32_t planes = 0;
     uint32_t pixel_range = 0;
     std::unique_ptr<Halide::Runtime::Buffer<uint16_t>> buffer;
-    // Scratch host storage that backs dst_buf in run_polynomial3_kernel when
-    // defer_copy_to_host=true. Sized W*H*planes*sizeof(uint16_t); grows on
-    // demand but never shrinks. Lives here (under mu) so it outlives the call
-    // frame and the device buffer can safely reference it.
+    // Interleaved RGB scratch host storage that backs dst_buf in
+    // run_polynomial3_kernel when defer_copy_to_host=true. Sized
+    // W*H*planes*sizeof(uint16_t); grows on demand but never shrinks. Lives
+    // here (under mu) so it outlives the call frame and the device buffer can
+    // safely reference it.
     std::vector<uint16_t> poly3_scratch;
     // Pointer to the dng_image-internal memory where results must be written
     // back when copy_to_host is eventually requested.  The caller guarantees
@@ -163,7 +198,8 @@ bool device_handoff_requested() {
 
 // Publish the device-resident dst buffer together with the image pointer so
 // that copy_to_host() can write results back to the SDK image.
-// scratch_ptr must point to memory already owned by state.poly3_scratch.
+// scratch_ptr must point to interleaved RGB memory already owned by
+// state.poly3_scratch.
 void publish_device_handoff(Halide::Runtime::Buffer<uint16_t> &&buffer,
                             uint32_t width,
                             uint32_t height,
@@ -215,6 +251,9 @@ double prewarm_polynomial3_kernel_once() {
         }
         Halide::Runtime::Buffer<float> coeff(coeff_f32, 9, 3);
         Halide::Runtime::Buffer<int32_t> degree(degree_i32, 3);
+        src.set_host_dirty(true);
+        coeff.set_host_dirty(true);
+        degree.set_host_dirty(true);
 
         auto t0 = std::chrono::high_resolution_clock::now();
         const int rc = dng_opcode_polynomial3(src, coeff, degree,
@@ -250,6 +289,8 @@ double prewarm_polynomial_kernel_once() {
         coeff_f32[0] = 0.0f;
         coeff_f32[1] = 1.0f;
         Halide::Runtime::Buffer<float> coeff(coeff_f32, 9);
+        src.set_host_dirty(true);
+        coeff.set_host_dirty(true);
 
         auto t0 = std::chrono::high_resolution_clock::now();
         const int rc = dng_opcode_polynomial(src, coeff,
@@ -334,10 +375,16 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
                            const double *coeff_real64,
                            float pixel_range,
                            PolynomialTiming *timing) {
+    if (timing) {
+        timing->t_func_entry = std::chrono::high_resolution_clock::now();
+        timing->first_call = !g_polynomial_first_seen.exchange(true);
+        timing->t_inner_start = timing->t_func_entry;
+    }
     // Pre-warm Metal + kernel before any large dispatch. No-op after the
     // first call.
     if (timing) {
         timing->prewarm_ms = prewarm_polynomial_kernel_once();
+        timing->t_after_prewarm = std::chrono::high_resolution_clock::now();
     } else {
         (void)prewarm_polynomial_kernel_once();
     }
@@ -389,6 +436,46 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
         coeff_f32[i] = static_cast<float>(coeff_real64[i]);
     }
     Halide::Runtime::Buffer<float> coeff(coeff_f32, 9);
+    coeff.set_host_dirty(true);
+
+    if (timing) {
+        timing->t_before_src_upload =
+            std::chrono::high_resolution_clock::now();
+    }
+
+    if (timing && map_poly_timing_enabled()) {
+        const halide_device_interface_t *metal_iface =
+            halide_metal_device_interface();
+        if (metal_iface) {
+            const auto src_upload_start =
+                std::chrono::high_resolution_clock::now();
+            const int src_rc = src_buf->copy_to_device(metal_iface);
+            const auto src_upload_end =
+                std::chrono::high_resolution_clock::now();
+            timing->src_upload_ms =
+                elapsed_ms(src_upload_start, src_upload_end);
+            if (src_rc != 0) {
+                std::fprintf(stderr,
+                             "[OpcodeList2Halide] polynomial src upload rc=%d\n",
+                             src_rc);
+                return false;
+            }
+
+            const auto param_upload_start =
+                std::chrono::high_resolution_clock::now();
+            const int coeff_rc = coeff.copy_to_device(metal_iface);
+            const auto param_upload_end =
+                std::chrono::high_resolution_clock::now();
+            timing->param_upload_ms =
+                elapsed_ms(param_upload_start, param_upload_end);
+            if (coeff_rc != 0) {
+                std::fprintf(stderr,
+                             "[OpcodeList2Halide] polynomial coeff upload rc=%d\n",
+                             coeff_rc);
+                return false;
+            }
+        }
+    }
 
     const auto kernel_start = std::chrono::high_resolution_clock::now();
     const int rc = dng_opcode_polynomial(*src_buf,
@@ -430,6 +517,8 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     const auto scatter_end = std::chrono::high_resolution_clock::now();
     if (timing) {
         timing->scatter_ms = elapsed_ms(scatter_start, scatter_end);
+        timing->t_inner_end = scatter_end;
+        timing->t_func_exit = std::chrono::high_resolution_clock::now();
     }
     return true;
 }
@@ -447,17 +536,25 @@ bool run_polynomial3_kernel(uint16_t *base,
                             bool defer_copy_to_host,
                             PolynomialTiming *timing) {
     if (timing) {
+        timing->t_func_entry = std::chrono::high_resolution_clock::now();
+        timing->first_call = !g_polynomial3_first_seen.exchange(true);
+        timing->t_inner_start = timing->t_func_entry;
+    }
+    if (timing) {
         timing->prewarm_ms = prewarm_polynomial3_kernel_once();
+        timing->t_after_prewarm = std::chrono::high_resolution_clock::now();
     } else {
         (void)prewarm_polynomial3_kernel_once();
     }
 
     // src_buf wraps the dng_image interleaved memory (read-only from Halide's
     // perspective).  dst_buf must NOT alias src_buf — allocate a dense
-    // plane-major scratch buffer that is independent of the image's lifetime.
+    // interleaved RGB scratch buffer that is independent of the image's
+    // lifetime and matches DngOpcodePolynomial3Generator's dst stride
+    // contract.
     //
-    // Scratch layout: plane-major, dense strides [1, W, W*H].
-    // This matches halide_dimension_t { {0,W,1}, {0,H,W}, {0,3,W*H} }.
+    // Scratch layout: interleaved RGB, dense strides [3, W*3, 1].
+    // This matches halide_dimension_t { {0,W,3}, {0,H,W*3}, {0,3,1} }.
     const size_t scratch_elems =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
 
@@ -483,11 +580,11 @@ bool run_polynomial3_kernel(uint16_t *base,
     };
     Halide::Runtime::Buffer<uint16_t> src_buf(base, 3, src_shape);
 
-    // dst: dense plane-major layout backed by scratch (not base).
+    // dst: dense interleaved RGB layout backed by scratch (not base).
     halide_dimension_t dst_shape[3] = {
-        {0, width,          1,             0},
-        {0, height,         width,         0},
-        {0, 3,              width * height, 0},
+        {0, width,          3,             0},
+        {0, height,         width * 3,     0},
+        {0, 3,              1,             0},
     };
     Halide::Runtime::Buffer<uint16_t> dst_buf(scratch_ptr, 3, dst_shape);
 
@@ -503,10 +600,53 @@ bool run_polynomial3_kernel(uint16_t *base,
     }
     Halide::Runtime::Buffer<float> coeff(coeff_f32, 9, 3);
     Halide::Runtime::Buffer<int32_t> degree(degree_i32, 3);
+    coeff.set_host_dirty(true);
+    degree.set_host_dirty(true);
 
     // Mark src host-dirty so Halide uploads it to the Metal device before the
     // kernel reads it.  Do NOT set host-dirty on dst — it is an output buffer.
     src_buf.set_host_dirty(true);
+
+    if (timing) {
+        timing->t_before_src_upload =
+            std::chrono::high_resolution_clock::now();
+    }
+
+    if (timing && map_poly_timing_enabled()) {
+        const halide_device_interface_t *metal_iface =
+            halide_metal_device_interface();
+        if (metal_iface) {
+            const auto src_upload_start =
+                std::chrono::high_resolution_clock::now();
+            const int src_rc = src_buf.copy_to_device(metal_iface);
+            const auto src_upload_end =
+                std::chrono::high_resolution_clock::now();
+            timing->src_upload_ms =
+                elapsed_ms(src_upload_start, src_upload_end);
+            if (src_rc != 0) {
+                std::fprintf(stderr,
+                             "[OpcodeList2Halide] polynomial3 src upload rc=%d\n",
+                             src_rc);
+                return false;
+            }
+
+            const auto param_upload_start =
+                std::chrono::high_resolution_clock::now();
+            const int coeff_rc = coeff.copy_to_device(metal_iface);
+            const int degree_rc = degree.copy_to_device(metal_iface);
+            const auto param_upload_end =
+                std::chrono::high_resolution_clock::now();
+            timing->param_upload_ms =
+                elapsed_ms(param_upload_start, param_upload_end);
+            if (coeff_rc != 0 || degree_rc != 0) {
+                std::fprintf(stderr,
+                             "[OpcodeList2Halide] polynomial3 param upload "
+                             "coeff_rc=%d degree_rc=%d\n",
+                             coeff_rc, degree_rc);
+                return false;
+            }
+        }
+    }
 
     const auto kernel_start = std::chrono::high_resolution_clock::now();
     const int rc = dng_opcode_polynomial3(src_buf, coeff, degree,
@@ -528,6 +668,7 @@ bool run_polynomial3_kernel(uint16_t *base,
         // back into the SDK image.  scratch_ptr remains valid because
         // poly3_scratch is owned by DeviceHandoffState and is never freed until
         // halide_stage2_ol2_clear_device_handoff() is called.
+        const auto handoff_start = std::chrono::high_resolution_clock::now();
         publish_device_handoff(std::move(dst_buf),
                                static_cast<uint32_t>(width),
                                static_cast<uint32_t>(height),
@@ -537,6 +678,14 @@ bool run_polynomial3_kernel(uint16_t *base,
                                col_step,
                                row_step,
                                plane_step);
+        const auto handoff_end = std::chrono::high_resolution_clock::now();
+        if (timing) {
+            timing->handoff_publish_ms =
+                elapsed_ms(handoff_start, handoff_end);
+            timing->t_inner_end = handoff_end;
+            timing->t_func_exit =
+                std::chrono::high_resolution_clock::now();
+        }
         return true;
     }
 
@@ -555,8 +704,15 @@ bool run_polynomial3_kernel(uint16_t *base,
     }
 
     // Scatter dense scratch back into the interleaved dng_image buffer.
+    const auto scatter_start = std::chrono::high_resolution_clock::now();
     scatter_poly3_to_image(scratch_ptr, base,
                            width, height, col_step, row_step, plane_step);
+    const auto scatter_end = std::chrono::high_resolution_clock::now();
+    if (timing) {
+        timing->scatter_ms = elapsed_ms(scatter_start, scatter_end);
+        timing->t_inner_end = scatter_end;
+        timing->t_func_exit = std::chrono::high_resolution_clock::now();
+    }
     return true;
 }
 
@@ -590,6 +746,27 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
         }
     }
 
+    // (Candidate A — P1) Pre-grow + page-touch the DeviceHandoffState scratch
+    // vector so the first real run_polynomial3_kernel() call avoids the 144MB
+    // page-fault zero-init that impl-instrument located as
+    // [MapPolynomialColdSubdivide] buffer_setup ≈ 249ms (see
+    // docs/logs/2026-05-27/Task_map_polynomial_coldpath_fix.md §2 Candidate A).
+    //
+    // std::vector::resize default-inits to 0 for uint16_t, which already
+    // commits and touches every page; the explicit std::memset(0) below makes
+    // the intent durable against any future switch to uninitialised storage.
+    const size_t scratch_elems =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+    {
+        DeviceHandoffState &state = device_handoff_state();
+        std::lock_guard<std::mutex> lock(state.mu);
+        if (state.poly3_scratch.size() < scratch_elems) {
+            state.poly3_scratch.resize(scratch_elems);
+        }
+        std::memset(state.poly3_scratch.data(), 0,
+                    state.poly3_scratch.size() * sizeof(uint16_t));
+    }
+
     // Allocate interleaved src/dst at actual image dimensions so Halide
     // specialises the Metal pipeline state for this exact size.
     Halide::Runtime::Buffer<uint16_t> src =
@@ -607,6 +784,9 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
     }
     Halide::Runtime::Buffer<float> coeff(coeff_f32, 9, 3);
     Halide::Runtime::Buffer<int32_t> degree(degree_i32, 3);
+    src.set_host_dirty(true);
+    coeff.set_host_dirty(true);
+    degree.set_host_dirty(true);
 
     const int rc = dng_opcode_polynomial3(src, coeff, degree,
                                           /*pixel_range=*/65535.0f, dst);
@@ -667,16 +847,20 @@ bool halide_stage2_ol2_device_handoff_copy_to_host() {
         return true;
     }
     // Pull GPU results into the scratch buffer (dst_buf's host pointer).
+    const auto copy_start = std::chrono::high_resolution_clock::now();
     const int rc = state.buffer->copy_to_host();
+    const auto copy_end = std::chrono::high_resolution_clock::now();
     if (rc != 0) {
         std::fprintf(stderr,
                      "[OpcodeList2Halide] device_handoff copy_to_host rc=%d\n",
                      rc);
         return false;
     }
+    double scatter_ms = 0.0;
     // If the caller recorded an image pointer, scatter scratch → dng_image.
     if (state.image_base != nullptr) {
         const uint16_t *scratch = state.poly3_scratch.data();
+        const auto scatter_start = std::chrono::high_resolution_clock::now();
         scatter_poly3_to_image(scratch,
                                state.image_base,
                                static_cast<int32_t>(state.width),
@@ -684,6 +868,15 @@ bool halide_stage2_ol2_device_handoff_copy_to_host() {
                                state.img_col_step,
                                state.img_row_step,
                                state.img_plane_step);
+        const auto scatter_end = std::chrono::high_resolution_clock::now();
+        scatter_ms = elapsed_ms(scatter_start, scatter_end);
+    }
+    if (map_poly_timing_enabled()) {
+        const double copy_ms = elapsed_ms(copy_start, copy_end);
+        std::fprintf(stderr,
+                     "[MapPolynomialHandoffTiming] copy_to_host=%.3f "
+                     "scatter=%.3f total=%.3f\n",
+                     copy_ms, scatter_ms, copy_ms + scatter_ms);
     }
     state.host_copied = true;
     return true;
@@ -774,6 +967,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     const int32_t height = static_cast<int32_t>(first_overlap->H());
     const bool defer_copy_to_host = device_handoff_requested();
     PolynomialTiming detail;
+    const auto dispatch_start = std::chrono::high_resolution_clock::now();
     const bool ok = run_polynomial3_kernel(base,
                                            width,
                                            height,
@@ -786,8 +980,69 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
                                            static_cast<float>(pixel_range),
                                            defer_copy_to_host,
                                            &detail);
+    const auto dispatch_end = std::chrono::high_resolution_clock::now();
+    detail.dispatch_call_ms = elapsed_ms(dispatch_start, dispatch_end);
     if (!ok) {
         return 0;
+    }
+    if (map_poly_timing_enabled()) {
+        const double total = detail.prewarm_ms + detail.gather_ms +
+                             detail.src_upload_ms + detail.param_upload_ms +
+                             detail.kernel_ms + detail.copy_to_host_ms +
+                             detail.scatter_ms + detail.handoff_publish_ms;
+        std::fprintf(stderr,
+                     "[MapPolynomialTiming] path=batched3 w=%d h=%d "
+                     "defer_handoff=%d prewarm=%.3f gather=%.3f "
+                     "src_upload=%.3f param_upload=%.3f kernel=%.3f "
+                     "copy_to_host=%.3f scatter=%.3f handoff_publish=%.3f "
+                     "inner_total=%.3f dispatch_call=%.3f gap=%.3f\n",
+                     width, height, defer_copy_to_host ? 1 : 0,
+                     detail.prewarm_ms, detail.gather_ms,
+                     detail.src_upload_ms, detail.param_upload_ms,
+                     detail.kernel_ms, detail.copy_to_host_ms,
+                     detail.scatter_ms, detail.handoff_publish_ms, total,
+                     detail.dispatch_call_ms, detail.dispatch_call_ms - total);
+
+        // Cold-path subdivision: split dispatch_call into pre_call /
+        // func_entry / prewarm window / buffer_setup / core (uploads+kernel
+        // +copy+scatter+handoff) / func_exit / post_call destructors.
+        const double pre_call_setup_ms =
+            elapsed_ms(dispatch_start, detail.t_func_entry);
+        const double kernel_func_entry_ms =
+            elapsed_ms(detail.t_func_entry, detail.t_inner_start);
+        const double prewarm_window_ms =
+            elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
+        const double buffer_setup_ms =
+            elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
+        const double core_window_ms =
+            elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
+        const double kernel_func_exit_ms =
+            elapsed_ms(detail.t_inner_end, detail.t_func_exit);
+        const double post_call_destructors_ms =
+            elapsed_ms(detail.t_func_exit, dispatch_end);
+        const double core_accounted =
+            detail.src_upload_ms + detail.param_upload_ms +
+            detail.kernel_ms + detail.copy_to_host_ms +
+            detail.scatter_ms + detail.handoff_publish_ms;
+        const double core_unaccounted_ms = core_window_ms - core_accounted;
+        const double subdiv_sum =
+            pre_call_setup_ms + kernel_func_entry_ms + prewarm_window_ms +
+            buffer_setup_ms + core_window_ms + kernel_func_exit_ms +
+            post_call_destructors_ms;
+        std::fprintf(stderr,
+                     "[MapPolynomialColdSubdivide] path=batched3 first_call=%d "
+                     "pre_call_setup=%.3f kernel_func_entry=%.3f "
+                     "prewarm_window=%.3f buffer_setup=%.3f core_window=%.3f "
+                     "core_unaccounted=%.3f kernel_func_exit=%.3f "
+                     "post_call_destructors=%.3f subdiv_sum=%.3f "
+                     "dispatch_call=%.3f residual=%.3f\n",
+                     detail.first_call ? 1 : 0,
+                     pre_call_setup_ms, kernel_func_entry_ms,
+                     prewarm_window_ms, buffer_setup_ms, core_window_ms,
+                     core_unaccounted_ms, kernel_func_exit_ms,
+                     post_call_destructors_ms, subdiv_sum,
+                     detail.dispatch_call_ms,
+                     detail.dispatch_call_ms - subdiv_sum);
     }
     return 3;
 }
@@ -861,6 +1116,7 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
     }
 
     PolynomialTiming detail;
+    const auto dispatch_start = std::chrono::high_resolution_clock::now();
     const bool ok = run_polynomial_kernel(base,
                                           width,
                                           height,
@@ -870,6 +1126,63 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
                                           mp->PolyCoefficients(),
                                           static_cast<float>(pixel_range),
                                           &detail);
+    const auto dispatch_end = std::chrono::high_resolution_clock::now();
+    detail.dispatch_call_ms = elapsed_ms(dispatch_start, dispatch_end);
+    if (ok && map_poly_timing_enabled()) {
+        const double total = detail.prewarm_ms + detail.gather_ms +
+                             detail.src_upload_ms + detail.param_upload_ms +
+                             detail.kernel_ms + detail.copy_to_host_ms +
+                             detail.scatter_ms;
+        std::fprintf(stderr,
+                     "[MapPolynomialTiming] path=single plane=%u w=%d h=%d "
+                     "prewarm=%.3f gather=%.3f src_upload=%.3f "
+                     "param_upload=%.3f kernel=%.3f copy_to_host=%.3f "
+                     "scatter=%.3f inner_total=%.3f dispatch_call=%.3f "
+                     "gap=%.3f\n",
+                     static_cast<unsigned>(plane), width, height,
+                     detail.prewarm_ms, detail.gather_ms,
+                     detail.src_upload_ms, detail.param_upload_ms,
+                     detail.kernel_ms, detail.copy_to_host_ms,
+                     detail.scatter_ms, total, detail.dispatch_call_ms,
+                     detail.dispatch_call_ms - total);
 
+        const double pre_call_setup_ms =
+            elapsed_ms(dispatch_start, detail.t_func_entry);
+        const double kernel_func_entry_ms =
+            elapsed_ms(detail.t_func_entry, detail.t_inner_start);
+        const double prewarm_window_ms =
+            elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
+        const double buffer_setup_ms =
+            elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
+        const double core_window_ms =
+            elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
+        const double kernel_func_exit_ms =
+            elapsed_ms(detail.t_inner_end, detail.t_func_exit);
+        const double post_call_destructors_ms =
+            elapsed_ms(detail.t_func_exit, dispatch_end);
+        const double core_accounted =
+            detail.src_upload_ms + detail.param_upload_ms +
+            detail.kernel_ms + detail.copy_to_host_ms +
+            detail.scatter_ms;
+        const double core_unaccounted_ms = core_window_ms - core_accounted;
+        const double subdiv_sum =
+            pre_call_setup_ms + kernel_func_entry_ms + prewarm_window_ms +
+            buffer_setup_ms + core_window_ms + kernel_func_exit_ms +
+            post_call_destructors_ms;
+        std::fprintf(stderr,
+                     "[MapPolynomialColdSubdivide] path=single first_call=%d "
+                     "pre_call_setup=%.3f kernel_func_entry=%.3f "
+                     "prewarm_window=%.3f buffer_setup=%.3f core_window=%.3f "
+                     "core_unaccounted=%.3f kernel_func_exit=%.3f "
+                     "post_call_destructors=%.3f subdiv_sum=%.3f "
+                     "dispatch_call=%.3f residual=%.3f\n",
+                     detail.first_call ? 1 : 0,
+                     pre_call_setup_ms, kernel_func_entry_ms,
+                     prewarm_window_ms, buffer_setup_ms, core_window_ms,
+                     core_unaccounted_ms, kernel_func_exit_ms,
+                     post_call_destructors_ms, subdiv_sum,
+                     detail.dispatch_call_ms,
+                     detail.dispatch_call_ms - subdiv_sum);
+    }
     return ok;
 }

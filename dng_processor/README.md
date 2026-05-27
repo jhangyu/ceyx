@@ -1,17 +1,43 @@
 # dng_processor
 
-A new Flutter project.
+Flutter UI and Dart FFI frontend for the native DNG decoder.
 
-## Getting Started
+## Build
 
-This project is a starting point for a Flutter application.
+Use the native build watchdog as the single build entry point:
 
-A few resources to get you started if this is your first Flutter project:
+```bash
+python3 native/scripts/build_native_watchdog.py \
+  --target dng_decoder_native \
+  --build-macos-app \
+  --macos-mode debug
+```
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+Android and web use the same entry point:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+python3 native/scripts/build_native_watchdog.py \
+  --target dng_decoder_native \
+  --build-android-app \
+  --android-mode debug
+
+python3 native/scripts/build_native_watchdog.py \
+  --target none \
+  --build-web-app
+```
+
+The Flutter/Xcode build cache remains under `build/`, but the useful artifacts
+are published to a shallow `dist/` tree:
+
+```text
+dist/
+├── dng_processor.app
+├── libdng_decoder_native.dylib
+├── dng_processor.apk
+└── web/
+```
+
+Direct `flutter build macos --debug` is still supported. The Xcode project calls
+`native/scripts/build_native_watchdog.py --embed-macos-dylib-only` during the
+build so the app bundle receives the current
+`native/build/libdng_decoder_native.dylib`.

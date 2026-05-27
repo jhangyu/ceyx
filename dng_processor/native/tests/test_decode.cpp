@@ -53,6 +53,8 @@
 #include <dng_warp_halide.h>
 
 #include "ConcurrentDngHost.h"
+#include "dng_opcodelist2_halide.h"
+#include "dng_pipeline_config.h"
 
 using namespace std;
 using namespace std::chrono;
@@ -522,6 +524,24 @@ void testDNG(dng_host& host,
         }
 
         // === Stage 2: BuildStage2Image ===
+        // Align with production FFI path (dng_pipeline_v2_decode_to_rgb):
+        // 1) prewarm Metal polynomial3 pipeline at actual image size (lossy only)
+        // 2) enable device handoff so MapPolynomial defers scatter_poly3_to_image
+        const bool isBayer = (decodePath == StageContract::DecodePath::CFA_BAYER);
+        const PipelineConfig pipelineConfig = PipelineConfig::loadFromEnv();
+        const bool enableStage2DeviceHandoff =
+            !isBayer && pipelineConfig.debug.stage2_stage4_device_handoff;
+
+        if (!isBayer) {
+            halide_prewarm_polynomial3_for_size(
+                static_cast<int>(width), static_cast<int>(height));
+        }
+
+        if (enableStage2DeviceHandoff) {
+            halide_stage2_ol2_clear_device_handoff();
+            halide_stage2_ol2_set_device_handoff_enabled(true);
+        }
+
         cout << "\n--- Stage 2: BuildStage2Image ---\n";
         auto stage2Start = high_resolution_clock::now();
 
@@ -530,6 +550,15 @@ void testDNG(dng_host& host,
         auto stage2End = high_resolution_clock::now();
         timing.build_stage2_ms = duration_cast<microseconds>(stage2End - stage2Start).count() / 1000.0;
         cout << "  Time: " << fixed << setprecision(2) << timing.build_stage2_ms << " ms\n";
+
+        if (enableStage2DeviceHandoff) {
+            // Restore host-side Stage2Image for contract check and PSNR comparison.
+            // This mirrors the restoreHostStage2 path in runLossyStage2Stage4DeviceHandoff
+            // when test_decode does not consume the device buffer directly.
+            halide_stage2_ol2_device_handoff_copy_to_host();
+            halide_stage2_ol2_set_device_handoff_enabled(false);
+            halide_stage2_ol2_clear_device_handoff();
+        }
 
         // Extract Stage 2 image data
         {
@@ -1188,6 +1217,19 @@ void printUsage(const char* programName) {
     cerr << "  " << programName << " image_samples/lossless_dng_sample.dng test halide-metal halide-metal\n";
 }
 
+int envIntOrDefault(const char* name, int fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw || raw[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    long value = std::strtol(raw, &end, 10);
+    if (end == raw || value < 1 || value > 1000) {
+        return fallback;
+    }
+    return static_cast<int>(value);
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         printUsage(argv[0]);
@@ -1215,12 +1257,23 @@ int main(int argc, char** argv) {
         cout << "WarpRectilinear mode: " << warpRectilinearModeName(warpMode) << "\n";
         cout << "Render mode: " << renderHalideModeName(renderMode) << "\n";
     }
+    const int repeat = envIntOrDefault("DNG_TEST_DECODE_REPEAT", 1);
+    cout << "In-process repeat: " << repeat << "\n";
 
     try {
         constexpr uint32_t kOptimizedAreaThreads = 20;
         ConcurrentDngHost host(kOptimizedAreaThreads);
         cout << "Area task threads: " << host.PerformAreaTaskThreads() << "\n";
-        testDNG(host, dngPath, prefix, generateBaseline, warpMode, renderMode);
+        for (int i = 0; i < repeat; ++i) {
+            if (repeat > 1) {
+                const string runLabel = "[InProcessRun " + to_string(i + 1) +
+                                        "/" + to_string(repeat) + "]";
+                cerr << runLabel << "\n";
+                cout << "\n" << runLabel << "\n";
+                cout.flush();
+            }
+            testDNG(host, dngPath, prefix, generateBaseline, warpMode, renderMode);
+        }
     } catch (const dng_exception& e) {
         cerr << "\nDNG Exception: " << e.ErrorCode() << "\n";
         return 1;

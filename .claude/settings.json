@@ -1,0 +1,84 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build dng_processor/native/build *)",
+      "Bash(cmake -S dng_processor/native *)",
+      "Bash(cmake -S .. -B . *)",
+      "Bash(dng_processor/native/build/test_decode *)",
+      "Bash(./dng_processor/native/build/test_decode *)",
+      "Bash(./dng_processor/native/build/test_warp_rectilinear_halide *)",
+      "Bash(python3 dng_processor/native/tests/run_decode_matrix.py *)",
+      "Bash(python3 dng_processor/native/scripts/build_native_watchdog.py *)",
+      "Bash(python3 dng_processor/native/scripts/tmp/*)",
+      "Bash(bash dng_processor/native/scripts/tmp/*)",
+      "Bash(python3 dng_processor/native/tests/compare_psnr.py *)",
+      "Bash(./dng_processor/native/build/bench_sdk_warp *)",
+      "Bash(./dng_processor/native/build/test_decode_strict_float *)",
+      "Bash(otool -L *)",
+      "Bash(nm -gU *)",
+      "Bash(exiftool *)",
+      "Bash(cd *)",
+      "Bash(cd * && *)",
+      "Bash(git *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/pre_native_edit.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/pre_write_tmp_check.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/pre_bash_whitelist_check.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/post_build_check.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/stop_reminder.py"
+          }
+        ]
+      }
+    ]
+  }
+}

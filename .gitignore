@@ -4,6 +4,11 @@
 # Logs
 *.log
 
+# Test output buffers/images
+*.raw
+*.ppm
+*.pgm
+
 # Python / Env
 .venv/
 __pycache__/
@@ -15,6 +20,7 @@ node_modules
 
 # Build artifacts
 dng_processor/native/build/
+dng_processor/native/.cache/
 dng_processor/native/*.o
 dng_processor/native/*.a
 dng_processor/native/*.dylib

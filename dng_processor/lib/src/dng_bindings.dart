@@ -155,10 +155,10 @@ class DngNativeBindings {
         'libdng_decoder_native.dylib',
         // 2. App bundle Frameworks directory
         '$execDir/../Frameworks/libdng_decoder_native.dylib',
-        // 3. Development: project native/build directory (project/ layout)
+        // 3. Development: shallow published artifact.
+        '$home/project/flutter_dng_decoder/dng_processor/dist/libdng_decoder_native.dylib',
+        // 4. Development: CMake build cache artifact.
         '$home/project/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib',
-        // 3b. Development: legacy Documents/ layout
-        '$home/Documents/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib',
       ]);
     } else if (Platform.isWindows) {
       lib = ffi.DynamicLibrary.open('dng_decoder_native.dll');
