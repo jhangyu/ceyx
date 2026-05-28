@@ -34,6 +34,8 @@ struct DngPipelineStage3Timing {
 bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
                                    DngPipelineV2Result &result);
 
+bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height);
+
 bool dng_pipeline_v2_run_stage3(dng_host &host,
                                 dng_negative &negative,
                                 bool use_halide_bayer,

@@ -1,4 +1,5 @@
 import 'dart:ffi';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
@@ -76,6 +77,17 @@ class DngDecoderService {
     if (_initialized) return;
     _bindings = DngNativeBindings.load();
     _initialized = true;
+  }
+
+  /// Warm native resources for the common 24MP decode path off the UI isolate.
+  Future<void> warmupForSize({int width = 6000, int height = 4000}) async {
+    final result = await Isolate.run(() {
+      final bindings = DngNativeBindings.load();
+      return bindings.dngDecoderWarmupForSize(width, height);
+    });
+    if (result != 0) {
+      throw DngDecodeException(result, 'Native warmup failed');
+    }
   }
 
   /// Extracts the embedded JPEG preview from the DNG file.

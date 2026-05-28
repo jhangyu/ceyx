@@ -75,6 +75,11 @@ class _DngHomePageState extends State<DngHomePage> {
     super.initState();
     try {
       _decoder.initialize();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _decoder.warmupForSize().catchError((e) {
+          debugPrint('DNG warmup failed: $e');
+        });
+      });
     } catch (e) {
       _error = 'Failed to load native library: $e';
     }

@@ -52,6 +52,10 @@ typedef DngFreeHalideBufferNative =
     ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
 typedef DngFreeHalideBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
 
+typedef DngDecoderWarmupForSizeNative =
+    ffi.Int32 Function(ffi.Int32 width, ffi.Int32 height);
+typedef DngDecoderWarmupForSizeDart = int Function(int width, int height);
+
 typedef dng_extract_preview_jpeg_func =
     ffi.Int32 Function(
       ffi.Pointer<Utf8> filePath,
@@ -73,6 +77,7 @@ class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
 
   late final DngDecodeAndProcessDart dngDecodeAndProcess;
+  late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   late final DngFreeResultDart dngFreeResult;
   late final DngFreeHalideBufferDart dngFreeHalideBuffer;
 
@@ -92,6 +97,12 @@ class DngNativeBindings {
         .lookupFunction<DngDecodeAndProcessNative, DngDecodeAndProcessDart>(
           'dng_decode_and_process',
         );
+
+    dngDecoderWarmupForSize = _lib
+        .lookupFunction<
+          DngDecoderWarmupForSizeNative,
+          DngDecoderWarmupForSizeDart
+        >('dng_decoder_warmup_for_size');
 
     dngFreeResult = _lib.lookupFunction<DngFreeResultNative, DngFreeResultDart>(
       'dng_free_result',

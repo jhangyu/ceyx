@@ -236,6 +236,25 @@ RgbOutputPool &rgbOutputPool() {
   return pool;
 }
 
+bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  const size_t w = static_cast<size_t>(width);
+  const size_t h = static_cast<size_t>(height);
+  const size_t stage3Elements = w * h * 3;
+  const size_t rgbBytes = w * h * 3;
+
+  uint16_t *stage3 = stage3WorkspacePool().acquire(stage3Elements);
+  uint8_t *rgb = rgbOutputPool().acquire(rgbBytes);
+  if (!stage3 || !rgb) {
+    return false;
+  }
+  std::memset(stage3, 0, stage3Elements * sizeof(uint16_t));
+  std::memset(rgb, 0, rgbBytes);
+  return true;
+}
+
 class ScopedStage2DeviceHandoff {
  public:
   explicit ScopedStage2DeviceHandoff(bool enabled) {
@@ -764,6 +783,14 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
 }
 
 } // namespace
+
+bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
+  if (!warmPipelinePoolsForSize(width, height)) {
+    return false;
+  }
+  halide_prewarm_polynomial3_for_size(width, height);
+  return true;
+}
 
 bool dng_pipeline_v2_run_stage3(dng_host &host,
                                 dng_negative &negative,

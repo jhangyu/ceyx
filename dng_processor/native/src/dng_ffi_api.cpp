@@ -57,6 +57,13 @@ DngResult *dng_decode_and_process(const char *file_path) {
   return result;
 }
 
+FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
+  if (width <= 0 || height <= 0) {
+    return -1;
+  }
+  return dng_pipeline_v2_warmup_for_size(width, height) ? 0 : -2;
+}
+
 FFI_EXPORT int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffer,
                                       int *outSize) {
   if (!filePath || !outBuffer || !outSize)

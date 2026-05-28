@@ -30,6 +30,11 @@ void dng_free_buffer(uint8_t *buffer);
 /// Returns a heap-allocated DngResult. Caller must free with dng_free_result().
 DngResult *dng_decode_and_process(const char *file_path);
 
+/// Warm process-scoped native resources for a likely decode size.
+/// This warms shared lossless/lossy workspaces and lossy MapPolynomial state.
+/// Returns 0 on success, or a negative error code.
+int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height);
+
 /// Free a DngResult previously returned by dng_decode_and_process.
 void dng_free_result(DngResult *result);
 
