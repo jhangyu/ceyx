@@ -530,7 +530,7 @@ void testDNG(dng_host& host,
         const bool isBayer = (decodePath == StageContract::DecodePath::CFA_BAYER);
         const PipelineConfig pipelineConfig = PipelineConfig::loadFromEnv();
         const bool enableStage2DeviceHandoff =
-            !isBayer && pipelineConfig.debug.stage2_stage4_device_handoff;
+            !isBayer && pipelineConfig.route.stage2_stage4_device_handoff;
 
         if (!isBayer) {
             halide_prewarm_polynomial3_for_size(

@@ -408,7 +408,7 @@ bool runHalideStage3ForBayer(dng_host &host,
   AutoPtr<dng_image> stage3;
   bool stage3Allocated = false;
 
-  if (config.debug.fused_demosaic_warp &&
+  if (config.route.fused_demosaic_warp &&
       opcodeList3.Count() == 1 &&
       opcodeList3.Entry(0).OpcodeID() == dngOpcode_WarpRectilinear) {
     const auto setupStart = Clock::now();
@@ -553,7 +553,7 @@ bool runHalideStage3And4Fused(dng_host &host,
                                size_t &rgb_size,
                                uint32_t &outW,
                                uint32_t &outH) {
-  if (!config.debug.fused_demosaic_warp || !config.debug.stage3_stage4_device_handoff)
+  if (!config.route.fused_demosaic_warp || !config.route.stage3_stage4_device_handoff)
     return false;
 
   const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
@@ -746,7 +746,7 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
                                         uint32_t &outH,
                                         bool &restoreFailed) {
   restoreFailed = false;
-  if (!config.debug.stage2_stage4_device_handoff)
+  if (!config.route.stage2_stage4_device_handoff)
     return false;
 
   Stage2Opcode2DeviceHandoff handoff;
@@ -877,7 +877,7 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
 
     {
       const bool enableStage2DeviceHandoff =
-          !isBayer && config.debug.stage2_stage4_device_handoff;
+          !isBayer && config.route.stage2_stage4_device_handoff;
       ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
       negative->BuildStage2Image(host);
     }

@@ -125,10 +125,14 @@ void dng_free_result(DngResult *result) {
   std::free(result);
 }
 
-void dng_free_halide_buffer(void *ptr) {
+FFI_EXPORT void dng_free_rgba_buffer(void *ptr) {
   if (!ptr)
     return;
   delete[] static_cast<uint8_t *>(ptr);
+}
+
+FFI_EXPORT void dng_free_halide_buffer(void *ptr) {
+  dng_free_rgba_buffer(ptr);
 }
 
 } // extern "C"

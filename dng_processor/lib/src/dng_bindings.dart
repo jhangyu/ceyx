@@ -51,6 +51,8 @@ typedef DngFreeResultDart = void Function(ffi.Pointer<DngResult> result);
 typedef DngFreeHalideBufferNative =
     ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
 typedef DngFreeHalideBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
+typedef DngFreeRgbaBufferNative = ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
+typedef DngFreeRgbaBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
 
 typedef DngDecoderWarmupForSizeNative =
     ffi.Int32 Function(ffi.Int32 width, ffi.Int32 height);
@@ -80,6 +82,7 @@ class DngNativeBindings {
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   late final DngFreeResultDart dngFreeResult;
   late final DngFreeHalideBufferDart dngFreeHalideBuffer;
+  late final DngFreeRgbaBufferDart dngFreeRgbaBuffer;
 
   late final DngExtractPreviewJpeg extractPreviewJpeg;
   late final DngFreeBuffer freeBuffer;
@@ -88,7 +91,11 @@ class DngNativeBindings {
   late final ffi.Pointer<ffi.NativeFunction<DngFreeResultNative>>
   dngFreeResultPtr;
 
-  /// Pointer to the C `dng_free_halide_buffer` function for NativeFinalizer
+  /// Pointer to the C `dng_free_rgba_buffer` function for NativeFinalizer
+  late final ffi.Pointer<ffi.NativeFunction<DngFreeRgbaBufferNative>>
+  dngFreeRgbaBufferPtr;
+
+  /// Deprecated pointer to the C `dng_free_halide_buffer` alias.
   late final ffi.Pointer<ffi.NativeFunction<DngFreeHalideBufferNative>>
   dngFreeHalideBufferPtr;
 
@@ -112,10 +119,19 @@ class DngNativeBindings {
         .lookupFunction<DngFreeHalideBufferNative, DngFreeHalideBufferDart>(
           'dng_free_halide_buffer',
         );
+    dngFreeRgbaBuffer = _lib
+        .lookupFunction<DngFreeRgbaBufferNative, DngFreeRgbaBufferDart>(
+          'dng_free_rgba_buffer',
+        );
 
     dngFreeResultPtr = _lib.lookup<ffi.NativeFunction<DngFreeResultNative>>(
       'dng_free_result',
     );
+
+    dngFreeRgbaBufferPtr = _lib
+        .lookup<ffi.NativeFunction<DngFreeRgbaBufferNative>>(
+          'dng_free_rgba_buffer',
+        );
 
     dngFreeHalideBufferPtr = _lib
         .lookup<ffi.NativeFunction<DngFreeHalideBufferNative>>(

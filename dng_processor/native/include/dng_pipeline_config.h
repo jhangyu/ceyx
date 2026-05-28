@@ -7,7 +7,7 @@
 // PipelineConfig — single source of truth for runtime env switches.
 //
 // Categories (Phase 11 architecture cleanup, Round 1 P1):
-//   1. RouteConfig (formerly `Debug`):
+//   1. RouteConfig:
 //        Production-relevant kill-switches and routing toggles. Default ON;
 //        flip OFF to take a fallback path. Read at decode entry.
 //        Envs: DNG_AREA_THREADS (tuning, see ThreadConfig),
@@ -29,15 +29,11 @@
 //              third_party/dng_sdk/source/, NOT modified here).
 //   3. ResearchConfig:
 //        Deprecated / experimental flags retained for A/B parity research.
-//        Do NOT consult in production paths; slated for removal in Round 2.
+//        Do NOT consult in production paths; default builds compile these out
+//        unless their dedicated diagnostic CMake option is enabled.
 //        Envs: DNG_WARP_PRECOMPUTED_COORDS (dng_warp_halide.cpp).
 //
 // Notes:
-//   * `PipelineConfig::RouteConfig` is the renamed `Debug` struct type. The
-//     field is still named `.debug` for source-compatibility with existing
-//     call sites in dng_pipeline_v2.cpp / dng_render_halide.cpp; both names
-//     refer to the same struct (see `using Debug = RouteConfig;`). The field
-//     name will be renamed in a follow-up sweep.
 //   * Diagnostic and Research envs are intentionally NOT loaded by
 //     loadFromEnv() to preserve their existing lazy-init / call-site cache
 //     semantics. Moving them would risk altering first-call timing windows.
@@ -56,11 +52,7 @@ struct PipelineConfig {
     bool stage2_ol2_halide = true;
   };
 
-  // Back-compat alias so existing call sites that reference
-  // `PipelineConfig::Debug` keep compiling. Prefer `RouteConfig` in new code.
-  using Debug = RouteConfig;
-
-  RouteConfig debug;  // field name kept for source-compat (Round 2 will rename to `route`).
+  RouteConfig route;
 
   struct Threads {
     uint32_t area_threads = 0;
@@ -68,10 +60,13 @@ struct PipelineConfig {
 
   static PipelineConfig loadFromEnv() {
     PipelineConfig config;
-    config.debug.fused_demosaic_warp = !envExplicitZero("DNG_FUSED_DEMOSAIC_WARP");
-    config.debug.stage3_stage4_device_handoff = !envExplicitZero("DNG_STAGE3_STAGE4_DEVICE_HANDOFF");
-    config.debug.stage2_stage4_device_handoff = !envExplicitZero("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
-    config.debug.stage2_ol2_halide = stage2OL2HalideEnabled();
+    config.route.fused_demosaic_warp =
+        !envExplicitZero("DNG_FUSED_DEMOSAIC_WARP");
+    config.route.stage3_stage4_device_handoff =
+        !envExplicitZero("DNG_STAGE3_STAGE4_DEVICE_HANDOFF");
+    config.route.stage2_stage4_device_handoff =
+        !envExplicitZero("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
+    config.route.stage2_ol2_halide = stage2OL2HalideEnabled();
 
     config.threads.area_threads = envPositiveU32("DNG_AREA_THREADS");
     return config;

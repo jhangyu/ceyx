@@ -15,13 +15,13 @@ file_summary: "App 進入點與首頁 UI，處理檔案選擇、狀態顯示與�
 modules:
   - name: "App Entry"
     description: "MaterialApp 與主題配置"
-    lines: "9-31"
+    lines: "28-50"
   - name: "DngHomePage"
     description: "首頁狀態管理、檔案選擇邏輯與解碼服務呼叫"
-    lines: "33-101"
+    lines: "52-183"
   - name: "UI Widgets"
     description: "主要的 Scaffold、狀態列顯示與 ImageViewer"
-    lines: "103-255"
+    lines: "185-413"
 ---
 */
 
@@ -125,7 +125,8 @@ class _DngHomePageState extends State<DngHomePage> {
       // Use Future.microtask or Future.delayed to allow the UI to render the preview first
       await Future.delayed(const Duration(milliseconds: 16));
 
-      final image = _decoder.decode(path);
+      final image = await _decoder.decodeOnWorker(path);
+      if (!mounted) return;
       setState(() {
         _image = image;
         _decodeMs = image.decodeMs;
@@ -134,12 +135,14 @@ class _DngHomePageState extends State<DngHomePage> {
         _showingPreview = false;
       });
     } on DngDecodeException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.toString();
         _decoding = false;
         _showingPreview = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = 'Unexpected error: $e';
         _decoding = false;

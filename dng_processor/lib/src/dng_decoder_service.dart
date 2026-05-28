@@ -11,13 +11,16 @@ file_summary: "提供 Flutter 與 Native 之間的 FFI 解碼服務封裝與記�
 modules:
   - name: "DngImage"
     description: "解碼後的影像資料與耗時紀錄容器"
-    lines: "8-34"
+    lines: "27-54"
   - name: "Exceptions"
     description: "解碼錯誤定義"
-    lines: "37-45"
+    lines: "56-65"
+  - name: "Worker Transfer"
+    description: "worker isolate 回傳 Dart-owned RGBA bytes 的容器"
+    lines: "67-91"
   - name: "DngDecoderService"
     description: "Native 方法調用，處理 Dart 端 ByteBuffer 複製與記憶體釋放"
-    lines: "69-232"
+    lines: "93-333"
 ---
 */
 
@@ -61,11 +64,37 @@ class DngDecodeException implements Exception {
   String toString() => 'DngDecodeException($errorCode): $message';
 }
 
+class _DecodeWorkerResult {
+  final TransferableTypedData rgbaData;
+  final int width;
+  final int height;
+  final double decodeMs;
+  final double processMs;
+
+  _DecodeWorkerResult({
+    required this.rgbaData,
+    required this.width,
+    required this.height,
+    required this.decodeMs,
+    required this.processMs,
+  });
+
+  DngImage toImage() {
+    return DngImage(
+      rgbaData: rgbaData.materialize().asUint8List(),
+      width: width,
+      height: height,
+      decodeMs: decodeMs,
+      processMs: processMs,
+    );
+  }
+}
+
 /// High-level DNG decoding service.
 ///
 /// Uses dart:ffi to call native C++ code (DNG SDK + Halide pipeline).
-/// Memory is managed via Dart-side copy of the RGBA buffer, with the
-/// native result freed immediately after copy.
+/// Memory is managed by transferring the native RGBA buffer to a Dart
+/// NativeFinalizer, while the surrounding result struct is freed immediately.
 class DngDecoderService {
   late final DngNativeBindings _bindings;
   // Service-owned finalizer reused by every decode() call. Constructing a fresh
@@ -82,9 +111,7 @@ class DngDecoderService {
   void initialize() {
     if (_initialized) return;
     _bindings = DngNativeBindings.load();
-    _rgbaFinalizer = NativeFinalizer(
-      _bindings.dngFreeHalideBufferPtr.cast(),
-    );
+    _rgbaFinalizer = NativeFinalizer(_bindings.dngFreeRgbaBufferPtr.cast());
     _initialized = true;
   }
 
@@ -97,6 +124,18 @@ class DngDecoderService {
     if (result != 0) {
       throw DngDecodeException(result, 'Native warmup failed');
     }
+  }
+
+  /// Decode on a worker isolate so the UI isolate can keep painting preview
+  /// and progress state while native full RAW processing runs.
+  ///
+  /// The worker intentionally does not send the zero-copy external RGBA view
+  /// across isolate boundaries. It copies the native buffer into Dart-owned
+  /// bytes, transfers those bytes with [TransferableTypedData], then frees the
+  /// native result inside the worker isolate.
+  Future<DngImage> decodeOnWorker(String filePath) async {
+    final result = await Isolate.run(() => _decodeFileToTransferable(filePath));
+    return result.toImage();
   }
 
   /// Extracts the embedded JPEG preview from the DNG file.
@@ -140,17 +179,26 @@ class DngDecoderService {
   /// Decode a DNG file and return the processed RGBA image.
   ///
   /// The returned [DngImage] exposes `rgbaData` as a zero-copy [Uint8List]
-  /// view backed directly by the native Halide RGBA buffer — no memcpy
+  /// view backed directly by the native RGBA buffer — no memcpy
   /// happens on the success path. Ownership of that native allocation is
   /// transferred to a service-owned [NativeFinalizer]: when the [DngImage]
   /// (and therefore the Dart wrapper of the typed list) is garbage collected,
-  /// `dng_free_halide_buffer` is invoked automatically on the native pointer.
+  /// `dng_free_rgba_buffer` is invoked automatically on the native pointer.
   /// The surrounding [DngResult] struct is always freed in `finally` via
   /// `dng_free_result`; on success its `rgbaData` field has been cleared so
   /// the struct teardown does not double-free the buffer.
   ///
   /// Throws [DngDecodeException] on failure.
   DngImage decode(String filePath) {
+    return _decodeZeroCopy(filePath);
+  }
+
+  static _DecodeWorkerResult _decodeFileToTransferable(String filePath) {
+    final service = DngDecoderService()..initialize();
+    return service._decodeToTransferable(filePath);
+  }
+
+  DngImage _decodeZeroCopy(String filePath) {
     if (!_initialized) {
       initialize();
     }
@@ -169,22 +217,7 @@ class DngDecoderService {
 
       if (result.errorCode != 0) {
         final code = result.errorCode;
-        String msg;
-        switch (code) {
-          case -1:
-            msg = 'File not found';
-          case -2:
-            msg = 'DNG parse error';
-          case -3:
-            msg = 'Unsupported format';
-          case -4:
-            msg = 'Memory allocation error';
-          case -10:
-            msg = 'Halide pipeline error';
-          default:
-            msg = 'Unknown error (code: $code)';
-        }
-        throw DngDecodeException(code, msg);
+        throw DngDecodeException(code, _messageForErrorCode(code));
       }
 
       if (result.rgbaData == nullptr) {
@@ -211,7 +244,7 @@ class DngDecoderService {
       );
 
       // Attach the service-owned NativeFinalizer to the DngImage.
-      // When `image` is garbage collected, Dart calls `dng_free_halide_buffer`
+      // When `image` is garbage collected, Dart calls `dng_free_rgba_buffer`
       // on the native pointer captured here.
       _rgbaFinalizer.attach(image, result.rgbaData.cast(), detach: image);
 
@@ -227,6 +260,74 @@ class DngDecoderService {
         _bindings.dngFreeResult(resultPtr);
       }
       malloc.free(pathPtr);
+    }
+  }
+
+  _DecodeWorkerResult _decodeToTransferable(String filePath) {
+    if (!_initialized) {
+      initialize();
+    }
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+
+    try {
+      resultPtr = _bindings.dngDecodeAndProcess(pathPtr.cast());
+
+      if (resultPtr == nullptr) {
+        throw DngDecodeException(-1, 'Native function returned null');
+      }
+
+      final result = resultPtr.ref;
+
+      if (result.errorCode != 0) {
+        final code = result.errorCode;
+        throw DngDecodeException(code, _messageForErrorCode(code));
+      }
+
+      if (result.rgbaData == nullptr) {
+        throw DngDecodeException(
+          -1,
+          'RGBA buffer is null despite success code',
+        );
+      }
+
+      final width = result.width;
+      final height = result.height;
+      final bufferSize = width * height * 4;
+      final rgbaCopy = Uint8List.fromList(
+        result.rgbaData.asTypedList(bufferSize),
+      );
+
+      return _DecodeWorkerResult(
+        rgbaData: TransferableTypedData.fromList([rgbaCopy]),
+        width: width,
+        height: height,
+        decodeMs: result.decodeMs,
+        processMs: result.processMs,
+      );
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  String _messageForErrorCode(int code) {
+    switch (code) {
+      case -1:
+        return 'File not found';
+      case -2:
+        return 'DNG parse error';
+      case -3:
+        return 'Unsupported format';
+      case -4:
+        return 'Memory allocation error';
+      case -10:
+        return 'Halide pipeline error';
+      default:
+        return 'Unknown error (code: $code)';
     }
   }
 }

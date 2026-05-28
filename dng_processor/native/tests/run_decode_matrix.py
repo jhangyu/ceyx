@@ -377,12 +377,14 @@ def _build_markdown(
     generated_at: str,
     repeat: int,
     show_halide_timing: bool,
+    artifact_dir: Path,
 ) -> str:
     L: list[str] = []
 
     L.append("# DNG Pipeline Matrix — SDK vs Halide Metal")
     L.append("")
     L.append(f"_Generated: {generated_at} | Repeat: {repeat} (arithmetic mean)_")
+    L.append(f"_Intermediate artifacts: `{artifact_dir}`_")
     L.append("")
     L.append("> **PSNR semantics**")
     L.append("> - SDK cases: no PSNR (they are the baseline reference)")
@@ -690,6 +692,15 @@ def main() -> int:
     )
     ap.add_argument("--output", default="", help="Optional Markdown output file path")
     ap.add_argument(
+        "--artifact-dir",
+        default="",
+        help=(
+            "Directory for test_decode intermediate raw outputs. Defaults to "
+            "<output-stem>_artifacts when --output is set, otherwise "
+            "decode_matrix_artifacts under the repo root."
+        ),
+    )
+    ap.add_argument(
         "--env",
         action="append",
         default=[],
@@ -726,6 +737,21 @@ def main() -> int:
         str(bin_path), lossless, lossy, extra_env, enable_timing=args.timing
     )
 
+    if args.artifact_dir:
+        artifact_dir = Path(args.artifact_dir)
+        if not artifact_dir.is_absolute():
+            artifact_dir = (root / artifact_dir).resolve()
+    elif args.output:
+        output_path = Path(args.output)
+        if not output_path.is_absolute():
+            output_path = (root / output_path).resolve()
+        artifact_dir = output_path.with_suffix("")
+        artifact_dir = artifact_dir.parent / f"{artifact_dir.name}_artifacts"
+    else:
+        artifact_dir = root / "decode_matrix_artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Intermediate artifacts: {artifact_dir}")
+
     agg_results: list[AggResult] = []
     for case_name, cmd, env in cases:
         runs: list[RunResult] = []
@@ -733,7 +759,7 @@ def main() -> int:
             label = f"[RUN {i+1}/{args.repeat}] {case_name}"
             print(label)
             try:
-                run = _run_case(root, cmd, case_name, env)
+                run = _run_case(artifact_dir, cmd, case_name, env)
                 runs.append(run)
             except RuntimeError as exc:
                 print(f"  ERROR: {exc}")
@@ -776,6 +802,7 @@ def main() -> int:
         generated_at=generated_at,
         repeat=args.repeat,
         show_halide_timing=args.timing,
+        artifact_dir=artifact_dir,
     )
 
     if args.output:

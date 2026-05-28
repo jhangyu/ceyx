@@ -237,6 +237,10 @@ def publish_web_dist(app_dir: Path) -> int:
 
 
 def main() -> int:
+    argv = sys.argv[1:]
+    target_was_explicit = any(
+        arg == "--target" or arg.startswith("--target=") for arg in argv
+    )
     parser = argparse.ArgumentParser(
         description="Build native targets with max cores and a no-output watchdog."
     )
@@ -252,8 +256,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--target",
-        default="test_decode",
-        help="Build target (default: test_decode)",
+        default="dng_decoder_native",
+        help=(
+            "Build target (default: dng_decoder_native). When --target is "
+            "omitted, this script also builds and publishes the macOS app and "
+            "Android APK by default."
+        ),
     )
     parser.add_argument(
         "--idle-timeout-sec",
@@ -278,9 +286,19 @@ def main() -> int:
         help="After native build, run flutter build macos and publish shallow dist artifacts.",
     )
     parser.add_argument(
+        "--no-build-macos-app",
+        action="store_true",
+        help="Disable the default macOS app build when --target is omitted.",
+    )
+    parser.add_argument(
         "--build-android-app",
         action="store_true",
         help="After native build, run flutter build apk and publish dist/dng_processor.apk.",
+    )
+    parser.add_argument(
+        "--no-build-android-app",
+        action="store_true",
+        help="Disable the default Android APK build when --target is omitted.",
     )
     parser.add_argument(
         "--build-web-app",
@@ -348,6 +366,14 @@ def main() -> int:
     if args.publish_web_dist_only:
         return publish_web_dist(app_dir)
 
+    default_product_build = not target_was_explicit and not args.build_web_app
+    build_macos_app = args.build_macos_app or (
+        default_product_build and not args.no_build_macos_app
+    )
+    build_android_app = args.build_android_app or (
+        default_product_build and not args.no_build_android_app
+    )
+
     build_dir = Path(args.build_dir)
     if not build_dir.is_absolute():
         build_dir = (native_dir / build_dir).resolve()
@@ -392,7 +418,7 @@ def main() -> int:
         if code != 0:
             return code
 
-    if args.build_macos_app:
+    if build_macos_app:
         flutter_cmd = [args.flutter_bin, "build", "macos", f"--{args.macos_mode}"]
         code = run_with_watchdog(
             flutter_cmd,
@@ -411,9 +437,11 @@ def main() -> int:
         code = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app_bundle)]).returncode
         if code != 0:
             return code
-        return publish_macos_dist(app_dir, args.macos_mode)
+        code = publish_macos_dist(app_dir, args.macos_mode)
+        if code != 0:
+            return code
 
-    if args.build_android_app:
+    if build_android_app:
         flutter_cmd = [args.flutter_bin, "build", "apk", f"--{args.android_mode}"]
         code = run_with_watchdog(
             flutter_cmd,
@@ -424,7 +452,9 @@ def main() -> int:
         )
         if code != 0:
             return code
-        return publish_android_dist(app_dir, args.android_mode)
+        code = publish_android_dist(app_dir, args.android_mode)
+        if code != 0:
+            return code
 
     if args.build_web_app:
         flutter_cmd = [args.flutter_bin, "build", "web"]

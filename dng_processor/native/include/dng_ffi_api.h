@@ -38,8 +38,12 @@ int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height);
 /// Free a DngResult previously returned by dng_decode_and_process.
 void dng_free_result(DngResult *result);
 
-/// Free a standalone memory buffer allocated by Halide / Native pipeline.
+/// Free a standalone RGBA buffer returned by dng_decode_and_process.
 /// Used for zero-copy memory management from Dart via NativeFinalizer.
+void dng_free_rgba_buffer(void *ptr);
+
+/// Deprecated alias for dng_free_rgba_buffer().
+/// Kept for ABI compatibility with older Dart builds.
 void dng_free_halide_buffer(void *ptr);
 
 #ifdef __cplusplus

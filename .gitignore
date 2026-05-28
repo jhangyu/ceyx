@@ -20,6 +20,7 @@ node_modules
 
 # Build artifacts
 dng_processor/native/build/
+dng_processor/native/build_diag/
 dng_processor/native/.cache/
 dng_processor/native/*.o
 dng_processor/native/*.a
