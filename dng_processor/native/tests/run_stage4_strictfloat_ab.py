@@ -84,16 +84,18 @@ def decode_case(
     warp_mode: str,
     render_mode: str,
 ) -> ABResult:
+    # NOTE (Phase 11 Round 2 follow-up): the historical env block that
+    # configured "Stage4-isolated" SDK bit-exact mode here injected
+    # DNG_WARP_BIT_EXACT / DNG_RENDER_BIT_EXACT / DNG_RENDER_HALIDE_DEBUG /
+    # DNG_RENDER_LSB_RESEARCH / DNG_RENDER_HALIDE_TIMING. All five envs were
+    # retired in commit 49d8111 (env-switch sweep) and the corresponding
+    # `[RenderHalide]` / `[RenderHalideDiff]` log emitters were also removed
+    # from the native source. As a result this A/B harness no longer captures
+    # meaningful per-channel diff data and PSNR_RE / DIFF_RE will match
+    # nothing. The script is preserved as a build-time A/B scaffold for the
+    # DNG_RENDER_STAGE4_STRICT_FLOAT CMake flag only; redesigning the
+    # measurement layer is tracked as a separate follow-up.
     env = os.environ.copy()
-    env.update(
-        {
-            "DNG_WARP_BIT_EXACT": "1",
-            "DNG_RENDER_BIT_EXACT": "0",
-            "DNG_RENDER_HALIDE_DEBUG": "1",
-            "DNG_RENDER_LSB_RESEARCH": "0",
-            "DNG_RENDER_HALIDE_TIMING": "0",
-        }
-    )
     cmd = [
         str(test_decode),
         str(dng_file),

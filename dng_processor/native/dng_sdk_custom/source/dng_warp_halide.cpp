@@ -2,12 +2,12 @@
 ---
 file_summary: >
   Stage3 WarpRectilinear 橋接層。負責從 DNG SDK opcode 取出 warp 參數、建立 tile clipping grid，
-  dispatch 到 Halide AOT 或明確指定的 CPU reference-compatible 路徑，並在 bit-exact 模式下退回 SDK Apply。
+  並 dispatch 到 Halide AOT 或明確指定的 CPU reference-compatible 路徑。
 
 notes:
   - `warp_rectilinear_halide()` 是純 buffer 入口；`apply_warp_rectilinear_to_image()` 是 `dng_image` 入口。
   - Halide kernel 依賴 tile clipping grid 來對齊 SDK resample 邊界與減少無效取樣。
-  - `DNG_WARP_BIT_EXACT` 啟用時，直接改走 SDK opcode `Apply()`。
+  - 歷史說明：`DNG_WARP_BIT_EXACT` 已於 49d8111 退役；現行行為固定走 Halide warp，無 SDK fallback。
 
 structs:
   - name: "WarpRuntimeParams"
@@ -33,60 +33,63 @@ functions:
   - name: "bicubicWeightsForSubsample"
     description: "回傳指定 subsample phase 的 4-tap 權重表。"
     lines: "161-176"
-  - name: "isWarpBitExactModeEnabled"
-    description: "透過 `PipelineConfig` 讀取 debug-only warp bit-exact flag。"
-    lines: "201-203"
   - name: "buildRuntimeParams"
     description: "由影像尺寸與 opcode 參數推導 warp 執行期幾何參數。"
-    lines: "205-234"
+    lines: "220-249"
   - name: "computeSdkTileExtent"
     description: "推導接近 SDK 行為的 tile size。"
-    lines: "236-243"
+    lines: "251-255"
   - name: "warpPlaneIndex"
     description: "將輸出 channel 映射到 warp plane index。"
-    lines: "245-253"
+    lines: "260-265"
   - name: "getSrcPixelPosition"
     description: "把目標座標反算回 source 座標，套用 radial/tangential distortion。"
-    lines: "255-294"
+    lines: "270-306"
   - name: "buildTileClippingGrid"
     description: "預估每個 tile 所需的 source sampling bounds。"
-    lines: "296-373"
+    lines: "311-385"
   - name: "warpRectilinearCpu"
     description: "CPU fallback；用 clipping grid + bicubic resample 執行 warp。"
-    lines: "375-455"
+    lines: "390-467"
   - name: "imageToInterleaved"
     description: "把 `dng_image` 讀成 uint16 interleaved buffer。"
-    lines: "457-482"
+    lines: "472-494"
   - name: "writeInterleavedToImage"
     description: "把 interleaved buffer 寫回 `dng_image`。"
-    lines: "484-505"
+    lines: "499-517"
   - name: "copyHalideOutputToHost"
     description: "將 Halide device output 同步回 caller-owned host buffer，並依 centralized timing config 拆分 sync/copy。"
-    lines: "507-543"
+    lines: "522-527"
+  - name: "isPrecomputedCoordsEnabled / computePrecomputedCoords"
+    description: "Round 2 (Task #6) gated diagnostic — host-CPU double-precision base_x/base_y/frac coords for the rectilinear_warp_precomputed AOT oracle. When `DNG_ENABLE_WARP_PRECOMPUTED_DIAG` is undefined (default production build) `isPrecomputedCoordsEnabled()` always returns false and the call site is compiled out."
+    lines: "538-624"
+  - name: "getOrGrowZeroBuf"
+    description: "Lazy-zero mmap arena reused for the baseline (non-precomputed) warp ABI placeholder buffers; avoids per-call ~292 MB zero-fill."
+    lines: "632-652"
   - name: "runWarpHalideAot"
-    description: "建立 Halide Buffer 與 tile bounds，呼叫 rectilinear_warp AOT kernel。"
-    lines: "545-633"
+    description: "建立 Halide Buffer 與 tile bounds，呼叫 rectilinear_warp AOT kernel。precomputed branch is `#if DNG_ENABLE_WARP_PRECOMPUTED_DIAG`-guarded (Round 2 Task #6)."
+    lines: "654-787"
   - name: "runDemosaicWarpHalideAot"
     description: "建立 Bayer input 與 RGB output Halide Buffer，呼叫 fused demosaic+WarpRectilinear AOT kernel。"
-    lines: "635-718"
+    lines: "789-874"
   - name: "demosaic_warp_rectilinear_halide_dispatch / _finish / _cancel"
     description: "Phase 8.2.1 Path D — 拆 fused kernel 為 async dispatch + finish；caller 可在 GPU sync window 內並行做 CPU 工作。Handle 採 PIMPL：file-scope `DemosaicWarpHalideHandle{void*}` 包 anon-ns `DemosaicWarpHalideAsyncImpl`。"
     lines: "結尾段；以 `// --- Phase 8.2.1 Path D` 註解標記"
   - name: "warpRectilinearModeName"
     description: "列舉值轉字串。"
-    lines: "722-730"
+    lines: "876-884"
   - name: "extractWarpRectilinearParams"
     description: "從 SDK opcode 取出 plane/radial/tangential 參數並填入 runtime struct。"
-    lines: "732-773"
+    lines: "886-927"
   - name: "warp_rectilinear_halide"
     description: "buffer 入口；依 mode dispatch Halide Metal / Halide CPU / AUTO 路徑。"
-    lines: "775-816"
+    lines: "929-970"
   - name: "demosaic_warp_rectilinear_halide"
     description: "Bayer fused demosaic+WarpRectilinear buffer 入口；正式 Stage3 fast path。"
-    lines: "818-849"
+    lines: "972-1003"
   - name: "apply_warp_rectilinear_to_image"
     description: "Stage3 正式入口；處理 bit-exact SDK fallback、image <-> buffer 轉換與 timing。"
-    lines: "851-912"
+    lines: "1005-1054"
 ---
 */
 #include "dng_warp_halide.h"
@@ -101,7 +104,13 @@ functions:
 #include "dng_pipeline_config.h"
 #include "dng_demosaic_warp.h"
 #include "rectilinear_warp.h"
+// Round 2 (Task #6): the precomputed warp variant is a diagnostic oracle, not
+// part of the production decode path. Gated behind DNG_ENABLE_WARP_PRECOMPUTED_DIAG
+// (CMake option, OFF by default). When off, the AOT artifact is not built and
+// no `rectilinear_warp_precomputed*` symbols are referenced.
+#if defined(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
 #include "rectilinear_warp_precomputed.h"
+#endif
 #include <cstdlib>
 #include <cstring>
 
@@ -524,9 +533,15 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
 // dng_pipeline_config.h for the category catalogue. Slated for removal in
 // Round 2.
 bool isPrecomputedCoordsEnabled() {
+#if defined(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
     const char* v = std::getenv("DNG_WARP_PRECOMPUTED_COORDS");
     if (!v) return false;
     return v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' || v[0] == 'Y';
+#else
+    // Round 2 (Task #6): precomputed-coords diagnostic is compiled out of the
+    // production dylib; env switch has no effect.
+    return false;
+#endif
 }
 
 // Compute base_x / base_y / frac_x_idx / frac_y_idx for every (x, y, c) in
@@ -709,6 +724,7 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     dst_buf.set_host_dirty(false);
 
     int result = 0;
+#if defined(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
     if (use_precomputed) {
         result = rectilinear_warp_precomputed(src_buf.raw_buffer(),
                                               rad_buf.raw_buffer(),
@@ -730,7 +746,9 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                                               frac_x_buf.raw_buffer(),
                                               frac_y_buf.raw_buffer(),
                                               dst_buf.raw_buffer());
-    } else {
+    } else
+#endif
+    {
         // Baseline path also expects the 4 precompute buffers in ABI (gen
         // emits them regardless because they are listed as Inputs); kernel
         // simply does not read from them when precompute_coords=false.

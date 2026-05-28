@@ -99,16 +99,17 @@ def decode_case(
     warp_mode: str,
     render_mode: str,
 ) -> tuple[float | None, dict]:
+    # NOTE (Phase 11 Round 2 follow-up): the historical env block here
+    # injected DNG_WARP_BIT_EXACT / DNG_RENDER_BIT_EXACT /
+    # DNG_RENDER_HALIDE_DEBUG / DNG_RENDER_LSB_RESEARCH /
+    # DNG_RENDER_HALIDE_TIMING. All five were retired in commit 49d8111
+    # (env-switch sweep) and the `[RenderHalide]` / `[RenderHalideDiff]`
+    # log emitters were also removed from the native source. PSNR_RE and
+    # DIFF_RE will therefore match nothing. The script is preserved as a
+    # build-time A/B scaffold for the DNG_RENDER_STAGE4_NO_VECTORIZE
+    # CMake flag only; redesigning the measurement layer is a deferred
+    # follow-up.
     env = os.environ.copy()
-    env.update(
-        {
-            "DNG_WARP_BIT_EXACT": "1",
-            "DNG_RENDER_BIT_EXACT": "0",
-            "DNG_RENDER_HALIDE_DEBUG": "1",
-            "DNG_RENDER_LSB_RESEARCH": "0",
-            "DNG_RENDER_HALIDE_TIMING": "0",
-        }
-    )
     cmd = [
         str(test_decode),
         str(dng_file),

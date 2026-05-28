@@ -7,7 +7,7 @@
 #
 # cases:
 #   Lossless / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
-#   Lossless / Halide:   DNG_WARP_BIT_EXACT=0，Halide bilinear/fused Stage3 + Halide Metal render
+#   Lossless / Halide:   Halide bilinear/fused Stage3 + Halide Metal render
 #   Lossy    / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
 #   Lossy    / Halide:   SDK YCbCr Stage3（passthrough）+ Halide Metal render
 #
@@ -15,15 +15,21 @@
 #   SDK cases:          無 PSNR（本身即為 baseline）
 #   Lossless Halide:
 #     Stage1/2 PSNR:    999 dB（同 DNG parse）
-#     Stage3 PSNR:      Halide bilinear/fused Stage3 vs SDK demosaic+SDK warp（end-to-end Stage3 品質）
-#     Stage4 PSNR:      最終影像 end-to-end 差（含 Stage3 差異，反映整體管線品質）
+#     Stage3 PSNR:      Halide bilinear/fused Stage3 vs SDK demosaic+SDK warp（end-to-end Stage3 品質；基準 ≈ 102.72 dB）
+#     Stage4 PSNR:      最終影像 end-to-end 差（含 Stage3 差異；基準 ≈ 79.85 dB）
 #   Lossy Halide:
 #     Stage1/2/3 PSNR:  999 dB（Stage3 走同一 SDK YCbCr 路徑）
-#     Stage4 PSNR:      Halide Metal render vs SDK render（Stage4 單獨品質，已排除 Stage3 差異）
+#     Stage4 PSNR:      Halide Metal render vs SDK render（Stage4 單獨品質，已排除 Stage3 差異；基準 999 dB）
 #
 # stage4_timing_note: >
 #   Stage4 time 包含 dng_render() 建構器時間（兩條路徑共有，約 250-260ms）。
-#   啟用 --timing 後，[halideFull] 欄位為 Halide GPU kernel 實際執行時間（不含建構器）。
+#   啟用 --timing 後，僅注入仍被認可的 DiagnosticConfig timing envs
+#   (DNG_STAGE1_TIMING, DNG_MAP_POLY_TIMING, DNG_STAGE2_SDK_TIMING)。
+#   歷史上的 [halideFull] / [DemosaicHalideTiming] / [DemosaicWarpHalideTiming]
+#   / [RenderHalideTiming] 等診斷輸出與其對應 envs (DNG_RENDER_HALIDE_TIMING、
+#   DNG_DEMOSAIC_HALIDE_TIMING、DNG_DEMOSAIC_WARP_HALIDE_TIMING、
+#   DNG_WARP_HALIDE_TIMING、DNG_WARP_BIT_EXACT) 已於 49d8111 sweep 全數退役；
+#   本腳本 2026-05-28 cleanup 後已移除對應 parsers / fields / 表格欄位。
 #
 # usage: |
 #   python3 run_decode_matrix.py --repo-root . --repeat 2 --timing
@@ -64,11 +70,6 @@ class RunResult:
     stage3: StageResult
     stage4: StageResult
     total_ms: Optional[float]
-    halide_full_ms: Optional[float]   # from [RenderHalideTiming] halideFull=X
-    demosaic_kernel_ms: Optional[float]
-    demosaic_copy_ms: Optional[float]
-    demosaic_warp_kernel_ms: Optional[float]
-    demosaic_warp_copy_ms: Optional[float]
     raw_output: str
     stage3_probe: dict[str, float] = field(default_factory=dict)
     stage2_probe: dict[str, float] = field(default_factory=dict)
@@ -89,8 +90,6 @@ class FfiRunResult:
     stage2_do_build_ms: Optional[float]
     stage2_opcode2_ms: Optional[float]
     stage2_total_ms: Optional[float]
-    render_assign_ms: Optional[float]
-    render_halide_full_ms: Optional[float]
     opcode2_probe: dict[str, float] = field(default_factory=dict)
 
 
@@ -110,14 +109,6 @@ class FfiAggResult:
     @property
     def wall_ms(self) -> Optional[float]:
         return mean_optional([r.wall_ms for r in self.runs])
-
-    @property
-    def render_assign_ms(self) -> Optional[float]:
-        return mean_optional([r.render_assign_ms for r in self.runs])
-
-    @property
-    def render_halide_full_ms(self) -> Optional[float]:
-        return mean_optional([r.render_halide_full_ms for r in self.runs])
 
     @property
     def stage2_do_build_ms(self) -> Optional[float]:
@@ -166,40 +157,8 @@ class AggResult:
     def total_ms(self) -> Optional[float]:
         return mean_optional([r.total_ms for r in self.runs])
 
-    @property
-    def halide_full_ms(self) -> Optional[float]:
-        return mean_optional([r.halide_full_ms for r in self.runs])
-
     def stage4_runs_str(self) -> str:
         vals = [r.stage4.time_ms for r in self.runs if r.stage4.time_ms is not None]
-        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
-
-    def halide_full_runs_str(self) -> str:
-        vals = [r.halide_full_ms for r in self.runs if r.halide_full_ms is not None]
-        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
-
-    @property
-    def demosaic_kernel_ms(self) -> Optional[float]:
-        return mean_optional([r.demosaic_kernel_ms for r in self.runs])
-
-    @property
-    def demosaic_copy_ms(self) -> Optional[float]:
-        return mean_optional([r.demosaic_copy_ms for r in self.runs])
-
-    def demosaic_kernel_runs_str(self) -> str:
-        vals = [r.demosaic_kernel_ms for r in self.runs if r.demosaic_kernel_ms is not None]
-        return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
-
-    @property
-    def demosaic_warp_kernel_ms(self) -> Optional[float]:
-        return mean_optional([r.demosaic_warp_kernel_ms for r in self.runs])
-
-    @property
-    def demosaic_warp_copy_ms(self) -> Optional[float]:
-        return mean_optional([r.demosaic_warp_copy_ms for r in self.runs])
-
-    def demosaic_warp_kernel_runs_str(self) -> str:
-        vals = [r.demosaic_warp_kernel_ms for r in self.runs if r.demosaic_warp_kernel_ms is not None]
         return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
 
     def stage3_probe_avg(self, key: str) -> Optional[float]:
@@ -255,9 +214,11 @@ _STAGE_RE = re.compile(r"^--- Stage (\d+):")
 _TIME_RE = re.compile(r"^\s*Time:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
 _PSNR_RE = re.compile(r"^\s*PSNR vs baseline:\s*([0-9]+(?:\.[0-9]+)?)\s*dB")
 _TOTAL_RE = re.compile(r"^\s*(?:DECODE )?TOTAL:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
-_HALIDE_TIMING_RE = re.compile(r"^\[RenderHalideTiming\].*\bhalideFull=([0-9]+(?:\.[0-9]+)?)\s*ms")
-_DEMOSAIC_TIMING_RE = re.compile(r"^\[DemosaicHalideTiming\].*\bkernel=([0-9]+(?:\.[0-9]+)?)\s*ms\b.*\bcopy_to_host=([0-9]+(?:\.[0-9]+)?)\s*ms")
-_DEMOSAIC_WARP_TIMING_RE = re.compile(r"^\[DemosaicWarpHalideTiming\].*\bkernel=([0-9]+(?:\.[0-9]+)?)\s*ms\b.*\bcopy_to_host=([0-9]+(?:\.[0-9]+)?)\s*ms")
+# Stale parsers removed (2026-05-28 cleanup): the source emitters
+# `[RenderHalideTiming]`, `[DemosaicHalideTiming]`, `[DemosaicWarpHalideTiming]`
+# were dropped together with the DNG_RENDER_HALIDE_TIMING /
+# DNG_DEMOSAIC_HALIDE_TIMING / DNG_DEMOSAIC_WARP_HALIDE_TIMING envs in
+# commit 49d8111. Only currently-emitted log lines retain matchers below.
 _STAGE3_PROBE_RE = re.compile(r"^\[Stage3Probe\]\s*(.*)$")
 _STAGE2_PROBE_RE = re.compile(r"^\[Stage2SdkTiming\]\s*(.*)$")
 _OPCODE2_TIMING_RE = re.compile(r"^\[OpcodeList2Timing\]\s*(.*)$")
@@ -266,7 +227,6 @@ _FFI_RUN_RE = re.compile(
     r"decode_ms=([0-9]+(?:\.[0-9]+)?)\s+process_ms=([0-9]+(?:\.[0-9]+)?)\s+"
     r"wall_ms=([0-9]+(?:\.[0-9]+)?)\s+err=(-?\d+)"
 )
-_RENDER_ASSIGN_RE = re.compile(r"^\[RenderHalideTiming\].*\bout_rgb_assign=([0-9]+(?:\.[0-9]+)?)\s*ms")
 _KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
 
 
@@ -296,11 +256,6 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
     stages: dict[str, StageResult] = {str(i): StageResult() for i in range(1, 5)}
     cur: Optional[str] = None
     total_ms: Optional[float] = None
-    halide_full_ms: Optional[float] = None
-    demosaic_kernel_ms: Optional[float] = None
-    demosaic_copy_ms: Optional[float] = None
-    demosaic_warp_kernel_ms: Optional[float] = None
-    demosaic_warp_copy_ms: Optional[float] = None
     stage3_probe: dict[str, float] = {}
     stage2_probe: dict[str, float] = {}
     opcode2_probe: dict[str, float] = {}
@@ -322,20 +277,6 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         if m:
             total_ms = float(m.group(1))
             continue
-        m = _HALIDE_TIMING_RE.match(line)
-        if m:
-            halide_full_ms = float(m.group(1))
-            continue
-        m = _DEMOSAIC_TIMING_RE.match(line)
-        if m:
-            demosaic_kernel_ms = float(m.group(1))
-            demosaic_copy_ms = float(m.group(2))
-            continue
-        m = _DEMOSAIC_WARP_TIMING_RE.match(line)
-        if m:
-            demosaic_warp_kernel_ms = float(m.group(1))
-            demosaic_warp_copy_ms = float(m.group(2))
-            continue
         m = _STAGE3_PROBE_RE.match(line)
         if m:
             stage3_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
@@ -355,11 +296,6 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         stage3=stages["3"],
         stage4=stages["4"],
         total_ms=total_ms,
-        halide_full_ms=halide_full_ms,
-        demosaic_kernel_ms=demosaic_kernel_ms,
-        demosaic_copy_ms=demosaic_copy_ms,
-        demosaic_warp_kernel_ms=demosaic_warp_kernel_ms,
-        demosaic_warp_copy_ms=demosaic_warp_copy_ms,
         raw_output=output,
         stage3_probe=stage3_probe,
         stage2_probe=stage2_probe,
@@ -381,18 +317,10 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         check=False,
     )
     output = proc.stdout
-    render_assign_ms: Optional[float] = None
-    render_halide_full_ms: Optional[float] = None
     stage2_probe: dict[str, float] = {}
     opcode2_probe: dict[str, float] = {}
     ffi_match: Optional[re.Match[str]] = None
     for line in output.splitlines():
-        m = _RENDER_ASSIGN_RE.match(line)
-        if m:
-            render_assign_ms = float(m.group(1))
-        m = _HALIDE_TIMING_RE.match(line)
-        if m:
-            render_halide_full_ms = float(m.group(1))
         m = _FFI_RUN_RE.match(line)
         if m:
             ffi_match = m
@@ -417,8 +345,6 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         stage2_do_build_ms=stage2_probe.get("doBuildStage2"),
         stage2_opcode2_ms=stage2_probe.get("opcode2"),
         stage2_total_ms=stage2_probe.get("total"),
-        render_assign_ms=render_assign_ms,
-        render_halide_full_ms=render_halide_full_ms,
         opcode2_probe=opcode2_probe,
     )
 
@@ -465,10 +391,12 @@ def _build_markdown(
     L.append("> - Lossy Halide: Stage3 PSNR = 999 dB (same SDK YCbCr path); "
              "Stage4 PSNR = Stage4-isolated rendering quality")
     L.append(">")
-    L.append("> **Stage4 timing note**: total Stage4 now closely tracks `halideFull` GPU kernel time "
-             "(prior 250ms+ first-touch page-fault cost on `out_rgb` was eliminated by caller "
-             "pre-allocating + replacing `assign(N,0)` with `resize(N)` in `runHalideFullOrSdkFallback`). "
-             "SDK Stage4 = `dng_render::Render()` total. `dng_render()` constructor itself is ~0.03 ms.")
+    L.append("> **Stage4 timing note**: total Stage4 = `dng_render::Render()` (SDK path) or the "
+             "Halide AOT Stage4 kernel + SDK fallback wrapper (Halide path). `dng_render()` "
+             "constructor itself is ~0.03 ms. The historical `halideFull` GPU-kernel-only breakdown "
+             "(emitted via `[RenderHalideTiming]` under `DNG_RENDER_HALIDE_TIMING=1`) was retired in "
+             "commit 49d8111; the corresponding `out_rgb_assign` first-touch cost was also eliminated "
+             "by the caller pre-allocating + `resize(N)` change in `runHalideFullOrSdkFallback`.")
     L.append(">")
     L.append("> **Production vs validation timing**: `production` is the stage work that belongs to the "
              "decode/render pipeline. `validation extract` is extra test-harness work used to materialize "
@@ -477,9 +405,8 @@ def _build_markdown(
     if ffi_results:
         L.append(">")
         L.append("> **FFI timing note**: FFI timings are collected from `dng_pipeline_v2_decode_to_rgb()` "
-                 "with a separate harness. They are shown in their own table because FFI includes output "
-                 "buffer ownership costs such as `out_rgb_assign`; these costs are not mixed into the "
-                 "normalized Stage4 matrix columns.")
+                 "with a separate harness. Output-buffer ownership costs are now amortised by the "
+                 "RGB output pool; FFI columns therefore reflect end-to-end decode + process + wall time.")
     L.append("")
 
     # --- Timing table ---
@@ -506,8 +433,8 @@ def _build_markdown(
     if ffi_results:
         L.append("## FFI Production Timing (ms, independent from Stage4)")
         L.append("")
-        L.append("| Sample | decode_ms | process_ms | wall_ms | Stage2 total | Stage2 doBuildStage2 | Stage2 opcode2 | out_rgb_assign | halideFull | rgb_bytes |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        L.append("| Sample | decode_ms | process_ms | wall_ms | Stage2 total | Stage2 doBuildStage2 | Stage2 opcode2 | rgb_bytes |")
+        L.append("|---|---|---|---|---|---|---|---|")
         for r in ffi_results:
             rgb_bytes = str(r.rgb_bytes) if r.rgb_bytes is not None else "N/A"
             L.append(
@@ -518,8 +445,6 @@ def _build_markdown(
                 f"| {_fmt_ms(r.stage2_total_ms)} "
                 f"| {_fmt_ms(r.stage2_do_build_ms)} "
                 f"| {_fmt_ms(r.stage2_opcode2_ms)} "
-                f"| {_fmt_ms(r.render_assign_ms)} "
-                f"| {_fmt_ms(r.render_halide_full_ms)} "
                 f"| {rgb_bytes} |"
             )
         L.append("")
@@ -539,9 +464,11 @@ def _build_markdown(
         )
     L.append("")
 
-    # --- Halide timing breakdown ---
+    # --- Diagnostic timing breakdown (Stage2 SDK / OpcodeList2 / Stage3 probe) ---
+    # Historical Stage3 Demosaic / DemosaicWarp AOT and Stage4 halideFull tables
+    # were removed alongside the [DemosaicHalideTiming] / [DemosaicWarpHalideTiming]
+    # / [RenderHalideTiming] source emitters in commit 49d8111.
     if show_halide_timing:
-        has_any = any(r.halide_full_ms is not None for r in results)
         has_stage2_probe = any(r.stage2_probe_avg("total") is not None for r in results)
         has_stage3_probe = any(r.stage3_probe_avg("total") is not None for r in results)
         if has_stage2_probe:
@@ -653,58 +580,6 @@ def _build_markdown(
                 )
             L.append("")
 
-        has_demosaic_warp_timing = any(r.demosaic_warp_kernel_ms is not None for r in results)
-        if has_demosaic_warp_timing:
-            L.append("## Stage3 Fused Demosaic+Warp AOT Time (ms)")
-            L.append("")
-            L.append("_`kernel` is the fused Halide Metal demosaic+WarpRectilinear kernel. `copy_to_host` is the final Stage3 host readback, not the old intermediate demosaic readback._")
-            L.append("")
-            L.append("| Case | kernel avg | kernel runs | copy_to_host avg | Stage3 total |")
-            L.append("|---|---|---|---|---|")
-            for r in results:
-                L.append(
-                    f"| {r.case_name} "
-                    f"| {_fmt_ms(r.demosaic_warp_kernel_ms)} "
-                    f"| {r.demosaic_warp_kernel_runs_str()} "
-                    f"| {_fmt_ms(r.demosaic_warp_copy_ms)} "
-                    f"| {_fmt_ms(r.stage3.time_ms)} |"
-                )
-            L.append("")
-
-        has_demosaic_timing = any(r.demosaic_kernel_ms is not None for r in results)
-        if has_demosaic_timing:
-            L.append("## Stage3 Demosaic AOT Time (ms)")
-            L.append("")
-            L.append("_`kernel` is the Halide Metal demosaic kernel. `copy_to_host` is still paid before the current warp step; Step 7.4 should remove that round-trip._")
-            L.append("")
-            L.append("| Case | kernel avg | kernel runs | copy_to_host avg | Stage3 total |")
-            L.append("|---|---|---|---|---|")
-            for r in results:
-                L.append(
-                    f"| {r.case_name} "
-                    f"| {_fmt_ms(r.demosaic_kernel_ms)} "
-                    f"| {r.demosaic_kernel_runs_str()} "
-                    f"| {_fmt_ms(r.demosaic_copy_ms)} "
-                    f"| {_fmt_ms(r.stage3.time_ms)} |"
-                )
-            L.append("")
-
-        if has_any:
-            L.append("## Stage4 Halide GPU Kernel Time (ms)")
-            L.append("")
-            L.append("_`halideFull` = actual GPU kernel time, excluding `dng_render()` constructor._")
-            L.append("")
-            L.append("| Case | halideFull avg (ms) | runs (ms) | Stage4 total (ms) |")
-            L.append("|---|---|---|---|")
-            for r in results:
-                L.append(
-                    f"| {r.case_name} "
-                    f"| {_fmt_ms(r.halide_full_ms)} "
-                    f"| {r.halide_full_runs_str()} "
-                    f"| {_fmt_ms(r.stage4.time_ms)} |"
-                )
-            L.append("")
-
     # --- Raw run data ---
     L.append("## Stage4 Raw Runs (ms)")
     L.append("")
@@ -730,16 +605,22 @@ def _build_cases(
 ) -> list[tuple[str, list[str], dict[str, str]]]:
     """Returns [(case_name, cmd, env), ...]."""
 
+    # --timing injects DiagnosticConfig env switches that are still honored.
+    # Retired switches (DNG_RENDER_HALIDE_TIMING, DNG_DEMOSAIC_HALIDE_TIMING,
+    # DNG_DEMOSAIC_WARP_HALIDE_TIMING, DNG_WARP_HALIDE_TIMING, DNG_DEMOSAIC_AOT)
+    # were swept in commit 49d8111 and are no longer read by the native pipeline.
+    # See dng_pipeline_config.h for the current env category catalogue.
     timing_env = {
-        "DNG_RENDER_HALIDE_TIMING": "1",
-        "DNG_DEMOSAIC_HALIDE_TIMING": "1",
-        "DNG_DEMOSAIC_WARP_HALIDE_TIMING": "1",
-        "DNG_WARP_HALIDE_TIMING": "1",
-        "DNG_STAGE2_SDK_TIMING": "1",
+        "DNG_STAGE1_TIMING": "1",          # DiagnosticConfig (ConcurrentDngHost)
+        "DNG_MAP_POLY_TIMING": "1",        # DiagnosticConfig (Stage2 OL2 bridge)
+        "DNG_STAGE2_SDK_TIMING": "1",      # DiagnosticConfig (vendor DNG SDK)
     } if enable_timing else {}
 
+    # NOTE: DNG_WARP_BIT_EXACT was retired in 49d8111; setting it explicitly
+    # is a no-op now. Lossless / Halide path therefore inherits the same env
+    # as the SDK case plus the diagnostic timing envs.
     sdk_env = {**extra_env, **timing_env}
-    halide_env_lossless = {**extra_env, **timing_env, "DNG_WARP_BIT_EXACT": "0"}
+    halide_env_lossless = {**extra_env, **timing_env}
     halide_env_lossy = {**extra_env, **timing_env}
 
     return [
@@ -795,7 +676,12 @@ def main() -> int:
         "--timing",
         action="store_true",
         default=False,
-        help="Enable DNG_RENDER_HALIDE_TIMING=1 and show halideFull breakdown table",
+        help=(
+            "Enable DiagnosticConfig timing envs (DNG_STAGE1_TIMING, "
+            "DNG_MAP_POLY_TIMING, DNG_STAGE2_SDK_TIMING). The historical "
+            "DNG_RENDER_HALIDE_TIMING / halideFull breakdown was retired in "
+            "commit 49d8111; the corresponding columns may render as '-'."
+        ),
     )
     ap.add_argument(
         "--ffi-harness",
@@ -859,9 +745,12 @@ def main() -> int:
         ffi_harness = (root / args.ffi_harness).resolve()
         if not ffi_harness.exists():
             ap.error(f"FFI harness not found: {ffi_harness}")
+        # DNG_RENDER_HALIDE_TIMING was retired in 49d8111; keep only the
+        # currently-honored DiagnosticConfig timing envs.
         ffi_env = {
             **extra_env,
-            "DNG_RENDER_HALIDE_TIMING": "1",
+            "DNG_STAGE1_TIMING": "1",
+            "DNG_MAP_POLY_TIMING": "1",
             "DNG_STAGE2_SDK_TIMING": "1",
         }
         ffi_cases = [

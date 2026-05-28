@@ -32,7 +32,9 @@ void demosaic_bilinear_halide(const uint16_t* input,
  * CPU reference bilinear demosaic for Bayer CFA pattern.
  *
  * This is retained as a deterministic fallback/reference path. The default
- * demosaic_bilinear_halide entry uses Halide AOT unless DNG_DEMOSAIC_AOT=0.
+ * demosaic_bilinear_halide entry uses the Halide AOT implementation
+ * unconditionally; the historical DNG_DEMOSAIC_AOT runtime switch was
+ * retired in commit 49d8111 (env-switch sweep) and is no longer consulted.
  */
 void demosaic_pattern_bilinear(const uint16_t* input,
                                int width,

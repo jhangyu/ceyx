@@ -2,92 +2,96 @@
 ---
 file_summary: >
   Stage4 render 橋接層。負責把 DNG SDK 的 Stage3 `dng_image` 與 color/tone/profile
-  參數整理成 Halide AOT kernel 可用的 Buffer，並在 full / SDK quality-lock 路徑間
-  dispatch，同時提供 timing。
+  參數整理成 Halide AOT kernel 可用的 Buffer，並在 full Halide / SDK fallback
+  兩條路徑間 dispatch。
 
 notes:
   - `render_stage4_halide()` 是唯一正式入口；其餘多為資料萃取、參數建構與 full AOT 包裝。
-  - `DNG_RENDER_BIT_EXACT` 或 `DNG_WARP_BIT_EXACT` 啟用時，會走 SDK render quality-lock 路徑。
   - Phase 8.3 後只保留正式 full Stage4 kernel 與 SDK fallback/quality-lock。
+  - Round 1 P1 (commit 1d1726e) sweep 移除了 `renderHalideTimingEnabled` /
+    `renderHalideTryFullEnabled` / `renderHalideForceFullKernelEnabled` /
+    `renderHalideBitExactModeEnabled` 四個 env getter 與對應的 `DNG_RENDER_*`
+    env，全部退役；本檔不再直接呼叫 `std::getenv`。env 分類請見
+    `include/dng_pipeline_config.h` 頂部的 RouteConfig/DiagnosticConfig/
+    ResearchConfig 目錄。
+  - Phase 10 Sprint E 加入 RGB pool 版本的 `render_stage4_halide` 多載
+    （ptr-based），供 mmap pool zero-copy 路徑直接寫入 caller-owned 記憶體。
 
 structs:
   - name: "RenderParams"
     description: "Stage4 所需矩陣、1D/3D table、encoding table 與 SDK reference 物件快取。"
-    lines: "117-155"
+    lines: "125-163"
   - name: "CachedRenderHost"
     description: "quality-lock SDK Render 專用的 reusable host cache。"
-    lines: "167-185"
+    lines: "175-193"
 
 functions:
   - name: "copyRenderSettings"
     description: "把既有 `dng_render` 參數複製到另一個 renderer（供 host 分離時重建）。"
-    lines: "157-165"
+    lines: "165-173"
   - name: "qualityLockRenderHostCache"
     description: "回傳 quality-lock SDK Render 專用的快取 host。"
-    lines: "187-190"
+    lines: "195-198"
   - name: "extractStage3Interleaved"
     description: "把 Stage3 `dng_image` 抽成 float interleaved buffer。"
-    lines: "192-214"
+    lines: "200-222"
   - name: "extractStage3Interleaved16"
     description: "把 Stage3 `dng_image` 抽成 uint16 interleaved buffer。"
-    lines: "216-238"
+    lines: "224-246"
   - name: "borrowStage3Interleaved16"
     description: "嘗試直接借用 Stage3 tile buffer，避免額外拷貝。"
-    lines: "240-279"
+    lines: "248-287"
   - name: "packBorrowedStage3Interleaved16"
     description: "將 borrowed Stage3 tile 重新整理成緊密 interleaved 版面。"
-    lines: "281-314"
+    lines: "289-322"
   - name: "borrowImageInterleaved8"
     description: "嘗試直接借用最終 8-bit image tile buffer。"
-    lines: "316-354"
+    lines: "324-362"
   - name: "packBorrowedInterleaved8"
     description: "將 borrowed 8-bit tile 重新整理成緊密 interleaved 輸出。"
-    lines: "356-389"
+    lines: "364-397"
   - name: "matrixToRowMajor3x3"
     description: "將 `dng_matrix` 轉成 Halide 端使用的 row-major 3x3 array。"
-    lines: "391-397"
+    lines: "399-405"
   - name: "toIdentityHueSat"
     description: "建立 identity HueSat / Look table。"
-    lines: "399-405"
+    lines: "407-413"
   - name: "toIdentityCurve"
     description: "建立 identity 1D curve。"
-    lines: "407-414"
+    lines: "415-422"
   - name: "copyHueSatMap"
     description: "將 SDK HueSatMap 轉成 Halide 期望的 planar layout。"
-    lines: "416-442"
+    lines: "424-450"
   - name: "buildRenderParams"
     description: "從 `dng_negative`/`dng_render` 與 centralized config 萃取 Stage4 所需矩陣、tone/gamma/table 與 profile map。"
-    lines: "444-597"
+    lines: "452-589"
   - name: "runRenderStage4HalideAot"
     description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。"
-    lines: "599-690"
+    lines: "591-683"
   - name: "runRenderStage4HalideAotFromDevice"
     description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 已在 GPU device buffer。8.2.3 修正：crop() 後直接 mutate raw_buffer()->dim[i].min = 0（不能用 set_min/translate，會 device_deallocate 殺掉 device handle），讓 src/dst 都在 [0..dst_w-1] 座標系，對齊 generator 寫死的 clamp(x, 0, extent-1)。"
-    lines: "697-805"
-  - name: "renderHalideTimingEnabled"
-    description: "透過 `PipelineConfig` 讀取 render timing flag。"
-    lines: "797-799"
-  - name: "renderHalideTryFullEnabled"
-    description: "透過 `PipelineConfig` 判斷 full kernel 是否允許啟用。"
-    lines: "801-803"
-  - name: "renderHalideForceFullKernelEnabled"
-    description: "透過 `PipelineConfig` 讀取 force-full debug flag。"
-    lines: "805-807"
-  - name: "renderHalideBitExactModeEnabled"
-    description: "透過 `PipelineConfig` 判斷是否進入 SDK quality-lock / bit-exact 模式。"
-    lines: "809-812"
-  - name: "runHalideFullOrSdkFallback"
+    lines: "689-796"
+  - name: "runHalideFullOrSdkFallback (host src overload)"
     description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
-    lines: "817-980"
+    lines: "798-924"
+  - name: "runHalideFullOrSdkFallback (device src overload)"
+    description: "Stage3-on-device 路徑的 full Stage4 kernel + SDK fallback。"
+    lines: "931-1063"
   - name: "renderHalideModeName"
     description: "列舉值轉字串。"
-    lines: "984-991"
-  - name: "render_stage4_halide"
-    description: "Stage4 正式入口；處理 mode、Stage3 取得、kernel dispatch、fallback 與 timing。"
-    lines: "993-1015"
-  - name: "render_stage4_halide_from_device_buffer"
+    lines: "1067-1074"
+  - name: "render_stage4_halide (host vector overload)"
+    description: "Stage4 正式入口；處理 Stage3 取得、kernel dispatch、fallback 與 timing。"
+    lines: "1076-1099"
+  - name: "render_stage4_halide_from_device_buffer (host vector overload)"
     description: "Phase 8.2.2 device handoff 入口；傳入 Stage3 device buffer（不 copy_to_host），計算 DefaultCropArea 並呼叫 runRenderStage4HalideAotFromDevice。"
-    lines: "1019-1085"
+    lines: "1101-1158"
+  - name: "render_stage4_halide (pool ptr overload)"
+    description: "Phase 10 Sprint E RGB pool — 以 caller-supplied (mmap pool) 指標直接寫入；包裝 vector overload 並驗證 data() 未搬家。"
+    lines: "1196-1244"
+  - name: "render_stage4_halide_from_device_buffer (pool ptr overload)"
+    description: "Phase 10 Sprint E RGB pool — device handoff + caller pool ptr 版本。"
+    lines: "1246-1303"
 ---
 */
 #include "dng_render_halide.h"
