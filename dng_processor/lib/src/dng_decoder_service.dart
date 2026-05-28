@@ -17,7 +17,7 @@ modules:
     lines: "37-45"
   - name: "DngDecoderService"
     description: "Native 方法調用，處理 Dart 端 ByteBuffer 複製與記憶體釋放"
-    lines: "47-137"
+    lines: "69-232"
 ---
 */
 
@@ -68,6 +68,12 @@ class DngDecodeException implements Exception {
 /// native result freed immediately after copy.
 class DngDecoderService {
   late final DngNativeBindings _bindings;
+  // Service-owned finalizer reused by every decode() call. Constructing a fresh
+  // NativeFinalizer per call (as the previous implementation did) ties each
+  // finalizer's lifetime to the per-call frame and risks the finalizer itself
+  // being collected before the attached DngImage. Promoting to a field keeps
+  // it alive for the service's lifetime so the GC callback always fires.
+  late final NativeFinalizer _rgbaFinalizer;
   bool _initialized = false;
 
   DngDecoderService();
@@ -76,6 +82,9 @@ class DngDecoderService {
   void initialize() {
     if (_initialized) return;
     _bindings = DngNativeBindings.load();
+    _rgbaFinalizer = NativeFinalizer(
+      _bindings.dngFreeHalideBufferPtr.cast(),
+    );
     _initialized = true;
   }
 
@@ -130,8 +139,15 @@ class DngDecoderService {
 
   /// Decode a DNG file and return the processed RGBA image.
   ///
-  /// The returned [DngImage] owns a Dart-side copy of the pixel data,
-  /// so the native buffer is freed immediately. No manual cleanup needed.
+  /// The returned [DngImage] exposes `rgbaData` as a zero-copy [Uint8List]
+  /// view backed directly by the native Halide RGBA buffer — no memcpy
+  /// happens on the success path. Ownership of that native allocation is
+  /// transferred to a service-owned [NativeFinalizer]: when the [DngImage]
+  /// (and therefore the Dart wrapper of the typed list) is garbage collected,
+  /// `dng_free_halide_buffer` is invoked automatically on the native pointer.
+  /// The surrounding [DngResult] struct is always freed in `finally` via
+  /// `dng_free_result`; on success its `rgbaData` field has been cleared so
+  /// the struct teardown does not double-free the buffer.
   ///
   /// Throws [DngDecodeException] on failure.
   DngImage decode(String filePath) {
@@ -194,13 +210,10 @@ class DngDecoderService {
         processMs: result.processMs,
       );
 
-      // Attach the NativeFinalizer to the Dart list object.
-      // When the `image` object is garbage collected, Dart will automatically
-      // call `dng_free_halide_buffer` with the native pointer.
-      final finalizer = NativeFinalizer(
-        _bindings.dngFreeHalideBufferPtr.cast(),
-      );
-      finalizer.attach(image, result.rgbaData.cast(), detach: image);
+      // Attach the service-owned NativeFinalizer to the DngImage.
+      // When `image` is garbage collected, Dart calls `dng_free_halide_buffer`
+      // on the native pointer captured here.
+      _rgbaFinalizer.attach(image, result.rgbaData.cast(), detach: image);
 
       // Since we handed ownership of `rgbaData` over to the Finalizer,
       // we must set it to null in the result struct so `dng_free_result`

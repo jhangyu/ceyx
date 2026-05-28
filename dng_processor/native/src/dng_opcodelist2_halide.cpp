@@ -44,6 +44,10 @@
 #include "HalideRuntimeMetal.h"
 #include "dng_opcode_polynomial.h"
 #include "dng_opcode_polynomial3.h"
+// PipelineConfig::stage2OL2HalideEnabled() is the canonical reader for
+// DNG_STAGE2_OL2_HALIDE; this bridge defers to it (source-of-truth:
+// dng_pipeline_config.h, RouteConfig category).
+#include "dng_pipeline_config.h"
 
 #include "dng_image.h"
 #include "dng_misc_opcodes.h"
@@ -99,18 +103,19 @@ static void scatter_poly3_to_image(const uint16_t *scratch,
 
 namespace {
 
-// Process-level cache of the env-derived enable flag. Avoids re-reading the
-// env on every opcode dispatch.
+// DNG_STAGE2_OL2_HALIDE — RouteConfig (production kill-switch).
+// source-of-truth: dng_pipeline_config.h (PipelineConfig::stage2OL2HalideEnabled).
+// This wrapper exists so callers below can keep their local name; do NOT
+// re-read the env here.
 bool stage2_ol2_halide_enabled() {
-    static const bool enabled = []() {
-        const char *raw = std::getenv("DNG_STAGE2_OL2_HALIDE");
-        return !(raw && raw[0] == '0');
-    }();
-    return enabled;
+    return PipelineConfig::stage2OL2HalideEnabled();
 }
 
+// DNG_STAGE2_OL2_PREWARM — RouteConfig/DiagnosticConfig hybrid.
+// Default ON; allow disabling for A/B measurement via env. Kept as a
+// call-site lazy cache (rather than centralising in PipelineConfig) so the
+// pre-warm decision happens before any RouteConfig load on the cold path.
 bool ol2_prewarm_enabled() {
-    // Default ON; allow disabling for A/B measurement via env.
     static const bool enabled = []() {
         const char *v = std::getenv("DNG_STAGE2_OL2_PREWARM");
         return !(v && v[0] == '0');
@@ -121,6 +126,9 @@ bool ol2_prewarm_enabled() {
 // ol2_persistent_enabled: hardcoded true (Phase 10 Sprint E-F cleanup).
 // ol2_batched_enabled: hardcoded true (Phase 10 Sprint E-F cleanup).
 
+// DNG_MAP_POLY_TIMING — DiagnosticConfig (observability only).
+// Kept as a call-site lazy cache to avoid touching hot path with a config
+// load when timing is disabled.
 bool map_poly_timing_enabled() {
     static const bool enabled = []() {
         const char *v = std::getenv("DNG_MAP_POLY_TIMING");

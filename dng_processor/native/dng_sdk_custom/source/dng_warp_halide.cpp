@@ -518,6 +518,11 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
 // Reads DNG_WARP_PRECOMPUTED_COORDS=1 to switch standalone warp Metal path
 // to the rectilinear_warp_precomputed AOT variant, feeding base_x/base_y/
 // frac_x_idx/frac_y_idx as input buffers (computed on host with double).
+//
+// DNG_WARP_PRECOMPUTED_COORDS — ResearchConfig (deprecated; A/B parity
+// research only; not consulted on production code paths). See
+// dng_pipeline_config.h for the category catalogue. Slated for removal in
+// Round 2.
 bool isPrecomputedCoordsEnabled() {
     const char* v = std::getenv("DNG_WARP_PRECOMPUTED_COORDS");
     if (!v) return false;

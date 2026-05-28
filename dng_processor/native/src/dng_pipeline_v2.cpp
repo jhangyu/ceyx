@@ -17,9 +17,15 @@ functions:
   - name: "runSdkStage3 / runStage4ToRgb"
     description: "SDK Stage3 fallback and Stage4 render through Halide Metal."
     lines: "312-370"
+  - name: "pipelineSingleFlightMutex"
+    description: "File-scope std::mutex accessor; both public FFI entries lock it to serialize warmup vs decode and prevent races on shared native pools / DeviceHandoffState."
+    lines: "793-801"
+  - name: "dng_pipeline_v2_warmup_for_size"
+    description: "Idle-time warm hook; locks single-flight mutex and primes pipeline pools + polynomial3 scratch."
+    lines: "803-810"
   - name: "dng_pipeline_v2_run_stage3 / dng_pipeline_v2_decode_to_rgb"
-    description: "Shared Stage3 orchestration + top-level decode entry returning RGB and timing; production FFI uses ConcurrentDngHost so Stage1/2 materialization follows matrix threading."
-    lines: "725-845"
+    description: "Shared Stage3 orchestration + top-level decode entry returning RGB and timing; production FFI uses ConcurrentDngHost so Stage1/2 materialization follows matrix threading. decode_to_rgb takes single-flight mutex."
+    lines: "812-955"
 ---
 */
 #include "dng_pipeline_v2.h"
@@ -784,7 +790,18 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
 
 } // namespace
 
+// Single-flight mutex serializing the public FFI entry points against the
+// background warmup hook.  Both paths mutate shared native pools (RGBA output
+// pool, polynomial scratch caches) and DeviceHandoffState; without this lock a
+// warmup invoked from idle could race a concurrent decode and corrupt those
+// shared resources.  Function-local static guarantees thread-safe init.
+static std::mutex &pipelineSingleFlightMutex() {
+  static std::mutex m;
+  return m;
+}
+
 bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
+  std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
   if (!warmPipelinePoolsForSize(width, height)) {
     return false;
   }
@@ -812,6 +829,7 @@ bool dng_pipeline_v2_run_stage3(dng_host &host,
 
 bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
                                    DngPipelineV2Result &result) {
+  std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
   result = DngPipelineV2Result{};
   if (!file_path || !file_path[0]) {
     result.error_code = -1;

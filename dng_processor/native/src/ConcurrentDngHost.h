@@ -40,6 +40,10 @@ public:
         uint32 threads = PerformAreaTaskThreads();
         uint32 maxThreads = task.MaxThreads();
         {
+            // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
+            // Read inline (not via PipelineConfig) so the Stage 1 area-task
+            // entry stays self-contained; default OFF so cost is one
+            // getenv() per task entry when disabled.
             const char *timing_env = std::getenv("DNG_STAGE1_TIMING");
             if (timing_env && timing_env[0] && timing_env[0] != '0') {
                 std::fprintf(stderr,
@@ -117,6 +121,7 @@ public:
                 currentV += heightForThisThread;
             }
 
+            // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
             const char *timing_env = std::getenv("DNG_STAGE1_TIMING");
             const bool timing = timing_env && timing_env[0] && timing_env[0] != '0';
             auto t_dispatch = std::chrono::steady_clock::now();
