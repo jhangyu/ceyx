@@ -97,12 +97,15 @@ class _DecodeWorkerResult {
 /// NativeFinalizer, while the surrounding result struct is freed immediately.
 class DngDecoderService {
   late final DngNativeBindings _bindings;
-  // Service-owned finalizer reused by every decode() call. Constructing a fresh
-  // NativeFinalizer per call (as the previous implementation did) ties each
-  // finalizer's lifetime to the per-call frame and risks the finalizer itself
-  // being collected before the attached DngImage. Promoting to a field keeps
-  // it alive for the service's lifetime so the GC callback always fires.
-  late final NativeFinalizer _rgbaFinalizer;
+  // Service-owned finalizer, lazily created on the first _decodeZeroCopy call.
+  // Kept as a field (not a local) so its lifetime matches the service — if it
+  // were per-call the GC could collect it before the attached DngImage, silently
+  // leaking the native buffer (Gotcha #45, memory.md).
+  // Worker-path callers (_decodeToTransferable) never attach to this finalizer;
+  // they rely on dng_free_result() in their finally block to free rgba_data,
+  // so we do NOT create the finalizer eagerly in initialize() — that would waste
+  // a handle in every worker isolate that never uses zero-copy.
+  NativeFinalizer? _rgbaFinalizer;
   bool _initialized = false;
 
   DngDecoderService();
@@ -111,7 +114,9 @@ class DngDecoderService {
   void initialize() {
     if (_initialized) return;
     _bindings = DngNativeBindings.load();
-    _rgbaFinalizer = NativeFinalizer(_bindings.dngFreeRgbaBufferPtr.cast());
+    // _rgbaFinalizer is intentionally NOT created here; it is lazily created in
+    // _decodeZeroCopy so that worker-isolate services (which only call
+    // _decodeToTransferable) do not allocate a finalizer they will never use.
     _initialized = true;
   }
 
@@ -188,6 +193,13 @@ class DngDecoderService {
   /// `dng_free_result`; on success its `rgbaData` field has been cleared so
   /// the struct teardown does not double-free the buffer.
   ///
+  /// ⚠️ Do NOT capture the returned [DngImage] across isolate boundaries.
+  /// The zero-copy `rgbaData` view is backed by a native pointer managed by
+  /// this service's [NativeFinalizer]; sending it to another isolate transfers
+  /// neither the finalizer nor the native ownership, risking use-after-free.
+  /// Use [decodeOnWorker] instead when the result must cross isolate boundaries.
+  /// (See also: Gotcha #45, memory.md — NativeFinalizer lifecycle.)
+  ///
   /// Throws [DngDecodeException] on failure.
   DngImage decode(String filePath) {
     return _decodeZeroCopy(filePath);
@@ -243,10 +255,15 @@ class DngDecoderService {
         processMs: result.processMs,
       );
 
+      // Lazily create the service-owned finalizer on the first zero-copy decode.
+      // Using ??= keeps it alive for the entire service lifetime once created
+      // (Gotcha #45: per-call finalizer risks GC before DngImage is collected).
+      _rgbaFinalizer ??= NativeFinalizer(_bindings.dngFreeRgbaBufferPtr.cast());
+
       // Attach the service-owned NativeFinalizer to the DngImage.
       // When `image` is garbage collected, Dart calls `dng_free_rgba_buffer`
       // on the native pointer captured here.
-      _rgbaFinalizer.attach(image, result.rgbaData.cast(), detach: image);
+      _rgbaFinalizer!.attach(image, result.rgbaData.cast(), detach: image);
 
       // Since we handed ownership of `rgbaData` over to the Finalizer,
       // we must set it to null in the result struct so `dng_free_result`
@@ -295,6 +312,9 @@ class DngDecoderService {
       final width = result.width;
       final height = result.height;
       final bufferSize = width * height * 4;
+      // Copy native RGBA into Dart-owned bytes. We do NOT use zero-copy here
+      // because TransferableTypedData cannot carry a native-backed typed list
+      // across isolate boundaries safely.
       final rgbaCopy = Uint8List.fromList(
         result.rgbaData.asTypedList(bufferSize),
       );
@@ -307,6 +327,9 @@ class DngDecoderService {
         processMs: result.processMs,
       );
     } finally {
+      // dng_free_result frees BOTH the DngResult struct and its rgba_data
+      // (rgba_data was NOT cleared above, unlike _decodeZeroCopy).
+      // No separate dngFreeRgbaBuffer call is needed — no memory leak.
       if (resultPtr != nullptr) {
         _bindings.dngFreeResult(resultPtr);
       }

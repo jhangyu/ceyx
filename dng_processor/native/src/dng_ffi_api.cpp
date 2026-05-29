@@ -18,7 +18,7 @@
 
 extern "C" {
 
-DngResult *dng_decode_and_process(const char *file_path) {
+FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
   DngResult *result =
       static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
   if (!result)
@@ -113,11 +113,12 @@ FFI_EXPORT void dng_free_buffer(uint8_t *buffer) {
     delete[] buffer;
 }
 
-void dng_free_result(DngResult *result) {
+FFI_EXPORT void dng_free_result(DngResult *result) {
   if (!result)
     return;
-  // NOTE: If rgba_data is transferred to zero-copy in Dart, it might be null
-  // here
+  // Frees rgba_data when non-NULL, then frees the struct itself.
+  // Zero-copy callers MUST clear result->rgba_data before calling this
+  // (see _decodeZeroCopy in dng_decoder_service.dart) to avoid double-free.
   if (result->rgba_data) {
     delete[] result->rgba_data;
     result->rgba_data = nullptr;
