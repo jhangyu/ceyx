@@ -1,57 +1,70 @@
-import 'dart:io';
-import 'dart:ffi' as ffi;
-import 'package:ffi/ffi.dart';
-import 'package:dng_processor/src/dng_bindings.dart';
+// ignore_for_file: avoid_print
 
-void main(List<String> args) {
+import 'dart:async';
+import 'dart:io';
+import 'package:dng_processor/src/dng_decoder_service.dart';
+
+/// Benchmark: preview JPEG extraction via DngDecoderService worker isolate.
+///
+/// Uses [DngDecoderService.getPreviewJpegOnWorker] so the event loop keeps
+/// ticking while the native FFI call runs on a background isolate.
+///
+/// Usage:
+///   dart run bin/benchmark_preview.dart `<path_to_dng>`
+void main(List<String> args) async {
   if (args.isEmpty) {
     print('Usage: dart benchmark_preview.dart <path_to_dng>');
     exit(1);
   }
 
   final dngPath = args[0];
-  print('--- Benchmarking Fast Preview Extraction ---');
+  if (!File(dngPath).existsSync()) {
+    print('Error: $dngPath not found');
+    exit(1);
+  }
+
+  print('--- Benchmarking Fast Preview Extraction (worker isolate) ---');
   print('Target: $dngPath');
 
-  final bindings = DngNativeBindings();
+  final decoder = DngDecoderService()..initialize();
 
-  final outBufferPtr = calloc<ffi.Pointer<ffi.Uint8>>();
-  final outSizePtr = calloc<ffi.Int32>();
-  final pathPtr = dngPath.toNativeUtf8();
+  // Track event-loop ticks while the worker runs — verifies the UI thread
+  // remains unblocked during native preview extraction.
+  // Preview extraction is typically only a few ms, so use a sub-millisecond
+  // ticker to give the event loop a chance to fire several times before the
+  // worker isolate finishes.
+  var ticks = 0;
+  final ticker = Timer.periodic(
+    const Duration(milliseconds: 1),
+    (_) => ticks++,
+  );
 
-  try {
-    final sw = Stopwatch()..start();
-    final result = bindings.extractPreviewJpeg(
-      pathPtr,
-      outBufferPtr,
-      outSizePtr,
+  final sw = Stopwatch()..start();
+  final previewBytes = await decoder.getPreviewJpegOnWorker(dngPath);
+  sw.stop();
+  ticker.cancel();
+
+  if (previewBytes != null) {
+    print(
+      'Success! Extracted ${previewBytes.length} bytes '
+      'in ${sw.elapsedMilliseconds} ms',
     );
-    sw.stop();
 
-    if (result == 0) {
-      final size = outSizePtr.value;
-      print('Success! Extracted $size bytes in ${sw.elapsedMilliseconds} ms');
-
-      // We can also verify it's a JPEG by checking magic bytes
-      if (size >= 2) {
-        final data = outBufferPtr.value.asTypedList(size);
-        if (data[0] == 0xFF && data[1] == 0xD8) {
-          print('Valid JPEG magic bytes found (FF D8)');
-        }
-      }
-
-      // Save it out for proof
-      final outFile = File('preview_out.jpg');
-      outFile.writeAsBytesSync(outBufferPtr.value.asTypedList(size));
-      print('Saved preview to ${outFile.path}');
-
-      bindings.freeBuffer(outBufferPtr.value);
-    } else {
-      print('Failed with error code: $result');
+    // Verify JPEG magic bytes (FF D8)
+    if (previewBytes.length >= 2 &&
+        previewBytes[0] == 0xFF &&
+        previewBytes[1] == 0xD8) {
+      print('Valid JPEG magic bytes found (FF D8)');
     }
-  } finally {
-    calloc.free(outBufferPtr);
-    calloc.free(outSizePtr);
-    calloc.free(pathPtr);
+
+    // Save preview for visual inspection
+    final outFile = File('preview_out.jpg');
+    outFile.writeAsBytesSync(previewBytes);
+    print('Saved preview to ${outFile.path}');
+
+    print('Event-loop ticks during worker preview: $ticks');
+  } else {
+    print('Failed to extract preview JPEG');
+    exit(1);
   }
 }

@@ -17,11 +17,11 @@ modules:
     description: "MaterialApp 與主題配置"
     lines: "28-50"
   - name: "DngHomePage"
-    description: "首頁狀態管理、檔案選擇邏輯與解碼服務呼叫"
-    lines: "52-183"
+    description: "首頁狀態管理、檔案選擇邏輯與解碼服務呼叫；_saving/_decoding 分離"
+    lines: "52-185"
   - name: "UI Widgets"
     description: "主要的 Scaffold、狀態列顯示與 ImageViewer"
-    lines: "185-413"
+    lines: "187-415"
 ---
 */
 
@@ -65,6 +65,9 @@ class _DngHomePageState extends State<DngHomePage> {
   String? _filePath;
   String? _error;
   bool _decoding = false;
+  // Separate flag for save-screenshot operation so it does not affect
+  // the image-area overlay or the Open-file button (W2-3).
+  bool _saving = false;
 
   // Timing info
   double _decodeMs = 0;
@@ -107,9 +110,10 @@ class _DngHomePageState extends State<DngHomePage> {
       _filePath = path;
     });
 
-    // Attempt to extract the fast preview JPEG first
+    // Attempt to extract the fast preview JPEG first — runs on a worker
+    // isolate so the UI can render the spinner frame before the FFI call.
     try {
-      final preview = _decoder.getPreviewJpeg(path);
+      final preview = await _decoder.getPreviewJpegOnWorker(path);
       if (preview != null) {
         setState(() {
           _previewBytes = preview;
@@ -154,7 +158,9 @@ class _DngHomePageState extends State<DngHomePage> {
   Future<void> _saveScreenshot() async {
     if (_image == null) return;
 
-    setState(() => _decoding = true);
+    // Use _saving (not _decoding) so the full-image display stays visible
+    // and the Open-file button is not disabled during the save operation.
+    setState(() => _saving = true);
     try {
       final uiImage = await dngImageToUiImage(_image!);
       final byteData = await uiImage.toByteData(format: ui.ImageByteFormat.png);
@@ -178,7 +184,7 @@ class _DngHomePageState extends State<DngHomePage> {
         );
       }
     } finally {
-      if (mounted) setState(() => _decoding = false);
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -193,7 +199,9 @@ class _DngHomePageState extends State<DngHomePage> {
             IconButton(
               icon: const Icon(Icons.save_alt),
               tooltip: 'Save Screenshot',
-              onPressed: _decoding ? null : _saveScreenshot,
+              // Disable while decoding (image about to change) or while
+              // a save is already in progress.
+              onPressed: (_decoding || _saving) ? null : _saveScreenshot,
             ),
           IconButton(
             icon: const Icon(Icons.folder_open),

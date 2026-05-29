@@ -19,8 +19,8 @@ modules:
     description: "worker isolate 回傳 Dart-owned RGBA bytes 的容器"
     lines: "67-91"
   - name: "DngDecoderService"
-    description: "Native 方法調用，處理 Dart 端 ByteBuffer 複製與記憶體釋放"
-    lines: "93-333"
+    description: "Native 方法調用，處理 Dart 端 ByteBuffer 複製與記憶體釋放；包含 getPreviewJpegOnWorker（preview isolate 化）"
+    lines: "93-377"
 ---
 */
 
@@ -179,6 +179,28 @@ class DngDecoderService {
       calloc.free(outBuffer);
       calloc.free(outSize);
     }
+  }
+
+  /// Extracts the embedded JPEG preview from the DNG file on a worker isolate,
+  /// so the UI isolate is not blocked during the native FFI call.
+  ///
+  /// Internally delegates to [getPreviewJpeg] running inside a fresh
+  /// worker isolate. The resulting bytes are already Dart-owned [Uint8List]
+  /// when returned — no native pointer crosses isolate boundaries.
+  ///
+  /// Returns null if extraction fails.
+  Future<Uint8List?> getPreviewJpegOnWorker(String filePath) {
+    return Isolate.run(() => _extractPreviewJpegOnWorker(filePath));
+  }
+
+  /// Worker-isolate entry point for preview JPEG extraction.
+  /// Creates a fresh [DngDecoderService], calls the synchronous
+  /// [getPreviewJpeg] (which already copies native bytes into Dart-owned
+  /// [Uint8List] before returning), and returns those bytes.
+  /// Static so [Isolate.run] does not accidentally capture parent-isolate state.
+  static Uint8List? _extractPreviewJpegOnWorker(String filePath) {
+    final service = DngDecoderService()..initialize();
+    return service.getPreviewJpeg(filePath);
   }
 
   /// Decode a DNG file and return the processed RGBA image.
