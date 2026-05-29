@@ -695,9 +695,8 @@ def main() -> int:
         "--artifact-dir",
         default="",
         help=(
-            "Directory for test_decode intermediate raw outputs. Defaults to "
-            "<output-stem>_artifacts when --output is set, otherwise "
-            "decode_matrix_artifacts under the repo root."
+            "Directory for test_decode intermediate raw outputs. "
+            "Defaults to <repo_root>/artifacts."
         ),
     )
     ap.add_argument(
@@ -741,14 +740,8 @@ def main() -> int:
         artifact_dir = Path(args.artifact_dir)
         if not artifact_dir.is_absolute():
             artifact_dir = (root / artifact_dir).resolve()
-    elif args.output:
-        output_path = Path(args.output)
-        if not output_path.is_absolute():
-            output_path = (root / output_path).resolve()
-        artifact_dir = output_path.with_suffix("")
-        artifact_dir = artifact_dir.parent / f"{artifact_dir.name}_artifacts"
     else:
-        artifact_dir = root / "decode_matrix_artifacts"
+        artifact_dir = root / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Intermediate artifacts: {artifact_dir}")
 

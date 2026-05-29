@@ -9,6 +9,9 @@
 *.ppm
 *.pgm
 
+# Matrix test intermediate artifacts
+/artifacts/
+
 # Python / Env
 .venv/
 __pycache__/
