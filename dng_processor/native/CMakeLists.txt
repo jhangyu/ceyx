@@ -117,6 +117,21 @@ option(DNG_ENABLE_WARP_PRECOMPUTED_DIAG
        "Build & link the rectilinear_warp_precomputed diagnostic oracle (off by default)"
        OFF)
 
+option(DNG_DIAGNOSTIC_BUILD
+       "Build deprecated research generators (DngWarpStrictFloatGenerator, DngWarpDebugGenerator) for diagnostics"
+       OFF)
+
+# Research & diagnostic generators (only built if DNG_DIAGNOSTIC_BUILD=ON)
+if(DNG_DIAGNOSTIC_BUILD)
+    add_executable(dng_warp_strict_float_generator ${SRC_DIR}/research/DngWarpStrictFloatGenerator.cpp)
+    target_include_directories(dng_warp_strict_float_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_warp_strict_float_generator PRIVATE Halide::Generator)
+
+    add_executable(dng_warp_debug_generator ${SRC_DIR}/research/DngWarpDebugGenerator.cpp)
+    target_include_directories(dng_warp_debug_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_warp_debug_generator PRIVATE Halide::Generator)
+endif()
+
 add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
 target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
 target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
@@ -234,6 +249,10 @@ add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
 add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
+# CRITICAL: dng_pipeline.a MUST be linked (it is the only AOT without -no_runtime,
+# providing Halide Metal runtime symbols: _halide_copy_to_device, _halide_malloc,
+# _halide_metal_run, etc.). Removing it causes undefined symbol linker errors.
+# All other AOT kernels use -no_runtime and depend on dng_pipeline.a for runtime.
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
 target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
