@@ -32,3 +32,7 @@ preview_out.jpg
 
 # Ralph loop
 .sisyphus/
+
+# W7-7 (TD-19): diagnostic/one-off scripts directory; not for tracking
+# Run `git rm --cached dng_processor/native/scripts/tmp/` to untrack existing entries
+dng_processor/native/scripts/tmp/

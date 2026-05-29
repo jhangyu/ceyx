@@ -1,0 +1,3 @@
+adobe_dng_sdk: vendored fork
+upstream: Adobe DNG SDK 1.7.1
+fork_rationale: see docs/architecture/ADR_002_CustomDngSdkFork.md

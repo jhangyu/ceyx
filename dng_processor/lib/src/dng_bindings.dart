@@ -177,15 +177,47 @@ class DngNativeBindings {
     if (Platform.isMacOS) {
       final execDir = File(Platform.resolvedExecutable).parent.path;
       final home = Platform.environment['HOME'] ?? '/tmp';
+
+      // W7-6 (TD-18): dylib loader path 3/4 hardened.
+      // Priority:
+      //   1. System default (DYLD_LIBRARY_PATH) — no path prefix needed
+      //   2. App bundle Frameworks/ — production distribution
+      //   3. DNG_NATIVE_BUILD_DIR env override — CI / custom build directories
+      //   4. Platform.script-relative — dart run from repo root (e.g. dart run bin/*)
+      //   5. last-resort dev path — hardcoded fallback for local dev at HOME/project/...
+
+      // Resolve paths 4a/4b relative to the script entry point (repo layout).
+      final scriptDir = Platform.script.toFilePath(windows: false);
+      final scriptParent = File(scriptDir).parent.path;
+      // When running `dart run bin/benchmark_*.dart` the script is at
+      // <repo>/dng_processor/bin/benchmark_*.dart → parent = dng_processor/bin
+      // so ../../native/build reaches dng_processor/native/build.
+      final scriptRelativeDist =
+          File('$scriptParent/../../native/dist/libdng_decoder_native.dylib')
+              .path;
+      final scriptRelativeBuild =
+          File('$scriptParent/../../native/build/libdng_decoder_native.dylib')
+              .path;
+
+      // DNG_NATIVE_BUILD_DIR env override (path to the CMake build directory).
+      final nativeBuildDir =
+          Platform.environment['DNG_NATIVE_BUILD_DIR'];
+
       lib = _openFirst([
         // 1. System default (DYLD_LIBRARY_PATH)
         'libdng_decoder_native.dylib',
         // 2. App bundle Frameworks directory
         '$execDir/../Frameworks/libdng_decoder_native.dylib',
-        // 3. Development: shallow published artifact.
-        '$home/project/flutter_dng_decoder/dng_processor/dist/libdng_decoder_native.dylib',
-        // 4. Development: CMake build cache artifact.
-        '$home/project/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib',
+        // 3. Env override: DNG_NATIVE_BUILD_DIR (CI / custom build dir)
+        if (nativeBuildDir != null)
+          '$nativeBuildDir/libdng_decoder_native.dylib',
+        // 4a. Script-relative: dist artifact (dart run scenario)
+        scriptRelativeDist,
+        // 4b. Script-relative: CMake build cache (dart run scenario)
+        scriptRelativeBuild,
+        // 5. last-resort dev path (HOME-relative, works for standard checkout)
+        '$home/project/flutter_dng_decoder/dng_processor/dist/libdng_decoder_native.dylib', // last-resort dev path
+        '$home/project/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib', // last-resort dev path
       ]);
     } else if (Platform.isWindows) {
       lib = ffi.DynamicLibrary.open('dng_decoder_native.dll');

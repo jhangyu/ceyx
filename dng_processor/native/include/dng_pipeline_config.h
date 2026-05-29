@@ -24,14 +24,21 @@
 //        Envs: DNG_STAGE1_TIMING (ConcurrentDngHost.h),
 //              DNG_MAP_POLY_TIMING (dng_opcodelist2_halide.cpp),
 //              DNG_STAGE2_OL2_PREWARM (route/diagnostic hybrid; gates the
-//              Stage 2 Metal pre-warm shot — leave ON in production),
+//              Stage 2 Metal pre-warm shot — leave ON in production. Read
+//              at ol2_prewarm_enabled() in dng_opcodelist2_halide.cpp; the
+//              actual prewarm dispatch happens in
+//              dng_pipeline_v2.cpp::dng_pipeline_v2_decode_to_rgb just
+//              before BuildStage2Image (see W6-6 / TD-29)),
 //              DNG_STAGE2_SDK_TIMING (vendor — read in
 //              third_party/dng_sdk/source/, NOT modified here).
 //   3. ResearchConfig:
 //        Deprecated / experimental flags retained for A/B parity research.
 //        Do NOT consult in production paths; default builds compile these out
 //        unless their dedicated diagnostic CMake option is enabled.
-//        Envs: DNG_WARP_PRECOMPUTED_COORDS (dng_warp_halide.cpp).
+//        Envs: DNG_WARP_PRECOMPUTED_COORDS (research-only switch consumed by
+//              the precomputed-coords WarpRectilinear AOT path in
+//              src/research/; see Phase 8.1.6 D-1 / Gotcha #51. Production
+//              builds must NOT depend on this — registry-only since W6-6).
 //
 // Notes:
 //   * Diagnostic and Research envs are intentionally NOT loaded by

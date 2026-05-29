@@ -15,16 +15,23 @@ def print_dependency_hints(native_dir: Path, build_dir: Path, last_step: str) ->
     cmake_file = native_dir / "CMakeLists.txt"
     print(f"[HINT] Check: {cmake_file}", file=sys.stderr)
 
+    import re as _re
+    # W5-6 / TD-25: step_map now uses regex patterns so partial / reworded
+    # AOT step names still match correctly.
     step_map = [
-        ("Rectilinear Warp", "dng_warp_aot_target"),
-        ("Stage4 Render", "dng_render_aot_target"),
-        ("Stage4 No-Map Render", "dng_render_nomap_aot_target"),
-        ("Stage4 Maps-NoEncoding Render", "dng_render_maps_noencode_aot_target"),
-        ("Stage4 Tail Render", "dng_render_tail_aot_target"),
-        ("Stage4 Tone+Tail Render", "dng_render_tonetail_aot_target"),
+        (_re.compile(r"Rectilinear Warp", _re.IGNORECASE), "dng_warp_aot_target"),
+        (_re.compile(r"Stage4.*Render|Halide AOT Stage4", _re.IGNORECASE), "dng_render_aot_target"),
+        (_re.compile(r"No-?Map Render", _re.IGNORECASE), "dng_render_nomap_aot_target"),
+        (_re.compile(r"Maps.*NoEncod|Maps-?NoEncoding", _re.IGNORECASE), "dng_render_maps_noencode_aot_target"),
+        (_re.compile(r"Tail Render", _re.IGNORECASE), "dng_render_tail_aot_target"),
+        (_re.compile(r"Tone.*Tail|ToneTail", _re.IGNORECASE), "dng_render_tonetail_aot_target"),
+        (_re.compile(r"Demosaic.*Warp|fused.*demosaic", _re.IGNORECASE), "dng_demosaic_warp_aot_target"),
+        (_re.compile(r"Demosaic Bilinear|demosaic_bilinear", _re.IGNORECASE), "dng_demosaic_aot_target"),
+        (_re.compile(r"Polynomial3|polynomial3", _re.IGNORECASE), "dng_opcode_polynomial3_aot_target"),
+        (_re.compile(r"Polynomial|OpcodePolynomial", _re.IGNORECASE), "dng_opcode_polynomial_aot_target"),
     ]
-    for marker, target in step_map:
-        if marker in last_step:
+    for pattern, target in step_map:
+        if pattern.search(last_step):
             build_make = build_dir / "CMakeFiles" / f"{target}.dir" / "build.make"
             print(f"[HINT] Check generated rule: {build_make}", file=sys.stderr)
             return
@@ -111,6 +118,15 @@ def run_with_watchdog(cmd: list[str], cwd: Path, idle_timeout_sec: int, native_d
                 "(OUTPUT/DEPENDS/target wiring).",
                 file=sys.stderr,
             )
+            # W5-6 / TD-25: dump last 20 lines for easier diagnosis
+            recent_snapshot = list(recent_lines)[-20:]
+            if recent_snapshot:
+                print(
+                    f"[ERROR] Last {len(recent_snapshot)} output lines before timeout:",
+                    file=sys.stderr,
+                )
+                for dump_line in recent_snapshot:
+                    print(f"  | {dump_line}", file=sys.stderr)
             print_dependency_hints(native_dir, build_dir, suspected_step)
             print_known_issue_hints(list(recent_lines), suspected_step)
             proc.kill()

@@ -51,9 +51,10 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
   result->decode_ms = pipeline.decode_ms;
   result->process_ms = pipeline.process_ms;
 
-  std::cerr << "[FFI] Success: " << pipeline.width << "x" << pipeline.height
-            << " decode=" << result->decode_ms
-            << "ms process=" << result->process_ms << "ms\n";
+  // [FFI] Success stderr removed (W6-5 / TD-23): timing fields on result
+  // struct are sufficient; always-on stderr polluted Xcode console and
+  // CI timing parsers. Re-enable via DiagnosticConfig in the future if
+  // a dedicated debug channel is needed.
   return result;
 }
 

@@ -1,21 +1,7 @@
 #include "Halide.h"
+#include "dng_halide_utils.h"
 
 using namespace Halide;
-
-namespace {
-
-Expr cubic_weight(Expr x) {
-    const float a = -0.75f;
-    x = abs(x);
-    return select(x >= 2.0f, 0.0f,
-                  x >= 1.0f, (((a * x - 5.0f * a) * x + 8.0f * a) * x - 4.0f * a),
-                  (((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f));
-}
-
-constexpr int kResampleSubsampleBits2D = 5;
-constexpr int kResampleSubsampleCount2D = 1 << kResampleSubsampleBits2D;
-
-}  // namespace
 
 class RectilinearWarp : public Halide::Generator<RectilinearWarp> {
 public:

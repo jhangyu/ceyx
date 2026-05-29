@@ -1,44 +1,7 @@
 #include "Halide.h"
+#include "dng_halide_utils.h"
 
 using namespace Halide;
-
-namespace {
-
-Expr positive_modulo(Expr v, Expr m) {
-    return ((v % m) + m) % m;
-}
-
-Expr map_repeat_coord(Expr coord, Expr size) {
-    Expr repeat = min(Expr(2), size);
-    Expr start = size - repeat;
-    return select(coord < 0,
-                  positive_modulo(coord, repeat),
-                  coord >= size,
-                  start + positive_modulo(coord - start, repeat),
-                  coord);
-}
-
-Expr avg2_u16(Expr a, Expr b) {
-    return cast<uint16_t>((cast<uint32_t>(a) + cast<uint32_t>(b) + cast<uint32_t>(1)) >> 1);
-}
-
-Expr avg4_u16(Expr a, Expr b, Expr c, Expr d) {
-    Expr total = cast<uint32_t>(a) + cast<uint32_t>(b) + cast<uint32_t>(c) + cast<uint32_t>(d);
-    return cast<uint16_t>((total + cast<uint32_t>(2)) >> 2);
-}
-
-Expr cubic_weight(Expr x) {
-    const float a = -0.75f;
-    x = abs(x);
-    return select(x >= 2.0f, 0.0f,
-                  x >= 1.0f, (((a * x - 5.0f * a) * x + 8.0f * a) * x - 4.0f * a),
-                  (((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f));
-}
-
-constexpr int kResampleSubsampleBits2D = 5;
-constexpr int kResampleSubsampleCount2D = 1 << kResampleSubsampleBits2D;
-
-}  // namespace
 
 class DngDemosaicWarp : public Halide::Generator<DngDemosaicWarp> {
 public:

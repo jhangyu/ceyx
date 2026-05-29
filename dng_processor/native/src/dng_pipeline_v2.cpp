@@ -628,7 +628,7 @@ bool runHalideStage3And4Fused(dng_host &host,
   bool stage4Ok = false;
   if (deviceBuf) {
     stage4Ok = render_stage4_halide_from_device_buffer(
-        host, negative, renderer, deviceBuf, srcScale,
+        host, negative, renderer, deviceBuf, srcScale, config,
         rgb_ptr, rgb_size, outW, outH);
   }
 
@@ -703,9 +703,12 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
 
   bool ok = render_stage4_halide(host, negative, renderer,
                                  RenderHalideMode::HALIDE_METAL,
+                                 config,
                                  rgb_ptr, rgb_size, outW, outH);
   if (ok)
     return true;
+
+  std::cerr << "[PipelineV2] Stage4 Halide Metal failed; falling back to SDK render\n";
 
   // SDK fallback: renderer.Render() may produce a different output size.
   // Acquire a fresh pool buffer at the fallback size if needed.
@@ -778,7 +781,7 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
 
   const float srcScale = 1.0f / static_cast<float>(handoff.pixel_range);
   const bool ok = render_stage4_halide_from_device_buffer(
-      host, negative, renderer, handoff.device_buffer, srcScale,
+      host, negative, renderer, handoff.device_buffer, srcScale, config,
       rgb_ptr, rgb_size, outW, outH);
   if (ok) {
     halide_stage2_ol2_clear_device_handoff();

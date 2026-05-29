@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.14)
 project(dng_decoder_native VERSION 1.0.0 LANGUAGES CXX C)
 
+# W7-2 (TD-4): Halide vendor version pin.
+# See third_party/halide/VERSION for full provenance and ABI notes.
+# Changing Halide version requires full AOT artifact regen (schedule ABI is not stable).
+message(STATUS "Halide vendored: 21.0.0 (see third_party/halide/VERSION)")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -21,15 +26,67 @@ endif()
 
 find_package(ZLIB REQUIRED)
 
-# Use libjpeg-turbo for SIMD-accelerated JPEG decoding
-find_library(TURBOJPEG_LIBRARY NAMES turbojpeg PATHS /opt/homebrew/opt/jpeg-turbo/lib NO_DEFAULT_PATH)
+# W7-1 (TD-3): libjpeg-turbo cross-platform finder.
+# Priority order:
+#   1. CMake config package (Homebrew, vcpkg, system install with cmake/ dir)
+#   2. pkg-config (Linux CI, Debian/Ubuntu libturbojpeg-dev)
+#   3. Manual fallback: macOS arm64 /opt/homebrew, macOS Intel /usr/local/opt
+# Requires version >=3.0 for API stability.
+find_package(PkgConfig QUIET)
+
+set(TURBOJPEG_LIBRARY "")
+set(TURBOJPEG_INCLUDE_DIRS "")
+
+# Stage 1: CMake config (preferred — gives imported target libjpeg-turbo::turbojpeg-static)
+find_package(libjpeg-turbo 3.0 CONFIG QUIET
+    HINTS
+        /opt/homebrew/opt/jpeg-turbo/lib/cmake/libjpeg-turbo
+        /usr/local/opt/jpeg-turbo/lib/cmake/libjpeg-turbo
+)
+if(libjpeg-turbo_FOUND)
+    set(TURBOJPEG_LIBRARY libjpeg-turbo::turbojpeg-static)
+    get_target_property(TURBOJPEG_INCLUDE_DIRS libjpeg-turbo::turbojpeg-static INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "Found libjpeg-turbo via CMake config: version=${libjpeg-turbo_VERSION} includes=${TURBOJPEG_INCLUDE_DIRS}")
+endif()
+
+# Stage 2: pkg-config fallback (Linux CI / system install without cmake/ dir)
+if(NOT TURBOJPEG_LIBRARY AND PkgConfig_FOUND)
+    pkg_check_modules(JPEG_TURBO QUIET libturbojpeg>=3.0)
+    if(JPEG_TURBO_FOUND)
+        set(TURBOJPEG_LIBRARY ${JPEG_TURBO_LIBRARIES})
+        set(TURBOJPEG_INCLUDE_DIRS ${JPEG_TURBO_INCLUDE_DIRS})
+        message(STATUS "Found libjpeg-turbo via pkg-config: version=${JPEG_TURBO_VERSION} lib=${TURBOJPEG_LIBRARY}")
+    endif()
+endif()
+
+# Stage 3: manual path fallback (macOS without cmake/ or pkg-config)
+if(NOT TURBOJPEG_LIBRARY)
+    if(APPLE)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+            set(_JPEG_TURBO_HINT_PATHS /opt/homebrew/opt/jpeg-turbo/lib)
+        else()
+            set(_JPEG_TURBO_HINT_PATHS /usr/local/opt/jpeg-turbo/lib)
+        endif()
+        find_library(_TURBOJPEG_LIB_MANUAL NAMES turbojpeg
+            PATHS ${_JPEG_TURBO_HINT_PATHS}
+            NO_DEFAULT_PATH)
+        if(_TURBOJPEG_LIB_MANUAL)
+            set(TURBOJPEG_LIBRARY ${_TURBOJPEG_LIB_MANUAL})
+            # Derive include dir from lib path (lib → include, same prefix)
+            get_filename_component(_JPEG_TURBO_PREFIX ${_TURBOJPEG_LIB_MANUAL} DIRECTORY)
+            set(TURBOJPEG_INCLUDE_DIRS "${_JPEG_TURBO_PREFIX}/../include")
+            message(STATUS "Found libjpeg-turbo via manual path: ${TURBOJPEG_LIBRARY}")
+        endif()
+    endif()
+endif()
+
 if(TURBOJPEG_LIBRARY)
-    message(STATUS "Found TurboJPEG: ${TURBOJPEG_LIBRARY}")
-    set(TURBOJPEG_INCLUDE_DIRS "/opt/homebrew/opt/jpeg-turbo/include")
     add_compile_definitions(USE_LIBJPEG_TURBO=1)
 else()
     find_package(JPEG REQUIRED)
-    message(WARNING "TurboJPEG not found, lossless JPEG acceleration disabled")
+    message(WARNING "libjpeg-turbo >=3.0 not found (tried CMake config, pkg-config, manual paths). "
+        "Falling back to system JPEG — SIMD acceleration disabled. "
+        "Install: brew install jpeg-turbo  OR  apt install libturbojpeg-dev")
 endif()
 
 # Adobe DNG SDK
@@ -57,6 +114,10 @@ endif()
 
 # Native library
 file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
+# W7-4 (TD-17): Exclude entire research/ subdirectory from production dylib.
+# Complements the Generator filter below — any new WarpUtils.cpp or helper
+# placed under src/research/ is automatically excluded without updating regex.
+list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/research/.*")
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp$")
 list(APPEND NATIVE_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_mosaic_halide.cpp"
@@ -279,6 +340,42 @@ if(APPLE)
 endif()
 
 
+# W5-4 / TD-2: Device handoff path independent test.
+# Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
+# handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.
+# NOTE: dng_pipeline.a provides Halide Metal runtime symbols (Gotcha #79, #64):
+#   all other -no_runtime AOT kernels link against it for halide_metal_run etc.
+add_executable(test_device_handoff tests/test_device_handoff.cpp
+    src/dng_pipeline_v2.cpp
+    src/dng_opcodelist2_halide.cpp
+    dng_sdk_custom/source/dng_mosaic_halide.cpp
+    dng_sdk_custom/source/dng_warp_halide.cpp
+    dng_sdk_custom/source/dng_render_halide.cpp)
+target_include_directories(test_device_handoff PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+if(TURBOJPEG_LIBRARY)
+    target_include_directories(test_device_handoff PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${TURBOJPEG_LIBRARY})
+else()
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+endif()
+add_dependencies(test_device_handoff dng_halide_aot_target)
+add_dependencies(test_device_handoff dng_demosaic_aot_target)
+add_dependencies(test_device_handoff dng_demosaic_warp_aot_target)
+add_dependencies(test_device_handoff dng_warp_aot_target)
+add_dependencies(test_device_handoff dng_render_aot_target)
+add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
+add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_device_handoff ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
 # Color accuracy / visual regression test
 add_executable(test_color_accuracy tests/test_color_accuracy.cpp)
 target_include_directories(test_color_accuracy PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
@@ -355,7 +452,11 @@ target_include_directories(test_mosaic_halide PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+# W7-5 (TD-27): dng_pipeline.a is the Halide Metal runtime anchor (no -no_runtime).
+# Without it, -no_runtime AOT kernels (rectilinear_warp, dng_demosaic_bilinear)
+# fail to link with undefined Metal runtime symbols on Halide upgrades.
+target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_mosaic_halide dng_halide_aot_target)
 add_dependencies(test_mosaic_halide dng_warp_aot_target)
 add_dependencies(test_mosaic_halide dng_demosaic_aot_target)
 if(APPLE)
@@ -371,7 +472,9 @@ target_include_directories(test_mosaic_debug PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+# W7-5 (TD-27): same runtime anchor as test_mosaic_halide above.
+target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_mosaic_debug dng_halide_aot_target)
 add_dependencies(test_mosaic_debug dng_warp_aot_target)
 add_dependencies(test_mosaic_debug dng_demosaic_aot_target)
 if(APPLE)

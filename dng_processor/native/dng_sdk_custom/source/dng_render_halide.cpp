@@ -122,6 +122,34 @@ namespace {
 
 using Halide::Runtime::Buffer;
 
+// W6-2 / TD-20: shared output size computation used by all four
+// render_stage4_halide overloads.  Mirrors the MaximumSize / AspectRatio
+// clamp logic that was previously duplicated verbatim at four call sites.
+// Pure refactor — must remain bit-exact.
+dng_point computeOutputSize(const dng_negative& negative,
+                            const dng_render& renderer) {
+    dng_point dst_size;
+    dst_size.h = static_cast<int32>(negative.DefaultFinalWidth());
+    dst_size.v = static_cast<int32>(negative.DefaultFinalHeight());
+    if (renderer.MaximumSize()) {
+        if (Max_uint32(static_cast<uint32>(dst_size.h),
+                       static_cast<uint32>(dst_size.v)) >
+            renderer.MaximumSize()) {
+            const real64 ratio = negative.AspectRatio();
+            if (ratio >= 1.0) {
+                dst_size.h = static_cast<int32>(renderer.MaximumSize());
+                dst_size.v = static_cast<int32>(Max_uint32(1,
+                    Round_uint32(static_cast<real64>(dst_size.h) / ratio)));
+            } else {
+                dst_size.v = static_cast<int32>(renderer.MaximumSize());
+                dst_size.h = static_cast<int32>(Max_uint32(1,
+                    Round_uint32(static_cast<real64>(dst_size.v) * ratio)));
+            }
+        }
+    }
+    return dst_size;
+}
+
 struct RenderParams {
     dng_vector camera_white_vec;
     dng_matrix camera_to_rgb_mat;
@@ -799,27 +827,11 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
                                 dng_image* stage3,
                                 const dng_render& renderer,
+                                const PipelineConfig& config,
                                 std::vector<uint8_t>& out_rgb,
                                 uint32_t& out_w,
                                 uint32_t& out_h) {
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
-
-    dng_point dst_size;
-    dst_size.h = negative.DefaultFinalWidth();
-    dst_size.v = negative.DefaultFinalHeight();
-    if (renderer.MaximumSize()) {
-        if (Max_uint32(static_cast<uint32>(dst_size.h), static_cast<uint32>(dst_size.v)) >
-            renderer.MaximumSize()) {
-            const real64 ratio = negative.AspectRatio();
-            if (ratio >= 1.0) {
-                dst_size.h = renderer.MaximumSize();
-                dst_size.v = Max_uint32(1, Round_uint32(dst_size.h / ratio));
-            } else {
-                dst_size.v = renderer.MaximumSize();
-                dst_size.h = Max_uint32(1, Round_uint32(dst_size.v * ratio));
-            }
-        }
-    }
+    const dng_point dst_size = computeOutputSize(negative, renderer);
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
@@ -932,28 +944,12 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
                                 dng_image* stage3,
                                 const dng_render& renderer,
+                                const PipelineConfig& config,
                                 uint8_t* out_rgb_ptr,
                                 size_t out_rgb_size,
                                 uint32_t& out_w,
                                 uint32_t& out_h) {
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
-
-    dng_point dst_size;
-    dst_size.h = negative.DefaultFinalWidth();
-    dst_size.v = negative.DefaultFinalHeight();
-    if (renderer.MaximumSize()) {
-        if (Max_uint32(static_cast<uint32>(dst_size.h), static_cast<uint32>(dst_size.v)) >
-            renderer.MaximumSize()) {
-            const real64 ratio = negative.AspectRatio();
-            if (ratio >= 1.0) {
-                dst_size.h = renderer.MaximumSize();
-                dst_size.v = Max_uint32(1, Round_uint32(dst_size.h / ratio));
-            } else {
-                dst_size.v = renderer.MaximumSize();
-                dst_size.h = Max_uint32(1, Round_uint32(dst_size.v * ratio));
-            }
-        }
-    }
+    const dng_point dst_size = computeOutputSize(negative, renderer);
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
@@ -1077,6 +1073,7 @@ bool render_stage4_halide(dng_host& host,
                           dng_negative& negative,
                           const dng_render& renderer,
                           RenderHalideMode mode,
+                          const PipelineConfig& config,
                           std::vector<uint8_t>& out_rgb,
                           uint32_t& out_w,
                           uint32_t& out_h) {
@@ -1093,6 +1090,7 @@ bool render_stage4_halide(dng_host& host,
                                       negative,
                                       stage3,
                                       renderer,
+                                      config,
                                       out_rgb,
                                       out_w,
                                       out_h);
@@ -1103,6 +1101,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               const dng_render& renderer,
                                               halide_buffer_t* stage3_device_buf,
                                               float src_scale,
+                                              const PipelineConfig& config,
                                               std::vector<uint8_t>& out_rgb,
                                               uint32_t& out_w,
                                               uint32_t& out_h) {
@@ -1110,26 +1109,8 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
-    // Compute output size (mirrors runHalideFullOrSdkFallback logic).
-    dng_point dst_size;
-    dst_size.h = static_cast<int32>(negative.DefaultFinalWidth());
-    dst_size.v = static_cast<int32>(negative.DefaultFinalHeight());
-    if (renderer.MaximumSize()) {
-        const uint32 max_dim = Max_uint32(static_cast<uint32>(dst_size.h),
-                                          static_cast<uint32>(dst_size.v));
-        if (max_dim > renderer.MaximumSize()) {
-            const real64 ratio = negative.AspectRatio();
-            if (ratio >= 1.0) {
-                dst_size.h = static_cast<int32>(renderer.MaximumSize());
-                dst_size.v = static_cast<int32>(Max_uint32(1,
-                    Round_uint32(static_cast<real64>(dst_size.h) / ratio)));
-            } else {
-                dst_size.v = static_cast<int32>(renderer.MaximumSize());
-                dst_size.h = static_cast<int32>(Max_uint32(1,
-                    Round_uint32(static_cast<real64>(dst_size.v) * ratio)));
-            }
-        }
-    }
+    // W6-2 / TD-20: shared dst_size helper (mirrors runHalideFullOrSdkFallback).
+    const dng_point dst_size = computeOutputSize(negative, renderer);
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
@@ -1144,7 +1125,6 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         out_rgb.resize(needed);
     }
 
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
     RenderParams params;
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;
@@ -1197,6 +1177,7 @@ bool render_stage4_halide(dng_host& host,
                           dng_negative& negative,
                           const dng_render& renderer,
                           RenderHalideMode mode,
+                          const PipelineConfig& config,
                           uint8_t* out_rgb_ptr,
                           size_t out_rgb_size,
                           uint32_t& out_w,
@@ -1237,6 +1218,7 @@ bool render_stage4_halide(dng_host& host,
                                       negative,
                                       stage3,
                                       renderer,
+                                      config,
                                       out_rgb_ptr,
                                       out_rgb_size,
                                       out_w,
@@ -1248,6 +1230,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               const dng_render& renderer,
                                               halide_buffer_t* stage3_device_buf,
                                               float src_scale,
+                                              const PipelineConfig& config,
                                               uint8_t* out_rgb_ptr,
                                               size_t out_rgb_size,
                                               uint32_t& out_w,
@@ -1256,25 +1239,8 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
-    dng_point dst_size;
-    dst_size.h = static_cast<int32>(negative.DefaultFinalWidth());
-    dst_size.v = static_cast<int32>(negative.DefaultFinalHeight());
-    if (renderer.MaximumSize()) {
-        const uint32 max_dim = Max_uint32(static_cast<uint32>(dst_size.h),
-                                          static_cast<uint32>(dst_size.v));
-        if (max_dim > renderer.MaximumSize()) {
-            const real64 ratio = negative.AspectRatio();
-            if (ratio >= 1.0) {
-                dst_size.h = static_cast<int32>(renderer.MaximumSize());
-                dst_size.v = static_cast<int32>(Max_uint32(1,
-                    Round_uint32(static_cast<real64>(dst_size.h) / ratio)));
-            } else {
-                dst_size.v = static_cast<int32>(renderer.MaximumSize());
-                dst_size.h = static_cast<int32>(Max_uint32(1,
-                    Round_uint32(static_cast<real64>(dst_size.v) * ratio)));
-            }
-        }
-    }
+    // W6-2 / TD-20: shared dst_size helper.
+    const dng_point dst_size = computeOutputSize(negative, renderer);
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
@@ -1289,7 +1255,6 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
     RenderParams params;
     if (!buildRenderParams(host, negative, renderer, config, params)) {
         return false;

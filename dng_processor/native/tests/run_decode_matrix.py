@@ -815,6 +815,45 @@ def main() -> int:
     else:
         print(md)
 
+    # W5-3 / TD-10: Post-matrix PSNR gate.
+    # For Halide cases (non-SDK baselines) enforce per-stage minimum PSNR thresholds.
+    # Lossless: Stage1/2 ≥999, Stage3 ≥100, Stage4 ≥75.
+    # Lossy:    All stages ≥999 (SDK YCbCr passthrough Stage3, bit-exact Stage4).
+    _PSNR_THRESHOLDS = {
+        # (case_name_fragment, stage_attr): threshold_db
+        ("Lossless / Halide", "stage1"): 999.0,
+        ("Lossless / Halide", "stage2"): 999.0,
+        ("Lossless / Halide", "stage3"): 100.0,
+        ("Lossless / Halide", "stage4"): 75.0,
+        ("Lossy / Halide",    "stage1"): 999.0,
+        ("Lossy / Halide",    "stage2"): 999.0,
+        ("Lossy / Halide",    "stage3"): 999.0,
+        ("Lossy / Halide",    "stage4"): 999.0,
+    }
+    gate_failed = False
+    for r in agg_results:
+        for stage_attr in ("stage1", "stage2", "stage3", "stage4"):
+            for frag, s_attr in _PSNR_THRESHOLDS:
+                if frag in r.case_name and s_attr == stage_attr:
+                    threshold = _PSNR_THRESHOLDS[(frag, s_attr)]
+                    stage_result = getattr(r, stage_attr)
+                    psnr = stage_result.psnr_db
+                    if psnr is None:
+                        # PSNR not available (baseline case or missing baseline file)
+                        continue
+                    ok = psnr >= threshold
+                    marker = "PASS" if ok else "FAIL"
+                    print(
+                        f"[MATRIX PSNR GATE] {r.case_name} {stage_attr}: "
+                        f"{psnr:.2f} dB {'≥' if ok else '<'} {threshold} dB  [{marker}]"
+                    )
+                    if not ok:
+                        gate_failed = True
+
+    if gate_failed:
+        print("[MATRIX PSNR GATE] FAIL — one or more cases below threshold")
+        return 1
+
     return 0
 
 

@@ -1,34 +1,7 @@
 #include "Halide.h"
+#include "dng_halide_utils.h"
 
 using namespace Halide;
-
-namespace {
-
-Expr positive_modulo(Expr v, Expr m) {
-    return ((v % m) + m) % m;
-}
-
-Expr map_repeat_coord(Expr coord, Expr size) {
-    constexpr int kCfaRepeat = 2;
-    Expr repeat = min(Expr(kCfaRepeat), size);
-    Expr start = size - repeat;
-    return select(coord < 0,
-                  positive_modulo(coord, repeat),
-                  coord >= size,
-                  start + positive_modulo(coord - start, repeat),
-                  coord);
-}
-
-Expr avg2_u16(Expr a, Expr b) {
-    return cast<uint16_t>((cast<uint32_t>(a) + cast<uint32_t>(b) + cast<uint32_t>(1)) >> 1);
-}
-
-Expr avg4_u16(Expr a, Expr b, Expr c, Expr d) {
-    Expr total = cast<uint32_t>(a) + cast<uint32_t>(b) + cast<uint32_t>(c) + cast<uint32_t>(d);
-    return cast<uint16_t>((total + cast<uint32_t>(2)) >> 2);
-}
-
-}  // namespace
 
 class DngDemosaicBilinear : public Halide::Generator<DngDemosaicBilinear> {
 public:

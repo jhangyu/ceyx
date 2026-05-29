@@ -99,6 +99,7 @@ struct StagePSNR {
     double stage2_psnr = 0;
     double stage3_psnr = 0;
     double render_psnr = 0;
+    bool failed = false;  // true when testDNG aborted before PSNR was computed
 };
 
 void printBanner(const string& title) {
@@ -423,16 +424,19 @@ void extractImageData(dng_image* image, vector<uint16_t>& data, uint32_t& width,
 }
 
 // Stage-by-stage test for one DNG file
-void testDNG(dng_host& host,
-             const string& dngPath,
-             const string& prefix,
-             bool generateBaseline,
-             WarpRectilinearMode warpMode,
-             RenderHalideMode renderMode) {
+// Returns StagePSNR with failed=true if the test aborted before producing PSNR values.
+StagePSNR testDNG(dng_host& host,
+                  const string& dngPath,
+                  const string& prefix,
+                  bool generateBaseline,
+                  WarpRectilinearMode warpMode,
+                  RenderHalideMode renderMode) {
     printBanner(prefix + " DNG Decoding Test");
 
     StageTiming timing;
     StagePSNR psnr;
+    StagePSNR failedResult;
+    failedResult.failed = true;
 
     auto totalStart = high_resolution_clock::now();
 
@@ -449,13 +453,24 @@ void testDNG(dng_host& host,
 
         if (!info.IsValidDNG()) {
             cerr << "ERROR: Not a valid DNG file\n";
-            return;
+            return failedResult;
         }
 
         const dng_ifd& rawIFD = *info.fIFD[info.fMainIndex];
         uint32 width = rawIFD.fImageWidth;
         uint32 height = rawIFD.fImageLength;
         StageContract::DecodePath decodePath = StageContract::detectDecodePath(rawIFD.fPhotometricInterpretation);
+
+        // W5-2: derive prefix from photometric metadata; fallback to filename with warning
+        // CFA_BAYER == lossless Bayer; YCBCR / LINEAR_RAW_LOSSY == lossy path
+        const bool isLosslessPhotometric = (decodePath == StageContract::DecodePath::CFA_BAYER);
+        const string photometricPrefix = isLosslessPhotometric ? "lossless" : "lossy";
+        if (photometricPrefix != prefix) {
+            cerr << "WARNING: filename-derived prefix '" << prefix
+                 << "' does not match photometric-derived prefix '" << photometricPrefix
+                 << "'; using photometric prefix for baseline/test filenames.\n";
+        }
+        const string& filePrefix = photometricPrefix;
 
         cout << "Image: " << width << "x" << height << "\n";
         cout << "Photometric: " << photometricName(rawIFD.fPhotometricInterpretation)
@@ -504,16 +519,16 @@ void testDNG(dng_host& host,
             extractImageData(stage1Img, stage1Data, w, h, p, pt, ps);
             if (!StageContract::validateStageContract16("Stage1", decodePath, w, h, p, pt, ps, stage1Data.size())) {
                 cerr << "ERROR: Stage1 contract check failed\n";
-                return;
+                return failedResult;
             }
 
-            string filename = prefix + "_stage1_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+            string filename = filePrefix + "_stage1_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
             if (generateBaseline) {
                 saveRawFile(filename, stage1Data.data(), stage1Data.size() * sizeof(uint16_t));
                 cout << "  Saved baseline: " << filename << " (" << stage1Data.size() * 2 << " bytes)\n";
             } else {
                 vector<uint16_t> refData(stage1Data.size());
-                string refFilename = prefix + "_stage1_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+                string refFilename = filePrefix + "_stage1_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
                 if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
                     psnr.stage1_psnr = computePSNR_16bit(refData.data(), stage1Data.data(), stage1Data.size());
                     cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage1_psnr << " dB\n";
@@ -569,16 +584,16 @@ void testDNG(dng_host& host,
             extractImageData(stage2Img, stage2Data, w, h, p, pt, ps);
             if (!StageContract::validateStageContract16("Stage2", decodePath, w, h, p, pt, ps, stage2Data.size())) {
                 cerr << "ERROR: Stage2 contract check failed\n";
-                return;
+                return failedResult;
             }
 
-            string filename = prefix + "_stage2_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+            string filename = filePrefix + "_stage2_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
             if (generateBaseline) {
                 saveRawFile(filename, stage2Data.data(), stage2Data.size() * sizeof(uint16_t));
                 cout << "  Saved baseline: " << filename << " (" << stage2Data.size() * 2 << " bytes)\n";
             } else {
                 vector<uint16_t> refData(stage2Data.size());
-                string refFilename = prefix + "_stage2_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+                string refFilename = filePrefix + "_stage2_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
                 if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
                     psnr.stage2_psnr = computePSNR_16bit(refData.data(), stage2Data.data(), stage2Data.size());
                     cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage2_psnr << " dB\n";
@@ -629,7 +644,7 @@ void testDNG(dng_host& host,
             DngPipelineStage3Timing sharedTiming;
             if (!dng_pipeline_v2_run_stage3(host, *negative, true, &sharedTiming, &stage3Data)) {
                 cerr << "ERROR: shared PipelineV2 Stage3 failed\n";
-                return;
+                return failedResult;
             }
             timing.stage3_extract_stage2_ms = sharedTiming.extract_stage2_ms;
             timing.stage3_make_image_ms = sharedTiming.make_image_ms;
@@ -825,7 +840,7 @@ void testDNG(dng_host& host,
                 if (!applied && warpMode != WarpRectilinearMode::AUTO) {
                     cerr << "ERROR: WarpRectilinear " << warpRectilinearModeName(warpMode)
                          << " failed; refusing fallback to SDK in explicit mode\n";
-                    return;
+                    return failedResult;
                 }
                 fastWarpApplied = applied;
             }
@@ -857,7 +872,7 @@ void testDNG(dng_host& host,
                 auto stage3OpcodeStart = high_resolution_clock::now();
                 if (!applyOpcodeList3Custom(host, *negative, opcodeList3, warpMode, halideStage3, opcodeTimings)) {
                     cerr << "ERROR: applyOpcodeList3Custom failed\n";
-                    return;
+                    return failedResult;
                 }
                 auto stage3OpcodeEnd = high_resolution_clock::now();
                 timing.stage3_apply_opcode3_ms =
@@ -970,10 +985,10 @@ void testDNG(dng_host& host,
 
         if (!StageContract::validateStageContract16("Stage3", decodePath, s3w, s3h, s3p, s3pt, s3ps, stage3Elements)) {
             cerr << "ERROR: Stage3 contract check failed\n";
-            return;
+            return failedResult;
         }
 
-        string filename = prefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
+        string filename = filePrefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
         if (generateBaseline) {
             if (!stage3View && stage3StridedBase) {
                 copyFromStridedInterleaved16(stage3StridedBase,
@@ -990,7 +1005,7 @@ void testDNG(dng_host& host,
             cout << "  Saved baseline: " << filename << " (" << stage3Elements * 2 << " bytes)\n";
         } else {
             vector<uint16_t> refData(stage3Elements);
-            string refFilename = prefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
+            string refFilename = filePrefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
             if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
                 if (stage3View) {
                     psnr.stage3_psnr = computePSNR_16bit(refData.data(), stage3View, stage3Elements);
@@ -1055,7 +1070,7 @@ void testDNG(dng_host& host,
                 cout << "  [Render] Halide AUTO failed, falling back to SDK render\n";
             } else if (!renderOk) {
                 cerr << "ERROR: Stage4 Halide render failed in explicit mode\n";
-                return;
+                return failedResult;
             }
         }
 
@@ -1063,7 +1078,7 @@ void testDNG(dng_host& host,
             AutoPtr<dng_image> finalImage(renderer.Render());
             if (!finalImage.Get()) {
                 cerr << "ERROR: Stage4 SDK render failed\n";
-                return;
+                return failedResult;
             }
 
             outW = finalImage->Width();
@@ -1113,24 +1128,24 @@ void testDNG(dng_host& host,
                                                         1,
                                                         rgbData.size())) {
             cerr << "ERROR: Stage4 contract check failed\n";
-            return;
+            return failedResult;
         }
 
         // Save PPM
-        string ppmFilename = "output_" + prefix + "_" + to_string(outW) + "x" + to_string(outH) + ".ppm";
+        string ppmFilename = "output_" + filePrefix + "_" + to_string(outW) + "x" + to_string(outH) + ".ppm";
         ofstream fout(ppmFilename, ios::binary);
         fout << "P6\n" << outW << " " << outH << "\n255\n";
         fout.write(reinterpret_cast<const char*>(rgbData.data()), rgbData.size());
         cout << "  Saved PPM: " << ppmFilename << "\n";
 
         // PSNR for Render stage (8-bit)
-        string renderFilename = prefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
+        string renderFilename = filePrefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
         if (generateBaseline) {
             saveRawFile(renderFilename, rgbData.data(), rgbData.size());
             cout << "  Saved baseline: " << renderFilename << " (" << rgbData.size() << " bytes)\n";
         } else {
             vector<uint8_t> refData(rgbData.size());
-            string refFilename = prefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
+            string refFilename = filePrefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
             if (loadRawFile(refFilename, refData.data(), refData.size())) {
                 psnr.render_psnr = computePSNR_8bit(refData.data(), rgbData.data(), rgbData.size());
                 cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.render_psnr << " dB\n";
@@ -1196,9 +1211,12 @@ void testDNG(dng_host& host,
 
     } catch (const dng_exception& e) {
         cerr << "\nDNG Exception: " << e.ErrorCode() << "\n";
+        return failedResult;
     } catch (const std::exception& e) {
         cerr << "\nException: " << e.what() << "\n";
+        return failedResult;
     }
+    return psnr;
 }
 
 void printUsage(const char* programName) {
@@ -1260,6 +1278,25 @@ int main(int argc, char** argv) {
     const int repeat = envIntOrDefault("DNG_TEST_DECODE_REPEAT", 1);
     cout << "In-process repeat: " << repeat << "\n";
 
+    // PSNR gate thresholds (W5-1 / TD-1).
+    // Lossless (CFA_BAYER): Stage1/2 bit-exact ≥999dB; Stage3 ≥100dB; Stage4 ≥75dB.
+    // Lossy (YCbCr / LinearRaw): all stages bit-exact ≥999dB (SDK passthrough Stage3 + same render).
+    // Baseline mode skips gate (no PSNR is generated).
+    struct PsnrThresholds {
+        double stage1 = 999.0;
+        double stage2 = 999.0;
+        double stage3 = 100.0;
+        double stage4 = 75.0;
+    };
+    // isLossless is based on filename (fallback); photometric-based re-check happens inside testDNG
+    PsnrThresholds thresholds;
+    if (!isLossless) {
+        // Lossy: all stages must be bit-exact (999dB)
+        thresholds.stage3 = 999.0;
+        thresholds.stage4 = 999.0;
+    }
+
+    StagePSNR lastPsnr;
     try {
         constexpr uint32_t kOptimizedAreaThreads = 20;
         ConcurrentDngHost host(kOptimizedAreaThreads);
@@ -1272,7 +1309,11 @@ int main(int argc, char** argv) {
                 cout << "\n" << runLabel << "\n";
                 cout.flush();
             }
-            testDNG(host, dngPath, prefix, generateBaseline, warpMode, renderMode);
+            lastPsnr = testDNG(host, dngPath, prefix, generateBaseline, warpMode, renderMode);
+            if (lastPsnr.failed) {
+                cerr << "[PSNR GATE] testDNG aborted (failed=true); treating as FAIL\n";
+                return 1;
+            }
         }
     } catch (const dng_exception& e) {
         cerr << "\nDNG Exception: " << e.ErrorCode() << "\n";
@@ -1280,6 +1321,29 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         cerr << "\nException: " << e.what() << "\n";
         return 1;
+    }
+
+    // PSNR gate (only in test mode; baseline mode has no PSNR values to check)
+    if (!generateBaseline) {
+        bool gatePassed = true;
+        auto check = [&](const char* label, double actual, double threshold) {
+            const bool ok = (actual >= threshold);
+            cout << "[PSNR GATE] " << label << ": " << fixed << setprecision(2) << actual
+                 << " dB " << (ok ? ">=" : "<") << " " << threshold << " dB  ["
+                 << (ok ? "PASS" : "FAIL") << "]\n";
+            if (!ok) {
+                gatePassed = false;
+            }
+        };
+        check("Stage1", lastPsnr.stage1_psnr, thresholds.stage1);
+        check("Stage2", lastPsnr.stage2_psnr, thresholds.stage2);
+        check("Stage3", lastPsnr.stage3_psnr, thresholds.stage3);
+        check("Stage4", lastPsnr.render_psnr, thresholds.stage4);
+        if (!gatePassed) {
+            cerr << "[PSNR GATE] FAIL — one or more stages below threshold; exiting 1\n";
+            return 1;
+        }
+        cout << "[PSNR GATE] ALL PASS\n";
     }
 
     return 0;

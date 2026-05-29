@@ -279,6 +279,7 @@ def compute_psnr_per_channel_numpy(
     planes: int,
     pixel_size: int,
     layout: str,
+    threshold: float = 36.0,
 ) -> None:
     """用 numpy 計算整體 + per-channel PSNR/MAE/maxAbs，輸出詳細統計。"""
     import numpy as np
@@ -334,9 +335,8 @@ def compute_psnr_per_channel_numpy(
     print("-" * 70)
     print(f"{'Overall':<10} {overall_psnr_str} dB")
 
-    # Pass/Fail 判斷
+    # Pass/Fail 判斷（threshold 由 --min-psnr 傳入，預設 36.0dB 保向後相容）
     print()
-    threshold = 36.0
     passed = overall_psnr >= threshold or not math.isfinite(overall_psnr)
     status = "PASS" if passed else "FAIL"
     marker = "✅" if passed else "❌"
@@ -348,6 +348,7 @@ def compute_psnr_fallback(
     data_a: bytes,
     data_b: bytes,
     pixel_size: int,
+    threshold: float = 36.0,
 ) -> None:
     """純 Python fallback（無 numpy）。僅計算整體 PSNR，無 per-channel 統計。"""
     max_val = float(PSNR_MAX_VAL[pixel_size])
@@ -366,7 +367,6 @@ def compute_psnr_fallback(
     psnr_str = f"{psnr:.2f}" if math.isfinite(psnr) else "999.00"
 
     print(f"\n  PSNR: {psnr_str} dB  (numpy 未安裝，僅輸出整體 PSNR)")
-    threshold = 36.0
     passed = psnr >= threshold or not math.isfinite(psnr)
     status = "PASS" if passed else "FAIL"
     print(f"  [{'✅' if passed else '❌'}] [{status}] {psnr_str} dB vs {threshold} dB threshold")
@@ -376,7 +376,7 @@ def compute_psnr_fallback(
 # Legacy JPEG mode
 # ---------------------------------------------------------------------------
 
-def run_jpeg_mode(path_a: Path, path_b: Path) -> None:
+def run_jpeg_mode(path_a: Path, path_b: Path, threshold: float = 36.0) -> None:
     """Legacy mode：比較 rendered.rgb 或 headless uint8 raw vs JPEG 參考圖。"""
     print(f"\n[Mode] jpeg  file_a={path_a.name}  file_b={path_b.name}")
 
@@ -407,9 +407,9 @@ def run_jpeg_mode(path_a: Path, path_b: Path) -> None:
     abort_if_contract_failed()
 
     try:
-        compute_psnr_per_channel_numpy(raw_a, raw_b, wa, ha, 3, 1, "interleaved")
+        compute_psnr_per_channel_numpy(raw_a, raw_b, wa, ha, 3, 1, "interleaved", threshold=threshold)
     except ImportError:
-        compute_psnr_fallback(raw_a, raw_b, 1)
+        compute_psnr_fallback(raw_a, raw_b, 1, threshold=threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +459,7 @@ def resolve_raw_params(
     return w, h, p, bps
 
 
-def run_raw_mode(args: argparse.Namespace) -> None:
+def run_raw_mode(args: argparse.Namespace, threshold: float = 36.0) -> None:
     path_a = Path(args.file_a)
     path_b = Path(args.file_b)
 
@@ -490,10 +490,10 @@ def run_raw_mode(args: argparse.Namespace) -> None:
     # PSNR 計算
     try:
         import numpy  # noqa: F401
-        compute_psnr_per_channel_numpy(data_a, data_b, w_a, h_a, p_a, bps_a, layout_a)
+        compute_psnr_per_channel_numpy(data_a, data_b, w_a, h_a, p_a, bps_a, layout_a, threshold=threshold)
     except ImportError:
         print("  (numpy 未安裝，使用純 Python fallback，無 per-channel 統計)")
-        compute_psnr_fallback(data_a, data_b, bps_a)
+        compute_psnr_fallback(data_a, data_b, bps_a, threshold=threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +531,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="interleaved",
         help="記憶體佈局（預設：interleaved）",
     )
+    p.add_argument(
+        "--min-psnr",
+        type=float,
+        default=36.0,
+        metavar="DB",
+        help="最低可接受 PSNR（dB）。預設 36.0（Phase 2 遺留值，向後相容）。"
+             "run_decode_matrix.py 對 Stage3 傳 100、Stage4 傳 75、999路徑傳 999。",
+    )
     return p
 
 
@@ -545,14 +553,16 @@ def main() -> int:
             print(f"ERROR: 找不到檔案：{p}")
             return 1
 
+    threshold = float(args.min_psnr)
+
     print("=" * 65)
     print("  compare_psnr.py — Stage Contract + PSNR/Channel Statistics")
     print("=" * 65)
 
     if args.mode == "jpeg":
-        run_jpeg_mode(path_a, path_b)
+        run_jpeg_mode(path_a, path_b, threshold=threshold)
     else:
-        run_raw_mode(args)
+        run_raw_mode(args, threshold=threshold)
 
     print()
     return 0 if not _contract_failed else 2

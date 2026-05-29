@@ -19,8 +19,13 @@
 
 class ConcurrentDngHost : public dng_host {
 public:
+    // W6-3 / TD-21: cache PipelineConfig at construction time so
+    // PerformAreaTaskThreads() doesn't re-read DNG_AREA_THREADS on every
+    // area-task entry (Stage1 can hit this dozens of times per decode).
     explicit ConcurrentDngHost(uint32_t requestedThreads = 0)
-        : dng_host(), requestedThreads_(requestedThreads) {}
+        : dng_host(),
+          requestedThreads_(requestedThreads),
+          cachedConfig_(PipelineConfig::loadFromEnv()) {}
     virtual ~ConcurrentDngHost() {}
 
     virtual uint32 PerformAreaTaskThreads() override {
@@ -28,7 +33,7 @@ public:
         if (requestedThreads_ > 0) {
             return requestedThreads_;
         }
-        const uint32_t configuredThreads = PipelineConfig::loadFromEnv().threads.area_threads;
+        const uint32_t configuredThreads = cachedConfig_.threads.area_threads;
         if (configuredThreads > 0) {
             return configuredThreads;
         }
@@ -164,4 +169,5 @@ public:
 
 private:
     uint32_t requestedThreads_ = 0;
+    PipelineConfig cachedConfig_{};
 };

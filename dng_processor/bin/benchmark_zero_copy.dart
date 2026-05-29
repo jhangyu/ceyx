@@ -4,6 +4,31 @@ import 'dart:async';
 import 'dart:io';
 import 'package:dng_processor/src/dng_decoder_service.dart';
 
+/// W5-5 / TD-9: Assert that the decoded image has valid dimensions and no
+/// error code. Exits with code 1 on assertion failure so CI can detect regressions.
+void _assertValidImage(DngImage image, String label) {
+  if (image.width <= 0 || image.height <= 0) {
+    print(
+      '[ASSERT FAIL] $label: width=${image.width} height=${image.height} must be > 0',
+    );
+    exit(1);
+  }
+  // DngDecodeException is thrown for non-zero error codes by the service,
+  // so reaching here guarantees errorCode==0. Verify buffer size as extra guard.
+  final expectedSize = image.width * image.height * 4;
+  if (image.rgbaData.length != expectedSize) {
+    print(
+      '[ASSERT FAIL] $label: rgbaData.length=${image.rgbaData.length} '
+      'expected $expectedSize (${image.width}x${image.height}x4)',
+    );
+    exit(1);
+  }
+  print(
+    '[ASSERT PASS] $label: ${image.width}x${image.height} '
+    'rgba=${image.rgbaData.length} bytes',
+  );
+}
+
 void main(List<String> args) async {
   final service = DngDecoderService();
   service.initialize();
@@ -46,6 +71,8 @@ void main(List<String> args) async {
     print('Image dimensions: ${image.width}x${image.height}');
     print('Buffer size: ${image.rgbaData.length} bytes');
 
+    _assertValidImage(image, 'worker decode');
+
     final sum = image.rgbaData[0] + image.rgbaData[1];
     print('Sample pixel sum: $sum');
     return;
@@ -62,6 +89,8 @@ void main(List<String> args) async {
   print('C++ internal process time: ${image.processMs.toStringAsFixed(2)} ms');
   print('Image dimensions: ${image.width}x${image.height}');
   print('Buffer size: ${image.rgbaData.length} bytes');
+
+  _assertValidImage(image, 'zero-copy decode');
 
   // Verify data is accessible
   final sum = image.rgbaData[0] + image.rgbaData[1];
