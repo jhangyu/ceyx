@@ -9,8 +9,15 @@
 *.ppm
 *.pgm
 
-# Matrix test intermediate artifacts
+# Matrix test intermediate artifacts —— 一律落到 repo root /artifacts/
 /artifacts/
+
+# 嚴禁把 raw/ppm/pgm 等 binary artifacts 寫進 docs/logs/
+# （Task log 只能放 markdown / 小型截圖；歷史教訓：曾累積 1.2G 污染）
+docs/logs/**/*.raw
+docs/logs/**/*.ppm
+docs/logs/**/*.pgm
+docs/logs/**/artifacts/
 
 # Python / Env
 .venv/

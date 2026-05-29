@@ -34,6 +34,8 @@
 # usage: |
 #   python3 run_decode_matrix.py --repo-root . --repeat 2 --timing
 #   python3 run_decode_matrix.py --repo-root . --repeat 3 --output docs/logs/YYYY-MM-DD/matrix.md
+# 注意：--output 只寫 markdown 報告；raw/ppm/pgm 中間產物一律落到 <repo>/artifacts/。
+# 嚴禁透過 --artifact-dir 把 raw 檔導向 docs/logs（會被 .gitignore 阻擋並造成空間污染）。
 # ---
 import argparse
 import datetime as dt
