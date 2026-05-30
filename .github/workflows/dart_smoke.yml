@@ -1,0 +1,73 @@
+name: Dart / Flutter Smoke (placeholder)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "dng_processor/**"
+      - ".github/workflows/dart_smoke.yml"
+
+concurrency:
+  group: dart-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dart-smoke:
+    name: dart analyze + flutter test
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      FLUTTER_DIR: ${{ github.workspace }}/dng_processor
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: ${{ github.workspace }}/dng_processor
+        run: flutter pub get
+
+      - name: dart analyze
+        working-directory: ${{ github.workspace }}/dng_processor
+        run: dart analyze
+
+      - name: flutter test
+        working-directory: ${{ github.workspace }}/dng_processor
+        run: flutter test
+
+      - name: Download native artifact (optional)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: dng_decoder_native-macos-arm64
+          path: ${{ github.workspace }}/artifacts/native
+
+      - name: Optional FFI smoke (requires sample DNG + native dylib)
+        working-directory: ${{ github.workspace }}/dng_processor
+        continue-on-error: true
+        run: |
+          SAMPLE="${REPO_ROOT}/image_samples/lossless_dng_sample.dng"
+          if [ -f "$SAMPLE" ]; then
+            dart run bin/benchmark_zero_copy.dart "$SAMPLE" || echo "::warning::benchmark_zero_copy failed (placeholder)."
+          else
+            echo "::warning::Sample DNG not available; skipping FFI smoke."
+          fi
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dart-smoke-artifacts
+          path: ${{ github.workspace }}/artifacts
+          if-no-files-found: ignore
+          retention-days: 7

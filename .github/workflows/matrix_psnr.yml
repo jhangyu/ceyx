@@ -1,0 +1,73 @@
+name: Matrix PSNR Regression (placeholder)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "dng_processor/native/**"
+      - ".github/workflows/matrix_psnr.yml"
+
+concurrency:
+  group: matrix-psnr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix-psnr:
+    name: Run 4-case decode matrix + PSNR gate
+    runs-on: macos-14
+    timeout-minutes: 45
+    needs: []
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      NATIVE_DIR: ${{ github.workspace }}/dng_processor/native
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build prerequisites
+        run: |
+          brew update
+          brew install cmake ninja jpeg-turbo
+
+      - name: Download native build artifact (if available)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: dng_decoder_native-macos-arm64
+          path: ${{ github.workspace }}/artifacts/native
+
+      - name: Build test_decode target
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 dng_processor/native/scripts/build_native_watchdog.py --target test_decode
+
+      - name: Ensure sample DNGs are present
+        run: |
+          if [ ! -f "${REPO_ROOT}/image_samples/lossless_dng_sample.dng" ]; then
+            echo "::warning::Missing lossless_dng_sample.dng; PSNR matrix will be skipped."
+            exit 0
+          fi
+
+      - name: Run run_decode_matrix.py (PSNR gate enforced by W5)
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          python3 dng_processor/native/tests/run_decode_matrix.py --repeat 1
+
+      - name: Upload PSNR matrix artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-psnr-artifacts
+          path: ${{ github.workspace }}/artifacts
+          if-no-files-found: warn
+          retention-days: 7
