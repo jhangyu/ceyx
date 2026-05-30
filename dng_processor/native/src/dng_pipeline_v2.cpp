@@ -2,15 +2,15 @@
 ---
 file_summary: "Production DNG pipeline v2 entry used by Flutter FFI; runs SDK Stage1/2, Halide Stage3/4 where applicable, and returns RGB8."
 functions:
-  - name: "copyImageToInterleaved16 / makeImageFromInterleaved16 / allocStage3Image / putStage3Data"
-    description: "Stage3 image <-> uint16 interleaved buffer helpers; alloc/put are split so latency hiding can pre-allocate while GPU runs."
-    lines: "63-130"
+  - name: "copyImageToInterleaved16 / allocStage3Image"
+    description: "Stage3 image <-> uint16 interleaved buffer helpers; alloc/put are split so latency hiding can pre-allocate while GPU runs. Pointer-based variants (makeImageFromInterleaved16Ptr / putStage3DataPtr / prepareStage3WorkspacePtr) are the production path; vector variants were retired in Phase 11 W4."
+    lines: "63-90"
   - name: "applyOpcodeList3"
     description: "Apply OpcodeList3 to a Stage3 image, using Halide WarpRectilinear when config allows."
-    lines: "132-160"
-  - name: "prepareStage3Workspace"
-    description: "Reuse caller-owned Stage3 output storage, preserving the prealloc contract across shared orchestration."
-    lines: "162-177"
+    lines: "92-120"
+  - name: "extractStage2Bayer16"
+    description: "Phase 11 W4 — borrow-or-copy Stage2 Bayer with timing; consolidates the duplicated extract block of runHalideStage3ForBayer and runHalideStage3And4Fused."
+    lines: "260-300"
   - name: "runHalideStage3ForBayer"
     description: "Run production Bayer Stage3 with fused demosaic+WarpRectilinear fast path; Phase 8.2.1 Path D — async dispatch + Make_dng_image overlap to hide GPU sync_wait."
     lines: "179-310"
@@ -87,47 +87,11 @@ bool copyImageToInterleaved16(const dng_image *image, std::vector<uint16_t> &out
   return true;
 }
 
-AutoPtr<dng_image> makeImageFromInterleaved16(dng_host &host, uint32_t width,
-                                              uint32_t height, uint32_t planes,
-                                              const std::vector<uint16_t> &data) {
-  dng_point size(static_cast<int32>(height), static_cast<int32>(width));
-  AutoPtr<dng_image> image(host.Make_dng_image(dng_rect(size), planes, ttShort));
-
-  dng_pixel_buffer buffer;
-  buffer.fArea = image->Bounds();
-  buffer.fPlane = 0;
-  buffer.fPlanes = planes;
-  buffer.fPixelType = ttShort;
-  buffer.fPixelSize = sizeof(uint16_t);
-  buffer.fData = const_cast<uint16_t *>(data.data());
-  buffer.fRowStep = static_cast<int32>(width * planes);
-  buffer.fColStep = static_cast<int32>(planes);
-  buffer.fPlaneStep = 1;
-  image->Put(buffer);
-  return AutoPtr<dng_image>(image.Release());
-}
-
 AutoPtr<dng_image> allocStage3Image(dng_host &host, uint32_t width,
                                     uint32_t height, uint32_t planes) {
   dng_point size(static_cast<int32>(height), static_cast<int32>(width));
   return AutoPtr<dng_image>(
       host.Make_dng_image(dng_rect(size), planes, ttShort));
-}
-
-void putStage3Data(dng_image &image, const std::vector<uint16_t> &data,
-                   uint32_t width, uint32_t height, uint32_t planes) {
-  (void)height;
-  dng_pixel_buffer buffer;
-  buffer.fArea = image.Bounds();
-  buffer.fPlane = 0;
-  buffer.fPlanes = planes;
-  buffer.fPixelType = ttShort;
-  buffer.fPixelSize = sizeof(uint16_t);
-  buffer.fData = const_cast<uint16_t *>(data.data());
-  buffer.fRowStep = static_cast<int32>(width * planes);
-  buffer.fColStep = static_cast<int32>(planes);
-  buffer.fPlaneStep = 1;
-  image.Put(buffer);
 }
 
 bool applyOpcodeList3(dng_host &host, dng_negative &negative,
@@ -156,23 +120,6 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
     }
   }
   return true;
-}
-
-std::vector<uint16_t> &prepareStage3Workspace(std::vector<uint16_t> &fallback,
-                                              std::vector<uint16_t> *callerWorkspace,
-                                              size_t elements,
-                                              DngPipelineStage3Timing *timing) {
-  std::vector<uint16_t> &workspace = callerWorkspace ? *callerWorkspace : fallback;
-  const auto resizeStart = Clock::now();
-  if (workspace.size() != elements) {
-    workspace.resize(elements);
-  }
-  const auto resizeEnd = Clock::now();
-  if (timing) {
-    timing->resize_ms =
-        std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count();
-  }
-  return workspace;
 }
 
 // Phase 10 Sprint D-B F1: process-level mmap pool for Stage3 workspace.
@@ -329,8 +276,40 @@ bool borrowStage2Bayer16(dng_image *stage2,
   return true;
 }
 
-// Pointer-based overloads — same bodies as makeImageFromInterleaved16 /
-// putStage3Data but accept raw uint16_t* instead of std::vector.
+// Phase 11 W4 — consolidates the Stage2 borrow + fallback-copy + extract timing
+// block that previously lived verbatim in both runHalideStage3ForBayer and
+// runHalideStage3And4Fused. Pure refactor; behaviour preserved bit-exact:
+// on success stage2Ptr points either into the borrowed simple_image buffer or
+// into stage2FallbackData.data() (caller-owned vector kept alive by reference).
+bool extractStage2Bayer16(dng_image *stage2,
+                          uint16_t *&stage2Ptr,
+                          std::vector<uint16_t> &stage2FallbackData,
+                          uint32_t &width,
+                          uint32_t &height,
+                          uint32_t &planes,
+                          DngPipelineStage3Timing *timing) {
+  const auto extractStart = Clock::now();
+  bool borrowed = borrowStage2Bayer16(stage2, stage2Ptr, width, height, planes);
+  if (!borrowed) {
+    if (!copyImageToInterleaved16(stage2, stage2FallbackData, width, height,
+                                  planes) ||
+        planes != 1) {
+      return false;
+    }
+    stage2Ptr = stage2FallbackData.data();
+  } else if (planes != 1) {
+    return false;
+  }
+  const auto extractEnd = Clock::now();
+  if (timing) {
+    timing->extract_stage2_ms =
+        std::chrono::duration<double, std::milli>(extractEnd - extractStart)
+            .count();
+  }
+  return true;
+}
+
+// Pointer-based overloads — accept raw uint16_t* instead of std::vector.
 AutoPtr<dng_image> makeImageFromInterleaved16Ptr(dng_host &host, uint32_t width,
                                                  uint32_t height, uint32_t planes,
                                                  const uint16_t *data) {
@@ -377,25 +356,13 @@ bool runHalideStage3ForBayer(dng_host &host,
   uint32_t height = 0;
   uint32_t planes = 0;
 
-  // Phase 10 Sprint D-B F2: try zero-copy borrow of Stage2 contiguous buffer.
+  // Phase 10 Sprint D-B F2 + Phase 11 W4: zero-copy borrow with copy fallback,
+  // consolidated into extractStage2Bayer16.
   uint16_t *stage2Ptr = nullptr;
   std::vector<uint16_t> stage2Data;
-  const auto extractStart = Clock::now();
-  bool borrowed = borrowStage2Bayer16(stage2, stage2Ptr, width, height, planes);
-  if (!borrowed) {
-    // Fallback: copy via SDK Get() path (non-contiguous or non-simple_image).
-    if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
-        planes != 1) {
-      return false;
-    }
-    stage2Ptr = stage2Data.data();
-  } else if (planes != 1) {
+  if (!extractStage2Bayer16(stage2, stage2Ptr, stage2Data, width, height,
+                            planes, timing)) {
     return false;
-  }
-  const auto extractEnd = Clock::now();
-  if (timing) {
-    timing->extract_stage2_ms =
-        std::chrono::duration<double, std::milli>(extractEnd - extractStart).count();
   }
 
   const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
@@ -564,24 +531,12 @@ bool runHalideStage3And4Fused(dng_host &host,
   dng_image *stage2 = const_cast<dng_image *>(negative.Stage2Image());
   uint32_t width = 0, height = 0, planes = 0;
 
-  // Phase 10 Sprint D-B F2: zero-copy borrow of Stage2 contiguous buffer.
+  // Phase 10 Sprint D-B F2 + Phase 11 W4: see extractStage2Bayer16.
   uint16_t *stage2Ptr = nullptr;
   std::vector<uint16_t> stage2Data;
-  const auto extractStart = Clock::now();
-  bool borrowed = borrowStage2Bayer16(stage2, stage2Ptr, width, height, planes);
-  if (!borrowed) {
-    if (!copyImageToInterleaved16(stage2, stage2Data, width, height, planes) ||
-        planes != 1) {
-      return false;
-    }
-    stage2Ptr = stage2Data.data();
-  } else if (planes != 1) {
+  if (!extractStage2Bayer16(stage2, stage2Ptr, stage2Data, width, height,
+                            planes, timing)) {
     return false;
-  }
-  const auto extractEnd = Clock::now();
-  if (timing) {
-    timing->extract_stage2_ms =
-        std::chrono::duration<double, std::milli>(extractEnd - extractStart).count();
   }
 
   const auto &warpOpcode =
