@@ -238,6 +238,29 @@ double elapsed_ms(std::chrono::high_resolution_clock::time_point start,
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
+// Time a single explicit copy_to_device upload and record the elapsed
+// milliseconds. Returns the buffer's rc unchanged; the caller keeps full
+// control of error labelling and return semantics (this helper only collapses
+// the identical now()/copy_to_device/now()/elapsed_ms timing snippet that the
+// single-plane and polynomial3 src uploads share).
+//
+// Template over the Halide buffer type because run_polynomial_kernel passes a
+// Halide::Runtime::Buffer<uint16_t> while run_polynomial3_kernel passes one of
+// a different (strided) construction; both expose copy_to_device(iface).
+//
+// Must stay in the anonymous namespace (do NOT move to a header): it depends on
+// Halide runtime types and is a private bridge implementation detail.
+template <typename BufT>
+int measure_device_upload(BufT &buffer,
+                          const halide_device_interface_t *iface,
+                          double &out_ms) {
+    const auto upload_start = std::chrono::high_resolution_clock::now();
+    const int rc = buffer.copy_to_device(iface);
+    const auto upload_end = std::chrono::high_resolution_clock::now();
+    out_ms = elapsed_ms(upload_start, upload_end);
+    return rc;
+}
+
 double prewarm_polynomial3_kernel_once() {
     if (!ol2_prewarm_enabled()) {
         return 0.0;
@@ -455,13 +478,9 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
         const halide_device_interface_t *metal_iface =
             halide_metal_device_interface();
         if (metal_iface) {
-            const auto src_upload_start =
-                std::chrono::high_resolution_clock::now();
-            const int src_rc = src_buf->copy_to_device(metal_iface);
-            const auto src_upload_end =
-                std::chrono::high_resolution_clock::now();
-            timing->src_upload_ms =
-                elapsed_ms(src_upload_start, src_upload_end);
+            const int src_rc =
+                measure_device_upload(*src_buf, metal_iface,
+                                      timing->src_upload_ms);
             if (src_rc != 0) {
                 std::fprintf(stderr,
                              "[OpcodeList2Halide] polynomial src upload rc=%d\n",
@@ -469,13 +488,9 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
                 return false;
             }
 
-            const auto param_upload_start =
-                std::chrono::high_resolution_clock::now();
-            const int coeff_rc = coeff.copy_to_device(metal_iface);
-            const auto param_upload_end =
-                std::chrono::high_resolution_clock::now();
-            timing->param_upload_ms =
-                elapsed_ms(param_upload_start, param_upload_end);
+            const int coeff_rc =
+                measure_device_upload(coeff, metal_iface,
+                                      timing->param_upload_ms);
             if (coeff_rc != 0) {
                 std::fprintf(stderr,
                              "[OpcodeList2Halide] polynomial coeff upload rc=%d\n",
@@ -624,13 +639,9 @@ bool run_polynomial3_kernel(uint16_t *base,
         const halide_device_interface_t *metal_iface =
             halide_metal_device_interface();
         if (metal_iface) {
-            const auto src_upload_start =
-                std::chrono::high_resolution_clock::now();
-            const int src_rc = src_buf.copy_to_device(metal_iface);
-            const auto src_upload_end =
-                std::chrono::high_resolution_clock::now();
-            timing->src_upload_ms =
-                elapsed_ms(src_upload_start, src_upload_end);
+            const int src_rc =
+                measure_device_upload(src_buf, metal_iface,
+                                      timing->src_upload_ms);
             if (src_rc != 0) {
                 std::fprintf(stderr,
                              "[OpcodeList2Halide] polynomial3 src upload rc=%d\n",
@@ -638,6 +649,11 @@ bool run_polynomial3_kernel(uint16_t *base,
                 return false;
             }
 
+            // coeff + degree are timed together as one param_upload window
+            // (poly3 uploads both, unlike the single-plane path which only has
+            // coeff). Keep this joint window inline: folding it into
+            // measure_device_upload would change the per-buffer timing
+            // granularity and the combined coeff_rc||degree_rc error label.
             const auto param_upload_start =
                 std::chrono::high_resolution_clock::now();
             const int coeff_rc = coeff.copy_to_device(metal_iface);
@@ -722,6 +738,65 @@ bool run_polynomial3_kernel(uint16_t *base,
         timing->t_func_exit = std::chrono::high_resolution_clock::now();
     }
     return true;
+}
+
+// Emit the [MapPolynomialColdSubdivide] diagnostic line. Both the batched3 and
+// single dispatch paths produce byte-identical output structure; the only
+// behavioural difference is whether handoff_publish_ms participates in the
+// core_accounted figure (batched3 publishes a device handoff, single does not).
+//
+// Caller contract (unchanged): only invoke under
+// `map_poly_timing_enabled()` after a successful dispatch. The timestamps must
+// already be populated by run_polynomial*_kernel via the PolynomialTiming
+// struct. path_label is "batched3" or "single"; has_handoff selects whether
+// handoff_publish_ms is folded into core_accounted.
+void emit_cold_subdivide_log(
+    const char *path_label,
+    const PolynomialTiming &detail,
+    std::chrono::high_resolution_clock::time_point dispatch_start,
+    std::chrono::high_resolution_clock::time_point dispatch_end,
+    bool has_handoff) {
+    const double pre_call_setup_ms =
+        elapsed_ms(dispatch_start, detail.t_func_entry);
+    const double kernel_func_entry_ms =
+        elapsed_ms(detail.t_func_entry, detail.t_inner_start);
+    const double prewarm_window_ms =
+        elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
+    const double buffer_setup_ms =
+        elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
+    const double core_window_ms =
+        elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
+    const double kernel_func_exit_ms =
+        elapsed_ms(detail.t_inner_end, detail.t_func_exit);
+    const double post_call_destructors_ms =
+        elapsed_ms(detail.t_func_exit, dispatch_end);
+    double core_accounted =
+        detail.src_upload_ms + detail.param_upload_ms +
+        detail.kernel_ms + detail.copy_to_host_ms +
+        detail.scatter_ms;
+    if (has_handoff) {
+        core_accounted += detail.handoff_publish_ms;
+    }
+    const double core_unaccounted_ms = core_window_ms - core_accounted;
+    const double subdiv_sum =
+        pre_call_setup_ms + kernel_func_entry_ms + prewarm_window_ms +
+        buffer_setup_ms + core_window_ms + kernel_func_exit_ms +
+        post_call_destructors_ms;
+    std::fprintf(stderr,
+                 "[MapPolynomialColdSubdivide] path=%s first_call=%d "
+                 "pre_call_setup=%.3f kernel_func_entry=%.3f "
+                 "prewarm_window=%.3f buffer_setup=%.3f core_window=%.3f "
+                 "core_unaccounted=%.3f kernel_func_exit=%.3f "
+                 "post_call_destructors=%.3f subdiv_sum=%.3f "
+                 "dispatch_call=%.3f residual=%.3f\n",
+                 path_label,
+                 detail.first_call ? 1 : 0,
+                 pre_call_setup_ms, kernel_func_entry_ms,
+                 prewarm_window_ms, buffer_setup_ms, core_window_ms,
+                 core_unaccounted_ms, kernel_func_exit_ms,
+                 post_call_destructors_ms, subdiv_sum,
+                 detail.dispatch_call_ms,
+                 detail.dispatch_call_ms - subdiv_sum);
 }
 
 }  // namespace
@@ -1014,43 +1089,8 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
         // Cold-path subdivision: split dispatch_call into pre_call /
         // func_entry / prewarm window / buffer_setup / core (uploads+kernel
         // +copy+scatter+handoff) / func_exit / post_call destructors.
-        const double pre_call_setup_ms =
-            elapsed_ms(dispatch_start, detail.t_func_entry);
-        const double kernel_func_entry_ms =
-            elapsed_ms(detail.t_func_entry, detail.t_inner_start);
-        const double prewarm_window_ms =
-            elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
-        const double buffer_setup_ms =
-            elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
-        const double core_window_ms =
-            elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
-        const double kernel_func_exit_ms =
-            elapsed_ms(detail.t_inner_end, detail.t_func_exit);
-        const double post_call_destructors_ms =
-            elapsed_ms(detail.t_func_exit, dispatch_end);
-        const double core_accounted =
-            detail.src_upload_ms + detail.param_upload_ms +
-            detail.kernel_ms + detail.copy_to_host_ms +
-            detail.scatter_ms + detail.handoff_publish_ms;
-        const double core_unaccounted_ms = core_window_ms - core_accounted;
-        const double subdiv_sum =
-            pre_call_setup_ms + kernel_func_entry_ms + prewarm_window_ms +
-            buffer_setup_ms + core_window_ms + kernel_func_exit_ms +
-            post_call_destructors_ms;
-        std::fprintf(stderr,
-                     "[MapPolynomialColdSubdivide] path=batched3 first_call=%d "
-                     "pre_call_setup=%.3f kernel_func_entry=%.3f "
-                     "prewarm_window=%.3f buffer_setup=%.3f core_window=%.3f "
-                     "core_unaccounted=%.3f kernel_func_exit=%.3f "
-                     "post_call_destructors=%.3f subdiv_sum=%.3f "
-                     "dispatch_call=%.3f residual=%.3f\n",
-                     detail.first_call ? 1 : 0,
-                     pre_call_setup_ms, kernel_func_entry_ms,
-                     prewarm_window_ms, buffer_setup_ms, core_window_ms,
-                     core_unaccounted_ms, kernel_func_exit_ms,
-                     post_call_destructors_ms, subdiv_sum,
-                     detail.dispatch_call_ms,
-                     detail.dispatch_call_ms - subdiv_sum);
+        emit_cold_subdivide_log("batched3", detail, dispatch_start,
+                                dispatch_end, /*has_handoff=*/true);
     }
     return 3;
 }
@@ -1154,43 +1194,8 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
                      detail.scatter_ms, total, detail.dispatch_call_ms,
                      detail.dispatch_call_ms - total);
 
-        const double pre_call_setup_ms =
-            elapsed_ms(dispatch_start, detail.t_func_entry);
-        const double kernel_func_entry_ms =
-            elapsed_ms(detail.t_func_entry, detail.t_inner_start);
-        const double prewarm_window_ms =
-            elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
-        const double buffer_setup_ms =
-            elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
-        const double core_window_ms =
-            elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
-        const double kernel_func_exit_ms =
-            elapsed_ms(detail.t_inner_end, detail.t_func_exit);
-        const double post_call_destructors_ms =
-            elapsed_ms(detail.t_func_exit, dispatch_end);
-        const double core_accounted =
-            detail.src_upload_ms + detail.param_upload_ms +
-            detail.kernel_ms + detail.copy_to_host_ms +
-            detail.scatter_ms;
-        const double core_unaccounted_ms = core_window_ms - core_accounted;
-        const double subdiv_sum =
-            pre_call_setup_ms + kernel_func_entry_ms + prewarm_window_ms +
-            buffer_setup_ms + core_window_ms + kernel_func_exit_ms +
-            post_call_destructors_ms;
-        std::fprintf(stderr,
-                     "[MapPolynomialColdSubdivide] path=single first_call=%d "
-                     "pre_call_setup=%.3f kernel_func_entry=%.3f "
-                     "prewarm_window=%.3f buffer_setup=%.3f core_window=%.3f "
-                     "core_unaccounted=%.3f kernel_func_exit=%.3f "
-                     "post_call_destructors=%.3f subdiv_sum=%.3f "
-                     "dispatch_call=%.3f residual=%.3f\n",
-                     detail.first_call ? 1 : 0,
-                     pre_call_setup_ms, kernel_func_entry_ms,
-                     prewarm_window_ms, buffer_setup_ms, core_window_ms,
-                     core_unaccounted_ms, kernel_func_exit_ms,
-                     post_call_destructors_ms, subdiv_sum,
-                     detail.dispatch_call_ms,
-                     detail.dispatch_call_ms - subdiv_sum);
+        emit_cold_subdivide_log("single", detail, dispatch_start,
+                                dispatch_end, /*has_handoff=*/false);
     }
     return ok;
 }
