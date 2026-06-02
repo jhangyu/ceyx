@@ -1025,6 +1025,15 @@ StagePSNR testDNG(dng_host& host,
             } else {
                 cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
             }
+
+            // Emit Halide Stage3 artifact with distinct filename for SHA-256 gate.
+            // Only in test mode (Halide path) after contract PASS.
+            if (useHalideDemosaic && stage3View && stage3Elements > 0) {
+                const string halideStage3File = "halide_demosaic_output.raw";
+                saveRawFile(halideStage3File, stage3View, stage3Elements * sizeof(uint16_t));
+                cout << "  [ArtifactEmit] " << halideStage3File
+                     << " (" << stage3Elements * 2 << " bytes)\n";
+            }
         }
 
         // === Render ===
@@ -1151,6 +1160,15 @@ StagePSNR testDNG(dng_host& host,
                 cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.render_psnr << " dB\n";
             } else {
                 cout << "  WARNING: Could not load baseline file: " << refFilename << "\n";
+            }
+
+            // Emit Halide Stage4 RGB artifact with distinct filename for SHA-256 gate.
+            // Only in test mode after contract PASS.
+            {
+                const string halideStage4File = "halide_render_output.raw";
+                saveRawFile(halideStage4File, rgbData.data(), rgbData.size());
+                cout << "  [ArtifactEmit] " << halideStage4File
+                     << " (" << rgbData.size() << " bytes)\n";
             }
         }
 

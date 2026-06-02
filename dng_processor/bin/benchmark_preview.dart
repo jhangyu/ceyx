@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:dng_processor/src/dng_decoder_service.dart';
+import 'package:path/path.dart' as p;
 
 /// Benchmark: preview JPEG extraction via DngDecoderService worker isolate.
 ///
@@ -58,7 +59,17 @@ void main(List<String> args) async {
     }
 
     // Save preview for visual inspection
-    final outFile = File('preview_out.jpg');
+    final configuredArtifactDir = Platform.environment['ARTIFACT_DIR'];
+    final repoRoot = Directory.current.parent.path;
+    final artifactDir = Directory(
+      configuredArtifactDir == null
+          ? p.join(repoRoot, 'artifacts')
+          : p.isAbsolute(configuredArtifactDir)
+          ? configuredArtifactDir
+          : p.join(repoRoot, configuredArtifactDir),
+    );
+    artifactDir.createSync(recursive: true);
+    final outFile = File(p.join(artifactDir.path, 'preview_out.jpg')).absolute;
     outFile.writeAsBytesSync(previewBytes);
     print('Saved preview to ${outFile.path}');
 

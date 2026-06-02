@@ -340,6 +340,12 @@ if(APPLE)
 endif()
 
 
+# P12-W0B-03: production C ABI verification harness.
+add_executable(dng_ffi_harness tests/dng_ffi_harness.cpp)
+target_include_directories(dng_ffi_harness PRIVATE ${INC_DIR})
+target_link_libraries(dng_ffi_harness PRIVATE dng_decoder_native)
+
+
 # W5-4 / TD-2: Device handoff path independent test.
 # Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
 # handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.

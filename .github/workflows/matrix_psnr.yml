@@ -33,38 +33,55 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check sample DNGs
+        id: samples
+        run: |
+          missing=0
+          for sample in \
+            "${REPO_ROOT}/image_samples/lossless_dng_sample.dng" \
+            "${REPO_ROOT}/image_samples/lossy_dng_sample.dng"; do
+            if [ ! -f "$sample" ]; then
+              echo "::warning::Missing ${sample}; PSNR matrix will be skipped."
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install build prerequisites
+        if: steps.samples.outputs.available == 'true'
         run: |
           brew update
           brew install cmake ninja jpeg-turbo
 
-      - name: Download native build artifact (if available)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: dng_decoder_native-macos-arm64
-          path: ${{ github.workspace }}/artifacts/native
-
       - name: Build test_decode target
+        if: steps.samples.outputs.available == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           python3 dng_processor/native/scripts/build_native_watchdog.py --target test_decode
 
-      - name: Ensure sample DNGs are present
+      - name: Build test_device_handoff target
+        if: steps.samples.outputs.available == 'true'
+        working-directory: ${{ github.workspace }}
         run: |
-          if [ ! -f "${REPO_ROOT}/image_samples/lossless_dng_sample.dng" ]; then
-            echo "::warning::Missing lossless_dng_sample.dng; PSNR matrix will be skipped."
-            exit 0
-          fi
+          python3 dng_processor/native/scripts/build_native_watchdog.py \
+            --target test_device_handoff --skip-configure
 
       - name: Run run_decode_matrix.py (PSNR gate enforced by W5)
+        if: steps.samples.outputs.available == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p "${ARTIFACT_DIR}"
-          python3 dng_processor/native/tests/run_decode_matrix.py --repeat 1
+          python3 dng_processor/native/tests/run_decode_matrix.py \
+            --repeat 1 \
+            --device-handoff-harness dng_processor/native/build/test_device_handoff
 
       - name: Upload PSNR matrix artifacts
-        if: always()
+        if: always() && steps.samples.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: matrix-psnr-artifacts

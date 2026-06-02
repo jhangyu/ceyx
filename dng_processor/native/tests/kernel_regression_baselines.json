@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "_update_policy": "Baseline updates must be proposed via --propose-baseline-update flag, producing artifacts/baseline_candidate_diff.txt. Only user-approved changes may be committed.",
+  "fixtures": {
+    "lossless": {
+      "path": "image_samples/lossless_dng_sample.dng",
+      "sha256": "9babdda53f66efa2269dd92f510dccfae22fe5943040d7e8b0aef59459599ba1"
+    },
+    "lossy": {
+      "path": "image_samples/lossy_dng_sample.dng",
+      "sha256": "09961a4f215d62207cad2cf19770b320de0d910b6c551ca90ee01256b9ba5e98"
+    }
+  },
+  "cases": {
+    "lossless": {
+      "thresholds": {"stage1": 999.0, "stage2": 999.0, "stage3": 100.0, "stage4": 75.0},
+      "baselines": {
+        "stage3": {"value": 102.72, "source": "Phase 11 matrix 2026-05-29"},
+        "stage4": {"value": 79.85, "source": "Phase 11 matrix 2026-05-29"}
+      }
+    },
+    "lossy": {
+      "thresholds": {"stage1": 999.0, "stage2": 999.0, "stage3": 999.0, "stage4": 999.0}
+    }
+  },
+  "selected_artifacts": [
+    {
+      "id": "lossless_halide_stage3",
+      "fixture": "lossless",
+      "producer": "test",
+      "route": "halide",
+      "stage": "stage3",
+      "artifact_pattern": "halide_demosaic_output.raw",
+      "contract": {
+        "width": 6048,
+        "height": 4024,
+        "planes": 3,
+        "pixelType": "uint16",
+        "pixelSize": 2,
+        "bufferSize": 146022912,
+        "layout": "interleaved RGB",
+        "opcodeScope": "post-OpcodeList3"
+      },
+      "sha256": "fd846558c5343a14be1fac321bf5fc2549e5717a29c47fa600d56f43fa7e2fa0"
+    },
+    {
+      "id": "lossless_halide_stage4",
+      "fixture": "lossless",
+      "producer": "test",
+      "route": "halide",
+      "stage": "stage4",
+      "artifact_pattern": "halide_render_output.raw",
+      "contract": {
+        "width": 6000,
+        "height": 4000,
+        "planes": 3,
+        "pixelType": "uint8",
+        "pixelSize": 1,
+        "bufferSize": 72000000,
+        "layout": "interleaved RGB",
+        "opcodeScope": "final post-Stage4 render"
+      },
+      "sha256": "e008516441dfd187dccc6998100a06bb44ca79a6488747c833e2f387dfa28f25"
+    },
+    {
+      "id": "lossy_halide_stage4",
+      "fixture": "lossy",
+      "producer": "test",
+      "route": "halide",
+      "stage": "stage4",
+      "artifact_pattern": "halide_render_output.raw",
+      "contract": {
+        "width": 6000,
+        "height": 4000,
+        "planes": 3,
+        "pixelType": "uint8",
+        "pixelSize": 1,
+        "bufferSize": 72000000,
+        "layout": "interleaved RGB",
+        "opcodeScope": "final post-Stage4 render"
+      },
+      "sha256": "19df63cf33c2b23d1060461ca5acce71db7b9a3314e6678a893af65737934843"
+    }
+  ]
+}

@@ -36,16 +36,25 @@
 #   python3 run_decode_matrix.py --repo-root . --repeat 3 --output docs/logs/YYYY-MM-DD/matrix.md
 # 注意：--output 只寫 markdown 報告；raw/ppm/pgm 中間產物一律落到 <repo>/artifacts/。
 # 嚴禁透過 --artifact-dir 把 raw 檔導向 docs/logs（會被 .gitignore 阻擋並造成空間污染）。
+#
+# auto_diff:
+#   - name: "_auto_diff_on_failure"
+#     description: "gate FAIL 時寫入文字診斷；同次 raw 齊全時執行 contract-first PSNR 與 heatmap"
+#     lines: "1073-1184"
 # ---
 import argparse
 import datetime as dt
+import hashlib
+import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +101,8 @@ class FfiRunResult:
     stage2_do_build_ms: Optional[float]
     stage2_opcode2_ms: Optional[float]
     stage2_total_ms: Optional[float]
+    contract_pass: bool
+    rgb_match_pass: bool
     opcode2_probe: dict[str, float] = field(default_factory=dict)
 
 
@@ -208,6 +219,28 @@ class AggResult:
         return sum(present) if present else None
 
 
+@dataclass
+class FailedGateInfo:
+    gate_kind: str
+    case_name: str
+    stage: str
+    actual_psnr: Optional[float]
+    threshold: Optional[float]
+    raw_prefix: str
+    reference_raw: Optional[Path]
+    candidate_raw: Optional[Path]
+    expected_hash: Optional[str] = None
+    actual_hash: Optional[str] = None
+
+
+@dataclass
+class DeviceHandoffResult:
+    sample_name: str
+    psnr_db: float
+    gate_pass: bool
+    byte_exact: bool
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -228,6 +261,16 @@ _FFI_RUN_RE = re.compile(
     r"^\[FFI run \d+\]\s+ok=(\d+)\s+w=(\d+)\s+h=(\d+)\s+rgb_bytes=(\d+)\s+"
     r"decode_ms=([0-9]+(?:\.[0-9]+)?)\s+process_ms=([0-9]+(?:\.[0-9]+)?)\s+"
     r"wall_ms=([0-9]+(?:\.[0-9]+)?)\s+err=(-?\d+)"
+)
+_CONTRACT_PASS_RE = re.compile(r"^\s*\[Contract\] PASS\b")
+_CONTRACT_FAIL_RE = re.compile(r"^\s*\[Contract\] FAIL\b")
+_FFI_RGB_MATCH_RE = re.compile(
+    r"^\[FFI RGB MATCH\]\s+render:\s+byte_exact=(\d+)\s+"
+    r"psnr=([0-9]+(?:\.[0-9]+)?)\s+dB\s+\[(PASS|FAIL)\]"
+)
+_HANDOFF_PSNR_RE = re.compile(
+    r"^\s*PSNR\(handoff ON vs OFF\):\s*([0-9]+(?:\.[0-9]+)?)\s+"
+    r"dB\s+\[(PASS|FAIL)\]"
 )
 _KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
 
@@ -306,11 +349,11 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
 
 
 def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
-                  env: dict[str, str]) -> FfiRunResult:
+                  env: dict[str, str], artifact_dir: Path) -> FfiRunResult:
     merged = os.environ.copy()
     merged.update(env)
     proc = subprocess.run(
-        [harness, dng_path, "1"],
+        [harness, dng_path, "1", "--save-raw", str(artifact_dir)],
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -322,17 +365,36 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
     stage2_probe: dict[str, float] = {}
     opcode2_probe: dict[str, float] = {}
     ffi_match: Optional[re.Match[str]] = None
+    contract_pass = False
+    contract_failed = False
+    rgb_match: Optional[re.Match[str]] = None
     for line in output.splitlines():
         m = _FFI_RUN_RE.match(line)
         if m:
             ffi_match = m
+        if _CONTRACT_PASS_RE.match(line):
+            contract_pass = True
+        if _CONTRACT_FAIL_RE.match(line):
+            contract_failed = True
+        m = _FFI_RGB_MATCH_RE.match(line)
+        if m:
+            rgb_match = m
         m = _STAGE2_PROBE_RE.match(line)
         if m:
             stage2_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
         m = _OPCODE2_TIMING_RE.match(line)
         if m:
             _accumulate_opcode2_timing(opcode2_probe, m.group(1))
-    if proc.returncode != 0 or not ffi_match:
+    rgb_match_pass = bool(
+        rgb_match and rgb_match.group(1) == "1" and rgb_match.group(3) == "PASS"
+    )
+    if (
+        proc.returncode != 0
+        or not ffi_match
+        or not contract_pass
+        or contract_failed
+        or not rgb_match_pass
+    ):
         raise RuntimeError(f"[FFI {sample_name}] exit={proc.returncode}\n{output}")
     return FfiRunResult(
         sample_name=sample_name,
@@ -347,8 +409,60 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         stage2_do_build_ms=stage2_probe.get("doBuildStage2"),
         stage2_opcode2_ms=stage2_probe.get("opcode2"),
         stage2_total_ms=stage2_probe.get("total"),
+        contract_pass=contract_pass,
+        rgb_match_pass=rgb_match_pass,
         opcode2_probe=opcode2_probe,
     )
+
+
+def _run_device_handoff(
+    cwd: Path,
+    harness: str,
+    lossless: str,
+    lossy: str,
+    env: dict[str, str],
+) -> list[DeviceHandoffResult]:
+    merged = os.environ.copy()
+    merged.update(env)
+    proc = subprocess.run(
+        [harness, lossless, lossy],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=merged,
+        check=False,
+    )
+    output = proc.stdout
+    contract_passes = sum(
+        1 for line in output.splitlines() if _CONTRACT_PASS_RE.match(line)
+    )
+    contract_failed = any(
+        _CONTRACT_FAIL_RE.match(line) for line in output.splitlines()
+    )
+    matches = [
+        _HANDOFF_PSNR_RE.match(line)
+        for line in output.splitlines()
+        if _HANDOFF_PSNR_RE.match(line)
+    ]
+    if proc.returncode != 0 or contract_failed or contract_passes != 2 or len(matches) != 2:
+        raise RuntimeError(f"[Device Handoff] exit={proc.returncode}\n{output}")
+
+    labels = ("Lossless / Stage3-Stage4", "Lossy / Stage2-Stage4")
+    results: list[DeviceHandoffResult] = []
+    for label, match in zip(labels, matches):
+        assert match is not None
+        psnr = float(match.group(1))
+        gate_pass = match.group(2) == "PASS" and psnr >= 99.0
+        if not gate_pass:
+            raise RuntimeError(f"[Device Handoff] gate failed\n{output}")
+        results.append(DeviceHandoffResult(
+            sample_name=label,
+            psnr_db=psnr,
+            gate_pass=gate_pass,
+            byte_exact=psnr >= 998.0,
+        ))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +490,7 @@ def _fmt_db(v: Optional[float]) -> str:
 def _build_markdown(
     results: list[AggResult],
     ffi_results: list[FfiAggResult],
+    handoff_results: list[DeviceHandoffResult],
     generated_at: str,
     repeat: int,
     show_halide_timing: bool,
@@ -437,8 +552,8 @@ def _build_markdown(
     if ffi_results:
         L.append("## FFI Production Timing (ms, independent from Stage4)")
         L.append("")
-        L.append("| Sample | decode_ms | process_ms | wall_ms | Stage2 total | Stage2 doBuildStage2 | Stage2 opcode2 | rgb_bytes |")
-        L.append("|---|---|---|---|---|---|---|---|")
+        L.append("| Sample | decode_ms | process_ms | wall_ms | Stage2 total | Stage2 doBuildStage2 | Stage2 opcode2 | rgb_bytes | Contract | RGB exact |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|")
         for r in ffi_results:
             rgb_bytes = str(r.rgb_bytes) if r.rgb_bytes is not None else "N/A"
             L.append(
@@ -449,7 +564,22 @@ def _build_markdown(
                 f"| {_fmt_ms(r.stage2_total_ms)} "
                 f"| {_fmt_ms(r.stage2_do_build_ms)} "
                 f"| {_fmt_ms(r.stage2_opcode2_ms)} "
-                f"| {rgb_bytes} |"
+                f"| {rgb_bytes} "
+                f"| {'PASS' if all(run.contract_pass for run in r.runs) else 'FAIL'} "
+                f"| {'PASS' if all(run.rgb_match_pass for run in r.runs) else 'FAIL'} |"
+            )
+        L.append("")
+
+    if handoff_results:
+        L.append("## Device Handoff PSNR")
+        L.append("")
+        L.append("| Sample | PSNR | >=99dB gate | Byte exact |")
+        L.append("|---|---:|---|---|")
+        for r in handoff_results:
+            L.append(
+                f"| {r.sample_name} | {r.psnr_db:.2f} dB "
+                f"| {'PASS' if r.gate_pass else 'FAIL'} "
+                f"| {'yes' if r.byte_exact else 'no'} |"
             )
         L.append("")
 
@@ -597,6 +727,464 @@ def _build_markdown(
 
 
 # ---------------------------------------------------------------------------
+# Regression baselines (JSON manifest)
+# ---------------------------------------------------------------------------
+
+def _compute_sha256(path: Path) -> str:
+    """Compute SHA-256 hex digest for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)  # 1 MiB
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _load_regression_baselines(path: Path) -> dict[str, Any]:
+    """Load kernel_regression_baselines.json and return as dict."""
+    if not path.exists():
+        raise FileNotFoundError(f"Regression baselines file not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    print(f"[INFO] Loaded regression baselines v{data.get('version', '?')} from {path}")
+    return data
+
+
+def _build_psnr_thresholds_from_baselines(baselines: dict[str, Any]) -> dict[tuple[str, str], float]:
+    """Convert JSON cases.*.thresholds to the (case_fragment, stage_attr) dict."""
+    fallback: dict[tuple[str, str], float] = {
+        ("Lossless / Halide", "stage1"): 999.0,
+        ("Lossless / Halide", "stage2"): 999.0,
+        ("Lossless / Halide", "stage3"): 100.0,
+        ("Lossless / Halide", "stage4"): 75.0,
+        ("Lossy / Halide",    "stage1"): 999.0,
+        ("Lossy / Halide",    "stage2"): 999.0,
+        ("Lossy / Halide",    "stage3"): 999.0,
+        ("Lossy / Halide",    "stage4"): 999.0,
+    }
+
+    cases = baselines["cases"]
+
+    result: dict[tuple[str, str], float] = {}
+    # Map JSON case keys to runner case name fragments
+    case_fragment_map = {
+        "lossless": "Lossless / Halide",
+        "lossy": "Lossy / Halide",
+    }
+    for json_key, fragment in case_fragment_map.items():
+        case_data = cases.get(json_key, {})
+        thresholds = case_data.get("thresholds", {})
+        for stage in ("stage1", "stage2", "stage3", "stage4"):
+            if stage in thresholds:
+                result[(fragment, stage)] = float(thresholds[stage])
+            elif (fragment, stage) in fallback:
+                result[(fragment, stage)] = fallback[(fragment, stage)]
+    return result
+
+
+def _validate_regression_baselines_schema(baselines: dict[str, Any]) -> bool:
+    if baselines.get("version") != 1:
+        print("[REGRESSION BASELINES] FAIL — expected schema version 1")
+        return False
+    fixtures = baselines.get("fixtures")
+    cases = baselines.get("cases")
+    selected = baselines.get("selected_artifacts")
+    if not isinstance(fixtures, dict) or not {"lossless", "lossy"} <= fixtures.keys():
+        print("[REGRESSION BASELINES] FAIL — fixtures must define lossless and lossy")
+        return False
+    if not isinstance(cases, dict) or not {"lossless", "lossy"} <= cases.keys():
+        print("[REGRESSION BASELINES] FAIL — cases must define lossless and lossy")
+        return False
+    for case_name in ("lossless", "lossy"):
+        thresholds = cases[case_name].get("thresholds")
+        if not isinstance(thresholds, dict) or not {
+            "stage1", "stage2", "stage3", "stage4"
+        } <= thresholds.keys():
+            print(f"[REGRESSION BASELINES] FAIL — {case_name} thresholds incomplete")
+            return False
+    if not isinstance(selected, list) or not selected:
+        print("[REGRESSION BASELINES] FAIL — selected_artifacts must not be empty")
+        return False
+    return True
+
+
+def _verify_fixture_hashes(baselines: dict[str, Any], root: Path) -> bool:
+    """Verify DNG fixture SHA-256 hashes against manifest.
+
+    Returns True if all locked fixture hashes match. Prints results.
+    """
+    fixtures = baselines.get("fixtures")
+    if not fixtures:
+        print("[FIXTURE HASH] FAIL — manifest has no locked fixtures")
+        return False
+
+    all_ok = True
+    for name, info in fixtures.items():
+        expected = info.get("sha256", "")
+        if not expected:
+            print(f"[FIXTURE HASH] {name}: FAIL — locked sha256 is empty")
+            all_ok = False
+            continue
+        fixture_relpath = info.get("path", "")
+        if not fixture_relpath:
+            print(f"[FIXTURE HASH] {name}: FAIL — fixture path is empty")
+            all_ok = False
+            continue
+        fixture_path = root / fixture_relpath
+        if not fixture_path.exists():
+            print(f"[FIXTURE HASH] {name}: FAIL — file not found: {fixture_path}")
+            all_ok = False
+            continue
+        actual = _compute_sha256(fixture_path)
+        ok = actual == expected
+        marker = "PASS" if ok else "FAIL"
+        print(f"[FIXTURE HASH] {name}: {marker}")
+        if not ok:
+            print(f"  expected: {expected}")
+            print(f"  actual:   {actual}")
+            all_ok = False
+    return all_ok
+
+
+def _run_sha256_gate(
+    baselines: dict[str, Any],
+    artifact_dir: Path,
+    case_artifact_map: dict[str, Path],
+) -> tuple[bool, list[dict[str, str]]]:
+    """Check SHA-256 of selected artifacts against manifest.
+
+    Args:
+        baselines: The loaded JSON manifest.
+        artifact_dir: The directory containing current run artifacts.
+        case_artifact_map: Maps "<fixture>/<artifact_pattern>" to actual file path.
+
+    Returns:
+        (all_passed, entries) where entries is a list of dicts for diff output.
+    """
+    selected = baselines.get("selected_artifacts", [])
+    if not selected:
+        print("[SHA256 GATE] FAIL — selected_artifacts is empty")
+        return False, []
+
+    all_ok = True
+    entries: list[dict[str, str]] = []
+    for item in selected:
+        artifact_id = item.get("id", "unknown")
+        expected_hash = item.get("sha256", "")
+        pattern = item.get("artifact_pattern", "")
+        fixture = item.get("fixture", "")
+        lookup_key = f"{fixture}/{pattern}"
+
+        actual_path = case_artifact_map.get(lookup_key)
+        if actual_path is None or not actual_path.exists():
+            print(f"[SHA256 GATE] {artifact_id}: FAIL — selected artifact not found")
+            entries.append({
+                "id": artifact_id,
+                "expected": expected_hash,
+                "actual": "<missing>",
+                "fixture": fixture,
+                "stage": item.get("stage", "unknown"),
+                "path": str(artifact_dir / "matrix-current" / fixture / pattern),
+            })
+            all_ok = False
+            continue
+
+        actual_hash = _compute_sha256(actual_path)
+        entry = {
+            "id": artifact_id,
+            "expected": expected_hash,
+            "actual": actual_hash,
+            "fixture": fixture,
+            "stage": item.get("stage", "unknown"),
+            "path": str(actual_path),
+        }
+        entries.append(entry)
+
+        if not _validate_selected_artifact_contract(item, actual_path):
+            all_ok = False
+
+        if not expected_hash:
+            # Uninitialized baseline — skip gate, just report
+            print(f"[SHA256 GATE] {artifact_id}: SKIP (baseline uninitialized)")
+            continue
+
+        ok = actual_hash == expected_hash
+        marker = "PASS" if ok else "FAIL"
+        print(f"[SHA256 GATE] {artifact_id}: {marker}")
+        if not ok:
+            print(f"  expected: {expected_hash}")
+            print(f"  actual:   {actual_hash}")
+            all_ok = False
+
+    return all_ok, entries
+
+
+def _validate_selected_artifact_contract(item: dict[str, Any], path: Path) -> bool:
+    artifact_id = item.get("id", "unknown")
+    contract = item.get("contract")
+    required = ("width", "height", "planes", "pixelType", "pixelSize", "bufferSize", "layout")
+    if not isinstance(contract, dict):
+        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — contract is missing")
+        return False
+    missing = [key for key in required if key not in contract]
+    if missing:
+        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — missing fields: {', '.join(missing)}")
+        return False
+
+    calculated_size = (
+        int(contract["width"])
+        * int(contract["height"])
+        * int(contract["planes"])
+        * int(contract["pixelSize"])
+    )
+    expected_size = int(contract["bufferSize"])
+    actual_size = path.stat().st_size
+    ok = calculated_size == expected_size and actual_size == expected_size
+    marker = "PASS" if ok else "FAIL"
+    print(
+        f"[ARTIFACT CONTRACT] {artifact_id}: {marker} — "
+        f"{contract['width']}x{contract['height']} planes={contract['planes']} "
+        f"pixelType={contract['pixelType']} pixelSize={contract['pixelSize']} "
+        f"bufferSize={actual_size} layout={contract['layout']}"
+    )
+    if not ok:
+        print(
+            f"  expected bufferSize={expected_size} calculated={calculated_size} "
+            f"actual={actual_size}"
+        )
+    return ok
+
+
+def _write_baseline_candidate_diff(
+    entries: list[dict[str, str]],
+    output_path: Path,
+) -> None:
+    """Write baseline_candidate_diff.txt for --propose-baseline-update."""
+    lines = [
+        "# Baseline Candidate Diff",
+        f"# Generated: {dt.datetime.now().astimezone().isoformat()}",
+        "#",
+        "# Review these changes and update kernel_regression_baselines.json manually.",
+        "# Only user-approved changes should be committed.",
+        "",
+    ]
+    changed = False
+    for e in entries:
+        status = "MATCH" if e["expected"] == e["actual"] else "CHANGED"
+        if e["expected"] == "":
+            status = "NEW (was uninitialized)"
+        lines.append(f"[{status}] {e['id']}")
+        if status != "MATCH":
+            changed = True
+            if e["expected"]:
+                lines.append(f"  - old: {e['expected']}")
+            lines.append(f"  + new: {e['actual']}")
+        lines.append("")
+
+    if not changed:
+        lines.append("No changes detected — all hashes match manifest.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[INFO] Baseline candidate diff written: {output_path}")
+
+
+def _clear_auto_diff_outputs(artifact_dir: Path) -> None:
+    """Remove reports owned by this runner so a PASS run leaves no stale diff."""
+    for pattern in ("diff_report_*.txt", "heatmap_*.png"):
+        for path in artifact_dir.glob(pattern):
+            path.unlink()
+
+
+def _clear_halide_case_outputs(artifact_dir: Path) -> None:
+    """Avoid staging raw files emitted by an earlier Halide case."""
+    for name in ("halide_demosaic_output.raw", "halide_render_output.raw"):
+        path = artifact_dir / name
+        if path.exists():
+            path.unlink()
+
+
+def _psnr_raw_pair(
+    artifact_dir: Path,
+    matrix_current: Path,
+    fixture: str,
+    stage: str,
+) -> tuple[Optional[Path], Optional[Path]]:
+    """Return the same-run SDK reference and Halide candidate when available."""
+    if stage == "stage3" and fixture == "lossless":
+        reference_pattern = "lossless_stage3_*_3p.raw"
+        candidate = matrix_current / fixture / "halide_demosaic_output.raw"
+    elif stage == "stage4" and fixture in ("lossless", "lossy"):
+        reference_pattern = f"{fixture}_render_*_3p.raw"
+        candidate = matrix_current / fixture / "halide_render_output.raw"
+    else:
+        return None, None
+
+    references = sorted(artifact_dir.glob(reference_pattern))
+    reference = references[0] if len(references) == 1 else None
+    return reference, candidate if candidate.exists() else None
+
+
+def _stage_ffi_test_render(
+    artifact_dir: Path,
+    matrix_current: Path,
+    fixture: str,
+    dng_path: str,
+) -> Path:
+    source = matrix_current / fixture / "halide_render_output.raw"
+    if not source.is_file():
+        raise RuntimeError(f"[FFI {fixture}] Halide test render missing: {source}")
+
+    references = []
+    for path in artifact_dir.glob(f"{fixture}_render_*_3p.raw"):
+        match = re.search(r"_render_(\d+)x(\d+)_3p\.raw$", path.name)
+        if match and path.stat().st_size == source.stat().st_size:
+            references.append((path, match.group(1), match.group(2)))
+    if len(references) != 1:
+        raise RuntimeError(
+            f"[FFI {fixture}] expected one SDK render dimension source, got {len(references)}"
+        )
+
+    _, width, height = references[0]
+    prefix = Path(dng_path).stem
+    destination = matrix_current / fixture / f"{prefix}_test_render_{width}x{height}_3p.raw"
+    shutil.copy2(source, destination)
+    return destination.parent
+
+
+def _comparison_scope(stage: str) -> str:
+    if stage == "stage3":
+        return "post OpcodeList3 Stage3 SDK baseline vs Halide Stage3 output"
+    if stage == "stage4":
+        return "final Stage4 rendered RGB; no pre/post OpcodeList3 artifact mixing"
+    return "no same-run raw diagnostic pair for this stage"
+
+
+def _raw_dimension_args(reference_raw: Path) -> list[str]:
+    match = re.search(r"_(\d+)x(\d+)_([134])p\.raw$", reference_raw.name)
+    if not match:
+        return []
+    width, height, planes = match.groups()
+    return ["--width", width, "--height", height, "--planes", planes]
+
+
+def _auto_diff_on_failure(
+    artifact_dir: Path,
+    failed_cases: list[FailedGateInfo],
+    script_dir: Path,
+    baselines: dict[str, Any],
+    root: Path,
+) -> None:
+    """Write gate diagnostics and run optional same-run raw comparisons."""
+    for failed in failed_cases:
+        safe_case = re.sub(r"[^A-Za-z0-9]+", "_", failed.case_name).strip("_").lower()
+        report_path = artifact_dir / f"diff_report_{safe_case}_{failed.stage}.txt"
+        heatmap_path = artifact_dir / f"heatmap_{safe_case}_{failed.stage}.png"
+        fixture = baselines.get("fixtures", {}).get(failed.raw_prefix, {})
+        fixture_path = root / fixture.get("path", "")
+        fixture_expected = fixture.get("sha256") or "n/a"
+        fixture_actual = (
+            _compute_sha256(fixture_path) if fixture_path.is_file() else "unavailable"
+        )
+        candidate_actual = failed.actual_hash
+        if candidate_actual is None and failed.candidate_raw and failed.candidate_raw.is_file():
+            candidate_actual = _compute_sha256(failed.candidate_raw)
+
+        lines = [
+            "# Gate Failure Auto Diff",
+            f"gate kind: {failed.gate_kind}",
+            f"case: {failed.case_name}",
+            f"stage: {failed.stage}",
+            f"comparison scope: {_comparison_scope(failed.stage)}",
+            f"actual PSNR: {failed.actual_psnr if failed.actual_psnr is not None else 'n/a'}",
+            f"threshold: {failed.threshold if failed.threshold is not None else 'n/a'}",
+            f"fixture path: {fixture_path if fixture else 'n/a'}",
+            f"fixture expected SHA-256: {fixture_expected}",
+            f"fixture actual SHA-256: {fixture_actual}",
+            f"expected artifact SHA-256: {failed.expected_hash or 'n/a'}",
+            f"actual artifact SHA-256: {candidate_actual or 'n/a'}",
+            (
+                f"reference raw: {failed.reference_raw} "
+                f"(exists={bool(failed.reference_raw and failed.reference_raw.is_file())})"
+            ),
+            (
+                f"candidate raw: {failed.candidate_raw} "
+                f"(exists={bool(failed.candidate_raw and failed.candidate_raw.is_file())})"
+            ),
+        ]
+
+        have_raw_pair = bool(
+            failed.reference_raw
+            and failed.reference_raw.is_file()
+            and failed.candidate_raw
+            and failed.candidate_raw.is_file()
+        )
+        if not have_raw_pair:
+            lines.append("contract / PSNR diagnostic: SKIP (same-run raw pair unavailable)")
+            lines.append("heatmap: SKIP (same-run raw pair unavailable)")
+        else:
+            compare_cmd = [
+                sys.executable,
+                str(script_dir / "compare_psnr.py"),
+                str(failed.reference_raw),
+                str(failed.candidate_raw),
+                "--min-psnr",
+                "0",
+                *_raw_dimension_args(failed.reference_raw),
+            ]
+            compare = subprocess.run(
+                compare_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            lines.extend([
+                "",
+                "## compare_psnr.py",
+                f"exit code: {compare.returncode}",
+                compare.stdout.rstrip(),
+            ])
+
+            if compare.returncode != 0:
+                lines.append("heatmap: SKIP (compare_psnr contract / diagnostic failed)")
+            else:
+                heatmap_cmd = [
+                    sys.executable,
+                    str(script_dir / "heatmap_diff.py"),
+                    str(failed.reference_raw),
+                    str(failed.candidate_raw),
+                    "--output",
+                    str(heatmap_path),
+                    "--plane",
+                    "-1",
+                    *_raw_dimension_args(failed.reference_raw),
+                ]
+                heatmap = subprocess.run(
+                    heatmap_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+                lines.extend([
+                    "",
+                    "## heatmap_diff.py",
+                    f"exit code: {heatmap.returncode}",
+                    heatmap.stdout.rstrip(),
+                ])
+                if heatmap.returncode == 0:
+                    lines.append(f"heatmap: {heatmap_path}")
+                else:
+                    lines.append("heatmap: SKIP (optional dependency or heatmap command failed)")
+
+        report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"[AUTO DIFF] report: {report_path}")
+
+
+# ---------------------------------------------------------------------------
 # Case definitions
 # ---------------------------------------------------------------------------
 
@@ -690,7 +1278,12 @@ def main() -> int:
     ap.add_argument(
         "--ffi-harness",
         default="",
-        help="Optional FFI timing harness path. When set, adds an independent FFI timing table.",
+        help="Optional production C ABI harness path. When set, gates contract and RGB exact match.",
+    )
+    ap.add_argument(
+        "--device-handoff-harness",
+        default="",
+        help="Optional device handoff harness path. When set, gates both handoff routes.",
     )
     ap.add_argument("--output", default="", help="Optional Markdown output file path")
     ap.add_argument(
@@ -707,6 +1300,23 @@ def main() -> int:
         default=[],
         metavar="KEY=VALUE",
         help="Extra env var override, repeatable (applies to all cases)",
+    )
+    ap.add_argument(
+        "--regression-baselines",
+        default="",
+        help=(
+            "Path to kernel_regression_baselines.json. "
+            "Default: <script_dir>/kernel_regression_baselines.json"
+        ),
+    )
+    ap.add_argument(
+        "--propose-baseline-update",
+        action="store_true",
+        default=False,
+        help=(
+            "After matrix completes, write artifacts/baseline_candidate_diff.txt "
+            "with current hashes vs manifest. Does NOT modify the manifest."
+        ),
     )
     args = ap.parse_args()
 
@@ -746,6 +1356,42 @@ def main() -> int:
         artifact_dir = root / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Intermediate artifacts: {artifact_dir}")
+    _clear_auto_diff_outputs(artifact_dir)
+
+    # --- Load regression baselines ---
+    script_dir = Path(__file__).resolve().parent
+    baselines_path = (
+        Path(args.regression_baselines)
+        if args.regression_baselines
+        else script_dir / "kernel_regression_baselines.json"
+    )
+    if not baselines_path.is_absolute():
+        baselines_path = (root / baselines_path).resolve()
+    try:
+        baselines = _load_regression_baselines(baselines_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[REGRESSION BASELINES] FAIL — {exc}")
+        return 1
+    if not _validate_regression_baselines_schema(baselines):
+        return 1
+
+    # --- Verify fixture hashes ---
+    if not _verify_fixture_hashes(baselines, root):
+        print("[FIXTURE HASH] FAIL — fixture DNG files do not match manifest")
+        return 1
+
+    # --- Clean matrix-current/ to avoid stale artifacts ---
+    matrix_current = artifact_dir / "matrix-current"
+    if matrix_current.exists():
+        shutil.rmtree(matrix_current)
+    matrix_current.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Clean artifact staging: {matrix_current}")
+
+    # Map case_name fragments to fixture keys for artifact staging
+    _CASE_FIXTURE_MAP: dict[str, str] = {
+        "Lossless / Halide": "lossless",
+        "Lossy / Halide": "lossy",
+    }
 
     agg_results: list[AggResult] = []
     for case_name, cmd, env in cases:
@@ -754,12 +1400,40 @@ def main() -> int:
             label = f"[RUN {i+1}/{args.repeat}] {case_name}"
             print(label)
             try:
+                if "Halide" in case_name:
+                    _clear_halide_case_outputs(artifact_dir)
                 run = _run_case(artifact_dir, cmd, case_name, env)
                 runs.append(run)
             except RuntimeError as exc:
                 print(f"  ERROR: {exc}")
                 raise SystemExit(1)
         agg_results.append(AggResult(case_name=case_name, runs=runs))
+
+        # Stage Halide artifacts into matrix-current/<fixture>/ for SHA-256 gate.
+        # Only the LAST repeat's artifacts matter (they overwrite each other).
+        for frag, fixture_key in _CASE_FIXTURE_MAP.items():
+            if frag in case_name:
+                fixture_staging = matrix_current / fixture_key
+                fixture_staging.mkdir(parents=True, exist_ok=True)
+                for artifact_name in ("halide_demosaic_output.raw", "halide_render_output.raw"):
+                    src = artifact_dir / artifact_name
+                    if src.exists():
+                        dst = fixture_staging / artifact_name
+                        shutil.copy2(str(src), str(dst))
+                break
+
+    handoff_results: list[DeviceHandoffResult] = []
+    if args.device_handoff_harness:
+        handoff_harness = (root / args.device_handoff_harness).resolve()
+        if not handoff_harness.exists():
+            ap.error(f"Device handoff harness not found: {handoff_harness}")
+        try:
+            handoff_results = _run_device_handoff(
+                root, str(handoff_harness), lossless, lossy, extra_env
+            )
+        except RuntimeError as exc:
+            print(f"  ERROR: {exc}")
+            raise SystemExit(1)
 
     ffi_results: list[FfiAggResult] = []
     if args.ffi_harness:
@@ -775,16 +1449,23 @@ def main() -> int:
             "DNG_STAGE2_SDK_TIMING": "1",
         }
         ffi_cases = [
-            ("Lossless / FFI", lossless),
-            ("Lossy / FFI", lossy),
+            ("Lossless / FFI", lossless, "lossless"),
+            ("Lossy / FFI", lossy, "lossy"),
         ]
-        for sample_name, dng_path in ffi_cases:
+        for sample_name, dng_path, fixture in ffi_cases:
             runs: list[FfiRunResult] = []
+            try:
+                ffi_artifact_dir = _stage_ffi_test_render(
+                    artifact_dir, matrix_current, fixture, dng_path
+                )
+            except RuntimeError as exc:
+                print(f"  ERROR: {exc}")
+                raise SystemExit(1)
             for i in range(args.repeat):
                 print(f"[FFI {i+1}/{args.repeat}] {sample_name}")
                 try:
                     runs.append(_run_ffi_case(root, str(ffi_harness), sample_name,
-                                              dng_path, ffi_env))
+                                              dng_path, ffi_env, ffi_artifact_dir))
                 except RuntimeError as exc:
                     print(f"  ERROR: {exc}")
                     raise SystemExit(1)
@@ -794,6 +1475,7 @@ def main() -> int:
     md = _build_markdown(
         agg_results,
         ffi_results,
+        handoff_results,
         generated_at=generated_at,
         repeat=args.repeat,
         show_halide_timing=args.timing,
@@ -812,20 +1494,11 @@ def main() -> int:
 
     # W5-3 / TD-10: Post-matrix PSNR gate.
     # For Halide cases (non-SDK baselines) enforce per-stage minimum PSNR thresholds.
-    # Lossless: Stage1/2 ≥999, Stage3 ≥100, Stage4 ≥75.
-    # Lossy:    All stages ≥999 (SDK YCbCr passthrough Stage3, bit-exact Stage4).
-    _PSNR_THRESHOLDS = {
-        # (case_name_fragment, stage_attr): threshold_db
-        ("Lossless / Halide", "stage1"): 999.0,
-        ("Lossless / Halide", "stage2"): 999.0,
-        ("Lossless / Halide", "stage3"): 100.0,
-        ("Lossless / Halide", "stage4"): 75.0,
-        ("Lossy / Halide",    "stage1"): 999.0,
-        ("Lossy / Halide",    "stage2"): 999.0,
-        ("Lossy / Halide",    "stage3"): 999.0,
-        ("Lossy / Halide",    "stage4"): 999.0,
-    }
+    # Thresholds loaded from kernel_regression_baselines.json when available,
+    # otherwise fall back to hardcoded values.
+    _PSNR_THRESHOLDS = _build_psnr_thresholds_from_baselines(baselines)
     gate_failed = False
+    failed_psnr_cases: list[FailedGateInfo] = []
     for r in agg_results:
         for stage_attr in ("stage1", "stage2", "stage3", "stage4"):
             for frag, s_attr in _PSNR_THRESHOLDS:
@@ -834,7 +1507,25 @@ def main() -> int:
                     stage_result = getattr(r, stage_attr)
                     psnr = stage_result.psnr_db
                     if psnr is None:
-                        # PSNR not available (baseline case or missing baseline file)
+                        gate_failed = True
+                        fixture = "lossless" if "Lossless" in r.case_name else "lossy"
+                        reference_raw, candidate_raw = _psnr_raw_pair(
+                            artifact_dir, matrix_current, fixture, stage_attr
+                        )
+                        print(
+                            f"[MATRIX PSNR GATE] {r.case_name} {stage_attr}: "
+                            "missing PSNR  [FAIL]"
+                        )
+                        failed_psnr_cases.append(FailedGateInfo(
+                            gate_kind="psnr",
+                            case_name=r.case_name,
+                            stage=stage_attr,
+                            actual_psnr=None,
+                            threshold=threshold,
+                            raw_prefix=fixture,
+                            reference_raw=reference_raw,
+                            candidate_raw=candidate_raw,
+                        ))
                         continue
                     ok = psnr >= threshold
                     marker = "PASS" if ok else "FAIL"
@@ -844,9 +1535,73 @@ def main() -> int:
                     )
                     if not ok:
                         gate_failed = True
+                        fixture = "lossless" if "Lossless" in r.case_name else "lossy"
+                        reference_raw, candidate_raw = _psnr_raw_pair(
+                            artifact_dir, matrix_current, fixture, stage_attr
+                        )
+                        failed_psnr_cases.append(FailedGateInfo(
+                            gate_kind="psnr",
+                            case_name=r.case_name,
+                            stage=stage_attr,
+                            actual_psnr=psnr,
+                            threshold=threshold,
+                            raw_prefix=fixture,
+                            reference_raw=reference_raw,
+                            candidate_raw=candidate_raw,
+                        ))
 
-    if gate_failed:
-        print("[MATRIX PSNR GATE] FAIL — one or more cases below threshold")
+    # --- SHA-256 artifact gate ---
+    sha_ok = True
+    sha_entries: list[dict[str, str]] = []
+    failed_sha_cases: list[FailedGateInfo] = []
+    if baselines and baselines.get("selected_artifacts"):
+        # Build artifact lookup from matrix-current staging directory.
+        # Keys: "<fixture>/<artifact_pattern>" → actual file path.
+        case_artifact_map: dict[str, Path] = {}
+        for item in baselines["selected_artifacts"]:
+            fixture = item.get("fixture", "")
+            pattern = item.get("artifact_pattern", "")
+            if fixture and pattern:
+                candidate = matrix_current / fixture / pattern
+                if candidate.exists():
+                    case_artifact_map[f"{fixture}/{pattern}"] = candidate
+
+        sha_ok, sha_entries = _run_sha256_gate(baselines, artifact_dir, case_artifact_map)
+
+        if args.propose_baseline_update and sha_entries:
+            diff_path = artifact_dir / "baseline_candidate_diff.txt"
+            _write_baseline_candidate_diff(sha_entries, diff_path)
+
+        if not sha_ok:
+            failed_sha_cases = [
+                FailedGateInfo(
+                    gate_kind="sha256",
+                    case_name=e["id"],
+                    stage=e["stage"],
+                    actual_psnr=None,
+                    threshold=None,
+                    raw_prefix=e["fixture"],
+                    reference_raw=None,
+                    candidate_raw=Path(e["path"]),
+                    expected_hash=e["expected"],
+                    actual_hash=e["actual"],
+                )
+                for e in sha_entries
+                if e["expected"] and e["expected"] != e["actual"]
+            ]
+
+    if gate_failed or not sha_ok:
+        _auto_diff_on_failure(
+            artifact_dir,
+            [*failed_psnr_cases, *failed_sha_cases],
+            script_dir,
+            baselines,
+            root,
+        )
+        if gate_failed:
+            print("[MATRIX PSNR GATE] FAIL — one or more cases below threshold")
+        if not sha_ok:
+            print("[SHA256 GATE] FAIL — one or more artifacts do not match manifest")
         return 1
 
     return 0

@@ -1,4 +1,24 @@
 /**
+ * ---
+ * file_summary: "Stage3->4 / Stage2->4 device handoff correctness harness"
+ * functions:
+ *   - name: "computePsnr8"
+ *     description: "Compute uint8 RGB PSNR, returning 999 dB for byte-exact output"
+ *     lines: "57-66"
+ *   - name: "runDecode"
+ *     description: "Decode one DNG through pipeline v2 and retain an owned RGB copy"
+ *     lines: "75-88"
+ *   - name: "validateContract"
+ *     description: "Validate post-Stage4 handoff ON/OFF interleaved RGB contract before PSNR"
+ *     lines: "90-134"
+ *   - name: "testSample"
+ *     description: "Run one handoff ON/OFF sample, enforce contract-first validation, then gate PSNR"
+ *     lines: "140-197"
+ *   - name: "main"
+ *     description: "Run lossless Stage3->4 and lossy Stage2->4 handoff regression samples"
+ *     lines: "209-259"
+ * ---
+ *
  * test_device_handoff.cpp — W5-4 / TD-2: Device handoff path independent test
  *
  * Validates that Stage3→Stage4 device handoff (lossless) and Stage2→Stage4
@@ -67,6 +87,52 @@ static DecodeOutput runDecode(const char* path) {
     return out;
 }
 
+static bool validateContract(
+    const DecodeOutput& handoffOut,
+    const DecodeOutput& fallbackOut,
+    size_t& logicalRgbBytes
+) {
+    constexpr size_t kPlanes = 3;
+    constexpr size_t kPixelSize = sizeof(uint8_t);
+    const uint64_t expectedBytes =
+        static_cast<uint64_t>(handoffOut.width) *
+        static_cast<uint64_t>(handoffOut.height) *
+        kPlanes *
+        kPixelSize;
+
+    cout << "  [Contract] post-Stage4 handoff ON vs OFF\n";
+    cout << "    width=" << handoffOut.width
+         << "  height=" << handoffOut.height
+         << "  planes=" << kPlanes
+         << "  pixelType=uint8"
+         << "  pixelSize=" << kPixelSize
+         << "  buffer_size=" << handoffOut.rgb.size()
+         << "  logical_rgb_bytes=" << expectedBytes
+         << "  layout=interleaved RGB\n";
+
+    if (handoffOut.width == 0 || handoffOut.height == 0) {
+        cerr << "  [Contract] FAIL: width/height must be non-zero\n";
+        return false;
+    }
+    if (handoffOut.width != fallbackOut.width ||
+        handoffOut.height != fallbackOut.height) {
+        cerr << "  [Contract] FAIL: width/height mismatch between handoff ON and OFF\n";
+        return false;
+    }
+    if (handoffOut.rgb.size() != fallbackOut.rgb.size()) {
+        cerr << "  [Contract] FAIL: buffer size mismatch between handoff ON and OFF\n";
+        return false;
+    }
+    if (handoffOut.rgb.size() < expectedBytes) {
+        cerr << "  [Contract] FAIL: buffer size is smaller than interleaved RGB layout\n";
+        return false;
+    }
+
+    logicalRgbBytes = static_cast<size_t>(expectedBytes);
+    cout << "  [Contract] PASS\n";
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Per-sample gate
 // ---------------------------------------------------------------------------
@@ -106,11 +172,9 @@ static bool testSample(
 
     unsetenv(handoffEnvKey);
 
-    // --- Dimension contract ---
-    if (handoffOut.width  != fallbackOut.width  ||
-        handoffOut.height != fallbackOut.height ||
-        handoffOut.rgb.size() != fallbackOut.rgb.size()) {
-        cerr << "  [FAIL] output dimensions/size mismatch between handoff ON and OFF\n";
+    // --- Contract gate: PSNR is invalid until layout compatibility is proven. ---
+    size_t logicalRgbBytes = 0;
+    if (!validateContract(handoffOut, fallbackOut, logicalRgbBytes)) {
         return false;
     }
 
@@ -118,7 +182,7 @@ static bool testSample(
     double psnr = computePsnr8(
         handoffOut.rgb.data(),
         fallbackOut.rgb.data(),
-        handoffOut.rgb.size()
+        logicalRgbBytes
     );
     bool passed = psnr >= psnrThreshold;
     cout << "  PSNR(handoff ON vs OFF): " << fixed << setprecision(2) << psnr << " dB  "
