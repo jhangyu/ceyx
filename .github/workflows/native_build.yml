@@ -45,10 +45,54 @@ jobs:
           restore-keys: |
             native-build-${{ runner.os }}-
 
+      - name: Record native build start
+        run: echo "NATIVE_BUILD_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Build dng_decoder_native via watchdog
+        id: native_build
         working-directory: ${{ github.workspace }}
         run: |
           python3 dng_processor/native/scripts/build_native_watchdog.py --target dng_decoder_native
+
+      - name: Collect AOT build metrics (observation-only)
+        if: ${{ always() }}
+        env:
+          NATIVE_BUILD_OUTCOME: ${{ steps.native_build.outcome }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import time
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          artifact_dir = Path(os.environ["ARTIFACT_DIR"])
+          native_dir = Path(os.environ["NATIVE_DIR"])
+          artifact_dir.mkdir(parents=True, exist_ok=True)
+          aot_files = sorted((native_dir / "build" / "halide_generated").glob("*.a"))
+          aot_artifacts = {path.name: path.stat().st_size for path in aot_files}
+          dylib = native_dir / "build" / "libdng_decoder_native.dylib"
+          started_at = int(os.environ["NATIVE_BUILD_STARTED_AT"])
+          metrics = {
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+              "commit": os.environ["GITHUB_SHA"],
+              "build_outcome": os.environ["NATIVE_BUILD_OUTCOME"],
+              "build_duration_seconds": max(0, int(time.time()) - started_at),
+              "dylib_size_bytes": dylib.stat().st_size if dylib.is_file() else None,
+              "aot_total_bytes": sum(aot_artifacts.values()) if aot_files else None,
+              "aot_artifacts": aot_artifacts,
+          }
+          (artifact_dir / "aot_build_metrics.json").write_text(
+              json.dumps(metrics, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("### AOT Build Metrics (observation-only)\n\n")
+              summary.write("| Metric | Value |\n|---|---|\n")
+              for key in ("build_outcome", "build_duration_seconds",
+                          "dylib_size_bytes", "aot_total_bytes"):
+                  summary.write(f"| {key} | {metrics[key]} |\n")
+          PY
 
       - name: Stage native artifacts
         run: |
@@ -63,5 +107,14 @@ jobs:
         with:
           name: dng_decoder_native-macos-arm64
           path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload AOT build metrics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: aot-build-metrics-macos-arm64
+          path: ${{ github.workspace }}/artifacts/aot_build_metrics.json
           if-no-files-found: warn
           retention-days: 7
