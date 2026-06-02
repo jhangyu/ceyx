@@ -392,12 +392,15 @@ public:
         Var x("x"), y("y"), c("c");
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
-            rendered_rgb.compute_root()
-                        .gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+            // P12-W1-03: fuse rendered_rgb into dst via compute_at to eliminate
+            // the ~145.8 MB intermediate GPU global-memory roundtrip and collapse
+            // two Metal kernel dispatches into one. dst now drives the 16x16 tile.
             dst.bound(c, 0, 3)
                .reorder(c, x, y)
-               .gpu_tile(x, y, xo, yo, xi, yi, 32, 8)
+               .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
                .unroll(c);
+            rendered_rgb.compute_at(dst, xo)
+                        .gpu_threads(x, y);
         } else {
             Var yo("yo"), yi("yi");
             dst.bound(c, 0, 3)
