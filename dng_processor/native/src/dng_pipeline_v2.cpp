@@ -195,16 +195,16 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   }
   const size_t w = static_cast<size_t>(width);
   const size_t h = static_cast<size_t>(height);
-  const size_t stage3Elements = w * h * 3;
-  const size_t rgbBytes = w * h * 3;
+  const size_t stage3ElementCount = w * h * 3;
+  const size_t rgbByteCount = w * h * 3;
 
-  uint16_t *stage3 = stage3WorkspacePool().acquire(stage3Elements);
-  uint8_t *rgb = rgbOutputPool().acquire(rgbBytes);
+  uint16_t *stage3 = stage3WorkspacePool().acquire(stage3ElementCount);
+  uint8_t *rgb = rgbOutputPool().acquire(rgbByteCount);
   if (!stage3 || !rgb) {
     return false;
   }
-  std::memset(stage3, 0, stage3Elements * sizeof(uint16_t));
-  std::memset(rgb, 0, rgbBytes);
+  std::memset(stage3, 0, stage3ElementCount * sizeof(uint16_t));
+  std::memset(rgb, 0, rgbByteCount);
   return true;
 }
 
@@ -239,7 +239,7 @@ uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
   }
   const auto resizeEnd = Clock::now();
   if (timing) {
-    timing->resize_ms =
+    timing->workspace_acquire_ms =
         std::chrono::duration<double, std::milli>(resizeEnd - resizeStart).count();
   }
   return ptr;
@@ -367,8 +367,8 @@ bool runHalideStage3ForBayer(dng_host &host,
 
   const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
   // Phase 10 Sprint D-B F1: use pool-backed ptr instead of vector resize.
-  const size_t stage3Elements = static_cast<size_t>(width) * height * 3;
-  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3Elements, timing);
+  const size_t stage3ElementCount = static_cast<size_t>(width) * height * 3;
+  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing);
   if (!stage3Ptr) return false;
 
   bool fused = false;
@@ -547,8 +547,8 @@ bool runHalideStage3And4Fused(dng_host &host,
     return false;
 
   // Phase 10 Sprint D-B F1: use pool-backed ptr instead of vector resize.
-  const size_t stage3Elements = static_cast<size_t>(width) * height * 3;
-  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3Elements, timing);
+  const size_t stage3ElementCount = static_cast<size_t>(width) * height * 3;
+  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing);
   if (!stage3Ptr) return false;
 
   const auto fusedStart = Clock::now();
@@ -797,7 +797,8 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
   try {
     const PipelineConfig config = PipelineConfig::loadFromEnv();
     const uint32_t decodeThreads =
-        config.threads.area_threads > 0 ? config.threads.area_threads : 20;
+        config.threads.area_threads > 0 ? config.threads.area_threads
+                                        : PipelineConfig::kDefaultAreaThreads;
     ConcurrentDngHost host(decodeThreads);
     dng_file_stream stream(file_path);
 

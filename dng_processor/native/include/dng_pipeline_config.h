@@ -65,6 +65,11 @@ struct PipelineConfig {
     uint32_t area_threads = 0;
   } threads;
 
+  // Default area-task thread count used when DNG_AREA_THREADS is unset / <= 0.
+  // Named constant so the production decode path and the test harness
+  // (test_decode.cpp kOptimizedAreaThreads) cannot drift apart.
+  static constexpr uint32_t kDefaultAreaThreads = 20;
+
   static PipelineConfig loadFromEnv() {
     PipelineConfig config;
     config.route.fused_demosaic_warp =

@@ -21,7 +21,7 @@ struct DngPipelineV2Result {
 struct DngPipelineStage3Timing {
   double extract_stage2_ms = 0.0;
   double make_image_ms = 0.0;
-  double resize_ms = 0.0;
+  double workspace_acquire_ms = 0.0;
   double demosaic_ms = 0.0;
   double fused_demosaic_warp_ms = 0.0;
   double fast_warp_setup_ms = 0.0;

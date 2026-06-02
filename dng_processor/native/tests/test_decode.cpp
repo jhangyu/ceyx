@@ -70,7 +70,7 @@ struct StageTiming {
     double stage3_extract_stage2_ms = 0;
     double stage3_make_image_ms = 0;
     double stage3_direct_tile_ms = 0;
-    double stage3_resize_ms = 0;
+    double stage3_workspace_acquire_ms = 0;
     double stage3_halide_kernel_ms = 0;
     double stage3_fused_demosaic_warp_ms = 0;
     double stage3_fast_warp_setup_ms = 0;
@@ -648,7 +648,7 @@ StagePSNR testDNG(dng_host& host,
             }
             timing.stage3_extract_stage2_ms = sharedTiming.extract_stage2_ms;
             timing.stage3_make_image_ms = sharedTiming.make_image_ms;
-            timing.stage3_resize_ms = sharedTiming.resize_ms;
+            timing.stage3_workspace_acquire_ms = sharedTiming.workspace_acquire_ms;
             timing.stage3_halide_kernel_ms = sharedTiming.demosaic_ms;
             timing.stage3_fused_demosaic_warp_ms = sharedTiming.fused_demosaic_warp_ms;
             timing.stage3_fast_warp_setup_ms = sharedTiming.fast_warp_setup_ms;
@@ -658,7 +658,7 @@ StagePSNR testDNG(dng_host& host,
             const double sharedAccounted =
                 sharedTiming.extract_stage2_ms +
                 sharedTiming.make_image_ms +
-                sharedTiming.resize_ms +
+                sharedTiming.workspace_acquire_ms +
                 sharedTiming.demosaic_ms +
                 sharedTiming.fused_demosaic_warp_ms +
                 sharedTiming.fast_warp_setup_ms +
@@ -740,7 +740,7 @@ StagePSNR testDNG(dng_host& host,
                 auto stage3ResizeStart = high_resolution_clock::now();
                 stage3Data.resize(outputSize);
                 auto stage3ResizeEnd = high_resolution_clock::now();
-                timing.stage3_resize_ms =
+                timing.stage3_workspace_acquire_ms =
                     duration_cast<microseconds>(stage3ResizeEnd - stage3ResizeStart).count() / 1000.0;
 
             } else {
@@ -945,7 +945,7 @@ StagePSNR testDNG(dng_host& host,
                 timing.stage3_extract_stage2_ms +
                 timing.stage3_make_image_ms +
                 timing.stage3_direct_tile_ms +
-                timing.stage3_resize_ms +
+                timing.stage3_workspace_acquire_ms +
                 timing.stage3_halide_kernel_ms +
                 timing.stage3_fused_demosaic_warp_ms +
                 timing.stage3_fast_warp_setup_ms +
@@ -963,7 +963,7 @@ StagePSNR testDNG(dng_host& host,
                  << " ms extractStage2=" << timing.stage3_extract_stage2_ms
                  << " ms makeImage=" << timing.stage3_make_image_ms
                  << " ms directTile=" << timing.stage3_direct_tile_ms
-                 << " ms resize=" << timing.stage3_resize_ms
+                 << " ms acquire=" << timing.stage3_workspace_acquire_ms
                  << " ms demosaic=" << timing.stage3_halide_kernel_ms
                  << " ms fused=" << timing.stage3_fused_demosaic_warp_ms
                  << " ms fastWarpSetup=" << timing.stage3_fast_warp_setup_ms
@@ -1197,7 +1197,7 @@ StagePSNR testDNG(dng_host& host,
                 cout << "      Prealloc(outside): " << fixed << setprecision(2) << timing.stage3_prealloc_ms << " ms\n";
                 cout << "      Extract Stage2: " << fixed << setprecision(2) << timing.stage3_extract_stage2_ms << " ms\n";
                 cout << "      Make Stage3 img: " << fixed << setprecision(2) << timing.stage3_make_image_ms << " ms\n";
-                cout << "      Stage3 resize:   " << fixed << setprecision(2) << timing.stage3_resize_ms << " ms\n";
+                cout << "      Stage3 acquire:  " << fixed << setprecision(2) << timing.stage3_workspace_acquire_ms << " ms\n";
                 cout << "      Halide kernel:   " << fixed << setprecision(2) << timing.stage3_halide_kernel_ms << " ms\n";
                 cout << "      Fused demosaic+warp: " << fixed << setprecision(2) << timing.stage3_fused_demosaic_warp_ms << " ms\n";
                 cout << "      Fast warp setup: " << fixed << setprecision(2) << timing.stage3_fast_warp_setup_ms << " ms\n";
@@ -1316,7 +1316,7 @@ int main(int argc, char** argv) {
 
     StagePSNR lastPsnr;
     try {
-        constexpr uint32_t kOptimizedAreaThreads = 20;
+        constexpr uint32_t kOptimizedAreaThreads = PipelineConfig::kDefaultAreaThreads;
         ConcurrentDngHost host(kOptimizedAreaThreads);
         cout << "Area task threads: " << host.PerformAreaTaskThreads() << "\n";
         for (int i = 0; i < repeat; ++i) {

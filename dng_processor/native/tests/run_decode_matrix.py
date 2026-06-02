@@ -177,6 +177,18 @@ class AggResult:
     def stage3_probe_avg(self, key: str) -> Optional[float]:
         return mean_optional([r.stage3_probe.get(key) for r in self.runs])
 
+    def stage3_workspace_acquire_avg(self) -> Optional[float]:
+        # W2-02 rename: the Stage3 probe key was renamed resize -> acquire
+        # (production field DngPipelineStage3Timing::workspace_acquire_ms).
+        # Accept the canonical new key, the emitted short key, and the legacy
+        # key for migration robustness.
+        def pick(probe: dict[str, float]) -> Optional[float]:
+            for key in ("workspaceAcquire", "acquire", "resize"):
+                if key in probe:
+                    return probe[key]
+            return None
+        return mean_optional([pick(r.stage3_probe) for r in self.runs])
+
     def stage3_probe_runs_str(self, key: str) -> str:
         vals = [r.stage3_probe.get(key) for r in self.runs if key in r.stage3_probe]
         return ", ".join(f"{v:.1f}" for v in vals) if vals else "N/A"
@@ -692,13 +704,13 @@ def _build_markdown(
             L.append("")
             L.append("_`prealloc` is intentionally outside Stage3 timing; `extractStage3` / `sdkExtract` are validation-only raw-buffer materialization costs._")
             L.append("")
-            L.append("| Case | prealloc | resize | makeImage | demosaic | fused | applyOpcode3 | put | extractStage3 | sdkBuild | sdkExtract | unaccounted | production | validation extract | total |")
+            L.append("| Case | prealloc | workspace acquire | makeImage | demosaic | fused | applyOpcode3 | put | extractStage3 | sdkBuild | sdkExtract | unaccounted | production | validation extract | total |")
             L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
             for r in results:
                 L.append(
                     f"| {r.case_name} "
                     f"| {_fmt_ms(r.stage3_probe_avg('prealloc'))} "
-                    f"| {_fmt_ms(r.stage3_probe_avg('resize'))} "
+                    f"| {_fmt_ms(r.stage3_workspace_acquire_avg())} "
                     f"| {_fmt_ms(r.stage3_probe_avg('makeImage'))} "
                     f"| {_fmt_ms(r.stage3_probe_avg('demosaic'))} "
                     f"| {_fmt_ms(r.stage3_probe_avg('fused'))} "
