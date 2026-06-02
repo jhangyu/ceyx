@@ -16,6 +16,54 @@
 #define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #endif
 
+// ---------------------------------------------------------------------------
+// NEON RGB->RGBA helper (ARM64) with scalar fallback for other platforms.
+// 16-pixel NEON lane: vld3q_u8 deinterleaves 3-channel RGB; vst4q_u8 writes
+// 4-channel RGBA with alpha hard-coded to 255.
+// Ownership contract: caller allocates `rgba` with new[]; this function only
+// fills it.  Do NOT change the allocation strategy without updating ABI and
+// Dart bindings.
+// ---------------------------------------------------------------------------
+#if defined(__aarch64__)
+#include <arm_neon.h>
+
+static void rgb_to_rgba_neon(const uint8_t* rgb, uint8_t* rgba,
+                              size_t pixel_count) {
+    const uint8x16_t alpha = vdupq_n_u8(255);
+    size_t i = 0;
+    const size_t vec_end = (pixel_count / 16) * 16;
+    for (; i < vec_end; i += 16) {
+        uint8x16x3_t src = vld3q_u8(rgb + i * 3);
+        uint8x16x4_t dst;
+        dst.val[0] = src.val[0];
+        dst.val[1] = src.val[1];
+        dst.val[2] = src.val[2];
+        dst.val[3] = alpha;
+        vst4q_u8(rgba + i * 4, dst);
+    }
+    for (; i < pixel_count; ++i) {
+        rgba[i * 4 + 0] = rgb[i * 3 + 0];
+        rgba[i * 4 + 1] = rgb[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+}
+
+#else  // non-ARM64 scalar fallback
+
+static void rgb_to_rgba_neon(const uint8_t* rgb, uint8_t* rgba,
+                              size_t pixel_count) {
+    for (size_t i = 0; i < pixel_count; ++i) {
+        rgba[i * 4 + 0] = rgb[i * 3 + 0];
+        rgba[i * 4 + 1] = rgb[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+}
+
+#endif  // __aarch64__
+// ---------------------------------------------------------------------------
+
 extern "C" {
 
 FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
@@ -35,14 +83,11 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
 
   const size_t pixelCount =
       static_cast<size_t>(pipeline.width) * static_cast<size_t>(pipeline.height);
+  // 24MP RGBA: ~96 MB. Ownership: new[] allocated here;
+  // freed by dng_free_result() / dng_free_rgba_buffer() / dng_free_halide_buffer()
+  // via delete[]. Do NOT change to mmap pool without updating ABI and Dart bindings.
   uint8_t *rgba = new uint8_t[pixelCount * 4];
-  const uint8_t *rgb = pipeline.rgb_ptr;
-  for (size_t i = 0; i < pixelCount; ++i) {
-    rgba[i * 4 + 0] = rgb[i * 3 + 0];
-    rgba[i * 4 + 1] = rgb[i * 3 + 1];
-    rgba[i * 4 + 2] = rgb[i * 3 + 2];
-    rgba[i * 4 + 3] = 255;
-  }
+  rgb_to_rgba_neon(pipeline.rgb_ptr, rgba, pixelCount);
 
   result->rgba_data = rgba;
   result->width = static_cast<int32_t>(pipeline.width);
