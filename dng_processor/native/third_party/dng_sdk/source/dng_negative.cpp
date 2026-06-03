@@ -40,6 +40,7 @@
 #include "dng_tag_codes.h"
 #include "dng_tag_values.h"
 #include "dng_tile_iterator.h"
+#include "dng_timing_utils.h"
 #include "dng_utils.h"
 #include "dng_xmp.h"
 
@@ -61,14 +62,6 @@ bool Stage2SdkTimingEnabled ()
 		} ();
 
 	return enabled;
-
-	}
-
-double Stage2ElapsedMs (std::chrono::high_resolution_clock::time_point start,
-						std::chrono::high_resolution_clock::time_point end)
-	{
-
-	return std::chrono::duration<double, std::milli> (end - start).count ();
 
 	}
 
@@ -3920,7 +3913,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		saveDecisionMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		saveDecisionMs = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -3964,7 +3957,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		rawPreOpcode1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		rawPreOpcode1Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -3975,7 +3968,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		opcode1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		opcode1Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 	
@@ -4005,7 +3998,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		rawPostOpcode1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		rawPostOpcode1Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 
@@ -4024,7 +4017,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		linearizationPostParseMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		linearizationPostParseMs = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -4035,7 +4028,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		doBuildStage2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		doBuildStage2Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -4046,7 +4039,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		releaseStage1Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		releaseStage1Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 	
@@ -4062,7 +4055,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		clearLinearizationMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		clearLinearizationMs = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 	
@@ -4073,7 +4066,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		opcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		opcode2Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 	
@@ -4089,7 +4082,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		clearOpcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		clearOpcode2Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -4100,7 +4093,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		postOpcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		postOpcode2Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -4116,7 +4109,7 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2SegmentEnd = std::chrono::high_resolution_clock::now ();
-		defloatMs = Stage2ElapsedMs (stage2SegmentStart, stage2SegmentEnd);
+		defloatMs = dng_timing::elapsed_ms (stage2SegmentStart, stage2SegmentEnd);
 		stage2SegmentStart = stage2SegmentEnd;
 		}
 		
@@ -4137,8 +4130,8 @@ void dng_negative::BuildStage2Image (dng_host &host)
 	if (stage2Timing)
 		{
 		const auto stage2TotalEnd = std::chrono::high_resolution_clock::now ();
-		rawPostOpcode2Ms = Stage2ElapsedMs (stage2SegmentStart, stage2TotalEnd);
-		const double totalMs = Stage2ElapsedMs (stage2TotalStart, stage2TotalEnd);
+		rawPostOpcode2Ms = dng_timing::elapsed_ms (stage2SegmentStart, stage2TotalEnd);
+		const double totalMs = dng_timing::elapsed_ms (stage2TotalStart, stage2TotalEnd);
 		std::fprintf (stderr,
 					  "[Stage2SdkTiming] saveDecision=%.3f rawPreOpcode1=%.3f "
 					  "opcode1=%.3f rawPostOpcode1=%.3f linearizationPostParse=%.3f "

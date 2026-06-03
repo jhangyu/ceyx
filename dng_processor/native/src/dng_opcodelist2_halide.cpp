@@ -48,6 +48,7 @@
 // DNG_STAGE2_OL2_HALIDE; this bridge defers to it (source-of-truth:
 // dng_pipeline_config.h, RouteConfig category).
 #include "dng_pipeline_config.h"
+#include "dng_timing_utils.h"
 
 #include "dng_image.h"
 #include "dng_misc_opcodes.h"
@@ -233,11 +234,6 @@ void publish_device_handoff(Halide::Runtime::Buffer<uint16_t> &&buffer,
     state.valid = true;
 }
 
-double elapsed_ms(std::chrono::high_resolution_clock::time_point start,
-                  std::chrono::high_resolution_clock::time_point end) {
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
 // Time a single explicit copy_to_device upload and record the elapsed
 // milliseconds. Returns the buffer's rc unchanged; the caller keeps full
 // control of error labelling and return semantics (this helper only collapses
@@ -257,7 +253,7 @@ int measure_device_upload(BufT &buffer,
     const auto upload_start = std::chrono::high_resolution_clock::now();
     const int rc = buffer.copy_to_device(iface);
     const auto upload_end = std::chrono::high_resolution_clock::now();
-    out_ms = elapsed_ms(upload_start, upload_end);
+    out_ms = dng_timing::elapsed_ms(upload_start, upload_end);
     return rc;
 }
 
@@ -291,7 +287,7 @@ double prewarm_polynomial3_kernel_once() {
                                               /*pixel_range=*/65535.0f, dst);
         dst.copy_to_host();
         auto t1 = std::chrono::high_resolution_clock::now();
-        prewarm_ms = elapsed_ms(t0, t1);
+        prewarm_ms = dng_timing::elapsed_ms(t0, t1);
     });
     return prewarm_ms;
 }
@@ -330,7 +326,7 @@ double prewarm_polynomial_kernel_once() {
                                              dst);
         dst.copy_to_host();
         auto t1 = std::chrono::high_resolution_clock::now();
-        prewarm_ms = elapsed_ms(t0, t1);
+        prewarm_ms = dng_timing::elapsed_ms(t0, t1);
     });
     return prewarm_ms;
 }
@@ -454,7 +450,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     }
     const auto gather_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->gather_ms = elapsed_ms(gather_start, gather_end);
+        timing->gather_ms = dng_timing::elapsed_ms(gather_start, gather_end);
     }
 
     // Host got new data; Halide must re-upload before dispatch.
@@ -508,7 +504,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
                                          *dst_buf);
     const auto kernel_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->kernel_ms = elapsed_ms(kernel_start, kernel_end);
+        timing->kernel_ms = dng_timing::elapsed_ms(kernel_start, kernel_end);
     }
     if (rc != 0) {
         std::fprintf(stderr,
@@ -521,7 +517,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     dst_buf->copy_to_host();
     const auto copy_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->copy_to_host_ms = elapsed_ms(copy_start, copy_end);
+        timing->copy_to_host_ms = dng_timing::elapsed_ms(copy_start, copy_end);
     }
 
     const auto scatter_start = std::chrono::high_resolution_clock::now();
@@ -539,7 +535,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     }
     const auto scatter_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->scatter_ms = elapsed_ms(scatter_start, scatter_end);
+        timing->scatter_ms = dng_timing::elapsed_ms(scatter_start, scatter_end);
         timing->t_inner_end = scatter_end;
         timing->t_func_exit = std::chrono::high_resolution_clock::now();
     }
@@ -661,7 +657,7 @@ bool run_polynomial3_kernel(uint16_t *base,
             const auto param_upload_end =
                 std::chrono::high_resolution_clock::now();
             timing->param_upload_ms =
-                elapsed_ms(param_upload_start, param_upload_end);
+                dng_timing::elapsed_ms(param_upload_start, param_upload_end);
             if (coeff_rc != 0 || degree_rc != 0) {
                 std::fprintf(stderr,
                              "[OpcodeList2Halide] polynomial3 param upload "
@@ -677,7 +673,7 @@ bool run_polynomial3_kernel(uint16_t *base,
                                           pixel_range, dst_buf);
     const auto kernel_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->kernel_ms = elapsed_ms(kernel_start, kernel_end);
+        timing->kernel_ms = dng_timing::elapsed_ms(kernel_start, kernel_end);
     }
     if (rc != 0) {
         std::fprintf(stderr,
@@ -705,7 +701,7 @@ bool run_polynomial3_kernel(uint16_t *base,
         const auto handoff_end = std::chrono::high_resolution_clock::now();
         if (timing) {
             timing->handoff_publish_ms =
-                elapsed_ms(handoff_start, handoff_end);
+                dng_timing::elapsed_ms(handoff_start, handoff_end);
             timing->t_inner_end = handoff_end;
             timing->t_func_exit =
                 std::chrono::high_resolution_clock::now();
@@ -718,7 +714,7 @@ bool run_polynomial3_kernel(uint16_t *base,
     const int copy_rc = dst_buf.copy_to_host();
     const auto copy_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->copy_to_host_ms = elapsed_ms(copy_start, copy_end);
+        timing->copy_to_host_ms = dng_timing::elapsed_ms(copy_start, copy_end);
     }
     if (copy_rc != 0) {
         std::fprintf(stderr,
@@ -733,7 +729,7 @@ bool run_polynomial3_kernel(uint16_t *base,
                            width, height, col_step, row_step, plane_step);
     const auto scatter_end = std::chrono::high_resolution_clock::now();
     if (timing) {
-        timing->scatter_ms = elapsed_ms(scatter_start, scatter_end);
+        timing->scatter_ms = dng_timing::elapsed_ms(scatter_start, scatter_end);
         timing->t_inner_end = scatter_end;
         timing->t_func_exit = std::chrono::high_resolution_clock::now();
     }
@@ -757,19 +753,19 @@ void emit_cold_subdivide_log(
     std::chrono::high_resolution_clock::time_point dispatch_end,
     bool has_handoff) {
     const double pre_call_setup_ms =
-        elapsed_ms(dispatch_start, detail.t_func_entry);
+        dng_timing::elapsed_ms(dispatch_start, detail.t_func_entry);
     const double kernel_func_entry_ms =
-        elapsed_ms(detail.t_func_entry, detail.t_inner_start);
+        dng_timing::elapsed_ms(detail.t_func_entry, detail.t_inner_start);
     const double prewarm_window_ms =
-        elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
+        dng_timing::elapsed_ms(detail.t_inner_start, detail.t_after_prewarm);
     const double buffer_setup_ms =
-        elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
+        dng_timing::elapsed_ms(detail.t_after_prewarm, detail.t_before_src_upload);
     const double core_window_ms =
-        elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
+        dng_timing::elapsed_ms(detail.t_before_src_upload, detail.t_inner_end);
     const double kernel_func_exit_ms =
-        elapsed_ms(detail.t_inner_end, detail.t_func_exit);
+        dng_timing::elapsed_ms(detail.t_inner_end, detail.t_func_exit);
     const double post_call_destructors_ms =
-        elapsed_ms(detail.t_func_exit, dispatch_end);
+        dng_timing::elapsed_ms(detail.t_func_exit, dispatch_end);
     double core_accounted =
         detail.src_upload_ms + detail.param_upload_ms +
         detail.kernel_ms + detail.copy_to_host_ms +
@@ -952,10 +948,10 @@ bool halide_stage2_ol2_device_handoff_copy_to_host() {
                                state.img_row_step,
                                state.img_plane_step);
         const auto scatter_end = std::chrono::high_resolution_clock::now();
-        scatter_ms = elapsed_ms(scatter_start, scatter_end);
+        scatter_ms = dng_timing::elapsed_ms(scatter_start, scatter_end);
     }
     if (map_poly_timing_enabled()) {
-        const double copy_ms = elapsed_ms(copy_start, copy_end);
+        const double copy_ms = dng_timing::elapsed_ms(copy_start, copy_end);
         std::fprintf(stderr,
                      "[MapPolynomialHandoffTiming] copy_to_host=%.3f "
                      "scatter=%.3f total=%.3f\n",
@@ -1064,7 +1060,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
                                            defer_copy_to_host,
                                            &detail);
     const auto dispatch_end = std::chrono::high_resolution_clock::now();
-    detail.dispatch_call_ms = elapsed_ms(dispatch_start, dispatch_end);
+    detail.dispatch_call_ms = dng_timing::elapsed_ms(dispatch_start, dispatch_end);
     if (!ok) {
         return 0;
     }
@@ -1175,7 +1171,7 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
                                           static_cast<float>(pixel_range),
                                           &detail);
     const auto dispatch_end = std::chrono::high_resolution_clock::now();
-    detail.dispatch_call_ms = elapsed_ms(dispatch_start, dispatch_end);
+    detail.dispatch_call_ms = dng_timing::elapsed_ms(dispatch_start, dispatch_end);
     if (ok && map_poly_timing_enabled()) {
         const double total = detail.prewarm_ms + detail.gather_ms +
                              detail.src_upload_ms + detail.param_upload_ms +

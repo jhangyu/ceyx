@@ -56,6 +56,7 @@ jobs:
 
       - name: Collect AOT build metrics (observation-only)
         if: ${{ always() }}
+        continue-on-error: true
         env:
           NATIVE_BUILD_OUTCOME: ${{ steps.native_build.outcome }}
         run: |
@@ -69,16 +70,38 @@ jobs:
           artifact_dir = Path(os.environ["ARTIFACT_DIR"])
           native_dir = Path(os.environ["NATIVE_DIR"])
           artifact_dir.mkdir(parents=True, exist_ok=True)
-          aot_files = sorted((native_dir / "build" / "halide_generated").glob("*.a"))
+          build_succeeded = os.environ["NATIVE_BUILD_OUTCOME"] == "success"
+          aot_files = (
+              sorted((native_dir / "build" / "halide_generated").glob("*.a"))
+              if build_succeeded else []
+          )
           aot_artifacts = {path.name: path.stat().st_size for path in aot_files}
           dylib = native_dir / "build" / "libdng_decoder_native.dylib"
-          started_at = int(os.environ["NATIVE_BUILD_STARTED_AT"])
+          started_at_raw = os.environ.get("NATIVE_BUILD_STARTED_AT")
+          try:
+              started_at = int(started_at_raw) if started_at_raw else None
+          except ValueError:
+              started_at = None
           metrics = {
               "timestamp": datetime.now(timezone.utc).isoformat(),
               "commit": os.environ["GITHUB_SHA"],
               "build_outcome": os.environ["NATIVE_BUILD_OUTCOME"],
-              "build_duration_seconds": max(0, int(time.time()) - started_at),
-              "dylib_size_bytes": dylib.stat().st_size if dylib.is_file() else None,
+              "build_duration_seconds": (
+                  max(0, int(time.time()) - started_at)
+                  if started_at is not None else None
+              ),
+              "build_duration_status": (
+                  "recorded" if started_at is not None
+                  else "start_timestamp_missing_or_invalid"
+              ),
+              "artifact_size_status": (
+                  "collected" if build_succeeded
+                  else "not_collected_build_outcome_not_success"
+              ),
+              "dylib_size_bytes": (
+                  dylib.stat().st_size if build_succeeded and dylib.is_file()
+                  else None
+              ),
               "aot_total_bytes": sum(aot_artifacts.values()) if aot_files else None,
               "aot_artifacts": aot_artifacts,
           }
@@ -90,6 +113,7 @@ jobs:
               summary.write("### AOT Build Metrics (observation-only)\n\n")
               summary.write("| Metric | Value |\n|---|---|\n")
               for key in ("build_outcome", "build_duration_seconds",
+                          "build_duration_status", "artifact_size_status",
                           "dylib_size_bytes", "aot_total_bytes"):
                   summary.write(f"| {key} | {metrics[key]} |\n")
           PY
@@ -112,6 +136,7 @@ jobs:
 
       - name: Upload AOT build metrics
         if: ${{ always() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: aot-build-metrics-macos-arm64

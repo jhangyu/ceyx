@@ -4,28 +4,31 @@ file_summary: "Production DNG pipeline v2 entry used by Flutter FFI; runs SDK St
 functions:
   - name: "copyImageToInterleaved16 / allocStage3Image"
     description: "Stage3 image <-> uint16 interleaved buffer helpers; alloc/put are split so latency hiding can pre-allocate while GPU runs. Pointer-based variants (makeImageFromInterleaved16Ptr / putStage3DataPtr / prepareStage3WorkspacePtr) are the production path; vector variants were retired in Phase 11 W4."
-    lines: "63-90"
+    lines: "67-98"
   - name: "applyOpcodeList3"
     description: "Apply OpcodeList3 to a Stage3 image, using Halide WarpRectilinear when config allows."
-    lines: "92-120"
+    lines: "100-126"
   - name: "extractStage2Bayer16"
     description: "Phase 11 W4 — borrow-or-copy Stage2 Bayer with timing; consolidates the duplicated extract block of runHalideStage3ForBayer and runHalideStage3And4Fused."
-    lines: "260-300"
+    lines: "287-313"
   - name: "runHalideStage3ForBayer"
     description: "Run production Bayer Stage3 with fused demosaic+WarpRectilinear fast path; Phase 8.2.1 Path D — async dispatch + Make_dng_image overlap to hide GPU sync_wait."
-    lines: "179-310"
+    lines: "351-497"
   - name: "runSdkStage3 / runStage4ToRgb"
     description: "SDK Stage3 fallback and Stage4 render through Halide Metal."
-    lines: "312-370"
+    lines: "633-697"
+  - name: "ParsedDngMetadata / parseDngFile / decodeStages"
+    description: "Private extract-method helpers for DNG parse + Stage1 and Stage2/3/4 decode orchestration; SDK owners remain in dng_pipeline_v2_decode_to_rgb."
+    lines: "752-872"
   - name: "pipelineSingleFlightMutex"
     description: "File-scope std::mutex accessor; both public FFI entries lock it to serialize warmup vs decode and prevent races on shared native pools / DeviceHandoffState."
-    lines: "793-801"
+    lines: "881-884"
   - name: "dng_pipeline_v2_warmup_for_size"
     description: "Idle-time warm hook; locks single-flight mutex and primes pipeline pools + polynomial3 scratch."
-    lines: "803-810"
+    lines: "886-893"
   - name: "dng_pipeline_v2_run_stage3 / dng_pipeline_v2_decode_to_rgb"
     description: "Shared Stage3 orchestration + top-level decode entry returning RGB and timing; production FFI uses ConcurrentDngHost so Stage1/2 materialization follows matrix threading. decode_to_rgb takes single-flight mutex."
-    lines: "812-955"
+    lines: "895-952"
 ---
 */
 #include "dng_pipeline_v2.h"
@@ -746,6 +749,128 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
   return restoreHostStage2();
 }
 
+struct ParsedDngMetadata {
+  bool isBayer;
+  uint32_t inputWidth;
+  uint32_t inputHeight;
+};
+
+bool parseDngFile(ConcurrentDngHost &host,
+                  dng_file_stream &stream,
+                  dng_info &info,
+                  AutoPtr<dng_negative> &negative,
+                  ParsedDngMetadata &metadata,
+                  Clock::time_point &decodeStart,
+                  DngPipelineV2Result &result) {
+  info.Parse(host, stream);
+  info.PostParse(host);
+  if (!info.IsValidDNG() || info.fMainIndex >= info.fIFDCount) {
+    result.error_code = -2;
+    return false;
+  }
+
+  dng_negative *negativeRaw = host.Make_dng_negative();
+  negative.Reset(negativeRaw);
+  negative->Parse(host, stream, info);
+  negative->PostParse(host, stream, info);
+
+  const dng_ifd &rawIFD = *info.fIFD[info.fMainIndex];
+  metadata.isBayer = rawIFD.fPhotometricInterpretation == piCFA;
+  metadata.inputWidth = rawIFD.fImageWidth;
+  metadata.inputHeight = rawIFD.fImageLength;
+  decodeStart = Clock::now();
+  negative->ReadStage1Image(host, stream, info);
+  return true;
+}
+
+bool decodeStages(ConcurrentDngHost &host,
+                  const PipelineConfig &config,
+                  dng_negative &negative,
+                  const ParsedDngMetadata &metadata,
+                  const Clock::time_point &decodeStart,
+                  DngPipelineV2Result &result) {
+  const bool isBayer = metadata.isBayer;
+  const uint32_t inputWidth = metadata.inputWidth;
+  const uint32_t inputHeight = metadata.inputHeight;
+
+  // Lazy actual-size prewarm: fire the batched polynomial3 kernel at the
+  // real image dimensions now that they are known.  This ensures Metal has
+  // compiled and cached the pipeline state for (inputWidth × inputHeight)
+  // before BuildStage2Image triggers the real MapPolynomial dispatch, saving
+  // ~40ms on the first decode of a given resolution.  The call is a no-op on
+  // Bayer images (no MapPolynomial in OpcodeList2) and on repeated decodes of
+  // the same size (per-size cache in halide_prewarm_polynomial3_for_size).
+  if (!isBayer) {
+    halide_prewarm_polynomial3_for_size(
+        static_cast<int>(inputWidth), static_cast<int>(inputHeight));
+  }
+
+  {
+    const bool enableStage2DeviceHandoff =
+        !isBayer && config.route.stage2_stage4_device_handoff;
+    ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
+    negative.BuildStage2Image(host);
+  }
+
+  // Phase 10 Sprint D-B F1: do NOT eagerly resize stage3Workspace here.
+  // FFI path gets a lazy mmap pool via prepareStage3WorkspacePtr; this
+  // eliminates the ~262ms zero-fill that was inside decodeStart-decodeEnd.
+  // test_decode harness passes its own pre-sized vector so is unaffected.
+  std::vector<uint16_t> stage3Workspace;
+  DngPipelineStage3Timing stage3Timing;
+
+  // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
+  bool allDone = false;
+  if (isBayer) {
+    allDone = runHalideStage3And4Fused(
+        host, negative, config, inputWidth, inputHeight,
+        &stage3Timing, &stage3Workspace,
+        result.rgb_ptr, result.rgb_size, result.width, result.height);
+  } else {
+    bool restoreFailed = false;
+    allDone = runLossyStage2Stage4DeviceHandoff(
+        host, negative, config, inputWidth, inputHeight,
+        result.rgb_ptr, result.rgb_size, result.width, result.height,
+        restoreFailed);
+    if (restoreFailed) {
+      result.error_code = -5;
+      return false;
+    }
+  }
+
+  const auto decodeEnd = Clock::now();
+  result.decode_ms =
+      std::chrono::duration<double, std::milli>(decodeEnd - decodeStart).count();
+
+  if (allDone) {
+    result.process_ms = 0;
+    result.error_code = 0;
+    return true;
+  }
+
+  // Normal Stage3 + Stage4 path (fused not applicable or dispatch failed).
+  bool stage3Ok =
+      dng_pipeline_v2_run_stage3(host, negative, isBayer, &stage3Timing,
+                                 isBayer ? &stage3Workspace : nullptr);
+  if (!stage3Ok) {
+    result.error_code = -3;
+    return false;
+  }
+
+  const auto processStart = Clock::now();
+  if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight,
+                      result.rgb_ptr, result.rgb_size,
+                      result.width, result.height)) {
+    result.error_code = -4;
+    return false;
+  }
+  const auto processEnd = Clock::now();
+  result.process_ms =
+      std::chrono::duration<double, std::milli>(processEnd - processStart).count();
+  result.error_code = 0;
+  return true;
+}
+
 } // namespace
 
 // Single-flight mutex serializing the public FFI entry points against the
@@ -803,101 +928,14 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     dng_file_stream stream(file_path);
 
     dng_info info;
-    info.Parse(host, stream);
-    info.PostParse(host);
-    if (!info.IsValidDNG() || info.fMainIndex >= info.fIFDCount) {
-      result.error_code = -2;
+    AutoPtr<dng_negative> negative;
+    ParsedDngMetadata metadata;
+    Clock::time_point decodeStart;
+    if (!parseDngFile(host, stream, info, negative, metadata, decodeStart,
+                      result)) {
       return false;
     }
-
-    dng_negative *negativeRaw = host.Make_dng_negative();
-    AutoPtr<dng_negative> negative(negativeRaw);
-    negative->Parse(host, stream, info);
-    negative->PostParse(host, stream, info);
-
-    const dng_ifd &rawIFD = *info.fIFD[info.fMainIndex];
-    const bool isBayer = rawIFD.fPhotometricInterpretation == piCFA;
-    const uint32_t inputWidth = rawIFD.fImageWidth;
-    const uint32_t inputHeight = rawIFD.fImageLength;
-    const auto decodeStart = Clock::now();
-    negative->ReadStage1Image(host, stream, info);
-
-    // Lazy actual-size prewarm: fire the batched polynomial3 kernel at the
-    // real image dimensions now that they are known.  This ensures Metal has
-    // compiled and cached the pipeline state for (inputWidth × inputHeight)
-    // before BuildStage2Image triggers the real MapPolynomial dispatch, saving
-    // ~40ms on the first decode of a given resolution.  The call is a no-op on
-    // Bayer images (no MapPolynomial in OpcodeList2) and on repeated decodes of
-    // the same size (per-size cache in halide_prewarm_polynomial3_for_size).
-    if (!isBayer) {
-      halide_prewarm_polynomial3_for_size(
-          static_cast<int>(inputWidth), static_cast<int>(inputHeight));
-    }
-
-    {
-      const bool enableStage2DeviceHandoff =
-          !isBayer && config.route.stage2_stage4_device_handoff;
-      ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
-      negative->BuildStage2Image(host);
-    }
-
-    // Phase 10 Sprint D-B F1: do NOT eagerly resize stage3Workspace here.
-    // FFI path gets a lazy mmap pool via prepareStage3WorkspacePtr; this
-    // eliminates the ~262ms zero-fill that was inside decodeStart-decodeEnd.
-    // test_decode harness passes its own pre-sized vector so is unaffected.
-    std::vector<uint16_t> stage3Workspace;
-    DngPipelineStage3Timing stage3Timing;
-
-    // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
-    bool allDone = false;
-    if (isBayer) {
-      allDone = runHalideStage3And4Fused(
-          host, *negative, config, inputWidth, inputHeight,
-          &stage3Timing, &stage3Workspace,
-          result.rgb_ptr, result.rgb_size, result.width, result.height);
-    } else {
-      bool restoreFailed = false;
-      allDone = runLossyStage2Stage4DeviceHandoff(
-          host, *negative, config, inputWidth, inputHeight,
-          result.rgb_ptr, result.rgb_size, result.width, result.height,
-          restoreFailed);
-      if (restoreFailed) {
-        result.error_code = -5;
-        return false;
-      }
-    }
-
-    const auto decodeEnd = Clock::now();
-    result.decode_ms =
-        std::chrono::duration<double, std::milli>(decodeEnd - decodeStart).count();
-
-    if (allDone) {
-      result.process_ms = 0;
-      result.error_code = 0;
-      return true;
-    }
-
-    // Normal Stage3 + Stage4 path (fused not applicable or dispatch failed).
-    bool stage3Ok =
-        dng_pipeline_v2_run_stage3(host, *negative, isBayer, &stage3Timing,
-                                   isBayer ? &stage3Workspace : nullptr);
-    if (!stage3Ok) {
-      result.error_code = -3;
-      return false;
-    }
-
-    const auto processStart = Clock::now();
-    if (!runStage4ToRgb(host, *negative, config, inputWidth, inputHeight,
-                        result.rgb_ptr, result.rgb_size,
-                        result.width, result.height)) {
-      result.error_code = -4;
-      return false;
-    }
-    const auto processEnd = Clock::now();
-    result.process_ms =
-        std::chrono::duration<double, std::milli>(processEnd - processStart).count();
-    result.error_code = 0;
-    return true;
+    return decodeStages(host, config, *negative, metadata, decodeStart, result);
   } catch (const dng_exception &e) {
     result.error_code = e.ErrorCode();
     std::cerr << "[PipelineV2] DNG exception: " << result.error_code << "\n";

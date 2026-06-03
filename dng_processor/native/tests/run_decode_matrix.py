@@ -3,7 +3,7 @@
 # file_summary: >
 #   SDK vs Halide Metal pipeline 比較矩陣工具。
 #   執行 Lossless/Lossy × SDK/Halide Metal 四組 case，
-#   解析 stdout 的 Stage1-4 時間與 PSNR，支援 repeat 平均，輸出 Markdown 表格。
+#   解析 stdout 的 Stage1-4 時間與 PSNR，支援 repeat timing 平均與逐輪 correctness gate，輸出 Markdown 表格。
 #
 # cases:
 #   Lossless / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
@@ -40,7 +40,7 @@
 # auto_diff:
 #   - name: "_auto_diff_on_failure"
 #     description: "gate FAIL 時寫入文字診斷；同次 raw 齊全時執行 contract-first PSNR 與 heatmap"
-#     lines: "1073-1184"
+#     lines: "1270-1381"
 # ---
 import argparse
 import datetime as dt
@@ -150,21 +150,22 @@ class AggResult:
     case_name: str
     runs: list[RunResult]
 
-    def _avg(self, attr: str) -> StageResult:
+    def _aggregate_stage(self, attr: str) -> StageResult:
         stages = [getattr(r, attr) for r in self.runs]
+        psnr_values = [s.psnr_db for s in stages if s.psnr_db is not None]
         return StageResult(
             time_ms=mean_optional([s.time_ms for s in stages]),
-            psnr_db=mean_optional([s.psnr_db for s in stages]),
+            psnr_db=min(psnr_values) if psnr_values else None,
         )
 
     @property
-    def stage1(self) -> StageResult: return self._avg("stage1")
+    def stage1(self) -> StageResult: return self._aggregate_stage("stage1")
     @property
-    def stage2(self) -> StageResult: return self._avg("stage2")
+    def stage2(self) -> StageResult: return self._aggregate_stage("stage2")
     @property
-    def stage3(self) -> StageResult: return self._avg("stage3")
+    def stage3(self) -> StageResult: return self._aggregate_stage("stage3")
     @property
-    def stage4(self) -> StageResult: return self._avg("stage4")
+    def stage4(self) -> StageResult: return self._aggregate_stage("stage4")
 
     @property
     def total_ms(self) -> Optional[float]:
@@ -261,6 +262,10 @@ _STAGE_RE = re.compile(r"^--- Stage (\d+):")
 _TIME_RE = re.compile(r"^\s*Time:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
 _PSNR_RE = re.compile(r"^\s*PSNR vs baseline:\s*([0-9]+(?:\.[0-9]+)?)\s*dB")
 _TOTAL_RE = re.compile(r"^\s*(?:DECODE )?TOTAL:\s*([0-9]+(?:\.[0-9]+)?)\s*ms")
+_STAGE_CONTRACT_RE = re.compile(
+    r"^\s*\[Contract\]\s+(Stage[1-4])\b.*->\s*(PASS|FAIL)\s*$"
+)
+_EXPECTED_NATIVE_CONTRACT_STAGES = ("Stage1", "Stage2", "Stage3", "Stage4")
 # Stale parsers removed (2026-05-28 cleanup): the source emitters
 # `[RenderHalideTiming]`, `[DemosaicHalideTiming]`, `[DemosaicWarpHalideTiming]`
 # were dropped together with the DNG_RENDER_HALIDE_TIMING /
@@ -307,17 +312,19 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         check=False,
     )
     output = proc.stdout
-    if proc.returncode != 0:
-        raise RuntimeError(f"[{case_name}] exit={proc.returncode}\n{output}")
-
     stages: dict[str, StageResult] = {str(i): StageResult() for i in range(1, 5)}
     cur: Optional[str] = None
     total_ms: Optional[float] = None
     stage3_probe: dict[str, float] = {}
     stage2_probe: dict[str, float] = {}
     opcode2_probe: dict[str, float] = {}
+    contract_statuses: dict[str, list[str]] = {}
 
     for line in output.splitlines():
+        m = _STAGE_CONTRACT_RE.match(line)
+        if m:
+            contract_statuses.setdefault(m.group(1), []).append(m.group(2))
+            continue
         m = _STAGE_RE.match(line)
         if m:
             cur = m.group(1)
@@ -345,6 +352,23 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         m = _OPCODE2_TIMING_RE.match(line)
         if m:
             _accumulate_opcode2_timing(opcode2_probe, m.group(1))
+
+    missing_contracts = [
+        stage for stage in _EXPECTED_NATIVE_CONTRACT_STAGES
+        if "PASS" not in contract_statuses.get(stage, [])
+    ]
+    failed_contracts = [
+        stage for stage, statuses in contract_statuses.items()
+        if "FAIL" in statuses
+    ]
+    if proc.returncode != 0 or missing_contracts or failed_contracts:
+        details = []
+        if missing_contracts:
+            details.append(f"missing PASS markers: {', '.join(missing_contracts)}")
+        if failed_contracts:
+            details.append(f"FAIL markers: {', '.join(sorted(failed_contracts))}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        raise RuntimeError(f"[{case_name}] exit={proc.returncode}{suffix}\n{output}")
 
     return RunResult(
         case_name=case_name,
@@ -512,7 +536,10 @@ def _build_markdown(
 
     L.append("# DNG Pipeline Matrix — SDK vs Halide Metal")
     L.append("")
-    L.append(f"_Generated: {generated_at} | Repeat: {repeat} (arithmetic mean)_")
+    L.append(
+        f"_Generated: {generated_at} | Repeat: {repeat} "
+        "(timing arithmetic mean; PSNR minimum across runs)_"
+    )
     L.append(f"_Intermediate artifacts: `{artifact_dir}`_")
     L.append("")
     L.append("> **PSNR semantics**")
@@ -596,7 +623,7 @@ def _build_markdown(
         L.append("")
 
     # --- PSNR table ---
-    L.append("## PSNR vs SDK Baseline (dB)")
+    L.append("## PSNR vs SDK Baseline (dB, minimum across runs)")
     L.append("")
     L.append("| Case | Stage1 | Stage2 | Stage3 | Stage4 |")
     L.append("|---|---|---|---|---|")
@@ -796,6 +823,72 @@ def _build_psnr_thresholds_from_baselines(baselines: dict[str, Any]) -> dict[tup
     return result
 
 
+_SELECTED_ARTIFACT_CONTRACT_SEMANTICS = {
+    "stage3": {
+        "pixelType": "uint16",
+        "pixelSize": 2,
+        "layout": "interleaved RGB",
+        "opcodeScope": "post-OpcodeList3",
+    },
+    "stage4": {
+        "pixelType": "uint8",
+        "pixelSize": 1,
+        "layout": "interleaved RGB",
+        "opcodeScope": "final post-Stage4 render",
+    },
+}
+
+
+def _validate_selected_artifact_manifest(item: dict[str, Any]) -> bool:
+    artifact_id = item.get("id", "unknown")
+    contract = item.get("contract")
+    required = (
+        "width", "height", "planes", "pixelType", "pixelSize",
+        "bufferSize", "layout", "opcodeScope",
+    )
+    if not isinstance(contract, dict):
+        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — contract is missing")
+        return False
+    missing = [key for key in required if key not in contract]
+    if missing:
+        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — missing fields: {', '.join(missing)}")
+        return False
+
+    for key in ("width", "height", "planes", "pixelSize", "bufferSize"):
+        if type(contract[key]) is not int or contract[key] <= 0:
+            print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — {key} must be a positive integer")
+            return False
+    calculated_size = (
+        contract["width"]
+        * contract["height"]
+        * contract["planes"]
+        * contract["pixelSize"]
+    )
+    if calculated_size != contract["bufferSize"]:
+        print(
+            f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — "
+            f"bufferSize={contract['bufferSize']}, calculated={calculated_size}"
+        )
+        return False
+
+    stage = item.get("stage")
+    semantics = _SELECTED_ARTIFACT_CONTRACT_SEMANTICS.get(stage)
+    if semantics is None:
+        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — unsupported stage: {stage!r}")
+        return False
+    for key, expected in semantics.items():
+        if contract[key] != expected:
+            print(
+                f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — "
+                f"{key}={contract[key]!r}, expected {expected!r} for {stage}"
+            )
+            return False
+    if contract["planes"] != 3:
+        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — interleaved RGB requires planes=3")
+        return False
+    return True
+
+
 def _validate_regression_baselines_schema(baselines: dict[str, Any]) -> bool:
     if baselines.get("version") != 1:
         print("[REGRESSION BASELINES] FAIL — expected schema version 1")
@@ -819,6 +912,10 @@ def _validate_regression_baselines_schema(baselines: dict[str, Any]) -> bool:
     if not isinstance(selected, list) or not selected:
         print("[REGRESSION BASELINES] FAIL — selected_artifacts must not be empty")
         return False
+    for item in selected:
+        if not isinstance(item, dict) or not _validate_selected_artifact_manifest(item):
+            print("[REGRESSION BASELINES] FAIL — invalid selected artifact contract")
+            return False
     return True
 
 
@@ -864,6 +961,7 @@ def _run_sha256_gate(
     baselines: dict[str, Any],
     artifact_dir: Path,
     case_artifact_map: dict[str, Path],
+    selected_artifacts: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[bool, list[dict[str, str]]]:
     """Check SHA-256 of selected artifacts against manifest.
 
@@ -875,7 +973,11 @@ def _run_sha256_gate(
     Returns:
         (all_passed, entries) where entries is a list of dicts for diff output.
     """
-    selected = baselines.get("selected_artifacts", [])
+    selected = (
+        baselines.get("selected_artifacts", [])
+        if selected_artifacts is None
+        else selected_artifacts
+    )
     if not selected:
         print("[SHA256 GATE] FAIL — selected_artifacts is empty")
         return False, []
@@ -918,8 +1020,8 @@ def _run_sha256_gate(
             all_ok = False
 
         if not expected_hash:
-            # Uninitialized baseline — skip gate, just report
-            print(f"[SHA256 GATE] {artifact_id}: SKIP (baseline uninitialized)")
+            print(f"[SHA256 GATE] {artifact_id}: FAIL — locked sha256 is empty")
+            all_ok = False
             continue
 
         ok = actual_hash == expected_hash
@@ -936,22 +1038,17 @@ def _run_sha256_gate(
 def _validate_selected_artifact_contract(item: dict[str, Any], path: Path) -> bool:
     artifact_id = item.get("id", "unknown")
     contract = item.get("contract")
-    required = ("width", "height", "planes", "pixelType", "pixelSize", "bufferSize", "layout")
-    if not isinstance(contract, dict):
-        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — contract is missing")
+    if not _validate_selected_artifact_manifest(item):
         return False
-    missing = [key for key in required if key not in contract]
-    if missing:
-        print(f"[ARTIFACT CONTRACT] {artifact_id}: FAIL — missing fields: {', '.join(missing)}")
-        return False
+    assert isinstance(contract, dict)
 
     calculated_size = (
-        int(contract["width"])
-        * int(contract["height"])
-        * int(contract["planes"])
-        * int(contract["pixelSize"])
+        contract["width"]
+        * contract["height"]
+        * contract["planes"]
+        * contract["pixelSize"]
     )
-    expected_size = int(contract["bufferSize"])
+    expected_size = contract["bufferSize"]
     actual_size = path.stat().st_size
     ok = calculated_size == expected_size and actual_size == expected_size
     marker = "PASS" if ok else "FAIL"
@@ -959,7 +1056,8 @@ def _validate_selected_artifact_contract(item: dict[str, Any], path: Path) -> bo
         f"[ARTIFACT CONTRACT] {artifact_id}: {marker} — "
         f"{contract['width']}x{contract['height']} planes={contract['planes']} "
         f"pixelType={contract['pixelType']} pixelSize={contract['pixelSize']} "
-        f"bufferSize={actual_size} layout={contract['layout']}"
+        f"bufferSize={actual_size} layout={contract['layout']} "
+        f"opcodeScope={contract['opcodeScope']}"
     )
     if not ok:
         print(
@@ -1018,6 +1116,27 @@ def _clear_halide_case_outputs(artifact_dir: Path) -> None:
             path.unlink()
 
 
+def _stage_halide_artifacts(
+    artifact_dir: Path,
+    matrix_current: Path,
+    fixture: str,
+) -> dict[str, Path]:
+    """Stage one Halide repeat without retaining files from an earlier round."""
+    fixture_staging = matrix_current / fixture
+    if fixture_staging.exists():
+        shutil.rmtree(fixture_staging)
+    fixture_staging.mkdir(parents=True, exist_ok=True)
+
+    case_artifact_map: dict[str, Path] = {}
+    for artifact_name in ("halide_demosaic_output.raw", "halide_render_output.raw"):
+        src = artifact_dir / artifact_name
+        if src.exists():
+            dst = fixture_staging / artifact_name
+            shutil.copy2(str(src), str(dst))
+            case_artifact_map[f"{fixture}/{artifact_name}"] = dst
+    return case_artifact_map
+
+
 def _psnr_raw_pair(
     artifact_dir: Path,
     matrix_current: Path,
@@ -1037,6 +1156,72 @@ def _psnr_raw_pair(
     references = sorted(artifact_dir.glob(reference_pattern))
     reference = references[0] if len(references) == 1 else None
     return reference, candidate if candidate.exists() else None
+
+
+def _run_psnr_gate(
+    run: RunResult,
+    thresholds: dict[tuple[str, str], float],
+    artifact_dir: Path,
+    matrix_current: Path,
+    round_label: str,
+) -> list[FailedGateInfo]:
+    failed: list[FailedGateInfo] = []
+    for (fragment, stage_attr), threshold in thresholds.items():
+        if fragment not in run.case_name:
+            continue
+        stage_result = getattr(run, stage_attr)
+        psnr = stage_result.psnr_db
+        fixture = "lossless" if "Lossless" in run.case_name else "lossy"
+        reference_raw, candidate_raw = _psnr_raw_pair(
+            artifact_dir, matrix_current, fixture, stage_attr
+        )
+        if psnr is None:
+            print(
+                f"[MATRIX PSNR GATE] {round_label} {run.case_name} {stage_attr}: "
+                "missing PSNR  [FAIL]"
+            )
+        else:
+            ok = psnr >= threshold
+            marker = "PASS" if ok else "FAIL"
+            print(
+                f"[MATRIX PSNR GATE] {round_label} {run.case_name} {stage_attr}: "
+                f"{psnr:.2f} dB {'≥' if ok else '<'} {threshold} dB  [{marker}]"
+            )
+            if ok:
+                continue
+        failed.append(FailedGateInfo(
+            gate_kind="psnr",
+            case_name=f"{run.case_name} ({round_label})",
+            stage=stage_attr,
+            actual_psnr=psnr,
+            threshold=threshold,
+            raw_prefix=fixture,
+            reference_raw=reference_raw,
+            candidate_raw=candidate_raw,
+        ))
+    return failed
+
+
+def _failed_sha_gate_infos(
+    entries: list[dict[str, str]],
+    round_label: str,
+) -> list[FailedGateInfo]:
+    return [
+        FailedGateInfo(
+            gate_kind="sha256",
+            case_name=f"{entry['id']} ({round_label})",
+            stage=entry["stage"],
+            actual_psnr=None,
+            threshold=None,
+            raw_prefix=entry["fixture"],
+            reference_raw=None,
+            candidate_raw=Path(entry["path"]),
+            expected_hash=entry["expected"],
+            actual_hash=entry["actual"],
+        )
+        for entry in entries
+        if entry["expected"] != entry["actual"]
+    ]
 
 
 def _stage_ffi_test_render(
@@ -1405,12 +1590,22 @@ def main() -> int:
         "Lossy / Halide": "lossy",
     }
 
+    psnr_thresholds = _build_psnr_thresholds_from_baselines(baselines)
+    gate_failed = False
+    sha_ok = True
+    sha_entries_by_id: dict[str, dict[str, str]] = {}
+
     agg_results: list[AggResult] = []
     for case_name, cmd, env in cases:
         runs: list[RunResult] = []
+        fixture_key = next(
+            (fixture for fragment, fixture in _CASE_FIXTURE_MAP.items() if fragment in case_name),
+            None,
+        )
         for i in range(args.repeat):
-            label = f"[RUN {i+1}/{args.repeat}] {case_name}"
-            print(label)
+            round_label = f"[RUN {i+1}/{args.repeat}]"
+            round_sha_failures: list[FailedGateInfo] = []
+            print(f"{round_label} {case_name}")
             try:
                 if "Halide" in case_name:
                     _clear_halide_case_outputs(artifact_dir)
@@ -1419,20 +1614,48 @@ def main() -> int:
             except RuntimeError as exc:
                 print(f"  ERROR: {exc}")
                 raise SystemExit(1)
-        agg_results.append(AggResult(case_name=case_name, runs=runs))
 
-        # Stage Halide artifacts into matrix-current/<fixture>/ for SHA-256 gate.
-        # Only the LAST repeat's artifacts matter (they overwrite each other).
-        for frag, fixture_key in _CASE_FIXTURE_MAP.items():
-            if frag in case_name:
-                fixture_staging = matrix_current / fixture_key
-                fixture_staging.mkdir(parents=True, exist_ok=True)
-                for artifact_name in ("halide_demosaic_output.raw", "halide_render_output.raw"):
-                    src = artifact_dir / artifact_name
-                    if src.exists():
-                        dst = fixture_staging / artifact_name
-                        shutil.copy2(str(src), str(dst))
-                break
+            if fixture_key is not None:
+                case_artifact_map = _stage_halide_artifacts(
+                    artifact_dir, matrix_current, fixture_key
+                )
+                selected = [
+                    item for item in baselines["selected_artifacts"]
+                    if item.get("fixture") == fixture_key
+                ]
+                print(f"[SHA256 GATE] {round_label} {case_name}")
+                round_sha_ok, round_sha_entries = _run_sha256_gate(
+                    baselines,
+                    artifact_dir,
+                    case_artifact_map,
+                    selected_artifacts=selected,
+                )
+                sha_ok = round_sha_ok and sha_ok
+                for entry in round_sha_entries:
+                    sha_entries_by_id[entry["id"]] = entry
+                if not round_sha_ok:
+                    round_sha_failures = _failed_sha_gate_infos(
+                        round_sha_entries, round_label
+                    )
+
+            round_psnr_failures = _run_psnr_gate(
+                run,
+                psnr_thresholds,
+                artifact_dir,
+                matrix_current,
+                round_label,
+            )
+            gate_failed = bool(round_psnr_failures) or gate_failed
+            if round_psnr_failures or round_sha_failures:
+                _auto_diff_on_failure(
+                    artifact_dir,
+                    [*round_psnr_failures, *round_sha_failures],
+                    script_dir,
+                    baselines,
+                    root,
+                )
+
+        agg_results.append(AggResult(case_name=case_name, runs=runs))
 
     handoff_results: list[DeviceHandoffResult] = []
     if args.device_handoff_harness:
@@ -1504,112 +1727,12 @@ def main() -> int:
     else:
         print(md)
 
-    # W5-3 / TD-10: Post-matrix PSNR gate.
-    # For Halide cases (non-SDK baselines) enforce per-stage minimum PSNR thresholds.
-    # Thresholds loaded from kernel_regression_baselines.json when available,
-    # otherwise fall back to hardcoded values.
-    _PSNR_THRESHOLDS = _build_psnr_thresholds_from_baselines(baselines)
-    gate_failed = False
-    failed_psnr_cases: list[FailedGateInfo] = []
-    for r in agg_results:
-        for stage_attr in ("stage1", "stage2", "stage3", "stage4"):
-            for frag, s_attr in _PSNR_THRESHOLDS:
-                if frag in r.case_name and s_attr == stage_attr:
-                    threshold = _PSNR_THRESHOLDS[(frag, s_attr)]
-                    stage_result = getattr(r, stage_attr)
-                    psnr = stage_result.psnr_db
-                    if psnr is None:
-                        gate_failed = True
-                        fixture = "lossless" if "Lossless" in r.case_name else "lossy"
-                        reference_raw, candidate_raw = _psnr_raw_pair(
-                            artifact_dir, matrix_current, fixture, stage_attr
-                        )
-                        print(
-                            f"[MATRIX PSNR GATE] {r.case_name} {stage_attr}: "
-                            "missing PSNR  [FAIL]"
-                        )
-                        failed_psnr_cases.append(FailedGateInfo(
-                            gate_kind="psnr",
-                            case_name=r.case_name,
-                            stage=stage_attr,
-                            actual_psnr=None,
-                            threshold=threshold,
-                            raw_prefix=fixture,
-                            reference_raw=reference_raw,
-                            candidate_raw=candidate_raw,
-                        ))
-                        continue
-                    ok = psnr >= threshold
-                    marker = "PASS" if ok else "FAIL"
-                    print(
-                        f"[MATRIX PSNR GATE] {r.case_name} {stage_attr}: "
-                        f"{psnr:.2f} dB {'≥' if ok else '<'} {threshold} dB  [{marker}]"
-                    )
-                    if not ok:
-                        gate_failed = True
-                        fixture = "lossless" if "Lossless" in r.case_name else "lossy"
-                        reference_raw, candidate_raw = _psnr_raw_pair(
-                            artifact_dir, matrix_current, fixture, stage_attr
-                        )
-                        failed_psnr_cases.append(FailedGateInfo(
-                            gate_kind="psnr",
-                            case_name=r.case_name,
-                            stage=stage_attr,
-                            actual_psnr=psnr,
-                            threshold=threshold,
-                            raw_prefix=fixture,
-                            reference_raw=reference_raw,
-                            candidate_raw=candidate_raw,
-                        ))
-
-    # --- SHA-256 artifact gate ---
-    sha_ok = True
-    sha_entries: list[dict[str, str]] = []
-    failed_sha_cases: list[FailedGateInfo] = []
-    if baselines and baselines.get("selected_artifacts"):
-        # Build artifact lookup from matrix-current staging directory.
-        # Keys: "<fixture>/<artifact_pattern>" → actual file path.
-        case_artifact_map: dict[str, Path] = {}
-        for item in baselines["selected_artifacts"]:
-            fixture = item.get("fixture", "")
-            pattern = item.get("artifact_pattern", "")
-            if fixture and pattern:
-                candidate = matrix_current / fixture / pattern
-                if candidate.exists():
-                    case_artifact_map[f"{fixture}/{pattern}"] = candidate
-
-        sha_ok, sha_entries = _run_sha256_gate(baselines, artifact_dir, case_artifact_map)
-
-        if args.propose_baseline_update and sha_entries:
-            diff_path = artifact_dir / "baseline_candidate_diff.txt"
-            _write_baseline_candidate_diff(sha_entries, diff_path)
-
-        if not sha_ok:
-            failed_sha_cases = [
-                FailedGateInfo(
-                    gate_kind="sha256",
-                    case_name=e["id"],
-                    stage=e["stage"],
-                    actual_psnr=None,
-                    threshold=None,
-                    raw_prefix=e["fixture"],
-                    reference_raw=None,
-                    candidate_raw=Path(e["path"]),
-                    expected_hash=e["expected"],
-                    actual_hash=e["actual"],
-                )
-                for e in sha_entries
-                if e["expected"] and e["expected"] != e["actual"]
-            ]
+    sha_entries = list(sha_entries_by_id.values())
+    if args.propose_baseline_update and sha_entries:
+        diff_path = artifact_dir / "baseline_candidate_diff.txt"
+        _write_baseline_candidate_diff(sha_entries, diff_path)
 
     if gate_failed or not sha_ok:
-        _auto_diff_on_failure(
-            artifact_dir,
-            [*failed_psnr_cases, *failed_sha_cases],
-            script_dir,
-            baselines,
-            root,
-        )
         if gate_failed:
             print("[MATRIX PSNR GATE] FAIL — one or more cases below threshold")
         if not sha_ok:
