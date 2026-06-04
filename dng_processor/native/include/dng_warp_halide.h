@@ -31,6 +31,7 @@ enum class WarpRectilinearMode {
     SDK,
     HALIDE_CPU,
     HALIDE_METAL,
+    HALIDE_GPU,  // Platform-adaptive: Metal on Apple, Vulkan on Android
     AUTO
 };
 

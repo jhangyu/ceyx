@@ -101,7 +101,6 @@ functions:
 #include <vector>
 
 #include "HalideBuffer.h"
-#include "dng_pipeline_config.h"
 #include "dng_demosaic_warp.h"
 #include "rectilinear_warp.h"
 // Round 2 (Task #6): the precomputed warp variant is a diagnostic oracle, not
@@ -875,6 +874,7 @@ const char* warpRectilinearModeName(WarpRectilinearMode mode) {
         case WarpRectilinearMode::SDK: return "sdk";
         case WarpRectilinearMode::HALIDE_CPU: return "halide-cpu";
         case WarpRectilinearMode::HALIDE_METAL: return "halide-metal";
+        case WarpRectilinearMode::HALIDE_GPU: return "HALIDE_GPU";
         case WarpRectilinearMode::AUTO: return "auto";
     }
     return "unknown";
@@ -940,7 +940,9 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
 
     const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
     const TileClippingGrid tile_grid = buildTileClippingGrid(width, height, planes, runtime, params);
-    if (mode == WarpRectilinearMode::HALIDE_METAL || mode == WarpRectilinearMode::AUTO) {
+    if (mode == WarpRectilinearMode::HALIDE_METAL ||
+        mode == WarpRectilinearMode::HALIDE_GPU ||
+        mode == WarpRectilinearMode::AUTO) {
         if (runWarpHalideAot(src_interleaved_rgb,
                              width,
                              height,
@@ -951,7 +953,8 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
                              dst_interleaved_rgb)) {
             return true;
         }
-        if (mode == WarpRectilinearMode::HALIDE_METAL) {
+        if (mode == WarpRectilinearMode::HALIDE_METAL ||
+            mode == WarpRectilinearMode::HALIDE_GPU) {
             return false;
         }
     }
@@ -981,7 +984,9 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
 
     const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
     const TileClippingGrid tile_grid = buildTileClippingGrid(width, height, 3, runtime, params);
-    if (mode == WarpRectilinearMode::HALIDE_METAL || mode == WarpRectilinearMode::AUTO) {
+    if (mode == WarpRectilinearMode::HALIDE_METAL ||
+        mode == WarpRectilinearMode::HALIDE_GPU ||
+        mode == WarpRectilinearMode::AUTO) {
         if (runDemosaicWarpHalideAot(src_bayer,
                                      width,
                                      height,
@@ -991,7 +996,8 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
                                      dst_interleaved_rgb)) {
             return true;
         }
-        if (mode == WarpRectilinearMode::HALIDE_METAL) {
+        if (mode == WarpRectilinearMode::HALIDE_METAL ||
+            mode == WarpRectilinearMode::HALIDE_GPU) {
             return false;
         }
     }
@@ -1064,6 +1070,7 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
         return nullptr;
     }
     if (mode != WarpRectilinearMode::HALIDE_METAL &&
+        mode != WarpRectilinearMode::HALIDE_GPU &&
         mode != WarpRectilinearMode::HALIDE_CPU &&
         mode != WarpRectilinearMode::AUTO) {
         return nullptr;

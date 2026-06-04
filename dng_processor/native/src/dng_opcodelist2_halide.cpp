@@ -1,19 +1,19 @@
 // Phase 10 Sprint C3 — Stage 2 OpcodeList2 GPU bridge.
-// Phase 10 Sprint D-A — Metal pre-warm + persistent device-resident scratch.
+// Phase 10 Sprint D-A — GPU pre-warm + persistent device-resident scratch.
 //
 // Intercepts dng_opcode_MapPolynomial (opcodeID = 8) in dng_opcode_list::Apply
-// and dispatches a Halide AOT kernel (dng_opcode_polynomial.a, Metal target).
+// and dispatches a Halide AOT kernel (dng_opcode_polynomial.a, GPU target).
 // Stage 2 image stays host-resident uint16; the kernel reads uint16 → float
 // normalize → Horner polynomial → uint16 round in a single GPU pass.
 //
 // Sprint D-A optimisations:
-//   * Option 1 — Metal pre-warm: a 32×32 dispatch fired once via std::call_once
-//     pays the JIT / MTLLibrary load on a cheap buffer instead of plane 0 of a
-//     6048×4024 polynomial dispatch (saved ~30ms on the first real call).
+//   * Option 1 — GPU pre-warm: a 32×32 dispatch fired once via std::call_once
+//     pays the JIT / shader library load on a cheap buffer instead of plane 0
+//     of a 6048×4024 polynomial dispatch (saved ~30ms on the first real call).
 //   * Option 2 — Persistent device-resident src/dst scratch: a single pair of
 //     Halide::Runtime::Buffer<uint16_t> is allocated once and reused across
-//     all three planes. We explicitly `device_malloc()` on the Metal interface
-//     so subsequent dispatches reuse the same MTLBuffer (no per-plane device
+//     all three planes. We explicitly `device_malloc()` on the GPU interface
+//     so subsequent dispatches reuse the same device buffer (no per-plane device
 //     alloc / free churn). After memcpying the gathered plane into host, we
 //     mark host-dirty so Halide uploads on the next call; the kernel writes
 //     to the device side of `dst`, which we then `copy_to_host()` for scatter.
@@ -41,7 +41,7 @@
 
 #include "HalideBuffer.h"
 #include "HalideRuntime.h"
-#include "HalideRuntimeMetal.h"
+#include "dng_halide_device.h"
 #include "dng_opcode_polynomial.h"
 #include "dng_opcode_polynomial3.h"
 // PipelineConfig::stage2OL2HalideEnabled() is the canonical reader for
@@ -292,10 +292,10 @@ double prewarm_polynomial3_kernel_once() {
     return prewarm_ms;
 }
 
-// One-shot Metal pre-warm: fire a tiny dng_opcode_polynomial dispatch so that
-// the Metal device, command queue, and MTLLibrary for this kernel are all
+// One-shot GPU pre-warm: fire a tiny dng_opcode_polynomial dispatch so that
+// the GPU device, command queue, and shader library for this kernel are all
 // initialised before the first 24MP plane comes through. Empirically this
-// shaves ~30ms off the plane 0 latency (which otherwise pays for both Metal
+// shaves ~30ms off the plane 0 latency (which otherwise pays for both GPU
 // context bring-up and kernel compilation).
 double prewarm_polynomial_kernel_once() {
     if (!ol2_prewarm_enabled()) {
@@ -367,7 +367,7 @@ bool ensure_persistent_scratch(int width, int height) {
     s.ready = false;
 
     const halide_device_interface_t *metal_iface =
-        halide_metal_device_interface();
+        dng_halide_gpu_device_interface();
     if (!metal_iface) {
         return false;
     }
@@ -472,7 +472,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
 
     if (timing && map_poly_timing_enabled()) {
         const halide_device_interface_t *metal_iface =
-            halide_metal_device_interface();
+            dng_halide_gpu_device_interface();
         if (metal_iface) {
             const int src_rc =
                 measure_device_upload(*src_buf, metal_iface,
@@ -633,7 +633,7 @@ bool run_polynomial3_kernel(uint16_t *base,
 
     if (timing && map_poly_timing_enabled()) {
         const halide_device_interface_t *metal_iface =
-            halide_metal_device_interface();
+            dng_halide_gpu_device_interface();
         if (metal_iface) {
             const int src_rc =
                 measure_device_upload(src_buf, metal_iface,

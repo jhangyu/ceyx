@@ -12,7 +12,8 @@
 enum class RenderHalideMode {
     SDK = 0,
     HALIDE_METAL = 1,
-    AUTO = 2,
+    HALIDE_GPU = 2,  // Platform-adaptive: Metal on Apple, Vulkan on Android
+    AUTO = 3,
 };
 
 const char* renderHalideModeName(RenderHalideMode mode);

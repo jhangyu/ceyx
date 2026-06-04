@@ -30,7 +30,10 @@
 //              dng_pipeline_v2.cpp::dng_pipeline_v2_decode_to_rgb just
 //              before BuildStage2Image (see W6-6 / TD-29)),
 //              DNG_STAGE2_SDK_TIMING (vendor — read in
-//              third_party/dng_sdk/source/, NOT modified here).
+//              third_party/dng_sdk/source/, NOT modified here),
+//              DNG_GPU_BACKEND (route: override GPU backend — "metal"/"vulkan"/"cpu";
+//              default auto-detect per platform. Read once at first GPU dispatch via
+//              dng_halide_device.cpp; see dng_halide_device.h).
 //   3. ResearchConfig:
 //        Deprecated / experimental flags retained for A/B parity research.
 //        Do NOT consult in production paths; default builds compile these out

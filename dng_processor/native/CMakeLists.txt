@@ -451,6 +451,7 @@ target_link_libraries(dng_ffi_harness PRIVATE dng_decoder_native)
 #   all other -no_runtime AOT kernels link against it for halide_metal_run etc.
 add_executable(test_device_handoff tests/test_device_handoff.cpp
     src/dng_pipeline_v2.cpp
+    src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
     dng_sdk_custom/source/dng_mosaic_halide.cpp
     dng_sdk_custom/source/dng_warp_halide.cpp
@@ -513,6 +514,7 @@ endif()
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
     src/dng_pipeline_v2.cpp
+    src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
     dng_sdk_custom/source/dng_mosaic_halide.cpp
     dng_sdk_custom/source/dng_warp_halide.cpp

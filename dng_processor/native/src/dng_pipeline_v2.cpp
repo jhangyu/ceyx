@@ -15,7 +15,7 @@ functions:
     description: "Run production Bayer Stage3 with fused demosaic+WarpRectilinear fast path; Phase 8.2.1 Path D — async dispatch + Make_dng_image overlap to hide GPU sync_wait."
     lines: "351-497"
   - name: "runSdkStage3 / runStage4ToRgb"
-    description: "SDK Stage3 fallback and Stage4 render through Halide Metal."
+    description: "SDK Stage3 fallback and Stage4 render through Halide GPU (Metal/Vulkan)."
     lines: "633-697"
   - name: "ParsedDngMetadata / parseDngFile / decodeStages"
     description: "Private extract-method helpers for DNG parse + Stage1 and Stage2/3/4 decode orchestration; SDK owners remain in dng_pipeline_v2_decode_to_rgb."
@@ -59,6 +59,7 @@ functions:
 #include "dng_opcodelist2_halide.h"
 #include "dng_render_halide.h"
 #include "dng_warp_halide.h"
+#include "dng_halide_device.h"
 
 namespace {
 
@@ -111,7 +112,7 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
       const auto &warpOpcode =
           static_cast<const dng_opcode_WarpRectilinear &>(opcode);
       applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
-                                                WarpRectilinearMode::HALIDE_METAL);
+                                                WarpRectilinearMode::HALIDE_GPU);
       if (!applied) {
         applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
                                                   WarpRectilinearMode::HALIDE_CPU);
@@ -393,14 +394,14 @@ bool runHalideStage3ForBayer(dng_host &host,
             std::chrono::duration<double, std::milli>(setupEnd - setupStart).count();
       }
 
-      // Path D — async dispatch the fused Metal kernel, then run
+      // Path D — async dispatch the fused GPU kernel, then run
       // CPU-only Make_dng_image while the GPU is in flight, then sync+copy.
       const auto fusedStart = Clock::now();
       DemosaicWarpHalideHandle *handle =
           demosaic_warp_rectilinear_halide_dispatch(
               stage2Ptr, static_cast<int>(width),
               static_cast<int>(height), params,
-              WarpRectilinearMode::HALIDE_METAL, stage3Ptr);
+              WarpRectilinearMode::HALIDE_GPU, stage3Ptr);
       if (!handle) {
         handle = demosaic_warp_rectilinear_halide_dispatch(
             stage2Ptr, static_cast<int>(width),
@@ -558,7 +559,7 @@ bool runHalideStage3And4Fused(dng_host &host,
 
   DemosaicWarpHalideHandle *handle = demosaic_warp_rectilinear_halide_dispatch(
       stage2Ptr, static_cast<int>(width), static_cast<int>(height),
-      warpParams, WarpRectilinearMode::HALIDE_METAL, stage3Ptr);
+      warpParams, WarpRectilinearMode::HALIDE_GPU, stage3Ptr);
   if (!handle)
     return false;
 
@@ -579,8 +580,8 @@ bool runHalideStage3And4Fused(dng_host &host,
   renderer.SetFinalPixelType(ttByte);
   renderer.SetFinalSpace(dng_space_sRGB::Get());
 
-  // Try Stage4 from device buffer.  Stage3 GPU may still be running; the Metal
-  // serial command queue guarantees Stage4 won't read until Stage3 finishes.
+  // Try Stage4 from device buffer.  Stage3 GPU may still be running; the GPU
+  // serial command queue (Metal/Vulkan) guarantees Stage4 won't read until Stage3 finishes.
   halide_buffer_t *deviceBuf = demosaic_warp_halide_get_device_buffer(handle);
   const float srcScale = 1.0f / 65535.0f;
   bool stage4Ok = false;
@@ -660,13 +661,13 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   rgb_size = needed;
 
   bool ok = render_stage4_halide(host, negative, renderer,
-                                 RenderHalideMode::HALIDE_METAL,
+                                 RenderHalideMode::HALIDE_GPU,
                                  config,
                                  rgb_ptr, rgb_size, outW, outH);
   if (ok)
     return true;
 
-  std::cerr << "[PipelineV2] Stage4 Halide Metal failed; falling back to SDK render\n";
+  std::cerr << "[PipelineV2] Stage4 Halide GPU failed; falling back to SDK render\n";
 
   // SDK fallback: renderer.Render() may produce a different output size.
   // Acquire a fresh pool buffer at the fallback size if needed.
@@ -921,6 +922,7 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
 
   try {
     const PipelineConfig config = PipelineConfig::loadFromEnv();
+    fprintf(stderr, "[Pipeline] GPU backend: %s\n", dng_halide_gpu_backend_name());
     const uint32_t decodeThreads =
         config.threads.area_threads > 0 ? config.threads.area_threads
                                         : PipelineConfig::kDefaultAreaThreads;

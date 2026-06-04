@@ -741,11 +741,19 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // dst (which we leave at min=0). Cannot use Buffer::set_min/translate
     // here — both call device_deallocate() and would drop the device handle.
     if (crop_l > 0 || crop_t > 0) {
+#if defined(__ANDROID__)
+        // W1-04: Vulkan device_crop behavior unverified.
+        // Conservative: copy to host, crop on host, re-upload on next kernel call.
+        src_buf.copy_to_host();
+#endif
         src_buf.crop(0, crop_l, dst_w);
         src_buf.crop(1, crop_t, dst_h);
         halide_buffer_t* raw = src_buf.raw_buffer();
         raw->dim[0].min = 0;
         raw->dim[1].min = 0;
+#if defined(__ANDROID__)
+        src_buf.set_host_dirty();
+#endif
     }
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
@@ -1064,6 +1072,7 @@ const char* renderHalideModeName(RenderHalideMode mode) {
     switch (mode) {
         case RenderHalideMode::SDK: return "sdk";
         case RenderHalideMode::HALIDE_METAL: return "halide-metal";
+        case RenderHalideMode::HALIDE_GPU: return "HALIDE_GPU";
         case RenderHalideMode::AUTO: return "auto";
     }
     return "unknown";
