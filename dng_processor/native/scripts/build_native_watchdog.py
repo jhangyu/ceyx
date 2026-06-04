@@ -252,6 +252,113 @@ def publish_web_dist(app_dir: Path) -> int:
     return 0
 
 
+def build_android(args, native_dir: Path, cores: int) -> int:
+    android_build_dir = (native_dir / "build-android").resolve()
+    host_gen_dir = (android_build_dir / "host-generators").resolve()
+    aot_dir = host_gen_dir / "halide_generated"
+
+    aot_target = "arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query"
+
+    # --- Stage 1: Host generators + AOT ---
+    print("[INFO] === Stage 1: Host generators + AOT ===")
+    if not args.skip_configure:
+        stage1_configure = [
+            "cmake", "-S", str(native_dir), "-B", str(host_gen_dir),
+            "-DDNG_HOST_GENERATORS_ONLY=ON",
+            f"-DDNG_AOT_TARGET_OVERRIDE={aot_target}",
+            *args.cmake_arg,
+        ]
+        code = run_with_watchdog(stage1_configure, cwd=native_dir.parent,
+                                  idle_timeout_sec=args.idle_timeout_sec,
+                                  native_dir=native_dir, build_dir=host_gen_dir)
+        if code != 0:
+            return code
+
+    stage1_build = [
+        "cmake", "--build", str(host_gen_dir), f"-j{cores}",
+    ]
+    code = run_with_watchdog(stage1_build, cwd=native_dir.parent,
+                              idle_timeout_sec=args.idle_timeout_sec,
+                              native_dir=native_dir, build_dir=host_gen_dir)
+    if code != 0:
+        return code
+
+    # Verify AOT artifacts
+    expected_aot = [
+        "dng_pipeline.a", "dng_pipeline.h",
+        "dng_demosaic_bilinear.a", "dng_demosaic_bilinear.h",
+        "dng_demosaic_warp.a", "dng_demosaic_warp.h",
+        "rectilinear_warp.a", "rectilinear_warp.h",
+        "dng_render_stage4.a", "dng_render_stage4.h",
+        "dng_opcode_polynomial.a", "dng_opcode_polynomial.h",
+        "dng_opcode_polynomial3.a", "dng_opcode_polynomial3.h",
+    ]
+    missing = [f for f in expected_aot if not (aot_dir / f).exists()]
+    if missing:
+        print(f"[ERROR] Missing AOT artifacts after Stage 1:", file=sys.stderr)
+        for m in missing:
+            print(f"  {aot_dir / m}", file=sys.stderr)
+        return 1
+    print(f"[OK] Stage 1 complete: {len(expected_aot)} AOT artifacts verified in {aot_dir}")
+
+    if args.skip_stage2:
+        print("[INFO] --skip-stage2: skipping NDK cross-compile")
+        return 0
+
+    # --- Stage 2: NDK cross-compile (NDK required from here) ---
+    ndk_home = args.android_ndk or os.environ.get("ANDROID_NDK_HOME")
+    if not ndk_home:
+        print("[ERROR] ANDROID_NDK_HOME not set and --android-ndk not provided.", file=sys.stderr)
+        print("[HINT] Set ANDROID_NDK_HOME or pass --android-ndk /path/to/ndk", file=sys.stderr)
+        return 1
+    ndk_path = Path(ndk_home)
+    if not ndk_path.exists():
+        print(f"[ERROR] NDK path does not exist: {ndk_path}", file=sys.stderr)
+        return 1
+    toolchain_file = ndk_path / "build" / "cmake" / "android.toolchain.cmake"
+    if not toolchain_file.exists():
+        print(f"[ERROR] NDK toolchain not found: {toolchain_file}", file=sys.stderr)
+        return 1
+    cross_dir = (android_build_dir / "android-arm64").resolve()
+
+    print("[INFO] === Stage 2: NDK cross-compile ===")
+    if not args.skip_configure:
+        stage2_configure = [
+            "cmake", "-S", str(native_dir), "-B", str(cross_dir),
+            f"-DCMAKE_TOOLCHAIN_FILE={toolchain_file}",
+            f"-DANDROID_ABI={args.android_abi}",
+            f"-DANDROID_PLATFORM={args.android_platform}",
+            "-DDNG_CROSS_BUILD=ON",
+            f"-DDNG_PREBUILT_AOT_DIR={aot_dir}",
+            *args.cmake_arg,
+        ]
+        code = run_with_watchdog(stage2_configure, cwd=native_dir.parent,
+                                  idle_timeout_sec=args.idle_timeout_sec,
+                                  native_dir=native_dir, build_dir=cross_dir)
+        if code != 0:
+            return code
+
+    target = args.target
+    stage2_build = [
+        "cmake", "--build", str(cross_dir),
+        "--target", target, f"-j{cores}",
+    ]
+    code = run_with_watchdog(stage2_build, cwd=native_dir.parent,
+                              idle_timeout_sec=args.idle_timeout_sec,
+                              native_dir=native_dir, build_dir=cross_dir)
+    if code != 0:
+        return code
+
+    # Verify output
+    so_path = cross_dir / f"lib{target}.so"
+    if so_path.exists():
+        print(f"[OK] Stage 2 complete: {so_path}")
+    else:
+        print(f"[WARN] Expected {so_path} not found; check build output.", file=sys.stderr)
+
+    return 0
+
+
 def main() -> int:
     argv = sys.argv[1:]
     target_was_explicit = any(
@@ -363,6 +470,32 @@ def main() -> int:
         action="store_true",
         help="Only publish an existing web artifact to dist, then exit.",
     )
+    parser.add_argument(
+        "--platform",
+        choices=["host", "android"],
+        default="host",
+        help="Target platform. 'android' triggers two-stage cross-compile (default: host).",
+    )
+    parser.add_argument(
+        "--android-ndk",
+        default=None,
+        help="Android NDK root (default: $ANDROID_NDK_HOME env var).",
+    )
+    parser.add_argument(
+        "--android-abi",
+        default="arm64-v8a",
+        help="Android ABI (default: arm64-v8a).",
+    )
+    parser.add_argument(
+        "--android-platform",
+        default="android-24",
+        help="Android platform level (default: android-24, minimum for Vulkan).",
+    )
+    parser.add_argument(
+        "--skip-stage2",
+        action="store_true",
+        help="(Android only) Only run Stage 1 (host generators + AOT), skip NDK cross-compile.",
+    )
     args = parser.parse_args()
 
     native_dir = Path(args.native_dir).resolve()
@@ -400,6 +533,9 @@ def main() -> int:
     print(f"[INFO] Target: {args.target}")
     if args.cmake_arg:
         print(f"[INFO] Extra cmake args: {args.cmake_arg}")
+
+    if args.platform == "android":
+        return build_android(args, native_dir, cores)
 
     native_needed = args.target != "none" and not args.build_web_app
     flutter_idle_timeout_sec = max(args.idle_timeout_sec, 300)

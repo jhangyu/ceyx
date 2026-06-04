@@ -28,6 +28,7 @@ find_package(ZLIB REQUIRED)
 
 # W7-1 (TD-3): libjpeg-turbo cross-platform finder.
 # Priority order:
+#   0. Android pre-built from third_party (NDK cross-compile)
 #   1. CMake config package (Homebrew, vcpkg, system install with cmake/ dir)
 #   2. pkg-config (Linux CI, Debian/Ubuntu libturbojpeg-dev)
 #   3. Manual fallback: macOS arm64 /opt/homebrew, macOS Intel /usr/local/opt
@@ -36,6 +37,19 @@ find_package(PkgConfig QUIET)
 
 set(TURBOJPEG_LIBRARY "")
 set(TURBOJPEG_INCLUDE_DIRS "")
+
+# Stage 0: Android pre-built libjpeg-turbo from third_party
+if(ANDROID AND NOT TURBOJPEG_LIBRARY)
+    set(_ANDROID_JPEG_TURBO_DIR ${THIRD_PARTY_DIR}/libjpeg-turbo-android/${ANDROID_ABI})
+    find_library(_TURBOJPEG_LIB_ANDROID NAMES turbojpeg jpeg
+        PATHS ${_ANDROID_JPEG_TURBO_DIR}/lib
+        NO_DEFAULT_PATH)
+    if(_TURBOJPEG_LIB_ANDROID)
+        set(TURBOJPEG_LIBRARY ${_TURBOJPEG_LIB_ANDROID})
+        set(TURBOJPEG_INCLUDE_DIRS "${_ANDROID_JPEG_TURBO_DIR}/include")
+        message(STATUS "Found libjpeg-turbo for Android: ${TURBOJPEG_LIBRARY}")
+    endif()
+endif()
 
 # Stage 1: CMake config (preferred — gives imported target libjpeg-turbo::turbojpeg-static)
 find_package(libjpeg-turbo 3.0 CONFIG QUIET
@@ -89,6 +103,56 @@ else()
         "Install: brew install jpeg-turbo  OR  apt install libturbojpeg-dev")
 endif()
 
+# =============================================================================
+# Options
+# =============================================================================
+option(DNG_DEMOSAIC_WARP_FAST_CODEGEN
+       "Use fast 8x8 GPU schedule for fused demosaic+warp AOT; OFF uses 16x16 + channel unroll schedule"
+       ON)
+
+# Round 2 cleanup (Task #6): the precomputed-coords variant of rectilinear_warp
+# was a Phase 8.1.6 diagnostic oracle (host-CPU double-precision baseline used
+# to A/B against Metal fast-math drift). It is NOT part of the production decode
+# path — production always uses the regular `rectilinear_warp` Metal kernel.
+# When OFF (default) the precomputed AOT artifact is not generated, the dylib
+# does not link it, and `dng_warp_halide.cpp` compiles out the include and call
+# site so no `rectilinear_warp_precomputed` symbols are emitted. Flip ON only
+# when running `test_warp_rectilinear_halide` for parity research.
+option(DNG_ENABLE_WARP_PRECOMPUTED_DIAG
+       "Build & link the rectilinear_warp_precomputed diagnostic oracle (off by default)"
+       OFF)
+
+option(DNG_DIAGNOSTIC_BUILD
+       "Build deprecated research generators (DngWarpStrictFloatGenerator, DngWarpDebugGenerator) for diagnostics"
+       OFF)
+
+# --- Phase 14: Cross-compile and AOT target options ---
+option(DNG_HOST_GENERATORS_ONLY
+       "Only build host-side Halide generators and run AOT (Stage 1 of cross-compile)"
+       OFF)
+
+option(DNG_CROSS_BUILD
+       "Cross-compile mode: skip generator compilation, use prebuilt AOT artifacts"
+       OFF)
+
+set(DNG_PREBUILT_AOT_DIR "" CACHE PATH
+    "Path to prebuilt AOT artifacts (used when DNG_CROSS_BUILD=ON)")
+
+set(DNG_AOT_TARGET_OVERRIDE "" CACHE STRING
+    "Override AOT target string (e.g. arm-64-android-vulkan-no_asserts-no_bounds_query)")
+
+# Phase 14: Force diagnostic options OFF on Android (no Metal backend)
+if(ANDROID)
+    set(DNG_ENABLE_WARP_PRECOMPUTED_DIAG OFF CACHE BOOL "" FORCE)
+    set(DNG_DIAGNOSTIC_BUILD OFF CACHE BOOL "" FORCE)
+endif()
+
+# =============================================================================
+# Phase 14: dng_sdk, dng_decoder_native, and test targets are skipped when
+# building only host-side generators (Stage 1 of cross-compile).
+# =============================================================================
+if(NOT DNG_HOST_GENERATORS_ONLY)
+
 # Adobe DNG SDK
 set(DNG_SDK_DIR ${THIRD_PARTY_DIR}/dng_sdk/source)
 file(GLOB_RECURSE DNG_SOURCES "${DNG_SDK_DIR}/*.cpp")
@@ -104,6 +168,9 @@ list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
 add_library(dng_sdk STATIC ${DNG_SOURCES})
 target_include_directories(dng_sdk PUBLIC ${DNG_SDK_DIR} ${INC_DIR})
 target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=1)
+if(ANDROID)
+    target_compile_definitions(dng_sdk PUBLIC qDNG64Bit=1)
+endif()
 target_include_directories(dng_sdk PUBLIC ${JPEG_INCLUDE_DIRS})
 if(TURBOJPEG_LIBRARY)
     target_include_directories(dng_sdk PUBLIC ${TURBOJPEG_INCLUDE_DIRS})
@@ -142,80 +209,96 @@ else()
     target_link_libraries(dng_decoder_native dng_sdk ${JPEG_LIBRARIES})
 endif()
 
+endif() # NOT DNG_HOST_GENERATORS_ONLY
+
+# =============================================================================
+# Halide: generators, AOT commands, and linking
+# =============================================================================
 set(HALIDE_DIR ${THIRD_PARTY_DIR}/halide)
-list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
-find_package(Halide REQUIRED)
 
-# AOT Generator for Halide Pipeline
-add_executable(dng_generator ${SRC_DIR}/DngHalideGenerator.cpp)
-target_include_directories(dng_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_generator PRIVATE Halide::Generator)
+# Phase 14: In cross-build mode, skip Halide find_package and all generator targets.
+# We only need Halide headers for AOT-generated .h includes.
+if(NOT DNG_CROSS_BUILD)
+    list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
+    find_package(Halide REQUIRED)
 
-add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
-target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_warp_generator PRIVATE Halide::Generator)
+    # AOT Generator for Halide Pipeline
+    add_executable(dng_generator ${SRC_DIR}/DngHalideGenerator.cpp)
+    target_include_directories(dng_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_generator PRIVATE Halide::Generator)
 
-add_executable(dng_demosaic_generator ${SRC_DIR}/DngDemosaicGenerator.cpp)
-target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator)
+    add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
+    target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_warp_generator PRIVATE Halide::Generator)
 
-add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
-target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator)
-option(DNG_DEMOSAIC_WARP_FAST_CODEGEN
-       "Use fast 8x8 GPU schedule for fused demosaic+warp AOT; OFF uses 16x16 + channel unroll schedule"
-       ON)
+    add_executable(dng_demosaic_generator ${SRC_DIR}/DngDemosaicGenerator.cpp)
+    target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator)
 
-# Round 2 cleanup (Task #6): the precomputed-coords variant of rectilinear_warp
-# was a Phase 8.1.6 diagnostic oracle (host-CPU double-precision baseline used
-# to A/B against Metal fast-math drift). It is NOT part of the production decode
-# path — production always uses the regular `rectilinear_warp` Metal kernel.
-# When OFF (default) the precomputed AOT artifact is not generated, the dylib
-# does not link it, and `dng_warp_halide.cpp` compiles out the include and call
-# site so no `rectilinear_warp_precomputed` symbols are emitted. Flip ON only
-# when running `test_warp_rectilinear_halide` for parity research.
-option(DNG_ENABLE_WARP_PRECOMPUTED_DIAG
-       "Build & link the rectilinear_warp_precomputed diagnostic oracle (off by default)"
-       OFF)
+    add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
+    target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator)
 
-option(DNG_DIAGNOSTIC_BUILD
-       "Build deprecated research generators (DngWarpStrictFloatGenerator, DngWarpDebugGenerator) for diagnostics"
-       OFF)
+    # Research & diagnostic generators (only built if DNG_DIAGNOSTIC_BUILD=ON)
+    if(DNG_DIAGNOSTIC_BUILD)
+        add_executable(dng_warp_strict_float_generator ${SRC_DIR}/research/DngWarpStrictFloatGenerator.cpp)
+        target_include_directories(dng_warp_strict_float_generator PRIVATE ${INC_DIR})
+        target_link_libraries(dng_warp_strict_float_generator PRIVATE Halide::Generator)
 
-# Research & diagnostic generators (only built if DNG_DIAGNOSTIC_BUILD=ON)
-if(DNG_DIAGNOSTIC_BUILD)
-    add_executable(dng_warp_strict_float_generator ${SRC_DIR}/research/DngWarpStrictFloatGenerator.cpp)
-    target_include_directories(dng_warp_strict_float_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_warp_strict_float_generator PRIVATE Halide::Generator)
+        add_executable(dng_warp_debug_generator ${SRC_DIR}/research/DngWarpDebugGenerator.cpp)
+        target_include_directories(dng_warp_debug_generator PRIVATE ${INC_DIR})
+        target_link_libraries(dng_warp_debug_generator PRIVATE Halide::Generator)
+    endif()
 
-    add_executable(dng_warp_debug_generator ${SRC_DIR}/research/DngWarpDebugGenerator.cpp)
-    target_include_directories(dng_warp_debug_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_warp_debug_generator PRIVATE Halide::Generator)
-endif()
+    add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
+    target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
+    target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
 
-add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
-target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
-target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
+    # Phase 10 Sprint C1: MapPolynomial AOT generator (Stage 2 OpcodeList2 GPU).
+    add_executable(dng_opcode_polynomial_generator
+        ${SRC_DIR}/DngOpcodePolynomialGenerator.cpp)
+    target_link_libraries(dng_opcode_polynomial_generator PRIVATE Halide::Generator)
 
-# Phase 10 Sprint C1: MapPolynomial AOT generator (Stage 2 OpcodeList2 GPU).
-add_executable(dng_opcode_polynomial_generator
-    ${SRC_DIR}/DngOpcodePolynomialGenerator.cpp)
-target_link_libraries(dng_opcode_polynomial_generator PRIVATE Halide::Generator)
+    add_executable(dng_opcode_polynomial3_generator
+        ${SRC_DIR}/DngOpcodePolynomial3Generator.cpp)
+    target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator)
 
-add_executable(dng_opcode_polynomial3_generator
-    ${SRC_DIR}/DngOpcodePolynomial3Generator.cpp)
-target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator)
+endif() # NOT DNG_CROSS_BUILD
 
-set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
-file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
-
-if(APPLE)
-    set(AOT_TARGET "host-metal-no_asserts-no_bounds_query")
+# =============================================================================
+# Phase 14: AOT output directory and target string
+# =============================================================================
+if(DNG_CROSS_BUILD)
+    if(NOT DNG_PREBUILT_AOT_DIR)
+        message(FATAL_ERROR "DNG_CROSS_BUILD=ON requires DNG_PREBUILT_AOT_DIR to be set")
+    endif()
+    set(HALIDE_OUTPUT_DIR "${DNG_PREBUILT_AOT_DIR}")
 else()
-    set(AOT_TARGET "host-no_asserts-no_bounds_query")
+    set(HALIDE_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/halide_generated)
+    file(MAKE_DIRECTORY ${HALIDE_OUTPUT_DIR})
 endif()
 
-set(DNG_RENDER_STAGE4_AOT_TARGET "host-metal-no_asserts-no_bounds_query-no_runtime")
+# --- Phase 14: Platform-specific Halide AOT target strings ---
+if(DNG_AOT_TARGET_OVERRIDE)
+    set(AOT_TARGET "${DNG_AOT_TARGET_OVERRIDE}")
+else()
+    if(APPLE)
+        set(AOT_TARGET "host-metal-no_asserts-no_bounds_query")
+    elseif(ANDROID)
+        set(AOT_TARGET "arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
+    else()
+        set(AOT_TARGET "host-no_asserts-no_bounds_query")
+    endif()
+endif()
+
+# Stage4 render uses same base target with -no_runtime (fixes hardcoded Metal bug)
+set(DNG_RENDER_STAGE4_AOT_TARGET "${AOT_TARGET}-no_runtime")
+
+# =============================================================================
+# AOT custom commands (only when NOT cross-building — cross-build uses prebuilt)
+# =============================================================================
+if(NOT DNG_CROSS_BUILD)
+
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_pipeline.h
     COMMAND dng_generator -g dng_pipeline -f dng_pipeline -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
@@ -297,25 +380,65 @@ add_custom_command(
 add_custom_target(dng_opcode_polynomial3_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 
-target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
-add_dependencies(dng_decoder_native dng_halide_aot_target)
-add_dependencies(dng_decoder_native dng_demosaic_aot_target)
-add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
-add_dependencies(dng_decoder_native dng_warp_aot_target)
-if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    add_dependencies(dng_decoder_native dng_warp_precomputed_aot_target)
+# When building host generators only (Stage 1), pull AOT targets into ALL
+# so `cmake --build` actually runs the generators.
+if(DNG_HOST_GENERATORS_ONLY)
+    add_custom_target(dng_all_aot ALL DEPENDS
+        ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+    )
 endif()
-add_dependencies(dng_decoder_native dng_render_aot_target)
-add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
-add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
+
+endif() # NOT DNG_CROSS_BUILD (AOT custom commands)
+
+# =============================================================================
+# Link AOT artifacts and platform libraries into dng_decoder_native
+# =============================================================================
+if(NOT DNG_HOST_GENERATORS_ONLY)
+
+target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
+
+if(NOT DNG_CROSS_BUILD)
+    add_dependencies(dng_decoder_native dng_halide_aot_target)
+    add_dependencies(dng_decoder_native dng_demosaic_aot_target)
+    add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
+    add_dependencies(dng_decoder_native dng_warp_aot_target)
+    if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
+        add_dependencies(dng_decoder_native dng_warp_precomputed_aot_target)
+    endif()
+    add_dependencies(dng_decoder_native dng_render_aot_target)
+    add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
+    add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
+endif()
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
 # CRITICAL: dng_pipeline.a MUST be linked (it is the only AOT without -no_runtime,
-# providing Halide Metal runtime symbols: _halide_copy_to_device, _halide_malloc,
-# _halide_metal_run, etc.). Removing it causes undefined symbol linker errors.
-# All other AOT kernels use -no_runtime and depend on dng_pipeline.a for runtime.
+# providing Halide Metal/Vulkan runtime symbols: _halide_copy_to_device, _halide_malloc,
+# _halide_metal_run / _halide_vulkan_run, etc.). Removing it causes undefined symbol
+# linker errors. All other AOT kernels use -no_runtime and depend on dng_pipeline.a
+# for runtime.
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
-target_link_libraries(dng_decoder_native Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+
+# Phase 14: Halide::Halide (host libHalide) is only needed for native host builds.
+# Android cross-build should NOT link host-arch libHalide.a.
+if(NOT DNG_CROSS_BUILD AND NOT ANDROID)
+    target_link_libraries(dng_decoder_native Halide::Halide)
+endif()
+
+# AOT artifacts (always linked — either freshly built or prebuilt)
+target_link_libraries(dng_decoder_native
+    ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)
     target_link_libraries(dng_decoder_native ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
@@ -337,8 +460,20 @@ if(APPLE)
         FRAMEWORK FALSE
         MACOSX_RPATH TRUE
     )
+elseif(ANDROID)
+    find_library(VULKAN_LIBRARY vulkan)
+    if(NOT VULKAN_LIBRARY)
+        message(FATAL_ERROR "Vulkan not found in NDK sysroot. Ensure ANDROID_PLATFORM >= android-24.")
+    endif()
+    find_library(LOG_LIBRARY log)
+    target_link_libraries(dng_decoder_native ${VULKAN_LIBRARY} ${LOG_LIBRARY})
 endif()
 
+# =============================================================================
+# Test targets — only built for native host builds (not cross-compile, not
+# generator-only). Phase 14: guarded to prevent Android/cross-compile breakage.
+# =============================================================================
+if(NOT DNG_CROSS_BUILD)
 
 # P12-W0B-03: production C ABI verification harness.
 add_executable(dng_ffi_harness tests/dng_ffi_harness.cpp)
@@ -536,3 +671,7 @@ if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
             ${FOUNDATION_LIBRARY})
     endif()
 endif()
+
+endif() # NOT DNG_CROSS_BUILD (test targets)
+
+endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)
