@@ -35,6 +35,7 @@
 #   python3 run_decode_matrix.py --repo-root . --repeat 2 --timing
 #   python3 run_decode_matrix.py --repo-root . --repeat 3 --output docs/logs/YYYY-MM-DD/matrix.md
 # 注意：--output 只寫 markdown 報告；raw/ppm/pgm 中間產物一律落到 <repo>/artifacts/。
+# artifacts/ 是 ephemeral workspace；每次 matrix run 開始前會清空，避免跨 run 囤積不同版本。
 # 嚴禁透過 --artifact-dir 把 raw 檔導向 docs/logs（會被 .gitignore 阻擋並造成空間污染）。
 #
 # auto_diff:
@@ -1109,6 +1110,29 @@ def _clear_auto_diff_outputs(artifact_dir: Path) -> None:
             path.unlink()
 
 
+def _reset_artifact_dir(root: Path, artifact_dir: Path) -> None:
+    """Clear ephemeral matrix artifacts before writing the current run."""
+    artifact_dir = artifact_dir.resolve()
+    default_artifact_dir = (root / "artifacts").resolve()
+    try:
+        artifact_dir.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"refusing to clean artifact dir outside repo: {artifact_dir}") from exc
+    if artifact_dir.name != "artifacts" and artifact_dir.parent != default_artifact_dir:
+        raise ValueError(
+            "refusing to clean artifact dir outside <repo>/artifacts or its direct children: "
+            f"{artifact_dir}"
+        )
+
+    if artifact_dir.exists():
+        for path in artifact_dir.iterdir():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _clear_halide_case_outputs(artifact_dir: Path) -> None:
     """Avoid staging raw files emitted by an earlier Halide case."""
     for name in ("halide_demosaic_output.raw", "halide_render_output.raw"):
@@ -1146,17 +1170,17 @@ def _psnr_raw_pair(
 ) -> tuple[Optional[Path], Optional[Path]]:
     """Return the same-run SDK reference and Halide candidate when available."""
     if stage == "stage3" and fixture == "lossless":
-        reference_pattern = "lossless_stage3_*_3p.raw"
+        reference = artifact_dir / "lossless_stage3.raw"
         candidate = matrix_current / fixture / "halide_demosaic_output.raw"
     elif stage == "stage4" and fixture in ("lossless", "lossy"):
-        reference_pattern = f"{fixture}_render_*_3p.raw"
+        reference = artifact_dir / (
+            "lossless_render.raw" if fixture == "lossless" else "lossy_render.raw"
+        )
         candidate = matrix_current / fixture / "halide_render_output.raw"
     else:
         return None, None
 
-    references = sorted(artifact_dir.glob(reference_pattern))
-    reference = references[0] if len(references) == 1 else None
-    return reference, candidate if candidate.exists() else None
+    return reference if reference.exists() else None, candidate if candidate.exists() else None
 
 
 def _run_psnr_gate(
@@ -1235,19 +1259,15 @@ def _stage_ffi_test_render(
     if not source.is_file():
         raise RuntimeError(f"[FFI {fixture}] Halide test render missing: {source}")
 
-    references = []
-    for path in artifact_dir.glob(f"{fixture}_render_*_3p.raw"):
-        match = re.search(r"_render_(\d+)x(\d+)_3p\.raw$", path.name)
-        if match and path.stat().st_size == source.stat().st_size:
-            references.append((path, match.group(1), match.group(2)))
-    if len(references) != 1:
-        raise RuntimeError(
-            f"[FFI {fixture}] expected one SDK render dimension source, got {len(references)}"
-        )
+    reference = artifact_dir / (
+        "lossless_render.raw" if fixture == "lossless" else "lossy_render.raw"
+    )
+    if not reference.is_file() or reference.stat().st_size != source.stat().st_size:
+        raise RuntimeError(f"[FFI {fixture}] SDK render reference missing or size mismatch")
 
-    _, width, height = references[0]
-    prefix = Path(dng_path).stem
-    destination = matrix_current / fixture / f"{prefix}_test_render_{width}x{height}_3p.raw"
+    destination = matrix_current / fixture / (
+        "lossless_test_render.raw" if fixture == "lossless" else "lossy_test_render.raw"
+    )
     shutil.copy2(source, destination)
     return destination.parent
 
@@ -1261,11 +1281,11 @@ def _comparison_scope(stage: str) -> str:
 
 
 def _raw_dimension_args(reference_raw: Path) -> list[str]:
-    match = re.search(r"_(\d+)x(\d+)_([134])p\.raw$", reference_raw.name)
-    if not match:
-        return []
-    width, height, planes = match.groups()
-    return ["--width", width, "--height", height, "--planes", planes]
+    if reference_raw.name == "lossless_stage3.raw":
+        return ["--width", "6048", "--height", "4024", "--planes", "3"]
+    if reference_raw.name in ("lossless_render.raw", "lossy_render.raw"):
+        return ["--width", "6000", "--height", "4000", "--planes", "3"]
+    return []
 
 
 def _auto_diff_on_failure(
@@ -1277,9 +1297,8 @@ def _auto_diff_on_failure(
 ) -> None:
     """Write gate diagnostics and run optional same-run raw comparisons."""
     for failed in failed_cases:
-        safe_case = re.sub(r"[^A-Za-z0-9]+", "_", failed.case_name).strip("_").lower()
-        report_path = artifact_dir / f"diff_report_{safe_case}_{failed.stage}.txt"
-        heatmap_path = artifact_dir / f"heatmap_{safe_case}_{failed.stage}.png"
+        report_path = artifact_dir / "diff_report.txt"
+        heatmap_path = artifact_dir / "heatmap.png"
         fixture = baselines.get("fixtures", {}).get(failed.raw_prefix, {})
         fixture_path = root / fixture.get("path", "")
         fixture_expected = fixture.get("sha256") or "n/a"
@@ -1552,9 +1571,11 @@ def main() -> int:
             artifact_dir = (root / artifact_dir).resolve()
     else:
         artifact_dir = root / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _reset_artifact_dir(root, artifact_dir)
+    except ValueError as exc:
+        ap.error(str(exc))
     print(f"[INFO] Intermediate artifacts: {artifact_dir}")
-    _clear_auto_diff_outputs(artifact_dir)
 
     # --- Load regression baselines ---
     script_dir = Path(__file__).resolve().parent

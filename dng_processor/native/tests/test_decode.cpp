@@ -84,6 +84,24 @@ fs::path artifactPath(const string& filename) {
     return gArtifactDir / filename;
 }
 
+string fixedStageArtifactName(const string& filePrefix, const char* stage) {
+    if (filePrefix == "lossless") {
+        if (strcmp(stage, "stage1") == 0) return "lossless_stage1.raw";
+        if (strcmp(stage, "stage2") == 0) return "lossless_stage2.raw";
+        if (strcmp(stage, "stage3") == 0) return "lossless_stage3.raw";
+        if (strcmp(stage, "render") == 0) return "lossless_render.raw";
+        if (strcmp(stage, "ppm") == 0) return "output_lossless.ppm";
+    }
+    if (filePrefix == "lossy") {
+        if (strcmp(stage, "stage1") == 0) return "lossy_stage1.raw";
+        if (strcmp(stage, "stage2") == 0) return "lossy_stage2.raw";
+        if (strcmp(stage, "stage3") == 0) return "lossy_stage3.raw";
+        if (strcmp(stage, "render") == 0) return "lossy_render.raw";
+        if (strcmp(stage, "ppm") == 0) return "output_lossy.ppm";
+    }
+    return "unknown_artifact.raw";
+}
+
 // Global timing and PSNR data
 struct StageTiming {
     double parse_info_ms = 0;
@@ -530,13 +548,13 @@ StagePSNR testDNG(dng_host& host,
                 return failedResult;
             }
 
-            string filename = filePrefix + "_stage1_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+            string filename = fixedStageArtifactName(filePrefix, "stage1");
             if (generateBaseline) {
                 saveRawFile(filename, stage1Data.data(), stage1Data.size() * sizeof(uint16_t));
                 cout << "  Saved baseline: " << filename << " (" << stage1Data.size() * 2 << " bytes)\n";
             } else {
                 vector<uint16_t> refData(stage1Data.size());
-                string refFilename = filePrefix + "_stage1_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+                string refFilename = fixedStageArtifactName(filePrefix, "stage1");
                 if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
                     psnr.stage1_psnr = computePSNR_16bit(refData.data(), stage1Data.data(), stage1Data.size());
                     cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage1_psnr << " dB\n";
@@ -595,13 +613,13 @@ StagePSNR testDNG(dng_host& host,
                 return failedResult;
             }
 
-            string filename = filePrefix + "_stage2_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+            string filename = fixedStageArtifactName(filePrefix, "stage2");
             if (generateBaseline) {
                 saveRawFile(filename, stage2Data.data(), stage2Data.size() * sizeof(uint16_t));
                 cout << "  Saved baseline: " << filename << " (" << stage2Data.size() * 2 << " bytes)\n";
             } else {
                 vector<uint16_t> refData(stage2Data.size());
-                string refFilename = filePrefix + "_stage2_" + to_string(w) + "x" + to_string(h) + "_" + to_string(p) + "p.raw";
+                string refFilename = fixedStageArtifactName(filePrefix, "stage2");
                 if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
                     psnr.stage2_psnr = computePSNR_16bit(refData.data(), stage2Data.data(), stage2Data.size());
                     cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.stage2_psnr << " dB\n";
@@ -999,7 +1017,7 @@ StagePSNR testDNG(dng_host& host,
             return failedResult;
         }
 
-        string filename = filePrefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
+        string filename = fixedStageArtifactName(filePrefix, "stage3");
         if (generateBaseline) {
             if (!stage3View && stage3StridedBase) {
                 copyFromStridedInterleaved16(stage3StridedBase,
@@ -1016,7 +1034,7 @@ StagePSNR testDNG(dng_host& host,
             cout << "  Saved baseline: " << filename << " (" << stage3Elements * 2 << " bytes)\n";
         } else {
             vector<uint16_t> refData(stage3Elements);
-            string refFilename = filePrefix + "_stage3_" + to_string(s3w) + "x" + to_string(s3h) + "_" + to_string(s3p) + "p.raw";
+            string refFilename = fixedStageArtifactName(filePrefix, "stage3");
             if (loadRawFile(refFilename, refData.data(), refData.size() * sizeof(uint16_t))) {
                 if (stage3View) {
                     psnr.stage3_psnr = computePSNR_16bit(refData.data(), stage3View, stage3Elements);
@@ -1150,20 +1168,20 @@ StagePSNR testDNG(dng_host& host,
         }
 
         // Save PPM
-        string ppmFilename = "output_" + filePrefix + "_" + to_string(outW) + "x" + to_string(outH) + ".ppm";
+        string ppmFilename = fixedStageArtifactName(filePrefix, "ppm");
         ofstream fout(artifactPath(ppmFilename), ios::binary);
         fout << "P6\n" << outW << " " << outH << "\n255\n";
         fout.write(reinterpret_cast<const char*>(rgbData.data()), rgbData.size());
         cout << "  Saved PPM: " << ppmFilename << "\n";
 
         // PSNR for Render stage (8-bit)
-        string renderFilename = filePrefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
+        string renderFilename = fixedStageArtifactName(filePrefix, "render");
         if (generateBaseline) {
             saveRawFile(renderFilename, rgbData.data(), rgbData.size());
             cout << "  Saved baseline: " << renderFilename << " (" << rgbData.size() << " bytes)\n";
         } else {
             vector<uint8_t> refData(rgbData.size());
-            string refFilename = filePrefix + "_render_" + to_string(outW) + "x" + to_string(outH) + "_3p.raw";
+            string refFilename = fixedStageArtifactName(filePrefix, "render");
             if (loadRawFile(refFilename, refData.data(), refData.size())) {
                 psnr.render_psnr = computePSNR_8bit(refData.data(), rgbData.data(), rgbData.size());
                 cout << "  PSNR vs baseline: " << fixed << setprecision(2) << psnr.render_psnr << " dB\n";

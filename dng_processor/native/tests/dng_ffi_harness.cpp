@@ -146,10 +146,12 @@ bool writeAndCompareRgb(const DngResult &result, const fs::path &artifactDir,
   const size_t pixelCount =
       static_cast<size_t>(result.width) * static_cast<size_t>(result.height);
   const size_t rgbBytes = pixelCount * 3;
-  const std::string suffix = std::to_string(result.width) + "x" +
-                             std::to_string(result.height) + "_3p.raw";
-  const fs::path output = artifactDir / (prefix + "_ffi_render_" + suffix);
-  const fs::path expected = artifactDir / (prefix + "_test_render_" + suffix);
+  const fs::path output =
+      artifactDir / (prefix == "lossless_dng_sample" ? "lossless_ffi_render.raw"
+                                                     : "lossy_ffi_render.raw");
+  const fs::path expected =
+      artifactDir / (prefix == "lossless_dng_sample" ? "lossless_test_render.raw"
+                                                     : "lossy_test_render.raw");
 
   std::ofstream rgbOut(output, std::ios::binary);
   if (!rgbOut) {
