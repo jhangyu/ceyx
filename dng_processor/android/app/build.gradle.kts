@@ -24,10 +24,32 @@ android {
         applicationId = "com.example.dng_processor"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments(
+                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_PLATFORM=android-24",
+                    "-DDNG_CROSS_BUILD=ON",
+                    "-DDNG_PREBUILT_AOT_DIR=${rootProject.projectDir}/../../native/build-android/host-generators/halide_generated"
+                )
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("../../native/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {

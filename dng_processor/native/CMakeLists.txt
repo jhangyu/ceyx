@@ -24,83 +24,44 @@ elseif(UNIX)
     add_compile_definitions(qLinux=1 qMacOS=0 qWinOS=0)
 endif()
 
-find_package(ZLIB REQUIRED)
-
-# W7-1 (TD-3): libjpeg-turbo cross-platform finder.
-# Priority order:
-#   0. Android pre-built from third_party (NDK cross-compile)
-#   1. CMake config package (Homebrew, vcpkg, system install with cmake/ dir)
-#   2. pkg-config (Linux CI, Debian/Ubuntu libturbojpeg-dev)
-#   3. Manual fallback: macOS arm64 /opt/homebrew, macOS Intel /usr/local/opt
-# Requires version >=3.0 for API stability.
-find_package(PkgConfig QUIET)
-
-set(TURBOJPEG_LIBRARY "")
-set(TURBOJPEG_INCLUDE_DIRS "")
-
-# Stage 0: Android pre-built libjpeg-turbo from third_party
-if(ANDROID AND NOT TURBOJPEG_LIBRARY)
-    set(_ANDROID_JPEG_TURBO_DIR ${THIRD_PARTY_DIR}/libjpeg-turbo-android/${ANDROID_ABI})
-    find_library(_TURBOJPEG_LIB_ANDROID NAMES turbojpeg jpeg
-        PATHS ${_ANDROID_JPEG_TURBO_DIR}/lib
-        NO_DEFAULT_PATH)
-    if(_TURBOJPEG_LIB_ANDROID)
-        set(TURBOJPEG_LIBRARY ${_TURBOJPEG_LIB_ANDROID})
-        set(TURBOJPEG_INCLUDE_DIRS "${_ANDROID_JPEG_TURBO_DIR}/include")
-        message(STATUS "Found libjpeg-turbo for Android: ${TURBOJPEG_LIBRARY}")
-    endif()
-endif()
-
-# Stage 1: CMake config (preferred — gives imported target libjpeg-turbo::turbojpeg-static)
-find_package(libjpeg-turbo 3.0 CONFIG QUIET
-    HINTS
-        /opt/homebrew/opt/jpeg-turbo/lib/cmake/libjpeg-turbo
-        /usr/local/opt/jpeg-turbo/lib/cmake/libjpeg-turbo
-)
-if(libjpeg-turbo_FOUND)
-    set(TURBOJPEG_LIBRARY libjpeg-turbo::turbojpeg-static)
-    get_target_property(TURBOJPEG_INCLUDE_DIRS libjpeg-turbo::turbojpeg-static INTERFACE_INCLUDE_DIRECTORIES)
-    message(STATUS "Found libjpeg-turbo via CMake config: version=${libjpeg-turbo_VERSION} includes=${TURBOJPEG_INCLUDE_DIRS}")
-endif()
-
-# Stage 2: pkg-config fallback (Linux CI / system install without cmake/ dir)
-if(NOT TURBOJPEG_LIBRARY AND PkgConfig_FOUND)
-    pkg_check_modules(JPEG_TURBO QUIET libturbojpeg>=3.0)
-    if(JPEG_TURBO_FOUND)
-        set(TURBOJPEG_LIBRARY ${JPEG_TURBO_LIBRARIES})
-        set(TURBOJPEG_INCLUDE_DIRS ${JPEG_TURBO_INCLUDE_DIRS})
-        message(STATUS "Found libjpeg-turbo via pkg-config: version=${JPEG_TURBO_VERSION} lib=${TURBOJPEG_LIBRARY}")
-    endif()
-endif()
-
-# Stage 3: manual path fallback (macOS without cmake/ or pkg-config)
-if(NOT TURBOJPEG_LIBRARY)
-    if(APPLE)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
-            set(_JPEG_TURBO_HINT_PATHS /opt/homebrew/opt/jpeg-turbo/lib)
-        else()
-            set(_JPEG_TURBO_HINT_PATHS /usr/local/opt/jpeg-turbo/lib)
+# P14-W0B-07: Android NDK sysroot has libz.so but no CMake config file.
+# Probe via find_library/find_path first; synthesize the imported target so
+# the rest of the build can use ZLIB::ZLIB uniformly on all platforms.
+if(ANDROID)
+    find_library(ZLIB_LIBRARY_ANDROID z)
+    find_path(ZLIB_INCLUDE_DIR_ANDROID zlib.h)
+    if(ZLIB_LIBRARY_ANDROID AND ZLIB_INCLUDE_DIR_ANDROID)
+        if(NOT TARGET ZLIB::ZLIB)
+            add_library(ZLIB::ZLIB SHARED IMPORTED)
+            set_target_properties(ZLIB::ZLIB PROPERTIES
+                IMPORTED_LOCATION "${ZLIB_LIBRARY_ANDROID}"
+                INTERFACE_INCLUDE_DIRECTORIES "${ZLIB_INCLUDE_DIR_ANDROID}")
         endif()
-        find_library(_TURBOJPEG_LIB_MANUAL NAMES turbojpeg
-            PATHS ${_JPEG_TURBO_HINT_PATHS}
-            NO_DEFAULT_PATH)
-        if(_TURBOJPEG_LIB_MANUAL)
-            set(TURBOJPEG_LIBRARY ${_TURBOJPEG_LIB_MANUAL})
-            # Derive include dir from lib path (lib → include, same prefix)
-            get_filename_component(_JPEG_TURBO_PREFIX ${_TURBOJPEG_LIB_MANUAL} DIRECTORY)
-            set(TURBOJPEG_INCLUDE_DIRS "${_JPEG_TURBO_PREFIX}/../include")
-            message(STATUS "Found libjpeg-turbo via manual path: ${TURBOJPEG_LIBRARY}")
-        endif()
+        set(ZLIB_FOUND TRUE)
+        message(STATUS "Found zlib via NDK sysroot: ${ZLIB_LIBRARY_ANDROID}")
     endif()
 endif()
 
-if(TURBOJPEG_LIBRARY)
-    add_compile_definitions(USE_LIBJPEG_TURBO=1)
+if(NOT ZLIB_FOUND)
+    find_package(ZLIB REQUIRED)
+endif()
+
+# JPEG library for DNG SDK lossy JPEG support (qDNGUseLibJPEG=1).
+# Uses standard jpeglib.h API — any libjpeg-compatible library works.
+# Android NDK sysroot does not ship libjpeg, so we make it optional on Android.
+if(ANDROID)
+    find_package(JPEG QUIET)
+    if(NOT JPEG_FOUND)
+        message(WARNING "libjpeg not found in NDK sysroot. "
+            "Setting qDNGUseLibJPEG=0 — lossy DNG JPEG tile decode will be disabled. "
+            "To enable: provide libjpeg via add_subdirectory or -DJPEG_LIBRARY/-DJPEG_INCLUDE_DIR.")
+        set(DNG_USE_LIBJPEG OFF)
+    else()
+        set(DNG_USE_LIBJPEG ON)
+    endif()
 else()
     find_package(JPEG REQUIRED)
-    message(WARNING "libjpeg-turbo >=3.0 not found (tried CMake config, pkg-config, manual paths). "
-        "Falling back to system JPEG — SIMD acceleration disabled. "
-        "Install: brew install jpeg-turbo  OR  apt install libturbojpeg-dev")
+    set(DNG_USE_LIBJPEG ON)
 endif()
 
 # =============================================================================
@@ -167,16 +128,19 @@ list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
 
 add_library(dng_sdk STATIC ${DNG_SOURCES})
 target_include_directories(dng_sdk PUBLIC ${DNG_SDK_DIR} ${INC_DIR})
-target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=1)
+if(DNG_USE_LIBJPEG)
+    target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=1)
+else()
+    target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=0)
+endif()
 if(ANDROID)
     target_compile_definitions(dng_sdk PUBLIC qDNG64Bit=1)
 endif()
-target_include_directories(dng_sdk PUBLIC ${JPEG_INCLUDE_DIRS})
-if(TURBOJPEG_LIBRARY)
-    target_include_directories(dng_sdk PUBLIC ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(dng_sdk ZLIB::ZLIB ${TURBOJPEG_LIBRARY})
-else()
+if(DNG_USE_LIBJPEG)
+    target_include_directories(dng_sdk PUBLIC ${JPEG_INCLUDE_DIRS})
     target_link_libraries(dng_sdk ZLIB::ZLIB ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(dng_sdk ZLIB::ZLIB)
 endif()
 
 # Native library
@@ -202,11 +166,10 @@ target_include_directories(dng_decoder_native PUBLIC
     ${SRC_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR})
-if(TURBOJPEG_LIBRARY)
-    target_include_directories(dng_decoder_native PUBLIC ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(dng_decoder_native dng_sdk ${TURBOJPEG_LIBRARY})
-else()
+if(DNG_USE_LIBJPEG)
     target_link_libraries(dng_decoder_native dng_sdk ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(dng_decoder_native dng_sdk)
 endif()
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
@@ -499,11 +462,10 @@ target_include_directories(test_device_handoff PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-if(TURBOJPEG_LIBRARY)
-    target_include_directories(test_device_handoff PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${TURBOJPEG_LIBRARY})
-else()
+if(DNG_USE_LIBJPEG)
     target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 endif()
 add_dependencies(test_device_handoff dng_halide_aot_target)
 add_dependencies(test_device_handoff dng_demosaic_aot_target)
@@ -562,11 +524,10 @@ target_include_directories(test_decode PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-if(TURBOJPEG_LIBRARY)
-    target_include_directories(test_decode PRIVATE ${TURBOJPEG_INCLUDE_DIRS})
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${TURBOJPEG_LIBRARY})
-else()
+if(DNG_USE_LIBJPEG)
     target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 endif()
 if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
     target_compile_definitions(test_decode PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)

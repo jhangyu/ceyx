@@ -77,7 +77,7 @@ flutter test
 
 | Stage | Role | Technology |
 |-------|------|------------|
-| 1 | Parse DNG metadata, decompress Bayer tiles (LJPEG) | Adobe DNG SDK + libjpeg-turbo |
+| 1 | Parse DNG metadata, decompress Bayer tiles (LJPEG) | Adobe DNG SDK + libjpeg |
 | 2 | OpcodeList2: linearization, black subtraction, pre-demosaic lens correction | Adobe DNG SDK |
 | 3 | Demosaic Bayer→RGB + fused WarpRectilinear (OpcodeList3) | Halide AOT (Metal GPU) |
 | 4 | Camera→sRGB color matrix, tone mapping, 8-bit RGBA encode | Halide AOT (Metal GPU) |
