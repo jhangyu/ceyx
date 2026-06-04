@@ -9,21 +9,21 @@
 
 namespace {
 
-enum class GpuBackend { kMetal, kVulkan, kCpu };
+enum class GpuBackend { kMetal, kVulkan, kUnsupported };
 
 GpuBackend resolve_backend() {
     const char* env = std::getenv("DNG_GPU_BACKEND");
     if (env) {
-        if (env[0] == 'c' || env[0] == 'C') return GpuBackend::kCpu;
         if (env[0] == 'm' || env[0] == 'M') return GpuBackend::kMetal;
         if (env[0] == 'v' || env[0] == 'V') return GpuBackend::kVulkan;
+        return GpuBackend::kUnsupported;
     }
 #if defined(__APPLE__)
     return GpuBackend::kMetal;
 #elif defined(__ANDROID__)
     return GpuBackend::kVulkan;
 #else
-    return GpuBackend::kCpu;
+    return GpuBackend::kUnsupported;
 #endif
 }
 
@@ -55,9 +55,9 @@ bool dng_halide_gpu_available() {
 
 const char* dng_halide_gpu_backend_name() {
     switch (cached_backend()) {
-    case GpuBackend::kMetal:  return "metal";
-    case GpuBackend::kVulkan: return "vulkan";
-    case GpuBackend::kCpu:    return "cpu";
+    case GpuBackend::kMetal:       return "metal";
+    case GpuBackend::kVulkan:      return "vulkan";
+    case GpuBackend::kUnsupported: return "unsupported";
     }
     return "unknown";
 }

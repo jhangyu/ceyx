@@ -15,7 +15,7 @@ functions:
     description: "Run production Bayer Stage3 with fused demosaic+WarpRectilinear fast path; Phase 8.2.1 Path D — async dispatch + Make_dng_image overlap to hide GPU sync_wait."
     lines: "351-497"
   - name: "runSdkStage3 / runStage4ToRgb"
-    description: "SDK Stage3 fallback and Stage4 render through Halide GPU (Metal/Vulkan)."
+    description: "SDK Stage3 helper and Stage4 render through Halide GPU (Metal/Vulkan)."
     lines: "633-697"
   - name: "ParsedDngMetadata / parseDngFile / decodeStages"
     description: "Private extract-method helpers for DNG parse + Stage1 and Stage2/3/4 decode orchestration; SDK owners remain in dng_pipeline_v2_decode_to_rgb."
@@ -64,6 +64,16 @@ functions:
 namespace {
 
 using Clock = std::chrono::high_resolution_clock;
+
+bool requireGpuBackend(const char *path) {
+  if (dng_halide_gpu_available()) {
+    return true;
+  }
+  std::cerr << "[PipelineV2] " << path << " requires a supported GPU backend; got "
+            << dng_halide_gpu_backend_name()
+            << ". Refusing CPU fallback.\n";
+  return false;
+}
 
 bool copyImageToInterleaved16(const dng_image *image, std::vector<uint16_t> &out,
                               uint32_t &width, uint32_t &height,
@@ -114,8 +124,9 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
       applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
                                                 WarpRectilinearMode::HALIDE_GPU);
       if (!applied) {
-        applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
-                                                  WarpRectilinearMode::HALIDE_CPU);
+        std::cerr << "[PipelineV2] WarpRectilinear HALIDE_GPU failed; "
+                     "refusing CPU/SDK fallback\n";
+        return false;
       }
     }
 
@@ -402,12 +413,6 @@ bool runHalideStage3ForBayer(dng_host &host,
               stage2Ptr, static_cast<int>(width),
               static_cast<int>(height), params,
               WarpRectilinearMode::HALIDE_GPU, stage3Ptr);
-      if (!handle) {
-        handle = demosaic_warp_rectilinear_halide_dispatch(
-            stage2Ptr, static_cast<int>(width),
-            static_cast<int>(height), params,
-            WarpRectilinearMode::HALIDE_CPU, stage3Ptr);
-      }
 
       if (handle) {
         // Latency hiding: allocate the dng_image container while the GPU
@@ -443,11 +448,14 @@ bool runHalideStage3ForBayer(dng_host &host,
 
   if (!fused) {
     const auto demosaicStart = Clock::now();
-    // Phase 8.1.6 D-1 fix: previously called undefined demosaic_ahd_halide;
-    // replaced with the existing bilinear halide entry point used elsewhere
-    // in the pipeline. Required for separate (non-fused) Stage3 path build.
-    demosaic_bilinear_halide(stage2Ptr, static_cast<int>(width),
-                             static_cast<int>(height), stage3Ptr);
+    // Separate GPU path: call the AOT entry directly so failure propagates
+    // instead of using demosaic_bilinear_halide()'s CPU reference fallback.
+    if (!demosaic_bilinear_halide_aot(stage2Ptr, static_cast<int>(width),
+                                      static_cast<int>(height), stage3Ptr)) {
+      std::cerr << "[PipelineV2] Stage3 demosaic Halide AOT failed; "
+                   "refusing CPU fallback\n";
+      return false;
+    }
     const auto demosaicEnd = Clock::now();
     if (timing) {
       timing->demosaic_ms =
@@ -607,9 +615,9 @@ bool runHalideStage3And4Fused(dng_host &host,
   }
 
   // Stage4 device handoff failed (e.g. resample needed or params error).
-  // Fall back: finish Stage3 → build Stage3 image → run Stage4 normally.
+  // Finish Stage3, build a Stage3 image, then run the normal GPU Stage4 path.
   std::cerr << "[PipelineV2] 8.2.2 device handoff Stage4 failed; "
-               "falling back to finish()+Stage4\n";
+               "using finish()+Stage4 host-copy path\n";
   bool fused = demosaic_warp_rectilinear_halide_finish(handle);
   if (fused && stage3Stub.Get()) {
     putStage3DataPtr(*stage3Stub.Get(), stage3Ptr, width, height, 3);
@@ -667,34 +675,8 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   if (ok)
     return true;
 
-  std::cerr << "[PipelineV2] Stage4 Halide GPU failed; falling back to SDK render\n";
-
-  // SDK fallback: renderer.Render() may produce a different output size.
-  // Acquire a fresh pool buffer at the fallback size if needed.
-  AutoPtr<dng_image> finalImage(renderer.Render());
-  if (!finalImage.Get())
-    return false;
-  outW = finalImage->Width();
-  outH = finalImage->Height();
-  const size_t fallbackNeeded = static_cast<size_t>(outW) * outH * 3;
-  if (fallbackNeeded > rgb_size) {
-    rgb_ptr = rgbOutputPool().acquire(fallbackNeeded);
-    if (!rgb_ptr) return false;
-    rgb_size = fallbackNeeded;
-  }
-
-  dng_pixel_buffer buffer;
-  buffer.fArea = finalImage->Bounds();
-  buffer.fPlane = 0;
-  buffer.fPlanes = 3;
-  buffer.fPixelType = ttByte;
-  buffer.fPixelSize = 1;
-  buffer.fData = rgb_ptr;
-  buffer.fRowStep = static_cast<int32>(outW * 3);
-  buffer.fColStep = 3;
-  buffer.fPlaneStep = 1;
-  finalImage->Get(buffer);
-  return true;
+  std::cerr << "[PipelineV2] Stage4 Halide GPU failed; refusing SDK CPU fallback\n";
+  return false;
 }
 
 bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
@@ -886,6 +868,9 @@ static std::mutex &pipelineSingleFlightMutex() {
 
 bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
   std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+  if (!requireGpuBackend("warmup")) {
+    return false;
+  }
   if (!warmPipelinePoolsForSize(width, height)) {
     return false;
   }
@@ -903,10 +888,14 @@ bool dng_pipeline_v2_run_stage3(dng_host &host,
   }
   const PipelineConfig config = PipelineConfig::loadFromEnv();
   if (use_halide_bayer) {
+    if (!requireGpuBackend("Stage3")) {
+      return false;
+    }
     if (runHalideStage3ForBayer(host, negative, config, timing, stage3_workspace)) {
       return true;
     }
-    std::cerr << "[PipelineV2] Halide Stage3 failed; falling back to SDK Stage3\n";
+    std::cerr << "[PipelineV2] Halide Stage3 failed; refusing SDK CPU fallback\n";
+    return false;
   }
   return runSdkStage3(host, negative, timing);
 }
@@ -923,6 +912,10 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
   try {
     const PipelineConfig config = PipelineConfig::loadFromEnv();
     fprintf(stderr, "[Pipeline] GPU backend: %s\n", dng_halide_gpu_backend_name());
+    if (!requireGpuBackend("decode")) {
+      result.error_code = -6;
+      return false;
+    }
     const uint32_t decodeThreads =
         config.threads.area_threads > 0 ? config.threads.area_threads
                                         : PipelineConfig::kDefaultAreaThreads;

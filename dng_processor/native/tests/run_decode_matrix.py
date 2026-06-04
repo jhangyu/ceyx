@@ -302,6 +302,7 @@ def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
 def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
     merged = os.environ.copy()
     merged.update(env)
+    merged["DNG_TEST_DECODE_ARTIFACT_DIR"] = str(cwd)
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),

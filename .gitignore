@@ -30,6 +30,7 @@ node_modules
 
 # Build artifacts
 dng_processor/native/build/
+dng_processor/native/build-android/
 dng_processor/native/build_diag/
 dng_processor/native/.cache/
 dng_processor/native/*.o
@@ -42,6 +43,7 @@ preview_out.jpg
 
 # Ralph loop
 .sisyphus/
+graphify-out/
 
 # W7-7 (TD-19): diagnostic/one-off scripts directory; not for tracking
 # Run `git rm --cached dng_processor/native/scripts/tmp/` to untrack existing entries

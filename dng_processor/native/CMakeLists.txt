@@ -100,7 +100,7 @@ set(DNG_PREBUILT_AOT_DIR "" CACHE PATH
     "Path to prebuilt AOT artifacts (used when DNG_CROSS_BUILD=ON)")
 
 set(DNG_AOT_TARGET_OVERRIDE "" CACHE STRING
-    "Override AOT target string (e.g. arm-64-android-vulkan-no_asserts-no_bounds_query)")
+    "Override AOT target string (e.g. arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query)")
 
 # Phase 14: Force diagnostic options OFF on Android (no Metal backend)
 if(ANDROID)
@@ -120,8 +120,8 @@ file(GLOB_RECURSE DNG_SOURCES "${DNG_SDK_DIR}/*.cpp")
 list(REMOVE_ITEM DNG_SOURCES "${DNG_SDK_DIR}/dng_xmp_sdk.cpp" "${DNG_SDK_DIR}/dng_xmp.cpp")
 
 # DNG SDK custom implementations (Halide-accelerated)
-# Note: dng_mosaic_halide.cpp is built into test targets that need Stage3 demosaic.
-# Its default path uses the dng_demosaic_bilinear AOT kernel with CPU fallback.
+    # Note: dng_mosaic_halide.cpp is built into targets that need Stage3 demosaic.
+    # Production/test_decode call the AOT entry directly and fail fast if GPU is unsupported.
 
 # Inject our XMP stubs into the base DNG SDK library so its internal references resolve
 list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
@@ -248,6 +248,7 @@ else()
     if(APPLE)
         set(AOT_TARGET "host-metal-no_asserts-no_bounds_query")
     elseif(ANDROID)
+        # Strict Android Vulkan device contract: arm64-v8a Vulkan with Halide vk_int8/vk_int16/vk_int64.
         set(AOT_TARGET "arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
     else()
         set(AOT_TARGET "host-no_asserts-no_bounds_query")
@@ -430,6 +431,46 @@ elseif(ANDROID)
     endif()
     find_library(LOG_LIBRARY log)
     target_link_libraries(dng_decoder_native ${VULKAN_LIBRARY} ${LOG_LIBRARY})
+endif()
+
+# Phase 14 W0 acceptance smoke: Android cross-build test binary for ADB.
+# Full host test targets stay under the NOT DNG_CROSS_BUILD block below.
+if(ANDROID AND DNG_CROSS_BUILD)
+    add_executable(test_android_vulkan_capability
+        tests/android_vulkan_capability_probe.cpp)
+    target_link_libraries(test_android_vulkan_capability PRIVATE
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+
+    add_executable(test_decode_android tests/test_decode.cpp
+        src/dng_pipeline_v2.cpp
+        src/dng_halide_device.cpp
+        src/dng_opcodelist2_halide.cpp
+        dng_sdk_custom/source/dng_mosaic_halide.cpp
+        dng_sdk_custom/source/dng_warp_halide.cpp
+        dng_sdk_custom/source/dng_render_halide.cpp)
+    target_include_directories(test_decode_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(test_decode_android PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+    add_dependencies(test_decode_android test_android_vulkan_capability)
 endif()
 
 # =============================================================================

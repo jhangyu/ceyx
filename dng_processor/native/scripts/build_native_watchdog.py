@@ -349,12 +349,19 @@ def build_android(args, native_dir: Path, cores: int) -> int:
     if code != 0:
         return code
 
-    # Verify output
+    # Verify output. Android Stage 2 can build either shared libraries or
+    # executable smoke-test targets such as test_decode_android.
+    target_path = cross_dir / target
     so_path = cross_dir / f"lib{target}.so"
-    if so_path.exists():
+    if target_path.exists():
+        print(f"[OK] Stage 2 complete: {target_path}")
+    elif so_path.exists():
         print(f"[OK] Stage 2 complete: {so_path}")
     else:
-        print(f"[WARN] Expected {so_path} not found; check build output.", file=sys.stderr)
+        print(
+            f"[WARN] Expected {target_path} or {so_path} not found; check build output.",
+            file=sys.stderr,
+        )
 
     return 0
 

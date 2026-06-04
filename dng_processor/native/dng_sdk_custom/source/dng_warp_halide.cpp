@@ -2,7 +2,7 @@
 ---
 file_summary: >
   Stage3 WarpRectilinear 橋接層。負責從 DNG SDK opcode 取出 warp 參數、建立 tile clipping grid，
-  並 dispatch 到 Halide AOT 或明確指定的 CPU reference-compatible 路徑。
+  並 dispatch 到 Halide AOT 或明確指定的 CPU reference-compatible 測試路徑。
 
 notes:
   - `warp_rectilinear_halide()` 是純 buffer 入口；`apply_warp_rectilinear_to_image()` 是 `dng_image` 入口。
@@ -49,7 +49,7 @@ functions:
     description: "預估每個 tile 所需的 source sampling bounds。"
     lines: "311-385"
   - name: "warpRectilinearCpu"
-    description: "CPU fallback；用 clipping grid + bicubic resample 執行 warp。"
+    description: "CPU reference；用 clipping grid + bicubic resample 執行 warp。"
     lines: "390-467"
   - name: "imageToInterleaved"
     description: "把 `dng_image` 讀成 uint16 interleaved buffer。"
@@ -82,7 +82,7 @@ functions:
     description: "從 SDK opcode 取出 plane/radial/tangential 參數並填入 runtime struct。"
     lines: "886-927"
   - name: "warp_rectilinear_halide"
-    description: "buffer 入口；依 mode dispatch Halide Metal / Halide CPU / AUTO 路徑。"
+    description: "buffer 入口；依 mode dispatch Halide GPU/AUTO；CPU reference 僅限明確 HALIDE_CPU。"
     lines: "929-970"
   - name: "demosaic_warp_rectilinear_halide"
     description: "Bayer fused demosaic+WarpRectilinear buffer 入口；正式 Stage3 fast path。"
@@ -940,33 +940,31 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
 
     const WarpRuntimeParams runtime = buildRuntimeParams(width, height, params);
     const TileClippingGrid tile_grid = buildTileClippingGrid(width, height, planes, runtime, params);
+    if (mode == WarpRectilinearMode::HALIDE_CPU) {
+        warpRectilinearCpu(src_interleaved_rgb,
+                           width,
+                           height,
+                           planes,
+                           params,
+                           tile_grid,
+                           dst_interleaved_rgb);
+        return true;
+    }
+
     if (mode == WarpRectilinearMode::HALIDE_METAL ||
         mode == WarpRectilinearMode::HALIDE_GPU ||
         mode == WarpRectilinearMode::AUTO) {
-        if (runWarpHalideAot(src_interleaved_rgb,
-                             width,
-                             height,
-                             planes,
-                             runtime,
-                             params,
-                             tile_grid,
-                             dst_interleaved_rgb)) {
-            return true;
-        }
-        if (mode == WarpRectilinearMode::HALIDE_METAL ||
-            mode == WarpRectilinearMode::HALIDE_GPU) {
-            return false;
-        }
+        return runWarpHalideAot(src_interleaved_rgb,
+                                width,
+                                height,
+                                planes,
+                                runtime,
+                                params,
+                                tile_grid,
+                                dst_interleaved_rgb);
     }
 
-    warpRectilinearCpu(src_interleaved_rgb,
-                       width,
-                       height,
-                       planes,
-                       params,
-                       tile_grid,
-                       dst_interleaved_rgb);
-    return true;
+    return false;
 }
 
 bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
@@ -979,6 +977,9 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
         return false;
     }
     if (mode == WarpRectilinearMode::SDK) {
+        return false;
+    }
+    if (mode == WarpRectilinearMode::HALIDE_CPU) {
         return false;
     }
 
@@ -1069,9 +1070,11 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     if (mode == WarpRectilinearMode::SDK) {
         return nullptr;
     }
+    if (mode == WarpRectilinearMode::HALIDE_CPU) {
+        return nullptr;
+    }
     if (mode != WarpRectilinearMode::HALIDE_METAL &&
         mode != WarpRectilinearMode::HALIDE_GPU &&
-        mode != WarpRectilinearMode::HALIDE_CPU &&
         mode != WarpRectilinearMode::AUTO) {
         return nullptr;
     }

@@ -69,7 +69,7 @@ functions:
     description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。"
     lines: "591-683"
   - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 已在 GPU device buffer。8.2.3 修正：crop() 後直接 mutate raw_buffer()->dim[i].min = 0（不能用 set_min/translate，會 device_deallocate 殺掉 device handle），讓 src/dst 都在 [0..dst_w-1] 座標系，對齊 generator 寫死的 clamp(x, 0, extent-1)。"
+    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 已在 GPU device buffer。Metal 以 device_crop 位移 device pointer；Android/Vulkan 先 copy_to_host 並卸除暫時 wrapper 的 device_interface，再做 host-side crop，避免 backend device_crop。crop 後直接 mutate raw_buffer()->dim[i].min = 0，讓 src/dst 都在 [0..dst_w-1] 座標系，對齊 generator 寫死的 clamp(x, 0, extent-1)。"
     lines: "689-796"
   - name: "runHalideFullOrSdkFallback (host src overload)"
     description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
@@ -735,16 +735,22 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // `extent-1 = dst_w-1`, so the rightmost crop_l columns and bottom
     // crop_t rows read replicated boundary pixels — measured PSNR ≈ 50dB.
     //
-    // Fix: physically shift the device pointer via crop() (Metal device_crop
-    // adjusts the read offset by crop_l*stride+crop_t*stride1), then mutate
+    // Fix: physically shift the read pointer via crop(), then mutate
     // dim[i].min back to 0 directly so the logical coordinate system matches
-    // dst (which we leave at min=0). Cannot use Buffer::set_min/translate
-    // here — both call device_deallocate() and would drop the device handle.
+    // dst (which we leave at min=0). On non-Android GPU paths this uses
+    // device_crop (Metal adjusts the read offset by crop_l*stride+
+    // crop_t*stride1). On Android/Vulkan, avoid device_crop entirely by
+    // first making this temporary wrapper host-backed, then re-uploading.
     if (crop_l > 0 || crop_t > 0) {
 #if defined(__ANDROID__)
-        // W1-04: Vulkan device_crop behavior unverified.
-        // Conservative: copy to host, crop on host, re-upload on next kernel call.
-        src_buf.copy_to_host();
+        // W1-04: Vulkan device_crop behavior is unsafe here. copy_to_host()
+        // materializes the in-flight Stage3 output, then device_deallocate()
+        // clears this unmanaged wrapper's device_interface so Buffer::crop()
+        // takes the host-only path below.
+        if (src_buf.copy_to_host() != 0) {
+            return false;
+        }
+        src_buf.device_deallocate();
 #endif
         src_buf.crop(0, crop_l, dst_w);
         src_buf.crop(1, crop_t, dst_h);

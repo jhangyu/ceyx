@@ -56,7 +56,8 @@ jobs:
         if: steps.samples.outputs.available == 'true'
         run: |
           brew update
-          brew install cmake ninja jpeg-turbo
+          brew install cmake ninja jpeg
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix jpeg):${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Build test_decode target
         if: steps.samples.outputs.available == 'true'

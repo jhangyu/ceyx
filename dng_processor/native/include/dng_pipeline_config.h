@@ -31,7 +31,7 @@
 //              before BuildStage2Image (see W6-6 / TD-29)),
 //              DNG_STAGE2_SDK_TIMING (vendor — read in
 //              third_party/dng_sdk/source/, NOT modified here),
-//              DNG_GPU_BACKEND (route: override GPU backend — "metal"/"vulkan"/"cpu";
+//              DNG_GPU_BACKEND (route: override GPU backend — "metal"/"vulkan";
 //              default auto-detect per platform. Read once at first GPU dispatch via
 //              dng_halide_device.cpp; see dng_halide_device.h).
 //   3. ResearchConfig:

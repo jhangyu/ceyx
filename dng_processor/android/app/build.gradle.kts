@@ -39,7 +39,7 @@ android {
                     "-DANDROID_STL=c++_shared",
                     "-DANDROID_PLATFORM=android-24",
                     "-DDNG_CROSS_BUILD=ON",
-                    "-DDNG_PREBUILT_AOT_DIR=${rootProject.projectDir}/../../native/build-android/host-generators/halide_generated"
+                    "-DDNG_PREBUILT_AOT_DIR=${file("../../native/build-android/host-generators/halide_generated").absolutePath}"
                 )
             }
         }

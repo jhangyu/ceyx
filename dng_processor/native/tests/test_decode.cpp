@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -53,11 +54,35 @@
 #include <dng_warp_halide.h>
 
 #include "ConcurrentDngHost.h"
+#include "dng_halide_device.h"
 #include "dng_opcodelist2_halide.h"
 #include "dng_pipeline_config.h"
 
 using namespace std;
 using namespace std::chrono;
+namespace fs = std::filesystem;
+
+fs::path gArtifactDir;
+
+fs::path defaultArtifactDir() {
+    const char* envDir = std::getenv("DNG_TEST_DECODE_ARTIFACT_DIR");
+    if (envDir && envDir[0] != '\0') {
+        return fs::path(envDir);
+    }
+
+    const fs::path cwd = fs::current_path();
+    if (cwd.filename() == "artifacts") {
+        return cwd;
+    }
+    if (fs::exists(cwd / "dng_processor") && fs::exists(cwd / ".git")) {
+        return cwd / "artifacts";
+    }
+    return cwd;
+}
+
+fs::path artifactPath(const string& filename) {
+    return gArtifactDir / filename;
+}
 
 // Global timing and PSNR data
 struct StageTiming {
@@ -153,14 +178,15 @@ string opcodeName(uint32 opcodeID) {
 
 WarpRectilinearMode parseWarpMode(const string& mode) {
     if (mode == "sdk") return WarpRectilinearMode::SDK;
-    if (mode == "halide-cpu") return WarpRectilinearMode::HALIDE_CPU;
     if (mode == "halide-metal") return WarpRectilinearMode::HALIDE_METAL;
+    if (mode == "halide-gpu") return WarpRectilinearMode::HALIDE_GPU;
     return WarpRectilinearMode::AUTO;
 }
 
 RenderHalideMode parseRenderMode(const string& mode) {
     if (mode == "sdk") return RenderHalideMode::SDK;
     if (mode == "halide-metal") return RenderHalideMode::HALIDE_METAL;
+    if (mode == "halide-gpu") return RenderHalideMode::HALIDE_GPU;
     return RenderHalideMode::AUTO;
 }
 
@@ -209,16 +235,9 @@ bool applyOpcodeList3Custom(dng_host& host,
             if (opcode.OpcodeID() == dngOpcode_WarpRectilinear && warpMode != WarpRectilinearMode::SDK) {
                 const auto& warpOpcode = static_cast<const dng_opcode_WarpRectilinear&>(opcode);
                 applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image, warpMode);
-                if (!applied && warpMode == WarpRectilinearMode::AUTO) {
-                    applied = apply_warp_rectilinear_to_image(host,
-                                                              negative,
-                                                              warpOpcode,
-                                                              image,
-                                                              WarpRectilinearMode::HALIDE_CPU);
-                }
-                if (!applied && warpMode != WarpRectilinearMode::AUTO) {
+                if (!applied) {
                     cerr << "ERROR: WarpRectilinear " << warpRectilinearModeName(warpMode)
-                         << " failed; refusing fallback to SDK in explicit mode\n";
+                         << " failed; refusing CPU/SDK fallback\n";
                     return false;
                 }
             }
@@ -272,17 +291,6 @@ bool applySingleWarpRectilinearInterleaved(dng_host& host,
                                  params,
                                  warpMode,
                                  warped.data())) {
-        if (warpMode == WarpRectilinearMode::AUTO &&
-            warp_rectilinear_halide(interleavedData.data(),
-                                    static_cast<int>(width),
-                                    static_cast<int>(height),
-                                    static_cast<int>(planes),
-                                    params,
-                                    WarpRectilinearMode::HALIDE_CPU,
-                                    warped.data())) {
-            interleavedData.swap(warped);
-            return true;
-        }
         return false;
     }
 
@@ -292,7 +300,7 @@ bool applySingleWarpRectilinearInterleaved(dng_host& host,
 
 // Save raw image data to file
 bool saveRawFile(const string& filename, const void* data, size_t byteSize) {
-    ofstream fout(filename, ios::binary);
+    ofstream fout(artifactPath(filename), ios::binary);
     if (!fout) return false;
     fout.write(reinterpret_cast<const char*>(data), byteSize);
     return fout.good();
@@ -300,7 +308,7 @@ bool saveRawFile(const string& filename, const void* data, size_t byteSize) {
 
 // Load raw image data from file
 bool loadRawFile(const string& filename, void* data, size_t byteSize) {
-    ifstream fin(filename, ios::binary);
+    ifstream fin(artifactPath(filename), ios::binary);
     if (!fin) return false;
     fin.read(reinterpret_cast<char*>(data), byteSize);
     return fin.good();
@@ -791,7 +799,7 @@ StagePSNR testDNG(dng_host& host,
                     } else {
                         cerr << "WARN: fused demosaic+WarpRectilinear "
                              << warpRectilinearModeName(warpMode)
-                             << " failed; falling back to separate demosaic + warp path\n";
+                             << " failed; trying separate demosaic + warp path\n";
                     }
                     fastWarpApplied = fusedDemosaicWarpApplied;
                     if (fusedDemosaicWarpApplied) {
@@ -804,7 +812,10 @@ StagePSNR testDNG(dng_host& host,
                 // Run Halide demosaic only when the fused demosaic+warp path did not
                 // already produce the final interleaved RGB Stage3 buffer.
                 auto stage3KernelStart = high_resolution_clock::now();
-                demosaic_bilinear_compat(stage2View, s2w, s2h, stage3Data.data());
+                if (!demosaic_bilinear_halide_aot(stage2View, s2w, s2h, stage3Data.data())) {
+                    cerr << "ERROR: Stage3 demosaic Halide AOT failed; refusing CPU fallback\n";
+                    return failedResult;
+                }
                 auto stage3KernelEnd = high_resolution_clock::now();
                 timing.stage3_halide_kernel_ms =
                     duration_cast<microseconds>(stage3KernelEnd - stage3KernelStart).count() / 1000.0;
@@ -837,9 +848,9 @@ StagePSNR testDNG(dng_host& host,
                 opcodeTimings.push_back(timingEntry);
                 timing.stage3_apply_opcode3_ms = timingEntry.elapsed_ms;
 
-                if (!applied && warpMode != WarpRectilinearMode::AUTO) {
+                if (!applied) {
                     cerr << "ERROR: WarpRectilinear " << warpRectilinearModeName(warpMode)
-                         << " failed; refusing fallback to SDK in explicit mode\n";
+                         << " failed; refusing CPU/SDK fallback\n";
                     return failedResult;
                 }
                 fastWarpApplied = applied;
@@ -1075,15 +1086,13 @@ StagePSNR testDNG(dng_host& host,
                                             rgbData,
                                             outW,
                                             outH);
-            if (!renderOk && renderMode == RenderHalideMode::AUTO) {
-                cout << "  [Render] Halide AUTO failed, falling back to SDK render\n";
-            } else if (!renderOk) {
-                cerr << "ERROR: Stage4 Halide render failed in explicit mode\n";
+            if (!renderOk) {
+                cerr << "ERROR: Stage4 Halide render failed; refusing SDK fallback\n";
                 return failedResult;
             }
         }
 
-        if (!renderOk) {
+        if (!tryHalideRender) {
             AutoPtr<dng_image> finalImage(renderer.Render());
             if (!finalImage.Get()) {
                 cerr << "ERROR: Stage4 SDK render failed\n";
@@ -1142,7 +1151,7 @@ StagePSNR testDNG(dng_host& host,
 
         // Save PPM
         string ppmFilename = "output_" + filePrefix + "_" + to_string(outW) + "x" + to_string(outH) + ".ppm";
-        ofstream fout(ppmFilename, ios::binary);
+        ofstream fout(artifactPath(ppmFilename), ios::binary);
         fout << "P6\n" << outW << " " << outH << "\n255\n";
         fout.write(reinterpret_cast<const char*>(rgbData.data()), rgbData.size());
         cout << "  Saved PPM: " << ppmFilename << "\n";
@@ -1241,8 +1250,8 @@ void printUsage(const char* programName) {
     cerr << "Usage: " << programName << " <dng_path> <mode> [warp_mode] [render_mode]\n";
     cerr << "  dng_path: Path to DNG file (lossless or lossy)\n";
     cerr << "  mode: 'baseline' or 'test'\n";
-    cerr << "  warp_mode: 'auto', 'sdk', 'halide-cpu', or 'halide-metal' (test mode only)\n";
-    cerr << "  render_mode: 'sdk', 'halide-metal', or 'auto' (test mode only)\n";
+    cerr << "  warp_mode: 'auto', 'sdk', 'halide-metal', or 'halide-gpu' (test mode only)\n";
+    cerr << "  render_mode: 'sdk', 'halide-metal', 'halide-gpu', or 'auto' (test mode only)\n";
     cerr << "\nExamples:\n";
     cerr << "  # Generate baseline reference outputs:\n";
     cerr << "  " << programName << " image_samples/lossless_dng_sample.dng baseline\n";
@@ -1251,6 +1260,7 @@ void printUsage(const char* programName) {
     cerr << "  " << programName << " image_samples/lossless_dng_sample.dng test\n";
     cerr << "  " << programName << " image_samples/lossy_dng_sample.dng test\n";
     cerr << "  " << programName << " image_samples/lossless_dng_sample.dng test halide-metal halide-metal\n";
+    cerr << "  " << programName << " image_samples/lossless_dng_sample.dng test halide-gpu halide-gpu\n";
 }
 
 int envIntOrDefault(const char* name, int fallback) {
@@ -1276,6 +1286,14 @@ int main(int argc, char** argv) {
     string mode = argv[2];
     string warpModeArg = argc >= 4 ? argv[3] : "auto";
     string renderModeArg = argc >= 5 ? argv[4] : "sdk";
+    gArtifactDir = fs::absolute(defaultArtifactDir()).lexically_normal();
+    std::error_code mkdirError;
+    fs::create_directories(gArtifactDir, mkdirError);
+    if (mkdirError) {
+        cerr << "ERROR: Could not create artifact directory: "
+             << gArtifactDir << " (" << mkdirError.message() << ")\n";
+        return 1;
+    }
 
     bool generateBaseline = (mode == "baseline");
     bool isLossless = dngPath.find("lossless") != string::npos;
@@ -1288,13 +1306,28 @@ int main(int argc, char** argv) {
     cout << "  Phase 5.0 - Step-by-Step PSNR Analysis\n";
     cout << string(70, '=') << "\n";
     cout << "\nDNG: " << dngPath << "\n";
+    cout << "Artifacts: " << gArtifactDir << "\n";
     cout << "Mode: " << (generateBaseline ? "BASELINE (generate reference)" : "TEST (compare to baseline)") << "\n";
     if (!generateBaseline) {
         cout << "WarpRectilinear mode: " << warpRectilinearModeName(warpMode) << "\n";
         cout << "Render mode: " << renderHalideModeName(renderMode) << "\n";
+        cout << "GPU backend: " << dng_halide_gpu_backend_name() << "\n";
+        const bool gpuModeRequested =
+            warpMode != WarpRectilinearMode::SDK ||
+            renderMode != RenderHalideMode::SDK;
+        if (gpuModeRequested && !dng_halide_gpu_available()) {
+            cerr << "ERROR: GPU backend unsupported ("
+                 << dng_halide_gpu_backend_name()
+                 << "); refusing CPU fallback\n";
+            return 1;
+        }
     }
     const int repeat = envIntOrDefault("DNG_TEST_DECODE_REPEAT", 1);
+    const bool contractOnly = envIntOrDefault("DNG_TEST_DECODE_CONTRACT_ONLY", 0) != 0;
     cout << "In-process repeat: " << repeat << "\n";
+    if (contractOnly) {
+        cout << "Contract-only mode: enabled\n";
+    }
 
     // PSNR gate thresholds (W5-1 / TD-1).
     // Lossless (CFA_BAYER): Stage1/2 bit-exact ≥999dB; Stage3 ≥100dB; Stage4 ≥75dB.
@@ -1342,7 +1375,7 @@ int main(int argc, char** argv) {
     }
 
     // PSNR gate (only in test mode; baseline mode has no PSNR values to check)
-    if (!generateBaseline) {
+    if (!generateBaseline && !contractOnly) {
         bool gatePassed = true;
         auto check = [&](const char* label, double actual, double threshold) {
             const bool ok = (actual >= threshold);
@@ -1362,6 +1395,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         cout << "[PSNR GATE] ALL PASS\n";
+    } else if (!generateBaseline) {
+        cout << "[PSNR GATE] SKIP contract-only mode\n";
     }
 
     return 0;

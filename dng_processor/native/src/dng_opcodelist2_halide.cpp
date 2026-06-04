@@ -36,6 +36,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -1062,7 +1063,8 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     const auto dispatch_end = std::chrono::high_resolution_clock::now();
     detail.dispatch_call_ms = dng_timing::elapsed_ms(dispatch_start, dispatch_end);
     if (!ok) {
-        return 0;
+        throw std::runtime_error(
+            "[OpcodeList2Halide] batched GPU dispatch failed; refusing SDK CPU fallback");
     }
     if (map_poly_timing_enabled()) {
         const double total = detail.prewarm_ms + detail.gather_ms +
@@ -1193,5 +1195,9 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
         emit_cold_subdivide_log("single", detail, dispatch_start,
                                 dispatch_end, /*has_handoff=*/false);
     }
-    return ok;
+    if (!ok) {
+        throw std::runtime_error(
+            "[OpcodeList2Halide] GPU dispatch failed; refusing SDK CPU fallback");
+    }
+    return true;
 }
