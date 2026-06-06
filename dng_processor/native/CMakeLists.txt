@@ -321,6 +321,18 @@ add_custom_command(
 )
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a)
 
+# Phase 14: Android Vulkan three-channel-split Stage4 generator.
+# Eliminates Tuple + dim(2) codegen that triggers Halide v21 SPIR-V R==G bug.
+if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
+    add_custom_command(
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.h
+        COMMAND dng_render_generator -g dng_render_stage4_android -f dng_render_stage4_android -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+        DEPENDS dng_render_generator
+        COMMENT "Generating Halide AOT Stage4 Render (Android 3-channel split)..."
+    )
+    add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+endif()
+
 # Phase 10 Sprint C1: MapPolynomial AOT (Stage 2 OpcodeList2 GPU).
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.h
@@ -347,7 +359,7 @@ add_custom_target(dng_opcode_polynomial3_aot_target
 # When building host generators only (Stage 1), pull AOT targets into ALL
 # so `cmake --build` actually runs the generators.
 if(DNG_HOST_GENERATORS_ONLY)
-    add_custom_target(dng_all_aot ALL DEPENDS
+    set(_DNG_ALL_AOT_DEPS
         ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
@@ -356,6 +368,10 @@ if(DNG_HOST_GENERATORS_ONLY)
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
     )
+    if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
+        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+    endif()
+    add_custom_target(dng_all_aot ALL DEPENDS ${_DNG_ALL_AOT_DEPS})
 endif()
 
 endif() # NOT DNG_CROSS_BUILD (AOT custom commands)
@@ -376,6 +392,9 @@ if(NOT DNG_CROSS_BUILD)
         add_dependencies(dng_decoder_native dng_warp_precomputed_aot_target)
     endif()
     add_dependencies(dng_decoder_native dng_render_aot_target)
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(dng_decoder_native dng_render_android_aot_target)
+    endif()
     add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
     add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
 endif()
@@ -403,6 +422,10 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+if(ANDROID)
+    target_link_libraries(dng_decoder_native
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+endif()
 if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)
     target_link_libraries(dng_decoder_native ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
@@ -463,6 +486,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
         ${VULKAN_LIBRARY}

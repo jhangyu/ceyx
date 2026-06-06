@@ -69,7 +69,7 @@ functions:
     description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。"
     lines: "591-683"
   - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 已在 GPU device buffer。Metal 以 device_crop 位移 device pointer；Android/Vulkan 先 copy_to_host 並卸除暫時 wrapper 的 device_interface，再做 host-side crop，避免 backend device_crop。crop 後直接 mutate raw_buffer()->dim[i].min = 0，讓 src/dst 都在 [0..dst_w-1] 座標系，對齊 generator 寫死的 clamp(x, 0, extent-1)。"
+    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer；Android/Vulkan 先 copy_to_host、host-side crop，固定只 repack RGB 前三通道成 dense planar 3D 再 dispatch；其他平台保留原 device handoff。"
     lines: "689-796"
   - name: "runHalideFullOrSdkFallback (host src overload)"
     description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
@@ -84,7 +84,7 @@ functions:
     description: "Stage4 正式入口；處理 Stage3 取得、kernel dispatch、fallback 與 timing。"
     lines: "1076-1099"
   - name: "render_stage4_halide_from_device_buffer (host vector overload)"
-    description: "Phase 8.2.2 device handoff 入口；傳入 Stage3 device buffer（不 copy_to_host），計算 DefaultCropArea 並呼叫 runRenderStage4HalideAotFromDevice。"
+    description: "Phase 8.2.2 device handoff 入口；傳入 Stage3 device buffer，計算 DefaultCropArea 並呼叫 runRenderStage4HalideAotFromDevice。"
     lines: "1101-1158"
   - name: "render_stage4_halide (pool ptr overload)"
     description: "Phase 10 Sprint E RGB pool — 以 caller-supplied (mmap pool) 指標直接寫入；包裝 vector overload 並驗證 data() 未搬家。"
@@ -116,7 +116,15 @@ functions:
 #include "dng_pipeline_config.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
+#if defined(__ANDROID__)
+#include "dng_render_stage4_android.h"
+#endif
 #include "dng_resample.h"
+
+// NOTE: Android/Vulkan Stage4 avoids interleaved 3D RGB input buffers. The
+// Android AOT generator declares dense planar src, so runtime code repacks the
+// first three RGB channels before dispatch. Other targets keep the original
+// interleaved RGB input/output contract for performance.
 
 namespace {
 
@@ -632,12 +640,43 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         return false;
     }
 
+#if defined(__ANDROID__)
+    // Repack Stage3 interleaved RGB into dense planar RGB. The Vulkan backend
+    // must not see the original channel stride 1 layout.
+    fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAot): src %dx%d col_step=%d row_step=%d plane_step=%d\n",
+            src_w, src_h, src_col_step, src_row_step, src_plane_step);
+    const int src_plane_size = src_w * src_h;
+    std::vector<uint16_t> planar_src(static_cast<size_t>(src_plane_size) * 3);
+    uint16_t* planar_r = planar_src.data();
+    uint16_t* planar_g = planar_r + src_plane_size;
+    uint16_t* planar_b = planar_g + src_plane_size;
+    for (int y = 0; y < src_h; ++y) {
+        const uint16_t* src_row = src + y * src_row_step;
+        const int dst_row = y * src_w;
+        for (int x = 0; x < src_w; ++x) {
+            const uint16_t* src_px = src_row + x * src_col_step;
+            const int dst_idx = dst_row + x;
+            planar_r[dst_idx] = src_px[0];
+            planar_g[dst_idx] = src_px[src_plane_step];
+            planar_b[dst_idx] = src_px[2 * src_plane_step];
+        }
+    }
+    fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
+            planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+
+    // Three-channel-split: three separate 2D buffers instead of one 3D buffer.
+    Buffer<uint16_t> src_r_buf(planar_r, src_w, src_h);
+    Buffer<uint16_t> src_g_buf(planar_g, src_w, src_h);
+    Buffer<uint16_t> src_b_buf(planar_b, src_w, src_h);
+#else
+    fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAot)\n");
     halide_dimension_t src_shape[3] = {
         {0, src_w, src_col_step, 0},
         {0, src_h, src_row_step, 0},
         {0, src_p, src_plane_step, 0},
     };
     Buffer<uint16_t> src_buf(const_cast<uint16_t*>(src), 3, src_shape);
+#endif
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
     Buffer<float> tone_buf(const_cast<float*>(params.tone_curve.data()),
@@ -659,9 +698,22 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                   static_cast<int>(params.look_encode.size()));
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
+#if defined(__ANDROID__)
+    // Three-channel-split: three separate 2D dst buffers.
+    Buffer<uint8_t> dst_r_buf(dst_w, dst_h);
+    Buffer<uint8_t> dst_g_buf(dst_w, dst_h);
+    Buffer<uint8_t> dst_b_buf(dst_w, dst_h);
+#else
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
+#endif
 
+#if defined(__ANDROID__)
+    src_r_buf.set_host_dirty();
+    src_g_buf.set_host_dirty();
+    src_b_buf.set_host_dirty();
+#else
     src_buf.set_host_dirty();
+#endif
     exp_buf.set_host_dirty();
     tone_buf.set_host_dirty();
     gamma_buf.set_host_dirty();
@@ -674,8 +726,46 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     look_table_buf.set_host_dirty();
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
+#if defined(__ANDROID__)
+    dst_r_buf.set_host_dirty(false);
+    dst_g_buf.set_host_dirty(false);
+    dst_b_buf.set_host_dirty(false);
+#else
     dst_buf.set_host_dirty(false);
+#endif
 
+#if defined(__ANDROID__)
+    const int result = dng_render_stage4_android(
+        src_r_buf.raw_buffer(),
+        src_g_buf.raw_buffer(),
+        src_b_buf.raw_buffer(),
+        src_scale,
+        exp_buf.raw_buffer(),
+        tone_buf.raw_buffer(),
+        gamma_buf.raw_buffer(),
+        cw_buf.raw_buffer(),
+        c2r_buf.raw_buffer(),
+        r2f_buf.raw_buffer(),
+        hs_table_buf.raw_buffer(),
+        hs_encode_buf.raw_buffer(),
+        hs_decode_buf.raw_buffer(),
+        params.huesat_hue_div,
+        params.huesat_sat_div,
+        params.huesat_val_div,
+        params.huesat_has_table,
+        params.huesat_has_encoding,
+        look_table_buf.raw_buffer(),
+        look_encode_buf.raw_buffer(),
+        look_decode_buf.raw_buffer(),
+        params.look_hue_div,
+        params.look_sat_div,
+        params.look_val_div,
+        params.look_has_table,
+        params.look_has_encoding,
+        dst_r_buf.raw_buffer(),
+        dst_g_buf.raw_buffer(),
+        dst_b_buf.raw_buffer());
+#else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
                                          exp_buf.raw_buffer(),
@@ -701,19 +791,45 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                          params.look_has_table,
                                          params.look_has_encoding,
                                          dst_buf.raw_buffer());
+#endif
+    fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAot)\n", result);
     if (result != 0) {
         return false;
     }
+
+#if defined(__ANDROID__)
+    if (dst_r_buf.copy_to_host() != 0) return false;
+    if (dst_g_buf.copy_to_host() != 0) return false;
+    if (dst_b_buf.copy_to_host() != 0) return false;
+
+    // Repack three 2D dst → interleaved RGB8 for downstream consumers.
+    for (int y = 0; y < dst_h; ++y) {
+        for (int x = 0; x < dst_w; ++x) {
+            const int out_idx = (y * dst_w + x) * 3;
+            dst[out_idx + 0] = dst_r_buf(x, y);
+            dst[out_idx + 1] = dst_g_buf(x, y);
+            dst[out_idx + 2] = dst_b_buf(x, y);
+        }
+    }
+    fprintf(stderr, "[Stage4-Diag] Android 3-ch split dst first 6: R=%u G=%u B=%u R=%u G=%u B=%u\n",
+            dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+    {
+        const int mid_idx = ((dst_h / 2) * dst_w + (dst_w / 2)) * 3;
+        fprintf(stderr, "[Stage4-Diag] Android 3-ch split dst mid pixel: R=%u G=%u B=%u\n",
+                dst[mid_idx], dst[mid_idx + 1], dst[mid_idx + 2]);
+    }
+#else
     if (dst_buf.copy_to_host() != 0) {
         return false;
     }
+#endif
+
     return true;
 }
 
-// Phase 8.2.2 — Stage3→Stage4 device handoff.
-// stage3_device_buf is already device-dirty (data on GPU from dng_demosaic_warp).
-// Skip set_host_dirty on the src buffer so the AOT kernel reads from device.
-// All other param buffers are host-side and still get set_host_dirty.
+// Phase 8.2.2 - Stage3->Stage4 device handoff.
+// Android/Vulkan uses a host-side planar repack before Stage4. Other targets
+// keep the original device buffer handoff path.
 bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          float src_scale,
                                          int crop_l,
@@ -722,45 +838,90 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int dst_h,
                                          const RenderParams& params,
                                          uint8_t* dst) {
-    if (!stage3_device_buf || !dst || dst_w <= 0 || dst_h <= 0) {
+    if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
+        !dst || dst_w <= 0 || dst_h <= 0) {
         return false;
     }
 
+#if defined(__ANDROID__)
+    fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAotFromDevice): dst_w=%d dst_h=%d crop_l=%d crop_t=%d\n",
+            dst_w, dst_h, crop_l, crop_t);
+    // Storage for the dense planar RGB src.
+    std::vector<uint16_t> planar_src_storage;
+
+    // Non-owning wrapper of the 3D device buffer.
+    Buffer<uint16_t> src3d(*stage3_device_buf);
+
+    // We always need host-side data to repack interleaved 3D to planar 3D.
+    // On Metal, the serial command queue guarantees Stage3 is finished.
+    if (src3d.copy_to_host() != 0) {
+        return false;
+    }
+    src3d.device_deallocate();
+
+    // Apply crop on the host-side 3D buffer.
+    if (crop_l > 0 || crop_t > 0) {
+        src3d.crop(0, crop_l, dst_w);
+        src3d.crop(1, crop_t, dst_h);
+        halide_buffer_t* raw = src3d.raw_buffer();
+        raw->dim[0].min = 0;
+        raw->dim[1].min = 0;
+    }
+
+    // Repack 3D interleaved (x, y, c) to dense planar RGB.
+    const int sw = src3d.dim(0).extent();
+    const int sh = src3d.dim(1).extent();
+    const int sp = src3d.dim(2).extent();
+    if (sp < 3) {
+        return false;
+    }
+    const int s_col   = src3d.dim(0).stride();
+    const int s_row   = src3d.dim(1).stride();
+    const int s_plane = src3d.dim(2).stride();
+    const int src_plane_size = sw * sh;
+    planar_src_storage.resize(static_cast<size_t>(src_plane_size) * 3);
+    const uint16_t* src_data = reinterpret_cast<const uint16_t*>(src3d.data());
+    uint16_t* planar_r = planar_src_storage.data();
+    uint16_t* planar_g = planar_r + src_plane_size;
+    uint16_t* planar_b = planar_g + src_plane_size;
+    for (int y = 0; y < sh; ++y) {
+        const uint16_t* src_row = src_data + y * s_row;
+        const int dst_row = y * sw;
+        for (int x = 0; x < sw; ++x) {
+            const uint16_t* src_px = src_row + x * s_col;
+            const int dst_idx = dst_row + x;
+            planar_r[dst_idx] = src_px[0];
+            planar_g[dst_idx] = src_px[s_plane];
+            planar_b[dst_idx] = src_px[2 * s_plane];
+        }
+    }
+    fprintf(stderr, "[Stage4-Diag] FromDevice planar src: %dx%d s_col=%d s_row=%d s_plane=%d\n",
+            sw, sh, s_col, s_row, s_plane);
+    fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
+            planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+
+    // Three-channel-split: three separate 2D src buffers.
+    Buffer<uint16_t> src_r_buf(planar_r, sw, sh);
+    Buffer<uint16_t> src_g_buf(planar_g, sw, sh);
+    Buffer<uint16_t> src_b_buf(planar_b, sw, sh);
+    src_r_buf.set_host_dirty();
+    src_g_buf.set_host_dirty();
+    src_b_buf.set_host_dirty();
+#else
+    fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);
-    // 8.2.3 fix: Halide AOT kernel hard-codes `clamp(x, 0, extent-1)` (see
-    // DngRenderGenerator.cpp:73-74), assuming src logical min == 0. If we
-    // leave src.dim.min at crop_l/crop_t after `crop()`, the kernel iterates
-    // dst in [crop_l..crop_l+dst_w-1] but the clamp upper bound is still
-    // `extent-1 = dst_w-1`, so the rightmost crop_l columns and bottom
-    // crop_t rows read replicated boundary pixels — measured PSNR ≈ 50dB.
-    //
-    // Fix: physically shift the read pointer via crop(), then mutate
-    // dim[i].min back to 0 directly so the logical coordinate system matches
-    // dst (which we leave at min=0). On non-Android GPU paths this uses
-    // device_crop (Metal adjusts the read offset by crop_l*stride+
-    // crop_t*stride1). On Android/Vulkan, avoid device_crop entirely by
-    // first making this temporary wrapper host-backed, then re-uploading.
+    // 8.2.3 fix: physically shift the read pointer via crop(), then mutate
+    // dim[i].min back to 0 so src/dst share the [0..dst_w-1] coordinate system.
     if (crop_l > 0 || crop_t > 0) {
-#if defined(__ANDROID__)
-        // W1-04: Vulkan device_crop behavior is unsafe here. copy_to_host()
-        // materializes the in-flight Stage3 output, then device_deallocate()
-        // clears this unmanaged wrapper's device_interface so Buffer::crop()
-        // takes the host-only path below.
-        if (src_buf.copy_to_host() != 0) {
-            return false;
-        }
-        src_buf.device_deallocate();
-#endif
         src_buf.crop(0, crop_l, dst_w);
         src_buf.crop(1, crop_t, dst_h);
         halide_buffer_t* raw = src_buf.raw_buffer();
         raw->dim[0].min = 0;
         raw->dim[1].min = 0;
-#if defined(__ANDROID__)
-        src_buf.set_host_dirty();
-#endif
     }
+#endif
+
     Buffer<float> exp_buf(const_cast<float*>(params.exp_ramp.data()),
                           static_cast<int>(params.exp_ramp.size()));
     Buffer<float> tone_buf(const_cast<float*>(params.tone_curve.data()),
@@ -782,13 +943,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                   static_cast<int>(params.look_encode.size()));
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
+#if defined(__ANDROID__)
+    // Three-channel-split: three separate 2D dst buffers.
+    Buffer<uint8_t> dst_r_buf(dst_w, dst_h);
+    Buffer<uint8_t> dst_g_buf(dst_w, dst_h);
+    Buffer<uint8_t> dst_b_buf(dst_w, dst_h);
+#else
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
-    // 8.2.3 fix: dst stays at min=0; src has been logically reset to min=0
-    // above (physical pointer is already shifted via device_crop). Both
-    // buffers now share the [0..dst_w-1] × [0..dst_h-1] logical coordinate
-    // system that the AOT kernel was compiled against.
+#endif
 
-    // src_buf: intentionally NO set_host_dirty — GPU has the authoritative data.
     exp_buf.set_host_dirty();
     tone_buf.set_host_dirty();
     gamma_buf.set_host_dirty();
@@ -801,8 +964,46 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     look_table_buf.set_host_dirty();
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
+#if defined(__ANDROID__)
+    dst_r_buf.set_host_dirty(false);
+    dst_g_buf.set_host_dirty(false);
+    dst_b_buf.set_host_dirty(false);
+#else
     dst_buf.set_host_dirty(false);
+#endif
 
+#if defined(__ANDROID__)
+    const int result = dng_render_stage4_android(
+        src_r_buf.raw_buffer(),
+        src_g_buf.raw_buffer(),
+        src_b_buf.raw_buffer(),
+        src_scale,
+        exp_buf.raw_buffer(),
+        tone_buf.raw_buffer(),
+        gamma_buf.raw_buffer(),
+        cw_buf.raw_buffer(),
+        c2r_buf.raw_buffer(),
+        r2f_buf.raw_buffer(),
+        hs_table_buf.raw_buffer(),
+        hs_encode_buf.raw_buffer(),
+        hs_decode_buf.raw_buffer(),
+        params.huesat_hue_div,
+        params.huesat_sat_div,
+        params.huesat_val_div,
+        params.huesat_has_table,
+        params.huesat_has_encoding,
+        look_table_buf.raw_buffer(),
+        look_encode_buf.raw_buffer(),
+        look_decode_buf.raw_buffer(),
+        params.look_hue_div,
+        params.look_sat_div,
+        params.look_val_div,
+        params.look_has_table,
+        params.look_has_encoding,
+        dst_r_buf.raw_buffer(),
+        dst_g_buf.raw_buffer(),
+        dst_b_buf.raw_buffer());
+#else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
                                          exp_buf.raw_buffer(),
@@ -828,12 +1029,34 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          params.look_has_table,
                                          params.look_has_encoding,
                                          dst_buf.raw_buffer());
+#endif
+    fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAotFromDevice)\n", result);
     if (result != 0) {
         return false;
     }
+
+#if defined(__ANDROID__)
+    if (dst_r_buf.copy_to_host() != 0) return false;
+    if (dst_g_buf.copy_to_host() != 0) return false;
+    if (dst_b_buf.copy_to_host() != 0) return false;
+
+    // Repack three 2D dst → interleaved RGB8.
+    for (int y = 0; y < dst_h; ++y) {
+        for (int x = 0; x < dst_w; ++x) {
+            const int out_idx = (y * dst_w + x) * 3;
+            dst[out_idx + 0] = dst_r_buf(x, y);
+            dst[out_idx + 1] = dst_g_buf(x, y);
+            dst[out_idx + 2] = dst_b_buf(x, y);
+        }
+    }
+    fprintf(stderr, "[Stage4-Diag] Android 3-ch split FromDevice dst first 6: R=%u G=%u B=%u R=%u G=%u B=%u\n",
+            dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+#else
     if (dst_buf.copy_to_host() != 0) {
         return false;
     }
+#endif
+
     return true;
 }
 

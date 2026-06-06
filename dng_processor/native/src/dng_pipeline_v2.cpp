@@ -69,9 +69,10 @@ bool requireGpuBackend(const char *path) {
   if (dng_halide_gpu_available()) {
     return true;
   }
-  std::cerr << "[PipelineV2] " << path << " requires a supported GPU backend; got "
-            << dng_halide_gpu_backend_name()
-            << ". Refusing CPU fallback.\n";
+  fprintf(stderr, "[Pipeline] GPU capability gate FAILED for %s: "
+          "backend=%s; decode requires Metal (macOS) or Vulkan (Android). "
+          "No SDK-CPU fallback route available.\n",
+          path, dng_halide_gpu_backend_name());
   return false;
 }
 
@@ -911,7 +912,13 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
 
   try {
     const PipelineConfig config = PipelineConfig::loadFromEnv();
-    fprintf(stderr, "[Pipeline] GPU backend: %s\n", dng_halide_gpu_backend_name());
+    fprintf(stderr, "[Pipeline] GPU backend: %s (available=%s)\n",
+            dng_halide_gpu_backend_name(),
+            dng_halide_gpu_available() ? "yes" : "no");
+
+    // W1-07 capability gate: fail-fast before any DNG parsing when GPU is
+    // unavailable. RouteConfig has no SDK-CPU mode; the pipeline is
+    // GPU-mandatory on all platforms. Log the rejection and return -6.
     if (!requireGpuBackend("decode")) {
       result.error_code = -6;
       return false;
