@@ -257,6 +257,8 @@ endif()
 
 # Stage4 render uses same base target with -no_runtime (fixes hardcoded Metal bug)
 set(DNG_RENDER_STAGE4_AOT_TARGET "${AOT_TARGET}-no_runtime")
+set(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE "-1" CACHE STRING
+    "Android Stage4 diagnostic stage (-1 full render)")
 
 # =============================================================================
 # AOT custom commands (only when NOT cross-building — cross-build uses prebuilt)
@@ -326,7 +328,7 @@ add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_
 if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
     add_custom_command(
         OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.h
-        COMMAND dng_render_generator -g dng_render_stage4_android -f dng_render_stage4_android -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+        COMMAND dng_render_generator -g dng_render_stage4_android -f dng_render_stage4_android -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET} diag_stage=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE}
         DEPENDS dng_render_generator
         COMMENT "Generating Halide AOT Stage4 Render (Android 3-channel split)..."
     )
@@ -425,6 +427,8 @@ target_link_libraries(dng_decoder_native
 if(ANDROID)
     target_link_libraries(dng_decoder_native
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+    target_compile_definitions(dng_decoder_native PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()
 if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)
@@ -491,6 +495,8 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
         ${VULKAN_LIBRARY}
         ${LOG_LIBRARY})
+    target_compile_definitions(test_decode_android PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
     if(DNG_USE_LIBJPEG)
         target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
     endif()

@@ -249,9 +249,9 @@ public:
             Expr val_scale_3d = s_fract0 * val_scale0_3d + s_fract1 * val_scale1_3d;
 
             Expr use_2d = val_div_safe < 2;
-            Expr hue_shift = select(use_2d, hue_shift_2d, hue_shift_3d);
-            Expr sat_mult = select(use_2d, sat_scale_2d, sat_scale_3d);
-            Expr val_mult = select(use_2d, val_scale_2d, val_scale_3d);
+            Expr hue_shift = hue_shift_3d;
+            Expr sat_mult = sat_scale_3d;
+            Expr val_mult = val_scale_3d;
 
             Expr hh = h + hue_shift * (6.0f / 360.0f);
             Expr ss = min(s * sat_mult, 1.0f);
@@ -436,71 +436,113 @@ public:
 };
 
 // =============================================================================
-// Android Vulkan workaround: separate generator with three 2D input/output
-// buffers per channel.  Eliminates Tuple + dim(2) codegen that triggers the
-// Halide v21 SPIR-V R==G bug.
+// Android Vulkan workaround: separate generator with one-dimensional planar
+// buffers per channel.  Avoids Tuple/2D/3D buffer stride codegen on Vulkan.
 // =============================================================================
 class DngRenderStage4Android : public Halide::Generator<DngRenderStage4Android> {
 public:
-    // Three separate 2D inputs instead of one 3D src(x,y,c)
-    Input<Buffer<uint16_t>> src_r{"src_r", 2};
-    Input<Buffer<uint16_t>> src_g{"src_g", 2};
-    Input<Buffer<uint16_t>> src_b{"src_b", 2};
+    GeneratorParam<int32_t> diag_stage{"diag_stage", -1};
+
+    // Three separate 1D inputs instead of one 3D src(x,y,c)
+    Input<Buffer<uint16_t>> src_r{"src_r", 1};
+    Input<Buffer<uint16_t>> src_g{"src_g", 1};
+    Input<Buffer<uint16_t>> src_b{"src_b", 1};
+    Input<int32_t> src_width{"src_width"};
+    Input<int32_t> src_height{"src_height"};
+    Input<int32_t> dst_width{"dst_width"};
     Input<float> src_scale{"src_scale"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
     Input<Buffer<float>> tone_curve{"tone_curve", 1};
     Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
     Input<Buffer<float>> camera_white{"camera_white", 1};
-    Input<Buffer<float>> camera_to_rgb{"camera_to_rgb", 2};
-    Input<Buffer<float>> rgb_to_final{"rgb_to_final", 2};
-    Input<Buffer<float>> huesat_table{"huesat_table", 2};
+    Input<Buffer<float>> camera_to_rgb{"camera_to_rgb", 1};
+    Input<Buffer<float>> rgb_to_final{"rgb_to_final", 1};
+    Input<Buffer<float>> huesat_table{"huesat_table", 1};
     Input<Buffer<float>> huesat_encode{"huesat_encode", 1};
     Input<Buffer<float>> huesat_decode{"huesat_decode", 1};
+    Input<int32_t> huesat_entry_count{"huesat_entry_count"};
     Input<int32_t> huesat_hue_div{"huesat_hue_div"};
     Input<int32_t> huesat_sat_div{"huesat_sat_div"};
     Input<int32_t> huesat_val_div{"huesat_val_div"};
     Input<int32_t> huesat_has_table{"huesat_has_table"};
     Input<int32_t> huesat_has_encoding{"huesat_has_encoding"};
-    Input<Buffer<float>> look_table{"look_table", 2};
+    Input<Buffer<float>> look_table{"look_table", 1};
     Input<Buffer<float>> look_encode{"look_encode", 1};
     Input<Buffer<float>> look_decode{"look_decode", 1};
+    Input<int32_t> look_entry_count{"look_entry_count"};
     Input<int32_t> look_hue_div{"look_hue_div"};
     Input<int32_t> look_sat_div{"look_sat_div"};
     Input<int32_t> look_val_div{"look_val_div"};
     Input<int32_t> look_has_table{"look_has_table"};
     Input<int32_t> look_has_encoding{"look_has_encoding"};
 
-    // Three separate 2D outputs instead of one 3D dst(x,y,c)
-    Output<Buffer<uint8_t>> dst_r{"dst_r", 2};
-    Output<Buffer<uint8_t>> dst_g{"dst_g", 2};
-    Output<Buffer<uint8_t>> dst_b{"dst_b", 2};
+    // Three separate 1D outputs instead of one 3D dst(x,y,c)
+    Output<Buffer<uint8_t>> dst_r{"dst_r", 1};
+    Output<Buffer<uint8_t>> dst_g{"dst_g", 1};
+    Output<Buffer<uint8_t>> dst_b{"dst_b", 1};
 
     Func rendered_r{"rendered_r"};
     Func rendered_g{"rendered_g"};
     Func rendered_b{"rendered_b"};
 
     void generate() {
-        Var x("x"), y("y");
+        Var i("i");
 
-        Expr sx = clamp(x, 0, src_r.dim(0).extent() - 1);
-        Expr sy = clamp(y, 0, src_r.dim(1).extent() - 1);
-        Expr s_r = cast<float>(src_r(sx, sy)) * src_scale;
-        Expr s_g = cast<float>(src_g(sx, sy)) * src_scale;
-        Expr s_b = cast<float>(src_b(sx, sy)) * src_scale;
+        Expr dst_x = i % dst_width;
+        Expr dst_y = i / dst_width;
+        Expr sx = clamp(dst_x, 0, src_width - 1);
+        Expr sy = clamp(dst_y, 0, src_height - 1);
+        Expr src_idx = clamp(sy * src_width + sx, 0, src_r.dim(0).extent() - 1);
+
+        Expr s_r = cast<float>(src_r(src_idx)) * src_scale;
+        Expr s_g = cast<float>(src_g(src_idx)) * src_scale;
+        Expr s_b = cast<float>(src_b(src_idx)) * src_scale;
+
+        auto linear8 = [&](Expr v) {
+            return cast<uint8_t>(clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
+        };
+
+        auto emit_rgb8 = [&](Expr r8, Expr g8, Expr b8) {
+            rendered_r(i) = r8;
+            rendered_g(i) = g8;
+            rendered_b(i) = b8;
+            dst_r(i) = rendered_r(i);
+            dst_g(i) = rendered_g(i);
+            dst_b(i) = rendered_b(i);
+        };
+
+        if (diag_stage == 0) {
+            emit_rgb8(linear8(s_r), linear8(s_g), linear8(s_b));
+            return;
+        }
 
         Expr wb_r = min(s_r, camera_white(0));
         Expr wb_g = min(s_g, camera_white(1));
         Expr wb_b = min(s_b, camera_white(2));
 
-        Expr p_r0_rg = wb_r * camera_to_rgb(0, 0) + wb_g * camera_to_rgb(1, 0);
-        Expr p_g0_rg = wb_r * camera_to_rgb(0, 1) + wb_g * camera_to_rgb(1, 1);
-        Expr p_b0_rg = wb_r * camera_to_rgb(0, 2) + wb_g * camera_to_rgb(1, 2);
-        Expr p_r0_sum = p_r0_rg + wb_b * camera_to_rgb(2, 0);
-        Expr p_g0_sum = p_g0_rg + wb_b * camera_to_rgb(2, 1);
-        Expr p_b0_sum = p_b0_rg + wb_b * camera_to_rgb(2, 2);
+        if (diag_stage == 1) {
+            emit_rgb8(linear8(wb_r), linear8(wb_g), linear8(wb_b));
+            return;
+        }
+
+        auto matrix3 = [&](const auto& matrix, int col, int row) {
+            return matrix(row * 3 + col);
+        };
+
+        Expr p_r0_rg = wb_r * matrix3(camera_to_rgb, 0, 0) + wb_g * matrix3(camera_to_rgb, 1, 0);
+        Expr p_g0_rg = wb_r * matrix3(camera_to_rgb, 0, 1) + wb_g * matrix3(camera_to_rgb, 1, 1);
+        Expr p_b0_rg = wb_r * matrix3(camera_to_rgb, 0, 2) + wb_g * matrix3(camera_to_rgb, 1, 2);
+        Expr p_r0_sum = p_r0_rg + wb_b * matrix3(camera_to_rgb, 2, 0);
+        Expr p_g0_sum = p_g0_rg + wb_b * matrix3(camera_to_rgb, 2, 1);
+        Expr p_b0_sum = p_b0_rg + wb_b * matrix3(camera_to_rgb, 2, 2);
         Expr p_r0 = clamp(p_r0_sum, 0.0f, 1.0f);
         Expr p_g0 = clamp(p_g0_sum, 0.0f, 1.0f);
         Expr p_b0 = clamp(p_b0_sum, 0.0f, 1.0f);
+
+        if (diag_stage == 2) {
+            emit_rgb8(linear8(p_r0), linear8(p_g0), linear8(p_b0));
+            return;
+        }
 
         Expr abc_r = p_r0;
         Expr abc_g = p_g0;
@@ -555,6 +597,7 @@ public:
         auto sample_hsv_map = [&](const auto& table,
                                   const auto& encode_table,
                                   const auto& decode_table,
+                                  Expr entry_count,
                                   Expr hue_div, Expr sat_div, Expr val_div,
                                   Expr has_table, Expr has_encoding,
                                   Expr r, Expr g, Expr b,
@@ -590,19 +633,9 @@ public:
             Expr s_fract0 = 1.0f - s_fract1;
             Expr v_fract0 = 1.0f - v_fract1;
             auto tval = [&](Expr idx, int comp) {
-                return table(clamp(cast<int>(idx), 0, table.dim(0).extent() - 1), comp);
+                Expr entry = clamp(cast<int>(idx), 0, entry_count - 1);
+                return table(comp * entry_count + entry);
             };
-            Expr base2d0 = h_index0 * hue_step + s_index0;
-            Expr base2d1 = h_index1 * hue_step + s_index0;
-            Expr hs_hue0 = h_fract0 * tval(base2d0, 0) + h_fract1 * tval(base2d1, 0);
-            Expr hs_sat0 = h_fract0 * tval(base2d0, 1) + h_fract1 * tval(base2d1, 1);
-            Expr hs_val0 = h_fract0 * tval(base2d0, 2) + h_fract1 * tval(base2d1, 2);
-            Expr hs_hue1 = h_fract0 * tval(base2d0 + 1, 0) + h_fract1 * tval(base2d1 + 1, 0);
-            Expr hs_sat1 = h_fract0 * tval(base2d0 + 1, 1) + h_fract1 * tval(base2d1 + 1, 1);
-            Expr hs_val1 = h_fract0 * tval(base2d0 + 1, 2) + h_fract1 * tval(base2d1 + 1, 2);
-            Expr hue_shift_2d = s_fract0 * hs_hue0 + s_fract1 * hs_hue1;
-            Expr sat_scale_2d = s_fract0 * hs_sat0 + s_fract1 * hs_sat1;
-            Expr val_scale_2d = s_fract0 * hs_val0 + s_fract1 * hs_val1;
             Expr base3d00 = v_index0 * val_step + h_index0 * hue_step + s_index0;
             Expr base3d01 = v_index0 * val_step + h_index1 * hue_step + s_index0;
             Expr base3d10 = base3d00 + val_step;
@@ -611,45 +644,52 @@ public:
                 return v_fract0 * (h_fract0 * tval(base3d00 + off, comp) + h_fract1 * tval(base3d01 + off, comp)) +
                        v_fract1 * (h_fract0 * tval(base3d10 + off, comp) + h_fract1 * tval(base3d11 + off, comp));
             };
-            Expr hue_shift0_3d = lerp_hv(0, 0);
-            Expr sat_scale0_3d = lerp_hv(1, 0);
-            Expr val_scale0_3d = lerp_hv(2, 0);
-            Expr hue_shift1_3d = lerp_hv(0, 1);
-            Expr sat_scale1_3d = lerp_hv(1, 1);
-            Expr val_scale1_3d = lerp_hv(2, 1);
-            Expr hue_shift_3d = s_fract0 * hue_shift0_3d + s_fract1 * hue_shift1_3d;
-            Expr sat_scale_3d = s_fract0 * sat_scale0_3d + s_fract1 * sat_scale1_3d;
-            Expr val_scale_3d = s_fract0 * val_scale0_3d + s_fract1 * val_scale1_3d;
-            Expr use_2d = val_div_safe < 2;
-            Expr hue_shift = select(use_2d, hue_shift_2d, hue_shift_3d);
-            Expr sat_mult = select(use_2d, sat_scale_2d, sat_scale_3d);
-            Expr val_mult = select(use_2d, val_scale_2d, val_scale_3d);
+            Expr hue_shift = s_fract0 * lerp_hv(0, 0) + s_fract1 * lerp_hv(0, 1);
+            Expr sat_mult = s_fract0 * lerp_hv(1, 0) + s_fract1 * lerp_hv(1, 1);
+            Expr val_mult = s_fract0 * lerp_hv(2, 0) + s_fract1 * lerp_hv(2, 1);
             Expr hh = h + hue_shift * (6.0f / 360.0f);
             Expr ss = min(s * sat_mult, 1.0f);
             Expr ve = clamp(v_encoded * val_mult, 0.0f, 1.0f);
             Expr vv = select(use_encode, table_interp(decode_table, ve), ve);
             Expr rr, gg, bb;
             hsv_to_rgb(hh, ss, vv, rr, gg, bb);
-            out_r = select(has_table != 0, rr, r);
-            out_g = select(has_table != 0, gg, g);
-            out_b = select(has_table != 0, bb, b);
+            out_r = rr;
+            out_g = gg;
+            out_b = bb;
         };
 
         Expr p_r1, p_g1, p_b1;
         sample_hsv_map(huesat_table, huesat_encode, huesat_decode,
+                       huesat_entry_count,
                        huesat_hue_div, huesat_sat_div, huesat_val_div,
                        huesat_has_table, huesat_has_encoding,
                        abc_r, abc_g, abc_b, p_r1, p_g1, p_b1);
+
+        if (diag_stage == 3) {
+            emit_rgb8(linear8(p_r1), linear8(p_g1), linear8(p_b1));
+            return;
+        }
 
         Expr e_r = table_interp(exp_ramp, p_r1);
         Expr e_g = table_interp(exp_ramp, p_g1);
         Expr e_b = table_interp(exp_ramp, p_b1);
 
+        if (diag_stage == 4) {
+            emit_rgb8(linear8(e_r), linear8(e_g), linear8(e_b));
+            return;
+        }
+
         Expr p_r2, p_g2, p_b2;
         sample_hsv_map(look_table, look_encode, look_decode,
+                       look_entry_count,
                        look_hue_div, look_sat_div, look_val_div,
                        look_has_table, look_has_encoding,
                        e_r, e_g, e_b, p_r2, p_g2, p_b2);
+
+        if (diag_stage == 5) {
+            emit_rgb8(linear8(p_r2), linear8(p_g2), linear8(p_b2));
+            return;
+        }
 
         auto rgb_tone = [&](Expr r, Expr g, Expr b, Expr& rr, Expr& gg, Expr& bb) {
             Expr tr = table_interp(tone_curve, r);
@@ -696,53 +736,58 @@ public:
         Expr t_r, t_g, t_b;
         rgb_tone(p_r2, p_g2, p_b2, t_r, t_g, t_b);
 
+        if (diag_stage == 6) {
+            emit_rgb8(linear8(t_r), linear8(t_g), linear8(t_b));
+            return;
+        }
+
         Expr tone_r = t_r;
         Expr tone_g = t_g;
         Expr tone_b = t_b;
-        Expr f_r_rg = tone_r * rgb_to_final(0, 0) + tone_g * rgb_to_final(1, 0);
-        Expr f_g_rg = tone_r * rgb_to_final(0, 1) + tone_g * rgb_to_final(1, 1);
-        Expr f_b_rg = tone_r * rgb_to_final(0, 2) + tone_g * rgb_to_final(1, 2);
-        Expr f_r_sum = f_r_rg + tone_b * rgb_to_final(2, 0);
-        Expr f_g_sum = f_g_rg + tone_b * rgb_to_final(2, 1);
-        Expr f_b_sum = f_b_rg + tone_b * rgb_to_final(2, 2);
+        Expr f_r_rg = tone_r * matrix3(rgb_to_final, 0, 0) + tone_g * matrix3(rgb_to_final, 1, 0);
+        Expr f_g_rg = tone_r * matrix3(rgb_to_final, 0, 1) + tone_g * matrix3(rgb_to_final, 1, 1);
+        Expr f_b_rg = tone_r * matrix3(rgb_to_final, 0, 2) + tone_g * matrix3(rgb_to_final, 1, 2);
+        Expr f_r_sum = f_r_rg + tone_b * matrix3(rgb_to_final, 2, 0);
+        Expr f_g_sum = f_g_rg + tone_b * matrix3(rgb_to_final, 2, 1);
+        Expr f_b_sum = f_b_rg + tone_b * matrix3(rgb_to_final, 2, 2);
 
         Expr f_r = clamp(f_r_sum, 0.0f, 1.0f);
         Expr f_g = clamp(f_g_sum, 0.0f, 1.0f);
         Expr f_b = clamp(f_b_sum, 0.0f, 1.0f);
+
+        if (diag_stage == 7) {
+            emit_rgb8(linear8(f_r), linear8(f_g), linear8(f_b));
+            return;
+        }
 
         auto encode8 = [&](Expr v) {
             Expr g = table_interp(encode_gamma, v);
             return clamp(g * 255.0f + 0.5f, 0.0f, 255.0f);
         };
 
-        // No Tuple: each channel is an independent Func
-        rendered_r(x, y) = cast<uint8_t>(encode8(f_r));
-        rendered_g(x, y) = cast<uint8_t>(encode8(f_g));
-        rendered_b(x, y) = cast<uint8_t>(encode8(f_b));
-
-        dst_r(x, y) = rendered_r(x, y);
-        dst_g(x, y) = rendered_g(x, y);
-        dst_b(x, y) = rendered_b(x, y);
+        emit_rgb8(cast<uint8_t>(encode8(f_r)),
+                  cast<uint8_t>(encode8(f_g)),
+                  cast<uint8_t>(encode8(f_b)));
     }
 
     void schedule() {
-        Var x("x"), y("y");
+        Var i("i");
         if (get_target().has_gpu_feature()) {
-            Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
-            dst_r.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-            dst_g.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-            dst_b.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-            rendered_r.compute_at(dst_r, xo).gpu_threads(x, y);
-            rendered_g.compute_at(dst_g, xo).gpu_threads(x, y);
-            rendered_b.compute_at(dst_b, xo).gpu_threads(x, y);
+            Var ro("ro"), ri("ri"), go("go"), gi("gi"), bo("bo"), bi("bi");
+            dst_r.gpu_tile(i, ro, ri, 256);
+            dst_g.gpu_tile(i, go, gi, 256);
+            dst_b.gpu_tile(i, bo, bi, 256);
+            rendered_r.compute_at(dst_r, ro).gpu_threads(i);
+            rendered_g.compute_at(dst_g, go).gpu_threads(i);
+            rendered_b.compute_at(dst_b, bo).gpu_threads(i);
         } else {
-            Var yo("yo"), yi("yi");
-            dst_r.split(y, yo, yi, 32).parallel(yo).vectorize(x, 8);
-            dst_g.split(y, yo, yi, 32).parallel(yo).vectorize(x, 8);
-            dst_b.split(y, yo, yi, 32).parallel(yo).vectorize(x, 8);
-            rendered_r.compute_at(dst_r, yo).vectorize(x, 8);
-            rendered_g.compute_at(dst_g, yo).vectorize(x, 8);
-            rendered_b.compute_at(dst_b, yo).vectorize(x, 8);
+            Var io("io"), ii("ii");
+            dst_r.split(i, io, ii, 1024).parallel(io).vectorize(ii, 8);
+            dst_g.split(i, io, ii, 1024).parallel(io).vectorize(ii, 8);
+            dst_b.split(i, io, ii, 1024).parallel(io).vectorize(ii, 8);
+            rendered_r.compute_at(dst_r, io).vectorize(i, 8);
+            rendered_g.compute_at(dst_g, io).vectorize(i, 8);
+            rendered_b.compute_at(dst_b, io).vectorize(i, 8);
         }
     }
 };
