@@ -476,17 +476,35 @@ public:
     Input<int32_t> look_has_table{"look_has_table"};
     Input<int32_t> look_has_encoding{"look_has_encoding"};
 
-    // Three separate 1D outputs instead of one 3D dst(x,y,c)
-    Output<Buffer<uint8_t>> dst_r{"dst_r", 1};
-    Output<Buffer<uint8_t>> dst_g{"dst_g", 1};
-    Output<Buffer<uint8_t>> dst_b{"dst_b", 1};
+    // W4-3 (b): single 2D planar output dst(i, c) — dim0 = pixel index i
+    // (stride 1, extent N), dim1 = channel c (stride N, extent 3). This is the
+    // three former dst_r/dst_g/dst_b planes laid end-to-end in one buffer, so it
+    // dispatches as ONE Vulkan kernel instead of three. With reorder(c,i) +
+    // unroll(c), the c-index folds to a constant per unrolled copy so select()
+    // prunes to one channel and the c-independent pipeline body is CSE-shared
+    // inside one thread (computed once per pixel, not three times). 2D dense
+    // buffers are verified safe on Vulkan (W3 §1); the host still repacks the
+    // planar output to interleaved RGB8 (W4-1 MT repack_dst).
+    //
+    // Plan (a) — a single interleaved 1D dst_rgb(j) with j=i*3+c — was tried
+    // first but produced incorrect output on Vulkan (~8 dB, border/coverage
+    // corruption); the j/3, j%3 affine reconstruction under split+gpu_tile does
+    // not lower correctly. (b) keeps the single-dispatch + compute-1x win without
+    // the interleaved-index codegen hazard.
+    Output<Buffer<uint8_t>> dst{"dst", 2};
 
-    Func rendered_r{"rendered_r"};
-    Func rendered_g{"rendered_g"};
-    Func rendered_b{"rendered_b"};
+    // Per-channel 8-bit results, set by emit_rgb8 (possibly from a diag stage),
+    // consumed once at the end of generate() to build dst.
+    Expr out8_r, out8_g, out8_b;
 
     void generate() {
         Var i("i");
+
+        // W4-3 (b): dense planar dst layout — dim0=i (stride 1), dim1=c (stride
+        // = N). Matches the host buffer wrap (three contiguous planes).
+        dst.dim(0).set_stride(1);
+        dst.dim(1).set_bounds(0, 3);
+        dst.dim(1).set_stride(dst.dim(0).extent());
 
         Expr dst_x = i % dst_width;
         Expr dst_y = i / dst_width;
@@ -502,17 +520,16 @@ public:
             return cast<uint8_t>(clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
         };
 
+        // Stash the three channel results; finalize() wires them into dst_rgb.
         auto emit_rgb8 = [&](Expr r8, Expr g8, Expr b8) {
-            rendered_r(i) = r8;
-            rendered_g(i) = g8;
-            rendered_b(i) = b8;
-            dst_r(i) = rendered_r(i);
-            dst_g(i) = rendered_g(i);
-            dst_b(i) = rendered_b(i);
+            out8_r = r8;
+            out8_g = g8;
+            out8_b = b8;
         };
 
         if (diag_stage == 0) {
             emit_rgb8(linear8(s_r), linear8(s_g), linear8(s_b));
+            finalize(i);
             return;
         }
 
@@ -522,6 +539,7 @@ public:
 
         if (diag_stage == 1) {
             emit_rgb8(linear8(wb_r), linear8(wb_g), linear8(wb_b));
+            finalize(i);
             return;
         }
 
@@ -541,6 +559,7 @@ public:
 
         if (diag_stage == 2) {
             emit_rgb8(linear8(p_r0), linear8(p_g0), linear8(p_b0));
+            finalize(i);
             return;
         }
 
@@ -667,6 +686,7 @@ public:
 
         if (diag_stage == 3) {
             emit_rgb8(linear8(p_r1), linear8(p_g1), linear8(p_b1));
+            finalize(i);
             return;
         }
 
@@ -676,6 +696,7 @@ public:
 
         if (diag_stage == 4) {
             emit_rgb8(linear8(e_r), linear8(e_g), linear8(e_b));
+            finalize(i);
             return;
         }
 
@@ -688,6 +709,7 @@ public:
 
         if (diag_stage == 5) {
             emit_rgb8(linear8(p_r2), linear8(p_g2), linear8(p_b2));
+            finalize(i);
             return;
         }
 
@@ -738,6 +760,7 @@ public:
 
         if (diag_stage == 6) {
             emit_rgb8(linear8(t_r), linear8(t_g), linear8(t_b));
+            finalize(i);
             return;
         }
 
@@ -757,6 +780,7 @@ public:
 
         if (diag_stage == 7) {
             emit_rgb8(linear8(f_r), linear8(f_g), linear8(f_b));
+            finalize(i);
             return;
         }
 
@@ -768,26 +792,38 @@ public:
         emit_rgb8(cast<uint8_t>(encode8(f_r)),
                   cast<uint8_t>(encode8(f_g)),
                   cast<uint8_t>(encode8(f_b)));
+        finalize(i);
+    }
+
+    // W4-3 (b): wire the three channel results into the 2D planar output.
+    // out8_r/g/b are Exprs over the pixel index `i`; dst(i, c) selects a channel
+    // by c. reorder(c,i) + unroll(c) fold c to a constant per copy so select()
+    // prunes to one channel while the pipeline body (independent of c) is shared.
+    void finalize(Var i) {
+        Var c("c");
+        dst(i, c) = select(c == 0, out8_r, c == 1, out8_g, out8_b);
     }
 
     void schedule() {
-        Var i("i");
+        Var i("i"), c("c");
+        // W4-3 (b): single 2D planar output. reorder(c,i) + unroll(c) keeps the
+        // three channels of one pixel in the same thread so c folds to a constant
+        // per copy, select() prunes to one channel, and the c-independent
+        // pipeline body is CSE-shared (computed once per pixel, one kernel).
         if (get_target().has_gpu_feature()) {
-            Var ro("ro"), ri("ri"), go("go"), gi("gi"), bo("bo"), bi("bi");
-            dst_r.gpu_tile(i, ro, ri, 256);
-            dst_g.gpu_tile(i, go, gi, 256);
-            dst_b.gpu_tile(i, bo, bi, 256);
-            rendered_r.compute_at(dst_r, ro).gpu_threads(i);
-            rendered_g.compute_at(dst_g, go).gpu_threads(i);
-            rendered_b.compute_at(dst_b, bo).gpu_threads(i);
+            Var io("io"), ii("ii");
+            dst.bound(c, 0, 3)
+               .reorder(c, i)
+               .gpu_tile(i, io, ii, 256)
+               .unroll(c);
         } else {
             Var io("io"), ii("ii");
-            dst_r.split(i, io, ii, 1024).parallel(io).vectorize(ii, 8);
-            dst_g.split(i, io, ii, 1024).parallel(io).vectorize(ii, 8);
-            dst_b.split(i, io, ii, 1024).parallel(io).vectorize(ii, 8);
-            rendered_r.compute_at(dst_r, io).vectorize(i, 8);
-            rendered_g.compute_at(dst_g, io).vectorize(i, 8);
-            rendered_b.compute_at(dst_b, io).vectorize(i, 8);
+            dst.bound(c, 0, 3)
+               .reorder(c, i)
+               .split(i, io, ii, 1024)
+               .parallel(io)
+               .vectorize(ii, 8)
+               .unroll(c);
         }
     }
 };

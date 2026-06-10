@@ -102,6 +102,7 @@ functions:
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "HalideBuffer.h"
@@ -131,6 +132,236 @@ functions:
 namespace {
 
 using Halide::Runtime::Buffer;
+
+#if defined(__ANDROID__)
+// W4-0: Android Stage4 verbose diagnostics (per-decode CPU oracle mirror +
+// [Stage4-Diag] dumps) are only meaningful while bisecting codegen issues with
+// an explicit diag_stage in [0..7]. The default production build keeps
+// DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE = -1 (full render): in that mode we
+// suppress the oracle mirror and verbose dumps so a clean decode only emits the
+// [Stage4-Perf] timing instrument. constexpr lets the compiler dead-strip the
+// guarded blocks entirely.
+#if defined(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE)
+constexpr bool kStage4AndroidVerboseDiag = (DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE >= 0);
+#else
+constexpr bool kStage4AndroidVerboseDiag = false;
+#endif
+
+// W4-3 (b): the Android Stage4 generator now emits a single 2D planar output
+// dst(i, c) — three contiguous channel planes (size = N*3) — dispatched as ONE
+// Vulkan kernel (vs the former three dst_r/g/b kernels each recomputing the full
+// pipeline). The host still repacks the planar output to interleaved RGB8 via
+// the W4-1 multithreaded NEON repack_dst. Plan (a) (single interleaved 1D
+// dst_rgb(j), j=i*3+c, no repack_dst) was attempted first but mis-lowered on
+// Vulkan (~8 dB border/coverage corruption); (b) keeps the single-dispatch +
+// compute-1x win without the interleaved-index codegen hazard.
+
+// W4-1: persistent, non-zero-initialised scratch for the Stage4 repacks. The
+// previous `std::vector<T>(N)` re-allocated and zero-filled large buffers on
+// every decode (a wasted full-buffer memset plus thousands of fresh page
+// faults). Stage4ScratchPool hands out reusable, uninitialised storage and only
+// grows when a larger frame arrives. A mutex-guarded free-list keeps this
+// race-free under the concurrent-decode convention used elsewhere in this file
+// (ConcurrentDngHost). Every consumer writes each element before reading it, so
+// skipping zero-init is safe.
+template <typename T>
+class Stage4ScratchPool {
+public:
+    // Checked-out lease: owns a buffer for the duration of one decode and
+    // returns it to the pool on destruction.
+    class Lease {
+    public:
+        Lease(Stage4ScratchPool* owner, std::unique_ptr<T[]> buf, size_t cap)
+            : owner_(owner), buf_(std::move(buf)), cap_(cap) {}
+        Lease(Lease&& other) noexcept
+            : owner_(other.owner_), buf_(std::move(other.buf_)), cap_(other.cap_) {
+            other.owner_ = nullptr;
+        }
+        Lease& operator=(Lease&&) = delete;
+        Lease(const Lease&) = delete;
+        Lease& operator=(const Lease&) = delete;
+        ~Lease() {
+            if (owner_) {
+                owner_->release(std::move(buf_), cap_);
+            }
+        }
+        T* data() const { return buf_.get(); }
+
+    private:
+        Stage4ScratchPool* owner_;
+        std::unique_ptr<T[]> buf_;
+        size_t cap_;
+    };
+
+    Lease acquire(size_t count) {
+        std::unique_ptr<T[]> buf;
+        size_t cap = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!free_.empty() && free_.back().cap >= count) {
+                buf = std::move(free_.back().buf);
+                cap = free_.back().cap;
+                free_.pop_back();
+            }
+        }
+        if (!buf || cap < count) {
+            buf.reset(new T[count]);  // no value-init -> no memset
+            cap = count;
+        }
+        return Lease(this, std::move(buf), cap);
+    }
+
+private:
+    struct Slot {
+        std::unique_ptr<T[]> buf;
+        size_t cap;
+    };
+    void release(std::unique_ptr<T[]> buf, size_t cap) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        free_.push_back({std::move(buf), cap});
+    }
+    std::mutex mutex_;
+    std::vector<Slot> free_;
+};
+
+using Stage4Scratch = Stage4ScratchPool<uint16_t>;     // interleaved->planar src
+using Stage4DstScratch = Stage4ScratchPool<uint8_t>;   // planar dst -> interleaved
+
+Stage4Scratch& stage4SrcScratch() {
+    static Stage4Scratch instance;
+    return instance;
+}
+
+Stage4DstScratch& stage4DstScratch() {
+    static Stage4DstScratch instance;
+    return instance;
+}
+
+// W4-1: row-partitioned multithreaded interleaved(u16)->planar(u16) repack.
+// The transform is embarrassingly parallel across rows, so we split the row
+// range into a handful of chunks and run NEON deinterleave on worker threads.
+// col_step==3 && plane_step==1 hits the vld3q_u16 fast path; otherwise a scalar
+// fallback handles arbitrary strides. Bit-exact with the original serial loop.
+void repackInterleavedToPlanarMT(const uint16_t* src,
+                                 int src_w,
+                                 int src_h,
+                                 int src_row_step,
+                                 int src_col_step,
+                                 int src_plane_step,
+                                 uint16_t* planar_r,
+                                 uint16_t* planar_g,
+                                 uint16_t* planar_b) {
+    const int plane_size = src_w * src_h;
+    const bool neon_fast = (src_col_step == 3 && src_plane_step == 1);
+
+    auto repack_rows = [&](int y_begin, int y_end) {
+        if (neon_fast) {
+            for (int y = y_begin; y < y_end; ++y) {
+                const uint16_t* src_row = src + y * src_row_step;
+                const int dst_row = y * src_w;
+                int x = 0;
+                for (; x + 8 <= src_w; x += 8) {
+                    uint16x8x3_t rgb = vld3q_u16(src_row + x * 3);
+                    vst1q_u16(planar_r + dst_row + x, rgb.val[0]);
+                    vst1q_u16(planar_g + dst_row + x, rgb.val[1]);
+                    vst1q_u16(planar_b + dst_row + x, rgb.val[2]);
+                }
+                for (; x < src_w; ++x) {
+                    const int dst_idx = dst_row + x;
+                    const uint16_t* px = src_row + x * 3;
+                    planar_r[dst_idx] = px[0];
+                    planar_g[dst_idx] = px[1];
+                    planar_b[dst_idx] = px[2];
+                }
+            }
+        } else {
+            for (int y = y_begin; y < y_end; ++y) {
+                const uint16_t* src_row = src + y * src_row_step;
+                const int dst_row = y * src_w;
+                for (int x = 0; x < src_w; ++x) {
+                    const uint16_t* src_px = src_row + x * src_col_step;
+                    const int dst_idx = dst_row + x;
+                    planar_r[dst_idx] = src_px[0];
+                    planar_g[dst_idx] = src_px[src_plane_step];
+                    planar_b[dst_idx] = src_px[2 * src_plane_step];
+                }
+            }
+        }
+    };
+
+    (void)plane_size;
+    unsigned hw = std::thread::hardware_concurrency();
+    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, 8u));
+    if (chunks < 1) chunks = 1;
+    if (chunks > src_h) chunks = std::max(1, src_h);
+    if (chunks <= 1) {
+        repack_rows(0, src_h);
+        return;
+    }
+    const int rows_per_chunk = (src_h + chunks - 1) / chunks;
+    std::vector<std::thread> workers;
+    workers.reserve(chunks - 1);
+    for (int c = 1; c < chunks; ++c) {
+        const int yb = c * rows_per_chunk;
+        if (yb >= src_h) break;
+        const int ye = std::min(src_h, yb + rows_per_chunk);
+        workers.emplace_back(repack_rows, yb, ye);
+    }
+    // Run the first chunk on the calling thread.
+    repack_rows(0, std::min(src_h, rows_per_chunk));
+    for (auto& w : workers) w.join();
+}
+
+// W4-1: row/element-partitioned multithreaded planar(u8 x3)->interleaved(u8)
+// repack of the GPU output. Mirrors the NEON vst3q_u8 fast path. Bit-exact.
+// W4-3 (b) keeps this: the kernel writes 3 contiguous u8 planes; this converts
+// them to the caller's interleaved RGB8 (pr/pg/pb = plane0/1/2 base pointers).
+void repackPlanarToInterleavedMT(const uint8_t* pr,
+                                 const uint8_t* pg,
+                                 const uint8_t* pb,
+                                 uint8_t* dst,
+                                 int total_px) {
+    auto repack_range = [&](int i_begin, int i_end) {
+        int i = i_begin;
+        for (; i + 16 <= i_end; i += 16) {
+            uint8x16_t r = vld1q_u8(pr + i);
+            uint8x16_t g = vld1q_u8(pg + i);
+            uint8x16_t b = vld1q_u8(pb + i);
+            uint8x16x3_t rgb = {r, g, b};
+            vst3q_u8(dst + i * 3, rgb);
+        }
+        for (; i < i_end; ++i) {
+            dst[i * 3 + 0] = pr[i];
+            dst[i * 3 + 1] = pg[i];
+            dst[i * 3 + 2] = pb[i];
+        }
+    };
+
+    unsigned hw = std::thread::hardware_concurrency();
+    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, 8u));
+    if (chunks < 1) chunks = 1;
+    if (chunks > total_px) chunks = std::max(1, total_px);
+    if (chunks <= 1) {
+        repack_range(0, total_px);
+        return;
+    }
+    // Align chunk boundaries to 16 so each worker keeps the vst3q_u8 fast path
+    // and writes disjoint 48-byte-aligned dst regions.
+    int base = (total_px / chunks) & ~15;
+    if (base < 16) base = 16;
+    std::vector<std::thread> workers;
+    workers.reserve(chunks);
+    int start = 0;
+    while (start < total_px) {
+        int end = std::min(total_px, start + base);
+        // Last remaining region folds into the final worker.
+        if (total_px - end < base) end = total_px;
+        workers.emplace_back(repack_range, start, end);
+        start = end;
+    }
+    for (auto& w : workers) w.join();
+}
+#endif
 
 // W6-2 / TD-20: shared output size computation used by all four
 // render_stage4_halide overloads.  Mirrors the MaximumSize / AspectRatio
@@ -838,6 +1069,11 @@ void logStage4OracleSamples(const char* label,
                             float src_scale,
                             const uint8_t* gpu_dst) {
 #if defined(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE)
+    if (!kStage4AndroidVerboseDiag) {
+        (void)label; (void)params; (void)planar_r; (void)planar_g; (void)planar_b;
+        (void)src_w; (void)src_h; (void)dst_w; (void)dst_h; (void)src_scale; (void)gpu_dst;
+        return;
+    }
     const int diag_stage = DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE;
     fprintf(stderr,
             "[Stage4-Oracle] %s huesat dims=%d/%d/%d has=%d encoding=%d entries=%zu\n",
@@ -1060,58 +1296,33 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     }
 
 #if defined(__ANDROID__)
-    auto t0 = std::chrono::high_resolution_clock::now();
     // Repack Stage3 interleaved RGB into dense planar RGB. The Vulkan backend
     // must not see the original channel stride 1 layout.
-    fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAot): src %dx%d col_step=%d row_step=%d plane_step=%d\n",
-            src_w, src_h, src_col_step, src_row_step, src_plane_step);
+    if (kStage4AndroidVerboseDiag) {
+        fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAot): src %dx%d col_step=%d row_step=%d plane_step=%d\n",
+                src_w, src_h, src_col_step, src_row_step, src_plane_step);
 #if defined(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE)
-    fprintf(stderr, "[Stage4-Diag] Android AOT compile diag_stage=%d (runRenderStage4HalideAot)\n",
-            DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE);
+        fprintf(stderr, "[Stage4-Diag] Android AOT compile diag_stage=%d (runRenderStage4HalideAot)\n",
+                DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE);
 #endif
+    }
+    auto t0 = std::chrono::high_resolution_clock::now();
     const int src_plane_size = src_w * src_h;
-    std::vector<uint16_t> planar_src(static_cast<size_t>(src_plane_size) * 3);
-    uint16_t* planar_r = planar_src.data();
+    // W4-1: reuse persistent, non-zero-initialised scratch (no per-decode
+    // re-alloc / memset / fresh page faults).
+    Stage4Scratch::Lease planar_lease =
+        stage4SrcScratch().acquire(static_cast<size_t>(src_plane_size) * 3);
+    uint16_t* planar_r = planar_lease.data();
     uint16_t* planar_g = planar_r + src_plane_size;
     uint16_t* planar_b = planar_g + src_plane_size;
-    if (src_col_step == 3 && src_plane_step == 1) {
-        // NEON fast path: vld3q_u16 deinterleaves 8 RGB pixels at once.
-        for (int y = 0; y < src_h; ++y) {
-            const uint16_t* src_row = src + y * src_row_step;
-            const int dst_row = y * src_w;
-            int x = 0;
-            for (; x + 8 <= src_w; x += 8) {
-                uint16x8x3_t rgb = vld3q_u16(src_row + x * 3);
-                vst1q_u16(planar_r + dst_row + x, rgb.val[0]);
-                vst1q_u16(planar_g + dst_row + x, rgb.val[1]);
-                vst1q_u16(planar_b + dst_row + x, rgb.val[2]);
-            }
-            // Scalar tail for remaining pixels.
-            for (; x < src_w; ++x) {
-                const int dst_idx = dst_row + x;
-                const uint16_t* px = src_row + x * 3;
-                planar_r[dst_idx] = px[0];
-                planar_g[dst_idx] = px[1];
-                planar_b[dst_idx] = px[2];
-            }
-        }
-    } else {
-        // Scalar fallback for non-standard strides.
-        for (int y = 0; y < src_h; ++y) {
-            const uint16_t* src_row = src + y * src_row_step;
-            const int dst_row = y * src_w;
-            for (int x = 0; x < src_w; ++x) {
-                const uint16_t* src_px = src_row + x * src_col_step;
-                const int dst_idx = dst_row + x;
-                planar_r[dst_idx] = src_px[0];
-                planar_g[dst_idx] = src_px[src_plane_step];
-                planar_b[dst_idx] = src_px[2 * src_plane_step];
-            }
-        }
-    }
-    fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
-            planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+    // W4-1: multithreaded row-partitioned NEON repack.
+    repackInterleavedToPlanarMT(src, src_w, src_h, src_row_step, src_col_step,
+                                src_plane_step, planar_r, planar_g, planar_b);
     auto t1 = std::chrono::high_resolution_clock::now();
+    if (kStage4AndroidVerboseDiag) {
+        fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
+                planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+    }
 
     // Three-channel-split: three separate 1D buffers instead of one 3D buffer.
     Buffer<uint16_t> src_r_buf(planar_r, src_plane_size);
@@ -1157,11 +1368,17 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
 #if defined(__ANDROID__)
-    // Three-channel-split: three separate 1D dst buffers.
+    // W4-3 (b): single 2D planar dst output (dim0=i stride1, dim1=c stride N).
+    // Persistent non-zero-init scratch holds the 3 contiguous channel planes;
+    // the host repacks them to the caller's interleaved RGB8 below.
     const int dst_pixel_count = dst_w * dst_h;
-    Buffer<uint8_t> dst_r_buf(dst_pixel_count);
-    Buffer<uint8_t> dst_g_buf(dst_pixel_count);
-    Buffer<uint8_t> dst_b_buf(dst_pixel_count);
+    Stage4DstScratch::Lease dst_lease =
+        stage4DstScratch().acquire(static_cast<size_t>(dst_pixel_count) * 3);
+    halide_dimension_t dst_shape[2] = {
+        {0, dst_pixel_count, 1, 0},
+        {0, 3, dst_pixel_count, 0},
+    };
+    Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
 #else
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
 #endif
@@ -1186,9 +1403,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
 #if defined(__ANDROID__)
-    dst_r_buf.set_host_dirty(false);
-    dst_g_buf.set_host_dirty(false);
-    dst_b_buf.set_host_dirty(false);
+    dst_planar_buf.set_host_dirty(false);
 #else
     dst_buf.set_host_dirty(false);
 #endif
@@ -1228,9 +1443,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         params.look_val_div,
         params.look_has_table,
         params.look_has_encoding,
-        dst_r_buf.raw_buffer(),
-        dst_g_buf.raw_buffer(),
-        dst_b_buf.raw_buffer());
+        dst_planar_buf.raw_buffer());
     auto t2 = std::chrono::high_resolution_clock::now();
 #else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
@@ -1265,32 +1478,17 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     }
 
 #if defined(__ANDROID__)
-    if (dst_r_buf.copy_to_host() != 0) return false;
-    if (dst_g_buf.copy_to_host() != 0) return false;
-    if (dst_b_buf.copy_to_host() != 0) return false;
+    // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
+    if (dst_planar_buf.copy_to_host() != 0) return false;
     auto t3 = std::chrono::high_resolution_clock::now();
 
-    // Repack three 1D dst buffers to interleaved RGB8 for downstream consumers.
-    // NEON fast path: vld1q_u8 + vst3q_u8 interleaves 16 pixels at once.
+    // The 3 channel planes are contiguous: plane0=base, plane1=base+N, plane2=base+2N.
+    // W4-1: multithreaded NEON vld1q_u8 + vst3q_u8 (16 px/iter).
     {
-        const uint8_t* pr = dst_r_buf.data();
-        const uint8_t* pg = dst_g_buf.data();
-        const uint8_t* pb = dst_b_buf.data();
+        const uint8_t* planar = dst_planar_buf.data();
         const int total_px = dst_w * dst_h;
-        int i = 0;
-        for (; i + 16 <= total_px; i += 16) {
-            uint8x16_t r = vld1q_u8(pr + i);
-            uint8x16_t g = vld1q_u8(pg + i);
-            uint8x16_t b = vld1q_u8(pb + i);
-            uint8x16x3_t rgb = {r, g, b};
-            vst3q_u8(dst + i * 3, rgb);
-        }
-        // Scalar tail for remaining pixels.
-        for (; i < total_px; ++i) {
-            dst[i * 3 + 0] = pr[i];
-            dst[i * 3 + 1] = pg[i];
-            dst[i * 3 + 2] = pb[i];
-        }
+        repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
+                                    dst, total_px);
     }
     auto t4 = std::chrono::high_resolution_clock::now();
     logStage4OracleSamples("host",
@@ -1310,9 +1508,9 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         std::chrono::duration<double, std::milli>(t3 - t2).count(),
         std::chrono::duration<double, std::milli>(t4 - t3).count(),
         std::chrono::duration<double, std::milli>(t4 - t0).count());
-    fprintf(stderr, "[Stage4-Diag] Android 3-ch split dst first 6: R=%u G=%u B=%u R=%u G=%u B=%u\n",
-            dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
-    {
+    if (kStage4AndroidVerboseDiag) {
+        fprintf(stderr, "[Stage4-Diag] Android 3-ch split dst first 6: R=%u G=%u B=%u R=%u G=%u B=%u\n",
+                dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
         const int mid_idx = ((dst_h / 2) * dst_w + (dst_w / 2)) * 3;
         fprintf(stderr, "[Stage4-Diag] Android 3-ch split dst mid pixel: R=%u G=%u B=%u\n",
                 dst[mid_idx], dst[mid_idx + 1], dst[mid_idx + 2]);
@@ -1343,15 +1541,18 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
 
 #if defined(__ANDROID__)
-    auto t0_fd = std::chrono::high_resolution_clock::now();
-    fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAotFromDevice): dst_w=%d dst_h=%d crop_l=%d crop_t=%d\n",
-            dst_w, dst_h, crop_l, crop_t);
+    if (kStage4AndroidVerboseDiag) {
+        fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAotFromDevice): dst_w=%d dst_h=%d crop_l=%d crop_t=%d\n",
+                dst_w, dst_h, crop_l, crop_t);
 #if defined(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE)
-    fprintf(stderr, "[Stage4-Diag] Android AOT compile diag_stage=%d (runRenderStage4HalideAotFromDevice)\n",
-            DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE);
+        fprintf(stderr, "[Stage4-Diag] Android AOT compile diag_stage=%d (runRenderStage4HalideAotFromDevice)\n",
+                DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE);
 #endif
-    // Storage for the dense planar RGB src.
-    std::vector<uint16_t> planar_src_storage;
+    }
+    auto t0_fd = std::chrono::high_resolution_clock::now();
+    // W4-1: persistent non-zero-init scratch for the dense planar RGB src
+    // (allocated once dimensions are known below). Kept alive to function end.
+    std::unique_ptr<Stage4Scratch::Lease> planar_lease;
 
     // Non-owning wrapper of the 3D device buffer.
     Buffer<uint16_t> src3d(*stage3_device_buf);
@@ -1383,51 +1584,22 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     const int s_row   = src3d.dim(1).stride();
     const int s_plane = src3d.dim(2).stride();
     const int src_plane_size = sw * sh;
-    planar_src_storage.resize(static_cast<size_t>(src_plane_size) * 3);
+    planar_lease.reset(new Stage4Scratch::Lease(
+        stage4SrcScratch().acquire(static_cast<size_t>(src_plane_size) * 3)));
     const uint16_t* src_data = reinterpret_cast<const uint16_t*>(src3d.data());
-    uint16_t* planar_r = planar_src_storage.data();
+    uint16_t* planar_r = planar_lease->data();
     uint16_t* planar_g = planar_r + src_plane_size;
     uint16_t* planar_b = planar_g + src_plane_size;
-    if (s_col == 3 && s_plane == 1) {
-        // NEON fast path: vld3q_u16 deinterleaves 8 RGB pixels at once.
-        for (int y = 0; y < sh; ++y) {
-            const uint16_t* src_row = src_data + y * s_row;
-            const int row_off = y * sw;
-            int x = 0;
-            for (; x + 8 <= sw; x += 8) {
-                uint16x8x3_t rgb = vld3q_u16(src_row + x * 3);
-                vst1q_u16(planar_r + row_off + x, rgb.val[0]);
-                vst1q_u16(planar_g + row_off + x, rgb.val[1]);
-                vst1q_u16(planar_b + row_off + x, rgb.val[2]);
-            }
-            // Scalar tail for remaining pixels.
-            for (; x < sw; ++x) {
-                const int dst_idx = row_off + x;
-                const uint16_t* px = src_row + x * 3;
-                planar_r[dst_idx] = px[0];
-                planar_g[dst_idx] = px[1];
-                planar_b[dst_idx] = px[2];
-            }
-        }
-    } else {
-        // Scalar fallback for non-standard strides.
-        for (int y = 0; y < sh; ++y) {
-            const uint16_t* src_row = src_data + y * s_row;
-            const int dst_row = y * sw;
-            for (int x = 0; x < sw; ++x) {
-                const uint16_t* src_px = src_row + x * s_col;
-                const int dst_idx = dst_row + x;
-                planar_r[dst_idx] = src_px[0];
-                planar_g[dst_idx] = src_px[s_plane];
-                planar_b[dst_idx] = src_px[2 * s_plane];
-            }
-        }
-    }
+    // W4-1: multithreaded row-partitioned NEON repack.
+    repackInterleavedToPlanarMT(src_data, sw, sh, s_row, s_col, s_plane,
+                                planar_r, planar_g, planar_b);
     auto t1_fd = std::chrono::high_resolution_clock::now();
-    fprintf(stderr, "[Stage4-Diag] FromDevice planar src: %dx%d s_col=%d s_row=%d s_plane=%d\n",
-            sw, sh, s_col, s_row, s_plane);
-    fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
-            planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+    if (kStage4AndroidVerboseDiag) {
+        fprintf(stderr, "[Stage4-Diag] FromDevice planar src: %dx%d s_col=%d s_row=%d s_plane=%d\n",
+                sw, sh, s_col, s_row, s_plane);
+        fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
+                planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+    }
 
     // Three-channel-split: three separate 1D src buffers.
     Buffer<uint16_t> src_r_buf(planar_r, src_plane_size);
@@ -1482,11 +1654,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
 #if defined(__ANDROID__)
-    // Three-channel-split: three separate 1D dst buffers.
+    // W4-3 (b): single 2D planar dst output (dim0=i stride1, dim1=c stride N).
     const int dst_pixel_count = dst_w * dst_h;
-    Buffer<uint8_t> dst_r_buf(dst_pixel_count);
-    Buffer<uint8_t> dst_g_buf(dst_pixel_count);
-    Buffer<uint8_t> dst_b_buf(dst_pixel_count);
+    Stage4DstScratch::Lease dst_lease =
+        stage4DstScratch().acquire(static_cast<size_t>(dst_pixel_count) * 3);
+    halide_dimension_t dst_shape[2] = {
+        {0, dst_pixel_count, 1, 0},
+        {0, 3, dst_pixel_count, 0},
+    };
+    Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
 #else
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
 #endif
@@ -1504,9 +1680,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
 #if defined(__ANDROID__)
-    dst_r_buf.set_host_dirty(false);
-    dst_g_buf.set_host_dirty(false);
-    dst_b_buf.set_host_dirty(false);
+    dst_planar_buf.set_host_dirty(false);
 #else
     dst_buf.set_host_dirty(false);
 #endif
@@ -1546,9 +1720,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         params.look_val_div,
         params.look_has_table,
         params.look_has_encoding,
-        dst_r_buf.raw_buffer(),
-        dst_g_buf.raw_buffer(),
-        dst_b_buf.raw_buffer());
+        dst_planar_buf.raw_buffer());
     auto t2_fd = std::chrono::high_resolution_clock::now();
 #else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
@@ -1583,32 +1755,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
 
 #if defined(__ANDROID__)
-    if (dst_r_buf.copy_to_host() != 0) return false;
-    if (dst_g_buf.copy_to_host() != 0) return false;
-    if (dst_b_buf.copy_to_host() != 0) return false;
+    // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
+    if (dst_planar_buf.copy_to_host() != 0) return false;
     auto t3_fd = std::chrono::high_resolution_clock::now();
 
-    // Repack three 1D dst buffers to interleaved RGB8.
-    // NEON fast path: vld1q_u8 + vst3q_u8 interleaves 16 pixels at once.
     {
-        const uint8_t* pr = dst_r_buf.data();
-        const uint8_t* pg = dst_g_buf.data();
-        const uint8_t* pb = dst_b_buf.data();
+        const uint8_t* planar = dst_planar_buf.data();
         const int total_px = dst_w * dst_h;
-        int i = 0;
-        for (; i + 16 <= total_px; i += 16) {
-            uint8x16_t r = vld1q_u8(pr + i);
-            uint8x16_t g = vld1q_u8(pg + i);
-            uint8x16_t b = vld1q_u8(pb + i);
-            uint8x16x3_t rgb = {r, g, b};
-            vst3q_u8(dst + i * 3, rgb);
-        }
-        // Scalar tail for remaining pixels.
-        for (; i < total_px; ++i) {
-            dst[i * 3 + 0] = pr[i];
-            dst[i * 3 + 1] = pg[i];
-            dst[i * 3 + 2] = pb[i];
-        }
+        repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
+                                    dst, total_px);
     }
     auto t4_fd = std::chrono::high_resolution_clock::now();
     logStage4OracleSamples("from_device",
@@ -1628,8 +1783,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         std::chrono::duration<double, std::milli>(t3_fd - t2_fd).count(),
         std::chrono::duration<double, std::milli>(t4_fd - t3_fd).count(),
         std::chrono::duration<double, std::milli>(t4_fd - t0_fd).count());
-    fprintf(stderr, "[Stage4-Diag] Android 3-ch split FromDevice dst first 6: R=%u G=%u B=%u R=%u G=%u B=%u\n",
-            dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+    if (kStage4AndroidVerboseDiag) {
+        fprintf(stderr, "[Stage4-Diag] Android 3-ch split FromDevice dst first 6: R=%u G=%u B=%u R=%u G=%u B=%u\n",
+                dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+    }
 #else
     if (dst_buf.copy_to_host() != 0) {
         return false;
