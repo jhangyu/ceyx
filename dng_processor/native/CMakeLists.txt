@@ -501,6 +501,45 @@ if(ANDROID AND DNG_CROSS_BUILD)
         target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
     endif()
     add_dependencies(test_decode_android test_android_vulkan_capability)
+
+    # P14-W4-4 measurement: Android cross-build of the production C ABI harness.
+    # Drives the FFI entry dng_decode_and_process -> dng_pipeline_v2_decode_to_rgb
+    # -> decodeStages -> runHalideStage3And4Fused (the device-handoff path that
+    # test_decode_android bypasses). Lets us measure on cc5bf709 whether device
+    # handoff actually triggers and what [Stage4-Perf] FromDevice: reports.
+    # Measurement-only target; no kernel / device-ownership code is touched.
+    add_executable(dng_ffi_harness_android tests/dng_ffi_harness.cpp
+        src/dng_ffi_api.cpp
+        src/dng_pipeline_v2.cpp
+        src/dng_halide_device.cpp
+        src/dng_opcodelist2_halide.cpp
+        dng_sdk_custom/source/dng_mosaic_halide.cpp
+        dng_sdk_custom/source/dng_warp_halide.cpp
+        dng_sdk_custom/source/dng_render_halide.cpp)
+    target_include_directories(dng_ffi_harness_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(dng_ffi_harness_android PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    target_compile_definitions(dng_ffi_harness_android PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(dng_ffi_harness_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
 endif()
 
 # =============================================================================

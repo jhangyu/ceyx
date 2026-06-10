@@ -41,6 +41,16 @@ android {
                     "-DDNG_CROSS_BUILD=ON",
                     "-DDNG_PREBUILT_AOT_DIR=${file("../../native/build-android/host-generators/halide_generated").absolutePath}"
                 )
+                // The prebuilt Halide AOT .a archives are arm64-only, so the
+                // CMake/externalNativeBuild must run for arm64-v8a exclusively
+                // (the defaultConfig ndk.abiFilters only filters packaging, not
+                // the native build ABIs). Without this, Gradle also configures
+                // armeabi-v7a and fails linking the arm64 .a (armelf_linux_eabi).
+                abiFilters("arm64-v8a")
+                // Only the APK needs the shared library; the CMakeLists also
+                // defines cross-compile test/measurement executables that should
+                // not be part of the APK build.
+                targets("dng_decoder_native")
             }
         }
     }
