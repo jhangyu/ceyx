@@ -70,6 +70,9 @@ endif()
 option(DNG_DEMOSAIC_WARP_FAST_CODEGEN
        "Use fast 8x8 GPU schedule for fused demosaic+warp AOT; OFF uses 16x16 + channel unroll schedule"
        ON)
+option(DNG_DEMOSAIC_WARP_STRICT_FLOAT
+       "Append -strict_float to dng_demosaic_warp AOT target (Vulkan FP contraction probe); default OFF = identical to previous behaviour"
+       OFF)
 
 # Round 2 cleanup (Task #6): the precomputed-coords variant of rectilinear_warp
 # was a Phase 8.1.6 diagnostic oracle (host-CPU double-precision baseline used
@@ -309,7 +312,7 @@ add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demos
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
-    COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime fast_codegen=$<IF:$<BOOL:${DNG_DEMOSAIC_WARP_FAST_CODEGEN}>,true,false>
+    COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime$<$<BOOL:${DNG_DEMOSAIC_WARP_STRICT_FLOAT}>:-strict_float> fast_codegen=$<IF:$<BOOL:${DNG_DEMOSAIC_WARP_FAST_CODEGEN}>,true,false>
     DEPENDS dng_demosaic_warp_generator
     COMMENT "Generating Halide AOT Stage3 Demosaic+Warp..."
 )
