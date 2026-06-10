@@ -333,6 +333,16 @@ if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "andr
         COMMENT "Generating Halide AOT Stage4 Render (Android 3-channel split)..."
     )
     add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+
+    # P14-W4-4 GO/NO-GO probe: isolated interleaved flat-1D src-read AOT.
+    # Separate kernel/signature; does not touch the production Stage4 kernel.
+    add_custom_command(
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.h
+        COMMAND dng_render_generator -g dng_render_stage4_android_probe -f dng_render_stage4_android_probe -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+        DEPENDS dng_render_generator
+        COMMENT "Generating Halide AOT Stage4 Render PROBE (Android interleaved-src go/no-go)..."
+    )
+    add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a)
 endif()
 
 # Phase 10 Sprint C1: MapPolynomial AOT (Stage 2 OpcodeList2 GPU).
@@ -372,6 +382,7 @@ if(DNG_HOST_GENERATORS_ONLY)
     )
     if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
         list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a)
     endif()
     add_custom_target(dng_all_aot ALL DEPENDS ${_DNG_ALL_AOT_DEPS})
 endif()
@@ -491,12 +502,16 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
         ${VULKAN_LIBRARY}
         ${LOG_LIBRARY})
     target_compile_definitions(test_decode_android PRIVATE
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_STAGE4_INTERLEAVED_SRC_PROBE)
+        target_compile_definitions(test_decode_android PRIVATE DNG_STAGE4_INTERLEAVED_SRC_PROBE=1)
+    endif()
     if(DNG_USE_LIBJPEG)
         target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
     endif()

@@ -828,5 +828,97 @@ public:
     }
 };
 
+// =============================================================================
+// P14-W4-4 GO/NO-GO PROBE — isolated, reversible experiment.
+//
+// Sole purpose: decide whether an INPUT-side interleaved flat-1D gather
+// `src_rgb(base + c)` (base = (sy*row_stride + sx)*3) lowers correctly on
+// Vulkan, i.e. whether the Stage4 generator can read the Stage3 interleaved
+// device buffer directly instead of the current host planar repack.
+//
+// This is a SEPARATE generator (separate AOT, separate signature) so it does
+// NOT touch the production three-planar DngRenderStage4Android at all — maximal
+// reversibility. It only does a linear8 passthrough (diag_stage 0 equivalent)
+// through the SAME verified 2D-planar dst(i,c) output, isolating the src-read
+// construct as the single variable under test.
+//
+// Gotcha context: #92 = interleaved 3D-buffer channel-stride aliasing (R==G);
+// #93 = OUTPUT-side `idx*3+c` mis-lowers under split+gpu_tile. The INPUT-side
+// `idx*3+c` gather is the untested construct this probe settles.
+// =============================================================================
+class DngRenderStage4AndroidProbe
+    : public Halide::Generator<DngRenderStage4AndroidProbe> {
+public:
+    // Single flat interleaved src: contents = SDK interleaved RGB buffer
+    // (row-major, channel stride 1) laid out as one 1D plane of size
+    // src_row_stride_px * src_height * 3.
+    Input<Buffer<uint16_t>> src_rgb{"src_rgb", 1};
+    Input<int32_t> src_width{"src_width"};
+    Input<int32_t> src_height{"src_height"};
+    Input<int32_t> dst_width{"dst_width"};
+    Input<int32_t> src_row_stride_px{"src_row_stride_px"};
+    Input<int32_t> crop_l{"crop_l"};
+    Input<int32_t> crop_t{"crop_t"};
+    Input<float> src_scale{"src_scale"};
+
+    // Same verified 2D-planar output as W4-3 (b): dim0=i (stride1), dim1=c
+    // (stride N). The dst construct is held constant vs the production kernel so
+    // the only variable under test is the interleaved src read.
+    Output<Buffer<uint8_t>> dst{"dst", 2};
+
+    Expr out8_r, out8_g, out8_b;
+
+    void generate() {
+        Var i("i");
+
+        dst.dim(0).set_stride(1);
+        dst.dim(1).set_bounds(0, 3);
+        dst.dim(1).set_stride(dst.dim(0).extent());
+
+        Expr dst_x = i % dst_width;
+        Expr dst_y = i / dst_width;
+        Expr sx = clamp(dst_x + crop_l, 0, src_width - 1);
+        Expr sy = clamp(dst_y + crop_t, 0, src_height - 1);
+
+        // INPUT-side interleaved gather under test:
+        Expr base = (sy * src_row_stride_px + sx) * 3;
+        Expr max_idx = src_rgb.dim(0).extent() - 1;
+        Expr s_r = cast<float>(src_rgb(clamp(base + 0, 0, max_idx))) * src_scale;
+        Expr s_g = cast<float>(src_rgb(clamp(base + 1, 0, max_idx))) * src_scale;
+        Expr s_b = cast<float>(src_rgb(clamp(base + 2, 0, max_idx))) * src_scale;
+
+        auto linear8 = [&](Expr v) {
+            return cast<uint8_t>(clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
+        };
+
+        out8_r = linear8(s_r);
+        out8_g = linear8(s_g);
+        out8_b = linear8(s_b);
+
+        Var c("c");
+        dst(i, c) = select(c == 0, out8_r, c == 1, out8_g, out8_b);
+    }
+
+    void schedule() {
+        Var i("i"), c("c");
+        if (get_target().has_gpu_feature()) {
+            Var io("io"), ii("ii");
+            dst.bound(c, 0, 3)
+               .reorder(c, i)
+               .gpu_tile(i, io, ii, 256)
+               .unroll(c);
+        } else {
+            Var io("io"), ii("ii");
+            dst.bound(c, 0, 3)
+               .reorder(c, i)
+               .split(i, io, ii, 1024)
+               .parallel(io)
+               .vectorize(ii, 8)
+               .unroll(c);
+        }
+    }
+};
+
 HALIDE_REGISTER_GENERATOR(DngRenderStage4, dng_render_stage4)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4Android, dng_render_stage4_android)
+HALIDE_REGISTER_GENERATOR(DngRenderStage4AndroidProbe, dng_render_stage4_android_probe)

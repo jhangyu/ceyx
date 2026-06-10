@@ -121,6 +121,10 @@ functions:
 #if defined(__ANDROID__)
 #include "dng_render_stage4_android.h"
 #include <arm_neon.h>
+#if defined(DNG_STAGE4_INTERLEAVED_SRC_PROBE)
+// P14-W4-4 go/no-go probe: isolated interleaved flat-1D src-read kernel.
+#include "dng_render_stage4_android_probe.h"
+#endif
 #endif
 #include "dng_resample.h"
 
@@ -1294,6 +1298,72 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
         return false;
     }
+
+#if defined(__ANDROID__) && defined(DNG_STAGE4_INTERLEAVED_SRC_PROBE)
+    // P14-W4-4 GO/NO-GO PROBE (host path only, isolated, reversible).
+    // Dispatch the interleaved flat-1D src-read kernel: zero-copy wrap the SDK
+    // interleaved RGB buffer as one flat 1D plane and let the GPU gather
+    // src_rgb(base + c). Output goes through the verified 2D-planar dst(i,c),
+    // then the existing MT repack to interleaved. linear8 passthrough only.
+    {
+        // src_row_step is the interleaved row stride in u16 elements (= pixels*3
+        // incl. any SDK tile padding). Per-pixel row stride therefore = /3.
+        const int src_row_stride_px = src_row_step / 3;
+        const int flat_len = src_row_step * src_h;  // elements in the flat plane
+        Buffer<uint16_t> src_rgb_buf(const_cast<uint16_t*>(src), flat_len);
+        src_rgb_buf.set_host_dirty();
+
+        const int dst_pixel_count = dst_w * dst_h;
+        Stage4DstScratch::Lease dst_lease =
+            stage4DstScratch().acquire(static_cast<size_t>(dst_pixel_count) * 3);
+        halide_dimension_t dst_shape[2] = {
+            {0, dst_pixel_count, 1, 0},
+            {0, 3, dst_pixel_count, 0},
+        };
+        Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
+        dst_planar_buf.set_host_dirty(false);
+
+        const int probe_result = dng_render_stage4_android_probe(
+            src_rgb_buf.raw_buffer(),
+            src_w,
+            src_h,
+            dst_w,
+            src_row_stride_px,
+            /*crop_l=*/0,
+            /*crop_t=*/0,
+            src_scale,
+            dst_planar_buf.raw_buffer());
+        fprintf(stderr, "[Stage4-Probe] interleaved-src kernel result=%d row_stride_px=%d flat_len=%d\n",
+                probe_result, src_row_stride_px, flat_len);
+        if (probe_result != 0) {
+            return false;
+        }
+        if (dst_planar_buf.copy_to_host() != 0) return false;
+        {
+            const uint8_t* planar = dst_planar_buf.data();
+            repackPlanarToInterleavedMT(planar, planar + dst_pixel_count,
+                                        planar + 2 * dst_pixel_count, dst,
+                                        dst_pixel_count);
+        }
+        // Reuse the existing oracle mirror to compare GPU vs CPU passthrough.
+        // The oracle expects three planar src pointers; build them from the
+        // interleaved src so the diff is apples-to-apples (diag_stage forced 0
+        // via the probe's linear8-passthrough semantics).
+        if (kStage4AndroidVerboseDiag) {
+            const int sp_sz = src_w * src_h;
+            Stage4Scratch::Lease mirror =
+                stage4SrcScratch().acquire(static_cast<size_t>(sp_sz) * 3);
+            uint16_t* pr = mirror.data();
+            uint16_t* pg = pr + sp_sz;
+            uint16_t* pb = pg + sp_sz;
+            repackInterleavedToPlanarMT(src, src_w, src_h, src_row_step,
+                                        src_col_step, src_plane_step, pr, pg, pb);
+            logStage4OracleSamples("probe", params, pr, pg, pb, src_w, src_h,
+                                   dst_w, dst_h, src_scale, dst);
+        }
+        return true;
+    }
+#endif
 
 #if defined(__ANDROID__)
     // Repack Stage3 interleaved RGB into dense planar RGB. The Vulkan backend
