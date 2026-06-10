@@ -199,6 +199,18 @@ public:
         Var x("x"), y("y"), c("c");
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
+            // [W1 materialization] compute_root demosaic into a 3D device buffer so
+            // the bicubic warp samples a precomputed plane instead of re-running the
+            // 144 gather/px demosaic per tap. macOS Metal: Stage3 fused -17% bit-exact.
+            // Android Vulkan: Stage3 PSNR regresses to 96.81 dB (R-channel dim2 stride
+            // mis-lower, see W1b Phase A) — accepted by user decision (Stage4 unaffected),
+            // root-cause study deferred to next wave.
+            Var dxo("dxo"), dyo("dyo"), dxi("dxi"), dyi("dyi");
+            demosaic.compute_root()
+                    .bound(c, 0, 3)
+                    .reorder(c, x, y)
+                    .gpu_tile(x, y, dxo, dyo, dxi, dyi, 8, 8)
+                    .unroll(c);
             if (fast_codegen) {
                 dst.bound(c, 0, 3)
                    .reorder(c, x, y)
@@ -210,6 +222,12 @@ public:
                    .unroll(c);
             }
         } else {
+            demosaic.compute_root()
+                    .bound(c, 0, 3)
+                    .reorder(c, x, y)
+                    .split(y, Var("dyo"), Var("dyi"), 32)
+                    .parallel(Var("dyo"))
+                    .vectorize(x, 8);
             Var yo("yo"), yi("yi");
             dst.bound(c, 0, 3)
                .reorder(c, x, y)

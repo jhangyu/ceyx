@@ -443,6 +443,14 @@ bool runHalideStage3ForBayer(dng_host &host,
       if (timing) {
         timing->fused_demosaic_warp_ms =
             std::chrono::duration<double, std::milli>(fusedEnd - fusedStart).count();
+#if defined(__ANDROID__)
+        // W0: Stage3 timing for test_decode_android host path (non-FFI).
+        fprintf(stderr,
+            "[Stage3-Perf] (host-path) fused_demosaic_warp=%.1f ms"
+            " make_image=%.1f ms\n",
+            timing->fused_demosaic_warp_ms,
+            timing->make_image_ms);
+#endif
       }
     }
   }
@@ -604,6 +612,14 @@ bool runHalideStage3And4Fused(dng_host &host,
   if (timing) {
     timing->fused_demosaic_warp_ms =
         std::chrono::duration<double, std::milli>(fusedEnd - fusedStart).count();
+#if defined(__ANDROID__)
+    // W0: Stage3 timing for FFI device-handoff path (fused Stage3+4).
+    fprintf(stderr,
+        "[Stage3-Perf] (fused-FFI) fused_demosaic_warp=%.1f ms"
+        " extract_stage2=%.1f ms\n",
+        timing->fused_demosaic_warp_ms,
+        timing->extract_stage2_ms);
+#endif
   }
 
   if (stage4Ok) {
@@ -789,12 +805,27 @@ bool decodeStages(ConcurrentDngHost &host,
         static_cast<int>(inputWidth), static_cast<int>(inputHeight));
   }
 
+  // W0: Stage1/2 boundary timing for per-stage Android ledger.
+  // decodeStart was set just before ReadStage1Image in parseDngFile.
+  const auto stage1End = Clock::now();
+  const double stage1_ms =
+      std::chrono::duration<double, std::milli>(stage1End - decodeStart).count();
+
   {
     const bool enableStage2DeviceHandoff =
         !isBayer && config.route.stage2_stage4_device_handoff;
     ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
     negative.BuildStage2Image(host);
   }
+
+  const auto stage2End = Clock::now();
+  const double stage2_ms =
+      std::chrono::duration<double, std::milli>(stage2End - stage1End).count();
+#if defined(__ANDROID__)
+  fprintf(stderr,
+      "[Stage12-Perf] stage1=%.1f ms stage2=%.1f ms\n",
+      stage1_ms, stage2_ms);
+#endif
 
   // Phase 10 Sprint D-B F1: do NOT eagerly resize stage3Workspace here.
   // FFI path gets a lazy mmap pool via prepareStage3WorkspacePtr; this
