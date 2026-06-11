@@ -202,13 +202,19 @@ public:
             // [W1 materialization] compute_root demosaic into a 3D device buffer so
             // the bicubic warp samples a precomputed plane instead of re-running the
             // 144 gather/px demosaic per tap. macOS Metal: Stage3 fused -17% bit-exact.
-            // Android Vulkan: Stage3 PSNR regresses to 96.81 dB (R-channel dim2 stride
-            // mis-lower, see W1b Phase A) — accepted by user decision (Stage4 unaffected),
-            // root-cause study deferred to next wave.
+            // [W6 H6 fix] align_bounds(x/y, 8, 0) forces this materialized allocation's
+            // buffer min to literal 0 (no halo-derived min expression). The default
+            // TailStrategy otherwise emits a non-trivial min (max(min(src.ext,8),1)+-8
+            // form) that Vulkan/Adreno mishandles as a buffer-head device base offset,
+            // corrupting the first rows of the R plane (W1b Stage3 96.81 dB regression).
+            // W6 X1a/X3a confirmed the buffer-head mechanism; this restores Android
+            // Vulkan to 102.72 dB, bit-exact with macOS Metal on both platforms.
             Var dxo("dxo"), dyo("dyo"), dxi("dxi"), dyi("dyi");
             demosaic.compute_root()
                     .bound(c, 0, 3)
                     .reorder(c, x, y)
+                    .align_bounds(x, 8, 0)
+                    .align_bounds(y, 8, 0)
                     .gpu_tile(x, y, dxo, dyo, dxi, dyi, 8, 8)
                     .unroll(c);
             if (fast_codegen) {
