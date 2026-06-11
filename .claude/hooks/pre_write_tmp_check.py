@@ -1,27 +1,46 @@
 #!/usr/bin/env python3
 """禁止寫入 /tmp/ 或操作 /tmp/ — 所有臨時操作必須在專案內進行"""
+import os
+from pathlib import Path
 import sys
 import json
+
+REPO_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path(__file__).resolve().parents[2])).resolve()
+
+
+def _in_repo() -> bool:
+    try:
+        return Path.cwd().resolve().is_relative_to(REPO_ROOT)
+    except AttributeError:
+        cwd = str(Path.cwd().resolve())
+        root = str(REPO_ROOT)
+        return cwd == root or cwd.startswith(root + "/")
+
 
 try:
     msg = json.loads(sys.stdin.read())
     tool = msg.get('tool') or {}
-    tool_name = tool.get('name', '')
+    tool_name = msg.get('tool_name') or tool.get('name', '')
+
+    if not _in_repo():
+        sys.exit(0)
 
     # Write 工具檢查
     if tool_name == 'Write':
-        file_path = tool.get('input', {}).get('file_path', '')
+        tool_input = msg.get('tool_input') or tool.get('input') or {}
+        file_path = tool_input.get('file_path', '')
         if file_path.startswith('/tmp/'):
             print('❌ 禁止寫入 /tmp/ —— 請使用 dng_processor/native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
             sys.exit(1)
 
     # Bash 工具檢查
     if tool_name == 'Bash':
-        cmd = tool.get('input', {}).get('command', '')
+        tool_input = msg.get('tool_input') or tool.get('input') or {}
+        cmd = tool_input.get('command', '')
         import re
 
         # 檢查重定向到 /tmp (可以有多個空格, 無空格等變體)
-        if re.search(r'[>|]\s*>\+?[\s]*/tmp(/|$|\s)', cmd):
+        if re.search(r'(?:>|>>|\|)\s*/tmp(?:/|$|\s)', cmd):
             print('❌ 禁止重定向到 /tmp/ —— 請使用 dng_processor/native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
             sys.exit(1)
 

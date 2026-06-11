@@ -1,16 +1,33 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 import json
 import subprocess
 import re
+from pathlib import Path
+
+REPO_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path(__file__).resolve().parents[2])).resolve()
+
+
+def _in_repo() -> bool:
+    try:
+        return Path.cwd().resolve().is_relative_to(REPO_ROOT)
+    except AttributeError:
+        cwd = str(Path.cwd().resolve())
+        root = str(REPO_ROOT)
+        return cwd == root or cwd.startswith(root + "/")
 
 try:
     data = json.load(sys.stdin)
 except json.JSONDecodeError:
     sys.exit(0)
 
-command = data.get("tool_input", {}).get("command", "")
+if not _in_repo():
+    sys.exit(0)
+
+tool_input = data.get("tool_input") or data.get("tool", {}).get("input") or data.get("input") or {}
+command = tool_input.get("command", "")
 
 BUILD_PATTERNS = [
     r"cmake\s+--build",

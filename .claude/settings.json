@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/pre_native_edit.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_native_edit.py\""
           }
         ]
       },
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/pre_write_tmp_check.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_write_tmp_check.py\""
           }
         ]
       },
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/pre_bash_whitelist_check.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_bash_whitelist_check.py\""
           }
         ]
       }
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/post_build_check.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/post_build_check.py\""
           }
         ]
       }
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/jhangyu/project/flutter_dng_decoder/.claude/hooks/stop_reminder.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_reminder.py\""
           }
         ]
       }

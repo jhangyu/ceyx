@@ -13,8 +13,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+from pathlib import Path
+
+REPO_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path(__file__).resolve().parents[2])).resolve()
+
+
+def _in_repo() -> bool:
+    try:
+        return Path.cwd().resolve().is_relative_to(REPO_ROOT)
+    except AttributeError:
+        cwd = str(Path.cwd().resolve())
+        root = str(REPO_ROOT)
+        return cwd == root or cwd.startswith(root + "/")
 
 
 _INLINE_PATTERNS = [
@@ -55,8 +68,12 @@ def main() -> int:
     except Exception:
         return 0
     if msg.get("tool_name") != "Bash":
+        if msg.get("tool", {}).get("name") != "Bash":
+            return 0
+    if not _in_repo():
         return 0
-    cmd = (msg.get("tool_input") or {}).get("command", "")
+    tool_input = msg.get("tool_input") or msg.get("tool", {}).get("input") or msg.get("input") or {}
+    cmd = tool_input.get("command", "")
     if not cmd:
         return 0
 

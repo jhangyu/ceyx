@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 import json
 import subprocess
 import re
+from pathlib import Path
+
+REPO_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path(__file__).resolve().parents[2])).resolve()
+
+
+def _in_repo() -> bool:
+    try:
+        return Path.cwd().resolve().is_relative_to(REPO_ROOT)
+    except AttributeError:
+        cwd = str(Path.cwd().resolve())
+        root = str(REPO_ROOT)
+        return cwd == root or cwd.startswith(root + "/")
 
 # Read JSON from stdin
 try:
@@ -11,8 +24,12 @@ try:
 except json.JSONDecodeError:
     sys.exit(0)
 
-tool_name = data.get("tool_name", "")
-file_path = data.get("tool_input", {}).get("file_path", "")
+if not _in_repo():
+    sys.exit(0)
+
+tool_name = data.get("tool_name") or data.get("tool", {}).get("name", "")
+tool_input = data.get("tool_input") or data.get("tool", {}).get("input") or data.get("input") or {}
+file_path = tool_input.get("file_path", "")
 
 # Check if this is a native C++ file edit
 if tool_name in ("Edit", "Write"):
