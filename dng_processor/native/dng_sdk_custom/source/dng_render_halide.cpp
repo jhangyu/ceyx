@@ -66,11 +66,11 @@ functions:
     description: "從 `dng_negative`/`dng_render` 與 centralized config 萃取 Stage4 所需矩陣、tone/gamma/table 與 profile map。"
     lines: "452-589"
   - name: "runRenderStage4HalideAot"
-    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。"
-    lines: "591-683"
+    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。"
+    lines: "1286-1588"
   - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer；Android/Vulkan 先 copy_to_host、host-side crop，固定只 repack RGB 前三通道成三個 dense 1D plane 再 dispatch；其他平台保留原 device handoff。"
-    lines: "689-796"
+    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。P15 W2：Android 保留 copy_to_host + device_deallocate（W4-4 device-alias 範疇排除），但刪除 host-side crop() 與 dense-planar repack，改把 host-side 3D interleaved buffer 攤平成 flat-1D 直餵 kernel，crop 由 crop_l/crop_t scalar 吸收；其他平台保留原 device handoff。"
+    lines: "1590-1888"
   - name: "runHalideFullOrSdkFallback (host src overload)"
     description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
     lines: "798-924"
@@ -1366,10 +1366,12 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #endif
 
 #if defined(__ANDROID__)
-    // Repack Stage3 interleaved RGB into dense planar RGB. The Vulkan backend
-    // must not see the original channel stride 1 layout.
+    // W2: zero-copy wrap the SDK interleaved RGB buffer as one flat 1D plane and
+    // let the GPU gather src_rgb(base + c) directly (Gotcha #95, probe GO). The
+    // former host repack_src (interleaved->3 dense planar) is eliminated — the
+    // bytes uploaded are identical, only the host CPU repack is removed.
     if (kStage4AndroidVerboseDiag) {
-        fprintf(stderr, "[Stage4-Diag] ANDROID planar repack ACTIVE (runRenderStage4HalideAot): src %dx%d col_step=%d row_step=%d plane_step=%d\n",
+        fprintf(stderr, "[Stage4-Diag] ANDROID interleaved direct-feed ACTIVE (runRenderStage4HalideAot): src %dx%d col_step=%d row_step=%d plane_step=%d\n",
                 src_w, src_h, src_col_step, src_row_step, src_plane_step);
 #if defined(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE)
         fprintf(stderr, "[Stage4-Diag] Android AOT compile diag_stage=%d (runRenderStage4HalideAot)\n",
@@ -1377,27 +1379,12 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #endif
     }
     auto t0 = std::chrono::high_resolution_clock::now();
-    const int src_plane_size = src_w * src_h;
-    // W4-1: reuse persistent, non-zero-initialised scratch (no per-decode
-    // re-alloc / memset / fresh page faults).
-    Stage4Scratch::Lease planar_lease =
-        stage4SrcScratch().acquire(static_cast<size_t>(src_plane_size) * 3);
-    uint16_t* planar_r = planar_lease.data();
-    uint16_t* planar_g = planar_r + src_plane_size;
-    uint16_t* planar_b = planar_g + src_plane_size;
-    // W4-1: multithreaded row-partitioned NEON repack.
-    repackInterleavedToPlanarMT(src, src_w, src_h, src_row_step, src_col_step,
-                                src_plane_step, planar_r, planar_g, planar_b);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    if (kStage4AndroidVerboseDiag) {
-        fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
-                planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
-    }
-
-    // Three-channel-split: three separate 1D buffers instead of one 3D buffer.
-    Buffer<uint16_t> src_r_buf(planar_r, src_plane_size);
-    Buffer<uint16_t> src_g_buf(planar_g, src_plane_size);
-    Buffer<uint16_t> src_b_buf(planar_b, src_plane_size);
+    // src_row_step is the interleaved row stride in u16 elements (= pixels*3
+    // incl. any SDK tile padding). Per-pixel row stride therefore = /3.
+    const int src_row_stride_px = src_row_step / 3;
+    const int flat_len = src_row_step * src_h;  // elements in the flat plane
+    Buffer<uint16_t> src_rgb_buf(const_cast<uint16_t*>(src), flat_len);
+    auto t1 = std::chrono::high_resolution_clock::now();  // repack_src now ~0
 #else
     fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAot)\n");
     halide_dimension_t src_shape[3] = {
@@ -1454,9 +1441,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #endif
 
 #if defined(__ANDROID__)
-    src_r_buf.set_host_dirty();
-    src_g_buf.set_host_dirty();
-    src_b_buf.set_host_dirty();
+    src_rgb_buf.set_host_dirty();
 #else
     src_buf.set_host_dirty();
 #endif
@@ -1482,12 +1467,13 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     const int result = dng_render_stage4_android(
-        src_r_buf.raw_buffer(),
-        src_g_buf.raw_buffer(),
-        src_b_buf.raw_buffer(),
+        src_rgb_buf.raw_buffer(),
         src_w,
         src_h,
         dst_w,
+        src_row_stride_px,
+        /*crop_l=*/0,
+        /*crop_t=*/0,
         src_scale,
         exp_buf.raw_buffer(),
         tone_buf.raw_buffer(),
@@ -1561,17 +1547,21 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                     dst, total_px);
     }
     auto t4 = std::chrono::high_resolution_clock::now();
-    logStage4OracleSamples("host",
-                           params,
-                           planar_r,
-                           planar_g,
-                           planar_b,
-                           src_w,
-                           src_h,
-                           dst_w,
-                           dst_h,
-                           src_scale,
-                           dst);
+    // W2: the production hot path no longer materialises dense planar src. The
+    // oracle still needs dense planar pointers; build a verbose-only temporary
+    // mirror so the diag_stage gate keeps comparing GPU vs CPU (off the hot path).
+    if (kStage4AndroidVerboseDiag) {
+        const int sp_sz = src_w * src_h;
+        Stage4Scratch::Lease mirror =
+            stage4SrcScratch().acquire(static_cast<size_t>(sp_sz) * 3);
+        uint16_t* pr = mirror.data();
+        uint16_t* pg = pr + sp_sz;
+        uint16_t* pb = pg + sp_sz;
+        repackInterleavedToPlanarMT(src, src_w, src_h, src_row_step,
+                                    src_col_step, src_plane_step, pr, pg, pb);
+        logStage4OracleSamples("host", params, pr, pg, pb, src_w, src_h,
+                               dst_w, dst_h, src_scale, dst);
+    }
     fprintf(stderr, "[Stage4-Perf] repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
         std::chrono::duration<double, std::milli>(t1 - t0).count(),
         std::chrono::duration<double, std::milli>(t2 - t1).count(),
@@ -1620,64 +1610,38 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #endif
     }
     auto t0_fd = std::chrono::high_resolution_clock::now();
-    // W4-1: persistent non-zero-init scratch for the dense planar RGB src
-    // (allocated once dimensions are known below). Kept alive to function end.
-    std::unique_ptr<Stage4Scratch::Lease> planar_lease;
-
     // Non-owning wrapper of the 3D device buffer.
     Buffer<uint16_t> src3d(*stage3_device_buf);
 
-    // We always need host-side data to repack interleaved 3D to planar 3D.
-    // On Metal, the serial command queue guarantees Stage3 is finished.
+    // We still copy the Stage3 result to host (device-alias = W4-4 scope, kept
+    // out of W2). On Metal, the serial command queue guarantees Stage3 is done.
     if (src3d.copy_to_host() != 0) {
         return false;
     }
     src3d.device_deallocate();
+    auto tcopy_fd = std::chrono::high_resolution_clock::now();  // end of D2H copy
 
-    // Apply crop on the host-side 3D buffer.
-    if (crop_l > 0 || crop_t > 0) {
-        src3d.crop(0, crop_l, dst_w);
-        src3d.crop(1, crop_t, dst_h);
-        halide_buffer_t* raw = src3d.raw_buffer();
-        raw->dim[0].min = 0;
-        raw->dim[1].min = 0;
-    }
-
-    // Repack 3D interleaved (x, y, c) to dense planar RGB.
+    // W2: no host repack and no host-side crop(). The host-side 3D buffer is
+    // already interleaved (x, y, c) with channel stride 1; flatten it to a 1D
+    // plane and feed the kernel directly. crop_l/crop_t are absorbed by the
+    // kernel's index arithmetic (src_row_stride_px = dim(1).stride()/3).
     const int sw = src3d.dim(0).extent();
     const int sh = src3d.dim(1).extent();
     const int sp = src3d.dim(2).extent();
     if (sp < 3) {
         return false;
     }
-    const int s_col   = src3d.dim(0).stride();
-    const int s_row   = src3d.dim(1).stride();
-    const int s_plane = src3d.dim(2).stride();
-    const int src_plane_size = sw * sh;
-    planar_lease.reset(new Stage4Scratch::Lease(
-        stage4SrcScratch().acquire(static_cast<size_t>(src_plane_size) * 3)));
-    const uint16_t* src_data = reinterpret_cast<const uint16_t*>(src3d.data());
-    uint16_t* planar_r = planar_lease->data();
-    uint16_t* planar_g = planar_r + src_plane_size;
-    uint16_t* planar_b = planar_g + src_plane_size;
-    // W4-1: multithreaded row-partitioned NEON repack.
-    repackInterleavedToPlanarMT(src_data, sw, sh, s_row, s_col, s_plane,
-                                planar_r, planar_g, planar_b);
-    auto t1_fd = std::chrono::high_resolution_clock::now();
+    const int s_row = src3d.dim(1).stride();  // = row_stride_px * 3
+    const int src_row_stride_px = s_row / 3;
+    const int flat_len = s_row * sh;          // elements in the flat plane
+    uint16_t* src_data = reinterpret_cast<uint16_t*>(src3d.data());
+    Buffer<uint16_t> src_rgb_buf(src_data, flat_len);
+    src_rgb_buf.set_host_dirty();
+    auto t1_fd = std::chrono::high_resolution_clock::now();  // repack_src now ~0
     if (kStage4AndroidVerboseDiag) {
-        fprintf(stderr, "[Stage4-Diag] FromDevice planar src: %dx%d s_col=%d s_row=%d s_plane=%d\n",
-                sw, sh, s_col, s_row, s_plane);
-        fprintf(stderr, "[Stage4-Diag] Planar src first 6 values: R[0]=%u G[0]=%u B[0]=%u R[1]=%u G[1]=%u B[1]=%u\n",
-                planar_r[0], planar_g[0], planar_b[0], planar_r[1], planar_g[1], planar_b[1]);
+        fprintf(stderr, "[Stage4-Diag] FromDevice interleaved direct-feed: %dx%d s_row=%d row_stride_px=%d flat_len=%d crop_l=%d crop_t=%d\n",
+                sw, sh, s_row, src_row_stride_px, flat_len, crop_l, crop_t);
     }
-
-    // Three-channel-split: three separate 1D src buffers.
-    Buffer<uint16_t> src_r_buf(planar_r, src_plane_size);
-    Buffer<uint16_t> src_g_buf(planar_g, src_plane_size);
-    Buffer<uint16_t> src_b_buf(planar_b, src_plane_size);
-    src_r_buf.set_host_dirty();
-    src_g_buf.set_host_dirty();
-    src_b_buf.set_host_dirty();
 #else
     fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
@@ -1759,12 +1723,13 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     const int result = dng_render_stage4_android(
-        src_r_buf.raw_buffer(),
-        src_g_buf.raw_buffer(),
-        src_b_buf.raw_buffer(),
+        src_rgb_buf.raw_buffer(),
         sw,
         sh,
         dst_w,
+        src_row_stride_px,
+        crop_l,
+        crop_t,
         src_scale,
         exp_buf.raw_buffer(),
         tone_buf.raw_buffer(),
@@ -1836,19 +1801,37 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                     dst, total_px);
     }
     auto t4_fd = std::chrono::high_resolution_clock::now();
-    logStage4OracleSamples("from_device",
-                           params,
-                           planar_r,
-                           planar_g,
-                           planar_b,
-                           sw,
-                           sh,
-                           dst_w,
-                           dst_h,
-                           src_scale,
-                           dst);
-    fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
-        std::chrono::duration<double, std::milli>(t1_fd - t0_fd).count(),
+    // W2: build a verbose-only dense-planar mirror over the cropped region so the
+    // oracle (which indexes dst_x/dst_y against a src_w-stride dense buffer with
+    // no crop) compares apples-to-apples against the GPU's crop-scalar gather.
+    if (kStage4AndroidVerboseDiag) {
+        const int sp_sz = dst_w * dst_h;
+        Stage4Scratch::Lease mirror =
+            stage4SrcScratch().acquire(static_cast<size_t>(sp_sz) * 3);
+        uint16_t* pr = mirror.data();
+        uint16_t* pg = pr + sp_sz;
+        uint16_t* pb = pg + sp_sz;
+        for (int y = 0; y < dst_h; ++y) {
+            const int syc = std::clamp(y + crop_t, 0, sh - 1);
+            for (int x = 0; x < dst_w; ++x) {
+                const int sxc = std::clamp(x + crop_l, 0, sw - 1);
+                const long base = (static_cast<long>(syc) * src_row_stride_px + sxc) * 3;
+                const int di = y * dst_w + x;
+                pr[di] = src_data[base + 0];
+                pg[di] = src_data[base + 1];
+                pb[di] = src_data[base + 2];
+            }
+        }
+        logStage4OracleSamples("from_device", params, pr, pg, pb,
+                               dst_w, dst_h, dst_w, dst_h, src_scale, dst);
+    }
+    // W2: repack_src now measures only the (eliminated) host repack — the flatten
+    // wrap is O(1), so it prints ~0. The kept Stage3->host D2H copy (W4-4 scope,
+    // not removed in W2) is broken out separately as d2h_src so the parser's
+    // repack_src= key still resolves and the total stays comparable to baseline.
+    fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
+        std::chrono::duration<double, std::milli>(t1_fd - tcopy_fd).count(),
+        std::chrono::duration<double, std::milli>(tcopy_fd - t0_fd).count(),
         std::chrono::duration<double, std::milli>(t2_fd - t1_fd).count(),
         std::chrono::duration<double, std::milli>(t3_fd - t2_fd).count(),
         std::chrono::duration<double, std::milli>(t4_fd - t3_fd).count(),

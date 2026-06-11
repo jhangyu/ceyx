@@ -443,13 +443,18 @@ class DngRenderStage4Android : public Halide::Generator<DngRenderStage4Android> 
 public:
     GeneratorParam<int32_t> diag_stage{"diag_stage", -1};
 
-    // Three separate 1D inputs instead of one 3D src(x,y,c)
-    Input<Buffer<uint16_t>> src_r{"src_r", 1};
-    Input<Buffer<uint16_t>> src_g{"src_g", 1};
-    Input<Buffer<uint16_t>> src_b{"src_b", 1};
+    // W2: single flat-1D interleaved src (replaces three planar src_r/g/b).
+    // Contents = SDK interleaved RGB buffer (row-major, channel stride 1) laid
+    // out as one 1D plane of size src_row_stride_px * src_height * 3. The host
+    // zero-copy wraps the SDK buffer (no repack_src). Verified bit-exact on
+    // Vulkan by the W4-2 probe (Gotcha #95).
+    Input<Buffer<uint16_t>> src_rgb{"src_rgb", 1};
     Input<int32_t> src_width{"src_width"};
     Input<int32_t> src_height{"src_height"};
     Input<int32_t> dst_width{"dst_width"};
+    Input<int32_t> src_row_stride_px{"src_row_stride_px"};
+    Input<int32_t> crop_l{"crop_l"};
+    Input<int32_t> crop_t{"crop_t"};
     Input<float> src_scale{"src_scale"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
     Input<Buffer<float>> tone_curve{"tone_curve", 1};
@@ -508,13 +513,15 @@ public:
 
         Expr dst_x = i % dst_width;
         Expr dst_y = i / dst_width;
-        Expr sx = clamp(dst_x, 0, src_width - 1);
-        Expr sy = clamp(dst_y, 0, src_height - 1);
-        Expr src_idx = clamp(sy * src_width + sx, 0, src_r.dim(0).extent() - 1);
+        Expr sx = clamp(dst_x + crop_l, 0, src_width - 1);
+        Expr sy = clamp(dst_y + crop_t, 0, src_height - 1);
 
-        Expr s_r = cast<float>(src_r(src_idx)) * src_scale;
-        Expr s_g = cast<float>(src_g(src_idx)) * src_scale;
-        Expr s_b = cast<float>(src_b(src_idx)) * src_scale;
+        // W2: input-side interleaved gather (replaces three planar reads).
+        Expr base = (sy * src_row_stride_px + sx) * 3;
+        Expr max_idx = src_rgb.dim(0).extent() - 1;
+        Expr s_r = cast<float>(src_rgb(clamp(base + 0, 0, max_idx))) * src_scale;
+        Expr s_g = cast<float>(src_rgb(clamp(base + 1, 0, max_idx))) * src_scale;
+        Expr s_b = cast<float>(src_rgb(clamp(base + 2, 0, max_idx))) * src_scale;
 
         auto linear8 = [&](Expr v) {
             return cast<uint8_t>(clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
