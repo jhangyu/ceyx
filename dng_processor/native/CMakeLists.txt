@@ -74,17 +74,6 @@ option(DNG_DEMOSAIC_WARP_STRICT_FLOAT
        "Append -strict_float to dng_demosaic_warp AOT target (Vulkan FP contraction probe); default OFF = identical to previous behaviour"
        OFF)
 
-# Round 2 cleanup (Task #6): the precomputed-coords variant of rectilinear_warp
-# was a Phase 8.1.6 diagnostic oracle (host-CPU double-precision baseline used
-# to A/B against Metal fast-math drift). It is NOT part of the production decode
-# path — production always uses the regular `rectilinear_warp` Metal kernel.
-# When OFF (default) the precomputed AOT artifact is not generated, the dylib
-# does not link it, and `dng_warp_halide.cpp` compiles out the include and call
-# site so no `rectilinear_warp_precomputed` symbols are emitted. Flip ON only
-# when running `test_warp_rectilinear_halide` for parity research.
-option(DNG_ENABLE_WARP_PRECOMPUTED_DIAG
-       "Build & link the rectilinear_warp_precomputed diagnostic oracle (off by default)"
-       OFF)
 
 option(DNG_DIAGNOSTIC_BUILD
        "Build deprecated research generators (DngWarpStrictFloatGenerator, DngWarpDebugGenerator) for diagnostics"
@@ -107,7 +96,6 @@ set(DNG_AOT_TARGET_OVERRIDE "" CACHE STRING
 
 # Phase 14: Force diagnostic options OFF on Android (no Metal backend)
 if(ANDROID)
-    set(DNG_ENABLE_WARP_PRECOMPUTED_DIAG OFF CACHE BOOL "" FORCE)
     set(DNG_DIAGNOSTIC_BUILD OFF CACHE BOOL "" FORCE)
 endif()
 
@@ -284,24 +272,6 @@ add_custom_command(
 )
 add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
 
-# Phase 8.1.6 D-1: precomputed-coords AOT variant. Same generator binary, but
-# reads host-CPU double-precision base_x/base_y/frac_idx from input buffers
-# instead of running the polynomial on GPU. Used to bypass Metal fast-math/FMA
-# drift on R/B chromatic aberration polynomial.
-# Round 2 (Task #6): gated behind DNG_ENABLE_WARP_PRECOMPUTED_DIAG (OFF by
-# default). When OFF, the artifact is not generated and the dylib doesn't link
-# it; dng_warp_halide.cpp also compiles out the call site (see the same macro
-# guard there).
-if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    add_custom_command(
-        OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.h
-        COMMAND dng_warp_generator -g rectilinear_warp -f rectilinear_warp_precomputed -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime precompute_coords=true
-        DEPENDS dng_warp_generator
-        COMMENT "Generating Halide AOT Rectilinear Warp (precomputed coords)..."
-    )
-    add_custom_target(dng_warp_precomputed_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
-endif()
-
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.h
     COMMAND dng_demosaic_generator -g dng_demosaic_bilinear -f dng_demosaic_bilinear -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
@@ -404,9 +374,6 @@ if(NOT DNG_CROSS_BUILD)
     add_dependencies(dng_decoder_native dng_demosaic_aot_target)
     add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
     add_dependencies(dng_decoder_native dng_warp_aot_target)
-    if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-        add_dependencies(dng_decoder_native dng_warp_precomputed_aot_target)
-    endif()
     add_dependencies(dng_decoder_native dng_render_aot_target)
     if(TARGET dng_render_android_aot_target)
         add_dependencies(dng_decoder_native dng_render_android_aot_target)
@@ -444,11 +411,6 @@ if(ANDROID)
     target_compile_definitions(dng_decoder_native PRIVATE
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()
-if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)
-    target_link_libraries(dng_decoder_native ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
-endif()
-
 if(APPLE)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
     find_library(CORESERVICES_LIBRARY CoreServices)
@@ -659,11 +621,6 @@ if(DNG_USE_LIBJPEG)
 else()
     target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 endif()
-if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    target_compile_definitions(test_decode PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)
-    target_link_libraries(test_decode ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a)
-    add_dependencies(test_decode dng_warp_precomputed_aot_target)
-endif()
 add_dependencies(test_decode dng_halide_aot_target)
 add_dependencies(test_decode dng_demosaic_aot_target)
 add_dependencies(test_decode dng_demosaic_warp_aot_target)
@@ -721,46 +678,6 @@ target_include_directories(test_render_halide PRIVATE
 target_link_libraries(test_render_halide dng_sdk)
 if(APPLE)
     target_link_libraries(test_render_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-
-# Round 2 (Task #6): test_warp_rectilinear_halide is the diagnostic A/B
-# oracle consumer for the precomputed warp variant. Built only when the diag
-# option is enabled (configure with -DDNG_ENABLE_WARP_PRECOMPUTED_DIAG=ON).
-# Default builds skip this test target entirely.
-if(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    add_executable(test_warp_rectilinear_halide
-        tests/test_warp_rectilinear_halide.cpp
-        src/dng_opcodelist2_halide.cpp
-        dng_sdk_custom/source/dng_mosaic_halide.cpp
-        dng_sdk_custom/source/dng_warp_halide.cpp)
-    target_compile_definitions(test_warp_rectilinear_halide PRIVATE DNG_ENABLE_WARP_PRECOMPUTED_DIAG=1)
-    target_include_directories(test_warp_rectilinear_halide PRIVATE
-        ${INC_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
-        ${DNG_SDK_DIR}
-        ${HALIDE_OUTPUT_DIR}
-        ${HALIDE_DIR}/include)
-    # NOTE: dng_pipeline.a is included specifically because it is the only AOT
-    # artifact compiled WITHOUT `-no_runtime` and therefore provides the
-    # Halide Metal runtime symbols (halide_metal_run, *_initialize_kernels,
-    # *_finalize_kernels, *_device_interface, halide_copy_to_device) that the
-    # other AOT .a files declare as undefined. Without it, linking this test
-    # fails with "symbol(s) not found" on those runtime entry points.
-    target_link_libraries(test_warp_rectilinear_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp_precomputed.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
-    add_dependencies(test_warp_rectilinear_halide dng_halide_aot_target)
-    add_dependencies(test_warp_rectilinear_halide dng_demosaic_aot_target)
-    add_dependencies(test_warp_rectilinear_halide dng_demosaic_warp_aot_target)
-    add_dependencies(test_warp_rectilinear_halide dng_warp_aot_target)
-    add_dependencies(test_warp_rectilinear_halide dng_warp_precomputed_aot_target)
-    add_dependencies(test_warp_rectilinear_halide dng_opcode_polynomial_aot_target)
-    add_dependencies(test_warp_rectilinear_halide dng_opcode_polynomial3_aot_target)
-    if(APPLE)
-        target_link_libraries(test_warp_rectilinear_halide
-            ${COREFOUNDATION_LIBRARY}
-            ${CORESERVICES_LIBRARY}
-            ${METAL_LIBRARY}
-            ${FOUNDATION_LIBRARY})
-    endif()
 endif()
 
 endif() # NOT DNG_CROSS_BUILD (test targets)

@@ -7,7 +7,7 @@ file_summary: >
 notes:
   - `warp_rectilinear_halide()` 是純 buffer 入口；`apply_warp_rectilinear_to_image()` 是 `dng_image` 入口。
   - Halide kernel 依賴 tile clipping grid 來對齊 SDK resample 邊界與減少無效取樣。
-  - 歷史說明：`DNG_WARP_BIT_EXACT` 已於 49d8111 退役；現行行為固定走 Halide warp，無 SDK fallback。
+  - 現行行為固定走 Halide warp，無 SDK fallback。
 
 structs:
   - name: "WarpRuntimeParams"
@@ -60,14 +60,11 @@ functions:
   - name: "copyHalideOutputToHost"
     description: "將 Halide device output 同步回 caller-owned host buffer，並依 centralized timing config 拆分 sync/copy。"
     lines: "522-527"
-  - name: "isPrecomputedCoordsEnabled / computePrecomputedCoords"
-    description: "Round 2 (Task #6) gated diagnostic — host-CPU double-precision base_x/base_y/frac coords for the rectilinear_warp_precomputed AOT oracle. When `DNG_ENABLE_WARP_PRECOMPUTED_DIAG` is undefined (default production build) `isPrecomputedCoordsEnabled()` always returns false and the call site is compiled out."
-    lines: "538-624"
   - name: "getOrGrowZeroBuf"
-    description: "Lazy-zero mmap arena reused for the baseline (non-precomputed) warp ABI placeholder buffers; avoids per-call ~292 MB zero-fill."
+    description: "Lazy-zero mmap arena reused for the warp ABI placeholder buffers; avoids per-call ~292 MB zero-fill."
     lines: "632-652"
   - name: "runWarpHalideAot"
-    description: "建立 Halide Buffer 與 tile bounds，呼叫 rectilinear_warp AOT kernel。precomputed branch is `#if DNG_ENABLE_WARP_PRECOMPUTED_DIAG`-guarded (Round 2 Task #6)."
+    description: "建立 Halide Buffer 與 tile bounds，呼叫 rectilinear_warp AOT kernel。"
     lines: "654-787"
   - name: "runDemosaicWarpHalideAot"
     description: "建立 Bayer input 與 RGB output Halide Buffer，呼叫 fused demosaic+WarpRectilinear AOT kernel。"
@@ -103,13 +100,6 @@ functions:
 #include "HalideBuffer.h"
 #include "dng_demosaic_warp.h"
 #include "rectilinear_warp.h"
-// Round 2 (Task #6): the precomputed warp variant is a diagnostic oracle, not
-// part of the production decode path. Gated behind DNG_ENABLE_WARP_PRECOMPUTED_DIAG
-// (CMake option, OFF by default). When off, the AOT artifact is not built and
-// no `rectilinear_warp_precomputed*` symbols are referenced.
-#if defined(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-#include "rectilinear_warp_precomputed.h"
-#endif
 #include <cstdlib>
 #include <cstring>
 
@@ -522,101 +512,8 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
     return true;
 }
 
-// Phase 8.1.6 D-1: env-var gated host-CPU double-precision precompute.
-// Reads DNG_WARP_PRECOMPUTED_COORDS=1 to switch standalone warp Metal path
-// to the rectilinear_warp_precomputed AOT variant, feeding base_x/base_y/
-// frac_x_idx/frac_y_idx as input buffers (computed on host with double).
-//
-// DNG_WARP_PRECOMPUTED_COORDS — ResearchConfig (deprecated; A/B parity
-// research only; not consulted on production code paths). See
-// dng_pipeline_config.h for the category catalogue. Slated for removal in
-// Round 2.
-bool isPrecomputedCoordsEnabled() {
-#if defined(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    const char* v = std::getenv("DNG_WARP_PRECOMPUTED_COORDS");
-    if (!v) return false;
-    return v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' || v[0] == 'Y';
-#else
-    // Round 2 (Task #6): precomputed-coords diagnostic is compiled out of the
-    // production dylib; env switch has no effect.
-    return false;
-#endif
-}
-
-// Compute base_x / base_y / frac_x_idx / frac_y_idx for every (x, y, c) in
-// double precision on the host. Mirrors the generator's "else" branch line for
-// line, but each arithmetic op is double. This eliminates Metal fast-math /
-// FMA contraction drift on the chromatic aberration polynomial for R/B planes.
-void computePrecomputedCoords(int width,
-                              int height,
-                              int dst_planes,
-                              const WarpRuntimeParams& runtime,
-                              const WarpRectilinearParams& params,
-                              std::vector<int32_t>& out_base_x,
-                              std::vector<int32_t>& out_base_y,
-                              std::vector<int32_t>& out_frac_x_idx,
-                              std::vector<int32_t>& out_frac_y_idx) {
-    const size_t total = static_cast<size_t>(width) * height * 3u;
-    out_base_x.assign(total, 0);
-    out_base_y.assign(total, 0);
-    out_frac_x_idx.assign(total, 0);
-    out_frac_y_idx.assign(total, 0);
-
-    // Detect identity per plane (rad=[1,0,0,0] AND tan=[0,0]) — for those we
-    // can fill base_x = x-1, base_y = y-1, frac=0 directly without polynomial.
-    auto plane_is_identity = [&](int plane) -> bool {
-        const double* r = params.rad_params64[plane];
-        const double* t = params.tan_params64[plane];
-        return r[0] == 1.0 && r[1] == 0.0 && r[2] == 0.0 && r[3] == 0.0 &&
-               t[0] == 0.0 && t[1] == 0.0;
-    };
-
-    // We always pack 3 channels (matching the AOT input ABI).
-    for (int c = 0; c < 3; ++c) {
-        const int plane = warpPlaneIndex(c, params);
-        const size_t base_off = static_cast<size_t>(c) * width * height;
-        if (plane_is_identity(plane)) {
-            // src_x = x, src_y = y → base = (x-1, y-1), frac = 0.
-            for (int y = 0; y < height; ++y) {
-                int32_t* bxr = out_base_x.data() + base_off + static_cast<size_t>(y) * width;
-                int32_t* byr = out_base_y.data() + base_off + static_cast<size_t>(y) * width;
-                for (int x = 0; x < width; ++x) {
-                    bxr[x] = x - 1;
-                    byr[x] = y - 1;
-                }
-                // frac arrays already zero-initialized by assign().
-            }
-            continue;
-        }
-
-        for (int y = 0; y < height; ++y) {
-            const size_t row_off = base_off + static_cast<size_t>(y) * width;
-            int32_t* bxr = out_base_x.data() + row_off;
-            int32_t* byr = out_base_y.data() + row_off;
-            int32_t* fxr = out_frac_x_idx.data() + row_off;
-            int32_t* fyr = out_frac_y_idx.data() + row_off;
-            for (int x = 0; x < width; ++x) {
-                double sx = 0.0, sy = 0.0;
-                getSrcPixelPosition(static_cast<double>(x),
-                                    static_cast<double>(y),
-                                    plane,
-                                    runtime,
-                                    params,
-                                    sx, sy);
-                const double sxf = std::floor(sx);
-                const double syf = std::floor(sy);
-                bxr[x] = static_cast<int32_t>(sxf) - 1;
-                byr[x] = static_cast<int32_t>(syf) - 1;
-                fxr[x] = quantizeSubsampleIndex(sx - sxf);
-                fyr[x] = quantizeSubsampleIndex(sy - syf);
-            }
-        }
-    }
-    (void)dst_planes;
-}
-
-// T4-A: Shared static zero buffer for the baseline (non-precomputed) ABI
-// placeholder. Avoids allocating + zero-filling ~73 MB on every call.
+// T4-A: Shared static zero buffer for the warp coord ABI placeholder.
+// Avoids allocating + zero-filling ~73 MB on every call.
 // Phase 10 Sprint D-B: mmap MAP_ANON lazy zero pages. The Halide kernel
 // never reads these inputs when precompute_coords=false, so committed
 // physical pages stay near zero RSS. Avoids the ~290ms eager zero-fill
@@ -659,8 +556,6 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
         return false;
     }
 
-    const bool use_precomputed = isPrecomputedCoordsEnabled();
-
     // Fast path: RGB interleaved input/output (common Stage3 path).
     Buffer<uint16_t> src_buf =
         Buffer<uint16_t>::make_interleaved(const_cast<uint16_t*>(src_interleaved_rgb), width, height, planes);
@@ -687,26 +582,15 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                                     tile_grid.tiles_x,
                                     tile_grid.tiles_y);
 
-    // Phase 8.1.6 D-1: optionally precompute coords on host in double.
-    std::vector<int32_t> base_x_storage, base_y_storage, frac_x_storage, frac_y_storage;
-    Buffer<int32_t> base_x_buf, base_y_buf, frac_x_buf, frac_y_buf;
-    if (use_precomputed) {
-        computePrecomputedCoords(width, height, planes, runtime, params,
-                                 base_x_storage, base_y_storage,
-                                 frac_x_storage, frac_y_storage);
-        // Halide Buffer with planar layout (x, y, c): width × height × 3.
-        base_x_buf  = Buffer<int32_t>(base_x_storage.data(),  width, height, 3);
-        base_y_buf  = Buffer<int32_t>(base_y_storage.data(),  width, height, 3);
-        frac_x_buf  = Buffer<int32_t>(frac_x_storage.data(),  width, height, 3);
-        frac_y_buf  = Buffer<int32_t>(frac_y_storage.data(),  width, height, 3);
-    } else {
-        // T4-A: Reuse static mmap lazy-zero buffer; no per-call zero-fill (~73 MB saved).
-        const int32_t* zero_ptr = getOrGrowZeroBuf(width, height);
-        base_x_buf  = Buffer<int32_t>(const_cast<int32_t*>(zero_ptr), width, height, 3);
-        base_y_buf  = base_x_buf;
-        frac_x_buf  = base_x_buf;
-        frac_y_buf  = base_x_buf;
-    }
+    // The rectilinear_warp ABI lists 4 coord buffers as Inputs (base_x/base_y/
+    // frac_x/frac_y), but the production kernel never reads them. Feed a shared
+    // lazy-zero mmap placeholder for all four — no per-call zero-fill (~73 MB
+    // saved).
+    const int32_t* zero_ptr = getOrGrowZeroBuf(width, height);
+    Buffer<int32_t> base_x_buf(const_cast<int32_t*>(zero_ptr), width, height, 3);
+    Buffer<int32_t> base_y_buf = base_x_buf;
+    Buffer<int32_t> frac_x_buf = base_x_buf;
+    Buffer<int32_t> frac_y_buf = base_x_buf;
 
     // Be explicit for GPU backends: inputs are host-authored, output host is stale
     // until we copy back after kernel execution.
@@ -714,64 +598,28 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
     rad_buf.set_host_dirty();
     tan_buf.set_host_dirty();
     tile_bounds_buf.set_host_dirty();
-    if (use_precomputed) {
-        base_x_buf.set_host_dirty();
-        base_y_buf.set_host_dirty();
-        frac_x_buf.set_host_dirty();
-        frac_y_buf.set_host_dirty();
-    }
     dst_buf.set_host_dirty(false);
 
-    int result = 0;
-#if defined(DNG_ENABLE_WARP_PRECOMPUTED_DIAG)
-    if (use_precomputed) {
-        result = rectilinear_warp_precomputed(src_buf.raw_buffer(),
-                                              rad_buf.raw_buffer(),
-                                              tan_buf.raw_buffer(),
-                                              tile_bounds_buf.raw_buffer(),
-                                              static_cast<int32_t>(params.planes),
-                                              static_cast<float>(runtime.center_x),
-                                              static_cast<float>(runtime.center_y),
-                                              static_cast<float>(runtime.norm_radius),
-                                              static_cast<float>(runtime.inv_norm_radius),
-                                              static_cast<float>(runtime.pixel_scale_v),
-                                              static_cast<float>(runtime.pixel_scale_v_inv),
-                                              params.is_rad_nop_all ? 1 : 0,
-                                              params.is_tan_nop_all ? 1 : 0,
-                                              static_cast<int32_t>(tile_grid.tile_width),
-                                              static_cast<int32_t>(tile_grid.tile_height),
-                                              base_x_buf.raw_buffer(),
-                                              base_y_buf.raw_buffer(),
-                                              frac_x_buf.raw_buffer(),
-                                              frac_y_buf.raw_buffer(),
-                                              dst_buf.raw_buffer());
-    } else
-#endif
-    {
-        // Baseline path also expects the 4 precompute buffers in ABI (gen
-        // emits them regardless because they are listed as Inputs); kernel
-        // simply does not read from them when precompute_coords=false.
-        result = rectilinear_warp(src_buf.raw_buffer(),
-                                  rad_buf.raw_buffer(),
-                                  tan_buf.raw_buffer(),
-                                  tile_bounds_buf.raw_buffer(),
-                                  static_cast<int32_t>(params.planes),
-                                  static_cast<float>(runtime.center_x),
-                                  static_cast<float>(runtime.center_y),
-                                  static_cast<float>(runtime.norm_radius),
-                                  static_cast<float>(runtime.inv_norm_radius),
-                                  static_cast<float>(runtime.pixel_scale_v),
-                                  static_cast<float>(runtime.pixel_scale_v_inv),
-                                  params.is_rad_nop_all ? 1 : 0,
-                                  params.is_tan_nop_all ? 1 : 0,
-                                  static_cast<int32_t>(tile_grid.tile_width),
-                                  static_cast<int32_t>(tile_grid.tile_height),
-                                  base_x_buf.raw_buffer(),
-                                  base_y_buf.raw_buffer(),
-                                  frac_x_buf.raw_buffer(),
-                                  frac_y_buf.raw_buffer(),
-                                  dst_buf.raw_buffer());
-    }
+    const int result = rectilinear_warp(src_buf.raw_buffer(),
+                                        rad_buf.raw_buffer(),
+                                        tan_buf.raw_buffer(),
+                                        tile_bounds_buf.raw_buffer(),
+                                        static_cast<int32_t>(params.planes),
+                                        static_cast<float>(runtime.center_x),
+                                        static_cast<float>(runtime.center_y),
+                                        static_cast<float>(runtime.norm_radius),
+                                        static_cast<float>(runtime.inv_norm_radius),
+                                        static_cast<float>(runtime.pixel_scale_v),
+                                        static_cast<float>(runtime.pixel_scale_v_inv),
+                                        params.is_rad_nop_all ? 1 : 0,
+                                        params.is_tan_nop_all ? 1 : 0,
+                                        static_cast<int32_t>(tile_grid.tile_width),
+                                        static_cast<int32_t>(tile_grid.tile_height),
+                                        base_x_buf.raw_buffer(),
+                                        base_y_buf.raw_buffer(),
+                                        frac_x_buf.raw_buffer(),
+                                        frac_y_buf.raw_buffer(),
+                                        dst_buf.raw_buffer());
     if (result != 0) {
         return false;
     }
