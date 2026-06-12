@@ -67,6 +67,16 @@ struct PipelineConfig {
 
   RouteConfig route;
 
+  // W7-B (P15): when true, the Stage4 bridge writes a fused interleaved RGBA8
+  // output (alpha=255) directly into the caller buffer instead of interleaved
+  // RGB8, eliminating the separate FFI rgb_to_rgba pass and one ~72MB
+  // read/write of the RGB intermediate. Set only by
+  // dng_pipeline_v2_decode_to_rgb on Android (Vulkan host-side repack path);
+  // test_decode and macOS leave it false so RGB output is preserved. This is an
+  // internal output-format toggle, NOT an env-driven route kill-switch, so it
+  // lives outside RouteConfig and is not read by loadFromEnv().
+  bool fuse_rgba_output = false;
+
   struct Threads {
     uint32_t area_threads = 0;
   } threads;

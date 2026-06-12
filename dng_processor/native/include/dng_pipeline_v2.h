@@ -9,14 +9,33 @@ class dng_negative;
 struct DngPipelineV2Result {
   // Pool-backed RGB buffer. NOT owned by this struct; lifetime is
   // process-scoped (RgbOutputPool singleton in dng_pipeline_v2.cpp).
+  // Populated on the non-fused / macOS path; null when rgba_ptr is set.
   uint8_t* rgb_ptr = nullptr;
   size_t   rgb_size = 0;
+  // W7-B (P15): fused interleaved RGBA8 output (alpha=255). Populated only on
+  // the Android Vulkan fused path; the buffer comes from the checkout-style
+  // RGBA output pool (dng_rgba_output_acquire) and MUST be returned via
+  // dng_rgba_output_release when freed. When set, rgb_ptr is null and the FFI
+  // layer skips its own rgb_to_rgba pass.
+  uint8_t* rgba_ptr = nullptr;
+  size_t   rgba_size = 0;
   uint32_t width = 0;
   uint32_t height = 0;
   double decode_ms = 0.0;
   double process_ms = 0.0;
   int32_t error_code = 0;
 };
+
+// W7-B (P15): shared, process-scoped, checkout-style pool for the returned
+// RGBA output buffer. Used by the Android fused Stage4 bridge (acquire) and by
+// the FFI layer (acquire on the non-fused macOS path; release on free). Unlike
+// RgbOutputPool (single reused buffer) this hands out distinct per-decode
+// buffers so a buffer handed to Dart via zero-copy NativeFinalizer is never
+// overwritten by a subsequent decode. acquire() returns uninitialised storage
+// (every byte is overwritten before read); release() returns true if the
+// pointer was pool-owned (reclaimed) or false if the caller must delete[] it.
+uint8_t* dng_rgba_output_acquire(size_t bytes);
+bool dng_rgba_output_release(uint8_t* ptr);
 
 struct DngPipelineStage3Timing {
   double extract_stage2_ms = 0.0;

@@ -36,7 +36,10 @@ functions:
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -205,6 +208,73 @@ RgbOutputPool &rgbOutputPool() {
   return pool;
 }
 
+// W7-B (P15): checkout-style RGBA output pool. See dng_pipeline_v2.h for the
+// rationale (distinct per-decode buffers so a zero-copy buffer handed to Dart
+// is not clobbered by the next decode). Mirrors the FFI W7-A RgbaPool that it
+// supersedes; consolidating here gives a single owner so both the Android
+// fused bridge (acquire) and the FFI free path (release) reach the same pool.
+class RgbaOutputPool {
+ public:
+  uint8_t *acquire(size_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < free_.size(); ++i) {
+      if (free_[i].cap >= bytes) {
+        uint8_t *p = free_[i].buf.release();
+        size_t cap = free_[i].cap;
+        free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(i));
+        checked_out_.emplace(p, cap);
+        return p;
+      }
+    }
+    uint8_t *p = new (std::nothrow) uint8_t[bytes];  // no value-init
+    if (p) checked_out_.emplace(p, bytes);
+    return p;
+  }
+  bool release(uint8_t *ptr) {
+    if (!ptr) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = checked_out_.find(ptr);
+    if (it == checked_out_.end()) return false;
+    size_t cap = it->second;
+    checked_out_.erase(it);
+    free_.push_back({std::unique_ptr<uint8_t[]>(ptr), cap});
+    return true;
+  }
+
+ private:
+  struct Slot {
+    std::unique_ptr<uint8_t[]> buf;
+    size_t cap;
+  };
+  std::mutex mutex_;
+  std::vector<Slot> free_;
+  std::unordered_map<uint8_t *, size_t> checked_out_;
+};
+
+RgbaOutputPool &rgbaOutputPool() {
+  static RgbaOutputPool pool;
+  return pool;
+}
+
+// Acquire the Stage4 output buffer. On the fused path (Android Vulkan) this is
+// an interleaved RGBA8 buffer from the checkout pool; otherwise an interleaved
+// RGB8 buffer from the single-reuse RgbOutputPool. Reuses an already-set ptr
+// (e.g. a device-handoff fallback re-entering runStage4ToRgb) to avoid leaking
+// a previously checked-out fused buffer.
+bool acquireStage4OutputBuffer(const PipelineConfig &config,
+                               uint32_t width, uint32_t height,
+                               uint8_t *&ptr, size_t &size) {
+  if (ptr) return true;  // already acquired upstream; reuse.
+  if (config.fuse_rgba_output) {
+    size = static_cast<size_t>(width) * height * 4;
+    ptr = rgbaOutputPool().acquire(size);
+  } else {
+    size = static_cast<size_t>(width) * height * 3;
+    ptr = rgbOutputPool().acquire(size);
+  }
+  return ptr != nullptr;
+}
+
 bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   if (width <= 0 || height <= 0) {
     return false;
@@ -221,6 +291,17 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   }
   std::memset(stage3, 0, stage3ElementCount * sizeof(uint16_t));
   std::memset(rgb, 0, rgbByteCount);
+#if defined(__ANDROID__)
+  // W7-B: seed one committed RGBA8 buffer into the checkout pool so the first
+  // fused decode does not pay the ~96MB first-touch page-fault.
+  const size_t rgbaByteCount = w * h * 4;
+  uint8_t *rgba = rgbaOutputPool().acquire(rgbaByteCount);
+  if (!rgba) {
+    return false;
+  }
+  std::memset(rgba, 0, rgbaByteCount);
+  rgbaOutputPool().release(rgba);
+#endif
   return true;
 }
 
@@ -581,11 +662,11 @@ bool runHalideStage3And4Fused(dng_host &host,
     return false;
 
   // CPU work while GPU runs Stage3 (latency hiding):
-  // 1. Pre-alloc Stage4 output buffer via RgbOutputPool (no page fault on warm calls)
-  const size_t stage4OutSize = static_cast<size_t>(inputWidth) * inputHeight * 3;
-  rgb_ptr = rgbOutputPool().acquire(stage4OutSize);
-  if (!rgb_ptr) return false;
-  rgb_size = stage4OutSize;
+  // 1. Pre-alloc Stage4 output buffer (no page fault on warm calls). W7-B: on
+  //    the Android fused path this is an RGBA8 checkout buffer; otherwise RGB8.
+  if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, rgb_ptr,
+                                 rgb_size))
+    return false;
 
   // 2. Allocate stub Stage3 image for negative.SetStage3Image() integrity
   AutoPtr<dng_image> stage3Stub;
@@ -679,11 +760,12 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   renderer.SetFinalPixelType(ttByte);
   renderer.SetFinalSpace(dng_space_sRGB::Get());
 
-  // Acquire pool buffer: mmap pages stay committed across calls → 0ms on warm paths.
-  const size_t needed = static_cast<size_t>(inputWidth) * inputHeight * 3;
-  rgb_ptr = rgbOutputPool().acquire(needed);
-  if (!rgb_ptr) return false;
-  rgb_size = needed;
+  // Acquire pool buffer: warm pages stay committed → 0ms on warm paths.
+  // W7-B: RGBA8 checkout buffer on the Android fused path, else RGB8. Reuses an
+  // already-set rgb_ptr when re-entered from the device-handoff fallback.
+  if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, rgb_ptr,
+                                 rgb_size))
+    return false;
 
   bool ok = render_stage4_halide(host, negative, renderer,
                                  RenderHalideMode::HALIDE_GPU,
@@ -727,10 +809,10 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
     return restoreHostStage2();
 
   // Acquire pool buffer before calling render to avoid page fault.
-  const size_t needed = static_cast<size_t>(inputWidth) * inputHeight * 3;
-  rgb_ptr = rgbOutputPool().acquire(needed);
-  if (!rgb_ptr) return restoreHostStage2();
-  rgb_size = needed;
+  // W7-B: RGBA8 checkout buffer on the Android fused path, else RGB8.
+  if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, rgb_ptr,
+                                 rgb_size))
+    return restoreHostStage2();
 
   dng_render renderer(host, negative);
   renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
@@ -888,6 +970,17 @@ bool decodeStages(ConcurrentDngHost &host,
 
 } // namespace
 
+// W7-B (P15): public shared RGBA output pool accessors (declared in
+// dng_pipeline_v2.h). Forward to the anonymous-namespace singleton, whose names
+// remain in scope for the rest of this translation unit.
+uint8_t *dng_rgba_output_acquire(size_t bytes) {
+  return rgbaOutputPool().acquire(bytes);
+}
+
+bool dng_rgba_output_release(uint8_t *ptr) {
+  return rgbaOutputPool().release(ptr);
+}
+
 // Single-flight mutex serializing the public FFI entry points against the
 // background warmup hook.  Both paths mutate shared native pools (RGBA output
 // pool, polynomial scratch caches) and DeviceHandoffState; without this lock a
@@ -942,7 +1035,14 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
   }
 
   try {
-    const PipelineConfig config = PipelineConfig::loadFromEnv();
+    PipelineConfig config = PipelineConfig::loadFromEnv();
+#if defined(__ANDROID__)
+    // W7-B: the Android Vulkan Stage4 bridge does a host-side planar->interleaved
+    // repack anyway; fuse it straight to RGBA8 (alpha=255) so the FFI layer skips
+    // its own rgb_to_rgba pass and one ~72MB RGB intermediate. macOS keeps RGB
+    // (its render writes interleaved RGB directly, no host repack to fuse).
+    config.fuse_rgba_output = true;
+#endif
     fprintf(stderr, "[Pipeline] GPU backend: %s (available=%s)\n",
             dng_halide_gpu_backend_name(),
             dng_halide_gpu_available() ? "yes" : "no");
@@ -968,7 +1068,18 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
                       result)) {
       return false;
     }
-    return decodeStages(host, config, *negative, metadata, decodeStart, result);
+    const bool ok =
+        decodeStages(host, config, *negative, metadata, decodeStart, result);
+    // W7-B: on the fused path the orchestrators filled result.rgb_ptr with an
+    // RGBA8 buffer from the checkout pool; expose it as rgba_ptr and null out
+    // rgb_ptr so the FFI layer takes the zero-extra-pass path.
+    if (ok && config.fuse_rgba_output && result.rgb_ptr) {
+      result.rgba_ptr = result.rgb_ptr;
+      result.rgba_size = result.rgb_size;
+      result.rgb_ptr = nullptr;
+      result.rgb_size = 0;
+    }
+    return ok;
   } catch (const dng_exception &e) {
     result.error_code = e.ErrorCode();
     std::cerr << "[PipelineV2] DNG exception: " << result.error_code << "\n";

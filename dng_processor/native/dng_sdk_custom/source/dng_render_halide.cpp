@@ -267,6 +267,62 @@ void repackPlanarToInterleavedMT(const uint8_t* pr,
     }
     for (auto& w : workers) w.join();
 }
+
+// W7-B: fused planar(u8 x3) -> interleaved RGBA8 (alpha=255) repack of the GPU
+// output. Replaces repackPlanarToInterleavedMT + the FFI rgb_to_rgba_neon two
+// passes with a single planar->RGBA pass (one fewer ~72MB read/write of the RGB
+// intermediate). NEON vld1q_u8 x3 + vst4q_u8 (16 px/iter); bit-exact with the
+// two-step path (same channel bytes, alpha hard 255). Used only when the caller
+// supplies an RGBA8 (W*H*4) dst (Android fused path); the dst-side stays a
+// host buffer, so this does NOT touch the Vulkan generator output (W4-1
+// dead-end / Gotcha #93 unaffected).
+void repackPlanarToRGBAMT(const uint8_t* pr,
+                          const uint8_t* pg,
+                          const uint8_t* pb,
+                          uint8_t* dst,
+                          int total_px) {
+    auto repack_range = [&](int i_begin, int i_end) {
+        const uint8x16_t alpha = vdupq_n_u8(255);
+        int i = i_begin;
+        for (; i + 16 <= i_end; i += 16) {
+            uint8x16x4_t rgba;
+            rgba.val[0] = vld1q_u8(pr + i);
+            rgba.val[1] = vld1q_u8(pg + i);
+            rgba.val[2] = vld1q_u8(pb + i);
+            rgba.val[3] = alpha;
+            vst4q_u8(dst + i * 4, rgba);
+        }
+        for (; i < i_end; ++i) {
+            dst[i * 4 + 0] = pr[i];
+            dst[i * 4 + 1] = pg[i];
+            dst[i * 4 + 2] = pb[i];
+            dst[i * 4 + 3] = 255;
+        }
+    };
+
+    unsigned hw = std::thread::hardware_concurrency();
+    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, 8u));
+    if (chunks < 1) chunks = 1;
+    if (chunks > total_px) chunks = std::max(1, total_px);
+    if (chunks <= 1) {
+        repack_range(0, total_px);
+        return;
+    }
+    // Align chunk boundaries to 16 so each worker keeps the vst4q_u8 fast path
+    // and writes disjoint 64-byte-aligned dst regions.
+    int base = (total_px / chunks) & ~15;
+    if (base < 16) base = 16;
+    std::vector<std::thread> workers;
+    workers.reserve(chunks);
+    int start = 0;
+    while (start < total_px) {
+        int end = std::min(total_px, start + base);
+        if (total_px - end < base) end = total_px;
+        workers.emplace_back(repack_range, start, end);
+        start = end;
+    }
+    for (auto& w : workers) w.join();
+}
 #endif
 
 // W6-2 / TD-20: shared output size computation used by all four
@@ -867,7 +923,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int dst_w,
                               int dst_h,
                               const RenderParams& params,
-                              uint8_t* dst) {
+                              uint8_t* dst,
+                              bool fuse_rgba = false) {
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
         return false;
     }
@@ -1039,11 +1096,18 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 
     // The 3 channel planes are contiguous: plane0=base, plane1=base+N, plane2=base+2N.
     // W4-1: multithreaded NEON vld1q_u8 + vst3q_u8 (16 px/iter).
+    // W7-B: when fuse_rgba, write interleaved RGBA8 (alpha=255) directly into the
+    // caller's RGBA buffer, fusing the former repack_dst + FFI rgb_to_rgba.
     {
         const uint8_t* planar = dst_planar_buf.data();
         const int total_px = dst_w * dst_h;
-        repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
-                                    dst, total_px);
+        if (fuse_rgba) {
+            repackPlanarToRGBAMT(planar, planar + total_px, planar + 2 * total_px,
+                                 dst, total_px);
+        } else {
+            repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
+                                        dst, total_px);
+        }
     }
     auto t4 = std::chrono::high_resolution_clock::now();
     fprintf(stderr, "[Stage4-Perf] repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
@@ -1071,7 +1135,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int dst_w,
                                          int dst_h,
                                          const RenderParams& params,
-                                         uint8_t* dst) {
+                                         uint8_t* dst,
+                                         bool fuse_rgba = false) {
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0) {
         return false;
@@ -1262,8 +1327,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     {
         const uint8_t* planar = dst_planar_buf.data();
         const int total_px = dst_w * dst_h;
-        repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
-                                    dst, total_px);
+        // W7-B: fuse planar->RGBA8 directly into the caller's RGBA buffer when
+        // requested (eliminates the separate FFI rgb_to_rgba pass).
+        if (fuse_rgba) {
+            repackPlanarToRGBAMT(planar, planar + total_px, planar + 2 * total_px,
+                                 dst, total_px);
+        } else {
+            repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
+                                        dst, total_px);
+        }
     }
     auto t4_fd = std::chrono::high_resolution_clock::now();
     // W2: repack_src now measures only the (eliminated) host repack — the flatten
@@ -1416,8 +1488,9 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
-    // Pool path: no resize, no page fault.
-    const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
+    // Pool path: no resize, no page fault. W7-B: fused path outputs RGBA8.
+    const size_t needed_out_size =
+        static_cast<size_t>(out_w) * out_h * (config.fuse_rgba_output ? 4 : 3);
     if (out_rgb_size < needed_out_size || !out_rgb_ptr) {
         return false;
     }
@@ -1487,10 +1560,18 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          static_cast<int>(out_w),
                                                          static_cast<int>(out_h),
                                                          params,
-                                                         out_rgb_ptr);
+                                                         out_rgb_ptr,
+                                                         config.fuse_rgba_output);
         if (render_ok) {
             return true;
         }
+    }
+
+    // W7-B: the SDK fallback below writes interleaved RGB8; it cannot satisfy an
+    // RGBA8 fused buffer. On the fused path the GPU render is mandatory (callers
+    // already refuse SDK CPU fallback), so fail rather than emit RGB-in-RGBA.
+    if (config.fuse_rgba_output) {
+        return false;
     }
 
     // SDK fallback with pool pointer: use fData directly.
@@ -1714,7 +1795,9 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     }
 
     // Pool path: buffer is already committed — no resize, no page fault.
-    const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
+    // W7-B: fused path outputs RGBA8.
+    const size_t needed =
+        static_cast<size_t>(out_w) * out_h * (config.fuse_rgba_output ? 4 : 3);
     if (out_rgb_size < needed || !out_rgb_ptr) {
         return false;
     }
@@ -1728,5 +1811,5 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(out_w), static_cast<int>(out_h),
-        params, out_rgb_ptr);
+        params, out_rgb_ptr, config.fuse_rgba_output);
 }
