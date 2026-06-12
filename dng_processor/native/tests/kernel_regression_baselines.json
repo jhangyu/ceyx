@@ -60,7 +60,7 @@
         "layout": "interleaved RGB",
         "opcodeScope": "final post-Stage4 render"
       },
-      "sha256": "e008516441dfd187dccc6998100a06bb44ca79a6488747c833e2f387dfa28f25"
+      "sha256": "fcea85d9658cf46ee8dead0eeb06cc00ede06cc03f5009035c072ad14411a8ad"
     },
     {
       "id": "lossy_halide_stage4",
@@ -79,7 +79,7 @@
         "layout": "interleaved RGB",
         "opcodeScope": "final post-Stage4 render"
       },
-      "sha256": "19df63cf33c2b23d1060461ca5acce71db7b9a3314e6678a893af65737934843"
+      "sha256": "19fa948b4fc5255234bb4fd1253d7e5f41f93dd15eac92b4fb9d4ac415ba2f8e"
     }
   ]
 }
