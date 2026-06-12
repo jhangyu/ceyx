@@ -118,6 +118,19 @@ list(REMOVE_ITEM DNG_SOURCES "${DNG_SDK_DIR}/dng_xmp_sdk.cpp" "${DNG_SDK_DIR}/dn
 list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
 
 add_library(dng_sdk STATIC ${DNG_SOURCES})
+# Route A adoption (P16, 2026-06-12): pin the SDK render reference to IEEE stepwise.
+# The Stage4 99.62 dB ±1 LSB residual is solely the default clang -ffp-contract=on
+# FMA grouping in the SDK render math (P2-1 forensics). The render bottlenecks
+# (RefBaseline* in dng_reference.cpp + the inline dng_1d_table::Interpolate lerp +
+# matrix/spline/huesat helpers) are *inline-shared across many TUs*; per-source
+# COMPILE_OPTIONS leaves a residual 98 px ±1 LSB because COMDAT folding can still
+# bind a call to a contract=on copy emitted by an un-pinned TU. The robust fix that
+# reproduces the P2-1 private-build (-ffp-contract=off whole libdng_sdk → byte-exact
+# vs Halide strict, 0 diff) is a library-wide option. Stage1/2/3 outputs quantize to
+# uint16 and are empirically unaffected (PSNR 999 + Stage3 SHA unchanged — see
+# Task_P16_routeA_adoption.md). The Halide Metal strict_float Stage4 kernel is the
+# matching GPU side; together Stage4-isolated is byte-exact.
+target_compile_options(dng_sdk PRIVATE -ffp-contract=off)
 target_include_directories(dng_sdk PUBLIC ${DNG_SDK_DIR} ${INC_DIR})
 if(DNG_USE_LIBJPEG)
     target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=1)
@@ -247,7 +260,18 @@ else()
 endif()
 
 # Stage4 render uses same base target with -no_runtime (fixes hardcoded Metal bug)
-set(DNG_RENDER_STAGE4_AOT_TARGET "${AOT_TARGET}-no_runtime")
+# Route A adoption (P16, 2026-06-12): the macOS Metal production Stage4 render is
+# pinned to IEEE stepwise via strict_float so its output is byte-exact against the
+# -ffp-contract=off SDK render reference (dng_reference.cpp, see below). The Android
+# Vulkan target is intentionally left unchanged — Halide v21 Vulkan
+# unstrictify_float() drops strict semantics, making strict_float a no-op there
+# (documented semantic gap; Android re-verified in W7 integration). Generic host
+# CPU build also unchanged.
+if(APPLE AND NOT ANDROID AND NOT (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
+    set(DNG_RENDER_STAGE4_AOT_TARGET "${AOT_TARGET}-strict_float-no_runtime")
+else()
+    set(DNG_RENDER_STAGE4_AOT_TARGET "${AOT_TARGET}-no_runtime")
+endif()
 set(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE "-1" CACHE STRING
     "Android Stage4 diagnostic stage (-1 full render)")
 
