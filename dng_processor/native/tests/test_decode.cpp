@@ -449,6 +449,44 @@ void extractImageData(dng_image* image, vector<uint16_t>& data, uint32_t& width,
     image->Get(buffer);
 }
 
+// P16 P2-2 probe (env-gated): dump pre-warp demosaic for Halide vs SDK then exit.
+// Halide standalone DngDemosaicGenerator shares dng_halide_utils.h helpers + RGGB kernel
+// with the fused generator's demosaic segment (R1C §2.1), so it proxies the W1-materialized
+// buffer. SDK side clears OpcodeList3 so BuildStage3Image yields demosaic only (no warp).
+// Both buffers are interleaved RGB uint16 (matching layouts) -> compare_psnr.py --planes 3.
+void maybeDumpDemosaicPreWarp(dng_host& host, dng_negative& negative, const string& filePrefix) {
+    if (!std::getenv("DNG_DUMP_DEMOSAIC_PRE_WARP")) return;
+    uint32_t w = 0, h = 0, p = 0, pt = 0; size_t ps = 0;
+    vector<uint16_t> s2;
+    extractImageData(const_cast<dng_image*>(negative.Stage2Image()), s2, w, h, p, pt, ps);
+    cout << "[DemosaicDump] stage2 w=" << w << " h=" << h << " planes=" << p
+         << " pt=" << pt << " ps=" << ps << "\n";
+    vector<uint16_t> halideRGB(static_cast<size_t>(w) * h * 3, 0);
+    if (!demosaic_bilinear_halide_aot(s2.data(), (int)w, (int)h, halideRGB.data())) {
+        cerr << "[DemosaicDump] Halide AOT failed\n"; std::exit(2);
+    }
+    negative.OpcodeList3().Clear();          // strip warp -> pure pre-warp demosaic
+    negative.BuildStage3Image(host);
+    uint32_t sw = 0, sh = 0, sp = 0, spt = 0; size_t sps = 0;
+    vector<uint16_t> sdkRGB;
+    extractImageData(const_cast<dng_image*>(negative.Stage3Image()), sdkRGB, sw, sh, sp, spt, sps);
+    bool pass = sw == w && sh == h && sp == 3 && spt == (uint32_t)ttShort && sps == 2 &&
+                sdkRGB.size() == halideRGB.size();
+    cout << "[Contract] halide{w=" << w << ",h=" << h << ",p=3,pt=" << (uint32_t)ttShort
+         << ",ps=2,size=" << halideRGB.size() << ",layout=interleaved-RGB}\n";
+    cout << "[Contract] sdk   {w=" << sw << ",h=" << sh << ",p=" << sp << ",pt=" << spt
+         << ",ps=" << sps << ",size=" << sdkRGB.size() << ",layout=interleaved-RGB}\n";
+    cout << "[Contract] " << (pass ? "PASS" : "FAIL") << "\n";
+    if (!pass) { cerr << "[DemosaicDump] contract FAIL; abort before compare\n"; std::exit(3); }
+    const string dims = std::to_string(w) + "x" + std::to_string(h);
+    saveRawFile(filePrefix + "_demosaic_prewarp_halide_" + dims + "_3p.raw",
+                halideRGB.data(), halideRGB.size() * sizeof(uint16_t));
+    saveRawFile(filePrefix + "_demosaic_prewarp_sdk_" + dims + "_3p.raw",
+                sdkRGB.data(), sdkRGB.size() * sizeof(uint16_t));
+    cout << "[DemosaicDump] wrote artifacts (" << dims << "); exiting probe mode\n";
+    std::exit(0);
+}
+
 // Stage-by-stage test for one DNG file
 // Returns StagePSNR with failed=true if the test aborted before producing PSNR values.
 StagePSNR testDNG(dng_host& host,
@@ -628,6 +666,9 @@ StagePSNR testDNG(dng_host& host,
                 }
             }
         }
+
+        // P16 P2-2 env-gated probe: dump pre-warp demosaic (Halide vs SDK) then exit.
+        maybeDumpDemosaicPreWarp(host, *negative, filePrefix);
 
         // For Bayer CFA in TEST mode: use Halide demosaic instead of DNG SDK
         // For YCbCr (lossy) or BASELINE mode: use DNG SDK directly
