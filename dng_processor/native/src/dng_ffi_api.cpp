@@ -1,6 +1,10 @@
 #include "dng_ffi_api.h"
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <dng_file_stream.h>
 #include <dng_host.h>
 #include <dng_ifd.h>
@@ -64,6 +68,79 @@ static void rgb_to_rgba_neon(const uint8_t* rgb, uint8_t* rgba,
 #endif  // __aarch64__
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// W7-A: process-scoped RGBA output pool.
+//
+// `dng_decode_and_process` previously did `new uint8_t[pixelCount*4]` (~96 MB
+// for 24 MP) on every decode.  On warm repeats this re-faults thousands of
+// fresh pages.  The pool hands out reusable, uninitialised storage and only
+// grows when a larger frame arrives — every byte is overwritten by the
+// planar->RGBA fill before it is read, so skipping zero-init is safe (mirrors
+// Stage4ScratchPool in dng_render_halide.cpp).
+//
+// Zero ABI impact: the DngResult struct is untouched (Gotcha #78 static_asserts
+// stay green).  Pool ownership is tracked via a side-channel map keyed on the
+// raw pointer.  The three release entry points (dng_free_result /
+// dng_free_rgba_buffer / dng_free_halide_buffer) consult the pool first and
+// only fall back to delete[] for non-pool buffers, so existing callers — incl.
+// the zero-copy NativeFinalizer path — keep working without changes.
+// ---------------------------------------------------------------------------
+namespace {
+
+class RgbaPool {
+public:
+    // Hands out a buffer of at least `count` bytes. Ownership stays with the
+    // pool (tracked in checked_out_); reclaim via release().
+    uint8_t* acquire(size_t count) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (size_t i = 0; i < free_.size(); ++i) {
+            if (free_[i].cap >= count) {
+                uint8_t* p = free_[i].buf.release();
+                size_t cap = free_[i].cap;
+                free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(i));
+                checked_out_.emplace(p, cap);
+                return p;
+            }
+        }
+        size_t cap = count;
+        uint8_t* p = new uint8_t[cap];  // no value-init -> no memset
+        checked_out_.emplace(p, cap);
+        return p;
+    }
+
+    // Returns true if `ptr` was pool-owned (now reclaimed); false if it is not
+    // a pool buffer and the caller should delete[] it.
+    bool release(uint8_t* ptr) {
+        if (!ptr)
+            return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = checked_out_.find(ptr);
+        if (it == checked_out_.end())
+            return false;
+        size_t cap = it->second;
+        checked_out_.erase(it);
+        free_.push_back({std::unique_ptr<uint8_t[]>(ptr), cap});
+        return true;
+    }
+
+private:
+    struct Slot {
+        std::unique_ptr<uint8_t[]> buf;
+        size_t cap;
+    };
+    std::mutex mutex_;
+    std::vector<Slot> free_;
+    std::unordered_map<uint8_t*, size_t> checked_out_;
+};
+
+RgbaPool& rgbaPool() {
+    static RgbaPool instance;
+    return instance;
+}
+
+}  // namespace
+// ---------------------------------------------------------------------------
+
 extern "C" {
 
 FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
@@ -83,10 +160,12 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
 
   const size_t pixelCount =
       static_cast<size_t>(pipeline.width) * static_cast<size_t>(pipeline.height);
-  // 24MP RGBA: ~96 MB. Ownership: new[] allocated here;
-  // freed by dng_free_result() / dng_free_rgba_buffer() / dng_free_halide_buffer()
-  // via delete[]. Do NOT change to mmap pool without updating ABI and Dart bindings.
-  uint8_t *rgba = new uint8_t[pixelCount * 4];
+  // 24MP RGBA: ~96 MB. W7-A: pool-backed (RgbaPool) to avoid a full re-fault
+  // of the buffer on every warm decode. Ownership stays with the pool and is
+  // reclaimed by dng_free_result() / dng_free_rgba_buffer() /
+  // dng_free_halide_buffer() (which consult the pool before delete[]). No ABI
+  // change — DngResult layout is untouched.
+  uint8_t *rgba = rgbaPool().acquire(pixelCount * 4);
   rgb_to_rgba_neon(pipeline.rgb_ptr, rgba, pixelCount);
 
   result->rgba_data = rgba;
@@ -165,8 +244,12 @@ FFI_EXPORT void dng_free_result(DngResult *result) {
   // Frees rgba_data when non-NULL, then frees the struct itself.
   // Zero-copy callers MUST clear result->rgba_data before calling this
   // (see _decodeZeroCopy in dng_decoder_service.dart) to avoid double-free.
+  // W7-A: rgba_data is pool-backed; reclaim via the pool, only delete[] if it
+  // was not a pool buffer.
   if (result->rgba_data) {
-    delete[] result->rgba_data;
+    if (!rgbaPool().release(result->rgba_data)) {
+      delete[] result->rgba_data;
+    }
     result->rgba_data = nullptr;
   }
   std::free(result);
@@ -175,7 +258,11 @@ FFI_EXPORT void dng_free_result(DngResult *result) {
 FFI_EXPORT void dng_free_rgba_buffer(void *ptr) {
   if (!ptr)
     return;
-  delete[] static_cast<uint8_t *>(ptr);
+  // W7-A: reclaim to the pool when applicable, else delete[].
+  uint8_t *p = static_cast<uint8_t *>(ptr);
+  if (!rgbaPool().release(p)) {
+    delete[] p;
+  }
 }
 
 FFI_EXPORT void dng_free_halide_buffer(void *ptr) {
