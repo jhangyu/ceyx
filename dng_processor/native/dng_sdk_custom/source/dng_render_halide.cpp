@@ -92,6 +92,12 @@ functions:
   - name: "render_stage4_halide_from_device_buffer (pool ptr overload)"
     description: "Phase 10 Sprint E RGB pool — device handoff + caller pool ptr 版本。"
     lines: "1246-1303"
+  - name: "LazyZeroBuf"
+    description: "T9 (Gotcha #62)：Android S4 prewarm dummy buffer 的 mmap MAP_ANON lazy-zero RAII 容器（calloc fallback），消除 ~410MB eager memset。"
+    lines: "1632-1655"
+  - name: "dng_render_stage4_prewarm_for_size"
+    description: "W7-E Android-only：以 actual-size LazyZeroBuf identity-params dummy 預建 Stage4 render Vulkan pipeline；per-size cache、[Warmup] s4 markers。macOS no-op。"
+    lines: "1659-1749"
 ---
 */
 #include "dng_render_halide.h"
@@ -106,7 +112,10 @@ functions:
 #include <vector>
 #if defined(__ANDROID__)
 // W7-E S4 prewarm per-size cache + crash-attribution markers (Android-only).
+// T9: mmap MAP_ANON lazy-zero dummy buffers (Gotcha #62).
 #include <cstdio>
+#include <cstdlib>
+#include <sys/mman.h>
 #include <unordered_set>
 #endif
 
@@ -1619,6 +1628,40 @@ const char* renderHalideModeName(RenderHalideMode mode) {
     return "unknown";
 }
 
+#if defined(__ANDROID__)
+namespace {
+// T9 (Gotcha #62): lazy-zero scratch for warmup dummy buffers. mmap MAP_ANON
+// hands back zero-pages committed only on first touch (the Halide H2D upload),
+// avoiding std::vector(N,0)'s eager full-buffer memset (~2s for the ~410MB of
+// S4 dummy src+dst at 6048x4024). munmap (or free for the calloc fallback)
+// releases on scope exit.
+struct LazyZeroBuf {
+    void* ptr = nullptr;
+    size_t bytes = 0;
+    bool mmaped = false;
+    explicit LazyZeroBuf(size_t n) : bytes(n) {
+        ptr = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (ptr == MAP_FAILED) {
+            ptr = std::calloc(1, bytes);  // OS-zeroed fallback
+            mmaped = false;
+        } else {
+            mmaped = true;
+        }
+    }
+    ~LazyZeroBuf() {
+        if (mmaped && ptr != nullptr) {
+            ::munmap(ptr, bytes);
+        } else if (ptr != nullptr) {
+            std::free(ptr);
+        }
+    }
+    LazyZeroBuf(const LazyZeroBuf&) = delete;
+    LazyZeroBuf& operator=(const LazyZeroBuf&) = delete;
+};
+}  // namespace
+#endif  // __ANDROID__
+
 void dng_render_stage4_prewarm_for_size(int width, int height) {
 #if defined(__ANDROID__)
     // W7-E: build the Stage4 render GPU pipeline at the actual image size so the
@@ -1676,20 +1719,22 @@ void dng_render_stage4_prewarm_for_size(int width, int height) {
         static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
     const size_t dstBytes =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
-    std::vector<uint16_t> dummy_src(srcElems, 0);
-    std::vector<uint8_t> dummy_dst(dstBytes, 0);
+    LazyZeroBuf dummy_src(srcElems * sizeof(uint16_t));
+    LazyZeroBuf dummy_dst(dstBytes * sizeof(uint8_t));
 
     std::fprintf(stderr, "[Warmup] s4 begin %dx%d\n", width, height);
     std::fflush(stderr);
-    (void)runRenderStage4HalideAot(dummy_src.data(),
-                                   width, height, /*src_p=*/3,
-                                   /*src_row_step=*/width * 3,
-                                   /*src_col_step=*/3,
-                                   /*src_plane_step=*/1,
-                                   /*src_scale=*/1.0f / 65535.0f,
-                                   /*dst_w=*/width, /*dst_h=*/height,
-                                   params, dummy_dst.data(),
-                                   /*fuse_rgba=*/false);
+    if (dummy_src.ptr != nullptr && dummy_dst.ptr != nullptr) {
+        (void)runRenderStage4HalideAot(static_cast<uint16_t*>(dummy_src.ptr),
+                                       width, height, /*src_p=*/3,
+                                       /*src_row_step=*/width * 3,
+                                       /*src_col_step=*/3,
+                                       /*src_plane_step=*/1,
+                                       /*src_scale=*/1.0f / 65535.0f,
+                                       /*dst_w=*/width, /*dst_h=*/height,
+                                       params, static_cast<uint8_t*>(dummy_dst.ptr),
+                                       /*fuse_rgba=*/false);
+    }
     std::fprintf(stderr, "[Warmup] s4 done\n");
     std::fflush(stderr);
 

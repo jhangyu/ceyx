@@ -74,19 +74,25 @@ functions:
     lines: "結尾段；以 `// --- Phase 8.2.1 Path D` 註解標記"
   - name: "warpRectilinearModeName"
     description: "列舉值轉字串。"
-    lines: "876-884"
+    lines: "737-745"
   - name: "extractWarpRectilinearParams"
     description: "從 SDK opcode 取出 plane/radial/tangential 參數並填入 runtime struct。"
-    lines: "886-927"
+    lines: "748-789"
   - name: "warp_rectilinear_halide"
     description: "buffer 入口；依 mode dispatch Halide GPU/AUTO；CPU reference 僅限明確 HALIDE_CPU。"
-    lines: "929-970"
+    lines: "791-833"
   - name: "demosaic_warp_rectilinear_halide"
     description: "Bayer fused demosaic+WarpRectilinear buffer 入口；正式 Stage3 fast path。"
-    lines: "972-1003"
+    lines: "835-872"
+  - name: "LazyZeroBuf"
+    description: "T9 (Gotcha #62)：Android prewarm dummy buffer 的 mmap MAP_ANON lazy-zero RAII 容器（calloc fallback），消除 std::vector(N,0) eager memset。"
+    lines: "879-902"
+  - name: "dng_demosaic_warp_prewarm_for_size"
+    description: "W7-E Android-only：以 actual-size LazyZeroBuf dummy 預建 fused demosaic+warp Vulkan pipeline；per-size cache、[Warmup] s3 markers。macOS no-op。"
+    lines: "905-936"
   - name: "apply_warp_rectilinear_to_image"
     description: "Stage3 正式入口；處理 bit-exact SDK fallback、image <-> buffer 轉換與 timing。"
-    lines: "1005-1054"
+    lines: "979-1028"
 ---
 */
 #include "dng_warp_halide.h"
@@ -871,6 +877,37 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
     return false;
 }
 
+#if defined(__ANDROID__)
+// W7-C T9 (Gotcha #62): lazy-zero scratch for warmup dummy buffers. mmap
+// MAP_ANON gives zero-pages committed only on first touch (the Halide H2D
+// upload), avoiding std::vector(N,0)'s eager full-buffer memset. munmap (or
+// free for the calloc fallback) releases on scope exit.
+struct LazyZeroBuf {
+    void* ptr = nullptr;
+    size_t bytes = 0;
+    bool mmaped = false;
+    explicit LazyZeroBuf(size_t n) : bytes(n) {
+        ptr = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (ptr == MAP_FAILED) {
+            ptr = std::calloc(1, bytes);  // OS-zeroed fallback
+            mmaped = false;
+        } else {
+            mmaped = true;
+        }
+    }
+    ~LazyZeroBuf() {
+        if (mmaped && ptr != nullptr) {
+            ::munmap(ptr, bytes);
+        } else if (ptr != nullptr) {
+            std::free(ptr);
+        }
+    }
+    LazyZeroBuf(const LazyZeroBuf&) = delete;
+    LazyZeroBuf& operator=(const LazyZeroBuf&) = delete;
+};
+#endif  // __ANDROID__
+
 void dng_demosaic_warp_prewarm_for_size(int width, int height) {
 #if defined(__ANDROID__)
     // W7-E: build the fused demosaic+WarpRectilinear GPU pipeline at the actual
@@ -907,19 +944,29 @@ void dng_demosaic_warp_prewarm_for_size(int width, int height) {
 
     const size_t bayerElems = static_cast<size_t>(width) * static_cast<size_t>(height);
     const size_t rgbElems = bayerElems * 3u;
-    std::vector<uint16_t> dummy_bayer(bayerElems, 0);
-    std::vector<uint16_t> dummy_dst(rgbElems, 0);
+
+    // Gotcha #62: std::vector(N, 0) eager value-inits trivially-constructible
+    // elements (~bayer 49MB + dst 146MB here = ~1.9s of pure zero-fill memset
+    // for the 6048x4024 case). The dummy content is irrelevant (output
+    // discarded); the GPU only needs a readable buffer to H2D-upload. mmap
+    // MAP_ANON hands back lazy zero-pages committed on first touch (during the
+    // Halide upload), so the eager memset disappears. calloc fallback keeps the
+    // OS-zero guarantee if mmap fails.
+    LazyZeroBuf dummy_bayer(bayerElems * sizeof(uint16_t));
+    LazyZeroBuf dummy_dst(rgbElems * sizeof(uint16_t));
 
     // Crash-attribution markers (T5b): let the on-device log pinpoint which
     // prewarm stage faulted if the GPU pipeline build throws.
     std::fprintf(stderr, "[Warmup] s3 begin %dx%d\n", width, height);
     std::fflush(stderr);
-    (void)demosaic_warp_rectilinear_halide(dummy_bayer.data(),
-                                           width,
-                                           height,
-                                           params,
-                                           WarpRectilinearMode::AUTO,
-                                           dummy_dst.data());
+    if (dummy_bayer.ptr != nullptr && dummy_dst.ptr != nullptr) {
+        (void)demosaic_warp_rectilinear_halide(static_cast<uint16_t*>(dummy_bayer.ptr),
+                                               width,
+                                               height,
+                                               params,
+                                               WarpRectilinearMode::AUTO,
+                                               static_cast<uint16_t*>(dummy_dst.ptr));
+    }
     std::fprintf(stderr, "[Warmup] s3 done\n");
     std::fflush(stderr);
 

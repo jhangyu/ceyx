@@ -999,7 +999,14 @@ bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
   if (!warmPipelinePoolsForSize(width, height)) {
     return false;
   }
-  halide_prewarm_polynomial3_for_size(width, height);
+  // T9 (W7-C): do NOT prewarm polynomial3 here. polynomial3 is the Stage2
+  // lossy MapPolynomial pipeline; the lossless Bayer main path (S3 fused + S4
+  // render) never dispatches it, so building it during the startup warmup is
+  // ~300ms of pure waste plus a ~3x144MB eager memset (Gotcha #62). Lossy
+  // decodes self-prewarm lazily at decodeStages() (`if (!isBayer)` guard,
+  // per-size cached), so the only effect of skipping here is that the very
+  // first lossy decode of a size pays the build instead of the idle warmup —
+  // an acceptable trade for the common (lossless) path.
   // W7-E: prime the Stage3 fused demosaic+WarpRectilinear GPU pipeline at the
   // actual size so the first Bayer decode skips the Vulkan pipeline-creation
   // cold tax (no-op on non-Android; per-size cached inside).
