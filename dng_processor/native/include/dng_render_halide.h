@@ -91,3 +91,12 @@ inline bool render_stage4_halide(dng_host& host,
                                 out_rgb, out_w, out_h);
 }
 
+// W7-E: idle-time prewarm of the Stage4 render AOT kernel
+// (dng_render_stage4_android) at the actual image size, so the GPU pipeline
+// state is built and cached before the first real decode of that resolution.
+// Dispatches one pass on a zeroed dummy src with an identity RenderParams
+// (built from the same toIdentity*/ensureSafeHueSatMap path buildRenderParams
+// uses) and discards the result. Per-size cached; Android-only body (no-op on
+// other platforms so macOS warmup behaviour is unchanged).
+void dng_render_stage4_prewarm_for_size(int width, int height);
+

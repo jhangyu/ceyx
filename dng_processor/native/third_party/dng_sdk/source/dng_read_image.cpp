@@ -65,6 +65,11 @@ struct Stage1ProfileAgg {
     std::atomic<uint32_t> threads_used{0};
     std::atomic<uint64_t> max_decode_ns{0};
     std::atomic<uint64_t> min_decode_ns{UINT64_MAX};
+    // D0: per-thread (whole-thread, not per-tile) lock_wait/decode spread.
+    std::atomic<uint64_t> max_thread_lock_wait_ns{0};
+    std::atomic<uint64_t> min_thread_lock_wait_ns{UINT64_MAX};
+    std::atomic<uint64_t> max_thread_decode_ns{0};
+    std::atomic<uint64_t> min_thread_decode_ns{UINT64_MAX};
 
     void reset () {
         sum_lock_wait_ns.store (0);
@@ -75,6 +80,10 @@ struct Stage1ProfileAgg {
         threads_used.store (0);
         max_decode_ns.store (0);
         min_decode_ns.store (UINT64_MAX);
+        max_thread_lock_wait_ns.store (0);
+        min_thread_lock_wait_ns.store (UINT64_MAX);
+        max_thread_decode_ns.store (0);
+        min_thread_decode_ns.store (UINT64_MAX);
     }
 };
 
@@ -3010,6 +3019,11 @@ class dng_read_tiles_task : public dng_area_task
 				if (tlocal_min_decode_ns != UINT64_MAX) {
 					atomic_min_u64 (fProfile.min_decode_ns, tlocal_min_decode_ns);
 				}
+				// D0: per-thread whole-thread lock_wait/decode spread.
+				atomic_max_u64 (fProfile.max_thread_lock_wait_ns, tlocal_lock_wait_ns);
+				atomic_min_u64 (fProfile.min_thread_lock_wait_ns, tlocal_lock_wait_ns);
+				atomic_max_u64 (fProfile.max_thread_decode_ns, tlocal_decode_ns);
+				atomic_min_u64 (fProfile.min_thread_decode_ns, tlocal_decode_ns);
 
 				std::fprintf (stderr,
 					"[Stage1Profile] threadIdx=%u tid=%s tiles=%u wall_ms=%.3f"
@@ -3466,6 +3480,26 @@ void dng_read_image::Read (dng_host &host,
 				ideal_speedup, actual_speedup, efficiency,
 				lock_wait_pct);
 			std::fflush (stderr);
+
+				// D0: per-thread lock_wait/decode distribution (min/avg/max).
+				uint32_t d0_threads = threads_used ? threads_used : 1;
+				uint64_t d0_lw_min = task.fProfile.min_thread_lock_wait_ns.load ();
+				uint64_t d0_lw_max = task.fProfile.max_thread_lock_wait_ns.load ();
+				uint64_t d0_dec_min = task.fProfile.min_thread_decode_ns.load ();
+				uint64_t d0_dec_max = task.fProfile.max_thread_decode_ns.load ();
+				double d0_lw_avg_ms = (sum_lock_wait_ns / 1.0e6) / (double) d0_threads;
+				double d0_dec_avg_ms = (sum_decode_ns / 1.0e6) / (double) d0_threads;
+				std::fprintf (stderr,
+					"[Stage1-Profile] threads=%u lock_wait_ms min/avg/max=%.3f/%.3f/%.3f"
+					" decode_ms min/avg/max=%.3f/%.3f/%.3f\n",
+					d0_threads,
+					(d0_lw_min == UINT64_MAX ? 0.0 : d0_lw_min / 1.0e6),
+					d0_lw_avg_ms,
+					d0_lw_max / 1.0e6,
+					(d0_dec_min == UINT64_MAX ? 0.0 : d0_dec_min / 1.0e6),
+					d0_dec_avg_ms,
+					d0_dec_max / 1.0e6);
+				std::fflush (stderr);
 			}
 
 		}

@@ -1000,6 +1000,13 @@ bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
     return false;
   }
   halide_prewarm_polynomial3_for_size(width, height);
+  // W7-E: prime the Stage3 fused demosaic+WarpRectilinear GPU pipeline at the
+  // actual size so the first Bayer decode skips the Vulkan pipeline-creation
+  // cold tax (no-op on non-Android; per-size cached inside).
+  dng_demosaic_warp_prewarm_for_size(width, height);
+  // W7-E: prime the Stage4 render GPU pipeline at the actual size (matrix S4
+  // cold ~440ms vs warm ~192ms). No-op on non-Android; per-size cached inside.
+  dng_render_stage4_prewarm_for_size(width, height);
   return true;
 }
 

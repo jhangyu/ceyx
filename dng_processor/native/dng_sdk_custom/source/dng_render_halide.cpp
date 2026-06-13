@@ -104,6 +104,11 @@ functions:
 #include <mutex>
 #include <thread>
 #include <vector>
+#if defined(__ANDROID__)
+// W7-E S4 prewarm per-size cache + crash-attribution markers (Android-only).
+#include <cstdio>
+#include <unordered_set>
+#endif
 
 #include "HalideBuffer.h"
 #include "ConcurrentDngHost.h"
@@ -1612,6 +1617,90 @@ const char* renderHalideModeName(RenderHalideMode mode) {
         case RenderHalideMode::AUTO: return "auto";
     }
     return "unknown";
+}
+
+void dng_render_stage4_prewarm_for_size(int width, int height) {
+#if defined(__ANDROID__)
+    // W7-E: build the Stage4 render GPU pipeline at the actual image size so the
+    // first real decode skips the Vulkan pipeline-creation + first large
+    // dispatch cold tax (matrix S4 ~440ms vs warm ~192ms). Mirrors the S3
+    // prewarm: per-size cache + one identity-params dispatch on zeroed dummy
+    // buffers, result discarded. Drives the same dng_render_stage4_android AOT
+    // entry production uses (host-src vs device-src do not change the compiled
+    // kernel / pipeline state).
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    static std::mutex cache_mu;
+    static std::unordered_set<uint64_t> warmed;
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(width)) << 32) |
+                         static_cast<uint64_t>(static_cast<uint32_t>(height));
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        if (warmed.count(key)) {
+            return;
+        }
+    }
+
+    // Identity RenderParams via the exact toIdentity*/ensureSafeHueSatMap path
+    // buildRenderParams uses for the linear/no-profile case (Gotcha #92 shape
+    // sanitization). The AOT kernel only reads the float members + dims/flags;
+    // the SDK-object scaffolding is unused. Values are irrelevant (output
+    // discarded) — only buffer shapes drive the Vulkan pipeline specialization.
+    RenderParams params;
+    toIdentityCurve(params.exp_ramp);
+    toIdentityCurve(params.tone_curve);
+    toIdentityCurve(params.encode_gamma);
+    params.camera_white[0] = params.camera_white[1] = params.camera_white[2] = 1.0f;
+    params.camera_to_rgb[0] = params.camera_to_rgb[4] = params.camera_to_rgb[8] = 1.0f;
+    params.rgb_to_final[0] = params.rgb_to_final[4] = params.rgb_to_final[8] = 1.0f;
+    toIdentityHueSatMap(params.huesat_table, params.huesat_hue_div,
+                        params.huesat_sat_div, params.huesat_val_div,
+                        params.huesat_has_table);
+    toIdentityHueSatMap(params.look_table, params.look_hue_div,
+                        params.look_sat_div, params.look_val_div,
+                        params.look_has_table);
+    toIdentityCurve(params.huesat_encode);
+    toIdentityCurve(params.huesat_decode);
+    toIdentityCurve(params.look_encode);
+    toIdentityCurve(params.look_decode);
+    ensureSafeHueSatMap(params.huesat_table, params.huesat_hue_div,
+                        params.huesat_sat_div, params.huesat_val_div,
+                        params.huesat_has_table);
+    ensureSafeHueSatMap(params.look_table, params.look_hue_div,
+                        params.look_sat_div, params.look_val_div,
+                        params.look_has_table);
+
+    // Dense interleaved RGB16 dummy src + RGB8 dummy dst at actual size.
+    const size_t srcElems =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
+    const size_t dstBytes =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
+    std::vector<uint16_t> dummy_src(srcElems, 0);
+    std::vector<uint8_t> dummy_dst(dstBytes, 0);
+
+    std::fprintf(stderr, "[Warmup] s4 begin %dx%d\n", width, height);
+    std::fflush(stderr);
+    (void)runRenderStage4HalideAot(dummy_src.data(),
+                                   width, height, /*src_p=*/3,
+                                   /*src_row_step=*/width * 3,
+                                   /*src_col_step=*/3,
+                                   /*src_plane_step=*/1,
+                                   /*src_scale=*/1.0f / 65535.0f,
+                                   /*dst_w=*/width, /*dst_h=*/height,
+                                   params, dummy_dst.data(),
+                                   /*fuse_rgba=*/false);
+    std::fprintf(stderr, "[Warmup] s4 done\n");
+    std::fflush(stderr);
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        warmed.insert(key);
+    }
+#else
+    (void)width;
+    (void)height;
+#endif
 }
 
 bool render_stage4_halide(dng_host& host,

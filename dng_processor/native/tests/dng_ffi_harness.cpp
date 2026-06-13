@@ -246,6 +246,23 @@ int main(int argc, char **argv) {
   }
 
   const std::string prefix = fs::path(argv[1]).stem().string();
+
+  // T5b: opt-in warmup hook so the "warmup-then-first-decode" cold tax can be
+  // measured. Off by default (env unset) and does not alter the decode path's
+  // numeric output — it only primes the GPU pipelines before the loop, exactly
+  // as the Flutter app does at startup. Enable with DNG_HARNESS_WARMUP=1.
+  if (const char *warmupEnv = std::getenv("DNG_HARNESS_WARMUP");
+      warmupEnv && warmupEnv[0] && warmupEnv[0] != '0') {
+    const auto warmStart = Clock::now();
+    const int32_t warmRc = dng_decoder_warmup_for_size(6000, 4000);
+    const double warmMs =
+        std::chrono::duration<double, std::milli>(Clock::now() - warmStart)
+            .count();
+    std::cerr << "[Harness] warmup_for_size(6000,4000) rc=" << warmRc
+              << " warmup_ms=" << std::fixed << std::setprecision(2) << warmMs
+              << "\n";
+  }
+
   for (int run = 1; run <= repeatCount; ++run) {
     const auto start = Clock::now();
     DngResult *result = dng_decode_and_process(argv[1]);

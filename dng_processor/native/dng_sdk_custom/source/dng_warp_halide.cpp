@@ -95,7 +95,17 @@ functions:
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <vector>
+#if defined(__ANDROID__)
+// W7-E prewarm per-size cache (Android-only body).
+#include <unordered_set>
+#endif
+#if defined(__ANDROID__)
+// C0 diagnostic timing (Stage3-Perf-C0) — Android-only, log-only.
+#include <chrono>
+#include <cstdio>
+#endif
 
 #include "HalideBuffer.h"
 #include "dng_demosaic_warp.h"
@@ -708,6 +718,13 @@ struct DemosaicWarpHalideAsyncImpl {
     Buffer<float> rad_buf;
     Buffer<float> tan_buf;
     Buffer<int32_t> tile_bounds_buf;
+#if defined(__ANDROID__)
+    // C0 diagnostic (Stage3-Perf-C0): time spent in the async kernel submit
+    // (dng_demosaic_warp dispatch call). Captured in _dispatch, consumed in
+    // _finish where sync_wait/d2h are measured. Android-only, log-only — no
+    // effect on the numeric path; macOS path is byte-for-byte unchanged.
+    double c0_submit_ms = 0.0;
+#endif
 };
 
 }  // namespace
@@ -854,6 +871,70 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
     return false;
 }
 
+void dng_demosaic_warp_prewarm_for_size(int width, int height) {
+#if defined(__ANDROID__)
+    // W7-E: build the fused demosaic+WarpRectilinear GPU pipeline at the actual
+    // image size during idle warmup so the first real Stage3 decode of this
+    // resolution does not pay the Vulkan pipeline-state creation + first large
+    // dispatch tax (cold S3 ~291ms vs warm dispatch ~167ms). Mirrors the
+    // halide_prewarm_polynomial3_for_size pattern: per-size cache + identity
+    // dispatch on zeroed dummy buffers, result discarded.
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    static std::mutex cache_mu;
+    static std::unordered_set<uint64_t> warmed;
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(width)) << 32) |
+                         static_cast<uint64_t>(static_cast<uint32_t>(height));
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        if (warmed.count(key)) {
+            return;
+        }
+    }
+
+    // Identity warp params (no radial / tangential distortion). This drives the
+    // exact dng_demosaic_warp AOT entry the production async path dispatches, so
+    // the Vulkan pipeline cached here is the one the real decode reuses.
+    WarpRectilinearParams params{};
+    params.planes = 3;
+    params.is_rad_nop_all = true;
+    params.is_tan_nop_all = true;
+    for (int plane = 0; plane < 3; ++plane) {
+        params.rad_params[plane][0] = 1.0f;  // r^0 coeff = 1 => identity radial
+    }
+
+    const size_t bayerElems = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t rgbElems = bayerElems * 3u;
+    std::vector<uint16_t> dummy_bayer(bayerElems, 0);
+    std::vector<uint16_t> dummy_dst(rgbElems, 0);
+
+    // Crash-attribution markers (T5b): let the on-device log pinpoint which
+    // prewarm stage faulted if the GPU pipeline build throws.
+    std::fprintf(stderr, "[Warmup] s3 begin %dx%d\n", width, height);
+    std::fflush(stderr);
+    (void)demosaic_warp_rectilinear_halide(dummy_bayer.data(),
+                                           width,
+                                           height,
+                                           params,
+                                           WarpRectilinearMode::AUTO,
+                                           dummy_dst.data());
+    std::fprintf(stderr, "[Warmup] s3 done\n");
+    std::fflush(stderr);
+
+    // Mark warmed regardless of result — even a failed dispatch means the GPU
+    // attempted pipeline creation; do not retry on every warmup call.
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        warmed.insert(key);
+    }
+#else
+    (void)width;
+    (void)height;
+#endif
+}
+
 bool apply_warp_rectilinear_to_image(dng_host& host,
                                      dng_negative& negative,
                                      const dng_opcode_WarpRectilinear& opcode,
@@ -965,6 +1046,9 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     impl->tile_bounds_buf.set_host_dirty();
     impl->dst_buf.set_host_dirty(false);
 
+#if defined(__ANDROID__)
+    const auto c0_submit_t0 = std::chrono::steady_clock::now();
+#endif
     const int result = dng_demosaic_warp(
         impl->src_buf.raw_buffer(),
         impl->rad_buf.raw_buffer(),
@@ -985,6 +1069,10 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     if (result != 0) {
         return nullptr;
     }
+#if defined(__ANDROID__)
+    impl->c0_submit_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - c0_submit_t0).count();
+#endif
 
     auto* handle = new DemosaicWarpHalideHandle();
     handle->impl = impl.release();
@@ -1002,10 +1090,38 @@ bool demosaic_warp_rectilinear_halide_finish(DemosaicWarpHalideHandle* handle) {
         return false;
     }
 
+#if defined(__ANDROID__)
+    // C0 diagnostic: split the readback into device_sync (GPU compute wait)
+    // vs copy_to_host (pure D2H transfer). NOTE (Gotcha #70): inserting an
+    // explicit device_sync here moves GPU compute time out of copy_to_host
+    // and into sync_wait, so these numbers are a *diagnostic decomposition*,
+    // not a production baseline. The fused kernel is a single Halide AOT entry
+    // (dng_demosaic_warp), so demosaic-producer vs warp-consumer GPU dispatches
+    // cannot be timed separately at the bridge — sync_wait is the whole fused
+    // GPU compute. Log-only; numeric output is identical to copy_to_host alone.
+    const auto c0_sync_t0 = std::chrono::steady_clock::now();
+    impl->dst_buf.device_sync();
+    const auto c0_sync_t1 = std::chrono::steady_clock::now();
+    const bool c0_ok = copyHalideOutputToHost(impl->dst_buf);
+    const auto c0_sync_t2 = std::chrono::steady_clock::now();
+    const double c0_sync_wait_ms =
+        std::chrono::duration<double, std::milli>(c0_sync_t1 - c0_sync_t0).count();
+    const double c0_d2h_ms =
+        std::chrono::duration<double, std::milli>(c0_sync_t2 - c0_sync_t1).count();
+    std::fprintf(stderr,
+                 "[Stage3-Perf-C0] submit=%.2f sync_wait=%.2f d2h=%.2f\n",
+                 impl->c0_submit_ms, c0_sync_wait_ms, c0_d2h_ms);
+    std::fflush(stderr);
+    if (!c0_ok) {
+        return false;
+    }
+    return true;
+#else
     if (!copyHalideOutputToHost(impl->dst_buf)) {
         return false;
     }
     return true;
+#endif
 }
 
 void demosaic_warp_rectilinear_halide_cancel(DemosaicWarpHalideHandle* handle) {

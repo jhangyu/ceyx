@@ -97,4 +97,12 @@ bool apply_warp_rectilinear_to_image(dng_host& host,
 
 const char* warpRectilinearModeName(WarpRectilinearMode mode);
 
+// W7-E: idle-time prewarm of the fused demosaic+WarpRectilinear AOT kernel at
+// the given actual image size, so the GPU pipeline state (Vulkan on Android,
+// Metal on Apple) is built and cached before the first real Stage3 decode of
+// that resolution. Dispatches one identity-warp pass on zeroed dummy buffers
+// and discards the result. Per-size cached; Android-only body (no-op on other
+// platforms so macOS warmup behaviour is unchanged).
+void dng_demosaic_warp_prewarm_for_size(int width, int height);
+
 #endif  // DNG_WARP_HALIDE_H_
