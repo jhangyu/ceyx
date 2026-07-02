@@ -10,6 +10,7 @@
 #include <iostream>
 #include <mutex>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -44,11 +45,12 @@ public:
     virtual void PerformAreaTask(dng_area_task &task, const dng_rect &area) override {
         uint32 threads = PerformAreaTaskThreads();
         uint32 maxThreads = task.MaxThreads();
+        // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
+        // Hoisted once per entry; reused below for both the M-9 create/join
+        // measurement and the per-slice launch_delay_us instrumentation.
+        const bool timing = stage1TimingEnabled();
         {
-            // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
-            // Cached via stage1TimingEnabled() (static const bool, one getenv()
-            // per process) instead of re-reading the env on every task entry.
-            if (stage1TimingEnabled()) {
+            if (timing) {
                 std::fprintf(stderr,
                     "[CDngHostEntry] PerformAreaTask threads=%u maxThreads=%u"
                     " area=(t=%d,l=%d,b=%d,r=%d) area.H=%d area.W=%d numTilesV=%d\n",
@@ -110,6 +112,19 @@ public:
         int32 currentV = area.t;
         int32 currentH = area.l;
 
+        // M-9 measurement (DNG_STAGE1_TIMING gate, zero cost when disabled):
+        // totalCreateUs sums the wall time each std::async(...) call takes to
+        // return (thread-creation overhead borne by the dispatching thread);
+        // lastWorkDoneUs tracks the latest ProcessOnThread completion
+        // timestamp across all spawned slices so we can measure the "join
+        // tail" — time spent in the f.wait() loop below after the last slice
+        // has actually finished its work (thread teardown / future
+        // synchronization overhead). spawnCount is the number of std::async
+        // calls actually issued (tilesForThisThread==0 slices are skipped).
+        long long totalCreateUs = 0;
+        uint32 spawnCount = 0;
+        std::atomic<long long> lastWorkDoneUs{0};
+
         for (uint32 i = 0; i < threads; ++i) {
             int32 tilesForThisThread = tilesPerThread + (i < (uint32)extraTiles ? 1 : 0);
             if (tilesForThisThread == 0) continue;
@@ -127,12 +142,8 @@ public:
                 currentV += heightForThisThread;
             }
 
-            // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
-            // L-3: was a raw getenv() per slice (×threads per area task);
-            // now shares the same process-wide cached value.
-            const bool timing = stage1TimingEnabled();
             auto t_dispatch = std::chrono::steady_clock::now();
-            futures.push_back(std::async(std::launch::async, [this, &task, i, subArea, tileSize, &exceptionMutex, &caughtException, t_dispatch, timing]() {
+            futures.push_back(std::async(std::launch::async, [this, &task, i, subArea, tileSize, &exceptionMutex, &caughtException, t_dispatch, timing, &lastWorkDoneUs]() {
                 if (timing) {
                     auto t_enter = std::chrono::steady_clock::now();
                     auto launch_delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -146,6 +157,19 @@ public:
                 }
                 try {
                     task.ProcessOnThread(i, subArea, tileSize, Sniffer());
+                    if (timing) {
+                        // M-9: record this slice's completion time; the max
+                        // across all slices marks when "real work" finished,
+                        // vs. when the main thread actually observes all
+                        // futures as joined (see join_tail_us below).
+                        auto t_done = std::chrono::steady_clock::now();
+                        long long done_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            t_done.time_since_epoch()).count();
+                        long long prev = lastWorkDoneUs.load(std::memory_order_relaxed);
+                        while (done_us > prev &&
+                               !lastWorkDoneUs.compare_exchange_weak(prev, done_us,
+                                   std::memory_order_relaxed)) {}
+                    }
                 } catch (...) {
                     std::lock_guard<std::mutex> lock(exceptionMutex);
                     if (!caughtException) {
@@ -153,11 +177,39 @@ public:
                     }
                 }
             }));
+
+            if (timing) {
+                auto t_created = std::chrono::steady_clock::now();
+                totalCreateUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                    t_created - t_dispatch).count();
+            }
+            ++spawnCount;
         }
 
         // Wait for all threads to finish
         for (auto &f : futures) {
             f.wait();
+        }
+
+        // M-9: join tail = time between the last slice's actual work
+        // completing (lastWorkDoneUs) and this point, where the main thread
+        // has observed every future as joined. Only meaningful if at least
+        // one slice recorded a completion timestamp.
+        if (timing) {
+            long long lastDone = lastWorkDoneUs.load(std::memory_order_relaxed);
+            long long joinTailUs = 0;
+            if (lastDone > 0) {
+                auto t_joined = std::chrono::steady_clock::now();
+                long long joined_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    t_joined.time_since_epoch()).count();
+                joinTailUs = joined_us - lastDone;
+            }
+            std::fprintf(stderr,
+                "[CDngHostTiming] spawn_count=%u create_us=%lld join_tail_us=%lld"
+                " area=(t=%d,l=%d,b=%d,r=%d)\n",
+                spawnCount, totalCreateUs, joinTailUs,
+                area.t, area.l, area.b, area.r);
+            std::fflush(stderr);
         }
 
         // Finish the task
