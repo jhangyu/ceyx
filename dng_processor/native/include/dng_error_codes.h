@@ -14,11 +14,6 @@
 
 #pragma once
 
-#ifdef __cplusplus
-#include <stdexcept>
-#include <string>
-#endif
-
 // ---------------------------------------------------------------------------
 // Pipeline error codes (written by dng_pipeline_v2.cpp)
 // ---------------------------------------------------------------------------
@@ -37,20 +32,11 @@ enum DngErrorCode {
 };
 
 // ---------------------------------------------------------------------------
-// W5 Option B typed exception: thrown by dng_opcodelist2_halide.cpp when a
-// GPU dispatch fails, caught in dng_pipeline_v2.cpp BEFORE the generic
-// std::exception handler. The throw is deliberate control flow to bypass
-// SDK CPU fallback at the opcode-loop boundary; a status-return redesign
-// at that boundary is intentionally deferred.
+// M-6: DngOl2DispatchError exception class has been removed.
+//
+// OpcodeList2 GPU dispatch failure is now reported via the
+// halide_stage2_ol2_dispatch_failed() status-return flag
+// (dng_opcodelist2_halide.h).  The SDK opcode loop (dng_opcode_list.cpp)
+// checks the flag after each dispatch call and breaks; dng_pipeline_v2.cpp
+// checks it after BuildStage2Image() and maps to kDngErrOl2DispatchFailed.
 // ---------------------------------------------------------------------------
-#ifdef __cplusplus
-
-class DngOl2DispatchError : public std::runtime_error {
- public:
-  explicit DngOl2DispatchError(const std::string &msg)
-      : std::runtime_error(msg) {}
-  explicit DngOl2DispatchError(const char *msg)
-      : std::runtime_error(msg) {}
-};
-
-#endif // __cplusplus

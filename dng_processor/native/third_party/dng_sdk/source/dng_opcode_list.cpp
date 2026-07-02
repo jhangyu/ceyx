@@ -125,18 +125,25 @@ void dng_opcode_list::Apply (dng_host &host,
 			// Phase 10 Sprint C3/C4: try Halide GPU dispatch for Stage2
 			// MapPolynomial. The batched path may consume three consecutive
 			// RGB plane opcodes; fallback handles one opcode at a time.
-			if (fStage == 2 && image.Get () != nullptr &&
-				halide_try_dispatch_opcode2_batch (host, negative, *this, index,
-												   *image.Get ()) == 3)
+			// M-6: dispatch failure is now signaled via a flag (no throw);
+			// check after each dispatch call and break to prevent SDK CPU
+			// fallback on GPU failure.
+			if (fStage == 2 && image.Get () != nullptr)
 				{
-				index += 2;
-				continue;
-				}
-
-			if (fStage == 2 && image.Get () != nullptr &&
-				halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
-				{
-				continue;
+				if (halide_try_dispatch_opcode2_batch (host, negative, *this,
+													   index, *image.Get ()) == 3)
+					{
+					index += 2;
+					continue;
+					}
+				if (halide_stage2_ol2_dispatch_failed ())
+					break;
+				if (halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
+					{
+					continue;
+					}
+				if (halide_stage2_ol2_dispatch_failed ())
+					break;
 				}
 
 			opcode.Apply (host,

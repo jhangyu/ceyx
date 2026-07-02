@@ -24,15 +24,16 @@ class dng_opcode_list;
 
 // Returns true if the opcode was handled on GPU (host MUST skip SDK Apply).
 // Returns false to fall through to SDK handling only when the opcode shape is
-// unsupported or the route is disabled. GPU dispatch failure throws instead of
-// silently falling back to SDK CPU processing.
+// unsupported or the route is disabled. GPU dispatch failure sets the
+// halide_stage2_ol2_dispatch_failed() flag and returns false; caller must check.
 bool halide_try_dispatch_opcode2(dng_host &host,
                                  dng_opcode &opcode,
                                  dng_image &image);
 
 // Returns the number of consecutive Stage2 opcodes handled on GPU. Currently
 // returns 3 for the batched RGB MapPolynomial fast path, or 0 when the batch
-// shape is unsupported. GPU dispatch failure throws instead of falling back.
+// shape is unsupported. GPU dispatch failure sets the
+// halide_stage2_ol2_dispatch_failed() flag and returns 0; caller must check.
 uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
                                            dng_negative &negative,
                                            dng_opcode_list &list,
@@ -56,6 +57,13 @@ void halide_stage2_ol2_set_device_handoff_enabled(bool enabled);
 void halide_stage2_ol2_clear_device_handoff();
 bool halide_stage2_ol2_get_device_handoff(Stage2Opcode2DeviceHandoff &out);
 bool halide_stage2_ol2_device_handoff_copy_to_host();
+
+// M-6: Query/clear the OL2 GPU dispatch failure flag.  Replaces the old
+// DngOl2DispatchError throw-as-control-flow path.  When a GPU dispatch fails,
+// the dispatch functions set this flag and return normally (0 for batch, false
+// for single); the caller (SDK opcode loop + pipeline) checks and acts on it.
+bool halide_stage2_ol2_dispatch_failed();
+void halide_stage2_ol2_clear_dispatch_failure();
 
 // Lazy actual-size prewarm for the batched 3-plane polynomial kernel.
 // Fires a dummy dispatch at (width x height) if that dimension pair has not

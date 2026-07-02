@@ -74,7 +74,7 @@ functions:
 #include <dng_render.h>
 
 #include "ConcurrentDngHost.h"
-#include "dng_error_codes.h"  // W5: unified error codes + DngOl2DispatchError
+#include "dng_error_codes.h"  // W5: unified DngErrorCode enum
 #include "dng_mosaic_halide.h"
 #include "dng_opcodelist2_halide.h"
 #include "dng_render_halide.h"
@@ -1131,7 +1131,16 @@ bool decodeStages(ConcurrentDngHost &host,
     const bool enableStage2DeviceHandoff =
         !isBayer && config.route.stage2_stage4_device_handoff;
     ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
+    // M-6: clear any stale dispatch-failure flag before entering BuildStage2.
+    halide_stage2_ol2_clear_dispatch_failure();
     negative.BuildStage2Image(host);
+    // M-6: check the dispatch-failure flag set by the OL2 bridge (status-return
+    // path, replaces the old DngOl2DispatchError throw-as-control-flow).
+    if (halide_stage2_ol2_dispatch_failed()) {
+      result.error_code = kDngErrOl2DispatchFailed;
+      std::cerr << "[PipelineV2] OL2 dispatch failed (status-return)\n";
+      return false;
+    }
   }
 
   const auto stage2End = Clock::now();
@@ -1420,13 +1429,8 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     result.error_code = e.ErrorCode();
     std::cerr << "[PipelineV2] DNG exception: " << result.error_code << "\n";
     return false;
-  } catch (const DngOl2DispatchError &e) {
-    // W5 (M-6 Option B): OpcodeList2 Halide GPU dispatch threw a typed
-    // exception to bypass the SDK CPU fallback loop. Caught here before the
-    // generic std::exception handler so it gets its own error code.
-    result.error_code = kDngErrOl2DispatchFailed;
-    std::cerr << "[PipelineV2] OL2 dispatch error: " << e.what() << "\n";
-    return false;
+  // M-6: DngOl2DispatchError catch removed — dispatch failure is now handled
+  // via halide_stage2_ol2_dispatch_failed() status-return in decodeStages().
   } catch (const std::exception &e) {
     result.error_code = kDngErrStdException;
     std::cerr << "[PipelineV2] Exception: " << e.what() << "\n";

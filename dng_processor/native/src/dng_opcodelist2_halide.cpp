@@ -40,7 +40,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "dng_error_codes.h"  // W5: DngOl2DispatchError typed exception (includes <stdexcept>)
+// M-6: dng_error_codes.h no longer needed here — DngOl2DispatchError removed,
+// dispatch failure now signaled via g_ol2_dispatch_failed flag.
 #include <utility>
 
 #include "HalideBuffer.h"
@@ -170,6 +171,37 @@ struct PolynomialTiming {
 std::atomic<bool> g_polynomial_first_seen{false};
 std::atomic<bool> g_polynomial3_first_seen{false};
 
+// M-6: Dispatch failure flag.  Set by halide_try_dispatch_opcode2{_batch} on
+// GPU dispatch failure; checked by the SDK opcode loop (to break) and by
+// pipeline_v2 (to map to kDngErrOl2DispatchFailed).  Replaces the old
+// DngOl2DispatchError throw-as-control-flow.  Protected by
+// pipelineSingleFlightMutex (single-flight invariant).
+std::atomic<bool> g_ol2_dispatch_failed{false};
+std::string g_ol2_dispatch_failure_msg;  // NOT thread-safe to read without pipelineSingleFlightMutex
+
+// M-5: Value object grouping the writeback destination pointer and its
+// interleaved layout geometry.  Replaces the previous comment-only lifetime
+// contract on the raw image_base / img_*_step fields.  No heap allocation;
+// trivially copyable.
+//
+// Lifetime contract: the caller of publish_device_handoff() guarantees that
+// `base` remains valid until halide_stage2_ol2_device_handoff_copy_to_host()
+// completes or halide_stage2_ol2_clear_device_handoff() is called.  This is
+// structurally enforced by the pipeline single-flight mutex
+// (pipelineSingleFlightMutex in dng_pipeline_v2.cpp).
+struct WritebackTarget {
+    uint16_t *base = nullptr;
+    int32_t col_step = 0;
+    int32_t row_step = 0;
+    int32_t plane_step = 0;
+
+    // True iff a valid writeback destination has been captured.
+    bool has_target() const { return base != nullptr; }
+
+    // Reset to empty / invalid state.
+    void reset() { *this = WritebackTarget{}; }
+};
+
 struct DeviceHandoffState {
     std::mutex mu;
     bool requested = false;
@@ -186,16 +218,10 @@ struct DeviceHandoffState {
     // here (under mu) so it outlives the call frame and the device buffer can
     // safely reference it.
     std::vector<uint16_t> poly3_scratch;
-    // Pointer to the dng_image-internal memory where results must be written
-    // back when copy_to_host is eventually requested.  The caller guarantees
-    // this pointer remains valid until halide_stage2_ol2_device_handoff_copy_to_host()
-    // completes.
-    uint16_t *image_base = nullptr;
-    // The interleaved layout geometry needed to memcpy from dense scratch back
-    // into the image buffer.  Only used when image_base != nullptr.
-    int32_t img_col_step = 0;
-    int32_t img_row_step = 0;
-    int32_t img_plane_step = 0;
+    // M-5: Destination for scattering GPU results back into the dng_image host
+    // memory.  Validity is tied to the pipeline single-flight mutex; the
+    // writeback is consumed (or reset) before the mutex is released.
+    WritebackTarget writeback;
 };
 
 DeviceHandoffState &device_handoff_state() {
@@ -209,8 +235,8 @@ bool device_handoff_requested() {
     return state.requested;
 }
 
-// Publish the device-resident dst buffer together with the image pointer so
-// that copy_to_host() can write results back to the SDK image.
+// Publish the device-resident dst buffer together with the writeback target so
+// that copy_to_host() can scatter results back into the SDK image.
 // scratch_ptr must point to interleaved RGB memory already owned by
 // state.poly3_scratch.
 void publish_device_handoff(Halide::Runtime::Buffer<uint16_t> &&buffer,
@@ -218,10 +244,7 @@ void publish_device_handoff(Halide::Runtime::Buffer<uint16_t> &&buffer,
                             uint32_t height,
                             uint32_t planes,
                             uint32_t pixel_range,
-                            uint16_t *image_base,
-                            int32_t img_col_step,
-                            int32_t img_row_step,
-                            int32_t img_plane_step) {
+                            const WritebackTarget &target) {
     DeviceHandoffState &state = device_handoff_state();
     std::lock_guard<std::mutex> lock(state.mu);
     state.buffer = std::make_unique<Halide::Runtime::Buffer<uint16_t>>(
@@ -230,10 +253,7 @@ void publish_device_handoff(Halide::Runtime::Buffer<uint16_t> &&buffer,
     state.height = height;
     state.planes = planes;
     state.pixel_range = pixel_range;
-    state.image_base = image_base;
-    state.img_col_step = img_col_step;
-    state.img_row_step = img_row_step;
-    state.img_plane_step = img_plane_step;
+    state.writeback = target;
     state.host_copied = false;
     state.valid = true;
 }
@@ -752,20 +772,18 @@ bool run_polynomial3_kernel(uint16_t *base,
 
     if (defer_copy_to_host) {
         // Leave GPU result device-resident.  Publish dst_buf together with the
-        // image pointer so the eventual copy_to_host() call can scatter results
-        // back into the SDK image.  scratch_ptr remains valid because
+        // writeback target so the eventual copy_to_host() call can scatter
+        // results back into the SDK image.  scratch_ptr remains valid because
         // poly3_scratch is owned by DeviceHandoffState and is never freed until
         // halide_stage2_ol2_clear_device_handoff() is called.
+        const WritebackTarget target{base, col_step, row_step, plane_step};
         const auto handoff_start = std::chrono::high_resolution_clock::now();
         publish_device_handoff(std::move(dst_buf),
                                static_cast<uint32_t>(width),
                                static_cast<uint32_t>(height),
                                3,
                                pixel_range_u32,
-                               base,
-                               col_step,
-                               row_step,
-                               plane_step);
+                               target);
         const auto handoff_end = std::chrono::high_resolution_clock::now();
         if (timing) {
             timing->handoff_publish_ms =
@@ -970,6 +988,16 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
     }
 }
 
+// M-6: public dispatch-failure query and clear functions.
+bool halide_stage2_ol2_dispatch_failed() {
+    return g_ol2_dispatch_failed.load(std::memory_order_acquire);
+}
+
+void halide_stage2_ol2_clear_dispatch_failure() {
+    g_ol2_dispatch_failed.store(false, std::memory_order_release);
+    g_ol2_dispatch_failure_msg.clear();
+}
+
 void halide_stage2_ol2_set_device_handoff_enabled(bool enabled) {
     DeviceHandoffState &state = device_handoff_state();
     std::lock_guard<std::mutex> lock(state.mu);
@@ -986,10 +1014,7 @@ void halide_stage2_ol2_clear_device_handoff() {
     state.height = 0;
     state.planes = 0;
     state.pixel_range = 0;
-    state.image_base = nullptr;
-    state.img_col_step = 0;
-    state.img_row_step = 0;
-    state.img_plane_step = 0;
+    state.writeback.reset();
     // Note: poly3_scratch vector is intentionally NOT cleared here — its
     // allocation is reused across frames (grow-on-demand, never shrinks).
 }
@@ -1026,17 +1051,17 @@ bool halide_stage2_ol2_device_handoff_copy_to_host() {
         return false;
     }
     double scatter_ms = 0.0;
-    // If the caller recorded an image pointer, scatter scratch → dng_image.
-    if (state.image_base != nullptr) {
+    // If the caller recorded a writeback target, scatter scratch → dng_image.
+    if (state.writeback.has_target()) {
         const uint16_t *scratch = state.poly3_scratch.data();
         const auto scatter_start = std::chrono::high_resolution_clock::now();
         scatter_poly3_to_image(scratch,
-                               state.image_base,
+                               state.writeback.base,
                                static_cast<int32_t>(state.width),
                                static_cast<int32_t>(state.height),
-                               state.img_col_step,
-                               state.img_row_step,
-                               state.img_plane_step);
+                               state.writeback.col_step,
+                               state.writeback.row_step,
+                               state.writeback.plane_step);
         const auto scatter_end = std::chrono::high_resolution_clock::now();
         scatter_ms = dng_timing::elapsed_ms(scatter_start, scatter_end);
     }
@@ -1153,14 +1178,14 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     const auto dispatch_end = std::chrono::high_resolution_clock::now();
     detail.dispatch_call_ms = dng_timing::elapsed_ms(dispatch_start, dispatch_end);
     if (!ok) {
-        // W5 (M-6 Option B): deliberate throw-as-control-flow. The opcode
-        // loop in dng_opcode_list.cpp (third_party) cannot be modified to
-        // accept a status return; the typed exception lets dng_pipeline_v2.cpp
-        // catch it separately from generic std::exception and map it to
-        // kDngErrOl2DispatchFailed. Status-return redesign at the opcode-loop
-        // boundary is intentionally deferred.
-        throw DngOl2DispatchError(
-            "[OpcodeList2Halide] batched GPU dispatch failed; refusing SDK CPU fallback");
+        // M-6: set dispatch-failure flag and return 0 (= not handled) so the
+        // SDK opcode loop can check the flag and break.  Replaces the old
+        // throw-as-control-flow via DngOl2DispatchError.
+        g_ol2_dispatch_failed.store(true, std::memory_order_release);
+        g_ol2_dispatch_failure_msg =
+            "[OpcodeList2Halide] batched GPU dispatch failed; refusing SDK CPU fallback";
+        std::fprintf(stderr, "%s\n", g_ol2_dispatch_failure_msg.c_str());
+        return 0;
     }
     if (map_poly_timing_enabled()) {
         const double total = detail.prewarm_ms + detail.gather_ms +
@@ -1292,10 +1317,14 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
                                 dispatch_end, /*has_handoff=*/false);
     }
     if (!ok) {
-        // W5 (M-6 Option B): deliberate throw-as-control-flow — same
-        // rationale as the batched path above. See dng_error_codes.h.
-        throw DngOl2DispatchError(
-            "[OpcodeList2Halide] GPU dispatch failed; refusing SDK CPU fallback");
+        // M-6: set dispatch-failure flag and return false (= not handled) so
+        // the SDK opcode loop can check the flag and break.  Replaces the old
+        // throw-as-control-flow via DngOl2DispatchError.
+        g_ol2_dispatch_failed.store(true, std::memory_order_release);
+        g_ol2_dispatch_failure_msg =
+            "[OpcodeList2Halide] GPU dispatch failed; refusing SDK CPU fallback";
+        std::fprintf(stderr, "%s\n", g_ol2_dispatch_failure_msg.c_str());
+        return false;
     }
     return true;
 }

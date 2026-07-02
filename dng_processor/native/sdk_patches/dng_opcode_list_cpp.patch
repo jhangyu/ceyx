@@ -1,46 +1,50 @@
 diff --git a/dng_processor/native/third_party/dng_sdk/source/dng_opcode_list.cpp b/dng_processor/native/third_party/dng_sdk/source/dng_opcode_list.cpp
-index a5af89a..fd496dc 100644
+index fd496dc..a95286a 100644
 --- a/dng_processor/native/third_party/dng_sdk/source/dng_opcode_list.cpp
 +++ b/dng_processor/native/third_party/dng_sdk/source/dng_opcode_list.cpp
-@@ -21,6 +21,8 @@
- #include "dng_negative.h"
- #include "dng_tag_values.h"
- #include "dng_utils.h"
-+// Phase 10 Sprint C3: Halide GPU dispatch bridge for Stage 2 OpcodeList2.
-+#include "dng_opcodelist2_halide.h"
- 
- #include <algorithm>
- 
-@@ -120,13 +122,29 @@ void dng_opcode_list::Apply (dng_host &host,
+@@ -122,22 +122,29 @@ void dng_opcode_list::Apply (dng_host &host,
  		
  		if (opcode.AboutToApply (host, negative))
  			{
--						
+-			// Phase 10 Sprint C3/C4: try Halide GPU dispatch for Stage2
+-			// MapPolynomial. The batched path may consume three consecutive
+-			// RGB plane opcodes; fallback handles one opcode at a time.
+-			if (fStage == 2 && image.Get () != nullptr &&
+-				halide_try_dispatch_opcode2_batch (host, negative, *this, index,
+-												   *image.Get ()) == 3)
+-				{
+-				index += 2;
+-				continue;
+-				}
+-
+-			if (fStage == 2 && image.Get () != nullptr &&
+-				halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
+-				{
+-				continue;
+-				}
 +			// Phase 10 Sprint C3/C4: try Halide GPU dispatch for Stage2
 +			// MapPolynomial. The batched path may consume three consecutive
 +			// RGB plane opcodes; fallback handles one opcode at a time.
-+			if (fStage == 2 && image.Get () != nullptr &&
-+				halide_try_dispatch_opcode2_batch (host, negative, *this, index,
-+												   *image.Get ()) == 3)
++			// M-6: dispatch failure is now signaled via a flag (no throw);
++			// check after each dispatch call and break to prevent SDK CPU
++			// fallback on GPU failure.
++			if (fStage == 2 && image.Get () != nullptr)
 +				{
-+				index += 2;
-+				continue;
++				if (halide_try_dispatch_opcode2_batch (host, negative, *this,
++													   index, *image.Get ()) == 3)
++					{
++					index += 2;
++					continue;
++					}
++				if (halide_stage2_ol2_dispatch_failed ())
++					break;
++				if (halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
++					{
++					continue;
++					}
++				if (halide_stage2_ol2_dispatch_failed ())
++					break;
 +				}
-+
-+			if (fStage == 2 && image.Get () != nullptr &&
-+				halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
-+				{
-+				continue;
-+				}
-+
+ 
  			opcode.Apply (host,
  						  negative,
- 						  image);
--			
-+
- 			}
--		
-+
- 		}
- 
- 	}
