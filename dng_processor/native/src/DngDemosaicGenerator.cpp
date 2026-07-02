@@ -25,43 +25,7 @@ public:
             return src(mx, my);
         };
 
-        Expr center = sample(x, y);
-        Expr n = sample(x, y - 1);
-        Expr s = sample(x, y + 1);
-        Expr w = sample(x - 1, y);
-        Expr e = sample(x + 1, y);
-        Expr nw = sample(x - 1, y - 1);
-        Expr ne = sample(x + 1, y - 1);
-        Expr sw = sample(x - 1, y + 1);
-        Expr se = sample(x + 1, y + 1);
-
-        Expr even_row = (y % 2) == 0;
-        Expr even_col = (x % 2) == 0;
-        Expr red_site = even_row && even_col;
-        Expr blue_site = !even_row && !even_col;
-        Expr green_on_red_row = even_row && !even_col;
-
-        Expr r = select(red_site,
-                        center,
-                        blue_site,
-                        avg4_u16(nw, ne, sw, se),
-                        green_on_red_row,
-                        avg2_u16(w, e),
-                        avg2_u16(n, s));
-
-        Expr g = select(red_site || blue_site,
-                        avg4_u16(n, s, w, e),
-                        center);
-
-        Expr b = select(red_site,
-                        avg4_u16(nw, ne, sw, se),
-                        blue_site,
-                        center,
-                        green_on_red_row,
-                        avg2_u16(n, s),
-                        avg2_u16(w, e));
-
-        dst(x, y, c) = select(c == 0, r, c == 1, g, b);
+        dst(x, y, c) = build_demosaic_expr(x, y, c, sample);
     }
 
     void schedule() {

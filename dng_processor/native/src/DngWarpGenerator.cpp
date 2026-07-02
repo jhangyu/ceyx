@@ -59,131 +59,41 @@ public:
         Expr plane = select(planes <= 1, 0, select(c < planes, c, 0));
         plane = clamp(plane, 0, rad.dim(1).extent() - 1);
 
-        Expr base_x, base_y, frac_x_idx, frac_y_idx;
+        // Warp coordinates: either from precomputed host-CPU buffers or from
+        // the polynomial distortion shared with DngDemosaicWarp.
+        WarpCoords coords;
         if (precompute_coords) {
             // Pre-computed path: read host-CPU double-precision coords directly.
             // Skips polynomial / floor / bin to avoid Metal fast-math drift.
-            base_x = pre_base_x(x, y, c);
-            base_y = pre_base_y(x, y, c);
-            frac_x_idx = clamp(pre_frac_x_idx(x, y, c), 0, kResampleSubsampleCount2D - 1);
-            frac_y_idx = clamp(pre_frac_y_idx(x, y, c), 0, kResampleSubsampleCount2D - 1);
+            coords.base_x     = pre_base_x(x, y, c);
+            coords.base_y     = pre_base_y(x, y, c);
+            coords.frac_x_idx = clamp(pre_frac_x_idx(x, y, c), 0,
+                                      kResampleSubsampleCount2D - 1);
+            coords.frac_y_idx = clamp(pre_frac_y_idx(x, y, c), 0,
+                                      kResampleSubsampleCount2D - 1);
         } else {
-            Expr diff_x = cast<float>(x) - center_x;
-            Expr diff_y = cast<float>(y) - center_y;
-
-            Expr diff_norm_x = diff_x * inv_norm_radius;
-            Expr diff_norm_y = diff_y * inv_norm_radius;
-            Expr diff_scaled_x = diff_norm_x;
-            Expr diff_scaled_y = diff_norm_y * pixel_scale_v;
-
-            Expr rr = min(diff_scaled_x * diff_scaled_x + diff_scaled_y * diff_scaled_y, 1.0f);
-
-            Expr k0 = rad(0, plane);
-            Expr k1 = rad(1, plane);
-            Expr k2 = rad(2, plane);
-            Expr k3 = rad(3, plane);
-            Expr ratio = k0 + rr * (k1 + rr * (k2 + rr * k3));
-
-            Expr kt0 = tan(0, plane);
-            Expr kt1 = tan(1, plane);
-
-            Expr tan_v = kt0 * (rr + 2.0f * diff_scaled_y * diff_scaled_y) +
-                         (2.0f * kt1 * diff_scaled_x * diff_scaled_y);
-            Expr tan_h = kt1 * (rr + 2.0f * diff_scaled_x * diff_scaled_x) +
-                         (2.0f * kt0 * diff_scaled_x * diff_scaled_y);
-
-            Expr src_x_rad = center_x + diff_x * ratio;
-            Expr src_y_rad = center_y + diff_y * ratio;
-            Expr src_x_tan = cast<float>(x) + norm_radius * tan_h;
-            Expr src_y_tan = cast<float>(y) + norm_radius * tan_v * pixel_scale_v_inv;
-            Expr src_x_both = center_x + norm_radius * (diff_norm_x * ratio + tan_h);
-            Expr src_y_both = center_y + norm_radius * (diff_norm_y * ratio + tan_v * pixel_scale_v_inv);
-
-            Expr src_x = select(is_tan_nop_all != 0,
-                                src_x_rad,
-                                is_rad_nop_all != 0,
-                                src_x_tan,
-                                src_x_both);
-            Expr src_y = select(is_tan_nop_all != 0,
-                                src_y_rad,
-                                is_rad_nop_all != 0,
-                                src_y_tan,
-                                src_y_both);
-
-            Expr src_x_floor = floor(src_x);
-            Expr src_y_floor = floor(src_y);
-
-            frac_x_idx = clamp(cast<int>(floor((src_x - src_x_floor) * kResampleSubsampleCount2D)),
-                               0,
-                               kResampleSubsampleCount2D - 1);
-            frac_y_idx = clamp(cast<int>(floor((src_y - src_y_floor) * kResampleSubsampleCount2D)),
-                               0,
-                               kResampleSubsampleCount2D - 1);
-
-            base_x = cast<int>(src_x_floor) - 1;
-            base_y = cast<int>(src_y_floor) - 1;
+            coords = compute_warp_polynomial(
+                x, y, plane,
+                center_x, center_y, norm_radius, inv_norm_radius,
+                pixel_scale_v, pixel_scale_v_inv,
+                is_rad_nop_all, is_tan_nop_all,
+                [&](int i, Expr p) { return rad(i, p); },
+                [&](int i, Expr p) { return tan(i, p); });
         }
 
-        Expr safe_tile_w = max(tile_width, 1);
-        Expr safe_tile_h = max(tile_height, 1);
-        Expr tile_x = clamp(x / safe_tile_w, 0, tile_bounds.dim(1).extent() - 1);
-        Expr tile_y = clamp(y / safe_tile_h, 0, tile_bounds.dim(2).extent() - 1);
-
-        Expr min_base_x = tile_bounds(0, tile_x, tile_y);
-        Expr max_base_x = tile_bounds(1, tile_x, tile_y);
-        Expr min_base_y = tile_bounds(2, tile_x, tile_y);
-        Expr max_base_y = tile_bounds(3, tile_x, tile_y);
-
-        Expr clipped_x = base_x < min_base_x || base_x > max_base_x;
-        Expr clipped_y = base_y < min_base_y || base_y > max_base_y;
-
-        Expr base_x_clamped = clamp(base_x, min_base_x, max_base_x);
-        Expr base_y_clamped = clamp(base_y, min_base_y, max_base_y);
-
-        Expr frac_x = select(clipped_x,
-                             0.0f,
-                             cast<float>(frac_x_idx) / kResampleSubsampleCount2D);
-        Expr frac_y = select(clipped_y,
-                             0.0f,
-                             cast<float>(frac_y_idx) / kResampleSubsampleCount2D);
-
-        Expr w0x = cubic_weight((-1.0f) - frac_x);
-        Expr w1x = cubic_weight(0.0f - frac_x);
-        Expr w2x = cubic_weight(1.0f - frac_x);
-        Expr w3x = cubic_weight(2.0f - frac_x);
-        Expr sumx = w0x + w1x + w2x + w3x;
-        w0x /= sumx;
-        w1x /= sumx;
-        w2x /= sumx;
-        w3x /= sumx;
-
-        Expr w0y = cubic_weight((-1.0f) - frac_y);
-        Expr w1y = cubic_weight(0.0f - frac_y);
-        Expr w2y = cubic_weight(1.0f - frac_y);
-        Expr w3y = cubic_weight(2.0f - frac_y);
-        Expr sumy = w0y + w1y + w2y + w3y;
-        w0y /= sumy;
-        w1y /= sumy;
-        w2y /= sumy;
-        w3y /= sumy;
-
+        // Clamped float view of src for bicubic sampling.
         src_clamped(x, y, c) = cast<float>(src(clamp(x, 0, src.dim(0).extent() - 1),
-                                             clamp(y, 0, src.dim(1).extent() - 1),
-                                             clamp(c, 0, src.dim(2).extent() - 1)));
+                                               clamp(y, 0, src.dim(1).extent() - 1),
+                                               clamp(c, 0, src.dim(2).extent() - 1)));
 
-        auto sample_row = [&](Expr yy, Expr wx0, Expr wx1, Expr wx2, Expr wx3) {
-            return wx0 * src_clamped(base_x_clamped + 0, yy, c) +
-                   wx1 * src_clamped(base_x_clamped + 1, yy, c) +
-                   wx2 * src_clamped(base_x_clamped + 2, yy, c) +
-                   wx3 * src_clamped(base_x_clamped + 3, yy, c);
-        };
+        // Bicubic 4×4 interpolation (shared with DngDemosaicWarp).
+        Expr value = build_warp_bicubic_expr(
+            x, y, c, coords,
+            tile_width, tile_height,
+            [&](int i, Expr tx, Expr ty) { return tile_bounds(i, tx, ty); },
+            tile_bounds.dim(1).extent(), tile_bounds.dim(2).extent(),
+            [&](Expr sx, Expr sy, Expr sc) { return src_clamped(sx, sy, sc); });
 
-        Expr row0 = sample_row(base_y_clamped + 0, w0x, w1x, w2x, w3x);
-        Expr row1 = sample_row(base_y_clamped + 1, w0x, w1x, w2x, w3x);
-        Expr row2 = sample_row(base_y_clamped + 2, w0x, w1x, w2x, w3x);
-        Expr row3 = sample_row(base_y_clamped + 3, w0x, w1x, w2x, w3x);
-
-        Expr value = w0y * row0 + w1y * row1 + w2y * row2 + w3y * row3;
         dst(x, y, c) = cast<uint16_t>(clamp(value + 0.5f, 0.0f, 65535.0f));
     }
 
