@@ -110,8 +110,9 @@ set(DNG_SDK_DIR ${THIRD_PARTY_DIR}/dng_sdk/source)
 file(GLOB_RECURSE DNG_SOURCES "${DNG_SDK_DIR}/*.cpp")
 list(REMOVE_ITEM DNG_SOURCES "${DNG_SDK_DIR}/dng_xmp_sdk.cpp" "${DNG_SDK_DIR}/dng_xmp.cpp")
 
-# DNG SDK custom implementations (Halide-accelerated)
-    # Note: dng_mosaic_halide.cpp is built into targets that need Stage3 demosaic.
+# Halide-accelerated bridge implementations (Stage3 demosaic, warp, Stage4 render).
+    # W6 H-3: bridge .cpp live in src/ (auto-discovered by glob for dng_decoder_native;
+    # explicitly listed for standalone test targets).
     # Production/test_decode call the AOT entry directly and fail fast if GPU is unsupported.
 
 # Inject our XMP stubs into the base DNG SDK library so its internal references resolve
@@ -154,10 +155,8 @@ file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
 # placed under src/research/ is automatically excluded without updating regex.
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/research/.*")
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp$")
-list(APPEND NATIVE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_mosaic_halide.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_warp_halide.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source/dng_render_halide.cpp")
+# W6 H-3: bridge .cpp moved from dng_sdk_custom/source/ into src/;
+# now auto-discovered by file(GLOB_RECURSE) above.
 # Only add target if there are sources, dummy for now to avoid target creation error
 if (NOT NATIVE_SOURCES)
     file(WRITE ${SRC_DIR}/dummy.cpp "void dummy(){}")
@@ -168,7 +167,6 @@ add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
 target_include_directories(dng_decoder_native PUBLIC
     ${INC_DIR}
     ${SRC_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR})
 if(DNG_USE_LIBJPEG)
     target_link_libraries(dng_decoder_native dng_sdk ${JPEG_LIBRARIES})
@@ -189,10 +187,9 @@ if(NOT DNG_CROSS_BUILD)
     list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
     find_package(Halide REQUIRED)
 
-    # AOT Generator for Halide Pipeline
-    add_executable(dng_generator ${SRC_DIR}/DngHalideGenerator.cpp)
-    target_include_directories(dng_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_generator PRIVATE Halide::Generator)
+    # W6 M-4: DngHalideGenerator.cpp (legacy dng_pipeline all-in-one kernel) archived.
+    # The standalone halide_runtime.a below replaces its runtime-anchor role.
+    # Source retained in src/ for reference; not compiled.
 
     add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
     target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
@@ -280,13 +277,15 @@ set(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE "-1" CACHE STRING
 # =============================================================================
 if(NOT DNG_CROSS_BUILD)
 
+# W6 M-4: Standalone Halide runtime replaces legacy dng_pipeline.a runtime anchor.
+# Any generator binary can emit the runtime via `-r`; we use dng_demosaic_generator.
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_pipeline.h
-    COMMAND dng_generator -g dng_pipeline -f dng_pipeline -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
-    DEPENDS dng_generator
-    COMMENT "Generating Halide AOT Pipeline..."
+    OUTPUT ${HALIDE_OUTPUT_DIR}/halide_runtime.a
+    COMMAND dng_demosaic_generator -r halide_runtime -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
+    DEPENDS dng_demosaic_generator
+    COMMENT "Generating standalone Halide runtime..."
 )
-add_custom_target(dng_halide_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_pipeline.a)
+add_custom_target(halide_runtime_target DEPENDS ${HALIDE_OUTPUT_DIR}/halide_runtime.a)
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.h
@@ -369,7 +368,7 @@ add_custom_target(dng_opcode_polynomial3_aot_target
 # so `cmake --build` actually runs the generators.
 if(DNG_HOST_GENERATORS_ONLY)
     set(_DNG_ALL_AOT_DEPS
-        ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
@@ -394,7 +393,7 @@ if(NOT DNG_HOST_GENERATORS_ONLY)
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
 
 if(NOT DNG_CROSS_BUILD)
-    add_dependencies(dng_decoder_native dng_halide_aot_target)
+    add_dependencies(dng_decoder_native halide_runtime_target)
     add_dependencies(dng_decoder_native dng_demosaic_aot_target)
     add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
     add_dependencies(dng_decoder_native dng_warp_aot_target)
@@ -407,22 +406,19 @@ if(NOT DNG_CROSS_BUILD)
 endif()
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
-# CRITICAL: dng_pipeline.a MUST be linked (it is the only AOT without -no_runtime,
-# providing Halide Metal/Vulkan runtime symbols: _halide_copy_to_device, _halide_malloc,
-# _halide_metal_run / _halide_vulkan_run, etc.). Removing it causes undefined symbol
-# linker errors. All other AOT kernels use -no_runtime and depend on dng_pipeline.a
-# for runtime.
+# W6 M-4: halide_runtime.a is the standalone Halide runtime (Metal/Vulkan backend
+# symbols: _halide_copy_to_device, _halide_malloc, _halide_metal_run, etc.).
+# All AOT kernels use -no_runtime and link against halide_runtime.a.
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
 
-# Phase 14: Halide::Halide (host libHalide) is only needed for native host builds.
-# Android cross-build should NOT link host-arch libHalide.a.
-if(NOT DNG_CROSS_BUILD AND NOT ANDROID)
-    target_link_libraries(dng_decoder_native Halide::Halide)
-endif()
+# W6 M-4 completion: Halide::Halide (host libHalide, 196MB shared lib) is no longer
+# linked into dng_decoder_native. The standalone halide_runtime.a provides all AOT
+# runtime symbols statically. Halide::Halide remains linked by generator executables
+# and test targets that use the Halide host API directly.
 
 # AOT artifacts (always linked — either freshly built or prebuilt)
 target_link_libraries(dng_decoder_native
-    ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+    ${HALIDE_OUTPUT_DIR}/halide_runtime.a
     ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
     ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
     ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
@@ -473,19 +469,18 @@ if(ANDROID AND DNG_CROSS_BUILD)
         src/dng_pipeline_v2.cpp
         src/dng_halide_device.cpp
         src/dng_opcodelist2_halide.cpp
-        dng_sdk_custom/source/dng_mosaic_halide.cpp
-        dng_sdk_custom/source/dng_warp_halide.cpp
-        dng_sdk_custom/source/dng_render_halide.cpp)
+        src/dng_mosaic_halide.cpp
+        src/dng_warp_halide.cpp
+        src/dng_render_halide.cpp)
     target_include_directories(test_decode_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
         ${DNG_SDK_DIR}
         ${HALIDE_OUTPUT_DIR}
         ${HALIDE_DIR}/include)
     target_link_libraries(test_decode_android PRIVATE
         dng_sdk
-        ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
@@ -517,19 +512,18 @@ if(ANDROID AND DNG_CROSS_BUILD)
         src/dng_pipeline_v2.cpp
         src/dng_halide_device.cpp
         src/dng_opcodelist2_halide.cpp
-        dng_sdk_custom/source/dng_mosaic_halide.cpp
-        dng_sdk_custom/source/dng_warp_halide.cpp
-        dng_sdk_custom/source/dng_render_halide.cpp)
+        src/dng_mosaic_halide.cpp
+        src/dng_warp_halide.cpp
+        src/dng_render_halide.cpp)
     target_include_directories(dng_ffi_harness_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
         ${DNG_SDK_DIR}
         ${HALIDE_OUTPUT_DIR}
         ${HALIDE_DIR}/include)
     target_link_libraries(dng_ffi_harness_android PRIVATE
         dng_sdk
-        ${HALIDE_OUTPUT_DIR}/dng_pipeline.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
@@ -561,28 +555,25 @@ target_link_libraries(dng_ffi_harness PRIVATE dng_decoder_native)
 # W5-4 / TD-2: Device handoff path independent test.
 # Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
 # handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.
-# NOTE: dng_pipeline.a provides Halide Metal runtime symbols (Gotcha #79, #64):
-#   all other -no_runtime AOT kernels link against it for halide_metal_run etc.
 add_executable(test_device_handoff tests/test_device_handoff.cpp
     src/dng_pipeline_v2.cpp
     src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
-    dng_sdk_custom/source/dng_mosaic_halide.cpp
-    dng_sdk_custom/source/dng_warp_halide.cpp
-    dng_sdk_custom/source/dng_render_halide.cpp)
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp
+    src/dng_render_halide.cpp)
 target_include_directories(test_device_handoff PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
 else()
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 endif()
-add_dependencies(test_device_handoff dng_halide_aot_target)
+add_dependencies(test_device_handoff halide_runtime_target)
 add_dependencies(test_device_handoff dng_demosaic_aot_target)
 add_dependencies(test_device_handoff dng_demosaic_warp_aot_target)
 add_dependencies(test_device_handoff dng_warp_aot_target)
@@ -630,22 +621,21 @@ add_executable(test_decode tests/test_decode.cpp
     src/dng_pipeline_v2.cpp
     src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
-    dng_sdk_custom/source/dng_mosaic_halide.cpp
-    dng_sdk_custom/source/dng_warp_halide.cpp
-    dng_sdk_custom/source/dng_render_halide.cpp)
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp
+    src/dng_render_halide.cpp)
 target_include_directories(test_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
 else()
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 endif()
-add_dependencies(test_decode dng_halide_aot_target)
+add_dependencies(test_decode halide_runtime_target)
 add_dependencies(test_decode dng_demosaic_aot_target)
 add_dependencies(test_decode dng_demosaic_warp_aot_target)
 add_dependencies(test_decode dng_warp_aot_target)
@@ -658,18 +648,15 @@ endif()
 
 # Phase 5.3: Halide Demosaic PSNR Test
 add_executable(test_mosaic_halide tests/test_mosaic_halide.cpp
-    dng_sdk_custom/source/dng_mosaic_halide.cpp)
+    src/dng_mosaic_halide.cpp)
 target_include_directories(test_mosaic_halide PRIVATE
     ${INC_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-# W7-5 (TD-27): dng_pipeline.a is the Halide Metal runtime anchor (no -no_runtime).
-# Without it, -no_runtime AOT kernels (rectilinear_warp, dng_demosaic_bilinear)
-# fail to link with undefined Metal runtime symbols on Halide upgrades.
-target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
-add_dependencies(test_mosaic_halide dng_halide_aot_target)
+# W6 M-4: halide_runtime.a provides Metal/Vulkan runtime symbols for all -no_runtime AOT kernels.
+target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_mosaic_halide halide_runtime_target)
 add_dependencies(test_mosaic_halide dng_warp_aot_target)
 add_dependencies(test_mosaic_halide dng_demosaic_aot_target)
 if(APPLE)
@@ -678,16 +665,15 @@ endif()
 
 # Debug demosaic test
 add_executable(test_mosaic_debug tests/test_mosaic_debug.cpp
-    dng_sdk_custom/source/dng_mosaic_halide.cpp)
+    src/dng_mosaic_halide.cpp)
 target_include_directories(test_mosaic_debug PRIVATE
     ${INC_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/dng_sdk_custom/source
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-# W7-5 (TD-27): same runtime anchor as test_mosaic_halide above.
-target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/dng_pipeline.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
-add_dependencies(test_mosaic_debug dng_halide_aot_target)
+# W6 M-4: same standalone runtime as test_mosaic_halide above.
+target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_mosaic_debug halide_runtime_target)
 add_dependencies(test_mosaic_debug dng_warp_aot_target)
 add_dependencies(test_mosaic_debug dng_demosaic_aot_target)
 if(APPLE)

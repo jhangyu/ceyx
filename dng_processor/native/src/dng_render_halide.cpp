@@ -339,6 +339,24 @@ void repackPlanarToRGBAMT(const uint8_t* pr,
 }
 #endif
 
+#if !defined(__ANDROID__)
+// W7 (M-11): persistent scratch for the macOS RGBA→RGB strip path (legacy
+// vector callers). Avoids a fresh 96MB allocation + first-touch page-fault per
+// decode (same Gotcha #62 pattern). Grow-only; safe because all decodes are
+// serialized by pipelineSingleFlightMutex in dng_pipeline_v2.cpp.
+// ponytail: simple static, upgrade to Stage4ScratchPool pattern if concurrent decode needed.
+static std::unique_ptr<uint8_t[]> s_rgba_strip_scratch;
+static size_t s_rgba_strip_scratch_cap = 0;
+
+static uint8_t* acquireRgbaStripScratch(size_t bytes) {
+    if (bytes > s_rgba_strip_scratch_cap) {
+        s_rgba_strip_scratch.reset(new (std::nothrow) uint8_t[bytes]);
+        s_rgba_strip_scratch_cap = s_rgba_strip_scratch ? bytes : 0;
+    }
+    return s_rgba_strip_scratch.get();
+}
+#endif
+
 // W6-2 / TD-20: shared output size computation used by all four
 // render_stage4_halide overloads.  Mirrors the MaximumSize / AspectRatio
 // clamp logic that was previously duplicated verbatim at four call sites.
@@ -1007,7 +1025,16 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     };
     Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
 #else
-    Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
+    // W7 (M-11): macOS generator outputs RGBA8 (4 channels, alpha=255 in-kernel).
+    // When fuse_rgba, the caller's buffer is already RGBA8 (W*H*4) — write directly.
+    // When !fuse_rgba (legacy vector callers), use persistent scratch for the
+    // 4-channel kernel output, then strip alpha to RGB8 in the caller's buffer.
+    uint8_t* dst_rgba = dst;
+    if (!fuse_rgba) {
+        dst_rgba = acquireRgbaStripScratch(static_cast<size_t>(dst_w) * dst_h * 4);
+        if (!dst_rgba) return false;
+    }
+    Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba, dst_w, dst_h, 4);
 #endif
 
 #if defined(__ANDROID__)
@@ -1134,6 +1161,15 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     if (dst_buf.copy_to_host() != 0) {
         return false;
     }
+    // W7 (M-11): strip alpha when legacy caller expects RGB8.
+    if (!fuse_rgba) {
+        const size_t total_px = static_cast<size_t>(dst_w) * dst_h;
+        for (size_t i = 0; i < total_px; ++i) {
+            dst[i * 3 + 0] = dst_rgba[i * 4 + 0];
+            dst[i * 3 + 1] = dst_rgba[i * 4 + 1];
+            dst[i * 3 + 2] = dst_rgba[i * 4 + 2];
+        }
+    }
 #endif
 
     return true;
@@ -1242,7 +1278,13 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     };
     Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
 #else
-    Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst, dst_w, dst_h, 3);
+    // W7 (M-11): macOS generator outputs RGBA8. Persistent scratch for strip path.
+    uint8_t* dst_rgba_fd = dst;
+    if (!fuse_rgba) {
+        dst_rgba_fd = acquireRgbaStripScratch(static_cast<size_t>(dst_w) * dst_h * 4);
+        if (!dst_rgba_fd) return false;
+    }
+    Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba_fd, dst_w, dst_h, 4);
 #endif
 
     exp_buf.set_host_dirty();
@@ -1367,6 +1409,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     if (dst_buf.copy_to_host() != 0) {
         return false;
     }
+    // W7 (M-11): strip alpha when legacy caller expects RGB8.
+    if (!fuse_rgba) {
+        const size_t total_px = static_cast<size_t>(dst_w) * dst_h;
+        for (size_t i = 0; i < total_px; ++i) {
+            dst[i * 3 + 0] = dst_rgba_fd[i * 4 + 0];
+            dst[i * 3 + 1] = dst_rgba_fd[i * 4 + 1];
+            dst[i * 3 + 2] = dst_rgba_fd[i * 4 + 2];
+        }
+    }
 #endif
 
     return true;
@@ -1387,6 +1438,10 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     // Use resize instead of assign(N, 0): the Halide kernel overwrites every byte,
     // so the zero-fill is wasted work. resize() is a no-op when out_rgb is already sized
     // by the caller (which avoids the 250ms first-touch page-fault cost on a 72MB buffer).
+    // W7 (M-11): macOS generator outputs RGBA8 but the caller's vector stays RGB (W*H*3).
+    // The kernel writes into the persistent RGBA scratch (via runRenderStage4HalideAot's
+    // fuse_rgba=false path), which strips to RGB in the caller's vector — no 4-channel
+    // resize of the caller's vector (that realloc + page-fault was costing ~150ms).
     const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb.size() != needed_out_size) {
         out_rgb.resize(needed_out_size);
@@ -1459,6 +1514,9 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          params,
                                                          out_rgb.data());
         if (render_ok) {
+            // W7 (M-11): on macOS, runRenderStage4HalideAot already stripped
+            // RGBA→RGB via the persistent scratch (fuse_rgba=false). The caller's
+            // vector is W*H*3 throughout — no resize needed.
             return true;
         }
     }
@@ -1799,6 +1857,9 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
+    // W7 (M-11): caller's vector stays RGB (W*H*3). macOS kernel writes RGBA into
+    // persistent scratch; runRenderStage4HalideAotFromDevice strips to the caller's
+    // buffer (fuse_rgba=false default).
     const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb.size() != needed) {
         out_rgb.resize(needed);

@@ -476,6 +476,13 @@ class dng_opcode_WarpRectilinear: public dng_opcode
 							dng_negative &negative,
 							AutoPtr<dng_image> &image);
 
+		// W6 SDK patch: public accessor for Halide bridge (dng_warp_halide.cpp)
+		// to extract warp coefficients without friend access.
+		const dng_warp_params_rectilinear & WarpParams () const
+			{
+			return fWarpParams;
+			}
+
 	protected:
 
 		static uint32 ParamBytes (uint32 planes);

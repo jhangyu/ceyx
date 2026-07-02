@@ -1,0 +1,18 @@
+diff --git a/dng_processor/native/third_party/dng_sdk/source/dng_lens_correction.h b/dng_processor/native/third_party/dng_sdk/source/dng_lens_correction.h
+index ae1ca6b..d092190 100644
+--- a/dng_processor/native/third_party/dng_sdk/source/dng_lens_correction.h
++++ b/dng_processor/native/third_party/dng_sdk/source/dng_lens_correction.h
+@@ -476,6 +476,13 @@ class dng_opcode_WarpRectilinear: public dng_opcode
+ 							dng_negative &negative,
+ 							AutoPtr<dng_image> &image);
+ 
++		// W6 SDK patch: public accessor for Halide bridge (dng_warp_halide.cpp)
++		// to extract warp coefficients without friend access.
++		const dng_warp_params_rectilinear & WarpParams () const
++			{
++			return fWarpParams;
++			}
++
+ 	protected:
+ 
+ 		static uint32 ParamBytes (uint32 planes);
