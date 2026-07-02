@@ -52,6 +52,7 @@ functions:
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -201,33 +202,83 @@ Stage3WorkspacePool &stage3WorkspacePool() {
   return pool;
 }
 
-// Phase 10 Sprint E-rgb-pool: process-level mmap pool for RGB output buffer.
-// Eliminates the 247ms zero-fill page-fault cost on every FFI call caused by
-// std::vector<uint8_t>::resize(W*H*3) constructing a fresh 72 MB allocation.
-// Pattern identical to Stage3WorkspacePool (Phase 10 Sprint D-round2).
+// 7.1: checkout-style RGB output pool. Mirrors RgbaOutputPool ownership model
+// (checked_out_ tracking, capped free_ list, best-fit acquire, unknown-pointer
+// defensive release, debug count accessor). Used on the fuse_rgba_output=false
+// path (test harness / rollback). Production FFI path uses RgbaOutputPool.
 class RgbOutputPool {
  public:
   uint8_t *acquire(size_t bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (bytes > capacity_bytes_) {
-      if (ptr_) {
-        munmap(ptr_, capacity_bytes_);
-        ptr_ = nullptr;
-        capacity_bytes_ = 0;
+    // Best-fit: find the smallest free slot with cap >= bytes.
+    size_t bestIdx = free_.size();  // sentinel: no fit found
+    size_t bestCap = SIZE_MAX;
+    for (size_t i = 0; i < free_.size(); ++i) {
+      if (free_[i].cap >= bytes && free_[i].cap < bestCap) {
+        bestIdx = i;
+        bestCap = free_[i].cap;
       }
-      void *p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                     MAP_ANON | MAP_PRIVATE, -1, 0);
-      if (p == MAP_FAILED) return nullptr;
-      ptr_ = static_cast<uint8_t *>(p);
-      capacity_bytes_ = bytes;
     }
-    return ptr_;
+    if (bestIdx < free_.size()) {
+      uint8_t *p = free_[bestIdx].buf.release();
+      size_t cap = free_[bestIdx].cap;
+      free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+      checked_out_.emplace(p, cap);
+      return p;
+    }
+    uint8_t *p = new (std::nothrow) uint8_t[bytes];  // no value-init
+    if (p) checked_out_.emplace(p, bytes);
+    return p;
   }
-  size_t capacity() const { return capacity_bytes_; }
+  bool release(uint8_t *ptr) {
+    if (!ptr) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = checked_out_.find(ptr);
+    if (it == checked_out_.end()) {
+      // H-2 pool defense: unknown pointer — absorb and log rather than
+      // returning false and letting the caller fall through to delete[]
+      // (which risks double-free if the pointer was pool-owned earlier).
+      fprintf(stderr, "[RgbOutputPool] release() called with unknown "
+              "pointer %p; absorbing to prevent double-free\n",
+              static_cast<void *>(ptr));
+      return true;
+    }
+    size_t cap = it->second;
+    checked_out_.erase(it);
+    // M-12: cap free_ at kMaxFreeSlots to bound memory growth.
+    // Evict the largest slot (most wasteful) to make room.
+    if (free_.size() >= kMaxFreeSlots) {
+      size_t largestIdx = 0;
+      for (size_t i = 1; i < free_.size(); ++i) {
+        if (free_[i].cap > free_[largestIdx].cap)
+          largestIdx = i;
+      }
+      // If the incoming buffer is larger than all cached slots,
+      // discard it directly instead of evicting a smaller one.
+      if (cap > free_[largestIdx].cap) {
+        delete[] ptr;
+        return true;
+      }
+      free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(largestIdx));
+    }
+    free_.push_back({std::unique_ptr<uint8_t[]>(ptr), cap});
+    return true;
+  }
+  // Debug accessor: number of buffers currently checked out.
+  size_t checked_out_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return checked_out_.size();
+  }
+
  private:
-  std::mutex mutex_;
-  uint8_t *ptr_ = nullptr;
-  size_t capacity_bytes_ = 0;
+  static constexpr size_t kMaxFreeSlots = 2;
+  struct Slot {
+    std::unique_ptr<uint8_t[]> buf;
+    size_t cap;
+  };
+  mutable std::mutex mutex_;
+  std::vector<Slot> free_;
+  std::unordered_map<uint8_t *, size_t> checked_out_;
 };
 
 RgbOutputPool &rgbOutputPool() {
@@ -329,9 +380,7 @@ RgbaOutputPool &rgbaOutputPool() {
 
 // W1 H-1: RAII guard for checkout-style RGBA output pool buffers. Releases
 // the buffer back to the pool on scope exit unless disarmed by commit().
-// Active only when config.fuse_rgba_output is true (checkout-pool path);
-// the single-reuse RgbOutputPool does not need scope-guarding because it
-// uses a shared mmap (no checkout/release model).
+// Active only when config.fuse_rgba_output is true (checkout-pool path).
 class ScopedRgbaCheckout {
  public:
   explicit ScopedRgbaCheckout(uint8_t *&ptr_ref, bool active)
@@ -350,11 +399,31 @@ class ScopedRgbaCheckout {
   bool active_;
 };
 
-// Acquire the Stage4 output buffer. On the fused path (Android Vulkan) this is
-// an interleaved RGBA8 buffer from the checkout pool; otherwise an interleaved
-// RGB8 buffer from the single-reuse RgbOutputPool. Reuses an already-set ptr
-// (e.g. a device-handoff fallback re-entering runStage4ToRgb) to avoid leaking
-// a previously checked-out fused buffer.
+// 7.1: RAII guard for checkout-style RGB output pool buffers. Mirrors
+// ScopedRgbaCheckout; active when config.fuse_rgba_output is false (RGB path).
+class ScopedRgbCheckout {
+ public:
+  explicit ScopedRgbCheckout(uint8_t *&ptr_ref, bool active)
+      : ptr_ref_(ptr_ref), active_(active) {}
+  ~ScopedRgbCheckout() {
+    if (active_ && ptr_ref_) {
+      rgbOutputPool().release(ptr_ref_);
+      ptr_ref_ = nullptr;
+    }
+  }
+  void commit() { active_ = false; }
+  ScopedRgbCheckout(const ScopedRgbCheckout &) = delete;
+  ScopedRgbCheckout &operator=(const ScopedRgbCheckout &) = delete;
+ private:
+  uint8_t *&ptr_ref_;
+  bool active_;
+};
+
+// Acquire the Stage4 output buffer. On the fused path (fuse_rgba_output=true)
+// this is an interleaved RGBA8 buffer from the checkout-style RgbaOutputPool;
+// otherwise an interleaved RGB8 buffer from the checkout-style RgbOutputPool.
+// Reuses an already-set ptr (e.g. a device-handoff fallback re-entering
+// runStage4ToRgb) to avoid leaking a previously checked-out buffer.
 bool acquireStage4OutputBuffer(const PipelineConfig &config,
                                uint32_t width, uint32_t height,
                                uint8_t *&ptr, size_t &size) {
@@ -393,11 +462,12 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   uint16_t *stage3 = stage3WorkspacePool().acquire(stage3ElementCount);
   uint8_t *rgb = rgbOutputPool().acquire(rgbByteCount);
   if (!stage3 || !rgb) {
+    if (rgb) rgbOutputPool().release(rgb);
     return false;
   }
 
   // L-5: per-size warmed cache — skip redundant memset when the same
-  // size was already warmed. Pools are grow-only (mmap/new), so a prior
+  // size was already warmed. Pools are grow-only (new[]), so a prior
   // acquire at this size guarantees the pages are already committed.
   // No mutex needed: always called under pipelineSingleFlightMutex.
   static int32_t warmedW = 0, warmedH = 0;
@@ -406,6 +476,8 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
     std::memset(stage3, 0, stage3ElementCount * sizeof(uint16_t));
     std::memset(rgb, 0, rgbByteCount);
   }
+  // 7.1: release RGB buffer back to checkout pool after warming.
+  rgbOutputPool().release(rgb);
   // W7 (M-11): seed one committed RGBA8 buffer into the checkout pool so the
   // first fused decode does not pay the ~96MB first-touch page-fault. Previously
   // Android-only (W7-B); now all platforms use the fused RGBA path.
@@ -1081,13 +1153,14 @@ bool decodeStages(ConcurrentDngHost &host,
   std::vector<uint16_t> stage3Workspace;
   DngPipelineStage3Timing stage3Timing;
 
-  // H-1: RAII guard for the checkout-style RGBA output pool. If any path
-  // below acquires an RGBA buffer (via acquireStage4OutputBuffer) but then
-  // fails, the guard releases it back to the pool on scope exit — preventing
-  // the checked-out buffer from leaking permanently. Disarmed on success.
-  // Only active when config.fuse_rgba_output is true (checkout-pool path);
-  // RgbOutputPool is a single-reuse mmap and does not need guarding.
+  // H-1: RAII guard for the checkout-style output pools. If any path below
+  // acquires a buffer (via acquireStage4OutputBuffer) but then fails, the
+  // guard releases it back to the pool on scope exit — preventing the
+  // checked-out buffer from leaking permanently. Disarmed on success.
+  // Exactly one guard is active per decode: RGBA when fuse_rgba_output is
+  // true (production FFI path), RGB when false (test harness / rollback).
   ScopedRgbaCheckout checkoutGuard(result.rgb_ptr, config.fuse_rgba_output);
+  ScopedRgbCheckout rgbCheckoutGuard(result.rgb_ptr, !config.fuse_rgba_output);
 
   // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
   bool allDone = false;
@@ -1116,6 +1189,7 @@ bool decodeStages(ConcurrentDngHost &host,
     result.process_ms = 0;
     result.error_code = kDngSuccess;
     checkoutGuard.commit();
+    rgbCheckoutGuard.commit();
     return true;
   }
 
@@ -1141,6 +1215,7 @@ bool decodeStages(ConcurrentDngHost &host,
       std::chrono::duration<double, std::milli>(processEnd - processStart).count();
   result.error_code = kDngSuccess;
   checkoutGuard.commit();
+  rgbCheckoutGuard.commit();
   return true;
 }
 
@@ -1161,6 +1236,15 @@ size_t dng_rgba_output_checked_out_count() {
   return rgbaOutputPool().checked_out_count();
 }
 
+// 7.1: public shared RGB output pool accessors (mirrors RGBA pattern above).
+bool dng_rgb_output_release(uint8_t *ptr) {
+  return rgbOutputPool().release(ptr);
+}
+
+size_t dng_rgb_output_checked_out_count() {
+  return rgbOutputPool().checked_out_count();
+}
+
 // Single-flight mutex serializing the public FFI entry points against the
 // background warmup hook.  Both paths mutate shared native pools (RGBA output
 // pool, polynomial scratch caches) and DeviceHandoffState; without this lock a
@@ -1171,14 +1255,45 @@ static std::mutex &pipelineSingleFlightMutex() {
   return m;
 }
 
+// L-4: atomic counter incremented at decode_to_rgb entry so warmup can
+// cheaply detect a pending decode and yield between sub-steps.  Function-local
+// static for thread-safe init matching pipelineSingleFlightMutex pattern.
+static std::atomic<int> &pendingDecodeCount() {
+  static std::atomic<int> count{0};
+  return count;
+}
+
 bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
-  std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
-  if (!requireGpuBackend("warmup")) {
-    return false;
+  // L-4: warmup lock split — each sub-step acquires and releases
+  // pipelineSingleFlightMutex independently so a pending decode can
+  // interleave between steps rather than blocking for the full warmup
+  // duration.  Pending-decode detection uses an atomic counter incremented
+  // at decode_to_rgb entry; warmup yields early (returns true = no error)
+  // when a decode is waiting, letting the decode proceed immediately while
+  // the remaining prewarm steps run on a future idle call.
+
+  // Step 1: GPU capability check.
+  {
+    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    if (!requireGpuBackend("warmup")) {
+      return false;
+    }
   }
-  if (!warmPipelinePoolsForSize(width, height)) {
-    return false;
+
+  // Yield to pending decode between steps.
+  if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
+
+  // Step 2: Pool touch (stage3 workspace, RGB output, RGBA output pools).
+  {
+    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    if (!warmPipelinePoolsForSize(width, height)) {
+      return false;
+    }
   }
+
+  if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
+
+  // Step 3: Stage3 fused demosaic+WarpRectilinear GPU pipeline prewarm.
   // T9 (W7-C): do NOT prewarm polynomial3 here. polynomial3 is the Stage2
   // lossy MapPolynomial pipeline; the lossless Bayer main path (S3 fused + S4
   // render) never dispatches it, so building it during the startup warmup is
@@ -1190,10 +1305,21 @@ bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
   // W7-E: prime the Stage3 fused demosaic+WarpRectilinear GPU pipeline at the
   // actual size so the first Bayer decode skips the Vulkan pipeline-creation
   // cold tax (no-op on non-Android; per-size cached inside).
-  dng_demosaic_warp_prewarm_for_size(width, height);
+  {
+    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    dng_demosaic_warp_prewarm_for_size(width, height);
+  }
+
+  if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
+
+  // Step 4: Stage4 render GPU pipeline prewarm (~440ms cold).
   // W7-E: prime the Stage4 render GPU pipeline at the actual size (matrix S4
   // cold ~440ms vs warm ~192ms). No-op on non-Android; per-size cached inside.
-  dng_render_stage4_prewarm_for_size(width, height);
+  {
+    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    dng_render_stage4_prewarm_for_size(width, height);
+  }
+
   return true;
 }
 
@@ -1212,6 +1338,17 @@ bool dng_pipeline_v2_run_stage3(dng_host &host,
 
 bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
                                    DngPipelineV2Result &result) {
+  // L-4: signal pending decode so warmup yields between sub-steps.  Counter
+  // is incremented before the mutex lock so warmup (which checks the counter
+  // after releasing the mutex between steps) detects this decode immediately.
+  // RAII guard ensures decrement on all exit paths including exceptions.
+  pendingDecodeCount().fetch_add(1, std::memory_order_release);
+  struct PendingDecodeGuard {
+    ~PendingDecodeGuard() {
+      pendingDecodeCount().fetch_sub(1, std::memory_order_release);
+    }
+  } pendingGuard;
+
   std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
   result = DngPipelineV2Result{};
   if (!file_path || !file_path[0]) {
@@ -1227,6 +1364,15 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     // ~72MB RGB intermediate are both eliminated. Config-gated: set to false for
     // rollback (requires reverting DngRenderStage4 generator to 3-channel RGB).
     config.fuse_rgba_output = true;
+    // 7.1: env override for testing the RGB checkout path and rollback.
+    // DNG_FUSE_RGBA=0 forces the non-fused RGB path; default remains true.
+    {
+      static const bool forceDisable = []() {
+        const char *v = std::getenv("DNG_FUSE_RGBA");
+        return v && v[0] == '0';
+      }();
+      if (forceDisable) config.fuse_rgba_output = false;
+    }
     // L-11: GPU backend banner — once-per-process to avoid per-decode spam.
     {
       static std::once_flag backendBannerOnce;

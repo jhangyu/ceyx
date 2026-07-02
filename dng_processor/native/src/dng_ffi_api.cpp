@@ -43,12 +43,29 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
     return result;
   }
 
-  // W7 (M-11): fuse_rgba_output is now always true — pipeline.rgba_ptr is the
-  // RGBA8 buffer produced by the Stage4 kernel (macOS in-kernel alpha=255,
-  // Android fused planar→RGBA repack). No rgb_to_rgba pass needed.
+  // W7 (M-11): production path sets fuse_rgba_output=true so pipeline.rgba_ptr
+  // is the RGBA8 buffer. When DNG_FUSE_RGBA=0 overrides this (rollback/testing),
+  // pipeline.rgb_ptr is set instead; repack to RGBA8 for the FFI contract
+  // (DngResult only carries rgba_data).
   uint8_t *rgba = pipeline.rgba_ptr;
+  if (!rgba && pipeline.rgb_ptr && pipeline.width > 0 && pipeline.height > 0) {
+    const size_t pixels =
+        static_cast<size_t>(pipeline.width) * pipeline.height;
+    const size_t rgbaBytes = pixels * 4;
+    rgba = dng_rgba_output_acquire(rgbaBytes);
+    if (rgba) {
+      for (size_t i = 0; i < pixels; ++i) {
+        rgba[i * 4 + 0] = pipeline.rgb_ptr[i * 3 + 0];
+        rgba[i * 4 + 1] = pipeline.rgb_ptr[i * 3 + 1];
+        rgba[i * 4 + 2] = pipeline.rgb_ptr[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+      }
+    }
+    // Release RGB buffer regardless of repack success to prevent pool leak.
+    dng_rgb_output_release(pipeline.rgb_ptr);
+    pipeline.rgb_ptr = nullptr;
+  }
   if (!rgba) {
-    // Defensive: should not happen with fuse_rgba_output=true, but guard anyway.
     result->error_code = kDngErrRgbaAllocFailed;
     return result;
   }
@@ -155,6 +172,10 @@ FFI_EXPORT void dng_free_halide_buffer(void *ptr) {
 
 FFI_EXPORT size_t dng_debug_pool_checked_out(void) {
   return dng_rgba_output_checked_out_count();
+}
+
+FFI_EXPORT size_t dng_debug_rgb_pool_checked_out(void) {
+  return dng_rgb_output_checked_out_count();
 }
 
 } // extern "C"
