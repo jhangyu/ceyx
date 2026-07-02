@@ -53,6 +53,25 @@ class DngImage implements Finalizable {
   double get totalMs => decodeMs + processMs;
 }
 
+/// W5 (M-6): Dart mirror of the C enum DngErrorCode (dng_error_codes.h).
+/// Any value change in the C header MUST be reflected here.
+///
+/// Note: warmup uses its own -1/-2 return scale (not this enum).
+/// Preview (dng_extract_preview_jpeg) uses four independent scales.
+abstract final class DngErrorCode {
+  static const int success = 0;
+  static const int nullPath = -1;
+  static const int parseFailed = -2;
+  static const int stage3Failed = -3;
+  static const int stage4Failed = -4;
+  static const int stage2HandoffRestoreFailed = -5;
+  static const int gpuUnavailable = -6;
+  static const int rgbaAllocFailed = -7; // FFI layer only
+  static const int ol2DispatchFailed = -8;
+  static const int stdException = -100;
+  static const int unknownException = -101;
+}
+
 /// Error thrown when DNG decoding fails
 class DngDecodeException implements Exception {
   final int errorCode;
@@ -359,19 +378,33 @@ class DngDecoderService {
     }
   }
 
+  // W5 (M-6): messages aligned with unified DngErrorCode enum.
   String _messageForErrorCode(int code) {
     switch (code) {
-      case -1:
-        return 'File not found';
-      case -2:
-        return 'DNG parse error';
-      case -3:
-        return 'Unsupported format';
-      case -4:
-        return 'Memory allocation error';
-      case -10:
-        return 'Halide pipeline error';
+      case DngErrorCode.nullPath:
+        return 'Null or empty file path';
+      case DngErrorCode.parseFailed:
+        return 'DNG parse/validation failed';
+      case DngErrorCode.stage3Failed:
+        return 'Stage3 (demosaic) failed';
+      case DngErrorCode.stage4Failed:
+        return 'Stage4 (render) failed';
+      case DngErrorCode.stage2HandoffRestoreFailed:
+        return 'Stage2 device-handoff restore failed';
+      case DngErrorCode.gpuUnavailable:
+        return 'GPU (Metal/Vulkan) unavailable';
+      case DngErrorCode.rgbaAllocFailed:
+        return 'RGBA buffer allocation failed';
+      case DngErrorCode.ol2DispatchFailed:
+        return 'OpcodeList2 GPU dispatch failed';
+      case DngErrorCode.stdException:
+        return 'Internal C++ exception';
+      case DngErrorCode.unknownException:
+        return 'Unknown internal exception';
       default:
+        if (code > 0) {
+          return 'DNG SDK error (code: $code)';
+        }
         return 'Unknown error (code: $code)';
     }
   }

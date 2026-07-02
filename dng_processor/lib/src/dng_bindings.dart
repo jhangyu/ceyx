@@ -150,11 +150,15 @@ class DngNativeBindings {
 
   /// Try to open dylib from a list of candidate paths.
   /// Returns the first one that loads successfully, or throws.
+  /// W5 (L-10): logs the successfully loaded path to stderr for diagnostics.
   static ffi.DynamicLibrary _openFirst(List<String> paths) {
     Object? lastError;
     for (final path in paths) {
       try {
-        return ffi.DynamicLibrary.open(path);
+        final lib = ffi.DynamicLibrary.open(path);
+        // W5 (L-10): log the loaded path so dylib provenance is traceable.
+        stderr.writeln('[DngNativeBindings] loaded: $path');
+        return lib;
       } catch (e) {
         lastError = e;
         continue;
@@ -191,17 +195,22 @@ class DngNativeBindings {
       final scriptParent = File(scriptDir).parent.path;
       // When running `dart run bin/benchmark_*.dart` the script is at
       // <repo>/dng_processor/bin/benchmark_*.dart → parent = dng_processor/bin
-      // so ../../native/build reaches dng_processor/native/build.
+      // so ../native/build reaches dng_processor/native/build.
       final scriptRelativeDist =
-          File('$scriptParent/../../native/dist/libdng_decoder_native.dylib')
+          File('$scriptParent/../native/dist/libdng_decoder_native.dylib')
               .path;
       final scriptRelativeBuild =
-          File('$scriptParent/../../native/build/libdng_decoder_native.dylib')
+          File('$scriptParent/../native/build/libdng_decoder_native.dylib')
               .path;
 
       // DNG_NATIVE_BUILD_DIR env override (path to the CMake build directory).
       final nativeBuildDir =
           Platform.environment['DNG_NATIVE_BUILD_DIR'];
+
+      // W5 (L-10): dev absolute fallback paths gated behind DNG_DEV_FALLBACK=1.
+      // Follows the DNG_NATIVE_BUILD_DIR precedent (env-gated, not unconditional).
+      final devFallback =
+          Platform.environment['DNG_DEV_FALLBACK'] == '1';
 
       lib = _openFirst([
         // 1. System default (DYLD_LIBRARY_PATH)
@@ -215,9 +224,11 @@ class DngNativeBindings {
         scriptRelativeDist,
         // 4b. Script-relative: CMake build cache (dart run scenario)
         scriptRelativeBuild,
-        // 5. last-resort dev path (HOME-relative, works for standard checkout)
-        '$home/project/flutter_dng_decoder/dng_processor/dist/libdng_decoder_native.dylib', // last-resort dev path
-        '$home/project/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib', // last-resort dev path
+        // 5. W5 (L-10): dev absolute paths, env-gated (DNG_DEV_FALLBACK=1)
+        if (devFallback)
+          '$home/project/flutter_dng_decoder/dng_processor/dist/libdng_decoder_native.dylib',
+        if (devFallback)
+          '$home/project/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib',
       ]);
     } else if (Platform.isWindows) {
       lib = ffi.DynamicLibrary.open('dng_decoder_native.dll');

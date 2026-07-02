@@ -1,4 +1,5 @@
 #include "dng_ffi_api.h"
+#include "dng_error_codes.h"  // W5: unified error codes
 #include <cstdlib>
 #include <cstring>
 #include <dng_file_stream.h>
@@ -17,60 +18,12 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// NEON RGB->RGBA helper (ARM64) with scalar fallback for other platforms.
-// 16-pixel NEON lane: vld3q_u8 deinterleaves 3-channel RGB; vst4q_u8 writes
-// 4-channel RGBA with alpha hard-coded to 255.
-// Ownership contract: caller allocates `rgba` with new[]; this function only
-// fills it.  Do NOT change the allocation strategy without updating ABI and
-// Dart bindings.
-// ---------------------------------------------------------------------------
-#if defined(__aarch64__)
-#include <arm_neon.h>
-
-static void rgb_to_rgba_neon(const uint8_t* rgb, uint8_t* rgba,
-                              size_t pixel_count) {
-    const uint8x16_t alpha = vdupq_n_u8(255);
-    size_t i = 0;
-    const size_t vec_end = (pixel_count / 16) * 16;
-    for (; i < vec_end; i += 16) {
-        uint8x16x3_t src = vld3q_u8(rgb + i * 3);
-        uint8x16x4_t dst;
-        dst.val[0] = src.val[0];
-        dst.val[1] = src.val[1];
-        dst.val[2] = src.val[2];
-        dst.val[3] = alpha;
-        vst4q_u8(rgba + i * 4, dst);
-    }
-    for (; i < pixel_count; ++i) {
-        rgba[i * 4 + 0] = rgb[i * 3 + 0];
-        rgba[i * 4 + 1] = rgb[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb[i * 3 + 2];
-        rgba[i * 4 + 3] = 255;
-    }
-}
-
-#else  // non-ARM64 scalar fallback
-
-static void rgb_to_rgba_neon(const uint8_t* rgb, uint8_t* rgba,
-                              size_t pixel_count) {
-    for (size_t i = 0; i < pixel_count; ++i) {
-        rgba[i * 4 + 0] = rgb[i * 3 + 0];
-        rgba[i * 4 + 1] = rgb[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb[i * 3 + 2];
-        rgba[i * 4 + 3] = 255;
-    }
-}
-
-#endif  // __aarch64__
-// ---------------------------------------------------------------------------
-// W7-A/W7-B: the returned ~96 MB RGBA buffer is pool-backed to avoid a full
-// page-fault on every warm decode. The checkout-style pool itself lives in
-// dng_pipeline_v2.cpp (dng_rgba_output_acquire / dng_rgba_output_release) so a
-// single owner serves both the FFI macOS path (acquire + rgb_to_rgba below) and
-// the Android fused path (acquire inside the pipeline, written straight to RGBA
-// by the Stage4 bridge — no rgb_to_rgba here). The three release entry points
-// consult the pool first and only delete[] non-pool buffers, so zero-copy
-// NativeFinalizer and preview callers keep working. Zero DngResult ABI change.
+// W7 (M-11): rgb_to_rgba_neon RETIRED. The pipeline now sets fuse_rgba_output
+// on all platforms, so pipeline.rgba_ptr is always set and the FFI layer takes
+// the RGBA buffer as-is. On macOS the Stage4 generator writes RGBA8 in-kernel
+// (alpha=255); on Android the bridge fuses planar→RGBA via repackPlanarToRGBAMT.
+// The ~96 MB RGBA buffer is pool-backed (checkout-style pool in
+// dng_pipeline_v2.cpp) to avoid page-faults on warm decodes.
 // ---------------------------------------------------------------------------
 
 extern "C" {
@@ -90,22 +43,14 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
     return result;
   }
 
-  const size_t pixelCount =
-      static_cast<size_t>(pipeline.width) * static_cast<size_t>(pipeline.height);
-  // 24MP RGBA: ~96 MB, pool-backed (see banner above). W7-B: when the pipeline
-  // produced a fused RGBA buffer (Android Vulkan path) take it as-is — the
-  // bridge already wrote interleaved RGBA8, so the rgb_to_rgba pass is skipped
-  // entirely. Otherwise (macOS RGB path) acquire a pool buffer and convert.
-  uint8_t *rgba = nullptr;
-  if (pipeline.rgba_ptr) {
-    rgba = pipeline.rgba_ptr;
-  } else {
-    rgba = dng_rgba_output_acquire(pixelCount * 4);
-    if (!rgba) {
-      result->error_code = -7;
-      return result;
-    }
-    rgb_to_rgba_neon(pipeline.rgb_ptr, rgba, pixelCount);
+  // W7 (M-11): fuse_rgba_output is now always true — pipeline.rgba_ptr is the
+  // RGBA8 buffer produced by the Stage4 kernel (macOS in-kernel alpha=255,
+  // Android fused planar→RGBA repack). No rgb_to_rgba pass needed.
+  uint8_t *rgba = pipeline.rgba_ptr;
+  if (!rgba) {
+    // Defensive: should not happen with fuse_rgba_output=true, but guard anyway.
+    result->error_code = kDngErrRgbaAllocFailed;
+    return result;
   }
 
   result->rgba_data = rgba;
@@ -184,12 +129,12 @@ FFI_EXPORT void dng_free_result(DngResult *result) {
   // Frees rgba_data when non-NULL, then frees the struct itself.
   // Zero-copy callers MUST clear result->rgba_data before calling this
   // (see _decodeZeroCopy in dng_decoder_service.dart) to avoid double-free.
-  // W7-A/W7-B: rgba_data is pool-backed; reclaim via the shared pool, only
-  // delete[] if it was not a pool buffer.
+  // W5 (H-2 FFI): the pool's release() now absorbs unknown pointers as a
+  // logged no-op (W1 pool defense), so the delete[] fallback is removed to
+  // prevent heap corruption if a pool-owned pointer is mistakenly released
+  // twice. Dart already nulls rgba_data at dng_decoder_service.dart:293.
   if (result->rgba_data) {
-    if (!dng_rgba_output_release(result->rgba_data)) {
-      delete[] result->rgba_data;
-    }
+    dng_rgba_output_release(result->rgba_data);
     result->rgba_data = nullptr;
   }
   std::free(result);
@@ -198,15 +143,18 @@ FFI_EXPORT void dng_free_result(DngResult *result) {
 FFI_EXPORT void dng_free_rgba_buffer(void *ptr) {
   if (!ptr)
     return;
-  // W7-A/W7-B: reclaim to the shared pool when applicable, else delete[].
+  // W5 (H-2 FFI): pool absorbs all pointers (known or unknown) — no
+  // delete[] fallback. See dng_free_result comment above.
   uint8_t *p = static_cast<uint8_t *>(ptr);
-  if (!dng_rgba_output_release(p)) {
-    delete[] p;
-  }
+  dng_rgba_output_release(p);
 }
 
 FFI_EXPORT void dng_free_halide_buffer(void *ptr) {
   dng_free_rgba_buffer(ptr);
+}
+
+FFI_EXPORT size_t dng_debug_pool_checked_out(void) {
+  return dng_rgba_output_checked_out_count();
 }
 
 } // extern "C"

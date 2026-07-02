@@ -28,6 +28,7 @@
 
 #include "dng_opcodelist2_halide.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -36,8 +37,10 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <unordered_set>
+#include <vector>
+
+#include "dng_error_codes.h"  // W5: DngOl2DispatchError typed exception (includes <stdexcept>)
 #include <utility>
 
 #include "HalideBuffer.h"
@@ -335,8 +338,13 @@ double prewarm_polynomial_kernel_once() {
 // Persistent device-resident scratch. Single-thread Stage 2 decode means we
 // can rely on a global pair guarded by std::call_once for first-use init plus
 // a mutex around the (width,height) check for resize.
+//
+// W8/L-6: only the dst side stays a persistent dense device buffer. The src
+// side is now a fresh strided wrap over the caller's plane memory each call
+// (see run_polynomial_kernel below, ported from the polynomial3 strided
+// pattern at ~:596-609), so there is no longer a dense host-owned src buffer
+// to keep device-resident here.
 struct PersistentScratch {
-    Halide::Runtime::Buffer<uint16_t> src;
     Halide::Runtime::Buffer<uint16_t> dst;
     int width = 0;
     int height = 0;
@@ -349,19 +357,18 @@ PersistentScratch &persistent_scratch() {
     return instance;
 }
 
-// Ensure the persistent scratch matches the requested size and is bound to
-// the Metal device. Returns false if device_malloc fails (caller falls back
-// to per-call temporaries).
+// Ensure the persistent dst scratch matches the requested size and is bound
+// to the Metal device. Returns false if device_malloc fails (caller falls
+// back to a per-call temporary).
 bool ensure_persistent_scratch(int width, int height) {
     PersistentScratch &s = persistent_scratch();
     std::lock_guard<std::mutex> lock(s.mu);
     if (s.ready && s.width == width && s.height == height) {
         return true;
     }
-    // Re-allocate fresh host buffers — Halide::Runtime::Buffer frees device
+    // Re-allocate a fresh host buffer — Halide::Runtime::Buffer frees device
     // memory on destruction, so simply assigning a new buffer drops the old
     // device allocation.
-    s.src = Halide::Runtime::Buffer<uint16_t>(width, height);
     s.dst = Halide::Runtime::Buffer<uint16_t>(width, height);
     s.width = width;
     s.height = height;
@@ -372,14 +379,7 @@ bool ensure_persistent_scratch(int width, int height) {
     if (!metal_iface) {
         return false;
     }
-    int rc = s.src.device_malloc(metal_iface);
-    if (rc != 0) {
-        std::fprintf(stderr,
-                     "[OpcodeList2Halide] persistent src device_malloc rc=%d\n",
-                     rc);
-        return false;
-    }
-    rc = s.dst.device_malloc(metal_iface);
+    const int rc = s.dst.device_malloc(metal_iface);
     if (rc != 0) {
         std::fprintf(stderr,
                      "[OpcodeList2Halide] persistent dst device_malloc rc=%d\n",
@@ -417,45 +417,36 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
         (void)prewarm_polynomial_kernel_once();
     }
 
-    Halide::Runtime::Buffer<uint16_t> local_src;
     Halide::Runtime::Buffer<uint16_t> local_dst;
-    Halide::Runtime::Buffer<uint16_t> *src_buf = nullptr;
     Halide::Runtime::Buffer<uint16_t> *dst_buf = nullptr;
 
     const bool use_persistent =
         ensure_persistent_scratch(width, height);
     if (use_persistent) {
         PersistentScratch &s = persistent_scratch();
-        src_buf = &s.src;
         dst_buf = &s.dst;
     } else {
-        local_src = Halide::Runtime::Buffer<uint16_t>(width, height);
         local_dst = Halide::Runtime::Buffer<uint16_t>(width, height);
-        src_buf = &local_src;
         dst_buf = &local_dst;
     }
 
-    // Host-side gather: interleaved plane → dense scratch.
+    // W8/L-6: direct strided wrap over the interleaved plane memory, ported
+    // from the polynomial3 strided-src pattern (~:596-609). copy_to_device
+    // below reads plane_ptr's strided layout straight off the host pointer,
+    // eliminating the scalar/memcpy host-side gather loop this path used to
+    // pay per plane before dispatch. gather_ms now only covers the
+    // near-zero-cost buffer view construction.
     const auto gather_start = std::chrono::high_resolution_clock::now();
-    uint16_t *src_data = src_buf->data();
-    for (int32_t y = 0; y < height; ++y) {
-        const uint16_t *row = plane_ptr + static_cast<ptrdiff_t>(y) * row_step;
-        uint16_t *scratch = src_data + static_cast<ptrdiff_t>(y) * width;
-        if (col_step == 1) {
-            std::memcpy(scratch, row, sizeof(uint16_t) * static_cast<size_t>(width));
-        } else {
-            for (int32_t x = 0; x < width; ++x) {
-                scratch[x] = row[x * col_step];
-            }
-        }
-    }
+    halide_dimension_t src_shape[2] = {
+        {0, width,  col_step, 0},
+        {0, height, row_step, 0},
+    };
+    Halide::Runtime::Buffer<uint16_t> src_buf(plane_ptr, 2, src_shape);
+    src_buf.set_host_dirty(true);
     const auto gather_end = std::chrono::high_resolution_clock::now();
     if (timing) {
         timing->gather_ms = dng_timing::elapsed_ms(gather_start, gather_end);
     }
-
-    // Host got new data; Halide must re-upload before dispatch.
-    src_buf->set_host_dirty(true);
 
     // Coeff buffer (9 entries, c0..c8, unused entries zeroed).
     float coeff_f32[9] = {0};
@@ -476,7 +467,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
             dng_halide_gpu_device_interface();
         if (metal_iface) {
             const int src_rc =
-                measure_device_upload(*src_buf, metal_iface,
+                measure_device_upload(src_buf, metal_iface,
                                       timing->src_upload_ms);
             if (src_rc != 0) {
                 std::fprintf(stderr,
@@ -498,7 +489,7 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     }
 
     const auto kernel_start = std::chrono::high_resolution_clock::now();
-    const int rc = dng_opcode_polynomial(*src_buf,
+    const int rc = dng_opcode_polynomial(src_buf,
                                          coeff,
                                          static_cast<int32_t>(degree),
                                          pixel_range,
@@ -541,6 +532,82 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
         timing->t_func_exit = std::chrono::high_resolution_clock::now();
     }
     return true;
+}
+
+// W8/L-6 self-check: the single-plane strided-wrap gather (above) isn't
+// exercised by the current lossy/lossless fixtures — they always route
+// through the 3-consecutive-opcode batched3 path. This verifies the
+// strided-wrap src_buf produces the same result as a reference scalar Horner
+// evaluation for a synthetic non-contiguous plane (col_step > 1, row_step
+// wider than width*col_step, i.e. embedded in larger padded/interleaved
+// memory), so the change is proven correct even without fixture coverage.
+// Opt-in only (DNG_OL2_SELFTEST=1); never runs on the production/matrix
+// hot path.
+void ol2_selftest_strided_gather() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+        const char *v = std::getenv("DNG_OL2_SELFTEST");
+        if (!(v && v[0] != '0' && v[0] != '\0')) {
+            return;
+        }
+        constexpr int32_t width = 17;
+        constexpr int32_t height = 13;
+        constexpr int32_t col_step = 5;    // simulates an interleaved plane
+        constexpr int32_t row_step = 131;  // > width*col_step: padded rows
+        constexpr float pixel_range = 65535.0f;
+        const double coeff[9] = {1000.0, 0.5, 0, 0, 0, 0, 0, 0, 0};
+
+        std::vector<uint16_t> host(static_cast<size_t>(row_step) * height, 0);
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x) {
+                host[static_cast<size_t>(y) * row_step +
+                     static_cast<size_t>(x) * col_step] =
+                    static_cast<uint16_t>((y * 37 + x * 101) % 60000);
+            }
+        }
+
+        // Reference: same Horner(degree=1) + clamp + round formula as
+        // DngOpcodePolynomialGenerator::generate().
+        std::vector<uint16_t> expected(static_cast<size_t>(width) * height);
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x) {
+                const uint16_t src_val =
+                    host[static_cast<size_t>(y) * row_step +
+                         static_cast<size_t>(x) * col_step];
+                const float x_norm = static_cast<float>(src_val) / pixel_range;
+                float y_val = static_cast<float>(coeff[0]) +
+                              x_norm * static_cast<float>(coeff[1]);
+                y_val = std::min(1.0f, std::max(0.0f, y_val));
+                expected[static_cast<size_t>(y) * width + x] =
+                    static_cast<uint16_t>(y_val * pixel_range + 0.5f);
+            }
+        }
+
+        std::vector<uint16_t> actual_host = host;
+        const bool dispatched = run_polynomial_kernel(
+            actual_host.data(), width, height, col_step, row_step,
+            /*degree=*/1, coeff, pixel_range, /*timing=*/nullptr);
+
+        bool ok = dispatched;
+        for (int32_t y = 0; ok && y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x) {
+                const uint16_t got =
+                    actual_host[static_cast<size_t>(y) * row_step +
+                                static_cast<size_t>(x) * col_step];
+                const uint16_t want = expected[static_cast<size_t>(y) * width + x];
+                if (got != want) {
+                    std::fprintf(stderr,
+                                 "[OL2SelfTest] FAIL at (%d,%d) got=%u want=%u\n",
+                                 x, y, static_cast<unsigned>(got),
+                                 static_cast<unsigned>(want));
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        std::fprintf(stderr, "[OL2SelfTest] strided_gather %s\n",
+                     ok ? "PASS" : "FAIL");
+    });
 }
 
 bool run_polynomial3_kernel(uint16_t *base,
@@ -847,14 +914,28 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
                     state.poly3_scratch.size() * sizeof(uint16_t));
     }
 
-    // Allocate interleaved src/dst at actual image dimensions so Halide
-    // specialises the Metal pipeline state for this exact size.
+    // W8/L-7: measured (docs/logs/2026-07-02/Task_w8_opcodelist2.md) that a
+    // fixed 256x256 identity dispatch warms the Metal pipeline state just as
+    // effectively as dispatching at the actual image dimensions — the
+    // generator schedule (DngOpcodePolynomial3Generator::schedule) has no
+    // width/height-dependent specialize()/bound() calls, only a fixed 16x16
+    // gpu_tile, so PSO compilation is size-independent. Measured on the
+    // lossy sample (6000x4000): full-size prewarm ~86-115ms vs 256x256
+    // ~33-38ms, with the subsequent real first dispatch's kernel_ms
+    // unchanged (~0.07-0.14ms either way) — confirming no re-compile is paid
+    // on the real dispatch. poly3_scratch above is still pre-grown to the
+    // real (width, height) since the real dispatch writes into it at full
+    // size.
+    const auto prewarm_start = std::chrono::high_resolution_clock::now();
+
+    constexpr int kPrewarmW = 256;
+    constexpr int kPrewarmH = 256;
     Halide::Runtime::Buffer<uint16_t> src =
-        Halide::Runtime::Buffer<uint16_t>::make_interleaved(width, height, 3);
+        Halide::Runtime::Buffer<uint16_t>::make_interleaved(kPrewarmW, kPrewarmH, 3);
     Halide::Runtime::Buffer<uint16_t> dst =
-        Halide::Runtime::Buffer<uint16_t>::make_interleaved(width, height, 3);
-    std::memset(src.data(), 0, sizeof(uint16_t) * static_cast<size_t>(width) *
-                                   static_cast<size_t>(height) * 3);
+        Halide::Runtime::Buffer<uint16_t>::make_interleaved(kPrewarmW, kPrewarmH, 3);
+    std::memset(src.data(), 0, sizeof(uint16_t) * static_cast<size_t>(kPrewarmW) *
+                                   static_cast<size_t>(kPrewarmH) * 3);
 
     // Identity polynomial (degree=1, c1=1) — correct output but no real work.
     float coeff_f32[27] = {0};
@@ -872,6 +953,14 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
                                           /*pixel_range=*/65535.0f, dst);
     dst.copy_to_host();
     (void)rc;
+
+    if (map_poly_timing_enabled()) {
+        const auto prewarm_end = std::chrono::high_resolution_clock::now();
+        std::fprintf(stderr,
+                     "[MapPolynomial3PrewarmForSize] w=%d h=%d total_ms=%.3f\n",
+                     width, height,
+                     dng_timing::elapsed_ms(prewarm_start, prewarm_end));
+    }
 
     // Mark this dimension as warmed regardless of rc — even a failed dispatch
     // means Metal has attempted compilation; we should not retry on every call.
@@ -970,6 +1059,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     if (!stage2_ol2_halide_enabled()) {
         return 0;
     }
+    ol2_selftest_strided_gather();  // W8/L-6: opt-in, no-op unless DNG_OL2_SELFTEST=1
     halide_stage2_ol2_clear_device_handoff();
     if (start_index + 2 >= list.Count()) {
         return 0;
@@ -1063,7 +1153,13 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     const auto dispatch_end = std::chrono::high_resolution_clock::now();
     detail.dispatch_call_ms = dng_timing::elapsed_ms(dispatch_start, dispatch_end);
     if (!ok) {
-        throw std::runtime_error(
+        // W5 (M-6 Option B): deliberate throw-as-control-flow. The opcode
+        // loop in dng_opcode_list.cpp (third_party) cannot be modified to
+        // accept a status return; the typed exception lets dng_pipeline_v2.cpp
+        // catch it separately from generic std::exception and map it to
+        // kDngErrOl2DispatchFailed. Status-return redesign at the opcode-loop
+        // boundary is intentionally deferred.
+        throw DngOl2DispatchError(
             "[OpcodeList2Halide] batched GPU dispatch failed; refusing SDK CPU fallback");
     }
     if (map_poly_timing_enabled()) {
@@ -1196,7 +1292,9 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
                                 dispatch_end, /*has_handoff=*/false);
     }
     if (!ok) {
-        throw std::runtime_error(
+        // W5 (M-6 Option B): deliberate throw-as-control-flow — same
+        // rationale as the batched path above. See dng_error_codes.h.
+        throw DngOl2DispatchError(
             "[OpcodeList2Halide] GPU dispatch failed; refusing SDK CPU fallback");
     }
     return true;

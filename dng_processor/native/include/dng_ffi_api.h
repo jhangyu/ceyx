@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -55,6 +56,11 @@ void dng_free_rgba_buffer(void *ptr);
 /// Deprecated alias for dng_free_rgba_buffer().
 /// Kept for ABI compatibility with older Dart builds.
 void dng_free_halide_buffer(void *ptr);
+
+/// W5-#15: Debug/stats — number of RGBA pool buffers currently checked out.
+/// Returns 0 when all decode results have been properly freed.
+/// Used by dng_ffi_harness to machine-check the H-1 leak guarantee.
+size_t dng_debug_pool_checked_out(void);
 
 #ifdef __cplusplus
 }
