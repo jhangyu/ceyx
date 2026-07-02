@@ -34,6 +34,16 @@
 # usage: |
 #   python3 run_decode_matrix.py --repo-root . --repeat 2 --timing
 #   python3 run_decode_matrix.py --repo-root . --repeat 3 --output docs/logs/YYYY-MM-DD/matrix.md
+#
+# harness_auto_enable: >
+#   The FFI (dng_ffi_harness) and device-handoff (test_device_handoff) cases
+#   are auto-enabled on macOS whenever their default build outputs exist
+#   (dng_processor/native/build/dng_ffi_harness,
+#   dng_processor/native/build/test_device_handoff) — no flag needed once
+#   both targets are built. Use --ffi-harness/--device-handoff-harness to
+#   point at a non-default binary, or --no-ffi-harness/
+#   --no-device-handoff-harness to opt out even if the default binary exists.
+#
 # 注意：--output 只寫 markdown 報告；raw/ppm/pgm 中間產物一律落到 <repo>/artifacts/。
 # artifacts/ 是 ephemeral workspace；每次 matrix run 開始前會清空，避免跨 run 囤積不同版本。
 # 嚴禁透過 --artifact-dir 把 raw 檔導向 docs/logs（會被 .gitignore 阻擋並造成空間污染）。
@@ -49,10 +59,12 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -291,6 +303,11 @@ _HANDOFF_PSNR_RE = re.compile(
     r"dB\s+\[(PASS|FAIL)\]"
 )
 _KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
+_DEFAULT_ANDROID_TEST_DECODE = (
+    "dng_processor/native/build-android/android-arm64/test_decode_android"
+)
+_DEFAULT_FFI_HARNESS = "dng_processor/native/build/dng_ffi_harness"
+_DEFAULT_DEVICE_HANDOFF_HARNESS = "dng_processor/native/build/test_device_handoff"
 
 
 def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
@@ -300,20 +317,224 @@ def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
             dst[key] = dst.get(key, 0.0) + values[key]
 
 
-def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
-    merged = os.environ.copy()
-    merged.update(env)
-    merged["DNG_TEST_DECODE_ARTIFACT_DIR"] = str(cwd)
+# ---------------------------------------------------------------------------
+# Android ADB helpers (ported from run_android_w0_gate.py)
+# ---------------------------------------------------------------------------
+
+def _parse_attached_devices(adb: str) -> tuple[list[str], str]:
+    """Parse `adb devices` output, return (serials, raw_output)."""
     proc = subprocess.run(
-        cmd,
-        cwd=str(cwd),
+        [adb, "devices"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=merged,
         check=False,
     )
-    output = proc.stdout
+    if proc.returncode != 0:
+        raise RuntimeError(f"adb devices failed with exit {proc.returncode}\n{proc.stdout}")
+    devices: list[str] = []
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            devices.append(parts[0])
+    return devices, proc.stdout
+
+
+def _resolve_serial(adb: str, requested: Optional[str]) -> str:
+    """Resolve ADB serial: use requested, or auto-detect if exactly one device."""
+    if requested:
+        proc = subprocess.run(
+            [adb, "-s", requested, "get-state"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0 or proc.stdout.strip() != "device":
+            raise RuntimeError(f"ADB device is not ready: {requested}")
+        return requested
+
+    devices, raw = _parse_attached_devices(adb)
+    if not devices:
+        raise RuntimeError(f"No attached ADB device in 'device' state.\n{raw}")
+    if len(devices) > 1:
+        raise RuntimeError(
+            "Multiple attached ADB devices; pass --android-serial. "
+            f"Devices: {', '.join(devices)}"
+        )
+    return devices[0]
+
+
+def _adb_cmd(adb: str, serial: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run `adb -s <serial> <args>` and return result."""
+    cmd = [adb, "-s", serial, *args]
+    print(f"[ADB] {' '.join(shlex.quote(part) for part in cmd)}")
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout)
+    return proc
+
+
+def _libcxx_path(ndk_path: Path, abi: str) -> Optional[Path]:
+    """Locate libc++_shared.so in the NDK for the given ABI."""
+    triples = {
+        "arm64-v8a": "aarch64-linux-android",
+        "armeabi-v7a": "arm-linux-androideabi",
+        "x86": "i686-linux-android",
+        "x86_64": "x86_64-linux-android",
+    }
+    triple = triples.get(abi)
+    if not triple:
+        return None
+    matches = sorted(
+        (ndk_path / "toolchains" / "llvm" / "prebuilt").glob(
+            f"*/sysroot/usr/lib/{triple}/libc++_shared.so"
+        )
+    )
+    return matches[0] if matches else None
+
+
+def _adb_stage_binaries(
+    adb: str,
+    serial: str,
+    test_decode_local: Path,
+    probe_local: Optional[Path],
+    shared_libs: list[Path],
+    lossless_local: Path,
+    lossy_local: Path,
+    remote_dir: str,
+) -> None:
+    """Push all required files to Android device in one batch.
+
+    Steps:
+    1. adb shell rm -rf <remote_dir> && mkdir -p <remote_dir>/artifacts <remote_dir>/samples
+    2. adb push test_decode_android -> <remote_dir>/
+    3. adb push test_android_vulkan_capability -> <remote_dir>/ (if exists)
+    4. adb push shared libs -> <remote_dir>/ (if any)
+    5. adb push lossless.dng -> <remote_dir>/samples/
+    6. adb push lossy.dng -> <remote_dir>/samples/
+    """
+    remote_artifacts = f"{remote_dir}/artifacts"
+    remote_samples = f"{remote_dir}/samples"
+    remote_bin = f"{remote_dir}/test_decode_android"
+    remote_probe = f"{remote_dir}/test_android_vulkan_capability"
+
+    # Clean and create directories
+    _adb_cmd(adb, serial, "shell",
+             f"rm -rf {shlex.quote(remote_dir)} && "
+             f"mkdir -p {shlex.quote(remote_artifacts)} {shlex.quote(remote_samples)}")
+
+    # Push test binary
+    _adb_cmd(adb, serial, "push", str(test_decode_local), remote_bin)
+    _adb_cmd(adb, serial, "shell", f"chmod 755 {shlex.quote(remote_bin)}")
+
+    # Push probe binary (optional)
+    if probe_local and probe_local.exists():
+        _adb_cmd(adb, serial, "push", str(probe_local), remote_probe)
+        _adb_cmd(adb, serial, "shell", f"chmod 755 {shlex.quote(remote_probe)}")
+
+    # Push shared libraries if this build needs any sidecar .so files.
+    for lib in shared_libs:
+        _adb_cmd(adb, serial, "push", str(lib), f"{remote_dir}/{lib.name}")
+
+    # Push DNG samples
+    _adb_cmd(adb, serial, "push", str(lossless_local), f"{remote_samples}/{lossless_local.name}")
+    _adb_cmd(adb, serial, "push", str(lossy_local), f"{remote_samples}/{lossy_local.name}")
+
+
+def _adb_run_vulkan_probe(adb: str, serial: str, remote_dir: str) -> None:
+    """Run Vulkan capability probe on device. Raise RuntimeError if fails."""
+    remote_probe = f"{remote_dir}/test_android_vulkan_capability"
+    probe_cmd = (
+        f"cd {shlex.quote(remote_dir)} && "
+        f"export LD_LIBRARY_PATH={shlex.quote(remote_dir)}:$LD_LIBRARY_PATH && "
+        f"{shlex.quote(remote_probe)}"
+    )
+    probe_proc = _adb_cmd(adb, serial, "shell", probe_cmd, check=False)
+    if probe_proc.returncode != 0:
+        raise RuntimeError(
+            "Android Vulkan capability probe failed; "
+            "device cannot run the configured Halide Vulkan AOT target"
+        )
+
+
+def _build_android_cases(
+    lossless_remote: str,
+    lossy_remote: str,
+    remote_artifacts: str,
+    extra_env: dict[str, str],
+    enable_timing: bool,
+    include_lossy: bool,
+) -> list[tuple[str, list[str], list[str], dict[str, str], dict[str, str]]]:
+    """Return Android test cases with device-side baseline and Vulkan test.
+
+    Returns:
+        [(case_name, baseline_args, test_args, baseline_env, test_env), ...]
+
+    test_env includes:
+        DNG_GPU_BACKEND=vulkan
+        DNG_TEST_DECODE_ARTIFACT_DIR=<remote_artifacts>
+        Optional timing envs when enable_timing is True.
+    """
+    baseline_env: dict[str, str] = {
+        "DNG_TEST_DECODE_ARTIFACT_DIR": remote_artifacts,
+        **extra_env,
+    }
+    test_env: dict[str, str] = {
+        **baseline_env,
+        "DNG_GPU_BACKEND": "vulkan",
+    }
+    if enable_timing:
+        timing_env = {
+            "DNG_STAGE1_TIMING": "1",
+            "DNG_MAP_POLY_TIMING": "1",
+            "DNG_STAGE2_SDK_TIMING": "1",
+        }
+        baseline_env.update(timing_env)
+        test_env.update(timing_env)
+
+    cases = [
+        (
+            "Lossless / Halide GPU (Android)",
+            [lossless_remote, "baseline", "halide-gpu", "cpu"],
+            [lossless_remote, "test", "halide-gpu", "halide-gpu"],
+            dict(baseline_env),
+            dict(test_env),
+        ),
+    ]
+    if include_lossy:
+        cases.append(
+            (
+                "Lossy / Halide GPU (Android)",
+                [lossy_remote, "baseline", "auto", "cpu"],
+                [lossy_remote, "test", "auto", "halide-gpu"],
+                dict(baseline_env),
+                dict(test_env),
+            )
+        )
+    return cases
+
+
+def _parse_test_decode_output(
+    output: str,
+    returncode: int,
+    case_name: str,
+    *,
+    require_android_vulkan_gate: bool = False,
+) -> RunResult:
+    """Parse test_decode stdout and validate contract markers.
+
+    Shared between macOS (_run_case) and Android (_run_android_case) since
+    both compile from the same test_decode.cpp and emit identical output.
+    """
     stages: dict[str, StageResult] = {str(i): StageResult() for i in range(1, 5)}
     cur: Optional[str] = None
     total_ms: Optional[float] = None
@@ -363,14 +584,25 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         stage for stage, statuses in contract_statuses.items()
         if "FAIL" in statuses
     ]
-    if proc.returncode != 0 or missing_contracts or failed_contracts:
+    if returncode != 0 or missing_contracts or failed_contracts:
         details = []
         if missing_contracts:
             details.append(f"missing PASS markers: {', '.join(missing_contracts)}")
         if failed_contracts:
             details.append(f"FAIL markers: {', '.join(sorted(failed_contracts))}")
         suffix = f" ({'; '.join(details)})" if details else ""
-        raise RuntimeError(f"[{case_name}] exit={proc.returncode}{suffix}\n{output}")
+        raise RuntimeError(f"[{case_name}] exit={returncode}{suffix}\n{output}")
+
+    if require_android_vulkan_gate:
+        details = []
+        if "GPU backend: vulkan" not in output:
+            details.append("missing 'GPU backend: vulkan' marker")
+        if "[PSNR GATE] ALL PASS" not in output:
+            details.append("missing PSNR gate pass marker")
+        if details:
+            raise RuntimeError(
+                f"[{case_name}] exit={returncode} ({'; '.join(details)})\n{output}"
+            )
 
     return RunResult(
         case_name=case_name,
@@ -384,6 +616,80 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         stage2_probe=stage2_probe,
         opcode2_probe=opcode2_probe,
     )
+
+
+def _run_android_case(
+    adb: str,
+    serial: str,
+    remote_dir: str,
+    baseline_args: list[str],
+    test_args: list[str],
+    case_name: str,
+    baseline_env: dict[str, str],
+    test_env: dict[str, str],
+) -> RunResult:
+    """Execute one Android test case via ADB shell.
+
+    Steps:
+    1. Clear remote artifacts.
+    2. Run device-side SDK baseline to generate raw references.
+    3. Run Vulkan test against those references.
+    4. Parse stdout using shared _parse_test_decode_output.
+    """
+    remote_artifacts = f"{remote_dir}/artifacts"
+    remote_bin = f"{remote_dir}/test_decode_android"
+
+    _adb_cmd(adb, serial, "shell",
+             f"rm -f {shlex.quote(remote_artifacts)}/*.raw", check=False)
+
+    def shell_cmd(remote_args: list[str], env: dict[str, str]) -> str:
+        exports = " ; ".join(
+            f"export {k}={shlex.quote(v)}"
+            for k, v in env.items()
+        )
+        args_str = " ".join(shlex.quote(a) for a in remote_args)
+        return (
+            f"cd {shlex.quote(remote_artifacts)} ; "
+            f"export LD_LIBRARY_PATH={shlex.quote(remote_dir)}:$LD_LIBRARY_PATH ; "
+            f"{exports} ; "
+            f"{shlex.quote(remote_bin)} {args_str}"
+        )
+
+    baseline = _adb_cmd(
+        adb,
+        serial,
+        "shell",
+        shell_cmd(baseline_args, baseline_env),
+        check=False,
+    )
+    if baseline.returncode != 0:
+        raise RuntimeError(
+            f"[{case_name} baseline] exit={baseline.returncode}\n{baseline.stdout}"
+        )
+
+    proc = _adb_cmd(adb, serial, "shell", shell_cmd(test_args, test_env), check=False)
+    return _parse_test_decode_output(
+        proc.stdout,
+        proc.returncode,
+        case_name,
+        require_android_vulkan_gate=True,
+    )
+
+
+def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
+    merged = os.environ.copy()
+    merged.update(env)
+    merged["DNG_TEST_DECODE_ARTIFACT_DIR"] = str(cwd)
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=merged,
+        check=False,
+    )
+    return _parse_test_decode_output(proc.stdout, proc.returncode, case_name)
 
 
 def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
@@ -529,10 +835,13 @@ def _build_markdown(
     results: list[AggResult],
     ffi_results: list[FfiAggResult],
     handoff_results: list[DeviceHandoffResult],
+    android_results: list[AggResult],
+    android_ffi_results: list[FfiAggResult],
     generated_at: str,
     repeat: int,
     show_halide_timing: bool,
     artifact_dir: Path,
+    android_serial: Optional[str] = None,
 ) -> str:
     L: list[str] = []
 
@@ -575,6 +884,20 @@ def _build_markdown(
     L.append("| Case | Stage1 production | Stage1 validation extract | Stage2 production | Stage2 validation extract | Stage3 production | Stage3 validation extract | Stage4 production | Stage4 validation extract | Production total | Legacy total |")
     L.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in results:
+        L.append(
+            f"| {r.case_name} "
+            f"| {_fmt_ms(r.stage_production_ms(1))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(1))} "
+            f"| {_fmt_ms(r.stage_production_ms(2))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(2))} "
+            f"| {_fmt_ms(r.stage_production_ms(3))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(3))} "
+            f"| {_fmt_ms(r.stage_production_ms(4))} "
+            f"| {_fmt_ms(r.stage_validation_extract_ms(4))} "
+            f"| {_fmt_ms(r.production_total_ms)} "
+            f"| {_fmt_ms(r.total_ms)} |"
+        )
+    for r in android_results:
         L.append(
             f"| {r.case_name} "
             f"| {_fmt_ms(r.stage_production_ms(1))} "
@@ -637,7 +960,35 @@ def _build_markdown(
             f"| {_fmt_db(r.stage3.psnr_db)} "
             f"| {_fmt_db(r.stage4.psnr_db)} |"
         )
+    for r in android_results:
+        L.append(
+            f"| {r.case_name} "
+            f"| {_fmt_db(r.stage1.psnr_db)} "
+            f"| {_fmt_db(r.stage2.psnr_db)} "
+            f"| {_fmt_db(r.stage3.psnr_db)} "
+            f"| {_fmt_db(r.stage4.psnr_db)} |"
+        )
     L.append("")
+
+    # --- Android Vulkan Timing (dedicated section) ---
+    if android_results:
+        L.append("## Android Vulkan Timing")
+        L.append("")
+        device_label = f"Device: {android_serial} | " if android_serial else ""
+        L.append(f"_{device_label}GPU backend: Vulkan | device-side SDK baseline + PSNR gate_")
+        L.append("")
+        L.append("| Case | Stage1 | Stage2 | Stage3 | Stage4 | Total |")
+        L.append("|---|---|---|---|---|---|")
+        for r in android_results:
+            L.append(
+                f"| {r.case_name} "
+                f"| {_fmt_ms(r.stage1.time_ms)} "
+                f"| {_fmt_ms(r.stage2.time_ms)} "
+                f"| {_fmt_ms(r.stage3.time_ms)} "
+                f"| {_fmt_ms(r.stage4.time_ms)} "
+                f"| {_fmt_ms(r.total_ms)} |"
+            )
+        L.append("")
 
     # --- Diagnostic timing breakdown (Stage2 SDK / OpcodeList2 / Stage3 probe) ---
     # Historical Stage3 Demosaic / DemosaicWarp AOT and Stage4 halideFull tables
@@ -755,12 +1106,34 @@ def _build_markdown(
                 )
             L.append("")
 
+        # --- Android Stage3 Probe Breakdown ---
+        has_android_stage3_probe = any(
+            r.stage3_probe_avg("total") is not None for r in android_results
+        )
+        if has_android_stage3_probe:
+            L.append("## Android Stage3 Probe Breakdown (ms)")
+            L.append("")
+            L.append("| Case | workspace acquire | demosaic | fused | applyOpcode3 | total |")
+            L.append("|---|---|---|---|---|---|")
+            for r in android_results:
+                L.append(
+                    f"| {r.case_name} "
+                    f"| {_fmt_ms(r.stage3_workspace_acquire_avg())} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('demosaic'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('fused'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('applyOpcode3'))} "
+                    f"| {_fmt_ms(r.stage3_probe_avg('total'))} |"
+                )
+            L.append("")
+
     # --- Raw run data ---
     L.append("## Stage4 Raw Runs (ms)")
     L.append("")
     L.append("| Case | Stage4 total runs (ms) |")
     L.append("|---|---|")
     for r in results:
+        L.append(f"| {r.case_name} | {r.stage4_runs_str()} |")
+    for r in android_results:
         L.append(f"| {r.case_name} | {r.stage4_runs_str()} |")
     L.append("")
 
@@ -1495,12 +1868,34 @@ def main() -> int:
     ap.add_argument(
         "--ffi-harness",
         default="",
-        help="Optional production C ABI harness path. When set, gates contract and RGB exact match.",
+        help=(
+            "Production C ABI harness path (relative to repo-root). Gates "
+            "contract and RGB exact match. Auto-enabled when the default "
+            f"build output exists ({_DEFAULT_FFI_HARNESS}); pass --no-ffi-harness "
+            "to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-ffi-harness",
+        action="store_true",
+        default=False,
+        help="Disable the FFI harness case even if the default binary exists.",
     )
     ap.add_argument(
         "--device-handoff-harness",
         default="",
-        help="Optional device handoff harness path. When set, gates both handoff routes.",
+        help=(
+            "Device handoff harness path (relative to repo-root). Gates both "
+            "handoff routes. Auto-enabled when the default build output exists "
+            f"({_DEFAULT_DEVICE_HANDOFF_HARNESS}); pass --no-device-handoff-harness "
+            "to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-device-handoff-harness",
+        action="store_true",
+        default=False,
+        help="Disable the device handoff harness case even if the default binary exists.",
     )
     ap.add_argument("--output", default="", help="Optional Markdown output file path")
     ap.add_argument(
@@ -1535,15 +1930,86 @@ def main() -> int:
             "with current hashes vs manifest. Does NOT modify the manifest."
         ),
     )
+    # --- Android device testing ---
+    ap.add_argument(
+        "--android-test-decode",
+        default="",
+        help=(
+            "Android test_decode binary path (relative to repo-root). "
+            f"Default: {_DEFAULT_ANDROID_TEST_DECODE}"
+        ),
+    )
+    ap.add_argument(
+        "--android-serial",
+        default=os.environ.get("ADB_SERIAL"),
+        help="ADB device serial; auto-detected when exactly one device is attached.",
+    )
+    ap.add_argument(
+        "--adb",
+        default=shutil.which("adb") or "",
+        help="adb executable path (default: auto-detect from PATH).",
+    )
+    ap.add_argument(
+        "--android-remote-dir",
+        default="/data/local/tmp/dng_matrix",
+        help="Remote working directory on the Android device.",
+    )
+    ap.add_argument(
+        "--android-ndk",
+        default=os.environ.get("ANDROID_NDK_HOME"),
+        help="Android NDK root (needed to locate libc++_shared.so for push).",
+    )
+    ap.add_argument(
+        "--android-abi",
+        default="arm64-v8a",
+        help="Android ABI for locating NDK shared libs.",
+    )
+    ap.add_argument(
+        "--platform",
+        choices=("all", "macos", "android"),
+        default="all",
+        help="Which platform(s) to test: all (default), macos, or android.",
+    )
+    ap.add_argument(
+        "--android-cooldown-sec",
+        type=int,
+        default=5,
+        help="Seconds to wait between Android repeats to avoid thermal throttling.",
+    )
+    ap.add_argument(
+        "--android-include-lossy",
+        action="store_true",
+        default=False,
+        help=(
+            "Also run the Android lossy DNG case. Disabled by default because "
+            "the current Android DNG SDK build does not enable JPEG decode."
+        ),
+    )
     args = ap.parse_args()
 
     if args.repeat < 1:
         ap.error("--repeat must be >= 1")
 
     root = Path(args.repo_root).resolve()
-    bin_path = (root / args.test_decode).resolve()
-    if not bin_path.exists():
-        ap.error(f"test_decode binary not found: {bin_path}")
+
+    # --- Platform flags ---
+    requested_android_test_decode = args.android_test_decode
+    if not args.android_test_decode:
+        args.android_test_decode = _DEFAULT_ANDROID_TEST_DECODE
+    default_android_bin = (root / args.android_test_decode).resolve()
+    android_enabled = args.platform == "android" or (
+        args.platform == "all" and default_android_bin.exists()
+    )
+    macos_enabled = args.platform in ("all", "macos")
+    if args.platform == "all" and not android_enabled and not requested_android_test_decode:
+        print(f"[INFO] Android binary not found; skipping Android: {default_android_bin}")
+
+    # Validate macOS binary only when macOS testing is enabled
+    bin_path = None
+    if macos_enabled:
+        bin_path = (root / args.test_decode).resolve()
+        if not bin_path.exists():
+            ap.error(f"test_decode binary not found: {bin_path}")
 
     lossless = str((root / args.lossless).resolve())
     lossy = str((root / args.lossy).resolve())
@@ -1561,9 +2027,11 @@ def main() -> int:
             ap.error(f"--env key empty: {item!r}")
         extra_env[k] = v
 
-    cases = _build_cases(
-        str(bin_path), lossless, lossy, extra_env, enable_timing=args.timing
-    )
+    cases: list[tuple[str, list[str], dict[str, str]]] = []
+    if macos_enabled:
+        cases = _build_cases(
+            str(bin_path), lossless, lossy, extra_env, enable_timing=args.timing
+        )
 
     if args.artifact_dir:
         artifact_dir = Path(args.artifact_dir)
@@ -1618,69 +2086,206 @@ def main() -> int:
     sha_entries_by_id: dict[str, dict[str, str]] = {}
 
     agg_results: list[AggResult] = []
-    for case_name, cmd, env in cases:
-        runs: list[RunResult] = []
-        fixture_key = next(
-            (fixture for fragment, fixture in _CASE_FIXTURE_MAP.items() if fragment in case_name),
-            None,
-        )
-        for i in range(args.repeat):
-            round_label = f"[RUN {i+1}/{args.repeat}]"
-            round_sha_failures: list[FailedGateInfo] = []
-            print(f"{round_label} {case_name}")
+    if macos_enabled:
+        for case_name, cmd, env in cases:
+            runs: list[RunResult] = []
+            fixture_key = next(
+                (fixture for fragment, fixture in _CASE_FIXTURE_MAP.items() if fragment in case_name),
+                None,
+            )
+            for i in range(args.repeat):
+                round_label = f"[RUN {i+1}/{args.repeat}]"
+                round_sha_failures: list[FailedGateInfo] = []
+                print(f"{round_label} {case_name}")
+                try:
+                    if "Halide" in case_name:
+                        _clear_halide_case_outputs(artifact_dir)
+                    run = _run_case(artifact_dir, cmd, case_name, env)
+                    runs.append(run)
+                except RuntimeError as exc:
+                    print(f"  ERROR: {exc}")
+                    raise SystemExit(1)
+
+                if fixture_key is not None:
+                    case_artifact_map = _stage_halide_artifacts(
+                        artifact_dir, matrix_current, fixture_key
+                    )
+                    selected = [
+                        item for item in baselines["selected_artifacts"]
+                        if item.get("fixture") == fixture_key
+                    ]
+                    print(f"[SHA256 GATE] {round_label} {case_name}")
+                    round_sha_ok, round_sha_entries = _run_sha256_gate(
+                        baselines,
+                        artifact_dir,
+                        case_artifact_map,
+                        selected_artifacts=selected,
+                    )
+                    sha_ok = round_sha_ok and sha_ok
+                    for entry in round_sha_entries:
+                        sha_entries_by_id[entry["id"]] = entry
+                    if not round_sha_ok:
+                        round_sha_failures = _failed_sha_gate_infos(
+                            round_sha_entries, round_label
+                        )
+
+                round_psnr_failures = _run_psnr_gate(
+                    run,
+                    psnr_thresholds,
+                    artifact_dir,
+                    matrix_current,
+                    round_label,
+                )
+                gate_failed = bool(round_psnr_failures) or gate_failed
+                if round_psnr_failures or round_sha_failures:
+                    _auto_diff_on_failure(
+                        artifact_dir,
+                        [*round_psnr_failures, *round_sha_failures],
+                        script_dir,
+                        baselines,
+                        root,
+                    )
+
+            agg_results.append(AggResult(case_name=case_name, runs=runs))
+
+    # --- Android test execution ---
+    android_agg_results: list[AggResult] = []
+    android_serial: Optional[str] = None
+    if android_enabled:
+        android_bin = (root / args.android_test_decode).resolve()
+        if not android_bin.exists():
+            ap.error(f"Android test_decode binary not found: {android_bin}")
+
+        adb = args.adb
+        if not adb:
+            ap.error("adb not found in PATH; use --adb to specify")
+
+        if not args.android_remote_dir.startswith("/data/local/tmp/"):
+            ap.error("--android-remote-dir must stay under /data/local/tmp/")
+
+        try:
+            android_serial = _resolve_serial(adb, args.android_serial)
+        except RuntimeError as exc:
+            ap.error(str(exc))
+        print(f"[INFO] Android device: {android_serial}")
+
+        # Locate optional shared libs. Some Android test_decode builds are
+        # fully satisfied by system libraries; others need sidecar .so files.
+        shared_libs: list[Path] = []
+        seen_libs: set[Path] = set()
+        for candidate in sorted(android_bin.parent.glob("*.so")):
+            resolved = candidate.resolve()
+            if resolved not in seen_libs:
+                shared_libs.append(candidate)
+                seen_libs.add(resolved)
+
+        if args.android_ndk:
+            ndk_path = Path(args.android_ndk).expanduser().resolve()
+            libcxx = _libcxx_path(ndk_path, args.android_abi)
+            if not libcxx or not libcxx.exists():
+                ap.error(f"libc++_shared.so not found in NDK for ABI {args.android_abi}")
+            resolved = libcxx.resolve()
+            if resolved not in seen_libs:
+                shared_libs.append(libcxx)
+                seen_libs.add(resolved)
+
+        # Probe binary (optional but recommended)
+        probe_bin = android_bin.parent / "test_android_vulkan_capability"
+
+        # Push files to device
+        print("[INFO] Pushing binaries and samples to Android device...")
+        try:
+            _adb_stage_binaries(
+                adb, android_serial, android_bin,
+                probe_bin if probe_bin.exists() else None,
+                shared_libs,
+                Path(lossless), Path(lossy),
+                args.android_remote_dir,
+            )
+        except subprocess.CalledProcessError as exc:
+            print(f"  ERROR: ADB staging failed: {exc}")
+            raise SystemExit(1)
+
+        # Vulkan capability check
+        if probe_bin.exists():
+            print("[INFO] Running Vulkan capability probe...")
             try:
-                if "Halide" in case_name:
-                    _clear_halide_case_outputs(artifact_dir)
-                run = _run_case(artifact_dir, cmd, case_name, env)
-                runs.append(run)
+                _adb_run_vulkan_probe(adb, android_serial, args.android_remote_dir)
             except RuntimeError as exc:
                 print(f"  ERROR: {exc}")
                 raise SystemExit(1)
 
-            if fixture_key is not None:
-                case_artifact_map = _stage_halide_artifacts(
-                    artifact_dir, matrix_current, fixture_key
-                )
-                selected = [
-                    item for item in baselines["selected_artifacts"]
-                    if item.get("fixture") == fixture_key
-                ]
-                print(f"[SHA256 GATE] {round_label} {case_name}")
-                round_sha_ok, round_sha_entries = _run_sha256_gate(
-                    baselines,
-                    artifact_dir,
-                    case_artifact_map,
-                    selected_artifacts=selected,
-                )
-                sha_ok = round_sha_ok and sha_ok
-                for entry in round_sha_entries:
-                    sha_entries_by_id[entry["id"]] = entry
-                if not round_sha_ok:
-                    round_sha_failures = _failed_sha_gate_infos(
-                        round_sha_entries, round_label
+        # Build and run Android cases
+        remote_lossless = f"{args.android_remote_dir}/samples/{Path(lossless).name}"
+        remote_lossy = f"{args.android_remote_dir}/samples/{Path(lossy).name}"
+        remote_artifacts = f"{args.android_remote_dir}/artifacts"
+        android_cases = _build_android_cases(
+            remote_lossless, remote_lossy, remote_artifacts,
+            extra_env,
+            enable_timing=args.timing,
+            include_lossy=args.android_include_lossy,
+        )
+        if not args.android_include_lossy:
+            print("[INFO] Android lossy DNG case skipped (JPEG decode is disabled in current Android SDK build)")
+
+        for case_name, baseline_args, test_args, baseline_env, test_env in android_cases:
+            android_runs: list[RunResult] = []
+            for i in range(args.repeat):
+                round_label = f"[RUN {i+1}/{args.repeat}]"
+                print(f"{round_label} {case_name}")
+                try:
+                    run = _run_android_case(
+                        adb, android_serial, args.android_remote_dir,
+                        baseline_args, test_args, case_name, baseline_env, test_env,
                     )
+                    android_runs.append(run)
+                except RuntimeError as exc:
+                    print(f"  ERROR: {exc}")
+                    raise SystemExit(1)
 
-            round_psnr_failures = _run_psnr_gate(
-                run,
-                psnr_thresholds,
-                artifact_dir,
-                matrix_current,
-                round_label,
-            )
-            gate_failed = bool(round_psnr_failures) or gate_failed
-            if round_psnr_failures or round_sha_failures:
-                _auto_diff_on_failure(
-                    artifact_dir,
-                    [*round_psnr_failures, *round_sha_failures],
-                    script_dir,
-                    baselines,
-                    root,
-                )
+                # Cooldown between repeats (except after last)
+                if i < args.repeat - 1 and args.android_cooldown_sec > 0:
+                    print(f"  Cooldown: {args.android_cooldown_sec}s...")
+                    time.sleep(args.android_cooldown_sec)
 
-        agg_results.append(AggResult(case_name=case_name, runs=runs))
+            android_agg_results.append(AggResult(case_name=case_name, runs=android_runs))
+
+    # --- Harness auto-enable (same pattern as Android: default path, skip
+    # silently with an [INFO] note when the binary hasn't been built yet) ---
+    requested_device_handoff_harness = args.device_handoff_harness
+    if not args.no_device_handoff_harness and not args.device_handoff_harness:
+        args.device_handoff_harness = _DEFAULT_DEVICE_HANDOFF_HARNESS
+    if args.no_device_handoff_harness:
+        args.device_handoff_harness = ""
+    default_handoff_bin = (root / args.device_handoff_harness).resolve() if args.device_handoff_harness else None
+    if (
+        macos_enabled
+        and args.device_handoff_harness
+        and not requested_device_handoff_harness
+        and default_handoff_bin is not None
+        and not default_handoff_bin.exists()
+    ):
+        print(f"[INFO] Device handoff harness binary not found; skipping: {default_handoff_bin}")
+        args.device_handoff_harness = ""
+
+    requested_ffi_harness = args.ffi_harness
+    if not args.no_ffi_harness and not args.ffi_harness:
+        args.ffi_harness = _DEFAULT_FFI_HARNESS
+    if args.no_ffi_harness:
+        args.ffi_harness = ""
+    default_ffi_bin = (root / args.ffi_harness).resolve() if args.ffi_harness else None
+    if (
+        macos_enabled
+        and args.ffi_harness
+        and not requested_ffi_harness
+        and default_ffi_bin is not None
+        and not default_ffi_bin.exists()
+    ):
+        print(f"[INFO] FFI harness binary not found; skipping: {default_ffi_bin}")
+        args.ffi_harness = ""
 
     handoff_results: list[DeviceHandoffResult] = []
-    if args.device_handoff_harness:
+    if macos_enabled and args.device_handoff_harness:
         handoff_harness = (root / args.device_handoff_harness).resolve()
         if not handoff_harness.exists():
             ap.error(f"Device handoff harness not found: {handoff_harness}")
@@ -1693,7 +2298,7 @@ def main() -> int:
             raise SystemExit(1)
 
     ffi_results: list[FfiAggResult] = []
-    if args.ffi_harness:
+    if macos_enabled and args.ffi_harness:
         ffi_harness = (root / args.ffi_harness).resolve()
         if not ffi_harness.exists():
             ap.error(f"FFI harness not found: {ffi_harness}")
@@ -1733,10 +2338,13 @@ def main() -> int:
         agg_results,
         ffi_results,
         handoff_results,
+        android_agg_results,
+        [],  # android_ffi_results (Phase 2)
         generated_at=generated_at,
         repeat=args.repeat,
         show_halide_timing=args.timing,
         artifact_dir=artifact_dir,
+        android_serial=android_serial,
     )
 
     if args.output:

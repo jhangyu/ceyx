@@ -56,6 +56,22 @@ flutter build macos  # release build
 python3 dng_processor/native/tests/run_decode_matrix.py
 python3 dng_processor/native/tests/run_decode_matrix.py --repeat 3
 
+# FFI + device-handoff harness cases (production C ABI + Metal device handoff
+# gate). Auto-enabled by run_decode_matrix.py whenever the default binaries
+# below exist — no flag needed once both targets are built:
+python3 dng_processor/native/scripts/build_native_watchdog.py --skip-configure --target dng_ffi_harness
+python3 dng_processor/native/scripts/build_native_watchdog.py --skip-configure --target test_device_handoff
+python3 dng_processor/native/tests/run_decode_matrix.py --repeat 3
+# `dng_ffi_harness` (dng_processor/native/tests/dng_ffi_harness.cpp) drives the
+# extern "C" FFI entry (dng_decode_and_process) directly, gating contract
+# checks and RGB byte-exact match.
+# `test_device_handoff` (dng_processor/native/tests/test_device_handoff.cpp)
+# calls decode_to_rgb directly and gates the Metal device-handoff PSNR (ON vs
+# OFF) for the fused Stage3→Stage4 path.
+# To point at non-default binaries or opt out explicitly:
+#   --ffi-harness <path> / --no-ffi-harness
+#   --device-handoff-harness <path> / --no-device-handoff-harness
+
 # PSNR comparison of two raw buffers
 python3 dng_processor/native/tests/compare_psnr.py \
   --ref lossless_stage3_6048x4024_1p.raw \
@@ -112,7 +128,7 @@ dng_image_widget.dart  (Flutter render)
 - **Device handoff crop origin**: After `src_buf.crop()`, must mutate `raw_buffer()->dim.min = 0` to match generator's hard-coded `clamp(x, 0, ext-1)`. Do NOT use `set_min`/`translate` (triggers `device_deallocate`).
 - **Halide device handoff**: Pass `device`-dirty `halide_buffer_t*` between AOT kernels without `copy_to_host`; Metal serial queue guarantees ordering.
 - **Adobe DNG SDK `AutoPtr`**: lvalue-only; use `.Reset(.Release())` instead of direct assignment.
-- **`run_decode_matrix.py`** only exercises the fallback path; device handoff validation requires FFI entry (`benchmark_zero_copy.dart`).
+- **`run_decode_matrix.py`** without harness flags only exercises the fallback path; the built-in `dng_ffi_harness` / `test_device_handoff` harness cases (auto-enabled when their binaries exist, see Test Commands) or `benchmark_zero_copy.dart` are required to validate the FFI + device-handoff (fused Stage3→Stage4) path.
 
 ## Documentation Convention
 
