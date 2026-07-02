@@ -58,8 +58,10 @@ public:
             dst.dim(2).set_bounds(0, 3);
             dst.dim(2).set_stride(dst.dim(0).extent() * dst.dim(1).extent());
         } else {
-            dst.dim(0).set_stride(3);
-            dst.dim(2).set_bounds(0, 3);
+            // W7 (M-11): macOS outputs RGBA8 (stride-4, alpha=255 in-kernel).
+            // Eliminates the FFI rgb_to_rgba pass and one ~72MB RGB intermediate.
+            dst.dim(0).set_stride(4);
+            dst.dim(2).set_bounds(0, 4);
             dst.dim(2).set_stride(1);
         }
 
@@ -403,19 +405,30 @@ public:
                                    cast<uint8_t>(encode8(f_g)),
                                    cast<uint8_t>(encode8(f_b)));
 
-        dst(x, y, c) = select(c == 0, rendered_rgb(x, y)[0],
-                              c == 1, rendered_rgb(x, y)[1],
-                                      rendered_rgb(x, y)[2]);
+        if (get_target().os == Target::Android) {
+            dst(x, y, c) = select(c == 0, rendered_rgb(x, y)[0],
+                                  c == 1, rendered_rgb(x, y)[1],
+                                          rendered_rgb(x, y)[2]);
+        } else {
+            // W7 (M-11): RGBA8 output with alpha=255 in-kernel.
+            dst(x, y, c) = select(c == 0, rendered_rgb(x, y)[0],
+                                  c == 1, rendered_rgb(x, y)[1],
+                                  c == 2, rendered_rgb(x, y)[2],
+                                          cast<uint8_t>(255));
+        }
     }
 
     void schedule() {
         Var x("x"), y("y"), c("c");
+        // W7 (M-11): macOS outputs 4 channels (RGBA8); Android (separate
+        // DngRenderStage4Android generator) stays 3. This generator is only
+        // compiled for non-Android targets.
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
             // P12-W1-03: fuse rendered_rgb into dst via compute_at to eliminate
             // the ~145.8 MB intermediate GPU global-memory roundtrip and collapse
             // two Metal kernel dispatches into one. dst now drives the 16x16 tile.
-            dst.bound(c, 0, 3)
+            dst.bound(c, 0, 4)
                .reorder(c, x, y)
                .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
                .unroll(c);
@@ -423,7 +436,7 @@ public:
                         .gpu_threads(x, y);
         } else {
             Var yo("yo"), yi("yi");
-            dst.bound(c, 0, 3)
+            dst.bound(c, 0, 4)
                .reorder(c, x, y)
                .split(y, yo, yi, 32)
                .parallel(yo)

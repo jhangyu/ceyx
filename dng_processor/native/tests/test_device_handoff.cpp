@@ -75,14 +75,40 @@ struct DecodeOutput {
 static DecodeOutput runDecode(const char* path) {
     DngPipelineV2Result result;
     bool success = dng_pipeline_v2_decode_to_rgb(path, result);
-    if (!success || result.error_code != 0 || !result.rgb_ptr) {
+    // W7 (M-11): fuse_rgba_output is now true on all platforms, so the pipeline
+    // sets rgba_ptr (not rgb_ptr). Accept either and extract RGB for comparison.
+    const uint8_t* src = result.rgb_ptr;
+    size_t src_size = result.rgb_size;
+    bool is_rgba = false;
+    if (!src && result.rgba_ptr) {
+        src = result.rgba_ptr;
+        src_size = result.rgba_size;
+        is_rgba = true;
+    }
+    if (!success || result.error_code != 0 || !src) {
         cerr << "  [decode FAIL] error_code=" << result.error_code << "\n";
         return {};
     }
     DecodeOutput out;
     out.width = result.width;
     out.height = result.height;
-    out.rgb.assign(result.rgb_ptr, result.rgb_ptr + result.rgb_size);
+    if (is_rgba) {
+        // Strip alpha: extract RGB from interleaved RGBA for PSNR comparison.
+        const size_t total_px = static_cast<size_t>(result.width) * result.height;
+        out.rgb.resize(total_px * 3);
+        for (size_t i = 0; i < total_px; ++i) {
+            out.rgb[i * 3 + 0] = src[i * 4 + 0];
+            out.rgb[i * 3 + 1] = src[i * 4 + 1];
+            out.rgb[i * 3 + 2] = src[i * 4 + 2];
+        }
+    } else {
+        out.rgb.assign(src, src + src_size);
+    }
+    // Release the pool buffer now that we have our own copy.
+    if (result.rgba_ptr) {
+        dng_rgba_output_release(result.rgba_ptr);
+        result.rgba_ptr = nullptr;
+    }
     out.ok = true;
     return out;
 }
