@@ -340,6 +340,25 @@ def _parse_attached_devices(adb: str) -> tuple[list[str], str]:
     return devices, proc.stdout
 
 
+def _adb_device_attached(adb: str) -> bool:
+    """Best-effort check for at least one authorized ADB device.
+
+    Returns False (never raises) when adb is missing/not on PATH, the
+    `adb devices` invocation fails, or no device is currently in the
+    'device' state. Used only to decide whether `--platform all` should
+    gracefully skip Android cases; the explicit `--platform android` path
+    still hard-fails via `_resolve_serial`/`ap.error` so an explicit
+    request is never silently skipped.
+    """
+    if not adb:
+        return False
+    try:
+        devices, _raw = _parse_attached_devices(adb)
+    except (RuntimeError, OSError):
+        return False
+    return bool(devices)
+
+
 def _resolve_serial(adb: str, requested: Optional[str]) -> str:
     """Resolve ADB serial: use requested, or auto-detect if exactly one device."""
     if requested:
@@ -2003,6 +2022,16 @@ def main() -> int:
     macos_enabled = args.platform in ("all", "macos")
     if args.platform == "all" and not android_enabled and not requested_android_test_decode:
         print(f"[INFO] Android binary not found; skipping Android: {default_android_bin}")
+
+    # `--platform all` (default) is a best-effort "test whatever is
+    # available" mode: if the Android binary exists but no ADB device is
+    # attached/authorized (or adb itself is missing), skip Android cases
+    # gracefully instead of hard-failing the whole matrix run. An explicit
+    # `--platform android` request is unaffected and still hard-fails below
+    # (via _resolve_serial / ap.error) when no device is available.
+    if args.platform == "all" and android_enabled and not _adb_device_attached(args.adb):
+        print("[INFO] no ADB device attached; skipping Android cases")
+        android_enabled = False
 
     # Validate macOS binary only when macOS testing is enabled
     bin_path = None
