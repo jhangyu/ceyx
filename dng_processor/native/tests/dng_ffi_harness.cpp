@@ -288,7 +288,19 @@ int main(int argc, char **argv) {
       return 1;
     }
     dng_free_result(result);
+
+    // W5-#15: H-1 leak assertion — after freeing the result, the RGBA output
+    // pool must have zero checked-out buffers. A non-zero count means a
+    // checkout leaked (the ScopedRgbaCheckout guard or dng_free_result path
+    // failed to return the buffer).
+    const size_t leakedCount = dng_debug_pool_checked_out();
+    if (leakedCount != 0) {
+      std::cout << "[Pool] FAIL checked_out=" << leakedCount
+                << " (expected 0 after free)\n";
+      return 1;
+    }
   }
 
+  std::cout << "[Pool] PASS checked_out=0 after " << repeatCount << " run(s)\n";
   return 0;
 }

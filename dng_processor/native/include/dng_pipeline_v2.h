@@ -36,6 +36,9 @@ struct DngPipelineV2Result {
 // pointer was pool-owned (reclaimed) or false if the caller must delete[] it.
 uint8_t* dng_rgba_output_acquire(size_t bytes);
 bool dng_rgba_output_release(uint8_t* ptr);
+// W5-#15: debug accessor — number of RGBA buffers currently checked out.
+// Zero after every dng_free_result cycle on a correct run.
+size_t dng_rgba_output_checked_out_count();
 
 struct DngPipelineStage3Timing {
   double extract_stage2_ms = 0.0;

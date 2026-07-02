@@ -46,11 +46,9 @@ public:
         uint32 maxThreads = task.MaxThreads();
         {
             // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
-            // Read inline (not via PipelineConfig) so the Stage 1 area-task
-            // entry stays self-contained; default OFF so cost is one
-            // getenv() per task entry when disabled.
-            const char *timing_env = std::getenv("DNG_STAGE1_TIMING");
-            if (timing_env && timing_env[0] && timing_env[0] != '0') {
+            // Cached via stage1TimingEnabled() (static const bool, one getenv()
+            // per process) instead of re-reading the env on every task entry.
+            if (stage1TimingEnabled()) {
                 std::fprintf(stderr,
                     "[CDngHostEntry] PerformAreaTask threads=%u maxThreads=%u"
                     " area=(t=%d,l=%d,b=%d,r=%d) area.H=%d area.W=%d numTilesV=%d\n",
@@ -75,9 +73,6 @@ public:
         }
 
         dng_point tileSize(task.FindTileSize(area));
-        
-        // Let the task know how many threads we will use
-        task.Start(threads, tileSize, &Allocator(), Sniffer());
 
         // Determine how to partition the area.
         // Primary: slice vertically (by rows of tiles).
@@ -98,6 +93,12 @@ public:
         if (numTilesAlongSlice < (int32)threads) {
             threads = numTilesAlongSlice > 0 ? (uint32)numTilesAlongSlice : 1;
         }
+
+        // M-10: Start() must receive the same thread count Finish() will use
+        // (dng_area_task.h:157 documents Finish's threads param as "Same as
+        // value passed to Start"). Moved here — after both clamps (maxThreads
+        // above, numTilesAlongSlice here) — so Start/Finish never disagree.
+        task.Start(threads, tileSize, &Allocator(), Sniffer());
 
         std::vector<std::future<void>> futures;
         std::mutex exceptionMutex;
@@ -127,8 +128,9 @@ public:
             }
 
             // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
-            const char *timing_env = std::getenv("DNG_STAGE1_TIMING");
-            const bool timing = timing_env && timing_env[0] && timing_env[0] != '0';
+            // L-3: was a raw getenv() per slice (×threads per area task);
+            // now shares the same process-wide cached value.
+            const bool timing = stage1TimingEnabled();
             auto t_dispatch = std::chrono::steady_clock::now();
             futures.push_back(std::async(std::launch::async, [this, &task, i, subArea, tileSize, &exceptionMutex, &caughtException, t_dispatch, timing]() {
                 if (timing) {
@@ -168,6 +170,18 @@ public:
     }
 
 private:
+    // DNG_STAGE1_TIMING — DiagnosticConfig (see dng_pipeline_config.h).
+    // Call-site lazy cache (pattern mirrors dng_opcodelist2_halide.cpp's
+    // ol2_prewarm_enabled()/map_poly_timing_enabled()): one getenv() per
+    // process instead of one per PerformAreaTask entry / per slice.
+    static bool stage1TimingEnabled() {
+        static const bool enabled = []() {
+            const char *v = std::getenv("DNG_STAGE1_TIMING");
+            return v && v[0] && v[0] != '0';
+        }();
+        return enabled;
+    }
+
     uint32_t requestedThreads_ = 0;
     PipelineConfig cachedConfig_{};
 };
