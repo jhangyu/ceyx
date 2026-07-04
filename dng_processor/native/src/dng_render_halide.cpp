@@ -69,7 +69,7 @@ functions:
     description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。"
     lines: "1286-1588"
   - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。P15 W2：Android 保留 copy_to_host + device_deallocate（W4-4 device-alias 範疇排除），但刪除 host-side crop() 與 dense-planar repack，改把 host-side 3D interleaved buffer 攤平成 flat-1D 直餵 kernel，crop 由 crop_l/crop_t scalar 吸收；其他平台保留原 device handoff。"
+    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。G1（Round 2）：Android 改為 zero-copy device alias——用 shallow halide_buffer_t 把 producer 的 Vulkan device allocation 以 offset-0 flat-1D view 直餵 kernel（crop 由 crop_l/crop_t scalar 吸收），刪除 W4-4 時代的全幀 copy_to_host + device_deallocate + 重上傳；成功後經原始 struct halide_device_free（owner destructor 因 device==0 不會 double-free），失敗路徑保留 device data 供 fallback。其他平台保留原 Metal device handoff。"
     lines: "1590-1888"
   - name: "runHalideFullOrSdkFallback (host src overload)"
     description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
@@ -1331,36 +1331,52 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     const bool verbose_timing_fd = pipelineVerbose();
     auto t0_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
-    // Non-owning wrapper of the 3D device buffer.
-    Buffer<uint16_t> src3d(*stage3_device_buf);
-
-    // We still copy the Stage3 result to host (device-alias = W4-4 scope, kept
-    // out of W2). On Metal, the serial command queue guarantees Stage3 is done.
-    if (src3d.copy_to_host() != 0) {
-        return false;
-    }
-    src3d.device_deallocate();
-    auto tcopy_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
-                                      : std::chrono::high_resolution_clock::time_point{};  // end of D2H copy
-
-    // W2: no host repack and no host-side crop(). The host-side 3D buffer is
-    // already interleaved (x, y, c) with channel stride 1; flatten it to a 1D
-    // plane and feed the kernel directly. crop_l/crop_t are absorbed by the
-    // kernel's index arithmetic (src_row_stride_px = dim(1).stride()/3).
-    const int sw = src3d.dim(0).extent();
-    const int sh = src3d.dim(1).extent();
-    const int sp = src3d.dim(2).extent();
+    // G1 (Round 2): zero-copy device alias — bind the producer's Vulkan device
+    // allocation directly as the kernel's flat-1D src, eliminating the W4-4-era
+    // full-frame copy_to_host + device_deallocate + re-upload round trip.
+    // Halide v21's Vulkan runtime is synchronous per dispatch (vkQueueWaitIdle
+    // inside halide_vulkan_run), so the Stage3/Stage2 producer kernel has
+    // already finished — no extra sync needed. Evidence + patch plan:
+    // docs/logs/2026-07-04/Task_g1_vulkan_handoff_spike.md.
+    const int sw = stage3_device_buf->dim[0].extent;
+    const int sh = stage3_device_buf->dim[1].extent;
+    const int sp = stage3_device_buf->dim[2].extent;
     if (sp < 3) {
         return false;
     }
-    const int s_row = src3d.dim(1).stride();  // = row_stride_px * 3
+    const int s_row = stage3_device_buf->dim[1].stride;  // = row_stride_px * 3
+    // Row-dense interleaved contract (same assumption the old host flatten made,
+    // now guarded explicitly).
+    if (s_row <= 0 || (s_row % 3) != 0 || sh <= 0) {
+        return false;
+    }
     const int src_row_stride_px = s_row / 3;
     const int flat_len = s_row * sh;          // elements in the flat plane
-    uint16_t* src_data = reinterpret_cast<uint16_t*>(src3d.data());
-    Buffer<uint16_t> src_rgb_buf(src_data, flat_len);
-    src_rgb_buf.set_host_dirty();
+    // Shallow flat-1D view borrowing the device handle at offset 0 — a pure
+    // 3D→1D reshape of the same allocation; the crop is absorbed by the
+    // kernel's crop_l/crop_t scalars, so no device_crop offset (and none of
+    // Vulkan's descriptor-offset alignment constraints) is involved.
+    // Deliberately a raw halide_buffer_t, NOT a Runtime::Buffer — Buffer's
+    // decref() would device_free the borrowed handle on destruction.
+    // ponytail: borrowed handle without retain — decodes are single-flight
+    // through this path; switch to halide_device_crop/release_crop if
+    // concurrent decodes ever share producer buffers.
+    halide_dimension_t flat_dim(0, flat_len, 1);
+    halide_buffer_t src_flat = *stage3_device_buf;  // copies device + flags (device_dirty)
+    src_flat.dimensions = 1;
+    src_flat.dim = &flat_dim;
+    if (src_flat.device == 0) {
+        // Producer fell back to host memory — upload path (pre-G1 behavior
+        // minus the redundant D2H, which is a no-op without a device buffer).
+        if (!src_flat.host) {
+            return false;
+        }
+        src_flat.set_host_dirty(true);
+    }
+    auto tcopy_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                      : std::chrono::high_resolution_clock::time_point{};  // d2h_src now ~0 (alias)
     auto t1_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
-                                   : std::chrono::high_resolution_clock::time_point{};  // repack_src now ~0
+                                   : std::chrono::high_resolution_clock::time_point{};  // repack_src ~0 (O(1) reshape)
 #else
     if (pipelineVerbose()) {
         fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
@@ -1450,7 +1466,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     const int result = dng_render_stage4_android(
-        src_rgb_buf.raw_buffer(),
+        &src_flat,
         sw,
         sh,
         dst_w,
@@ -1522,6 +1538,17 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #if defined(__ANDROID__)
     // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
     if (dst_planar_buf.copy_to_host() != 0) return false;
+    // G1: src device allocation fully consumed — free it through the ORIGINAL
+    // struct so the owner's halide_buffer_t sees device==0 and its Buffer
+    // destructor (lossless: impl->dst_buf via halide_cancel; lossy:
+    // DeviceHandoffState::buffer via clear_device_handoff) does not
+    // double-free a stale handle. On every failure return above we
+    // deliberately do NOT free: the lossless fallback
+    // (demosaic_warp_rectilinear_halide_finish) and the lossy restore
+    // (halide_stage2_ol2_device_handoff_copy_to_host) still need the data.
+    if (stage3_device_buf->device != 0) {
+        halide_device_free(nullptr, stage3_device_buf);
+    }
     auto t3_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
 
@@ -1540,10 +1567,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
     auto t4_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
-    // W2: repack_src now measures only the (eliminated) host repack — the flatten
-    // wrap is O(1), so it prints ~0. The kept Stage3->host D2H copy (W4-4 scope,
-    // not removed in W2) is broken out separately as d2h_src so the parser's
-    // repack_src= key still resolves and the total stays comparable to baseline.
+    // G1: both repack_src and d2h_src are now ~0 (O(1) device-alias reshape,
+    // no host round trip). The keys are kept so the [Stage4-Perf] parser and
+    // baseline comparisons keep resolving; they directly show the eliminated
+    // transfers vs the pre-G1 baseline.
     if (verbose_timing_fd) {
         fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
             std::chrono::duration<double, std::milli>(t1_fd - tcopy_fd).count(),
