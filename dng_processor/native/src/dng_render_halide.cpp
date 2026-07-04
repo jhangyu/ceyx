@@ -105,16 +105,19 @@ functions:
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 #if defined(__ANDROID__)
 // W7-E S4 prewarm per-size cache + crash-attribution markers (Android-only).
 // T9: mmap MAP_ANON lazy-zero dummy buffers (Gotcha #62).
-#include <cstdio>
-#include <cstdlib>
 #include <sys/mman.h>
 #include <unordered_set>
 #endif
@@ -146,6 +149,20 @@ functions:
 namespace {
 
 using Halide::Runtime::Buffer;
+
+// Q2 (Round 2 perf diag): runtime gate for this file's per-decode diagnostic
+// stderr prints (and the chrono::now() calls that exist only to time them).
+// Mirrors the pipelineVerbose() lazy-cache pattern in dng_pipeline_v2.cpp
+// (same DNG_PIPELINE_VERBOSE env; a separate TU-local static since that
+// function lives in dng_pipeline_v2.cpp's own anonymous namespace and isn't
+// exported via a header).
+bool pipelineVerbose() {
+    static const bool cached = []() {
+        const char *v = std::getenv("DNG_PIPELINE_VERBOSE");
+        return v && v[0] != '0';
+    }();
+    return cached;
+}
 
 #if defined(__ANDROID__)
 // W4-3 (b): the Android Stage4 generator now emits a single 2D planar output
@@ -232,6 +249,138 @@ Stage4DstScratch& stage4DstScratch() {
     return instance;
 }
 
+// Q3b (Round 2 perf diag): persistent worker pool backing the Stage4 repack
+// helpers below. Previously each repackPlanarTo*MT() call spawned/joined a
+// fresh std::vector<std::thread> (up to 8 pthread_create/join round trips per
+// call, twice per decode). RepackThreadPool creates its (fixed, <= kMaxWorkers)
+// threads once, lazily, and parks them between decodes; runRanges() hands out
+// work each call via a generation counter + condition_variable instead of
+// spawning new OS threads. Decodes are already single-flight (see
+// pipelineSingleFlightMutex, dng_pipeline_v2.cpp), so no two runRanges() calls
+// are ever in flight concurrently against this singleton.
+class RepackThreadPool {
+public:
+    static constexpr int kMaxWorkers = 8;
+
+    static RepackThreadPool& instance() {
+        static RepackThreadPool pool;
+        return pool;
+    }
+
+    // Runs `job(begin, end)` once per entry in `ranges` (ranges.size() <=
+    // kMaxWorkers), blocking until every range has completed.
+    void runRanges(const std::vector<std::pair<int, int>>& ranges,
+                   const std::function<void(int, int)>& job) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ranges_ = &ranges;
+        job_ = &job;
+        pending_ = static_cast<int>(ranges.size());
+        ++generation_;
+        lock.unlock();
+        cv_dispatch_.notify_all();
+
+        lock.lock();
+        cv_done_.wait(lock, [this] { return pending_ == 0; });
+    }
+
+private:
+    RepackThreadPool() {
+        workers_.reserve(kMaxWorkers);
+        for (int i = 0; i < kMaxWorkers; ++i) {
+            workers_.emplace_back([this, i] { workerLoop(i); });
+        }
+    }
+
+    // Q3b fix (Android FFI FORTIFY abort): this Meyers singleton IS destroyed —
+    // exit() runs the __cxa_atexit-registered destructor of the function-local
+    // static. Without a shutdown path, member destruction (reverse declaration
+    // order) tears down cv_dispatch_/mutex_ while all kMaxWorkers workers are
+    // still parked in cv_dispatch_.wait(): bionic wakes the waiters on
+    // pthread_cond destruction and each one re-locks the already-destroyed
+    // mutex_ ("FORTIFY: pthread_mutex_lock called on a destroyed mutex", one
+    // per worker), and ~workers_ then runs ~std::thread on joinable threads ->
+    // std::terminate ("libc++abi: terminating"). Observed on-device (cc5bf709)
+    // as an exit-time SIGABRT of dng_ffi_harness_android that also discards
+    // the harness's buffered stdout. The destructor therefore signals stop_
+    // under the mutex, wakes every worker, and joins them all BEFORE the
+    // mutex/condition variables are destroyed. Decodes are single-flight and
+    // exit() runs after main() returns, so no runRanges() call can race this.
+    ~RepackThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_dispatch_.notify_all();
+        for (auto& w : workers_) {
+            w.join();
+        }
+    }
+
+    void workerLoop(int idx) {
+        uint64_t seen_generation = 0;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_dispatch_.wait(lock, [this, seen_generation] {
+                return stop_ || generation_ != seen_generation;
+            });
+            if (stop_) {
+                return;
+            }
+            seen_generation = generation_;
+            const bool active = idx < static_cast<int>(ranges_->size());
+            const std::pair<int, int> range = active ? (*ranges_)[idx] : std::pair<int, int>{0, 0};
+            const std::function<void(int, int)>* job = job_;
+            lock.unlock();
+
+            if (active) {
+                (*job)(range.first, range.second);
+                std::lock_guard<std::mutex> done_lock(mutex_);
+                if (--pending_ == 0) {
+                    cv_done_.notify_one();
+                }
+            }
+        }
+    }
+
+    std::vector<std::thread> workers_;
+    std::mutex mutex_;
+    std::condition_variable cv_dispatch_;
+    std::condition_variable cv_done_;
+    uint64_t generation_ = 0;
+    bool stop_ = false;
+    int pending_ = 0;
+    const std::vector<std::pair<int, int>>* ranges_ = nullptr;
+    const std::function<void(int, int)>* job_ = nullptr;
+};
+
+// Splits [0, total_px) into up to RepackThreadPool::kMaxWorkers ranges, each
+// chunk-aligned to 16 elements so NEON repack loops keep their fast path and
+// write disjoint dst regions. Shared by both repackPlanarTo*MT() helpers.
+std::vector<std::pair<int, int>> partitionRepackRanges(int total_px, int align) {
+    unsigned hw = std::thread::hardware_concurrency();
+    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, static_cast<unsigned>(RepackThreadPool::kMaxWorkers)));
+    if (chunks < 1) chunks = 1;
+    if (chunks > total_px) chunks = std::max(1, total_px);
+
+    std::vector<std::pair<int, int>> ranges;
+    if (chunks <= 1) {
+        ranges.emplace_back(0, total_px);
+        return ranges;
+    }
+
+    int base = (total_px / chunks) & ~(align - 1);
+    if (base < align) base = align;
+    int start = 0;
+    while (start < total_px) {
+        int end = std::min(total_px, start + base);
+        // Last remaining region folds into the final worker.
+        if (total_px - end < base) end = total_px;
+        ranges.emplace_back(start, end);
+        start = end;
+    }
+    return ranges;
+}
+
 // W4-1: row/element-partitioned multithreaded planar(u8 x3)->interleaved(u8)
 // repack of the GPU output. Mirrors the NEON vst3q_u8 fast path. Bit-exact.
 // W4-3 (b) keeps this: the kernel writes 3 contiguous u8 planes; this converts
@@ -241,7 +390,7 @@ void repackPlanarToInterleavedMT(const uint8_t* pr,
                                  const uint8_t* pb,
                                  uint8_t* dst,
                                  int total_px) {
-    auto repack_range = [&](int i_begin, int i_end) {
+    std::function<void(int, int)> repack_range = [pr, pg, pb, dst](int i_begin, int i_end) {
         int i = i_begin;
         for (; i + 16 <= i_end; i += 16) {
             uint8x16_t r = vld1q_u8(pr + i);
@@ -257,29 +406,12 @@ void repackPlanarToInterleavedMT(const uint8_t* pr,
         }
     };
 
-    unsigned hw = std::thread::hardware_concurrency();
-    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, 8u));
-    if (chunks < 1) chunks = 1;
-    if (chunks > total_px) chunks = std::max(1, total_px);
-    if (chunks <= 1) {
+    const std::vector<std::pair<int, int>> ranges = partitionRepackRanges(total_px, 16);
+    if (ranges.size() <= 1) {
         repack_range(0, total_px);
         return;
     }
-    // Align chunk boundaries to 16 so each worker keeps the vst3q_u8 fast path
-    // and writes disjoint 48-byte-aligned dst regions.
-    int base = (total_px / chunks) & ~15;
-    if (base < 16) base = 16;
-    std::vector<std::thread> workers;
-    workers.reserve(chunks);
-    int start = 0;
-    while (start < total_px) {
-        int end = std::min(total_px, start + base);
-        // Last remaining region folds into the final worker.
-        if (total_px - end < base) end = total_px;
-        workers.emplace_back(repack_range, start, end);
-        start = end;
-    }
-    for (auto& w : workers) w.join();
+    RepackThreadPool::instance().runRanges(ranges, repack_range);
 }
 
 // W7-B: fused planar(u8 x3) -> interleaved RGBA8 (alpha=255) repack of the GPU
@@ -295,7 +427,7 @@ void repackPlanarToRGBAMT(const uint8_t* pr,
                           const uint8_t* pb,
                           uint8_t* dst,
                           int total_px) {
-    auto repack_range = [&](int i_begin, int i_end) {
+    std::function<void(int, int)> repack_range = [pr, pg, pb, dst](int i_begin, int i_end) {
         const uint8x16_t alpha = vdupq_n_u8(255);
         int i = i_begin;
         for (; i + 16 <= i_end; i += 16) {
@@ -314,28 +446,14 @@ void repackPlanarToRGBAMT(const uint8_t* pr,
         }
     };
 
-    unsigned hw = std::thread::hardware_concurrency();
-    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, 8u));
-    if (chunks < 1) chunks = 1;
-    if (chunks > total_px) chunks = std::max(1, total_px);
-    if (chunks <= 1) {
+    // Align chunk boundaries to 16 so each worker keeps the vst4q_u8 fast path
+    // and writes disjoint 64-byte-aligned dst regions.
+    const std::vector<std::pair<int, int>> ranges = partitionRepackRanges(total_px, 16);
+    if (ranges.size() <= 1) {
         repack_range(0, total_px);
         return;
     }
-    // Align chunk boundaries to 16 so each worker keeps the vst4q_u8 fast path
-    // and writes disjoint 64-byte-aligned dst regions.
-    int base = (total_px / chunks) & ~15;
-    if (base < 16) base = 16;
-    std::vector<std::thread> workers;
-    workers.reserve(chunks);
-    int start = 0;
-    while (start < total_px) {
-        int end = std::min(total_px, start + base);
-        if (total_px - end < base) end = total_px;
-        workers.emplace_back(repack_range, start, end);
-        start = end;
-    }
-    for (auto& w : workers) w.join();
+    RepackThreadPool::instance().runRanges(ranges, repack_range);
 }
 #endif
 
@@ -966,15 +1084,22 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     // let the GPU gather src_rgb(base + c) directly (Gotcha #95, probe GO). The
     // former host repack_src (interleaved->3 dense planar) is eliminated — the
     // bytes uploaded are identical, only the host CPU repack is removed.
-    auto t0 = std::chrono::high_resolution_clock::now();
+    // Q2: these timepoints only feed the verbose-gated [Stage4-Perf] print
+    // below; skip the clock reads entirely when not verbose.
+    const bool verbose_timing = pipelineVerbose();
+    auto t0 = verbose_timing ? std::chrono::high_resolution_clock::now()
+                             : std::chrono::high_resolution_clock::time_point{};
     // src_row_step is the interleaved row stride in u16 elements (= pixels*3
     // incl. any SDK tile padding). Per-pixel row stride therefore = /3.
     const int src_row_stride_px = src_row_step / 3;
     const int flat_len = src_row_step * src_h;  // elements in the flat plane
     Buffer<uint16_t> src_rgb_buf(const_cast<uint16_t*>(src), flat_len);
-    auto t1 = std::chrono::high_resolution_clock::now();  // repack_src now ~0
+    auto t1 = verbose_timing ? std::chrono::high_resolution_clock::now()
+                             : std::chrono::high_resolution_clock::time_point{};  // repack_src now ~0
 #else
-    fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAot)\n");
+    if (pipelineVerbose()) {
+        fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAot)\n");
+    }
     halide_dimension_t src_shape[3] = {
         {0, src_w, src_col_step, 0},
         {0, src_h, src_row_step, 0},
@@ -1097,7 +1222,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         params.look_has_table,
         params.look_has_encoding,
         dst_planar_buf.raw_buffer());
-    auto t2 = std::chrono::high_resolution_clock::now();
+    auto t2 = verbose_timing ? std::chrono::high_resolution_clock::now()
+                             : std::chrono::high_resolution_clock::time_point{};
 #else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
@@ -1125,7 +1251,9 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                          params.look_has_encoding,
                                          dst_buf.raw_buffer());
 #endif
-    fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAot)\n", result);
+    if (pipelineVerbose()) {
+        fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAot)\n", result);
+    }
     if (result != 0) {
         return false;
     }
@@ -1133,7 +1261,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #if defined(__ANDROID__)
     // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
     if (dst_planar_buf.copy_to_host() != 0) return false;
-    auto t3 = std::chrono::high_resolution_clock::now();
+    auto t3 = verbose_timing ? std::chrono::high_resolution_clock::now()
+                             : std::chrono::high_resolution_clock::time_point{};
 
     // The 3 channel planes are contiguous: plane0=base, plane1=base+N, plane2=base+2N.
     // W4-1: multithreaded NEON vld1q_u8 + vst3q_u8 (16 px/iter).
@@ -1150,13 +1279,16 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                         dst, total_px);
         }
     }
-    auto t4 = std::chrono::high_resolution_clock::now();
-    fprintf(stderr, "[Stage4-Perf] repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
-        std::chrono::duration<double, std::milli>(t1 - t0).count(),
-        std::chrono::duration<double, std::milli>(t2 - t1).count(),
-        std::chrono::duration<double, std::milli>(t3 - t2).count(),
-        std::chrono::duration<double, std::milli>(t4 - t3).count(),
-        std::chrono::duration<double, std::milli>(t4 - t0).count());
+    auto t4 = verbose_timing ? std::chrono::high_resolution_clock::now()
+                             : std::chrono::high_resolution_clock::time_point{};
+    if (verbose_timing) {
+        fprintf(stderr, "[Stage4-Perf] repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
+            std::chrono::duration<double, std::milli>(t1 - t0).count(),
+            std::chrono::duration<double, std::milli>(t2 - t1).count(),
+            std::chrono::duration<double, std::milli>(t3 - t2).count(),
+            std::chrono::duration<double, std::milli>(t4 - t3).count(),
+            std::chrono::duration<double, std::milli>(t4 - t0).count());
+    }
 #else
     if (dst_buf.copy_to_host() != 0) {
         return false;
@@ -1193,7 +1325,12 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
 
 #if defined(__ANDROID__)
-    auto t0_fd = std::chrono::high_resolution_clock::now();
+    // Q2: these timepoints only feed the verbose-gated [Stage4-Perf] print
+    // below; skip the clock reads entirely when not verbose. The real work
+    // (copy_to_host / device_deallocate below) always runs regardless.
+    const bool verbose_timing_fd = pipelineVerbose();
+    auto t0_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                   : std::chrono::high_resolution_clock::time_point{};
     // Non-owning wrapper of the 3D device buffer.
     Buffer<uint16_t> src3d(*stage3_device_buf);
 
@@ -1203,7 +1340,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         return false;
     }
     src3d.device_deallocate();
-    auto tcopy_fd = std::chrono::high_resolution_clock::now();  // end of D2H copy
+    auto tcopy_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                      : std::chrono::high_resolution_clock::time_point{};  // end of D2H copy
 
     // W2: no host repack and no host-side crop(). The host-side 3D buffer is
     // already interleaved (x, y, c) with channel stride 1; flatten it to a 1D
@@ -1221,9 +1359,12 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     uint16_t* src_data = reinterpret_cast<uint16_t*>(src3d.data());
     Buffer<uint16_t> src_rgb_buf(src_data, flat_len);
     src_rgb_buf.set_host_dirty();
-    auto t1_fd = std::chrono::high_resolution_clock::now();  // repack_src now ~0
+    auto t1_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                   : std::chrono::high_resolution_clock::time_point{};  // repack_src now ~0
 #else
-    fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
+    if (pipelineVerbose()) {
+        fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
+    }
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);
     // 8.2.3 fix: physically shift the read pointer via crop(), then mutate
@@ -1342,7 +1483,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         params.look_has_table,
         params.look_has_encoding,
         dst_planar_buf.raw_buffer());
-    auto t2_fd = std::chrono::high_resolution_clock::now();
+    auto t2_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                   : std::chrono::high_resolution_clock::time_point{};
 #else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
@@ -1370,7 +1512,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          params.look_has_encoding,
                                          dst_buf.raw_buffer());
 #endif
-    fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAotFromDevice)\n", result);
+    if (pipelineVerbose()) {
+        fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAotFromDevice)\n", result);
+    }
     if (result != 0) {
         return false;
     }
@@ -1378,7 +1522,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #if defined(__ANDROID__)
     // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
     if (dst_planar_buf.copy_to_host() != 0) return false;
-    auto t3_fd = std::chrono::high_resolution_clock::now();
+    auto t3_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                   : std::chrono::high_resolution_clock::time_point{};
 
     {
         const uint8_t* planar = dst_planar_buf.data();
@@ -1393,18 +1538,21 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         dst, total_px);
         }
     }
-    auto t4_fd = std::chrono::high_resolution_clock::now();
+    auto t4_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
+                                   : std::chrono::high_resolution_clock::time_point{};
     // W2: repack_src now measures only the (eliminated) host repack — the flatten
     // wrap is O(1), so it prints ~0. The kept Stage3->host D2H copy (W4-4 scope,
     // not removed in W2) is broken out separately as d2h_src so the parser's
     // repack_src= key still resolves and the total stays comparable to baseline.
-    fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
-        std::chrono::duration<double, std::milli>(t1_fd - tcopy_fd).count(),
-        std::chrono::duration<double, std::milli>(tcopy_fd - t0_fd).count(),
-        std::chrono::duration<double, std::milli>(t2_fd - t1_fd).count(),
-        std::chrono::duration<double, std::milli>(t3_fd - t2_fd).count(),
-        std::chrono::duration<double, std::milli>(t4_fd - t3_fd).count(),
-        std::chrono::duration<double, std::milli>(t4_fd - t0_fd).count());
+    if (verbose_timing_fd) {
+        fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
+            std::chrono::duration<double, std::milli>(t1_fd - tcopy_fd).count(),
+            std::chrono::duration<double, std::milli>(tcopy_fd - t0_fd).count(),
+            std::chrono::duration<double, std::milli>(t2_fd - t1_fd).count(),
+            std::chrono::duration<double, std::milli>(t3_fd - t2_fd).count(),
+            std::chrono::duration<double, std::milli>(t4_fd - t3_fd).count(),
+            std::chrono::duration<double, std::milli>(t4_fd - t0_fd).count());
+    }
 #else
     if (dst_buf.copy_to_host() != 0) {
         return false;

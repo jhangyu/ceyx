@@ -84,6 +84,12 @@ struct PipelineConfig {
   // Default area-task thread count used when DNG_AREA_THREADS is unset / <= 0.
   // Named constant so the production decode path and the test harness
   // (test_decode.cpp kOptimizedAreaThreads) cannot drift apart.
+  // Q3a (Round 2 perf diag): this is a fixed upper bound for the largest
+  // supported device tier, not a target — ConcurrentDngHost::
+  // PerformAreaTaskThreads() (ConcurrentDngHost.h) clamps whatever value
+  // resolves here (or via DNG_AREA_THREADS) down to
+  // std::thread::hardware_concurrency(), so machines with fewer logical
+  // cores never over-provision std::async workers per decode.
   static constexpr uint32_t kDefaultAreaThreads = 20;
 
   static PipelineConfig loadFromEnv() {

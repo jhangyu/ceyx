@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
 project(dng_decoder_native VERSION 1.0.0 LANGUAGES CXX C)
 
+# Perf fix (2026-07-04): default to Release when the caller (script or IDE)
+# does not set CMAKE_BUILD_TYPE. Without this, both the macOS host configure
+# and the Android two-stage cross-compile in build_native_watchdog.py silently
+# produced unoptimized, assert-enabled binaries (no -O flag, no -DNDEBUG).
+# Explicit -DCMAKE_BUILD_TYPE=... from a caller (e.g. --cmake-arg) still wins.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default: Release)" FORCE)
+endif()
+
 # W7-2 (TD-4): Halide vendor version pin.
 # See third_party/halide/VERSION for full provenance and ABI notes.
 # Changing Halide version requires full AOT artifact regen (schedule ABI is not stable).
@@ -48,17 +57,27 @@ endif()
 
 # JPEG library for DNG SDK lossy JPEG support (qDNGUseLibJPEG=1).
 # Uses standard jpeglib.h API — any libjpeg-compatible library works.
-# Android NDK sysroot does not ship libjpeg, so we make it optional on Android.
+# Android: build vendored libjpeg-turbo from source (NEON SIMD on arm64).
+# macOS/host: use system libjpeg (typically Homebrew libjpeg-turbo).
 if(ANDROID)
     find_package(JPEG QUIET)
     if(NOT JPEG_FOUND)
-        message(WARNING "libjpeg not found in NDK sysroot. "
-            "Setting qDNGUseLibJPEG=0 — lossy DNG JPEG tile decode will be disabled. "
-            "To enable: provide libjpeg via add_subdirectory or -DJPEG_LIBRARY/-DJPEG_INCLUDE_DIR.")
-        set(DNG_USE_LIBJPEG OFF)
-    else()
-        set(DNG_USE_LIBJPEG ON)
+        # Build libjpeg-turbo from vendored source for Android.
+        # Minimal build: static library only, no turbojpeg API, no tools.
+        set(ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+        set(ENABLE_STATIC ON CACHE BOOL "" FORCE)
+        set(WITH_TURBOJPEG OFF CACHE BOOL "" FORCE)
+        set(WITH_SIMD ON CACHE BOOL "" FORCE)
+        set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "libjpeg-turbo")
+        add_subdirectory(${THIRD_PARTY_DIR}/libjpeg-turbo libjpeg-turbo-build EXCLUDE_FROM_ALL)
+        # Expose headers (src/ has jpeglib.h etc, binary dir has generated jconfig.h)
+        set(JPEG_INCLUDE_DIRS
+            ${THIRD_PARTY_DIR}/libjpeg-turbo/src
+            ${CMAKE_CURRENT_BINARY_DIR}/libjpeg-turbo-build)
+        set(JPEG_LIBRARIES jpeg-static)
+        message(STATUS "Building vendored libjpeg-turbo 3.1.0 for Android (NEON SIMD)")
     endif()
+    set(DNG_USE_LIBJPEG ON)
 else()
     find_package(JPEG REQUIRED)
     set(DNG_USE_LIBJPEG ON)
@@ -537,6 +556,42 @@ if(ANDROID AND DNG_CROSS_BUILD)
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
     if(DNG_USE_LIBJPEG)
         target_link_libraries(dng_ffi_harness_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+
+    # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
+    # PSNR gate (Stage3->Stage4 device-dirty handoff vs host-copy fallback), mirroring
+    # dng_ffi_harness_android above but for tests/test_device_handoff.cpp. Uses the
+    # Android/Vulkan Stage4 AOT variant (dng_render_stage4_android.a), not the Metal
+    # one linked by the macOS-only test_device_handoff target below.
+    add_executable(test_device_handoff_android tests/test_device_handoff.cpp
+        src/dng_pipeline_v2.cpp
+        src/dng_halide_device.cpp
+        src/dng_opcodelist2_halide.cpp
+        src/dng_mosaic_halide.cpp
+        src/dng_warp_halide.cpp
+        src/dng_render_halide.cpp)
+    target_include_directories(test_device_handoff_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(test_device_handoff_android PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    target_compile_definitions(test_device_handoff_android PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(test_device_handoff_android PRIVATE ${JPEG_LIBRARIES})
     endif()
 endif()
 

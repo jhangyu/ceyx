@@ -294,6 +294,7 @@ _FFI_RUN_RE = re.compile(
 )
 _CONTRACT_PASS_RE = re.compile(r"^\s*\[Contract\] PASS\b")
 _CONTRACT_FAIL_RE = re.compile(r"^\s*\[Contract\] FAIL\b")
+_POOL_PASS_RE = re.compile(r"^\[Pool\] PASS\b")
 _FFI_RGB_MATCH_RE = re.compile(
     r"^\[FFI RGB MATCH\]\s+render:\s+byte_exact=(\d+)\s+"
     r"psnr=([0-9]+(?:\.[0-9]+)?)\s+dB\s+\[(PASS|FAIL)\]"
@@ -308,6 +309,12 @@ _DEFAULT_ANDROID_TEST_DECODE = (
 )
 _DEFAULT_FFI_HARNESS = "dng_processor/native/build/dng_ffi_harness"
 _DEFAULT_DEVICE_HANDOFF_HARNESS = "dng_processor/native/build/test_device_handoff"
+_DEFAULT_ANDROID_FFI_HARNESS = (
+    "dng_processor/native/build-android/android-arm64/dng_ffi_harness_android"
+)
+_DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS = (
+    "dng_processor/native/build-android/android-arm64/test_device_handoff_android"
+)
 
 
 def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
@@ -485,6 +492,52 @@ def _adb_run_vulkan_probe(adb: str, serial: str, remote_dir: str) -> None:
         )
 
 
+def _adb_pidof(adb: str, serial: str, process_name: str) -> list[str]:
+    """Return the list of PIDs for `process_name` on device (empty if none)."""
+    proc = subprocess.run(
+        [adb, "-s", serial, "shell", "pidof", process_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+    return proc.stdout.split()
+
+
+def _adb_wait_process_exit(
+    adb: str,
+    serial: str,
+    process_name: str,
+    timeout_sec: float = 20.0,
+    poll_interval_sec: float = 0.3,
+) -> bool:
+    """Poll until no process named `process_name` remains on device.
+
+    Root cause (2026-07-04 investigation, see Task_android_perf_diag_measure.md
+    Gap 1): the GPU/Vulkan device teardown for `test_decode_android` /
+    `dng_ffi_harness_android` continues briefly *after* `adb shell` returns to
+    the caller (stdout closes before the process fully exits). Launching the
+    next invocation (baseline->test within one round, or round N -> N+1)
+    while the previous process is still tearing down its Vulkan device causes
+    intermittent corruption: the next process's baseline-file reads fail
+    ("Could not load baseline file") or the decode itself throws a DNG
+    Exception. Confirmed via `pidof` polling in a real repro (dbg log:
+    docs/logs/2026-07-04/android_repeat_investigation.md).
+
+    Returns True once no matching process is found, False on timeout (the
+    caller should log a warning, not hard-fail, since `pidof` itself can be
+    momentarily flaky and a false-timeout should not abort a whole run).
+    """
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if not _adb_pidof(adb, serial, process_name):
+            return True
+        time.sleep(poll_interval_sec)
+    return not _adb_pidof(adb, serial, process_name)
+
+
 def _build_android_cases(
     lossless_remote: str,
     lossy_remote: str,
@@ -637,6 +690,40 @@ def _parse_test_decode_output(
     )
 
 
+def _adb_repush_binary(
+    adb: str, serial: str, local_path: Path, remote_path: str
+) -> None:
+    """Re-push a single binary and restore its exec bit (127-recovery path)."""
+    print(f"[WARN] re-pushing {remote_path} (recovering from exit=127)")
+    _adb_cmd(adb, serial, "push", str(local_path), remote_path)
+    _adb_cmd(adb, serial, "shell", f"chmod 755 {shlex.quote(remote_path)}")
+
+
+def _adb_shell_with_repush_retry(
+    adb: str,
+    serial: str,
+    shell_command: str,
+    *,
+    local_bin: Path,
+    remote_bin: str,
+) -> subprocess.CompletedProcess:
+    """Run `adb shell <shell_command>`, retrying once after re-pushing the
+    binary if the shell reports exit=127 ("inaccessible or not found").
+
+    See Task_android_perf_diag_measure.md Gap 1: the pushed binary was
+    observed to become unreachable between matrix repeats. `_adb_wait_process_exit`
+    (called by the caller between invocations) addresses the confirmed root
+    cause (GPU teardown race); this retry is a defensive second layer in case
+    the remote binary is genuinely missing/corrupted for an unrelated reason
+    (e.g. a concurrent device cleanup).
+    """
+    proc = _adb_cmd(adb, serial, "shell", shell_command, check=False)
+    if proc.returncode == 127:
+        _adb_repush_binary(adb, serial, local_bin, remote_bin)
+        proc = _adb_cmd(adb, serial, "shell", shell_command, check=False)
+    return proc
+
+
 def _run_android_case(
     adb: str,
     serial: str,
@@ -646,14 +733,23 @@ def _run_android_case(
     case_name: str,
     baseline_env: dict[str, str],
     test_env: dict[str, str],
+    *,
+    local_bin: Path,
+    process_name: str = "test_decode_android",
 ) -> RunResult:
     """Execute one Android test case via ADB shell.
 
     Steps:
     1. Clear remote artifacts.
     2. Run device-side SDK baseline to generate raw references.
-    3. Run Vulkan test against those references.
-    4. Parse stdout using shared _parse_test_decode_output.
+    3. Wait for the baseline process to fully exit (GPU/Vulkan device
+       teardown continues briefly after `adb shell` returns; see
+       `_adb_wait_process_exit` docstring for the confirmed root cause of the
+       Gap-1 --repeat>1 corruption).
+    4. Run Vulkan test against those references.
+    5. Wait for the test process to fully exit before returning, so the next
+       round (or the next case) never overlaps with this one's teardown.
+    6. Parse stdout using shared _parse_test_decode_output.
     """
     remote_artifacts = f"{remote_dir}/artifacts"
     remote_bin = f"{remote_dir}/test_decode_android"
@@ -674,25 +770,36 @@ def _run_android_case(
             f"{shlex.quote(remote_bin)} {args_str}"
         )
 
-    baseline = _adb_cmd(
-        adb,
-        serial,
-        "shell",
-        shell_cmd(baseline_args, baseline_env),
-        check=False,
+    baseline = _adb_shell_with_repush_retry(
+        adb, serial, shell_cmd(baseline_args, baseline_env),
+        local_bin=local_bin, remote_bin=remote_bin,
     )
     if baseline.returncode != 0:
         raise RuntimeError(
             f"[{case_name} baseline] exit={baseline.returncode}\n{baseline.stdout}"
         )
+    if not _adb_wait_process_exit(adb, serial, process_name):
+        print(
+            f"[WARN] {case_name}: {process_name} still visible after baseline "
+            "teardown timeout; proceeding anyway (best-effort wait)"
+        )
 
-    proc = _adb_cmd(adb, serial, "shell", shell_cmd(test_args, test_env), check=False)
-    return _parse_test_decode_output(
+    proc = _adb_shell_with_repush_retry(
+        adb, serial, shell_cmd(test_args, test_env),
+        local_bin=local_bin, remote_bin=remote_bin,
+    )
+    result = _parse_test_decode_output(
         proc.stdout,
         proc.returncode,
         case_name,
         require_android_vulkan_gate=True,
     )
+    if not _adb_wait_process_exit(adb, serial, process_name):
+        print(
+            f"[WARN] {case_name}: {process_name} still visible after test "
+            "teardown timeout; proceeding anyway (best-effort wait)"
+        )
+    return result
 
 
 def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) -> RunResult:
@@ -778,6 +885,140 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
     )
 
 
+def _shell_export_prefix(env: dict[str, str]) -> str:
+    """Build a ` ; `-joined `export K=V` prefix, empty string when env is
+    empty (avoids emitting a stray `; ;` that /system/bin/sh rejects as a
+    syntax error)."""
+    if not env:
+        return ""
+    exports = " ; ".join(f"export {k}={shlex.quote(v)}" for k, v in env.items())
+    return f"{exports} ; "
+
+
+def _adb_push_extra_binary(
+    adb: str, serial: str, local_path: Path, remote_dir: str
+) -> str:
+    """Push one extra standalone binary into remote_dir, chmod +x, return its
+    remote path."""
+    remote_path = f"{remote_dir}/{local_path.name}"
+    _adb_cmd(adb, serial, "push", str(local_path), remote_path)
+    _adb_cmd(adb, serial, "shell", f"chmod 755 {shlex.quote(remote_path)}")
+    return remote_path
+
+
+def _parse_android_ffi_output(
+    output: str,
+    returncode: int,
+    sample_name: str,
+    expected_runs: int,
+) -> list[FfiRunResult]:
+    """Parse `dng_ffi_harness_android <dng> <repeat_count>` stdout.
+
+    The harness loops `repeat_count` times inside a single process (no
+    --save-raw: there is no repo root / host Halide reference render
+    on-device, see dng_ffi_harness.cpp's resolveArtifactDir), so this parser
+    splits the output into one segment per `[FFI run k]` line and extracts a
+    FfiRunResult per segment. `rgb_match_pass` is trivially True — RGB
+    byte-exact comparison against a macOS-generated reference is out of
+    scope on-device and is never attempted (writeAndCompareRgb is only
+    called when --save-raw is passed).
+    """
+    lines = output.splitlines()
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        current.append(line)
+        if _FFI_RUN_RE.match(line):
+            segments.append(current)
+            current = []
+
+    pool_pass = any(_POOL_PASS_RE.match(line) for line in lines)
+
+    results: list[FfiRunResult] = []
+    for seg in segments:
+        stage2_probe: dict[str, float] = {}
+        opcode2_probe: dict[str, float] = {}
+        ffi_match: Optional[re.Match[str]] = None
+        contract_pass = False
+        contract_failed = False
+        for line in seg:
+            m = _FFI_RUN_RE.match(line)
+            if m:
+                ffi_match = m
+            if _CONTRACT_PASS_RE.match(line):
+                contract_pass = True
+            if _CONTRACT_FAIL_RE.match(line):
+                contract_failed = True
+            m = _STAGE2_PROBE_RE.match(line)
+            if m:
+                stage2_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
+            m = _OPCODE2_TIMING_RE.match(line)
+            if m:
+                _accumulate_opcode2_timing(opcode2_probe, m.group(1))
+        if ffi_match is None or not contract_pass or contract_failed:
+            continue
+        results.append(FfiRunResult(
+            sample_name=sample_name,
+            ok=ffi_match.group(1) == "1",
+            width=int(ffi_match.group(2)),
+            height=int(ffi_match.group(3)),
+            rgb_bytes=int(ffi_match.group(4)),
+            decode_ms=float(ffi_match.group(5)),
+            process_ms=float(ffi_match.group(6)),
+            wall_ms=float(ffi_match.group(7)),
+            error_code=int(ffi_match.group(8)),
+            stage2_do_build_ms=stage2_probe.get("doBuildStage2"),
+            stage2_opcode2_ms=stage2_probe.get("opcode2"),
+            stage2_total_ms=stage2_probe.get("total"),
+            contract_pass=contract_pass,
+            rgb_match_pass=True,
+            opcode2_probe=opcode2_probe,
+        ))
+
+    if returncode != 0 or not pool_pass or len(results) != expected_runs:
+        raise RuntimeError(
+            f"[Android FFI {sample_name}] exit={returncode} "
+            f"parsed_runs={len(results)}/{expected_runs} pool_pass={pool_pass}\n{output}"
+        )
+    return results
+
+
+def _run_android_ffi_case(
+    adb: str,
+    serial: str,
+    remote_dir: str,
+    remote_bin: str,
+    sample_name: str,
+    remote_dng_path: str,
+    env: dict[str, str],
+    repeat_count: int,
+    *,
+    local_bin: Path,
+    process_name: str = "dng_ffi_harness_android",
+) -> list[FfiRunResult]:
+    """Execute the Android FFI harness for `repeat_count` runs in ONE process
+    invocation (the harness's own internal repeat loop), which sidesteps the
+    inter-process GPU/Vulkan teardown race entirely (see
+    `_adb_wait_process_exit`) since there is only one process per call.
+    """
+    cmd_str = (
+        f"cd {shlex.quote(remote_dir)} ; "
+        f"export LD_LIBRARY_PATH={shlex.quote(remote_dir)}:$LD_LIBRARY_PATH ; "
+        f"{_shell_export_prefix(env)}"
+        f"{shlex.quote(remote_bin)} {shlex.quote(remote_dng_path)} {repeat_count}"
+    )
+    proc = _adb_shell_with_repush_retry(
+        adb, serial, cmd_str, local_bin=local_bin, remote_bin=remote_bin,
+    )
+    results = _parse_android_ffi_output(proc.stdout, proc.returncode, sample_name, repeat_count)
+    if not _adb_wait_process_exit(adb, serial, process_name):
+        print(
+            f"[WARN] Android FFI {sample_name}: {process_name} still visible "
+            "after teardown timeout; proceeding anyway (best-effort wait)"
+        )
+    return results
+
+
 def _run_device_handoff(
     cwd: Path,
     harness: str,
@@ -819,6 +1060,71 @@ def _run_device_handoff(
         gate_pass = match.group(2) == "PASS" and psnr >= 99.0
         if not gate_pass:
             raise RuntimeError(f"[Device Handoff] gate failed\n{output}")
+        results.append(DeviceHandoffResult(
+            sample_name=label,
+            psnr_db=psnr,
+            gate_pass=gate_pass,
+            byte_exact=psnr >= 998.0,
+        ))
+    return results
+
+
+def _run_android_device_handoff(
+    adb: str,
+    serial: str,
+    remote_dir: str,
+    remote_bin: str,
+    remote_lossless: str,
+    remote_lossy: str,
+    env: dict[str, str],
+    *,
+    local_bin: Path,
+    process_name: str = "test_device_handoff_android",
+) -> list[DeviceHandoffResult]:
+    """Run `test_device_handoff_android <lossless> <lossy>` on device.
+
+    Mirrors `_run_device_handoff` (macOS): same CLI signature, same
+    [Contract]/PSNR(handoff ON vs OFF) output contract (see
+    test_device_handoff.cpp), just executed over adb shell instead of a
+    local subprocess.
+    """
+    cmd_str = (
+        f"cd {shlex.quote(remote_dir)} ; "
+        f"export LD_LIBRARY_PATH={shlex.quote(remote_dir)}:$LD_LIBRARY_PATH ; "
+        f"{_shell_export_prefix(env)}"
+        f"{shlex.quote(remote_bin)} {shlex.quote(remote_lossless)} {shlex.quote(remote_lossy)}"
+    )
+    proc = _adb_shell_with_repush_retry(
+        adb, serial, cmd_str, local_bin=local_bin, remote_bin=remote_bin,
+    )
+    output = proc.stdout
+    contract_passes = sum(
+        1 for line in output.splitlines() if _CONTRACT_PASS_RE.match(line)
+    )
+    contract_failed = any(
+        _CONTRACT_FAIL_RE.match(line) for line in output.splitlines()
+    )
+    matches = [
+        _HANDOFF_PSNR_RE.match(line)
+        for line in output.splitlines()
+        if _HANDOFF_PSNR_RE.match(line)
+    ]
+    if not _adb_wait_process_exit(adb, serial, process_name):
+        print(
+            f"[WARN] Android Device Handoff: {process_name} still visible "
+            "after teardown timeout; proceeding anyway (best-effort wait)"
+        )
+    if proc.returncode != 0 or contract_failed or contract_passes != 2 or len(matches) != 2:
+        raise RuntimeError(f"[Android Device Handoff] exit={proc.returncode}\n{output}")
+
+    labels = ("Lossless / Stage3-Stage4 (Android)", "Lossy / Stage2-Stage4 (Android)")
+    results: list[DeviceHandoffResult] = []
+    for label, match in zip(labels, matches):
+        assert match is not None
+        psnr = float(match.group(1))
+        gate_pass = match.group(2) == "PASS" and psnr >= 99.0
+        if not gate_pass:
+            raise RuntimeError(f"[Android Device Handoff] gate failed\n{output}")
         results.append(DeviceHandoffResult(
             sample_name=label,
             psnr_db=psnr,
@@ -950,6 +1256,33 @@ def _build_markdown(
                 f"| {rgb_bytes} "
                 f"| {'PASS' if all(run.contract_pass for run in r.runs) else 'FAIL'} "
                 f"| {'PASS' if all(run.rgb_match_pass for run in r.runs) else 'FAIL'} |"
+            )
+        L.append("")
+
+    if android_ffi_results:
+        L.append("## Android FFI Production Timing (ms, production C ABI, single process)")
+        L.append("")
+        L.append("_Runs execute in one on-device process invocation (repeat_count passed directly "
+                 "to the harness) so no inter-process GPU/Vulkan teardown race is possible. There is "
+                 "no host-side Halide reference render on-device, so RGB byte-exact match against a "
+                 "macOS baseline is not attempted here — only `[Contract]` and the pool leak-check gate."
+                 " Contract PASS means the interleaved RGBA8 output passed shape/alpha validation on "
+                 "every run._")
+        L.append("")
+        L.append("| Sample | decode_ms | process_ms | wall_ms | Stage2 total | Stage2 doBuildStage2 | Stage2 opcode2 | rgb_bytes | Contract |")
+        L.append("|---|---|---|---|---|---|---|---|---|")
+        for r in android_ffi_results:
+            rgb_bytes = str(r.rgb_bytes) if r.rgb_bytes is not None else "N/A"
+            L.append(
+                f"| {r.sample_name} "
+                f"| {_fmt_ms(r.decode_ms)} "
+                f"| {_fmt_ms(r.process_ms)} "
+                f"| {_fmt_ms(r.wall_ms)} "
+                f"| {_fmt_ms(r.stage2_total_ms)} "
+                f"| {_fmt_ms(r.stage2_do_build_ms)} "
+                f"| {_fmt_ms(r.stage2_opcode2_ms)} "
+                f"| {rgb_bytes} "
+                f"| {'PASS' if all(run.contract_pass for run in r.runs) else 'FAIL'} |"
             )
         L.append("")
 
@@ -2004,6 +2337,44 @@ def main() -> int:
             "the current Android DNG SDK build does not enable JPEG decode."
         ),
     )
+    ap.add_argument(
+        "--android-ffi-harness",
+        default="",
+        help=(
+            "Android FFI harness binary path (relative to repo-root). Runs "
+            "the production C ABI entry on-device (repeat_count passed "
+            "directly to the harness, single process). Gates [Contract] + "
+            "pool leak-check only (no host RGB reference on-device). "
+            "Auto-enabled when the default build output exists "
+            f"({_DEFAULT_ANDROID_FFI_HARNESS}); pass --no-android-ffi-harness "
+            "to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-android-ffi-harness",
+        action="store_true",
+        default=False,
+        help="Disable the Android FFI harness case even if the default binary exists.",
+    )
+    ap.add_argument(
+        "--android-device-handoff-harness",
+        default="",
+        help=(
+            "Android device-handoff harness binary path (relative to "
+            "repo-root). Auto-enabled when the default build output exists "
+            f"({_DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS}); pass "
+            "--no-android-device-handoff-harness to skip explicitly. As of "
+            "2026-07-04 no CMake target cross-compiles this binary yet "
+            "(request pending with build-eng), so this case is normally "
+            "skipped with an [INFO] note."
+        ),
+    )
+    ap.add_argument(
+        "--no-android-device-handoff-harness",
+        action="store_true",
+        default=False,
+        help="Disable the Android device handoff harness case even if the default binary exists.",
+    )
     args = ap.parse_args()
 
     if args.repeat < 1:
@@ -2179,6 +2550,8 @@ def main() -> int:
 
     # --- Android test execution ---
     android_agg_results: list[AggResult] = []
+    android_ffi_agg_results: list[FfiAggResult] = []
+    handoff_results: list[DeviceHandoffResult] = []
     android_serial: Optional[str] = None
     if android_enabled:
         android_bin = (root / args.android_test_decode).resolve()
@@ -2266,6 +2639,7 @@ def main() -> int:
                     run = _run_android_case(
                         adb, android_serial, args.android_remote_dir,
                         baseline_args, test_args, case_name, baseline_env, test_env,
+                        local_bin=android_bin,
                     )
                     android_runs.append(run)
                 except RuntimeError as exc:
@@ -2278,6 +2652,97 @@ def main() -> int:
                     time.sleep(args.android_cooldown_sec)
 
             android_agg_results.append(AggResult(case_name=case_name, runs=android_runs))
+
+        # --- Android FFI harness (auto-enable pattern mirrors macOS FFI) ---
+        requested_android_ffi_harness = args.android_ffi_harness
+        if not args.no_android_ffi_harness and not args.android_ffi_harness:
+            args.android_ffi_harness = _DEFAULT_ANDROID_FFI_HARNESS
+        if args.no_android_ffi_harness:
+            args.android_ffi_harness = ""
+        default_android_ffi_bin = (
+            (root / args.android_ffi_harness).resolve() if args.android_ffi_harness else None
+        )
+        if (
+            args.android_ffi_harness
+            and not requested_android_ffi_harness
+            and default_android_ffi_bin is not None
+            and not default_android_ffi_bin.exists()
+        ):
+            print(f"[INFO] Android FFI harness binary not found; skipping: {default_android_ffi_bin}")
+            args.android_ffi_harness = ""
+
+        if args.android_ffi_harness:
+            android_ffi_bin = (root / args.android_ffi_harness).resolve()
+            if not android_ffi_bin.exists():
+                ap.error(f"Android FFI harness binary not found: {android_ffi_bin}")
+            print("[INFO] Pushing Android FFI harness binary...")
+            remote_ffi_bin = _adb_push_extra_binary(
+                adb, android_serial, android_ffi_bin, args.android_remote_dir
+            )
+            android_ffi_env: dict[str, str] = {**extra_env}
+            if args.timing:
+                android_ffi_env.update({
+                    "DNG_STAGE1_TIMING": "1",
+                    "DNG_MAP_POLY_TIMING": "1",
+                    "DNG_STAGE2_SDK_TIMING": "1",
+                })
+            android_ffi_cases = [("Lossless / FFI (Android)", remote_lossless)]
+            if args.android_include_lossy:
+                android_ffi_cases.append(("Lossy / FFI (Android)", remote_lossy))
+            for sample_name, remote_dng in android_ffi_cases:
+                print(f"[Android FFI] {sample_name} (repeat={args.repeat}, single process)")
+                try:
+                    ffi_runs = _run_android_ffi_case(
+                        adb, android_serial, args.android_remote_dir, remote_ffi_bin,
+                        sample_name, remote_dng, android_ffi_env, args.repeat,
+                        local_bin=android_ffi_bin,
+                    )
+                except RuntimeError as exc:
+                    print(f"  ERROR: {exc}")
+                    raise SystemExit(1)
+                android_ffi_agg_results.append(FfiAggResult(sample_name=sample_name, runs=ffi_runs))
+
+        # --- Android device handoff harness (auto-enable; no CMake target
+        # exists yet as of 2026-07-04 so this normally [INFO]-skips) ---
+        requested_android_handoff_harness = args.android_device_handoff_harness
+        if not args.no_android_device_handoff_harness and not args.android_device_handoff_harness:
+            args.android_device_handoff_harness = _DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS
+        if args.no_android_device_handoff_harness:
+            args.android_device_handoff_harness = ""
+        default_android_handoff_bin = (
+            (root / args.android_device_handoff_harness).resolve()
+            if args.android_device_handoff_harness else None
+        )
+        if (
+            args.android_device_handoff_harness
+            and not requested_android_handoff_harness
+            and default_android_handoff_bin is not None
+            and not default_android_handoff_bin.exists()
+        ):
+            print(
+                "[INFO] Android device handoff harness binary not found "
+                f"(no CMake cross-compile target yet); skipping: {default_android_handoff_bin}"
+            )
+            args.android_device_handoff_harness = ""
+
+        if args.android_device_handoff_harness:
+            android_handoff_bin = (root / args.android_device_handoff_harness).resolve()
+            if not android_handoff_bin.exists():
+                ap.error(f"Android device handoff harness not found: {android_handoff_bin}")
+            print("[INFO] Pushing Android device handoff harness binary...")
+            remote_handoff_bin = _adb_push_extra_binary(
+                adb, android_serial, android_handoff_bin, args.android_remote_dir
+            )
+            try:
+                android_handoff_results = _run_android_device_handoff(
+                    adb, android_serial, args.android_remote_dir, remote_handoff_bin,
+                    remote_lossless, remote_lossy, extra_env,
+                    local_bin=android_handoff_bin,
+                )
+                handoff_results.extend(android_handoff_results)
+            except RuntimeError as exc:
+                print(f"  ERROR: {exc}")
+                raise SystemExit(1)
 
     # --- Harness auto-enable (same pattern as Android: default path, skip
     # silently with an [INFO] note when the binary hasn't been built yet) ---
@@ -2313,15 +2778,17 @@ def main() -> int:
         print(f"[INFO] FFI harness binary not found; skipping: {default_ffi_bin}")
         args.ffi_harness = ""
 
-    handoff_results: list[DeviceHandoffResult] = []
+    # handoff_results is initialized above (before the Android block) so
+    # Android device-handoff results collected there survive into this
+    # macOS section; here we only append the macOS results.
     if macos_enabled and args.device_handoff_harness:
         handoff_harness = (root / args.device_handoff_harness).resolve()
         if not handoff_harness.exists():
             ap.error(f"Device handoff harness not found: {handoff_harness}")
         try:
-            handoff_results = _run_device_handoff(
+            handoff_results.extend(_run_device_handoff(
                 root, str(handoff_harness), lossless, lossy, extra_env
-            )
+            ))
         except RuntimeError as exc:
             print(f"  ERROR: {exc}")
             raise SystemExit(1)
@@ -2368,7 +2835,7 @@ def main() -> int:
         ffi_results,
         handoff_results,
         android_agg_results,
-        [],  # android_ffi_results (Phase 2)
+        android_ffi_agg_results,
         generated_at=generated_at,
         repeat=args.repeat,
         show_halide_timing=args.timing,

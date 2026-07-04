@@ -205,6 +205,29 @@ def publish_macos_dist(app_dir: Path, mode: str) -> int:
     return 0
 
 
+def strip_android_so(ndk_path: Path, so_path: Path) -> int:
+    """Strip the built Android shared library via the NDK's llvm-strip.
+
+    No prior artifact convention exists for keeping an unstripped copy
+    alongside the publish output, so this strips in place and does not
+    invent a new layout.
+    """
+    strip_candidates = sorted(ndk_path.glob("toolchains/llvm/prebuilt/*/bin/llvm-strip"))
+    if not strip_candidates:
+        print(
+            f"[WARN] llvm-strip not found under {ndk_path}/toolchains/llvm/prebuilt/*/bin; "
+            "skipping strip.",
+            file=sys.stderr,
+        )
+        return 0
+    llvm_strip = strip_candidates[0]
+    print(f"[INFO] Stripping {so_path} with {llvm_strip}")
+    result = subprocess.run([str(llvm_strip), "--strip-unneeded", str(so_path)])
+    if result.returncode != 0:
+        print(f"[ERROR] llvm-strip failed on {so_path}", file=sys.stderr)
+    return result.returncode
+
+
 def latest_file(paths: list[Path]) -> Optional[Path]:
     existing = [path for path in paths if path.exists()]
     if not existing:
@@ -266,6 +289,10 @@ def build_android(args, native_dir: Path, cores: int) -> int:
             "cmake", "-S", str(native_dir), "-B", str(host_gen_dir),
             "-DDNG_HOST_GENERATORS_ONLY=ON",
             f"-DDNG_AOT_TARGET_OVERRIDE={aot_target}",
+            # Perf fix (2026-07-04): explicit Release even though CMakeLists.txt
+            # now defaults to it, so this stays correct if the cache already
+            # pinned a different CMAKE_BUILD_TYPE from a prior configure.
+            "-DCMAKE_BUILD_TYPE=Release",
             *args.cmake_arg,
         ]
         code = run_with_watchdog(stage1_configure, cwd=native_dir.parent,
@@ -330,6 +357,10 @@ def build_android(args, native_dir: Path, cores: int) -> int:
             f"-DANDROID_PLATFORM={args.android_platform}",
             "-DDNG_CROSS_BUILD=ON",
             f"-DDNG_PREBUILT_AOT_DIR={aot_dir}",
+            # Perf fix (2026-07-04): explicit Release even though CMakeLists.txt
+            # now defaults to it, so this stays correct if the cache already
+            # pinned a different CMAKE_BUILD_TYPE from a prior configure.
+            "-DCMAKE_BUILD_TYPE=Release",
             *args.cmake_arg,
         ]
         code = run_with_watchdog(stage2_configure, cwd=native_dir.parent,
@@ -357,6 +388,9 @@ def build_android(args, native_dir: Path, cores: int) -> int:
         print(f"[OK] Stage 2 complete: {target_path}")
     elif so_path.exists():
         print(f"[OK] Stage 2 complete: {so_path}")
+        strip_code = strip_android_so(ndk_path, so_path)
+        if strip_code != 0:
+            return strip_code
     else:
         print(
             f"[WARN] Expected {target_path} or {so_path} not found; check build output.",
@@ -547,7 +581,14 @@ def main() -> int:
     native_needed = args.target != "none" and not args.build_web_app
     flutter_idle_timeout_sec = max(args.idle_timeout_sec, 300)
     if native_needed and not args.skip_configure:
-        configure_cmd = ["cmake", "-S", str(native_dir), "-B", str(build_dir), *args.cmake_arg]
+        # Perf fix (2026-07-04): explicit Release even though CMakeLists.txt now
+        # defaults to it, so this stays correct if the cache already pinned a
+        # different CMAKE_BUILD_TYPE from a prior configure.
+        configure_cmd = [
+            "cmake", "-S", str(native_dir), "-B", str(build_dir),
+            "-DCMAKE_BUILD_TYPE=Release",
+            *args.cmake_arg,
+        ]
         code = run_with_watchdog(
             configure_cmd,
             cwd=native_dir.parent,

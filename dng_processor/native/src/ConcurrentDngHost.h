@@ -31,15 +31,28 @@ public:
 
     virtual uint32 PerformAreaTaskThreads() override {
         // Priority: explicit constructor override > env var > hardware concurrency.
+        uint32_t threads;
         if (requestedThreads_ > 0) {
-            return requestedThreads_;
+            threads = requestedThreads_;
+        } else {
+            const uint32_t configuredThreads = cachedConfig_.threads.area_threads;
+            threads = configuredThreads > 0 ? configuredThreads
+                                             : std::thread::hardware_concurrency();
         }
-        const uint32_t configuredThreads = cachedConfig_.threads.area_threads;
-        if (configuredThreads > 0) {
-            return configuredThreads;
+        // Q3a (Round 2 perf diag): whichever source resolved `threads` above,
+        // never exceed hardware_concurrency(). kDefaultAreaThreads (20, see
+        // dng_pipeline_config.h) is a fixed upper bound sized for the largest
+        // supported device tier; on machines with fewer logical cores it
+        // over-provisioned std::async workers for every decode (extra
+        // create/join overhead with no added parallelism, since only
+        // hardware_concurrency() of them can run simultaneously anyway).
+        // DNG_AREA_THREADS still resolves `threads` above (still honored as
+        // the configured value) — it is simply subject to the same ceiling.
+        const uint32_t hw = std::thread::hardware_concurrency();
+        if (hw > 0 && threads > hw) {
+            threads = hw;
         }
-        uint32 threads = std::thread::hardware_concurrency();
-        return threads > 1 ? threads : 1;
+        return threads > 0 ? threads : 1;
     }
 
     virtual void PerformAreaTask(dng_area_task &task, const dng_rect &area) override {

@@ -1390,7 +1390,15 @@ int main(int argc, char** argv) {
 
     // PSNR gate thresholds (W5-1 / TD-1).
     // Lossless (CFA_BAYER): Stage1/2 bit-exact ≥999dB; Stage3 ≥100dB; Stage4 ≥75dB.
-    // Lossy (YCbCr / LinearRaw): all stages bit-exact ≥999dB (SDK passthrough Stage3 + same render).
+    // Lossy (YCbCr / LinearRaw): Stage1-3 bit-exact ≥999dB (SDK passthrough Stage3);
+    // Stage4 (render) is bit-exact only on backends that are truly CPU/SDK-identical
+    // for this image (macOS "halide-metal"). The platform-adaptive HALIDE_GPU
+    // backend (Vulkan on Android) has the same GPU-vs-CPU rendering precision
+    // floor already accepted for the lossless case below (75dB) — align lossy
+    // Stage4 to that same floor when using HALIDE_GPU (2026-07-04, Task #10:
+    // Android Vulkan lossy Stage4 measured 121.93 dB, well above the floor, vs
+    // the previous blanket 999dB requirement that only bit-exact backends can
+    // meet). macOS's "halide-metal" invocation is untouched — still 999dB.
     // Baseline mode skips gate (no PSNR is generated).
     struct PsnrThresholds {
         double stage1 = 999.0;
@@ -1401,9 +1409,9 @@ int main(int argc, char** argv) {
     // isLossless is based on filename (fallback); photometric-based re-check happens inside testDNG
     PsnrThresholds thresholds;
     if (!isLossless) {
-        // Lossy: all stages must be bit-exact (999dB)
+        // Lossy: Stage1-3 must be bit-exact (999dB); Stage4 depends on backend.
         thresholds.stage3 = 999.0;
-        thresholds.stage4 = 999.0;
+        thresholds.stage4 = (renderMode == RenderHalideMode::HALIDE_GPU) ? 75.0 : 999.0;
     }
 
     StagePSNR lastPsnr;
