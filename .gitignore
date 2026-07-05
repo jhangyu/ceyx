@@ -26,7 +26,7 @@ __pycache__/
 # Large media testing files
 *.dng
 *.arw
-node_modules
+node_modules/
 
 # Build artifacts
 dng_processor/native/build/
