@@ -15,11 +15,11 @@ functions:
     description: "Default demosaic entry; tries AOT unless disabled, then CPU reference if the AOT wrapper returns failure."
     lines: "236-244"
   - name: "demosaic_bilinear_compat"
-    description: "Compatibility entry that dispatches to bilinear demosaic; legacy AHD symbol remains as a non-header wrapper."
-    lines: "246-258"
+    description: "Compatibility entry that dispatches to bilinear demosaic; called only from Stage3 demosaic test tools (test_mosaic_halide.cpp, test_mosaic_debug.cpp)."
+    lines: "217-222"
   - name: "get_cfa_pattern"
     description: "Returns the fixed RGGB CFA pattern used by current samples."
-    lines: "260-265"
+    lines: "224-229"
 ---
 */
 
@@ -219,13 +219,6 @@ extern "C" void demosaic_bilinear_compat(const uint16_t* input,
                                           int height,
                                           uint16_t* output) {
     demosaic_bilinear_halide(input, width, height, output);
-}
-
-extern "C" void demosaic_ahd_halide(const uint16_t* input,
-                                     int width,
-                                     int height,
-                                     uint16_t* output) {
-    demosaic_bilinear_compat(input, width, height, output);
 }
 
 extern "C" void get_cfa_pattern(int pattern[4]) {

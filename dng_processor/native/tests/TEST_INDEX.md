@@ -31,6 +31,5 @@
 
 | 檔案 | 用途 |
 |------|------|
-| `dng_demosaic_bilinear.a/h` | Stage3 fallback（Phase 7.3 遺留） |
+| `dng_demosaic_bilinear.a/h` | Stage3 fallback（production correctness path） |
 | `dng_pipeline.a/h` | Phase 5 legacy pipeline |
-| `rectilinear_warp_precomputed.a/h` | Phase 8.1.6 D-1 diagnostic（deprecated production route） |
