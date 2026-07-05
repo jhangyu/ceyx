@@ -1272,6 +1272,16 @@ static std::atomic<int> &pendingDecodeCount() {
   return count;
 }
 
+#if defined(__ANDROID__)
+// R3-3: VkPipelineCache persistence bridge (weak — resolves to the Halide
+// Vulkan runtime fork when compiled in, nullptr otherwise; see
+// native/halide_runtime_fork/README.md). prepare() eagerly creates the
+// context + cache object and returns the status bitmask (bit 4 = the cache
+// file was loaded AND validated this launch — a rejected/corrupted envelope
+// does NOT set it).
+extern "C" __attribute__((weak)) int dng_vk_pipeline_cache_prepare(void);
+#endif
+
 bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
   // L-4: warmup lock split — each sub-step acquires and releases
   // pipelineSingleFlightMutex independently so a pending decode can
@@ -1301,6 +1311,38 @@ bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
   }
 
   if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
+
+#if defined(__ANDROID__)
+  // R3-3 Option B (user-approved trade-off, 2026-07-05): when the persistent
+  // VkPipelineCache was loaded from disk this launch (cross-launch HIT,
+  // status bit 4), skip the full-size S3/S4 prewarm dispatches below —
+  // pipeline compilation, their main purpose, is already served from the
+  // cache at first decode. Measured effect (cc5bf709): second-launch warmup
+  // ~1500 → ~200-300ms; app-cold first decode inherits the buffer-alloc/D2H
+  // staging cold cost (~560ms vs 428ms with full prewarm) — a KNOWN,
+  // user-approved limitation; launch→first-image total improves ~1550→~810ms.
+  // Keyed off bit 4 only: control (no cache path), corrupted or
+  // driver-mismatched cache files all keep the full prewarm. Defeatable via
+  // DNG_VK_SKIP_PREWARM_ON_HIT=0 (and DNG_VK_PIPELINE_CACHE=0 disables the
+  // whole feature). No-op on macOS/fork-less builds (weak symbol = nullptr).
+  if (&dng_vk_pipeline_cache_prepare != nullptr) {
+    const char *defeat = std::getenv("DNG_VK_SKIP_PREWARM_ON_HIT");
+    const bool allowSkip = !(defeat && defeat[0] == '0' && defeat[1] == '\0');
+    if (allowSkip) {
+      const int cacheStatus = dng_vk_pipeline_cache_prepare();
+      if (pipelineVerbose()) {
+        std::fprintf(stderr,
+                     "[Warmup] VkPipelineCache prepare status=%d skip_prewarm=%d\n",
+                     cacheStatus, (cacheStatus & 4) ? 1 : 0);
+        std::fflush(stderr);
+      }
+      if (cacheStatus & 4) {
+        // Pools are touched (Step 2); pipelines come from the cache.
+        return true;
+      }
+    }
+  }
+#endif
 
   // Step 3: Stage3 fused demosaic+WarpRectilinear GPU pipeline prewarm.
   // T9 (W7-C): do NOT prewarm polynomial3 here. polynomial3 is the Stage2

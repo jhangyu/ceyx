@@ -58,6 +58,19 @@ typedef DngDecoderWarmupForSizeNative =
     ffi.Int32 Function(ffi.Int32 width, ffi.Int32 height);
 typedef DngDecoderWarmupForSizeDart = int Function(int width, int height);
 
+// R3-3: VkPipelineCache persistence (Android/Vulkan only; native returns -1
+// "unsupported" on other platforms/builds — see dng_ffi_api.h).
+typedef DngDecoderSetPipelineCachePathNative =
+    ffi.Int32 Function(ffi.Pointer<Utf8> path);
+typedef DngDecoderSetPipelineCachePathDart =
+    int Function(ffi.Pointer<Utf8> path);
+
+typedef DngDecoderSavePipelineCacheNative = ffi.Int32 Function();
+typedef DngDecoderSavePipelineCacheDart = int Function();
+
+typedef DngDecoderPipelineCacheStatusNative = ffi.Int32 Function();
+typedef DngDecoderPipelineCacheStatusDart = int Function();
+
 typedef dng_extract_preview_jpeg_func =
     ffi.Int32 Function(
       ffi.Pointer<Utf8> filePath,
@@ -80,6 +93,10 @@ class DngNativeBindings {
 
   late final DngDecodeAndProcessDart dngDecodeAndProcess;
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
+  // R3-3: pipeline cache persistence controls.
+  late final DngDecoderSetPipelineCachePathDart dngDecoderSetPipelineCachePath;
+  late final DngDecoderSavePipelineCacheDart dngDecoderSavePipelineCache;
+  late final DngDecoderPipelineCacheStatusDart dngDecoderPipelineCacheStatus;
   late final DngFreeResultDart dngFreeResult;
   late final DngFreeHalideBufferDart dngFreeHalideBuffer;
   late final DngFreeRgbaBufferDart dngFreeRgbaBuffer;
@@ -110,6 +127,23 @@ class DngNativeBindings {
           DngDecoderWarmupForSizeNative,
           DngDecoderWarmupForSizeDart
         >('dng_decoder_warmup_for_size');
+
+    // R3-3: pipeline cache persistence controls.
+    dngDecoderSetPipelineCachePath = _lib
+        .lookupFunction<
+          DngDecoderSetPipelineCachePathNative,
+          DngDecoderSetPipelineCachePathDart
+        >('dng_decoder_set_pipeline_cache_path');
+    dngDecoderSavePipelineCache = _lib
+        .lookupFunction<
+          DngDecoderSavePipelineCacheNative,
+          DngDecoderSavePipelineCacheDart
+        >('dng_decoder_save_pipeline_cache');
+    dngDecoderPipelineCacheStatus = _lib
+        .lookupFunction<
+          DngDecoderPipelineCacheStatusNative,
+          DngDecoderPipelineCacheStatusDart
+        >('dng_decoder_pipeline_cache_status');
 
     dngFreeResult = _lib.lookupFunction<DngFreeResultNative, DngFreeResultDart>(
       'dng_free_result',

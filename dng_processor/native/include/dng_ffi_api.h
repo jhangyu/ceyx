@@ -67,6 +67,29 @@ size_t dng_debug_pool_checked_out(void);
 /// Non-zero on the DNG_FUSE_RGBA=0 path indicates a checkout leak.
 size_t dng_debug_rgb_pool_checked_out(void);
 
+/// R3-3: Set the VkPipelineCache persistence file path (Android/Vulkan only).
+/// Call BEFORE the first warmup/decode with a writable per-app path (e.g.
+/// <cacheDir>/dng_vk_pipeline.cache). Pass NULL or "" to disable.
+/// No-op (returns -1) on platforms/builds without the Halide Vulkan runtime
+/// fork (macOS, or CMake -DDNG_VK_PIPELINE_CACHE=OFF). Never fails a decode:
+/// invalid paths or I/O errors silently fall back to uncached compilation.
+/// Returns 0 when the setting was applied.
+int32_t dng_decoder_set_pipeline_cache_path(const char *path);
+
+/// R3-3: Flush the pipeline cache to disk now (if dirty). Also invoked
+/// automatically at the end of dng_decoder_warmup_for_size and
+/// dng_decode_and_process. Returns 0 on success or nothing-to-do, -1 when
+/// unsupported on this build, -2 on (non-fatal) save failure.
+int32_t dng_decoder_save_pipeline_cache(void);
+
+/// R3-3: Observability for cache-hit evidence. Bitmask:
+///   1 = feature enabled (path set, not disabled by env)
+///   2 = VkPipelineCache object exists this session
+///   4 = cache file was loaded & validated at startup (cross-launch HIT)
+///   8 = unsaved pipeline data pending
+/// Returns -1 when unsupported on this build.
+int32_t dng_decoder_pipeline_cache_status(void);
+
 #ifdef __cplusplus
 }
 #endif

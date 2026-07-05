@@ -113,6 +113,13 @@ set(DNG_PREBUILT_AOT_DIR "" CACHE PATH
 set(DNG_AOT_TARGET_OVERRIDE "" CACHE STRING
     "Override AOT target string (e.g. arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query)")
 
+# R3-3: Halide Vulkan runtime fork with VkPipelineCache cross-launch
+# persistence (Android only). OFF = stock runtime, feature cleanly absent.
+# See native/halide_runtime_fork/README.md.
+option(DNG_VK_PIPELINE_CACHE
+       "R3-3: fork the Halide Vulkan runtime to persist VkPipelineCache across launches (Android only; OFF = stock runtime)"
+       ON)
+
 # Phase 14: Force diagnostic options OFF on Android (no Metal backend)
 if(ANDROID)
     set(DNG_DIAGNOSTIC_BUILD OFF CACHE BOOL "" FORCE)
@@ -592,6 +599,54 @@ if(ANDROID AND DNG_CROSS_BUILD)
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
     if(DNG_USE_LIBJPEG)
         target_link_libraries(test_device_handoff_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+
+    # ------------------------------------------------------------------------
+    # R3-3: Halide Vulkan runtime fork (VkPipelineCache persistence).
+    # See native/halide_runtime_fork/README.md for the weak-override mechanism.
+    # The fork object is post-processed with llvm-objcopy --weaken: the fork TU
+    # and halide_runtime.a both define ~271 internal helper methods STRONG
+    # (LinkedList/BlockStorage/... — non-inline methods from src/runtime
+    # internal headers); weakening the fork object lets the archive win those
+    # (ABI-identical v21 sources) while the weak-vs-weak vulkan entry points
+    # resolve to the fork (objects precede archives on the link line —
+    # validated by scripts/tmp/r3_3_link_probe.sh disassembly evidence).
+    # ------------------------------------------------------------------------
+    if(DNG_VK_PIPELINE_CACHE)
+        set(DNG_VK_FORK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/halide_runtime_fork)
+        add_library(halide_vulkan_fork OBJECT ${DNG_VK_FORK_DIR}/vulkan.cpp)
+        target_include_directories(halide_vulkan_fork PRIVATE
+            ${DNG_VK_FORK_DIR}
+            ${DNG_VK_FORK_DIR}/upstream)
+        # Match the upstream Halide runtime build environment:
+        # runtime_internal.h rejects hosted compiles; COMPILING_HALIDE_RUNTIME
+        # makes HalideRuntime.h use runtime_internal.h typedefs.
+        target_compile_definitions(halide_vulkan_fork PRIVATE COMPILING_HALIDE_RUNTIME)
+        target_compile_options(halide_vulkan_fork PRIVATE
+            -ffreestanding -fno-exceptions -fno-rtti)
+
+        set(DNG_VK_FORK_WEAK_OBJ ${CMAKE_CURRENT_BINARY_DIR}/halide_vulkan_fork_weak.o)
+        add_custom_command(
+            OUTPUT ${DNG_VK_FORK_WEAK_OBJ}
+            COMMAND ${CMAKE_OBJCOPY} --weaken $<TARGET_OBJECTS:halide_vulkan_fork> ${DNG_VK_FORK_WEAK_OBJ}
+            DEPENDS halide_vulkan_fork $<TARGET_OBJECTS:halide_vulkan_fork>
+            COMMENT "R3-3: weakening Halide Vulkan fork object (avoid dup-strong collisions with halide_runtime.a)"
+            VERBATIM)
+        add_custom_target(halide_vulkan_fork_weak DEPENDS ${DNG_VK_FORK_WEAK_OBJ})
+
+        # dng_decoder_native (production .so) + the three Android test
+        # binaries link halide_runtime.a directly, so all four need the fork
+        # object — otherwise the FFI harness would benchmark the stock runtime.
+        foreach(_dng_vkpc_tgt
+                dng_decoder_native
+                dng_ffi_harness_android
+                test_decode_android
+                test_device_handoff_android)
+            if(TARGET ${_dng_vkpc_tgt})
+                target_sources(${_dng_vkpc_tgt} PRIVATE ${DNG_VK_FORK_WEAK_OBJ})
+                add_dependencies(${_dng_vkpc_tgt} halide_vulkan_fork_weak)
+            endif()
+        endforeach()
     endif()
 endif()
 

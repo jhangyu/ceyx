@@ -26,7 +26,64 @@
 // dng_pipeline_v2.cpp) to avoid page-faults on warm decodes.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// R3-3: VkPipelineCache persistence bridge (Android/Vulkan only).
+// The implementation lives in the Halide Vulkan runtime fork
+// (native/halide_runtime_fork/, CMake option DNG_VK_PIPELINE_CACHE). The
+// symbols are referenced WEAK so this file still links when the fork is not
+// compiled in (macOS/Metal, or the option is OFF): unresolved weak = nullptr
+// on ELF, and the wrappers below degrade to "unsupported" no-ops.
+// ---------------------------------------------------------------------------
+#if defined(__ANDROID__)
 extern "C" {
+__attribute__((weak)) int dng_vk_pipeline_cache_set_path(const char *path);
+__attribute__((weak)) int dng_vk_pipeline_cache_save(void);
+__attribute__((weak)) int dng_vk_pipeline_cache_status(void);
+}
+#endif
+
+namespace {
+// Best-effort flush; must never affect the caller's result (red line:
+// cache I/O failure on any path must never fail a decode).
+inline void dngVkpcAutoSave() {
+#if defined(__ANDROID__)
+  if (&dng_vk_pipeline_cache_save != nullptr) {
+    (void)dng_vk_pipeline_cache_save();
+  }
+#endif
+}
+}  // namespace
+
+extern "C" {
+
+FFI_EXPORT int32_t dng_decoder_set_pipeline_cache_path(const char *path) {
+#if defined(__ANDROID__)
+  if (&dng_vk_pipeline_cache_set_path != nullptr) {
+    return static_cast<int32_t>(dng_vk_pipeline_cache_set_path(path));
+  }
+#else
+  (void)path;
+#endif
+  return -1;  // unsupported on this build
+}
+
+FFI_EXPORT int32_t dng_decoder_save_pipeline_cache(void) {
+#if defined(__ANDROID__)
+  if (&dng_vk_pipeline_cache_save != nullptr) {
+    return dng_vk_pipeline_cache_save() == 0 ? 0 : -2;
+  }
+#endif
+  return -1;  // unsupported on this build
+}
+
+FFI_EXPORT int32_t dng_decoder_pipeline_cache_status(void) {
+#if defined(__ANDROID__)
+  if (&dng_vk_pipeline_cache_status != nullptr) {
+    return static_cast<int32_t>(dng_vk_pipeline_cache_status());
+  }
+#endif
+  return -1;  // unsupported on this build
+}
 
 FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
   DngResult *result =
@@ -81,6 +138,10 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
   // struct are sufficient; always-on stderr polluted Xcode console and
   // CI timing parsers. Re-enable via DiagnosticConfig in the future if
   // a dedicated debug channel is needed.
+
+  // R3-3: flush any newly created pipeline state to the persistent cache
+  // (dirty-flag no-op when nothing changed; never affects the result).
+  dngVkpcAutoSave();
   return result;
 }
 
@@ -88,7 +149,11 @@ FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
   if (width <= 0 || height <= 0) {
     return -1;
   }
-  return dng_pipeline_v2_warmup_for_size(width, height) ? 0 : -2;
+  const int32_t rc = dng_pipeline_v2_warmup_for_size(width, height) ? 0 : -2;
+  // R3-3: warmup compiles all production pipelines — persist them so the
+  // NEXT launch skips compilation. Save failure never fails the warmup.
+  dngVkpcAutoSave();
+  return rc;
 }
 
 FFI_EXPORT int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffer,

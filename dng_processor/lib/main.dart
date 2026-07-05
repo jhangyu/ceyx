@@ -79,12 +79,44 @@ class _DngHomePageState extends State<DngHomePage> {
     try {
       _decoder.initialize();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _decoder.warmupForSize().catchError((e) {
-          debugPrint('DNG warmup failed: $e');
-        });
+        _startupWarmup();
       });
     } catch (e) {
       _error = 'Failed to load native library: $e';
+    }
+  }
+
+  /// R3-3: startup warmup with VkPipelineCache persistence (Android only).
+  /// The cache path MUST be set before warmup so the warmup's pipeline
+  /// compilation hits the persisted cache from the second launch onward
+  /// (and its results are saved for the next launch).
+  Future<void> _startupWarmup() async {
+    if (Platform.isAndroid) {
+      try {
+        final cacheDir = await getApplicationCacheDirectory();
+        final rc = _decoder.setPipelineCachePath(
+          '${cacheDir.path}/dng_vk_pipeline.cache',
+        );
+        debugPrint(
+          'DNG pipeline cache path set rc=$rc '
+          'status=${_decoder.pipelineCacheStatus}',
+        );
+      } catch (e) {
+        // Cache setup failure must never block warmup/decoding.
+        debugPrint('DNG pipeline cache setup failed (non-fatal): $e');
+      }
+    }
+    try {
+      await _decoder.warmupForSize();
+      if (Platform.isAndroid) {
+        // Evidence hook: bit 4 = cache file was loaded this launch (hit).
+        debugPrint(
+          'DNG warmup done, pipeline cache status='
+          '${_decoder.pipelineCacheStatus}',
+        );
+      }
+    } catch (e) {
+      debugPrint('DNG warmup failed: $e');
     }
   }
 

@@ -150,6 +150,40 @@ class DngDecoderService {
     }
   }
 
+  /// R3-3: Set the VkPipelineCache persistence file path (Android/Vulkan only).
+  ///
+  /// Call BEFORE [warmupForSize] / the first decode with a writable per-app
+  /// path (e.g. `<cacheDir>/dng_vk_pipeline.cache`). Native state is
+  /// process-global, so setting it here is visible to worker isolates.
+  /// Returns 0 when applied, -1 when unsupported on this platform/build
+  /// (macOS/Metal, or native built with DNG_VK_PIPELINE_CACHE=OFF).
+  /// Never throws: cache problems must never break decoding.
+  int setPipelineCachePath(String path) {
+    if (!_initialized) initialize();
+    final nativePath = path.toNativeUtf8();
+    try {
+      return _bindings.dngDecoderSetPipelineCachePath(nativePath);
+    } finally {
+      malloc.free(nativePath);
+    }
+  }
+
+  /// R3-3: Flush the pipeline cache to disk now (also happens automatically
+  /// after warmup and after each decode). 0 = saved/nothing-to-do,
+  /// -1 = unsupported, -2 = non-fatal save failure.
+  int savePipelineCache() {
+    if (!_initialized) initialize();
+    return _bindings.dngDecoderSavePipelineCache();
+  }
+
+  /// R3-3: Pipeline-cache status bitmask for diagnostics/evidence:
+  /// 1 = enabled, 2 = cache object exists, 4 = cache file was loaded at
+  /// startup (cross-launch hit), 8 = unsaved data pending. -1 = unsupported.
+  int get pipelineCacheStatus {
+    if (!_initialized) initialize();
+    return _bindings.dngDecoderPipelineCacheStatus();
+  }
+
   /// Decode on a worker isolate so the UI isolate can keep painting preview
   /// and progress state while native full RAW processing runs.
   ///
