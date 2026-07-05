@@ -28,6 +28,10 @@ __pycache__/
 *.arw
 node_modules/
 
+# Vendored Halide v21 binary distribution (~540MB, exceeds GitHub 100MB file limit)
+# Fetch after clone: dng_processor/native/scripts/fetch_halide_v21_dist.sh
+dng_processor/native/third_party/halide/
+
 # Build artifacts
 dng_processor/native/build/
 dng_processor/native/build-android/

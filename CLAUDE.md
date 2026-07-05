@@ -20,6 +20,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Native C++ (preferred)
 
 ```bash
+# 首次 clone 後必跑一次：抓 vendored Halide v21 binary distribution
+# （~540MB，未 tracked——2026-07-05 起因 GitHub 100MB 單檔限制移出 git）
+dng_processor/native/scripts/fetch_halide_v21_dist.sh
+
 # 完整 configure + build（預設 target: test_decode）
 python3 dng_processor/native/scripts/build_native_watchdog.py
 
