@@ -449,8 +449,20 @@ public:
 };
 
 // =============================================================================
-// Android Vulkan workaround: separate generator with one-dimensional planar
-// buffers per channel.  Avoids Tuple/2D/3D buffer stride codegen on Vulkan.
+// Android Vulkan Stage4 generator.
+// G2 (Round 2): outputs interleaved RGBA8 directly (same dst layout as the
+// macOS kernel: dim0 stride 4, dim2 stride 1 bounds [0,4)), retiring the
+// planar-output workaround + host repack. The interleaved dst construct was
+// re-verified SAFE on Halide v21 Vulkan (Adreno 750) by the G2 pre-check
+// Probe A — fully-inlined kernel, 0/24,000,000 per-channel mismatches at
+// 6000x4000 (docs/logs/2026-07-04/Task_g2_vulkan_rg_bug_recheck.md).
+// HARD CONSTRAINT: do NOT port the macOS `rendered_rgb.compute_at` schedule —
+// any materialized compute_at producer still collapses G/B to the last select
+// branch on Vulkan (pre-check Probe B, re-confirmed 2026-07-05 with
+// align_bounds; TailStrategy::GuardWithIf is a compile error on this target:
+// dynamic workgroup sizes need Vulkan v1.3). The kernel body must stay fully
+// inlined; unroll(c) + select folds c per copy and CSE shares the
+// c-independent pipeline body, so inlining costs no redundant compute.
 // =============================================================================
 class DngRenderStage4Android : public Halide::Generator<DngRenderStage4Android> {
 public:
@@ -464,7 +476,6 @@ public:
     Input<Buffer<uint16_t>> src_rgb{"src_rgb", 1};
     Input<int32_t> src_width{"src_width"};
     Input<int32_t> src_height{"src_height"};
-    Input<int32_t> dst_width{"dst_width"};
     Input<int32_t> src_row_stride_px{"src_row_stride_px"};
     Input<int32_t> crop_l{"crop_l"};
     Input<int32_t> crop_t{"crop_t"};
@@ -494,40 +505,33 @@ public:
     Input<int32_t> look_has_table{"look_has_table"};
     Input<int32_t> look_has_encoding{"look_has_encoding"};
 
-    // W4-3 (b): single 2D planar output dst(i, c) — dim0 = pixel index i
-    // (stride 1, extent N), dim1 = channel c (stride N, extent 3). This is the
-    // three former dst_r/dst_g/dst_b planes laid end-to-end in one buffer, so it
-    // dispatches as ONE Vulkan kernel instead of three. With reorder(c,i) +
-    // unroll(c), the c-index folds to a constant per unrolled copy so select()
-    // prunes to one channel and the c-independent pipeline body is CSE-shared
-    // inside one thread (computed once per pixel, not three times). 2D dense
-    // buffers are verified safe on Vulkan (W3 §1); the host still repacks the
-    // planar output to interleaved RGB8 (W4-1 MT repack_dst).
+    // G2: interleaved RGBA8 output dst(x, y, c) — dim0 stride 4, dim2 stride 1
+    // bounds [0,4), alpha=255 in-kernel. Exact macOS production dst layout;
+    // construct verified 0-error on Vulkan by G2 pre-check Probe A. Replaces
+    // the W4-3 (b) 2D planar dst + host MT repack (repackPlanarToRGBAMT /
+    // repackPlanarToInterleavedMT + RepackThreadPool, all retired).
     //
-    // Plan (a) — a single interleaved 1D dst_rgb(j) with j=i*3+c — was tried
-    // first but produced incorrect output on Vulkan (~8 dB, border/coverage
-    // corruption); the j/3, j%3 affine reconstruction under split+gpu_tile does
-    // not lower correctly. (b) keeps the single-dispatch + compute-1x win without
-    // the interleaved-index codegen hazard.
-    Output<Buffer<uint8_t>> dst{"dst", 2};
+    // Historical dead ends kept for the record:
+    // - Plan (a), W4-1: single interleaved 1D dst_rgb(j), j=i*3+c — mis-lowered
+    //   on Vulkan (~8 dB border/coverage corruption; Gotcha #93).
+    // - W4-3 (b): 2D planar dst(i, c) — correct but needed a full-frame host
+    //   repack pass per decode (~8-12 ms MT) plus a 3-plane D2H.
+    Output<Buffer<uint8_t>> dst{"dst", 3};  // x, y, c
 
     // Per-channel 8-bit results, set by emit_rgb8 (possibly from a diag stage),
     // consumed once at the end of generate() to build dst.
     Expr out8_r, out8_g, out8_b;
 
     void generate() {
-        Var i("i");
+        Var x("x"), y("y");
 
-        // W4-3 (b): dense planar dst layout — dim0=i (stride 1), dim1=c (stride
-        // = N). Matches the host buffer wrap (three contiguous planes).
-        dst.dim(0).set_stride(1);
-        dst.dim(1).set_bounds(0, 3);
-        dst.dim(1).set_stride(dst.dim(0).extent());
+        // G2: interleaved RGBA8 dst layout (macOS layout; probe-A verified).
+        dst.dim(0).set_stride(4);
+        dst.dim(2).set_bounds(0, 4);
+        dst.dim(2).set_stride(1);
 
-        Expr dst_x = i % dst_width;
-        Expr dst_y = i / dst_width;
-        Expr sx = clamp(dst_x + crop_l, 0, src_width - 1);
-        Expr sy = clamp(dst_y + crop_t, 0, src_height - 1);
+        Expr sx = clamp(x + crop_l, 0, src_width - 1);
+        Expr sy = clamp(y + crop_t, 0, src_height - 1);
 
         // W2: input-side interleaved gather (replaces three planar reads).
         Expr base = (sy * src_row_stride_px + sx) * 3;
@@ -549,7 +553,7 @@ public:
 
         if (diag_stage == 0) {
             emit_rgb8(linear8(s_r), linear8(s_g), linear8(s_b));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -559,7 +563,7 @@ public:
 
         if (diag_stage == 1) {
             emit_rgb8(linear8(wb_r), linear8(wb_g), linear8(wb_b));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -579,7 +583,7 @@ public:
 
         if (diag_stage == 2) {
             emit_rgb8(linear8(p_r0), linear8(p_g0), linear8(p_b0));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -706,7 +710,7 @@ public:
 
         if (diag_stage == 3) {
             emit_rgb8(linear8(p_r1), linear8(p_g1), linear8(p_b1));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -716,7 +720,7 @@ public:
 
         if (diag_stage == 4) {
             emit_rgb8(linear8(e_r), linear8(e_g), linear8(e_b));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -729,7 +733,7 @@ public:
 
         if (diag_stage == 5) {
             emit_rgb8(linear8(p_r2), linear8(p_g2), linear8(p_b2));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -780,7 +784,7 @@ public:
 
         if (diag_stage == 6) {
             emit_rgb8(linear8(t_r), linear8(t_g), linear8(t_b));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -800,7 +804,7 @@ public:
 
         if (diag_stage == 7) {
             emit_rgb8(linear8(f_r), linear8(f_g), linear8(f_b));
-            finalize(i);
+            finalize(x, y);
             return;
         }
 
@@ -812,37 +816,40 @@ public:
         emit_rgb8(cast<uint8_t>(encode8(f_r)),
                   cast<uint8_t>(encode8(f_g)),
                   cast<uint8_t>(encode8(f_b)));
-        finalize(i);
+        finalize(x, y);
     }
 
-    // W4-3 (b): wire the three channel results into the 2D planar output.
-    // out8_r/g/b are Exprs over the pixel index `i`; dst(i, c) selects a channel
-    // by c. reorder(c,i) + unroll(c) fold c to a constant per copy so select()
-    // prunes to one channel while the pipeline body (independent of c) is shared.
-    void finalize(Var i) {
+    // G2: wire the three channel results into the interleaved RGBA8 output.
+    // out8_r/g/b are Exprs over (x, y); dst(x, y, c) selects a channel by c
+    // (alpha hard 255). reorder(c,x,y) + unroll(c) folds c to a constant per
+    // copy so select() prunes to one channel while the pipeline body
+    // (independent of c) is CSE-shared — same compute-1x property the planar
+    // kernel had, now with coalesced 4-byte interleaved stores.
+    void finalize(Var x, Var y) {
         Var c("c");
-        dst(i, c) = select(c == 0, out8_r, c == 1, out8_g, out8_b);
+        dst(x, y, c) = select(c == 0, out8_r,
+                              c == 1, out8_g,
+                              c == 2, out8_b,
+                                      cast<uint8_t>(255));
     }
 
     void schedule() {
-        Var i("i"), c("c");
-        // W4-3 (b): single 2D planar output. reorder(c,i) + unroll(c) keeps the
-        // three channels of one pixel in the same thread so c folds to a constant
-        // per copy, select() prunes to one channel, and the c-independent
-        // pipeline body is CSE-shared (computed once per pixel, one kernel).
+        Var x("x"), y("y"), c("c");
+        // G2: exact Probe-A schedule (the verified-safe configuration). Fully
+        // inlined — NO compute_at producer (see class comment; Probe B fails).
         if (get_target().has_gpu_feature()) {
-            Var io("io"), ii("ii");
-            dst.bound(c, 0, 3)
-               .reorder(c, i)
-               .gpu_tile(i, io, ii, 256)
+            Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
+            dst.bound(c, 0, 4)
+               .reorder(c, x, y)
+               .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
                .unroll(c);
         } else {
-            Var io("io"), ii("ii");
-            dst.bound(c, 0, 3)
-               .reorder(c, i)
-               .split(i, io, ii, 1024)
-               .parallel(io)
-               .vectorize(ii, 8)
+            Var yo("yo"), yi("yi");
+            dst.bound(c, 0, 4)
+               .reorder(c, x, y)
+               .split(y, yo, yi, 32)
+               .parallel(yo)
+               .vectorize(x, 8)
                .unroll(c);
         }
     }

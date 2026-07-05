@@ -66,10 +66,10 @@ functions:
     description: "從 `dng_negative`/`dng_render` 與 centralized config 萃取 Stage4 所需矩陣、tone/gamma/table 與 profile map。"
     lines: "452-589"
   - name: "runRenderStage4HalideAot"
-    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。"
+    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。G2（Round 2）：Android kernel 直接輸出 interleaved RGBA8（Probe-A 驗證構造），退役 planar D2H + repackPlanarToRGBAMT/repackPlanarToInterleavedMT + RepackThreadPool；legacy RGB8 caller 走 stripRgbaToRgbMT 去 alpha。"
     lines: "1286-1588"
   - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。G1（Round 2）：Android 改為 zero-copy device alias——用 shallow halide_buffer_t 把 producer 的 Vulkan device allocation 以 offset-0 flat-1D view 直餵 kernel（crop 由 crop_l/crop_t scalar 吸收），刪除 W4-4 時代的全幀 copy_to_host + device_deallocate + 重上傳；成功後經原始 struct halide_device_free（owner destructor 因 device==0 不會 double-free），失敗路徑保留 device data 供 fallback。其他平台保留原 Metal device handoff。"
+    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。G1（Round 2）：Android 改為 zero-copy device alias——用 shallow halide_buffer_t 把 producer 的 Vulkan device allocation 以 offset-0 flat-1D view 直餵 kernel（crop 由 crop_l/crop_t scalar 吸收），刪除 W4-4 時代的全幀 copy_to_host + device_deallocate + 重上傳；成功後經原始 struct halide_device_free（owner destructor 因 device==0 不會 double-free），失敗路徑保留 device data 供 fallback。其他平台保留原 Metal device handoff。G2（Round 2）：Android dst 改 kernel 直出 interleaved RGBA8，fused 路徑 D2H 直落 caller RGBA buffer（零 host repack）。"
     lines: "1590-1888"
   - name: "runHalideFullOrSdkFallback (host src overload)"
     description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
@@ -105,13 +105,12 @@ functions:
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -141,10 +140,13 @@ functions:
 #endif
 #include "dng_resample.h"
 
-// NOTE: Android/Vulkan Stage4 avoids multi-dimensional RGB buffers. The Android
-// AOT generator declares one dense 1D plane per channel, so runtime code repacks
-// the first three RGB channels before dispatch. Other targets keep the original
-// interleaved RGB input/output contract for performance.
+// NOTE: G2 (Round 2) — the Android/Vulkan Stage4 kernel now writes interleaved
+// RGBA8 directly (same dst layout as macOS; construct re-verified 0-error on
+// Halide v21 Vulkan by the G2 pre-check Probe A). The planar-output workaround
+// (planar D2H + repackPlanarToRGBAMT / repackPlanarToInterleavedMT +
+// RepackThreadPool) is retired. Legacy RGB8 callers get a host alpha-strip
+// pass (mirrors the macOS strip path); the production fused path writes the
+// caller's RGBA buffer with no host repack at all.
 
 namespace {
 
@@ -165,16 +167,12 @@ bool pipelineVerbose() {
 }
 
 #if defined(__ANDROID__)
-// W4-3 (b): the Android Stage4 generator now emits a single 2D planar output
-// dst(i, c) — three contiguous channel planes (size = N*3) — dispatched as ONE
-// Vulkan kernel (vs the former three dst_r/g/b kernels each recomputing the full
-// pipeline). The host still repacks the planar output to interleaved RGB8 via
-// the W4-1 multithreaded NEON repack_dst. Plan (a) (single interleaved 1D
-// dst_rgb(j), j=i*3+c, no repack_dst) was attempted first but mis-lowered on
-// Vulkan (~8 dB border/coverage corruption); (b) keeps the single-dispatch +
-// compute-1x win without the interleaved-index codegen hazard.
+// G2: the Android Stage4 generator emits interleaved RGBA8 directly (macOS
+// layout; Probe-A verified). The only remaining host pass is the alpha-strip
+// for legacy RGB8 callers below (stripRgbaToRgbMT); the fused production path
+// D2Hs straight into the caller's RGBA buffer.
 
-// W4-1: persistent, non-zero-initialised scratch for the Stage4 repacks. The
+// W4-1: persistent, non-zero-initialised scratch for the Stage4 strip path. The
 // previous `std::vector<T>(N)` re-allocated and zero-filled large buffers on
 // every decode (a wasted full-buffer memset plus thousands of fresh page
 // faults). Stage4ScratchPool hands out reusable, uninitialised storage and only
@@ -242,218 +240,59 @@ private:
     std::vector<Slot> free_;
 };
 
-using Stage4DstScratch = Stage4ScratchPool<uint8_t>;   // planar dst -> interleaved
+using Stage4DstScratch = Stage4ScratchPool<uint8_t>;   // RGBA8 kernel output for legacy RGB8 callers
 
 Stage4DstScratch& stage4DstScratch() {
     static Stage4DstScratch instance;
     return instance;
 }
 
-// Q3b (Round 2 perf diag): persistent worker pool backing the Stage4 repack
-// helpers below. Previously each repackPlanarTo*MT() call spawned/joined a
-// fresh std::vector<std::thread> (up to 8 pthread_create/join round trips per
-// call, twice per decode). RepackThreadPool creates its (fixed, <= kMaxWorkers)
-// threads once, lazily, and parks them between decodes; runRanges() hands out
-// work each call via a generation counter + condition_variable instead of
-// spawning new OS threads. Decodes are already single-flight (see
-// pipelineSingleFlightMutex, dng_pipeline_v2.cpp), so no two runRanges() calls
-// are ever in flight concurrently against this singleton.
-class RepackThreadPool {
-public:
-    static constexpr int kMaxWorkers = 8;
-
-    static RepackThreadPool& instance() {
-        static RepackThreadPool pool;
-        return pool;
-    }
-
-    // Runs `job(begin, end)` once per entry in `ranges` (ranges.size() <=
-    // kMaxWorkers), blocking until every range has completed.
-    void runRanges(const std::vector<std::pair<int, int>>& ranges,
-                   const std::function<void(int, int)>& job) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        ranges_ = &ranges;
-        job_ = &job;
-        pending_ = static_cast<int>(ranges.size());
-        ++generation_;
-        lock.unlock();
-        cv_dispatch_.notify_all();
-
-        lock.lock();
-        cv_done_.wait(lock, [this] { return pending_ == 0; });
-    }
-
-private:
-    RepackThreadPool() {
-        workers_.reserve(kMaxWorkers);
-        for (int i = 0; i < kMaxWorkers; ++i) {
-            workers_.emplace_back([this, i] { workerLoop(i); });
+// G2: RGBA8 -> RGB8 alpha-strip for legacy RGB8 callers (vector overloads /
+// matrix test path). The production fused path (fuse_rgba=true) needs no host
+// pass at all — the kernel's D2H lands directly in the caller's RGBA buffer.
+// NEON vld4q_u8 + vst3q_u8 (16 px/iter), range-split across a few short-lived
+// std::threads. Ad-hoc spawn is deliberate: this runs at most once per legacy
+// decode (~0.5 ms spawn cost vs a ~168 MB memory pass). The former persistent
+// RepackThreadPool (Q3b) existed for the retired per-decode planar repacks
+// (repackPlanarToRGBAMT / repackPlanarToInterleavedMT) and was removed with
+// them — which also removes the Q3b exit-teardown hazard it had to work
+// around (bionic FORTIFY abort on destroyed cv/mutex with parked workers).
+void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
+    auto strip_range = [rgba, rgb](int i_begin, int i_end) {
+        int i = i_begin;
+        for (; i + 16 <= i_end; i += 16) {
+            uint8x16x4_t v = vld4q_u8(rgba + static_cast<size_t>(i) * 4);
+            uint8x16x3_t o = {v.val[0], v.val[1], v.val[2]};
+            vst3q_u8(rgb + static_cast<size_t>(i) * 3, o);
         }
-    }
-
-    // Q3b fix (Android FFI FORTIFY abort): this Meyers singleton IS destroyed —
-    // exit() runs the __cxa_atexit-registered destructor of the function-local
-    // static. Without a shutdown path, member destruction (reverse declaration
-    // order) tears down cv_dispatch_/mutex_ while all kMaxWorkers workers are
-    // still parked in cv_dispatch_.wait(): bionic wakes the waiters on
-    // pthread_cond destruction and each one re-locks the already-destroyed
-    // mutex_ ("FORTIFY: pthread_mutex_lock called on a destroyed mutex", one
-    // per worker), and ~workers_ then runs ~std::thread on joinable threads ->
-    // std::terminate ("libc++abi: terminating"). Observed on-device (cc5bf709)
-    // as an exit-time SIGABRT of dng_ffi_harness_android that also discards
-    // the harness's buffered stdout. The destructor therefore signals stop_
-    // under the mutex, wakes every worker, and joins them all BEFORE the
-    // mutex/condition variables are destroyed. Decodes are single-flight and
-    // exit() runs after main() returns, so no runRanges() call can race this.
-    ~RepackThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = true;
+        for (; i < i_end; ++i) {
+            rgb[static_cast<size_t>(i) * 3 + 0] = rgba[static_cast<size_t>(i) * 4 + 0];
+            rgb[static_cast<size_t>(i) * 3 + 1] = rgba[static_cast<size_t>(i) * 4 + 1];
+            rgb[static_cast<size_t>(i) * 3 + 2] = rgba[static_cast<size_t>(i) * 4 + 2];
         }
-        cv_dispatch_.notify_all();
-        for (auto& w : workers_) {
-            w.join();
-        }
+    };
+
+    const unsigned hw = std::thread::hardware_concurrency();
+    const int workers = static_cast<int>(hw == 0 ? 4u : std::min(hw, 8u));
+    // Chunks 16-aligned so every worker keeps the NEON fast path and writes
+    // disjoint dst regions. Small frames: single-threaded.
+    const int base = workers > 1 ? (total_px / workers) & ~15 : 0;
+    if (workers <= 1 || base < 16) {
+        strip_range(0, total_px);
+        return;
     }
-
-    void workerLoop(int idx) {
-        uint64_t seen_generation = 0;
-        while (true) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_dispatch_.wait(lock, [this, seen_generation] {
-                return stop_ || generation_ != seen_generation;
-            });
-            if (stop_) {
-                return;
-            }
-            seen_generation = generation_;
-            const bool active = idx < static_cast<int>(ranges_->size());
-            const std::pair<int, int> range = active ? (*ranges_)[idx] : std::pair<int, int>{0, 0};
-            const std::function<void(int, int)>* job = job_;
-            lock.unlock();
-
-            if (active) {
-                (*job)(range.first, range.second);
-                std::lock_guard<std::mutex> done_lock(mutex_);
-                if (--pending_ == 0) {
-                    cv_done_.notify_one();
-                }
-            }
-        }
-    }
-
-    std::vector<std::thread> workers_;
-    std::mutex mutex_;
-    std::condition_variable cv_dispatch_;
-    std::condition_variable cv_done_;
-    uint64_t generation_ = 0;
-    bool stop_ = false;
-    int pending_ = 0;
-    const std::vector<std::pair<int, int>>* ranges_ = nullptr;
-    const std::function<void(int, int)>* job_ = nullptr;
-};
-
-// Splits [0, total_px) into up to RepackThreadPool::kMaxWorkers ranges, each
-// chunk-aligned to 16 elements so NEON repack loops keep their fast path and
-// write disjoint dst regions. Shared by both repackPlanarTo*MT() helpers.
-std::vector<std::pair<int, int>> partitionRepackRanges(int total_px, int align) {
-    unsigned hw = std::thread::hardware_concurrency();
-    int chunks = static_cast<int>(hw == 0 ? 4u : std::min<unsigned>(hw, static_cast<unsigned>(RepackThreadPool::kMaxWorkers)));
-    if (chunks < 1) chunks = 1;
-    if (chunks > total_px) chunks = std::max(1, total_px);
-
-    std::vector<std::pair<int, int>> ranges;
-    if (chunks <= 1) {
-        ranges.emplace_back(0, total_px);
-        return ranges;
-    }
-
-    int base = (total_px / chunks) & ~(align - 1);
-    if (base < align) base = align;
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(workers));
     int start = 0;
-    while (start < total_px) {
-        int end = std::min(total_px, start + base);
-        // Last remaining region folds into the final worker.
-        if (total_px - end < base) end = total_px;
-        ranges.emplace_back(start, end);
+    for (int w = 0; w < workers && start < total_px; ++w) {
+        const int end = (w == workers - 1) ? total_px
+                                           : std::min(total_px, start + base);
+        threads.emplace_back(strip_range, start, end);
         start = end;
     }
-    return ranges;
-}
-
-// W4-1: row/element-partitioned multithreaded planar(u8 x3)->interleaved(u8)
-// repack of the GPU output. Mirrors the NEON vst3q_u8 fast path. Bit-exact.
-// W4-3 (b) keeps this: the kernel writes 3 contiguous u8 planes; this converts
-// them to the caller's interleaved RGB8 (pr/pg/pb = plane0/1/2 base pointers).
-void repackPlanarToInterleavedMT(const uint8_t* pr,
-                                 const uint8_t* pg,
-                                 const uint8_t* pb,
-                                 uint8_t* dst,
-                                 int total_px) {
-    std::function<void(int, int)> repack_range = [pr, pg, pb, dst](int i_begin, int i_end) {
-        int i = i_begin;
-        for (; i + 16 <= i_end; i += 16) {
-            uint8x16_t r = vld1q_u8(pr + i);
-            uint8x16_t g = vld1q_u8(pg + i);
-            uint8x16_t b = vld1q_u8(pb + i);
-            uint8x16x3_t rgb = {r, g, b};
-            vst3q_u8(dst + i * 3, rgb);
-        }
-        for (; i < i_end; ++i) {
-            dst[i * 3 + 0] = pr[i];
-            dst[i * 3 + 1] = pg[i];
-            dst[i * 3 + 2] = pb[i];
-        }
-    };
-
-    const std::vector<std::pair<int, int>> ranges = partitionRepackRanges(total_px, 16);
-    if (ranges.size() <= 1) {
-        repack_range(0, total_px);
-        return;
+    for (auto& t : threads) {
+        t.join();
     }
-    RepackThreadPool::instance().runRanges(ranges, repack_range);
-}
-
-// W7-B: fused planar(u8 x3) -> interleaved RGBA8 (alpha=255) repack of the GPU
-// output. Replaces repackPlanarToInterleavedMT + the FFI rgb_to_rgba_neon two
-// passes with a single planar->RGBA pass (one fewer ~72MB read/write of the RGB
-// intermediate). NEON vld1q_u8 x3 + vst4q_u8 (16 px/iter); bit-exact with the
-// two-step path (same channel bytes, alpha hard 255). Used only when the caller
-// supplies an RGBA8 (W*H*4) dst (Android fused path); the dst-side stays a
-// host buffer, so this does NOT touch the Vulkan generator output (W4-1
-// dead-end / Gotcha #93 unaffected).
-void repackPlanarToRGBAMT(const uint8_t* pr,
-                          const uint8_t* pg,
-                          const uint8_t* pb,
-                          uint8_t* dst,
-                          int total_px) {
-    std::function<void(int, int)> repack_range = [pr, pg, pb, dst](int i_begin, int i_end) {
-        const uint8x16_t alpha = vdupq_n_u8(255);
-        int i = i_begin;
-        for (; i + 16 <= i_end; i += 16) {
-            uint8x16x4_t rgba;
-            rgba.val[0] = vld1q_u8(pr + i);
-            rgba.val[1] = vld1q_u8(pg + i);
-            rgba.val[2] = vld1q_u8(pb + i);
-            rgba.val[3] = alpha;
-            vst4q_u8(dst + i * 4, rgba);
-        }
-        for (; i < i_end; ++i) {
-            dst[i * 4 + 0] = pr[i];
-            dst[i * 4 + 1] = pg[i];
-            dst[i * 4 + 2] = pb[i];
-            dst[i * 4 + 3] = 255;
-        }
-    };
-
-    // Align chunk boundaries to 16 so each worker keeps the vst4q_u8 fast path
-    // and writes disjoint 64-byte-aligned dst regions.
-    const std::vector<std::pair<int, int>> ranges = partitionRepackRanges(total_px, 16);
-    if (ranges.size() <= 1) {
-        repack_range(0, total_px);
-        return;
-    }
-    RepackThreadPool::instance().runRanges(ranges, repack_range);
 }
 #endif
 
@@ -1138,17 +977,19 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
 #if defined(__ANDROID__)
-    // W4-3 (b): single 2D planar dst output (dim0=i stride1, dim1=c stride N).
-    // Persistent non-zero-init scratch holds the 3 contiguous channel planes;
-    // the host repacks them to the caller's interleaved RGB8 below.
-    const int dst_pixel_count = dst_w * dst_h;
-    Stage4DstScratch::Lease dst_lease =
-        stage4DstScratch().acquire(static_cast<size_t>(dst_pixel_count) * 3);
-    halide_dimension_t dst_shape[2] = {
-        {0, dst_pixel_count, 1, 0},
-        {0, 3, dst_pixel_count, 0},
-    };
-    Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
+    // G2: the kernel writes interleaved RGBA8 directly (macOS layout; Probe-A
+    // verified). fuse_rgba callers hand in an RGBA8 (W*H*4) buffer — the D2H
+    // lands there with zero host repack. Legacy RGB8 callers render into
+    // persistent RGBA scratch, then stripRgbaToRgbMT drops alpha below.
+    uint8_t* dst_rgba = dst;
+    std::optional<Stage4DstScratch::Lease> dst_lease;
+    if (!fuse_rgba) {
+        dst_lease.emplace(stage4DstScratch().acquire(
+            static_cast<size_t>(dst_w) * dst_h * 4));
+        dst_rgba = dst_lease->data();
+    }
+    Buffer<uint8_t> dst_rgba_buf =
+        Buffer<uint8_t>::make_interleaved(dst_rgba, dst_w, dst_h, 4);
 #else
     // W7 (M-11): macOS generator outputs RGBA8 (4 channels, alpha=255 in-kernel).
     // When fuse_rgba, the caller's buffer is already RGBA8 (W*H*4) — write directly.
@@ -1180,7 +1021,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
 #if defined(__ANDROID__)
-    dst_planar_buf.set_host_dirty(false);
+    dst_rgba_buf.set_host_dirty(false);
 #else
     dst_buf.set_host_dirty(false);
 #endif
@@ -1188,11 +1029,12 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #if defined(__ANDROID__)
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
+    // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
+    // output geometry.
     const int result = dng_render_stage4_android(
         src_rgb_buf.raw_buffer(),
         src_w,
         src_h,
-        dst_w,
         src_row_stride_px,
         /*crop_l=*/0,
         /*crop_t=*/0,
@@ -1221,7 +1063,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         params.look_val_div,
         params.look_has_table,
         params.look_has_encoding,
-        dst_planar_buf.raw_buffer());
+        dst_rgba_buf.raw_buffer());
     auto t2 = verbose_timing ? std::chrono::high_resolution_clock::now()
                              : std::chrono::high_resolution_clock::time_point{};
 #else
@@ -1259,25 +1101,16 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     }
 
 #if defined(__ANDROID__)
-    // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
-    if (dst_planar_buf.copy_to_host() != 0) return false;
+    // G2: one D2H copy of the interleaved RGBA output. On the fused path this
+    // lands directly in the caller's RGBA buffer — no host repack at all.
+    if (dst_rgba_buf.copy_to_host() != 0) return false;
     auto t3 = verbose_timing ? std::chrono::high_resolution_clock::now()
                              : std::chrono::high_resolution_clock::time_point{};
 
-    // The 3 channel planes are contiguous: plane0=base, plane1=base+N, plane2=base+2N.
-    // W4-1: multithreaded NEON vld1q_u8 + vst3q_u8 (16 px/iter).
-    // W7-B: when fuse_rgba, write interleaved RGBA8 (alpha=255) directly into the
-    // caller's RGBA buffer, fusing the former repack_dst + FFI rgb_to_rgba.
-    {
-        const uint8_t* planar = dst_planar_buf.data();
-        const int total_px = dst_w * dst_h;
-        if (fuse_rgba) {
-            repackPlanarToRGBAMT(planar, planar + total_px, planar + 2 * total_px,
-                                 dst, total_px);
-        } else {
-            repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
-                                        dst, total_px);
-        }
+    // Legacy RGB8 callers: strip alpha from the RGBA scratch (mirrors the
+    // macOS strip path, NEON + short-lived threads).
+    if (!fuse_rgba) {
+        stripRgbaToRgbMT(dst_rgba, dst, dst_w * dst_h);
     }
     auto t4 = verbose_timing ? std::chrono::high_resolution_clock::now()
                              : std::chrono::high_resolution_clock::time_point{};
@@ -1425,15 +1258,18 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
 #if defined(__ANDROID__)
-    // W4-3 (b): single 2D planar dst output (dim0=i stride1, dim1=c stride N).
-    const int dst_pixel_count = dst_w * dst_h;
-    Stage4DstScratch::Lease dst_lease =
-        stage4DstScratch().acquire(static_cast<size_t>(dst_pixel_count) * 3);
-    halide_dimension_t dst_shape[2] = {
-        {0, dst_pixel_count, 1, 0},
-        {0, 3, dst_pixel_count, 0},
-    };
-    Buffer<uint8_t> dst_planar_buf(dst_lease.data(), 2, dst_shape);
+    // G2: interleaved RGBA8 dst (macOS layout; Probe-A verified). Fused path
+    // writes the caller's RGBA buffer directly; legacy RGB8 callers go through
+    // RGBA scratch + alpha strip.
+    uint8_t* dst_rgba_and = dst;
+    std::optional<Stage4DstScratch::Lease> dst_lease;
+    if (!fuse_rgba) {
+        dst_lease.emplace(stage4DstScratch().acquire(
+            static_cast<size_t>(dst_w) * dst_h * 4));
+        dst_rgba_and = dst_lease->data();
+    }
+    Buffer<uint8_t> dst_rgba_buf =
+        Buffer<uint8_t>::make_interleaved(dst_rgba_and, dst_w, dst_h, 4);
 #else
     // W7 (M-11): macOS generator outputs RGBA8. Persistent scratch for strip path.
     uint8_t* dst_rgba_fd = dst;
@@ -1457,7 +1293,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
 #if defined(__ANDROID__)
-    dst_planar_buf.set_host_dirty(false);
+    dst_rgba_buf.set_host_dirty(false);
 #else
     dst_buf.set_host_dirty(false);
 #endif
@@ -1465,11 +1301,12 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #if defined(__ANDROID__)
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
+    // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
+    // output geometry.
     const int result = dng_render_stage4_android(
         &src_flat,
         sw,
         sh,
-        dst_w,
         src_row_stride_px,
         crop_l,
         crop_t,
@@ -1498,7 +1335,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         params.look_val_div,
         params.look_has_table,
         params.look_has_encoding,
-        dst_planar_buf.raw_buffer());
+        dst_rgba_buf.raw_buffer());
     auto t2_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
 #else
@@ -1536,8 +1373,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
 
 #if defined(__ANDROID__)
-    // W4-3 (b): one D2H copy of the planar output, then MT repack to interleaved.
-    if (dst_planar_buf.copy_to_host() != 0) return false;
+    // G2: one D2H copy of the interleaved RGBA output. On the fused path this
+    // lands directly in the caller's RGBA buffer — no host repack at all.
+    if (dst_rgba_buf.copy_to_host() != 0) return false;
     // G1: src device allocation fully consumed — free it through the ORIGINAL
     // struct so the owner's halide_buffer_t sees device==0 and its Buffer
     // destructor (lossless: impl->dst_buf via halide_cancel; lossy:
@@ -1552,25 +1390,18 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     auto t3_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
 
-    {
-        const uint8_t* planar = dst_planar_buf.data();
-        const int total_px = dst_w * dst_h;
-        // W7-B: fuse planar->RGBA8 directly into the caller's RGBA buffer when
-        // requested (eliminates the separate FFI rgb_to_rgba pass).
-        if (fuse_rgba) {
-            repackPlanarToRGBAMT(planar, planar + total_px, planar + 2 * total_px,
-                                 dst, total_px);
-        } else {
-            repackPlanarToInterleavedMT(planar, planar + total_px, planar + 2 * total_px,
-                                        dst, total_px);
-        }
+    // Legacy RGB8 callers: strip alpha from the RGBA scratch. Fused path:
+    // nothing left to do on the host.
+    if (!fuse_rgba) {
+        stripRgbaToRgbMT(dst_rgba_and, dst, dst_w * dst_h);
     }
     auto t4_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
-    // G1: both repack_src and d2h_src are now ~0 (O(1) device-alias reshape,
-    // no host round trip). The keys are kept so the [Stage4-Perf] parser and
-    // baseline comparisons keep resolving; they directly show the eliminated
-    // transfers vs the pre-G1 baseline.
+    // G1: both repack_src and d2h_src are ~0 (O(1) device-alias reshape, no
+    // host round trip). G2: repack_dst is the legacy alpha-strip time and ~0
+    // on the fused production path. The keys are kept so the [Stage4-Perf]
+    // parser and baseline comparisons keep resolving; they directly show the
+    // eliminated transfers vs the pre-G1/pre-G2 baselines.
     if (verbose_timing_fd) {
         fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
             std::chrono::duration<double, std::milli>(t1_fd - tcopy_fd).count(),
@@ -1895,7 +1726,13 @@ struct LazyZeroBuf {
 }  // namespace
 #endif  // __ANDROID__
 
-void dng_render_stage4_prewarm_for_size(int width, int height) {
+// G3: shared Stage4 prewarm body — called by both the (width, height) and the
+// (width, height, dst_rgba_ptr, dst_rgba_size) overloads. When dst_rgba_ptr
+// is non-null and large enough, the kernel writes there instead of a dummy
+// buffer, warming the GPU DMA path to the exact host pages production's
+// copy_to_host targets.
+static void prewarm_stage4_impl(int width, int height,
+                                uint8_t* dst_rgba_ptr, size_t dst_rgba_size) {
 #if defined(__ANDROID__)
     // W7-E: build the Stage4 render GPU pipeline at the actual image size so the
     // first real decode skips the Vulkan pipeline-creation + first large
@@ -1947,17 +1784,34 @@ void dng_render_stage4_prewarm_for_size(int width, int height) {
                         params.look_sat_div, params.look_val_div,
                         params.look_has_table);
 
-    // Dense interleaved RGB16 dummy src + RGB8 dummy dst at actual size.
+    // Dense interleaved RGB16 dummy src + RGBA8 dst at actual size.
+    // G2: fuse_rgba=true — the kernel now renders interleaved RGBA8 directly,
+    // so the prewarm writes the buffer without the legacy alpha-strip pass
+    // (same AOT entry + pipeline specialization production uses; fuse_rgba only
+    // changes host-side buffer wiring).
+    // G3: when a pool RGBA buffer is provided and large enough, the kernel
+    // writes there instead of a dummy. This warms the GPU DMA → host-page
+    // mapping so copy_to_host during production doesn't pay a first-touch
+    // staging penalty (~63ms cold on SM8650).
     const size_t srcElems =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
     const size_t dstBytes =
-        static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
     LazyZeroBuf dummy_src(srcElems * sizeof(uint16_t));
-    LazyZeroBuf dummy_dst(dstBytes * sizeof(uint8_t));
 
-    std::fprintf(stderr, "[Warmup] s4 begin %dx%d\n", width, height);
+    uint8_t* dst_ptr = nullptr;
+    std::optional<LazyZeroBuf> dummy_dst_holder;
+    if (dst_rgba_ptr != nullptr && dst_rgba_size >= dstBytes) {
+        dst_ptr = dst_rgba_ptr;
+    } else {
+        dummy_dst_holder.emplace(dstBytes);
+        dst_ptr = static_cast<uint8_t*>(dummy_dst_holder->ptr);
+    }
+
+    std::fprintf(stderr, "[Warmup] s4 begin %dx%d pool_dst=%d\n",
+                 width, height, (dst_rgba_ptr != nullptr && dst_rgba_size >= dstBytes) ? 1 : 0);
     std::fflush(stderr);
-    if (dummy_src.ptr != nullptr && dummy_dst.ptr != nullptr) {
+    if (dummy_src.ptr != nullptr && dst_ptr != nullptr) {
         (void)runRenderStage4HalideAot(static_cast<uint16_t*>(dummy_src.ptr),
                                        width, height, /*src_p=*/3,
                                        /*src_row_step=*/width * 3,
@@ -1965,8 +1819,8 @@ void dng_render_stage4_prewarm_for_size(int width, int height) {
                                        /*src_plane_step=*/1,
                                        /*src_scale=*/1.0f / 65535.0f,
                                        /*dst_w=*/width, /*dst_h=*/height,
-                                       params, static_cast<uint8_t*>(dummy_dst.ptr),
-                                       /*fuse_rgba=*/false);
+                                       params, dst_ptr,
+                                       /*fuse_rgba=*/true);
     }
     std::fprintf(stderr, "[Warmup] s4 done\n");
     std::fflush(stderr);
@@ -1978,7 +1832,19 @@ void dng_render_stage4_prewarm_for_size(int width, int height) {
 #else
     (void)width;
     (void)height;
+    (void)dst_rgba_ptr;
+    (void)dst_rgba_size;
 #endif
+}
+
+void dng_render_stage4_prewarm_for_size(int width, int height) {
+    prewarm_stage4_impl(width, height, nullptr, 0);
+}
+
+void dng_render_stage4_prewarm_for_size(int width, int height,
+                                         uint8_t* dst_rgba_ptr,
+                                         size_t dst_rgba_size) {
+    prewarm_stage4_impl(width, height, dst_rgba_ptr, dst_rgba_size);
 }
 
 bool render_stage4_halide(dng_host& host,

@@ -98,5 +98,14 @@ inline bool render_stage4_halide(dng_host& host,
 // (built from the same toIdentity*/ensureSafeHueSatMap path buildRenderParams
 // uses) and discards the result. Per-size cached; Android-only body (no-op on
 // other platforms so macOS warmup behaviour is unchanged).
+//
+// G3: optional dst_rgba_ptr overload — when provided, the prewarm kernel
+// writes to the caller's RGBA8 buffer (typically the pool RGBA buffer) instead
+// of an internal dummy. This warms the GPU DMA path to the exact host pages
+// production's copy_to_host will target, eliminating the ~63ms first-D2H
+// page-fault / staging-buffer cold penalty.
 void dng_render_stage4_prewarm_for_size(int width, int height);
+void dng_render_stage4_prewarm_for_size(int width, int height,
+                                         uint8_t* dst_rgba_ptr,
+                                         size_t dst_rgba_size);
 

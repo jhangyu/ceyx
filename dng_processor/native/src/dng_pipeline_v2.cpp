@@ -1321,12 +1321,44 @@ bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
 
   if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
 
+  // G3 Step 3b: Stage3 prewarm at common sensor-padded dimensions.
+  // Lossless DNGs have a raw sensor area larger than the DefaultCropSize
+  // (e.g., Sony RX100: sensor 6048×4024, crop 6000×4000 — 24px border per
+  // side). The startup warmup receives crop dimensions from the Dart side, but
+  // Stage3 dispatches at the full sensor resolution. If the Vulkan pipeline
+  // was only built at crop dimensions, the first lossless decode pays a
+  // residual cold tax from buffer-allocation at the larger size.
+  // Prewarm at (crop_w + 48, crop_h + 24) covers the most common sensor
+  // margin pattern. Per-size cached: no-op if (crop_w+48 == crop_w etc.) or if
+  // the exact size was already warmed.
+  {
+    const int32_t sensorW = width + 48;
+    const int32_t sensorH = height + 24;
+    if (sensorW != width || sensorH != height) {
+      std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+      dng_demosaic_warp_prewarm_for_size(sensorW, sensorH);
+    }
+  }
+
+  if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
+
   // Step 4: Stage4 render GPU pipeline prewarm (~440ms cold).
   // W7-E: prime the Stage4 render GPU pipeline at the actual size (matrix S4
   // cold ~440ms vs warm ~192ms). No-op on non-Android; per-size cached inside.
+  // G3: pass the pool RGBA buffer so the prewarm's D2H warms the exact host
+  // pages production will target — eliminates ~63ms first-decode copy_host
+  // cold penalty (SM8650 measurement: 80.5→17.0ms after this change).
   {
     std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
-    dng_render_stage4_prewarm_for_size(width, height);
+    const size_t rgbaByteCount =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+    uint8_t *rgba = rgbaOutputPool().acquire(rgbaByteCount);
+    if (rgba) {
+      dng_render_stage4_prewarm_for_size(width, height, rgba, rgbaByteCount);
+      rgbaOutputPool().release(rgba);
+    } else {
+      dng_render_stage4_prewarm_for_size(width, height);
+    }
   }
 
   return true;

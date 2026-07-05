@@ -20,8 +20,8 @@
 // ---------------------------------------------------------------------------
 // W7 (M-11): rgb_to_rgba_neon RETIRED. The pipeline now sets fuse_rgba_output
 // on all platforms, so pipeline.rgba_ptr is always set and the FFI layer takes
-// the RGBA buffer as-is. On macOS the Stage4 generator writes RGBA8 in-kernel
-// (alpha=255); on Android the bridge fuses planar→RGBA via repackPlanarToRGBAMT.
+// the RGBA buffer as-is. G2 (Round 2): BOTH platforms now write RGBA8
+// in-kernel (alpha=255) — the Android planar→RGBA host repack is retired.
 // The ~96 MB RGBA buffer is pool-backed (checkout-style pool in
 // dng_pipeline_v2.cpp) to avoid page-faults on warm decodes.
 // ---------------------------------------------------------------------------
