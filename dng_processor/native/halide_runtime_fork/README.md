@@ -25,7 +25,12 @@ directory first (patched files), then fall back to `-I upstream/`.
 object whose `halide_vulkan_*` entry points are **weak** symbols and whose
 module globals (`compilation_cache`, `cached_device`, vk function-pointer
 table, `vulkan_allocation_pool`) are **weak external** — verified with
-`llvm-nm` (see `scripts/tmp/r3_3_nm_runtime_symbols.sh`). Compiling this TU
+`llvm-nm` (the one-off verification script `r3_3_nm_runtime_symbols.sh` used
+during R3-3 was deleted in the R3-5 scripts/tmp/ cleanup; re-run an
+equivalent `llvm-nm -D --defined-only` check on `halide_runtime.a` if this
+needs re-verifying). The upstream re-fetch entry for this fork's source
+material lives at `scripts/fetch_halide_v21_runtime.sh` (promoted to tracked
+in R4 C2-1; was `scripts/tmp/fetch_halide_v21_runtime.sh`). Compiling this TU
 into the target makes its definitions win (objects precede archives on the
 link line), while state stays single-copy. Internal anonymous-namespace
 helpers in the archive become dead code. One trap is documented in
