@@ -9,15 +9,8 @@
 *.ppm
 *.pgm
 
-# Matrix test intermediate artifacts —— 一律落到 repo root /artifacts/
+# Matrix test intermediate artifacts
 /artifacts/
-
-# 嚴禁把 raw/ppm/pgm 等 binary artifacts 寫進 docs/logs/
-# （Task log 只能放 markdown / 小型截圖；歷史教訓：曾累積 1.2G 污染）
-docs/logs/**/*.raw
-docs/logs/**/*.ppm
-docs/logs/**/*.pgm
-docs/logs/**/artifacts/
 
 # Python / Env
 .venv/
@@ -28,27 +21,59 @@ __pycache__/
 *.arw
 node_modules/
 
-# Vendored Halide v21 binary distribution (~540MB, exceeds GitHub 100MB file limit)
-# Fetch after clone: dng_processor/native/scripts/fetch_halide_v21_dist.sh
-dng_processor/native/third_party/halide/
-
 # Build artifacts
 dng_processor/native/build/
 dng_processor/native/build-android/
 dng_processor/native/build_diag/
 dng_processor/native/.cache/
-dng_processor/native/*.o
-dng_processor/native/*.a
-dng_processor/native/*.dylib
-dng_processor/native/test_*
 *.o
 *.a
+*.dylib
 preview_out.jpg
+dng_processor/native/compile_commands.json
 
-# Ralph loop
+# Vendored Halide v21 binary distribution (~540MB)
+# Fetch after clone: dng_processor/native/scripts/fetch_halide_v21_dist.sh
+dng_processor/native/third_party/halide/
+
+# DNG SDK non-build artifacts (only source/*.cpp,*.h needed)
+dng_processor/native/third_party/dng_sdk/targets/
+dng_processor/native/third_party/dng_sdk/documents/
+dng_processor/native/third_party/dng_sdk/projects/
+dng_processor/native/third_party/dng_sdk/source/Makefile
+
+# libjpeg-turbo non-build artifacts (only src/, simd/, cmakescripts/ needed)
+dng_processor/native/third_party/libjpeg-turbo/java/
+dng_processor/native/third_party/libjpeg-turbo/doc/
+dng_processor/native/third_party/libjpeg-turbo/testimages/
+dng_processor/native/third_party/libjpeg-turbo/fuzz/
+dng_processor/native/third_party/libjpeg-turbo/release/
+dng_processor/native/third_party/libjpeg-turbo/win/
+dng_processor/native/third_party/libjpeg-turbo/sharedlib/
+dng_processor/native/third_party/libjpeg-turbo/test/
+dng_processor/native/third_party/libjpeg-turbo/ChangeLog.md
+
+# Non-code project files (docs, logs, images, project management)
+/docs/
+/image_samples/
+/memory.md
+/task.md
+/handover.md
+/plan.md
+/rule.md
+/file_index.md
+/unit_test.md
+/update_code_index_rule.md
+/dng_color_metadata_spec.md
+/AGENTS.md
+/package.json
+/package-lock.json
+
+# Claude Code agent files (auto-generated, not code)
+AGENTS.md
+
+# Tooling / generated
 .sisyphus/
+.claudito/
 graphify-out/
-
-# W7-7 (TD-19): diagnostic/one-off scripts directory; not for tracking
-# Run `git rm --cached dng_processor/native/scripts/tmp/` to untrack existing entries
 dng_processor/native/scripts/tmp/
