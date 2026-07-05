@@ -8,6 +8,14 @@
 # cases:
 #   Lossless / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
 #   Lossless / Halide:   Halide bilinear/fused Stage3 + Halide Metal render
+#   Lossless / Halide Metal (standalone fallback):
+#                        同一 fixture + cmd，env 加 DNG_FUSED_DEMOSAIC_WARP=0，
+#                        強制 dng_pipeline_v2.cpp 走 !fused 分支（standalone
+#                        demosaic_bilinear_halide_aot + rectilinear_warp 兩顆
+#                        AOT kernel）。D-A (2026-07-05) 新增，補上此分支從未
+#                        被 matrix 覆蓋到的缺口；PSNR 門檻沿用 "Lossless /
+#                        Halide" 前綴比對（同一組 kernel 數學，僅排程不同，
+#                        實測輸出與 fused 路徑 byte-identical）。
 #   Lossy    / SDK:      baseline mode，全 SDK Stage3+Stage4，作為 reference（存 .raw）
 #   Lossy    / Halide:   SDK YCbCr Stage3（passthrough）+ Halide Metal render
 #
@@ -2156,6 +2164,18 @@ def _build_cases(
     sdk_env = {**extra_env, **timing_env}
     halide_env_lossless = {**extra_env, **timing_env}
     halide_env_lossy = {**extra_env, **timing_env}
+    # D-A (2026-07-05): standalone-kernel fallback coverage. DNG_FUSED_DEMOSAIC_WARP=0
+    # forces dng_pipeline_v2.cpp's Stage3 host path to skip the fused
+    # demosaic+WarpRectilinear dispatch and fall through to the two standalone
+    # AOT kernels (demosaic_bilinear_halide_aot + rectilinear_warp via
+    # applyOpcodeList3) -- a real production branch taken for any DNG shape
+    # whose OpcodeList3 isn't exactly one WarpRectilinear opcode, previously
+    # untested (see docs/logs/2026-07-05/Task_r4_c1_generator_verdict.md §1).
+    # Same cmd as "Lossless / Halide Metal": the fixture already satisfies the
+    # fused precondition, so only the env flip changes which kernels run.
+    halide_env_lossless_standalone_fallback = {
+        **extra_env, **timing_env, "DNG_FUSED_DEMOSAIC_WARP": "0",
+    }
 
     return [
         (
@@ -2167,6 +2187,11 @@ def _build_cases(
             "Lossless / Halide Metal",
             [test_decode, lossless, "test", "halide-metal", "halide-metal"],
             halide_env_lossless,
+        ),
+        (
+            "Lossless / Halide Metal (standalone fallback)",
+            [test_decode, lossless, "test", "halide-metal", "halide-metal"],
+            halide_env_lossless_standalone_fallback,
         ),
         (
             "Lossy / SDK",
