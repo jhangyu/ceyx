@@ -15,7 +15,11 @@
 //              DNG_STAGE3_STAGE4_DEVICE_HANDOFF,
 //              DNG_STAGE2_STAGE4_DEVICE_HANDOFF,
 //              DNG_STAGE2_OL2_HALIDE (source-of-truth lives here; see
-//              stage2OL2HalideEnabled() and dng_opcodelist2_halide.cpp).
+//              stage2OL2HalideEnabled() and dng_opcodelist2_halide.cpp),
+//              DNG_FUSE_RGBA (7.1 testing/rollback override for the fused
+//              RGBA8 output feature; =0 forces the legacy RGB8 path. Consulted
+//              by dng_pipeline_v2_decode_to_rgb to set the internal
+//              fuse_rgba_output toggle; see route.fuse_rgba below).
 //   2. DiagnosticConfig:
 //        Observability / timing flags. Default OFF; flip ON to log timings.
 //        These are read lazily at their call sites (cached via static const)
@@ -34,6 +38,11 @@
 //              DNG_GPU_BACKEND (route: override GPU backend — "metal"/"vulkan";
 //              default auto-detect per platform. Read once at first GPU dispatch via
 //              dng_halide_device.cpp; see dng_halide_device.h).
+//              DNG_PIPELINE_VERBOSE (gates [Stage4-Diag]/[Stage4-Perf]/
+//              [Pipeline] GPU backend informational stderr banners. Lazy-cached
+//              via pipelineVerbose() in dng_pipeline_v2.cpp, with a separate
+//              TU-local cache of the same env in dng_render_halide.cpp by
+//              design, since that helper isn't exported via a header).
 //   3. ResearchConfig:
 //        Deprecated / experimental flags retained for A/B parity research.
 //        Do NOT consult in production paths; default builds compile these out
@@ -63,6 +72,10 @@ struct PipelineConfig {
     // PipelineConfig::stage2OL2HalideEnabled() for the canonical value (see
     // // source-of-truth: dng_pipeline_config.h comment there).
     bool stage2_ol2_halide = true;
+    // 7.1: testing/rollback override for the fused RGBA8 output feature.
+    // DNG_FUSE_RGBA=0 forces the legacy RGB8 path; default true. Consulted by
+    // dng_pipeline_v2_decode_to_rgb, which funnels this into fuse_rgba_output.
+    bool fuse_rgba = true;
   };
 
   RouteConfig route;
@@ -101,6 +114,7 @@ struct PipelineConfig {
     config.route.stage2_stage4_device_handoff =
         !envExplicitZero("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
     config.route.stage2_ol2_halide = stage2OL2HalideEnabled();
+    config.route.fuse_rgba = !envExplicitZero("DNG_FUSE_RGBA");
 
     config.threads.area_threads = envPositiveU32("DNG_AREA_THREADS");
     return config;

@@ -1446,15 +1446,14 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
     // RGBA8 in-kernel (alpha=255), so the FFI rgb_to_rgba pass and the separate
     // ~72MB RGB intermediate are both eliminated. Config-gated: set to false for
     // rollback (requires reverting DngRenderStage4 generator to 3-channel RGB).
-    config.fuse_rgba_output = true;
     // 7.1: env override for testing the RGB checkout path and rollback.
     // DNG_FUSE_RGBA=0 forces the non-fused RGB path; default remains true.
-    {
-      static const bool forceDisable = []() {
-        const char *v = std::getenv("DNG_FUSE_RGBA");
-        return v && v[0] == '0';
-      }();
-      if (forceDisable) config.fuse_rgba_output = false;
+    // Consolidated into PipelineConfig::route.fuse_rgba (see loadFromEnv()).
+    config.fuse_rgba_output = config.route.fuse_rgba;
+    // L-11: gated behind DNG_PIPELINE_VERBOSE env flag.
+    if (pipelineVerbose()) {
+      fprintf(stderr, "[Route] DNG_FUSE_RGBA fuse_rgba_output=%s\n",
+              config.fuse_rgba_output ? "true" : "false");
     }
     // L-11: GPU backend banner — once-per-process to avoid per-decode spam.
     {
