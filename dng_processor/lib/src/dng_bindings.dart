@@ -185,24 +185,100 @@ class DngNativeBindings {
   /// Try to open dylib from a list of candidate paths.
   /// Returns the first one that loads successfully, or throws.
   /// W5 (L-10): logs the successfully loaded path to stderr for diagnostics.
+  ///
+  /// 2026-08-17 (D4): the previous version kept only the LAST candidate's
+  /// error, which hides the real failure. A candidate that exists but whose
+  /// *dependencies* cannot be resolved (e.g. an absolute /opt/homebrew dep
+  /// blocked by App Sandbox) fails with a completely different message than a
+  /// candidate that is simply absent — and it was the discarded one. Every
+  /// candidate now reports its own error string.
   static ffi.DynamicLibrary _openFirst(List<String> paths) {
-    Object? lastError;
+    final errors = <String>[];
     for (final path in paths) {
       try {
         final lib = ffi.DynamicLibrary.open(path);
         // W5 (L-10): log the loaded path so dylib provenance is traceable.
-        stderr.writeln('[DngNativeBindings] loaded: $path');
+        // D4: print the RESOLVED absolute path, not the candidate string —
+        // downstream needs to know which copy actually got loaded.
+        stderr.writeln(
+          '[DngNativeBindings] loaded: ${_resolvedImagePath(lib, path)}',
+        );
         return lib;
       } catch (e) {
-        lastError = e;
+        errors.add('  $path\n    -> $e');
         continue;
       }
     }
     throw StateError(
-      'Could not load native library from any of:\n'
-      '  ${paths.join('\n  ')}\n'
-      'Last error: $lastError',
+      'Could not load native library. Tried ${paths.length} candidate(s), '
+      'each with its own error:\n'
+      '${errors.join('\n')}',
     );
+  }
+
+  /// Test-only entry point for [_openFirst]. Not part of the public API and
+  /// not exported by the package barrel; exists so the per-candidate error
+  /// reporting stays covered by a runnable check.
+  static ffi.DynamicLibrary openFirstForTesting(List<String> paths) =>
+      _openFirst(paths);
+
+  /// Best-effort ABSOLUTE path of the image that [lib] was actually loaded
+  /// from, for logging only.
+  ///
+  /// D4 (2026-08-17): the candidate string is not good enough. The first
+  /// candidate is the bare name `libdng_decoder_native.dylib`, which dyld
+  /// resolves through its own search paths — so logging the candidate tells a
+  /// downstream integrator nothing about which copy got loaded (this exact
+  /// ambiguity produced an unsatisfiable acceptance criterion downstream).
+  /// We ask the loader instead, via `dladdr` on a symbol of the freshly opened
+  /// library, and only fall back to path arithmetic.
+  static String _resolvedImagePath(ffi.DynamicLibrary lib, String candidate) {
+    final viaLoader = _imagePathViaDladdr(lib);
+    if (viaLoader != null) return viaLoader;
+    if (!candidate.contains('/')) return candidate;
+    try {
+      return File(candidate).absolute.resolveSymbolicLinksSync();
+    } catch (_) {
+      return candidate;
+    }
+  }
+
+  /// Resolve the on-disk path of an opened library via `dladdr` (POSIX only).
+  /// Returns null if anything goes wrong — this is diagnostics, never fatal.
+  static String? _imagePathViaDladdr(ffi.DynamicLibrary lib) {
+    if (Platform.isWindows) return null;
+    ffi.Pointer<ffi.Pointer<ffi.Void>>? info;
+    try {
+      // Any symbol belonging to the library identifies its image.
+      ffi.Pointer<ffi.Void>? probe;
+      for (final symbol in const ['dng_decode_and_process', 'dng_free_buffer']) {
+        try {
+          probe = lib.lookup<ffi.Void>(symbol);
+          break;
+        } catch (_) {
+          continue;
+        }
+      }
+      if (probe == null) return null;
+
+      final dladdr = ffi.DynamicLibrary.process().lookupFunction<
+          ffi.Int Function(
+              ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Pointer<ffi.Void>>),
+          int Function(ffi.Pointer<ffi.Void>,
+              ffi.Pointer<ffi.Pointer<ffi.Void>>)>('dladdr');
+
+      // Dl_info = { const char* dli_fname; void* dli_fbase;
+      //             const char* dli_sname; void* dli_saddr; }
+      info = calloc<ffi.Pointer<ffi.Void>>(4);
+      if (dladdr(probe, info) == 0) return null;
+      final fname = info[0];
+      if (fname == ffi.nullptr) return null;
+      return fname.cast<Utf8>().toDartString();
+    } catch (_) {
+      return null;
+    } finally {
+      if (info != null) calloc.free(info);
+    }
   }
 
   /// Load the native library based on the current platform

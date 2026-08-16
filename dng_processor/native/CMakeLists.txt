@@ -58,7 +58,15 @@ endif()
 # JPEG library for DNG SDK lossy JPEG support (qDNGUseLibJPEG=1).
 # Uses standard jpeglib.h API — any libjpeg-compatible library works.
 # Android: build vendored libjpeg-turbo from source (NEON SIMD on arm64).
-# macOS/host: use system libjpeg (typically Homebrew libjpeg-turbo).
+# macOS/host: STATICALLY link libjpeg-turbo (libjpeg.a).
+#   Rationale (2026-08-17, P0 sandbox blocker): linking Homebrew's
+#   libjpeg.dylib stamps an absolute LC_LOAD_DYLIB entry
+#   (/opt/homebrew/opt/jpeg-turbo/lib/libjpeg.8.dylib) into
+#   libdng_decoder_native.dylib. Any host app with App Sandbox enabled cannot
+#   read /opt/homebrew, so dyld fails the dependency with
+#   "file system sandbox blocked open()" and dlopen of our dylib fails outright.
+#   Static linking removes the external dependency entirely (option B of
+#   docs/logs/2026-08-17/handover-to-dng-decoder-team-libjpeg-blocker.md).
 if(ANDROID)
     find_package(JPEG QUIET)
     if(NOT JPEG_FOUND)
@@ -78,6 +86,56 @@ if(ANDROID)
         message(STATUS "Building vendored libjpeg-turbo 3.1.0 for Android (NEON SIMD)")
     endif()
     set(DNG_USE_LIBJPEG ON)
+elseif(APPLE)
+    # Locate the static archive. Override with -DDNG_JPEG_TURBO_ROOT=<prefix>
+    # if libjpeg-turbo lives outside the probed locations.
+    set(DNG_JPEG_TURBO_ROOT "" CACHE PATH
+        "libjpeg-turbo install prefix containing lib/libjpeg.a and include/jpeglib.h")
+    if(NOT DNG_JPEG_TURBO_ROOT)
+        find_program(DNG_BREW_EXECUTABLE brew)
+        if(DNG_BREW_EXECUTABLE)
+            execute_process(
+                COMMAND ${DNG_BREW_EXECUTABLE} --prefix jpeg-turbo
+                OUTPUT_VARIABLE DNG_BREW_JPEG_PREFIX
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                RESULT_VARIABLE DNG_BREW_JPEG_RESULT)
+            if(DNG_BREW_JPEG_RESULT EQUAL 0 AND DNG_BREW_JPEG_PREFIX)
+                set(DNG_JPEG_TURBO_ROOT "${DNG_BREW_JPEG_PREFIX}" CACHE PATH "" FORCE)
+            endif()
+        endif()
+    endif()
+
+    find_library(DNG_JPEG_STATIC_LIBRARY
+        NAMES libjpeg.a
+        HINTS "${DNG_JPEG_TURBO_ROOT}/lib"
+              /opt/homebrew/opt/jpeg-turbo/lib
+              /usr/local/opt/jpeg-turbo/lib
+        NO_DEFAULT_PATH)
+    find_path(DNG_JPEG_STATIC_INCLUDE_DIR
+        NAMES jpeglib.h
+        HINTS "${DNG_JPEG_TURBO_ROOT}/include"
+              /opt/homebrew/opt/jpeg-turbo/include
+              /usr/local/opt/jpeg-turbo/include
+        NO_DEFAULT_PATH)
+
+    if(NOT DNG_JPEG_STATIC_LIBRARY OR NOT DNG_JPEG_STATIC_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "Static libjpeg-turbo not found (need lib/libjpeg.a + include/jpeglib.h).\n"
+            "  probed DNG_JPEG_TURBO_ROOT='${DNG_JPEG_TURBO_ROOT}'\n"
+            "  libjpeg.a  = '${DNG_JPEG_STATIC_LIBRARY}'\n"
+            "  jpeglib.h  = '${DNG_JPEG_STATIC_INCLUDE_DIR}'\n"
+            "Install it (`brew install jpeg-turbo`) or pass "
+            "-DDNG_JPEG_TURBO_ROOT=<prefix>.\n"
+            "Do NOT fall back to the shared libjpeg.dylib: the resulting absolute "
+            "dependency makes libdng_decoder_native.dylib unloadable inside "
+            "App-Sandboxed host apps.")
+    endif()
+
+    set(JPEG_LIBRARIES ${DNG_JPEG_STATIC_LIBRARY})
+    set(JPEG_INCLUDE_DIRS ${DNG_JPEG_STATIC_INCLUDE_DIR})
+    set(DNG_USE_LIBJPEG ON)
+    message(STATUS "Using STATIC libjpeg-turbo: ${DNG_JPEG_STATIC_LIBRARY}")
 else()
     find_package(JPEG REQUIRED)
     set(DNG_USE_LIBJPEG ON)

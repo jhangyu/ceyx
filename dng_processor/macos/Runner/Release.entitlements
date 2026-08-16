@@ -2,7 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- 2026-08-17 (D2): App Sandbox is ON for Release. This is deliberate and
+	     acts as our regression harness: a sandboxed process cannot read
+	     /opt/homebrew, so any absolute Homebrew dependency stamped into
+	     libdng_decoder_native.dylib makes dlopen fail here immediately.
+	     A non-sandboxed build cannot detect that class of bug. -->
 	<key>com.apple.security.app-sandbox</key>
-	<false/>
+	<true/>
+	<!-- The app opens DNG files through file_picker (NSOpenPanel); under the
+	     sandbox the powerbox grants access only with this entitlement. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
 </dict>
 </plist>

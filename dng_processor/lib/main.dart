@@ -6,8 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'src/dng_decoder_service.dart';
-import 'src/dng_image_widget.dart';
+import 'dng_processor.dart';
 
 /*
 ---

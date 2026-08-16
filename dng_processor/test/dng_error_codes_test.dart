@@ -10,7 +10,7 @@
 // "Any addition or value change here MUST be reflected in the Dart
 // mirror" comment.
 import 'package:flutter_test/flutter_test.dart';
-import 'package:dng_processor/src/dng_decoder_service.dart';
+import 'package:dng_processor/dng_processor.dart';
 
 void main() {
   group('DngErrorCode Dart/C mirror contract', () {
