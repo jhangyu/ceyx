@@ -22,6 +22,11 @@ public:
     Input<int32_t> is_tan_nop_all{"is_tan_nop_all"};
     Input<int32_t> tile_width{"tile_width"};
     Input<int32_t> tile_height{"tile_height"};
+    // CFA phase: parity of the red site's column / row (see
+    // dng_halide_utils.h::build_demosaic_expr). Runtime inputs because the
+    // AOT kernel is compiled once but CFAPattern varies per DNG file.
+    Input<int32_t> red_x{"red_x"};
+    Input<int32_t> red_y{"red_y"};
 
     Output<Buffer<uint16_t>> dst{"dst", 3};
 
@@ -46,7 +51,7 @@ public:
             Expr my = map_repeat_coord(sy, height);
             return src(mx, my);
         };
-        demosaic(x, y, c) = build_demosaic_expr(x, y, c, cfa_sample);
+        demosaic(x, y, c) = build_demosaic_expr(x, y, c, cfa_sample, red_x, red_y);
 
         // Warp polynomial distortion (shared with RectilinearWarp).
         Expr plane = select(planes <= 1, 0, select(c < planes, c, 0));

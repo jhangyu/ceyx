@@ -6,6 +6,11 @@ using namespace Halide;
 class DngDemosaicBilinear : public Halide::Generator<DngDemosaicBilinear> {
 public:
     Input<Buffer<uint16_t>> src{"src", 2};  // x, y Bayer CFA
+    // CFA phase: parity of the red site's column / row (see
+    // dng_halide_utils.h::build_demosaic_expr). Runtime inputs because the
+    // AOT kernel is compiled once but CFAPattern varies per DNG file.
+    Input<int32_t> red_x{"red_x"};
+    Input<int32_t> red_y{"red_y"};
     Output<Buffer<uint16_t>> dst{"dst", 3}; // x, y, RGB channel
 
     void generate() {
@@ -25,7 +30,7 @@ public:
             return src(mx, my);
         };
 
-        dst(x, y, c) = build_demosaic_expr(x, y, c, sample);
+        dst(x, y, c) = build_demosaic_expr(x, y, c, sample, red_x, red_y);
     }
 
     void schedule() {

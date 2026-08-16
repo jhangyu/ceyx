@@ -123,7 +123,12 @@ int main(int argc, char** argv) {
     // Run demosaic and compare at same positions
     std::cout << "\n=== Running Halide Demosaic ===\n";
     std::vector<uint16_t> halideOutput(width * height * 3);
-    demosaic_bilinear_compat(stage2.data(), width, height, halideOutput.data());
+    // CFA phase (0, 0) = RGGB: this tool only ever reads the fixed-size raw
+    // dumps of the RGGB lossless fixture named above, so the phase is a
+    // property of those files, not something to read from metadata (there is
+    // no DNG open here).
+    demosaic_bilinear_compat(stage2.data(), width, height, halideOutput.data(),
+                             /*red_x=*/0, /*red_y=*/0);
     if (!StageContract::validateRawBufferContract("Stage3(Halide)",
                                                   width,
                                                   height,

@@ -48,6 +48,7 @@
 #include <dng_opcodes.h>
 #include <dng_rect.h>
 
+#include <dng_cfa_phase.h>
 #include <dng_mosaic_halide.h>
 #include <dng_pipeline_v2.h>
 #include <dng_render_halide.h>
@@ -450,7 +451,7 @@ void extractImageData(dng_image* image, vector<uint16_t>& data, uint32_t& width,
 }
 
 // P16 P2-2 probe (env-gated): dump pre-warp demosaic for Halide vs SDK then exit.
-// Halide standalone DngDemosaicGenerator shares dng_halide_utils.h helpers + RGGB kernel
+// Halide standalone DngDemosaicGenerator shares dng_halide_utils.h helpers + demosaic kernel
 // with the fused generator's demosaic segment (R1C §2.1), so it proxies the W1-materialized
 // buffer. SDK side clears OpcodeList3 so BuildStage3Image yields demosaic only (no warp).
 // Both buffers are interleaved RGB uint16 (matching layouts) -> compare_psnr.py --planes 3.
@@ -462,7 +463,10 @@ void maybeDumpDemosaicPreWarp(dng_host& host, dng_negative& negative, const stri
     cout << "[DemosaicDump] stage2 w=" << w << " h=" << h << " planes=" << p
          << " pt=" << pt << " ps=" << ps << "\n";
     vector<uint16_t> halideRGB(static_cast<size_t>(w) * h * 3, 0);
-    if (!demosaic_bilinear_halide_aot(s2.data(), (int)w, (int)h, halideRGB.data())) {
+    int dumpRedX = 0, dumpRedY = 0;
+    dng_resolve_cfa_phase(negative, dumpRedX, dumpRedY);
+    if (!demosaic_bilinear_halide_aot(s2.data(), (int)w, (int)h, halideRGB.data(),
+                                      dumpRedX, dumpRedY)) {
         cerr << "[DemosaicDump] Halide AOT failed\n"; std::exit(2);
     }
     negative.OpcodeList3().Clear();          // strip warp -> pure pre-warp demosaic
@@ -819,6 +823,21 @@ StagePSNR testDNG(dng_host& host,
             vector<OpcodeTimingEntry> opcodeTimings;
             opcodeTimings.reserve(opcodeList3.Count());
 
+            // CFA phase from the file's CFAPattern (see dng_cfa_phase.h). The
+            // SDK reference honours it, so the Halide kernels below must too
+            // or the Stage3 PSNR comparison is meaningless on non-RGGB files.
+            int cfaRedX = 0;
+            int cfaRedY = 0;
+            {
+                const char* cfaReason = nullptr;
+                if (!dng_resolve_cfa_phase(*negative, cfaRedX, cfaRedY, &cfaReason)) {
+                    cout << "  [CFA] phase undetermined ("
+                         << (cfaReason ? cfaReason : "unknown")
+                         << "); assuming RGGB\n";
+                }
+                cout << "  [CFA] red_x=" << cfaRedX << " red_y=" << cfaRedY << "\n";
+            }
+
             bool fastWarpApplied = false;
             bool fusedDemosaicWarpApplied = false;
             if (!demosaicDirectToImage &&
@@ -847,7 +866,9 @@ StagePSNR testDNG(dng_host& host,
                                                                                  static_cast<int>(s2h),
                                                                                  warpParams,
                                                                                  warpMode,
-                                                                                 stage3Data.data());
+                                                                                 stage3Data.data(),
+                                                                                 cfaRedX,
+                                                                                 cfaRedY);
                     auto fusedEnd = high_resolution_clock::now();
                     timing.stage3_fused_demosaic_warp_ms =
                         duration_cast<microseconds>(fusedEnd - fusedStart).count() / 1000.0;
@@ -871,7 +892,8 @@ StagePSNR testDNG(dng_host& host,
                 // Run Halide demosaic only when the fused demosaic+warp path did not
                 // already produce the final interleaved RGB Stage3 buffer.
                 auto stage3KernelStart = high_resolution_clock::now();
-                if (!demosaic_bilinear_halide_aot(stage2View, s2w, s2h, stage3Data.data())) {
+                if (!demosaic_bilinear_halide_aot(stage2View, s2w, s2h, stage3Data.data(),
+                                                  cfaRedX, cfaRedY)) {
                     cerr << "ERROR: Stage3 demosaic Halide AOT failed; refusing CPU fallback\n";
                     return failedResult;
                 }

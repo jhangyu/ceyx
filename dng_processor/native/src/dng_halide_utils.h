@@ -93,13 +93,24 @@ inline Halide::Expr cubic_weight(Halide::Expr x) {
 // M-3: Shared builder helpers for demosaic and warp IR dedup.
 // ---------------------------------------------------------------------------
 
-// Bilinear demosaic: 9-neighbor Bayer interpolation for RGGB pattern.
+// Bilinear demosaic: 9-neighbor Bayer interpolation, phase-parameterized.
 // `sample(sx, sy)` returns a uint16_t Halide::Expr for the CFA pixel at
 // (sx, sy), with caller-defined boundary handling (typically
 // map_repeat_coord).  Returns the select(c==0, R, c==1, G, B) expression.
+//
+// CFA phase (2026-08-16): `red_x` / `red_y` are the column / row parity of the
+// red CFA site (0 or 1), i.e. red lives wherever `x % 2 == red_x` and
+// `y % 2 == red_y`.  All four standard Bayer phases are covered by one
+// expression:
+//   RGGB -> (0, 0)   GRBG -> (1, 0)   GBRG -> (0, 1)   BGGR -> (1, 1)
+// They are runtime Exprs (Input<int32_t> on the generators), not compile-time
+// GeneratorParams: the AOT kernels are compiled once but the phase is a
+// per-file property read from the DNG CFAPattern tag.  Passing (0, 0)
+// reproduces the pre-2026-08-16 hard-coded RGGB behaviour bit-exactly.
 inline Halide::Expr build_demosaic_expr(
     Halide::Var x, Halide::Var y, Halide::Var c,
-    std::function<Halide::Expr(Halide::Expr, Halide::Expr)> sample)
+    std::function<Halide::Expr(Halide::Expr, Halide::Expr)> sample,
+    Halide::Expr red_x, Halide::Expr red_y)
 {
     Halide::Expr center = sample(x, y);
     Halide::Expr n  = sample(x, y - 1);
@@ -111,11 +122,11 @@ inline Halide::Expr build_demosaic_expr(
     Halide::Expr sw = sample(x - 1, y + 1);
     Halide::Expr se = sample(x + 1, y + 1);
 
-    Halide::Expr even_row = (y % 2) == 0;
-    Halide::Expr even_col = (x % 2) == 0;
-    Halide::Expr red_site        = even_row && even_col;
-    Halide::Expr blue_site       = !even_row && !even_col;
-    Halide::Expr green_on_red_row = even_row && !even_col;
+    Halide::Expr red_row = (y % 2) == red_y;
+    Halide::Expr red_col = (x % 2) == red_x;
+    Halide::Expr red_site        = red_row && red_col;
+    Halide::Expr blue_site       = !red_row && !red_col;
+    Halide::Expr green_on_red_row = red_row && !red_col;
 
     Halide::Expr r = Halide::select(red_site,
                         center,

@@ -68,12 +68,15 @@ functions:
 #include <dng_image.h>
 #include <dng_info.h>
 #include <dng_lens_correction.h>
+#include <dng_mosaic_info.h>
 #include <dng_negative.h>
 #include <dng_opcodes.h>
+#include <dng_tag_values.h>
 #include <dng_pixel_buffer.h>
 #include <dng_render.h>
 
 #include "ConcurrentDngHost.h"
+#include "dng_cfa_phase.h"
 #include "dng_error_codes.h"  // W5: unified DngErrorCode enum
 #include "dng_mosaic_halide.h"
 #include "dng_opcodelist2_halide.h"
@@ -105,6 +108,24 @@ bool requireGpuBackend(const char *path) {
           "No SDK-CPU fallback route available.\n",
           path, dng_halide_gpu_backend_name());
   return false;
+}
+
+// Reads the Bayer CFA phase out of the parsed DNG metadata (see
+// dng_cfa_phase.h for the mapping and why ActiveArea needs no correction).
+// Falls back to RGGB (0, 0) with a VERBOSE note when the phase cannot be
+// determined; a wrong-but-plausible phase still beats refusing to decode, and
+// the note makes it diagnosable.
+void resolveCfaPhase(const dng_negative &negative, int &red_x, int &red_y) {
+  const char *reason = nullptr;
+  if (dng_resolve_cfa_phase(negative, red_x, red_y, &reason)) {
+    return;
+  }
+  if (pipelineVerbose()) {
+    fprintf(stderr,
+            "[PipelineV2] CFA phase undetermined (%s); falling back to RGGB "
+            "(red_x=0, red_y=0)\n",
+            reason ? reason : "unknown");
+  }
 }
 
 bool copyImageToInterleaved16(const dng_image *image, std::vector<uint16_t> &out,
@@ -660,6 +681,10 @@ bool runHalideStage3ForBayer(dng_host &host,
   uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing);
   if (!stage3Ptr) return false;
 
+  int cfaRedX = 0;
+  int cfaRedY = 0;
+  resolveCfaPhase(negative, cfaRedX, cfaRedY);
+
   bool fused = false;
   AutoPtr<dng_image> stage3;
   bool stage3Allocated = false;
@@ -686,7 +711,8 @@ bool runHalideStage3ForBayer(dng_host &host,
           demosaic_warp_rectilinear_halide_dispatch(
               stage2Ptr, static_cast<int>(width),
               static_cast<int>(height), params,
-              WarpRectilinearMode::HALIDE_GPU, stage3Ptr);
+              WarpRectilinearMode::HALIDE_GPU, stage3Ptr,
+              cfaRedX, cfaRedY);
 
       if (handle) {
         // Latency hiding: allocate the dng_image container while the GPU
@@ -736,7 +762,8 @@ bool runHalideStage3ForBayer(dng_host &host,
     // Separate GPU path: call the AOT entry directly so failure propagates
     // instead of using demosaic_bilinear_halide()'s CPU reference fallback.
     if (!demosaic_bilinear_halide_aot(stage2Ptr, static_cast<int>(width),
-                                      static_cast<int>(height), stage3Ptr)) {
+                                      static_cast<int>(height), stage3Ptr,
+                                      cfaRedX, cfaRedY)) {
       std::cerr << "[PipelineV2] Stage3 demosaic Halide AOT failed; "
                    "refusing CPU fallback\n";
       return false;
@@ -848,11 +875,16 @@ bool runHalideStage3And4Fused(dng_host &host,
   uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing);
   if (!stage3Ptr) return false;
 
+  int cfaRedX = 0;
+  int cfaRedY = 0;
+  resolveCfaPhase(negative, cfaRedX, cfaRedY);
+
   const auto fusedStart = Clock::now();
 
   DemosaicWarpHalideHandle *handle = demosaic_warp_rectilinear_halide_dispatch(
       stage2Ptr, static_cast<int>(width), static_cast<int>(height),
-      warpParams, WarpRectilinearMode::HALIDE_GPU, stage3Ptr);
+      warpParams, WarpRectilinearMode::HALIDE_GPU, stage3Ptr,
+      cfaRedX, cfaRedY);
   if (!handle)
     return false;
 

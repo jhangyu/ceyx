@@ -661,6 +661,14 @@ add_executable(dng_ffi_harness tests/dng_ffi_harness.cpp)
 target_include_directories(dng_ffi_harness PRIVATE ${INC_DIR})
 target_link_libraries(dng_ffi_harness PRIVATE dng_decoder_native)
 
+# 2026-08-16 CFA phase: end-to-end pixel color-correctness gate. Decodes a
+# real DNG through the production C ABI and asserts a known channel relation
+# (blue sky must have B >> R), which is the only observable a wrong Bayer
+# phase corrupts. Driven by run_decode_matrix.py against an external sample.
+add_executable(test_cfa_color tests/test_cfa_color.cpp)
+target_include_directories(test_cfa_color PRIVATE ${INC_DIR})
+target_link_libraries(test_cfa_color PRIVATE dng_decoder_native)
+
 
 # W5-4 / TD-2: Device handoff path independent test.
 # Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
@@ -757,20 +765,49 @@ if(APPLE)
 endif()
 
 # Phase 5.3: Halide Demosaic PSNR Test
+# 2026-08-16: dng_opcodelist2_halide.cpp / dng_halide_device.cpp added to the
+# source list. libdng_sdk's dng_opcode_list::Apply references the Stage2
+# OpcodeList2 Halide bridge symbols unconditionally, so this target had been
+# failing to link since that bridge landed (no test_mosaic_halide binary was
+# ever produced). Linking the bridge in restores the target; the polynomial
+# AOT archives below satisfy the bridge's own kernel references.
 add_executable(test_mosaic_halide tests/test_mosaic_halide.cpp
-    src/dng_mosaic_halide.cpp)
+    src/dng_mosaic_halide.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_halide_device.cpp)
 target_include_directories(test_mosaic_halide PRIVATE
     ${INC_DIR}
+    ${SRC_DIR}
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 # W6 M-4: halide_runtime.a provides Metal/Vulkan runtime symbols for all -no_runtime AOT kernels.
-target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
 add_dependencies(test_mosaic_halide halide_runtime_target)
 add_dependencies(test_mosaic_halide dng_warp_aot_target)
 add_dependencies(test_mosaic_halide dng_demosaic_aot_target)
+add_dependencies(test_mosaic_halide dng_opcode_polynomial_aot_target)
+add_dependencies(test_mosaic_halide dng_opcode_polynomial3_aot_target)
 if(APPLE)
     target_link_libraries(test_mosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# 2026-08-16 CFA phase: all-four-Bayer-phases unit check on a synthetic
+# mosaic. Covers both the Halide AOT kernel and the CPU reference demosaic
+# plus get_cfa_pattern's phase expansion. No DNG fixture required.
+add_executable(test_cfa_phase tests/test_cfa_phase.cpp
+    src/dng_mosaic_halide.cpp)
+target_include_directories(test_cfa_phase PRIVATE
+    ${INC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+# dng_sdk: the resolver case feeds dng_resolve_cfa_phase a synthetic dng_mosaic_info.
+target_link_libraries(test_cfa_phase dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_dependencies(test_cfa_phase halide_runtime_target)
+add_dependencies(test_cfa_phase dng_demosaic_aot_target)
+if(APPLE)
+    target_link_libraries(test_cfa_phase ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # Debug demosaic test

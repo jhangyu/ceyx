@@ -132,6 +132,13 @@ namespace {
 
 using Halide::Runtime::Buffer;
 
+// CFA phase normalization: red_x / red_y are the column / row parity of the
+// red CFA site (see dng_mosaic_halide.h). Anything outside {0,1} is a caller
+// bug; clamp to the RGGB default rather than feeding the kernel garbage.
+inline int normalizeCfaPhase(int v) {
+    return (v == 1) ? 1 : 0;
+}
+
 float cubicWeight(float x) {
     const float a = -0.75f;
     x = std::fabs(x);
@@ -652,7 +659,9 @@ bool runDemosaicWarpHalideAot(const uint16_t* src_bayer,
                               const WarpRuntimeParams& runtime,
                               const WarpRectilinearParams& params,
                               const TileClippingGrid& tile_grid,
-                              uint16_t* dst_interleaved_rgb) {
+                              uint16_t* dst_interleaved_rgb,
+                              int red_x,
+                              int red_y) {
     if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
         return false;
     }
@@ -702,6 +711,8 @@ bool runDemosaicWarpHalideAot(const uint16_t* src_bayer,
                                          params.is_tan_nop_all ? 1 : 0,
                                          static_cast<int32_t>(tile_grid.tile_width),
                                          static_cast<int32_t>(tile_grid.tile_height),
+                                         normalizeCfaPhase(red_x),
+                                         normalizeCfaPhase(red_y),
                                          dst_buf.raw_buffer());
     if (result != 0) {
         return false;
@@ -843,7 +854,9 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
                                       int height,
                                       const WarpRectilinearParams& params,
                                       WarpRectilinearMode mode,
-                                      uint16_t* dst_interleaved_rgb) {
+                                      uint16_t* dst_interleaved_rgb,
+                                      int red_x,
+                                      int red_y) {
     if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
         return false;
     }
@@ -865,7 +878,9 @@ bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
                                      runtime,
                                      params,
                                      tile_grid,
-                                     dst_interleaved_rgb)) {
+                                     dst_interleaved_rgb,
+                                     red_x,
+                                     red_y)) {
             return true;
         }
         if (mode == WarpRectilinearMode::HALIDE_METAL ||
@@ -965,7 +980,12 @@ void dng_demosaic_warp_prewarm_for_size(int width, int height) {
                                                height,
                                                params,
                                                WarpRectilinearMode::AUTO,
-                                               static_cast<uint16_t*>(dummy_dst.ptr));
+                                               static_cast<uint16_t*>(dummy_dst.ptr),
+                                               // Prewarm only builds the GPU
+                                               // pipeline state; the CFA phase
+                                               // does not affect codegen, so
+                                               // RGGB is fine here.
+                                               /*red_x=*/0, /*red_y=*/0);
     }
     std::fprintf(stderr, "[Warmup] s3 done\n");
     std::fflush(stderr);
@@ -1039,7 +1059,9 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     int height,
     const WarpRectilinearParams& params,
     WarpRectilinearMode mode,
-    uint16_t* dst_interleaved_rgb) {
+    uint16_t* dst_interleaved_rgb,
+    int red_x,
+    int red_y) {
     if (!src_bayer || !dst_interleaved_rgb || width <= 0 || height <= 0) {
         return nullptr;
     }
@@ -1112,6 +1134,8 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
         params.is_tan_nop_all ? 1 : 0,
         static_cast<int32_t>(impl->tile_grid.tile_width),
         static_cast<int32_t>(impl->tile_grid.tile_height),
+        normalizeCfaPhase(red_x),
+        normalizeCfaPhase(red_y),
         impl->dst_buf.raw_buffer());
     if (result != 0) {
         return nullptr;

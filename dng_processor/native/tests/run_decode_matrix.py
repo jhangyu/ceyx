@@ -275,6 +275,19 @@ class DeviceHandoffResult:
     byte_exact: bool
 
 
+@dataclass
+class CfaCheckResult:
+    """2026-08-16 CFA phase gates (four-phase unit check + BGGR color check).
+
+    `status` is one of PASS / FAIL / SKIP. SKIP is used when the binary or the
+    external BGGR sample is absent and was not explicitly requested; it never
+    fails the run.
+    """
+    name: str
+    status: str
+    detail: str
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -323,6 +336,16 @@ _DEFAULT_ANDROID_FFI_HARNESS = (
 _DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS = (
     "dng_processor/native/build-android/android-arm64/test_device_handoff_android"
 )
+# 2026-08-16 CFA phase gates.
+_DEFAULT_CFA_PHASE_BIN = "dng_processor/native/build/test_cfa_phase"
+_DEFAULT_CFA_COLOR_BIN = "dng_processor/native/build/test_cfa_color"
+# BGGR sample lives outside the repo on purpose (user decision: do not copy
+# camera DNGs into the tree). Absent -> the case prints SKIP and does not fail.
+_DEFAULT_BGGR_SAMPLE = (
+    "/Users/jhangyu/project/Halcyon/local_data/photo_samples/DNG/IMG_20251112_092839.dng"
+)
+_CFA_PHASE_PASS_RE = re.compile(r"^\[CFA PHASE\] ALL PASS\s*$")
+_CFA_COLOR_RE = re.compile(r"^\[CFA COLOR\]\s+(.*)\[(PASS|FAIL)\]\s*$")
 
 
 def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
@@ -1143,6 +1166,79 @@ def _run_android_device_handoff(
 
 
 # ---------------------------------------------------------------------------
+# CFA phase gates (2026-08-16)
+# ---------------------------------------------------------------------------
+
+def _run_cfa_phase_case(cwd: Path, binary: Path) -> CfaCheckResult:
+    """Run the four-Bayer-phase synthetic unit check (test_cfa_phase).
+
+    Requires exit 0 AND the '[CFA PHASE] ALL PASS' marker: exit code alone is
+    not enough of a contract for a tool whose whole job is asserting pixels.
+    """
+    proc = subprocess.run(
+        [str(binary)],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = proc.stdout
+    all_pass = any(_CFA_PHASE_PASS_RE.match(line) for line in output.splitlines())
+    if proc.returncode != 0 or not all_pass:
+        print(output, end="" if output.endswith("\n") else "\n")
+        return CfaCheckResult(
+            name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
+            status="FAIL",
+            detail=f"exit={proc.returncode} all_pass_marker={all_pass}",
+        )
+    detail = next(
+        (line for line in output.splitlines() if line.startswith("[CFA PHASE] ALL PASS")),
+        "ALL PASS",
+    )
+    print(f"[CFA PHASE GATE] {detail}")
+    return CfaCheckResult(
+        name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
+        status="PASS",
+        detail="all four phases exact on both the Halide AOT kernel and the CPU reference",
+    )
+
+
+def _run_cfa_color_case(
+    cwd: Path, binary: Path, sample: Path, min_b_minus_r: float
+) -> CfaCheckResult:
+    """Run the BGGR end-to-end color gate (test_cfa_color) on `sample`."""
+    proc = subprocess.run(
+        [str(binary), str(sample), "--expect-blue-sky",
+         "--min-b-minus-r", str(min_b_minus_r)],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = proc.stdout
+    match = next(
+        (m for m in (_CFA_COLOR_RE.match(line) for line in output.splitlines()) if m),
+        None,
+    )
+    if proc.returncode != 0 or match is None or match.group(2) != "PASS":
+        print(output, end="" if output.endswith("\n") else "\n")
+        return CfaCheckResult(
+            name=f"CFA color / BGGR ({sample.name})",
+            status="FAIL",
+            detail=(match.group(1).strip() if match
+                    else f"exit={proc.returncode}, no [CFA COLOR] verdict line"),
+        )
+    print(f"[CFA COLOR GATE] {match.group(1).strip()} [PASS]")
+    return CfaCheckResult(
+        name=f"CFA color / BGGR ({sample.name})",
+        status="PASS",
+        detail=match.group(1).strip(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Markdown output
 # ---------------------------------------------------------------------------
 
@@ -1175,6 +1271,7 @@ def _build_markdown(
     show_halide_timing: bool,
     artifact_dir: Path,
     android_serial: Optional[str] = None,
+    cfa_results: Optional[list[CfaCheckResult]] = None,
 ) -> str:
     L: list[str] = []
 
@@ -1305,6 +1402,21 @@ def _build_markdown(
                 f"| {'PASS' if r.gate_pass else 'FAIL'} "
                 f"| {'yes' if r.byte_exact else 'no'} |"
             )
+        L.append("")
+
+    if cfa_results:
+        L.append("## CFA Phase Gates (2026-08-16)")
+        L.append("")
+        L.append("_Bayer phase must come from the file's CFAPattern tag. The phase check "
+                 "covers all four phases on a synthetic mosaic; the color check decodes a "
+                 "real BGGR sample end-to-end and asserts the sky is blue (B >> R). "
+                 "SKIP means the binary or the external sample is absent — it does not "
+                 "fail the run._")
+        L.append("")
+        L.append("| Check | Status | Detail |")
+        L.append("|---|---|---|")
+        for c in cfa_results:
+            L.append(f"| {c.name} | {c.status} | {c.detail} |")
         L.append("")
 
     # --- PSNR table ---
@@ -2274,6 +2386,56 @@ def main() -> int:
         default=False,
         help="Disable the device handoff harness case even if the default binary exists.",
     )
+    # --- CFA phase gates (2026-08-16) ---
+    ap.add_argument(
+        "--cfa-phase-harness",
+        default="",
+        help=(
+            "Four-Bayer-phase unit check binary (relative to repo-root). "
+            f"Auto-enabled when the default build output exists ({_DEFAULT_CFA_PHASE_BIN}); "
+            "pass --no-cfa-phase-harness to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-cfa-phase-harness",
+        action="store_true",
+        default=False,
+        help="Disable the four-phase CFA unit check even if the default binary exists.",
+    )
+    ap.add_argument(
+        "--cfa-color-harness",
+        default="",
+        help=(
+            "End-to-end pixel color check binary (relative to repo-root). "
+            f"Auto-enabled when the default build output exists ({_DEFAULT_CFA_COLOR_BIN})."
+        ),
+    )
+    ap.add_argument(
+        "--bggr-sample",
+        default="",
+        help=(
+            "Non-RGGB (BGGR) DNG sample for the color-correctness gate. "
+            f"Default: {_DEFAULT_BGGR_SAMPLE} (external path on purpose — camera "
+            "DNGs are not copied into the repo). When the default is used and the "
+            "file is absent, the case prints SKIP and does not fail the run; an "
+            "explicitly passed path must exist."
+        ),
+    )
+    ap.add_argument(
+        "--no-bggr-case",
+        action="store_true",
+        default=False,
+        help="Disable the BGGR color-correctness case even if the sample exists.",
+    )
+    ap.add_argument(
+        "--bggr-min-b-minus-r",
+        type=float,
+        default=50.0,
+        help=(
+            "Minimum mean(B) - mean(R) over the sky band for the BGGR sample. "
+            "Correct decode measures ~+235; an R/B swap measures ~-235."
+        ),
+    )
     ap.add_argument("--output", default="", help="Optional Markdown output file path")
     ap.add_argument(
         "--artifact-dir",
@@ -2854,6 +3016,66 @@ def main() -> int:
                     raise SystemExit(1)
             ffi_results.append(FfiAggResult(sample_name=sample_name, runs=runs))
 
+    # --- CFA phase gates (2026-08-16) ---
+    # Same auto-enable pattern as the FFI / handoff harnesses: run when the
+    # default binary exists, [INFO]-skip when it does not.
+    cfa_results: list[CfaCheckResult] = []
+    if macos_enabled:
+        requested_cfa_phase = args.cfa_phase_harness
+        if not args.no_cfa_phase_harness and not args.cfa_phase_harness:
+            args.cfa_phase_harness = _DEFAULT_CFA_PHASE_BIN
+        if args.no_cfa_phase_harness:
+            args.cfa_phase_harness = ""
+        if args.cfa_phase_harness:
+            cfa_phase_bin = (root / args.cfa_phase_harness).resolve()
+            if not cfa_phase_bin.exists():
+                if requested_cfa_phase:
+                    ap.error(f"CFA phase harness not found: {cfa_phase_bin}")
+                print(f"[SKIP] CFA phase harness not built; skipping: {cfa_phase_bin}")
+                cfa_results.append(CfaCheckResult(
+                    name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
+                    status="SKIP",
+                    detail=f"binary not built: {cfa_phase_bin}",
+                ))
+            else:
+                cfa_results.append(_run_cfa_phase_case(root, cfa_phase_bin))
+
+        if not args.no_bggr_case:
+            requested_bggr = bool(args.bggr_sample)
+            bggr_sample = Path(args.bggr_sample or _DEFAULT_BGGR_SAMPLE)
+            if not bggr_sample.is_absolute():
+                bggr_sample = (root / bggr_sample).resolve()
+            requested_cfa_color = bool(args.cfa_color_harness)
+            cfa_color_bin = (
+                root / (args.cfa_color_harness or _DEFAULT_CFA_COLOR_BIN)
+            ).resolve()
+
+            if not cfa_color_bin.exists():
+                if requested_cfa_color:
+                    ap.error(f"CFA color harness not found: {cfa_color_bin}")
+                print(f"[SKIP] CFA color harness not built; skipping BGGR case: {cfa_color_bin}")
+                cfa_results.append(CfaCheckResult(
+                    name="CFA color / BGGR",
+                    status="SKIP",
+                    detail=f"binary not built: {cfa_color_bin}",
+                ))
+            elif not bggr_sample.exists():
+                if requested_bggr:
+                    ap.error(f"BGGR sample not found: {bggr_sample}")
+                print(f"[SKIP] BGGR sample not present; skipping color gate: {bggr_sample}")
+                cfa_results.append(CfaCheckResult(
+                    name="CFA color / BGGR",
+                    status="SKIP",
+                    detail=f"external sample not present: {bggr_sample}",
+                ))
+            else:
+                cfa_results.append(_run_cfa_color_case(
+                    root, cfa_color_bin, bggr_sample, args.bggr_min_b_minus_r
+                ))
+
+    if any(c.status == "FAIL" for c in cfa_results):
+        gate_failed = True
+
     generated_at = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     md = _build_markdown(
         agg_results,
@@ -2866,6 +3088,7 @@ def main() -> int:
         show_halide_timing=args.timing,
         artifact_dir=artifact_dir,
         android_serial=android_serial,
+        cfa_results=cfa_results,
     )
 
     if args.output:
@@ -2882,6 +3105,9 @@ def main() -> int:
     if args.propose_baseline_update and sha_entries:
         diff_path = artifact_dir / "baseline_candidate_diff.txt"
         _write_baseline_candidate_diff(sha_entries, diff_path)
+
+    for c in cfa_results:
+        print(f"[CFA GATE] {c.name}: {c.status} — {c.detail}")
 
     if gate_failed or not sha_ok:
         if gate_failed:

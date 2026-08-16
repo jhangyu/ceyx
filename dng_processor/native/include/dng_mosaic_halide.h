@@ -16,17 +16,34 @@ extern "C" {
 #endif
 
 /**
+ * CFA phase convention shared by every entry in this header (2026-08-16).
+ *
+ * `red_x` / `red_y` are the column / row parity of the red CFA site: red lives
+ * wherever `x % 2 == red_x` and `y % 2 == red_y`, blue at the diagonally
+ * opposite parity, green on the other two. The four standard Bayer phases map
+ * as: RGGB=(0,0), GRBG=(1,0), GBRG=(0,1), BGGR=(1,1). Values outside {0,1}
+ * are normalized to 0 (RGGB).
+ *
+ * Callers must derive the phase from the file's CFAPattern tag; passing (0,0)
+ * unconditionally is the pre-2026-08-16 bug that mis-colored every non-RGGB
+ * sensor.
+ */
+
+/**
  * Bilinear demosaic for Bayer CFA pattern.
  *
  * @param input: 16-bit grayscale CFA image (width * height pixels)
  * @param width: image width
  * @param height: image height
  * @param output: 16-bit RGB output buffer (width * height * 3 pixels)
+ * @param red_x, red_y: CFA phase (see convention note above)
  */
 void demosaic_bilinear_halide(const uint16_t* input,
                               int width,
                               int height,
-                              uint16_t* output);
+                              uint16_t* output,
+                              int red_x,
+                              int red_y);
 
 /**
  * CPU reference bilinear demosaic for Bayer CFA pattern.
@@ -39,7 +56,9 @@ void demosaic_bilinear_halide(const uint16_t* input,
 void demosaic_pattern_bilinear(const uint16_t* input,
                                int width,
                                int height,
-                               uint16_t* output);
+                               uint16_t* output,
+                               int red_x,
+                               int red_y);
 
 /**
  * Halide AOT bilinear demosaic entry.
@@ -49,7 +68,9 @@ void demosaic_pattern_bilinear(const uint16_t* input,
 int demosaic_bilinear_halide_aot(const uint16_t* input,
                                  int width,
                                  int height,
-                                 uint16_t* output);
+                                 uint16_t* output,
+                                 int red_x,
+                                 int red_y);
 
 /**
  * Compatibility entry for the Stage3 bilinear demosaic call site.
@@ -65,15 +86,18 @@ int demosaic_bilinear_halide_aot(const uint16_t* input,
 void demosaic_bilinear_compat(const uint16_t* input,
                               int width,
                               int height,
-                              uint16_t* output);
+                              uint16_t* output,
+                              int red_x,
+                              int red_y);
 
 /**
- * Get the CFA pattern from DNG metadata
+ * Expand a CFA phase into the 2x2 Bayer color-key pattern.
  *
- * @param pattern: array of 4 values representing 2x2 Bayer pattern
- *                0=R, 1=G, 2=B (standard RGGB pattern)
+ * @param pattern: out, 4 values in row-major order (pattern[row * 2 + col]),
+ *                 0=R, 1=G, 2=B (DNG SDK ColorKeyCode)
+ * @param red_x, red_y: CFA phase (see convention note above)
  */
-void get_cfa_pattern(int pattern[4]);
+void get_cfa_pattern(int pattern[4], int red_x, int red_y);
 
 #ifdef __cplusplus
 }

@@ -6,7 +6,7 @@ functions:
     description: "Wraps the dng_demosaic_bilinear Halide AOT kernel and copies output back to host."
     lines: "94-131"
   - name: "demosaic_pattern_bilinear"
-    description: "CPU multithreaded RGGB bilinear demosaic fallback/reference implementation."
+    description: "CPU multithreaded phase-parameterized bilinear demosaic fallback/reference implementation."
     lines: "135-227"
   - name: "demosaic_bilinear_halide_aot"
     description: "C ABI for the Halide AOT demosaic path."
@@ -18,7 +18,7 @@ functions:
     description: "Compatibility entry that dispatches to bilinear demosaic; called only from Stage3 demosaic test tools (test_mosaic_halide.cpp, test_mosaic_debug.cpp)."
     lines: "217-222"
   - name: "get_cfa_pattern"
-    description: "Returns the fixed RGGB CFA pattern used by current samples."
+    description: "Expands a (red_x, red_y) CFA phase into the 2x2 Bayer color-key pattern."
     lines: "224-229"
 ---
 */
@@ -80,10 +80,19 @@ inline uint16_t avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
     return static_cast<uint16_t>((total + 2u) >> 2);
 }
 
+// CFA phase normalization: red_x / red_y are the column / row parity of the
+// red CFA site. Anything outside {0,1} is a caller bug; clamp to the RGGB
+// default rather than feeding an out-of-range value into the kernel.
+inline int normalizePhase(int v) {
+    return (v == 1) ? 1 : 0;
+}
+
 bool runDemosaicBilinearAot(const uint16_t* input,
                             int width,
                             int height,
-                            uint16_t* output) {
+                            uint16_t* output,
+                            int red_x,
+                            int red_y) {
     if (!input || !output || width <= 0 || height <= 0) {
         return false;
     }
@@ -94,7 +103,10 @@ bool runDemosaicBilinearAot(const uint16_t* input,
     src_buf.set_host_dirty();
     dst_buf.set_host_dirty(false);
 
-    const int result = dng_demosaic_bilinear(src_buf.raw_buffer(), dst_buf.raw_buffer());
+    const int result = dng_demosaic_bilinear(src_buf.raw_buffer(),
+                                             normalizePhase(red_x),
+                                             normalizePhase(red_y),
+                                             dst_buf.raw_buffer());
     if (result != 0) {
         return false;
     }
@@ -110,19 +122,25 @@ bool runDemosaicBilinearAot(const uint16_t* input,
 extern "C" void demosaic_pattern_bilinear(const uint16_t* input,
                                           int width,
                                           int height,
-                                          uint16_t* output) {
+                                          uint16_t* output,
+                                          int red_x,
+                                          int red_y) {
     if (!input || !output || width <= 0 || height <= 0) {
         return;
     }
 
+    const int redX = normalizePhase(red_x);
+    const int redY = normalizePhase(red_y);
+
     auto process_rows = [&](int y_begin, int y_end) {
-        // RGGB layout:
+        // Phase-parameterized Bayer layout (red at column parity redX, row
+        // parity redY). For RGGB (0,0) this is:
         //   row even: R G R G ...
         //   row odd : G B G B ...
         for (int y = y_begin; y < y_end; ++y) {
             for (int x = 0; x < width; ++x) {
-                const bool evenRow = (y & 1) == 0;
-                const bool evenCol = (x & 1) == 0;
+                const bool redRow = (y & 1) == redY;
+                const bool redCol = (x & 1) == redX;
 
                 const uint16_t c = sampleRepeat(input, width, height, x, y);
                 const uint16_t n = sampleRepeat(input, width, height, x, y - 1);
@@ -138,17 +156,17 @@ extern "C" void demosaic_pattern_bilinear(const uint16_t* input,
                 uint16_t g = 0;
                 uint16_t b = 0;
 
-                if (evenRow && evenCol) {
+                if (redRow && redCol) {
                     // R site
                     r = c;
                     g = avg4(n, s, w, e);
                     b = avg4(nw, ne, sw, se);
-                } else if (!evenRow && !evenCol) {
+                } else if (!redRow && !redCol) {
                     // B site
                     r = avg4(nw, ne, sw, se);
                     g = avg4(n, s, w, e);
                     b = c;
-                } else if (evenRow && !evenCol) {
+                } else if (redRow && !redCol) {
                     // G site on R row
                     r = avg2(w, e);
                     g = c;
@@ -200,30 +218,49 @@ extern "C" void demosaic_pattern_bilinear(const uint16_t* input,
 extern "C" int demosaic_bilinear_halide_aot(const uint16_t* input,
                                              int width,
                                              int height,
-                                             uint16_t* output) {
-    return runDemosaicBilinearAot(input, width, height, output) ? 1 : 0;
+                                             uint16_t* output,
+                                             int red_x,
+                                             int red_y) {
+    return runDemosaicBilinearAot(input, width, height, output, red_x, red_y) ? 1 : 0;
 }
 
 extern "C" void demosaic_bilinear_halide(const uint16_t* input,
                                           int width,
                                           int height,
-                                          uint16_t* output) {
-    if (demosaic_bilinear_halide_aot(input, width, height, output)) {
+                                          uint16_t* output,
+                                          int red_x,
+                                          int red_y) {
+    if (demosaic_bilinear_halide_aot(input, width, height, output, red_x, red_y)) {
         return;
     }
-    demosaic_pattern_bilinear(input, width, height, output);
+    demosaic_pattern_bilinear(input, width, height, output, red_x, red_y);
 }
 
 extern "C" void demosaic_bilinear_compat(const uint16_t* input,
                                           int width,
                                           int height,
-                                          uint16_t* output) {
-    demosaic_bilinear_halide(input, width, height, output);
+                                          uint16_t* output,
+                                          int red_x,
+                                          int red_y) {
+    demosaic_bilinear_halide(input, width, height, output, red_x, red_y);
 }
 
-extern "C" void get_cfa_pattern(int pattern[4]) {
-    pattern[0] = 0;
-    pattern[1] = 1;
-    pattern[2] = 1;
-    pattern[3] = 2;
+extern "C" void get_cfa_pattern(int pattern[4], int red_x, int red_y) {
+    // Expand the (red_x, red_y) phase into the 2x2 Bayer color-key pattern in
+    // row-major order: pattern[row * 2 + col], values 0=R, 1=G, 2=B (matching
+    // the DNG SDK's ColorKeyCode). Red sits at (red_y, red_x), blue at the
+    // diagonally opposite site, green on the other two.
+    const int redX = normalizePhase(red_x);
+    const int redY = normalizePhase(red_y);
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            int color = 1;  // green
+            if (row == redY && col == redX) {
+                color = 0;  // red
+            } else if (row != redY && col != redX) {
+                color = 2;  // blue
+            }
+            pattern[row * 2 + col] = color;
+        }
+    }
 }

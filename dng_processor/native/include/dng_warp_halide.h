@@ -47,12 +47,18 @@ bool warp_rectilinear_halide(const uint16_t* src_interleaved_rgb,
                              WarpRectilinearMode mode,
                              uint16_t* dst_interleaved_rgb);
 
+// `red_x` / `red_y` are the CFA phase (column / row parity of the red site);
+// see the convention note in dng_mosaic_halide.h. They must come from the
+// file's CFAPattern tag — hard-coding (0, 0) is the pre-2026-08-16 bug that
+// mis-colored every non-RGGB sensor.
 bool demosaic_warp_rectilinear_halide(const uint16_t* src_bayer,
                                       int width,
                                       int height,
                                       const WarpRectilinearParams& params,
                                       WarpRectilinearMode mode,
-                                      uint16_t* dst_interleaved_rgb);
+                                      uint16_t* dst_interleaved_rgb,
+                                      int red_x,
+                                      int red_y);
 
 // Opaque handle forward-declaration needs the Halide C runtime type.
 struct halide_buffer_t;
@@ -71,7 +77,9 @@ DemosaicWarpHalideHandle* demosaic_warp_rectilinear_halide_dispatch(
     int height,
     const WarpRectilinearParams& params,
     WarpRectilinearMode mode,
-    uint16_t* dst_interleaved_rgb);
+    uint16_t* dst_interleaved_rgb,
+    int red_x,
+    int red_y);
 
 // Finalizes the dispatched kernel: device_sync() + copy_to_host() into
 // the dst pointer that was passed to dispatch. Always destroys the handle.

@@ -32,6 +32,8 @@
 
 #include "stage_contract_checks.h"
 
+#include "dng_cfa_phase.h"
+
 extern "C" {
 #include "dng_mosaic_halide.h"
 }
@@ -143,6 +145,11 @@ int main(int argc, char** argv) {
     std::vector<uint16_t> stage3Ref;
     uint32_t width = 0;
     uint32_t height = 0;
+    // CFA phase read from the file's CFAPattern (see dng_cfa_phase.h); the
+    // Halide demosaic below must use the same phase the SDK reference used,
+    // otherwise this PSNR comparison is meaningless on non-RGGB samples.
+    int cfaRedX = 0;
+    int cfaRedY = 0;
 
     try {
         dng_file_stream stream(dngPath);
@@ -163,6 +170,14 @@ int main(int argc, char** argv) {
         std::cout << "Running DNG SDK Stage1 -> Stage2...\n";
         negative->ReadStage1Image(host, stream, info);
         negative->BuildStage2Image(host);
+
+        const char* cfaReason = nullptr;
+        if (!dng_resolve_cfa_phase(*negative, cfaRedX, cfaRedY, &cfaReason)) {
+            std::cout << "WARN: CFA phase undetermined ("
+                      << (cfaReason ? cfaReason : "unknown")
+                      << "); assuming RGGB\n";
+        }
+        std::cout << "CFA phase: red_x=" << cfaRedX << " red_y=" << cfaRedY << "\n";
 
         uint32_t s2w = 0;
         uint32_t s2h = 0;
@@ -234,7 +249,8 @@ int main(int argc, char** argv) {
     std::vector<uint16_t> stage3Test(width * height * 3);
 
     auto start = std::chrono::high_resolution_clock::now();
-    demosaic_bilinear_compat(stage2Data.data(), width, height, stage3Test.data());
+    demosaic_bilinear_compat(stage2Data.data(), width, height, stage3Test.data(),
+                             cfaRedX, cfaRedY);
     auto end = std::chrono::high_resolution_clock::now();
 
     double demosaicMs = std::chrono::duration<double, std::milli>(end - start).count();
