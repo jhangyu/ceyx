@@ -959,7 +959,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                              : std::chrono::high_resolution_clock::time_point{};  // repack_src now ~0
 #else
     if (pipelineVerbose()) {
-        fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAot)\n");
+        fprintf(stderr, "[Stage4-Diag] non-split-kernel interleaved path ACTIVE (runRenderStage4HalideAot)\n");
     }
     halide_dimension_t src_shape[3] = {
         {0, src_w, src_col_step, 0},
@@ -1234,7 +1234,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                    : std::chrono::high_resolution_clock::time_point{};  // repack_src ~0 (O(1) reshape)
 #else
     if (pipelineVerbose()) {
-        fprintf(stderr, "[Stage4-Diag] NON-ANDROID interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
+        fprintf(stderr, "[Stage4-Diag] non-split-kernel interleaved path ACTIVE (runRenderStage4HalideAotFromDevice)\n");
     }
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);

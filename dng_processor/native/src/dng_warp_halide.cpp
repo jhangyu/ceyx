@@ -551,6 +551,10 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
 static std::mutex s_zero_buf_mutex;
 static int32_t*   s_zero_buf_ptr   = nullptr;
 static size_t     s_zero_buf_bytes = 0;
+// The VirtualAlloc/mmap paths both have a std::calloc fallback, and calloc'd
+// memory must not be handed to VirtualFree/munmap. Remember where the current
+// buffer came from so the release below matches its allocation origin.
+static bool       s_zero_buf_is_calloc = false;
 
 const int32_t* getOrGrowZeroBuf(int width, int height) {
     const size_t needed_elems = static_cast<size_t>(width) * height * 3u;
@@ -558,14 +562,20 @@ const int32_t* getOrGrowZeroBuf(int width, int height) {
     std::lock_guard<std::mutex> lock(s_zero_buf_mutex);
     if (needed_bytes > s_zero_buf_bytes) {
         if (s_zero_buf_ptr) {
+            if (s_zero_buf_is_calloc) {
+                std::free(s_zero_buf_ptr);
+            } else {
 #if defined(_WIN32)
-            VirtualFree(s_zero_buf_ptr, 0, MEM_RELEASE);
+                VirtualFree(s_zero_buf_ptr, 0, MEM_RELEASE);
 #else
-            munmap(s_zero_buf_ptr, s_zero_buf_bytes);
+                munmap(s_zero_buf_ptr, s_zero_buf_bytes);
 #endif
+            }
             s_zero_buf_ptr = nullptr;
             s_zero_buf_bytes = 0;
+            s_zero_buf_is_calloc = false;
         }
+        bool from_calloc = false;
 #if defined(_WIN32)
         // MEM_RESERVE|MEM_COMMIT gives lazily-backed zero pages, matching the
         // MAP_ANON property this buffer depends on (the kernel never reads it
@@ -574,6 +584,7 @@ const int32_t* getOrGrowZeroBuf(int width, int height) {
                                PAGE_READWRITE);
         if (p == nullptr) {
             p = std::calloc(needed_elems, sizeof(int32_t));
+            from_calloc = true;
         }
 #else
         void* p = mmap(nullptr, needed_bytes,
@@ -581,10 +592,12 @@ const int32_t* getOrGrowZeroBuf(int width, int height) {
                        MAP_ANON | MAP_PRIVATE, -1, 0);
         if (p == MAP_FAILED) {
             p = std::calloc(needed_elems, sizeof(int32_t));
+            from_calloc = true;
         }
 #endif
         s_zero_buf_ptr = static_cast<int32_t*>(p);
         s_zero_buf_bytes = needed_bytes;
+        s_zero_buf_is_calloc = from_calloc && s_zero_buf_ptr != nullptr;
     }
     return s_zero_buf_ptr;
 }
