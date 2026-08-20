@@ -1,0 +1,11 @@
+# Tooling output.
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+
+# The vendored native libraries ARE the deliverable of this package, but the
+# repo-root .gitignore excludes *.dylib (line 31). Without these negations the
+# dylib is silently left out of commits and a fresh clone builds a host app
+# with no RAW decoding — the exact failure this package exists to prevent.
+!macos/Libraries/*.dylib
+!android/src/main/jniLibs/**/*.so

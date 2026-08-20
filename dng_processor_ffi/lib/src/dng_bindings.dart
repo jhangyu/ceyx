@@ -290,15 +290,20 @@ class DngNativeBindings {
 
     if (Platform.isMacOS) {
       final execDir = File(Platform.resolvedExecutable).parent.path;
-      final home = Platform.environment['HOME'] ?? '/tmp';
 
       // W7-6 (TD-18): dylib loader path 3/4 hardened.
       // Priority:
       //   1. System default (DYLD_LIBRARY_PATH) — no path prefix needed
-      //   2. App bundle Frameworks/ — production distribution
+      //   2. App bundle Frameworks/ — production distribution, populated by the
+      //      `dng_processor_ffi` plugin pod (see dng_processor_ffi/README.md)
       //   3. DNG_NATIVE_BUILD_DIR env override — CI / custom build directories
       //   4. Platform.script-relative — dart run from repo root (e.g. dart run bin/*)
-      //   5. last-resort dev path — hardcoded fallback for local dev at HOME/project/...
+      //
+      // 2026-08-21 (D1): the former candidate 5, a pair of absolute
+      // $HOME/project/... dev paths gated behind DNG_DEV_FALLBACK, is gone.
+      // Host apps now get the dylib bundled into Frameworks/ by the plugin, so
+      // candidate 2 covers what the dev fallback used to paper over, and
+      // candidate 4 still covers `dart run` inside this repo.
 
       // Resolve paths 4a/4b relative to the script entry point (repo layout).
       final scriptDir = Platform.script.toFilePath(windows: false);
@@ -317,11 +322,6 @@ class DngNativeBindings {
       final nativeBuildDir =
           Platform.environment['DNG_NATIVE_BUILD_DIR'];
 
-      // W5 (L-10): dev absolute fallback paths gated behind DNG_DEV_FALLBACK=1.
-      // Follows the DNG_NATIVE_BUILD_DIR precedent (env-gated, not unconditional).
-      final devFallback =
-          Platform.environment['DNG_DEV_FALLBACK'] == '1';
-
       lib = _openFirst([
         // 1. System default (DYLD_LIBRARY_PATH)
         'libdng_decoder_native.dylib',
@@ -334,11 +334,6 @@ class DngNativeBindings {
         scriptRelativeDist,
         // 4b. Script-relative: CMake build cache (dart run scenario)
         scriptRelativeBuild,
-        // 5. W5 (L-10): dev absolute paths, env-gated (DNG_DEV_FALLBACK=1)
-        if (devFallback)
-          '$home/project/flutter_dng_decoder/dng_processor/dist/libdng_decoder_native.dylib',
-        if (devFallback)
-          '$home/project/flutter_dng_decoder/dng_processor/native/build/libdng_decoder_native.dylib',
       ]);
     } else if (Platform.isWindows) {
       lib = ffi.DynamicLibrary.open('dng_decoder_native.dll');

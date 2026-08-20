@@ -41,6 +41,14 @@ dependencies:
   path_provider: ^2.1.5
   path: ^1.9.1
 
+  # Packaging-only plugin: makes host apps bundle libdng_decoder_native.
+  # It lives in a separate package because this project is an app project —
+  # its android/ and macos/ are app-shaped, so it cannot declare
+  # `flutter: plugin: platforms:` itself without breaking host app builds.
+  # See ../dng_processor_ffi/README.md.
+  dng_processor_ffi:
+    path: ../dng_processor_ffi
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

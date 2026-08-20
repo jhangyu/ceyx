@@ -1,0 +1,30 @@
+// Packaging-only Android library: it contributes nothing but jniLibs, so that
+// Gradle packs libdng_decoder_native.so into the host APK.
+//
+// No `buildscript {}` block on purpose — the Android Gradle Plugin is supplied
+// by the host application's build (Flutter's plugin loader includes this
+// directory as a subproject), so pinning an AGP version here would risk
+// clashing with the host's toolchain.
+group = 'com.example.dng_processor_ffi'
+version = '1.0'
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace = 'com.example.dng_processor_ffi'
+    compileSdk = 36
+
+    defaultConfig {
+        minSdk = 21
+    }
+
+    // ponytail: arm64 only — that is the only ABI the native build produces
+    // today (native/build-android/android-arm64). x86_64 emulators get no
+    // library and RAW decode will fail there. Add more ABIs when the upstream
+    // native build emits them.
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+}
