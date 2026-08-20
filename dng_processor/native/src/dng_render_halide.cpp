@@ -114,6 +114,18 @@ functions:
 #include <thread>
 #include <utility>
 #include <vector>
+
+// W7b: which Stage4 AOT kernel variant this host bridge talks to. The 3-channel
+// split kernel (dng_render_stage4_android) exists to dodge the Halide v21
+// SPIR-V Tuple R==G bug, so every Vulkan target needs it — Android and Windows
+// today. Mirrors CMake's DNG_STAGE4_SPLIT_KERNEL option (CMakeLists.txt:460).
+// Guards that are about the *kernel variant* (buffer shapes, RGBA scratch, D2H,
+// call sites) key off this macro; guards that are genuinely platform-specific
+// (arm_neon.h, mmap, Android-only prewarm) stay on __ANDROID__.
+#if defined(__ANDROID__) || defined(_WIN32)
+#define DNG_STAGE4_SPLIT_KERNEL 1
+#endif
+
 #if defined(__ANDROID__)
 // W7-E S4 prewarm per-size cache + crash-attribution markers (Android-only).
 // T9: mmap MAP_ANON lazy-zero dummy buffers (Gotcha #62).
@@ -134,8 +146,10 @@ functions:
 #include "dng_pipeline_config.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
 #include "dng_render_stage4_android.h"
+#endif
+#if defined(__ANDROID__)
 #include <arm_neon.h>
 #endif
 #include "dng_resample.h"
@@ -166,8 +180,8 @@ bool pipelineVerbose() {
     return cached;
 }
 
-#if defined(__ANDROID__)
-// G2: the Android Stage4 generator emits interleaved RGBA8 directly (macOS
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+// G2: the split Stage4 generator emits interleaved RGBA8 directly (macOS
 // layout; Probe-A verified). The only remaining host pass is the alpha-strip
 // for legacy RGB8 callers below (stripRgbaToRgbMT); the fused production path
 // D2Hs straight into the caller's RGBA buffer.
@@ -250,7 +264,9 @@ Stage4DstScratch& stage4DstScratch() {
 // G2: RGBA8 -> RGB8 alpha-strip for legacy RGB8 callers (vector overloads /
 // matrix test path). The production fused path (fuse_rgba=true) needs no host
 // pass at all — the kernel's D2H lands directly in the caller's RGBA buffer.
-// NEON vld4q_u8 + vst3q_u8 (16 px/iter), range-split across a few short-lived
+// On Android: NEON vld4q_u8 + vst3q_u8 (16 px/iter). W7b: other split-kernel
+// platforms (Windows) take the plain scalar loop — deliberately boring, no SSE
+// intrinsics. Range-split across a few short-lived
 // std::threads. Ad-hoc spawn is deliberate: this runs at most once per legacy
 // decode (~0.5 ms spawn cost vs a ~168 MB memory pass). The former persistent
 // RepackThreadPool (Q3b) existed for the retired per-decode planar repacks
@@ -260,11 +276,13 @@ Stage4DstScratch& stage4DstScratch() {
 void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
     auto strip_range = [rgba, rgb](int i_begin, int i_end) {
         int i = i_begin;
+#if defined(__ANDROID__)
         for (; i + 16 <= i_end; i += 16) {
             uint8x16x4_t v = vld4q_u8(rgba + static_cast<size_t>(i) * 4);
             uint8x16x3_t o = {v.val[0], v.val[1], v.val[2]};
             vst3q_u8(rgb + static_cast<size_t>(i) * 3, o);
         }
+#endif
         for (; i < i_end; ++i) {
             rgb[static_cast<size_t>(i) * 3 + 0] = rgba[static_cast<size_t>(i) * 4 + 0];
             rgb[static_cast<size_t>(i) * 3 + 1] = rgba[static_cast<size_t>(i) * 4 + 1];
@@ -296,7 +314,7 @@ void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
 }
 #endif
 
-#if !defined(__ANDROID__)
+#if !defined(DNG_STAGE4_SPLIT_KERNEL)
 // W7 (M-11): persistent scratch for the macOS RGBA→RGB strip path (legacy
 // vector callers). Avoids a fresh 96MB allocation + first-touch page-fault per
 // decode (same Gotcha #62 pattern). Grow-only; safe because all decodes are
@@ -885,7 +903,11 @@ bool buildRenderParams(dng_host& host,
         }
     }
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+    // Gotcha #92: the split kernel reads the hue/sat maps as one flat,
+    // component-major table and always samples the 3D path, so the shape must be
+    // sanitized + promoted here. The Tuple kernel takes an (n,3) 2D buffer and
+    // does its own 2D/3D selection — kernel-variant concern, not platform.
     ensureSafeHueSatMap(params.huesat_table,
                         params.huesat_hue_div,
                         params.huesat_sat_div,
@@ -918,7 +940,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         return false;
     }
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     // W2: zero-copy wrap the SDK interleaved RGB buffer as one flat 1D plane and
     // let the GPU gather src_rgb(base + c) directly (Gotcha #95, probe GO). The
     // former host repack_src (interleaved->3 dense planar) is eliminated — the
@@ -953,7 +975,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     Buffer<float> gamma_buf(const_cast<float*>(params.encode_gamma.data()),
                             static_cast<int>(params.encode_gamma.size()));
     Buffer<float> cw_buf(const_cast<float*>(params.camera_white), 3);
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     Buffer<float> c2r_buf(const_cast<float*>(params.camera_to_rgb), 9);
     Buffer<float> r2f_buf(const_cast<float*>(params.rgb_to_final), 9);
     Buffer<float> hs_table_buf(const_cast<float*>(params.huesat_table.data()),
@@ -976,7 +998,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                   static_cast<int>(params.look_encode.size()));
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: the kernel writes interleaved RGBA8 directly (macOS layout; Probe-A
     // verified). fuse_rgba callers hand in an RGBA8 (W*H*4) buffer — the D2H
     // lands there with zero host repack. Legacy RGB8 callers render into
@@ -1003,7 +1025,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba, dst_w, dst_h, 4);
 #endif
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     src_rgb_buf.set_host_dirty();
 #else
     src_buf.set_host_dirty();
@@ -1020,13 +1042,13 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     look_table_buf.set_host_dirty();
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     dst_rgba_buf.set_host_dirty(false);
 #else
     dst_buf.set_host_dirty(false);
 #endif
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
@@ -1100,7 +1122,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         return false;
     }
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
     if (dst_rgba_buf.copy_to_host() != 0) return false;
@@ -1157,7 +1179,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         return false;
     }
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     // Q2: these timepoints only feed the verbose-gated [Stage4-Perf] print
     // below; skip the clock reads entirely when not verbose. The real work
     // (copy_to_host / device_deallocate below) always runs regardless.
@@ -1234,7 +1256,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     Buffer<float> gamma_buf(const_cast<float*>(params.encode_gamma.data()),
                             static_cast<int>(params.encode_gamma.size()));
     Buffer<float> cw_buf(const_cast<float*>(params.camera_white), 3);
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     Buffer<float> c2r_buf(const_cast<float*>(params.camera_to_rgb), 9);
     Buffer<float> r2f_buf(const_cast<float*>(params.rgb_to_final), 9);
     Buffer<float> hs_table_buf(const_cast<float*>(params.huesat_table.data()),
@@ -1257,7 +1279,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                   static_cast<int>(params.look_encode.size()));
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: interleaved RGBA8 dst (macOS layout; Probe-A verified). Fused path
     // writes the caller's RGBA buffer directly; legacy RGB8 callers go through
     // RGBA scratch + alpha strip.
@@ -1292,13 +1314,13 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     look_table_buf.set_host_dirty();
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     dst_rgba_buf.set_host_dirty(false);
 #else
     dst_buf.set_host_dirty(false);
 #endif
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
@@ -1372,7 +1394,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         return false;
     }
 
-#if defined(__ANDROID__)
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
     if (dst_rgba_buf.copy_to_host() != 0) return false;
