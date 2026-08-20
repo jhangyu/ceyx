@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.14)
+# W3 (2026-08-21, Windows port): opt in to CMAKE_MSVC_RUNTIME_LIBRARY so the
+# `windows-vulkan` preset can actually select the static CRT (/MT) — with the
+# 3.14 minimum this policy would default to OLD and the setting would be a
+# silent no-op. The policy only governs MSVC runtime flag selection, so it has
+# no effect on the macOS or Android builds. Must precede project().
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
 project(dng_decoder_native VERSION 1.0.0 LANGUAGES CXX C)
 
 # Perf fix (2026-07-04): default to Release when the caller (script or IDE)
@@ -27,6 +35,14 @@ if(APPLE)
     add_compile_definitions(qMacOS=1 qWinOS=0)
 elseif(WIN32)
     add_compile_definitions(qMacOS=0 qWinOS=1)
+    # W3 (2026-08-21, Windows port, risk R4): four dng_sdk translation units
+    # include <windows.h> once qWinOS=1 (dng_pthread.cpp, dng_date_time.cpp,
+    # dng_string.cpp, dng_utils.cpp). Its unqualified min/max macros collide
+    # with <algorithm> and with the SDK's own Min_*/Max_* helpers, and the
+    # full header set drags in GDI's ERROR macro. Both are predefined
+    # project-wide rather than per-target so every TU (dng_sdk,
+    # dng_decoder_native, tests) sees the same windows.h shape.
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 elseif(ANDROID)
     add_compile_definitions(qAndroid=1 qMacOS=0 qWinOS=0)
 elseif(UNIX)
@@ -51,6 +67,42 @@ if(ANDROID)
     endif()
 endif()
 
+# W2a (2026-08-21, Windows port): Windows has no system zlib, so the plain
+# find_package(ZLIB REQUIRED) below is a hard configure failure there.
+# Acquisition order on Windows:
+#   1. -DDNG_ZLIB_ROOT=<prefix> or a vcpkg/CMAKE_PREFIX_PATH-provided config
+#      (find_package first — a user-supplied build always wins);
+#   2. otherwise fetch and build zlib from source (static, no examples), which
+#      keeps the produced DLL free of an external zlib1.dll dependency in the
+#      same spirit as the static libjpeg-turbo policy above.
+if(WIN32 AND NOT ZLIB_FOUND)
+    set(DNG_ZLIB_ROOT "" CACHE PATH
+        "zlib install prefix (contains include/zlib.h and lib/); empty = fetch from source")
+    if(DNG_ZLIB_ROOT)
+        list(APPEND CMAKE_PREFIX_PATH "${DNG_ZLIB_ROOT}")
+    endif()
+    find_package(ZLIB QUIET)
+    if(NOT ZLIB_FOUND)
+        include(FetchContent)
+        set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(dng_zlib
+            URL      https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+            URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23)
+        FetchContent_MakeAvailable(dng_zlib)
+        # zlib's own CMake exports `zlibstatic` (and `zlib` for the shared
+        # build) but no namespaced target, and its build-tree include dirs are
+        # not attached to the target. Supply both so the rest of this file can
+        # keep using ZLIB::ZLIB uniformly.
+        target_include_directories(zlibstatic PUBLIC
+            "${dng_zlib_SOURCE_DIR}" "${dng_zlib_BINARY_DIR}")
+        if(NOT TARGET ZLIB::ZLIB)
+            add_library(ZLIB::ZLIB ALIAS zlibstatic)
+        endif()
+        set(ZLIB_FOUND TRUE)
+        message(STATUS "Building vendored zlib 1.3.1 from source (Windows)")
+    endif()
+endif()
+
 if(NOT ZLIB_FOUND)
     find_package(ZLIB REQUIRED)
 endif()
@@ -67,15 +119,32 @@ endif()
 #   "file system sandbox blocked open()" and dlopen of our dylib fails outright.
 #   Static linking removes the external dependency entirely (option B of
 #   docs/logs/2026-08-17/handover-to-dng-decoder-team-libjpeg-blocker.md).
-if(ANDROID)
+# W2b (2026-08-21, Windows port): Windows has no system libjpeg either, so it
+# reuses the Android vendored-source branch. SIMD differs: Android gets NEON
+# with no extra tooling, while libjpeg-turbo's x86 SIMD path needs NASM — if
+# NASM is absent we fall back to WITH_SIMD=OFF rather than failing configure
+# (risk R6; JPEG decode is not on the Halide hot path).
+if(ANDROID OR WIN32)
     find_package(JPEG QUIET)
     if(NOT JPEG_FOUND)
-        # Build libjpeg-turbo from vendored source for Android.
+        # Build libjpeg-turbo from vendored source.
         # Minimal build: static library only, no turbojpeg API, no tools.
         set(ENABLE_SHARED OFF CACHE BOOL "" FORCE)
         set(ENABLE_STATIC ON CACHE BOOL "" FORCE)
         set(WITH_TURBOJPEG OFF CACHE BOOL "" FORCE)
-        set(WITH_SIMD ON CACHE BOOL "" FORCE)
+        if(ANDROID)
+            set(WITH_SIMD ON CACHE BOOL "" FORCE)
+            set(DNG_JPEG_SIMD_NOTE "NEON SIMD")
+        else()
+            find_program(DNG_NASM_EXECUTABLE NAMES nasm nasmw yasm)
+            if(DNG_NASM_EXECUTABLE)
+                set(WITH_SIMD ON CACHE BOOL "" FORCE)
+                set(DNG_JPEG_SIMD_NOTE "x86 SIMD via ${DNG_NASM_EXECUTABLE}")
+            else()
+                set(WITH_SIMD OFF CACHE BOOL "" FORCE)
+                set(DNG_JPEG_SIMD_NOTE "SIMD OFF - NASM not found")
+            endif()
+        endif()
         set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "libjpeg-turbo")
         add_subdirectory(${THIRD_PARTY_DIR}/libjpeg-turbo libjpeg-turbo-build EXCLUDE_FROM_ALL)
         # Expose headers (src/ has jpeglib.h etc, binary dir has generated jconfig.h)
@@ -83,7 +152,7 @@ if(ANDROID)
             ${THIRD_PARTY_DIR}/libjpeg-turbo/src
             ${CMAKE_CURRENT_BINARY_DIR}/libjpeg-turbo-build)
         set(JPEG_LIBRARIES jpeg-static)
-        message(STATUS "Building vendored libjpeg-turbo 3.1.0 for Android (NEON SIMD)")
+        message(STATUS "Building vendored libjpeg-turbo 3.1.0 (${DNG_JPEG_SIMD_NOTE})")
     endif()
     set(DNG_USE_LIBJPEG ON)
 elseif(APPLE)
@@ -215,7 +284,34 @@ add_library(dng_sdk STATIC ${DNG_SOURCES})
 # uint16 and are empirically unaffected (PSNR 999 + Stage3 SHA unchanged — see
 # Task_P16_routeA_adoption.md). The Halide Metal strict_float Stage4 kernel is the
 # matching GPU side; together Stage4-isolated is byte-exact.
-target_compile_options(dng_sdk PRIVATE -ffp-contract=off)
+# W3 (2026-08-21, Windows port, risk R3): the flag above is load-bearing, not a
+# style choice, so the Windows toolchain is *chosen* by it rather than the other
+# way round. clang-cl accepts the clang driver spelling when it is routed
+# through /clang:; MSVC's cl.exe has no equivalent (/fp:strict is a different,
+# stronger-but-not-identical guarantee and has never been validated against the
+# byte-exact Stage4 reference), so cl.exe is rejected at configure time instead
+# of silently producing a different colour pipeline. Override deliberately with
+# -DDNG_ALLOW_MSVC_FP_CONTRACT=ON if you are re-baselining the colour gate.
+option(DNG_ALLOW_MSVC_FP_CONTRACT
+       "Allow building with MSVC cl.exe despite the missing -ffp-contract=off equivalent (colour byte-exactness is then UNVERIFIED)"
+       OFF)
+if(MSVC AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(dng_sdk PRIVATE /clang:-ffp-contract=off)
+    elseif(DNG_ALLOW_MSVC_FP_CONTRACT)
+        message(WARNING "Building dng_sdk with cl.exe: -ffp-contract=off has no "
+                        "equivalent, Stage4 colour byte-exactness is UNVERIFIED.")
+        target_compile_options(dng_sdk PRIVATE /fp:strict)
+    else()
+        message(FATAL_ERROR
+            "dng_sdk requires -ffp-contract=off (see the Route A note above); "
+            "cl.exe does not support it. Configure with clang-cl, e.g. the "
+            "'windows-vulkan' preset (-DCMAKE_CXX_COMPILER=clang-cl), or set "
+            "-DDNG_ALLOW_MSVC_FP_CONTRACT=ON to accept an unverified colour path.")
+    endif()
+else()
+    target_compile_options(dng_sdk PRIVATE -ffp-contract=off)
+endif()
 target_include_directories(dng_sdk PUBLIC ${DNG_SDK_DIR} ${INC_DIR})
 if(DNG_USE_LIBJPEG)
     target_compile_definitions(dng_sdk PUBLIC qDNGThreadSafe=1 qDNGXMPDocOps=0 qDNGXMPFiles=0 qDNGUseLibJPEG=1)
@@ -335,10 +431,44 @@ else()
     elseif(ANDROID)
         # Strict Android Vulkan device contract: arm64-v8a Vulkan with Halide vk_int8/vk_int16/vk_int64.
         set(AOT_TARGET "arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
+    elseif(WIN32)
+        # W6a (2026-08-21, Windows port): same strict Vulkan device contract as
+        # Android, x86-64 host. The pipeline has no CPU fallback route
+        # (dng_pipeline_v2.cpp requireGpuBackend), so a GPU feature is mandatory
+        # rather than optional here.
+        set(AOT_TARGET "x86-64-windows-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
     else()
         set(AOT_TARGET "host-no_asserts-no_bounds_query")
     endif()
 endif()
+message(STATUS "Halide AOT target: ${AOT_TARGET}")
+
+# W6b (2026-08-21, Windows port, risk R8): Halide names AOT static-library
+# outputs after the *target* platform, not the host — `.a` on POSIX and `.lib`
+# for windows targets (see
+# third_party/halide/lib/cmake/HalideHelpers/HalideGeneratorHelpers.cmake).
+# Every AOT artifact path below therefore goes through this variable; a literal
+# ".a" left anywhere in the AOT/link blocks is a missing-file link error on
+# Windows whose message points at the build directory, not at this file.
+if(AOT_TARGET MATCHES "windows")
+    set(DNG_AOT_LIB_EXT ".lib")
+else()
+    set(DNG_AOT_LIB_EXT ".a")
+endif()
+
+# W7 (2026-08-21, Windows port, risk R2): the three-channel-split Stage4 kernel
+# (dng_render_stage4_android) exists to dodge the Halide v21 SPIR-V Tuple R==G
+# bug — a *Vulkan* codegen defect, not an Android platform trait. Select it by
+# the AOT target's backend instead of by platform, so Windows-Vulkan inherits
+# the same workaround. Android is unaffected: both its presets resolve
+# AOT_TARGET to a string containing "vulkan", exactly the cases the previous
+# `ANDROID OR override MATCHES "android"` condition covered.
+if(AOT_TARGET MATCHES "vulkan")
+    set(DNG_STAGE4_SPLIT_KERNEL ON)
+else()
+    set(DNG_STAGE4_SPLIT_KERNEL OFF)
+endif()
+message(STATUS "Halide AOT lib extension: ${DNG_AOT_LIB_EXT}; Stage4 split kernel: ${DNG_STAGE4_SPLIT_KERNEL}")
 
 # Stage4 render uses same base target with -no_runtime (fixes hardcoded Metal bug)
 # Route A adoption (P16, 2026-06-12): the macOS Metal production Stage4 render is
@@ -364,70 +494,71 @@ if(NOT DNG_CROSS_BUILD)
 # W6 M-4: Standalone Halide runtime replaces legacy dng_pipeline.a runtime anchor.
 # Any generator binary can emit the runtime via `-r`; we use dng_demosaic_generator.
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/halide_runtime.a
+    OUTPUT ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
     COMMAND dng_demosaic_generator -r halide_runtime -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}
     DEPENDS dng_demosaic_generator
     COMMENT "Generating standalone Halide runtime..."
 )
-add_custom_target(halide_runtime_target DEPENDS ${HALIDE_OUTPUT_DIR}/halide_runtime.a)
+add_custom_target(halide_runtime_target DEPENDS ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT})
 
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.h
+    OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp.h
     COMMAND dng_warp_generator -g rectilinear_warp -f rectilinear_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
     DEPENDS dng_warp_generator
     COMMENT "Generating Halide AOT Rectilinear Warp..."
 )
-add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a)
+add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT})
 
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.h
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.h
     COMMAND dng_demosaic_generator -g dng_demosaic_bilinear -f dng_demosaic_bilinear -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
     DEPENDS dng_demosaic_generator
     COMMENT "Generating Halide AOT Stage3 Demosaic..."
 )
-add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
 
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
     COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime$<$<BOOL:${DNG_DEMOSAIC_WARP_STRICT_FLOAT}>:-strict_float> fast_codegen=$<IF:$<BOOL:${DNG_DEMOSAIC_WARP_FAST_CODEGEN}>,true,false>
     DEPENDS dng_demosaic_warp_generator
     COMMENT "Generating Halide AOT Stage3 Demosaic+Warp..."
 )
-add_custom_target(dng_demosaic_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a)
+add_custom_target(dng_demosaic_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT})
 
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.h
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4.h
     COMMAND dng_render_generator -g dng_render_stage4 -f dng_render_stage4 -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
     DEPENDS dng_render_generator
     COMMENT "Generating Halide AOT Stage4 Render..."
 )
-add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a)
+add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 
-# Phase 14: Android Vulkan three-channel-split Stage4 generator.
+# Phase 14: Vulkan three-channel-split Stage4 generator (was Android-only; see
+# the DNG_STAGE4_SPLIT_KERNEL note above).
 # Eliminates Tuple + dim(2) codegen that triggers Halide v21 SPIR-V R==G bug.
-if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
+if(DNG_STAGE4_SPLIT_KERNEL)
     add_custom_command(
-        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.h
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.h
         COMMAND dng_render_generator -g dng_render_stage4_android -f dng_render_stage4_android -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET} diag_stage=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE}
         DEPENDS dng_render_generator
         COMMENT "Generating Halide AOT Stage4 Render (Android 3-channel split)..."
     )
-    add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+    add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
 
     # P14-W4-4 GO/NO-GO probe: isolated interleaved flat-1D src-read AOT.
     # Separate kernel/signature; does not touch the production Stage4 kernel.
     add_custom_command(
-        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.h
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.h
         COMMAND dng_render_generator -g dng_render_stage4_android_probe -f dng_render_stage4_android_probe -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
         DEPENDS dng_render_generator
         COMMENT "Generating Halide AOT Stage4 Render PROBE (Android interleaved-src go/no-go)..."
     )
-    add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a)
+    add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT})
 endif()
 
 # Phase 10 Sprint C1: MapPolynomial AOT (Stage 2 OpcodeList2 GPU).
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.h
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.h
     COMMAND dng_opcode_polynomial_generator -g dng_opcode_polynomial
         -f dng_opcode_polynomial -o ${HALIDE_OUTPUT_DIR}
         target=${AOT_TARGET}-no_runtime
@@ -435,10 +566,10 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage2 OpcodeList2 MapPolynomial..."
 )
 add_custom_target(dng_opcode_polynomial_aot_target
-    DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a)
+    DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT})
 
 add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.h
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.h
     COMMAND dng_opcode_polynomial3_generator -g dng_opcode_polynomial3
         -f dng_opcode_polynomial3 -o ${HALIDE_OUTPUT_DIR}
         target=${AOT_TARGET}-no_runtime
@@ -446,23 +577,23 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage2 OpcodeList2 batched MapPolynomial..."
 )
 add_custom_target(dng_opcode_polynomial3_aot_target
-    DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+    DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 
 # When building host generators only (Stage 1), pull AOT targets into ALL
 # so `cmake --build` actually runs the generators.
 if(DNG_HOST_GENERATORS_ONLY)
     set(_DNG_ALL_AOT_DEPS
-        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     )
-    if(ANDROID OR (DNG_AOT_TARGET_OVERRIDE AND DNG_AOT_TARGET_OVERRIDE MATCHES "android"))
-        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
-        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a)
+    if(DNG_STAGE4_SPLIT_KERNEL)
+        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
+        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT})
     endif()
     add_custom_target(dng_all_aot ALL DEPENDS ${_DNG_ALL_AOT_DEPS})
 endif()
@@ -502,16 +633,17 @@ target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
 
 # AOT artifacts (always linked — either freshly built or prebuilt)
 target_link_libraries(dng_decoder_native
-    ${HALIDE_OUTPUT_DIR}/halide_runtime.a
-    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
-    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
-    ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
-    ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
-    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
-    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
-if(ANDROID)
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+# W7: link the split Stage4 kernel wherever it is generated (Vulkan targets).
+if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(dng_decoder_native
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a)
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
     target_compile_definitions(dng_decoder_native PRIVATE
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()
@@ -538,6 +670,27 @@ elseif(ANDROID)
     endif()
     find_library(LOG_LIBRARY log)
     target_link_libraries(dng_decoder_native ${VULKAN_LIBRARY} ${LOG_LIBRARY})
+elseif(WIN32)
+    # W8 (2026-08-21, Windows port): the Halide Vulkan runtime resolves its
+    # entry points against the loader import library. The Vulkan SDK installer
+    # sets VULKAN_SDK; -DDNG_VULKAN_LIB=<path to vulkan-1.lib> overrides it.
+    set(DNG_VULKAN_LIB "" CACHE FILEPATH
+        "Path to vulkan-1.lib (defaults to $ENV{VULKAN_SDK}/Lib/vulkan-1.lib)")
+    if(NOT DNG_VULKAN_LIB)
+        find_library(VULKAN_LIBRARY
+            NAMES vulkan-1
+            HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/Lib32")
+        if(NOT VULKAN_LIBRARY)
+            message(FATAL_ERROR
+                "vulkan-1.lib not found. Install the LunarG Vulkan SDK (so that "
+                "VULKAN_SDK is set) or pass -DDNG_VULKAN_LIB=<path/to/vulkan-1.lib>. "
+                "There is no CPU fallback route in this pipeline.")
+        endif()
+    else()
+        set(VULKAN_LIBRARY "${DNG_VULKAN_LIB}")
+    endif()
+    message(STATUS "Linking Vulkan loader: ${VULKAN_LIBRARY}")
+    target_link_libraries(dng_decoder_native ${VULKAN_LIBRARY})
 endif()
 
 # Phase 14 W0 acceptance smoke: Android cross-build test binary for ADB.
@@ -564,15 +717,15 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_DIR}/include)
     target_link_libraries(test_decode_android PRIVATE
         dng_sdk
-        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
         ${LOG_LIBRARY})
     target_compile_definitions(test_decode_android PRIVATE
@@ -607,14 +760,14 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_DIR}/include)
     target_link_libraries(dng_ffi_harness_android PRIVATE
         dng_sdk
-        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
         ${LOG_LIBRARY})
     target_compile_definitions(dng_ffi_harness_android PRIVATE
@@ -643,14 +796,14 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_DIR}/include)
     target_link_libraries(test_device_handoff_android PRIVATE
         dng_sdk
-        ${HALIDE_OUTPUT_DIR}/halide_runtime.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
         ${LOG_LIBRARY})
     target_compile_definitions(test_device_handoff_android PRIVATE
@@ -745,9 +898,9 @@ target_include_directories(test_device_handoff PRIVATE
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
 else()
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 endif()
 add_dependencies(test_device_handoff halide_runtime_target)
 add_dependencies(test_device_handoff dng_demosaic_aot_target)
@@ -807,9 +960,9 @@ target_include_directories(test_decode PRIVATE
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a ${JPEG_LIBRARIES})
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
 else()
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_render_stage4.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 endif()
 add_dependencies(test_decode halide_runtime_target)
 add_dependencies(test_decode dng_demosaic_aot_target)
@@ -840,7 +993,7 @@ target_include_directories(test_mosaic_halide PRIVATE
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 # W6 M-4: halide_runtime.a provides Metal/Vulkan runtime symbols for all -no_runtime AOT kernels.
-target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial.a ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.a)
+target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 add_dependencies(test_mosaic_halide halide_runtime_target)
 add_dependencies(test_mosaic_halide dng_warp_aot_target)
 add_dependencies(test_mosaic_halide dng_demosaic_aot_target)
@@ -861,7 +1014,7 @@ target_include_directories(test_cfa_phase PRIVATE
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 # dng_sdk: the resolver case feeds dng_resolve_cfa_phase a synthetic dng_mosaic_info.
-target_link_libraries(test_cfa_phase dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+target_link_libraries(test_cfa_phase dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
 add_dependencies(test_cfa_phase halide_runtime_target)
 add_dependencies(test_cfa_phase dng_demosaic_aot_target)
 if(APPLE)
@@ -877,7 +1030,7 @@ target_include_directories(test_mosaic_debug PRIVATE
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 # W6 M-4: same standalone runtime as test_mosaic_halide above.
-target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime.a ${HALIDE_OUTPUT_DIR}/rectilinear_warp.a ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.a)
+target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
 add_dependencies(test_mosaic_debug halide_runtime_target)
 add_dependencies(test_mosaic_debug dng_warp_aot_target)
 add_dependencies(test_mosaic_debug dng_demosaic_aot_target)

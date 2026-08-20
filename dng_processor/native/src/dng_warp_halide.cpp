@@ -125,8 +125,15 @@ functions:
 #include <dng_pixel_buffer.h>
 #include <dng_rect.h>
 #include <dng_utils.h>
+// W4 (2026-08-21, Windows port): POSIX mapping headers are unavailable under
+// MSVC/clang-cl; getOrGrowZeroBuf below uses VirtualAlloc there. (The
+// LazyZeroBuf helper further down is already inside an __ANDROID__ guard.)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -551,16 +558,31 @@ const int32_t* getOrGrowZeroBuf(int width, int height) {
     std::lock_guard<std::mutex> lock(s_zero_buf_mutex);
     if (needed_bytes > s_zero_buf_bytes) {
         if (s_zero_buf_ptr) {
+#if defined(_WIN32)
+            VirtualFree(s_zero_buf_ptr, 0, MEM_RELEASE);
+#else
             munmap(s_zero_buf_ptr, s_zero_buf_bytes);
+#endif
             s_zero_buf_ptr = nullptr;
             s_zero_buf_bytes = 0;
         }
+#if defined(_WIN32)
+        // MEM_RESERVE|MEM_COMMIT gives lazily-backed zero pages, matching the
+        // MAP_ANON property this buffer depends on (the kernel never reads it
+        // when precompute_coords=false, so pages stay uncommitted).
+        void* p = VirtualAlloc(nullptr, needed_bytes, MEM_RESERVE | MEM_COMMIT,
+                               PAGE_READWRITE);
+        if (p == nullptr) {
+            p = std::calloc(needed_elems, sizeof(int32_t));
+        }
+#else
         void* p = mmap(nullptr, needed_bytes,
                        PROT_READ | PROT_WRITE,
                        MAP_ANON | MAP_PRIVATE, -1, 0);
         if (p == MAP_FAILED) {
             p = std::calloc(needed_elems, sizeof(int32_t));
         }
+#endif
         s_zero_buf_ptr = static_cast<int32_t*>(p);
         s_zero_buf_bytes = needed_bytes;
     }

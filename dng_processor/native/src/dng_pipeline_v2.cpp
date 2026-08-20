@@ -56,8 +56,15 @@ functions:
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+// W4 (2026-08-21, Windows port): <sys/mman.h>/<unistd.h> do not exist in the
+// MSVC/clang-cl environment. The only user is Stage3WorkspacePool below, which
+// gets a VirtualAlloc branch with the same lazy-commit semantics.
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #include <dng_color_space.h>
 #include <dng_simple_image.h>
@@ -200,13 +207,28 @@ class Stage3WorkspacePool {
     const size_t need_bytes = elements * sizeof(uint16_t);
     if (need_bytes > capacity_bytes_) {
       if (ptr_) {
+#if defined(_WIN32)
+        // MEM_RELEASE requires the size argument to be 0 and the address to be
+        // the exact base returned by VirtualAlloc.
+        VirtualFree(ptr_, 0, MEM_RELEASE);
+#else
         munmap(ptr_, capacity_bytes_);
+#endif
         ptr_ = nullptr;
         capacity_bytes_ = 0;
       }
+#if defined(_WIN32)
+      // MEM_RESERVE|MEM_COMMIT on Windows commits lazily backed zero pages,
+      // the same property MAP_ANON gives us here: the ~262ms eager zero-fill
+      // is avoided because physical pages arrive on first touch.
+      void *p = VirtualAlloc(nullptr, need_bytes, MEM_RESERVE | MEM_COMMIT,
+                             PAGE_READWRITE);
+      if (p == nullptr) return nullptr;
+#else
       void *p = mmap(nullptr, need_bytes, PROT_READ | PROT_WRITE,
                      MAP_ANON | MAP_PRIVATE, -1, 0);
       if (p == MAP_FAILED) return nullptr;
+#endif
       ptr_ = static_cast<uint16_t *>(p);
       capacity_bytes_ = need_bytes;
     }

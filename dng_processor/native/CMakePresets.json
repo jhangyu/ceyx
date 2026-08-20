@@ -45,6 +45,21 @@
         "DNG_ENABLE_WARP_PRECOMPUTED_DIAG": "OFF",
         "DNG_DIAGNOSTIC_BUILD": "OFF"
       }
+    },
+    {
+      "name": "windows-vulkan",
+      "displayName": "Windows Vulkan (native, clang-cl)",
+      "description": "Single-stage native Windows x64 build with the Halide Vulkan GPU backend. Generators run natively, so no host/target split is needed (unlike Android). Run from a Developer Command Prompt / after vcvars64.bat so Ninja can find the MSVC headers and libs, with LLVM's clang-cl on PATH and the LunarG Vulkan SDK installed (VULKAN_SDK set). clang-cl is mandatory: dng_sdk needs -ffp-contract=off for the byte-exact Stage4 colour contract, which cl.exe cannot express.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
+        "DNG_DIAGNOSTIC_BUILD": "OFF",
+        "DNG_VK_PIPELINE_CACHE": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -60,6 +75,11 @@
     {
       "name": "android-vulkan",
       "configurePreset": "android-vulkan",
+      "targets": ["dng_decoder_native"]
+    },
+    {
+      "name": "windows-vulkan",
+      "configurePreset": "windows-vulkan",
       "targets": ["dng_decoder_native"]
     }
   ]

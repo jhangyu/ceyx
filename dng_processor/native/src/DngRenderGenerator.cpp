@@ -2,6 +2,17 @@
 
 using namespace Halide;
 
+// W7 (2026-08-21, Windows port): the dense-planar src/dst layout selected below
+// is a workaround for the Halide v21 SPIR-V Tuple/dim(2) codegen bug, i.e. a
+// property of the *Vulkan* backend rather than of Android. Selecting it by
+// backend lets the Windows-Vulkan AOT target reuse the same workaround.
+// Android is unaffected: its AOT target string always carries the vulkan
+// feature (CMakeLists.txt AOT_TARGET), so this predicate is true exactly where
+// `os == Target::Android` used to be.
+static bool uses_vulkan_planar_layout(const Target &t) {
+    return t.os == Target::Android || t.has_feature(Target::Vulkan);
+}
+
 
 class DngRenderStage4 : public Halide::Generator<DngRenderStage4> {
 public:
@@ -37,7 +48,7 @@ public:
     void generate() {
         Var x("x"), y("y"), c("c");
 
-        if (get_target().os == Target::Android) {
+        if (uses_vulkan_planar_layout(get_target())) {
             // Vulkan SPIR-V workaround: use dense planar src so GPU code never
             // reads interleaved channel-stride-1 input on dim(2).
             src.dim(0).set_stride(1);
@@ -50,7 +61,7 @@ public:
             src.dim(2).set_bounds(0, 3);
             src.dim(2).set_stride(1);
         }
-        if (get_target().os == Target::Android) {
+        if (uses_vulkan_planar_layout(get_target())) {
             // Vulkan SPIR-V workaround: use dense planar dst so GPU code never
             // writes interleaved channel-stride-1 output on dim(2).
             dst.dim(0).set_stride(1);
@@ -405,7 +416,7 @@ public:
                                    cast<uint8_t>(encode8(f_g)),
                                    cast<uint8_t>(encode8(f_b)));
 
-        if (get_target().os == Target::Android) {
+        if (uses_vulkan_planar_layout(get_target())) {
             dst(x, y, c) = select(c == 0, rendered_rgb(x, y)[0],
                                   c == 1, rendered_rgb(x, y)[1],
                                           rendered_rgb(x, y)[2]);
