@@ -1,0 +1,6 @@
+Placeholder so this directory exists in git before dng_decoder_native.dll is
+committed here (W12, produced on a Windows build machine — see
+CMakeLists.txt in the parent directory and
+docs/logs/2026-08-21/windows-ffi-build-runbook.md in the Halcyon repo).
+
+Delete this file once dng_decoder_native.dll has been committed alongside it.
