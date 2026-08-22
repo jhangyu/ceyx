@@ -213,8 +213,14 @@ class DngDecoderService {
   /// null. Callers must read the returned [DngImage.width]/[DngImage.height]
   /// rather than assuming the request was honored.
   Future<DngImage> decodeOnWorker(String filePath, {int? maxDim}) async {
+    // Hoist to a local before the closure: referencing `_libraryPath`
+    // directly inside Isolate.run's closure captures `this` (the whole
+    // DngDecoderService, including its DynamicLibrary/NativeFinalizer once
+    // initialized), which Isolate.run cannot send — it throws ArgumentError
+    // for any service that has already been initialize()d.
+    final libraryPath = _libraryPath;
     final result = await Isolate.run(
-      () => _decodeFileToTransferable(filePath, _libraryPath, maxDim),
+      () => _decodeFileToTransferable(filePath, libraryPath, maxDim),
     );
     return result.toImage();
   }
