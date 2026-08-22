@@ -45,6 +45,16 @@ typedef DngDecodeAndProcessNative =
 typedef DngDecodeAndProcessDart =
     ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath);
 
+// Sized decode entry (additive; not present in the currently shipped
+// dylib — lookup MUST be guarded, see DngNativeBindings._).
+typedef DngDecodeAndProcessSizedNative =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+    );
+typedef DngDecodeAndProcessSizedDart =
+    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath, int maxDim);
+
 typedef DngFreeResultNative = ffi.Void Function(ffi.Pointer<DngResult> result);
 typedef DngFreeResultDart = void Function(ffi.Pointer<DngResult> result);
 
@@ -92,6 +102,12 @@ class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
 
   late final DngDecodeAndProcessDart dngDecodeAndProcess;
+  // Additive sized-decode entry. Null when the loaded dylib predates
+  // `dng_decode_and_process_sized` (the shipped dylib as of 2026-08-23 does
+  // not have it). Lookup is guarded in the constructor below — an unguarded
+  // lookup of a missing symbol would throw in the constructor and kill ALL
+  // decoding, not just sized calls.
+  DngDecodeAndProcessSizedDart? dngDecodeAndProcessSized;
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
   late final DngDecoderSetPipelineCachePathDart dngDecoderSetPipelineCachePath;
@@ -116,11 +132,26 @@ class DngNativeBindings {
   late final ffi.Pointer<ffi.NativeFunction<DngFreeHalideBufferNative>>
   dngFreeHalideBufferPtr;
 
+  /// Whether the loaded dylib exports `dng_decode_and_process_sized`.
+  bool get sizedDecodeAvailable => dngDecodeAndProcessSized != null;
+
   DngNativeBindings._(this._lib) {
     dngDecodeAndProcess = _lib
         .lookupFunction<DngDecodeAndProcessNative, DngDecodeAndProcessDart>(
           'dng_decode_and_process',
         );
+
+    try {
+      dngDecodeAndProcessSized = _lib
+          .lookupFunction<
+            DngDecodeAndProcessSizedNative,
+            DngDecodeAndProcessSizedDart
+          >('dng_decode_and_process_sized');
+    } catch (_) {
+      // Symbol absent in this build of the dylib — sizedDecodeAvailable
+      // stays false and callers fall back to dngDecodeAndProcess.
+      dngDecodeAndProcessSized = null;
+    }
 
     dngDecoderWarmupForSize = _lib
         .lookupFunction<
@@ -221,6 +252,14 @@ class DngNativeBindings {
   /// reporting stays covered by a runnable check.
   static ffi.DynamicLibrary openFirstForTesting(List<String> paths) =>
       _openFirst(paths);
+
+  /// Test-only entry point that loads bindings from an explicit dylib path,
+  /// bypassing the platform-specific candidate search in [load]. Exists so
+  /// tests can exercise the guarded `dng_decode_and_process_sized` lookup
+  /// against the actual shipped dylib without depending on the app-bundle /
+  /// script-relative search paths that only resolve at runtime.
+  factory DngNativeBindings.loadForTesting(String path) =>
+      DngNativeBindings._(_openFirst([path]));
 
   /// Best-effort ABSOLUTE path of the image that [lib] was actually loaded
   /// from, for logging only.

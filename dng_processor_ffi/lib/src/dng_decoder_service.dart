@@ -191,8 +191,15 @@ class DngDecoderService {
   /// across isolate boundaries. It copies the native buffer into Dart-owned
   /// bytes, transfers those bytes with [TransferableTypedData], then frees the
   /// native result inside the worker isolate.
-  Future<DngImage> decodeOnWorker(String filePath) async {
-    final result = await Isolate.run(() => _decodeFileToTransferable(filePath));
+  ///
+  /// [maxDim] requests a decode whose longest output edge is approximately
+  /// [maxDim] pixels. It is honored only when the loaded native library
+  /// exports `dng_decode_and_process_sized`; otherwise (or when null) the
+  /// existing full-resolution entry point is used unchanged.
+  Future<DngImage> decodeOnWorker(String filePath, {int? maxDim}) async {
+    final result = await Isolate.run(
+      () => _decodeFileToTransferable(filePath, maxDim),
+    );
     return result.toImage();
   }
 
@@ -280,9 +287,12 @@ class DngDecoderService {
     return _decodeZeroCopy(filePath);
   }
 
-  static _DecodeWorkerResult _decodeFileToTransferable(String filePath) {
+  static _DecodeWorkerResult _decodeFileToTransferable(
+    String filePath,
+    int? maxDim,
+  ) {
     final service = DngDecoderService()..initialize();
-    return service._decodeToTransferable(filePath);
+    return service._decodeToTransferable(filePath, maxDim);
   }
 
   DngImage _decodeZeroCopy(String filePath) {
@@ -355,7 +365,7 @@ class DngDecoderService {
     }
   }
 
-  _DecodeWorkerResult _decodeToTransferable(String filePath) {
+  _DecodeWorkerResult _decodeToTransferable(String filePath, int? maxDim) {
     if (!_initialized) {
       initialize();
     }
@@ -364,7 +374,9 @@ class DngDecoderService {
     Pointer<DngResult> resultPtr = nullptr;
 
     try {
-      resultPtr = _bindings.dngDecodeAndProcess(pathPtr.cast());
+      resultPtr = (maxDim != null && _bindings.sizedDecodeAvailable)
+          ? _bindings.dngDecodeAndProcessSized!(pathPtr.cast(), maxDim)
+          : _bindings.dngDecodeAndProcess(pathPtr.cast());
 
       if (resultPtr == nullptr) {
         throw DngDecodeException(-1, 'Native function returned null');
