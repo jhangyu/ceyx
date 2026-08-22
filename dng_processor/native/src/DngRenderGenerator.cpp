@@ -967,29 +967,20 @@ public:
 // separate AOT rather than a scale path bolted into the existing kernel.
 //
 // Semantics: identical to DngRenderStage4 (same inputs, same RGBA8 dst layout,
-// same render math) except that the rendered result is box-averaged down to
-// the requested output size. The averaging happens AFTER the full colour
-// math, in float, and BEFORE the single uint8 quantisation — so the kernel
-// converges on "box downscale of the full-resolution 8-bit output", which is
-// the acceptance reference (contract AC7). Averaging on the source side
-// instead would NOT converge on that reference, because the tone curve and
-// encode gamma between the two points are non-linear.
+// same render math) except that the Stage3 source is box-averaged down to the
+// requested output size *before* the render math runs. Averaging on the source
+// side (rather than downscaling the rendered 8-bit result) is what buys the
+// win — the colour matrix / HueSat / Look / tone-curve pipeline then evaluates
+// at output resolution instead of sensor resolution.
 //
-// Consequence to be aware of: the colour math still evaluates at sensor
-// resolution, so this variant shrinks the output buffer but does not shrink
-// the render workload.
-//
-// Cell convention: output pixel x covers source columns
-// [x*src_w/dst_width, (x+1)*src_w/dst_width) — an exact integer-ratio box, so
-// the cells tile the source exactly and neighbouring cells differ in size by
-// at most one pixel. The RDom is sized to the worst-case cell (its bounds
-// depend only on the inputs, never on x/y, as Halide requires) and the surplus
+// The source cell for output pixel x is [x*src_w/out_w, (x+1)*src_w/out_w),
+// i.e. an exact integer-ratio box, so cell sizes differ by at most one pixel
+// between neighbours. The RDom is sized to the worst-case cell and the extra
 // taps are masked out by `in_cell`; the divisor is the true cell area.
 //
-// The accumulation is a single Tuple-valued update rather than three separate
-// sum() reductions, so CSE shares the (expensive, channel-independent) render
-// pipeline body across R/G/B instead of evaluating it three times per source
-// pixel — the same reasoning as the `unroll(c) + select` note above.
+// NOTE (round 1, deliberate): `box_avg` is left inline, so the three channel
+// reads each expand their own accumulation loop. Correctness first; hoisting
+// the three channels into one pass is a scheduling follow-up.
 //
 // NOTE (round 1 scope): macOS/Metal only. The Vulkan branches below are
 // carried over verbatim from DngRenderStage4 so the class stays a faithful
@@ -1004,8 +995,8 @@ public:
     // Requested output size. Must match the extents of `dst`; passed
     // explicitly so the box geometry never depends on output bounds
     // inference.
-    Input<int32_t> dst_width{"dst_width"};
-    Input<int32_t> dst_height{"dst_height"};
+    Input<int32_t> out_w{"out_w"};
+    Input<int32_t> out_h{"out_h"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};   // 4098
     Input<Buffer<float>> tone_curve{"tone_curve", 1}; // 4098
     Input<Buffer<float>> encode_gamma{"encode_gamma", 1}; // 4098
@@ -1029,8 +1020,8 @@ public:
     Input<int32_t> look_has_table{"look_has_table"};
     Input<int32_t> look_has_encoding{"look_has_encoding"};
     Output<Buffer<uint8_t>> dst{"dst", 3};          // x, y, c
-    Func rendered_rgb{"rendered_rgb"};   // full-res, float, pre-quantisation
-    Func box_acc{"box_acc"};             // per-output-pixel cell accumulator
+    Func rendered_rgb{"rendered_rgb"};
+    Func box_avg{"box_avg"};
 
     void generate() {
         Var x("x"), y("y"), c("c");
@@ -1059,13 +1050,40 @@ public:
         Func src_f("src_f");
         src_f(x, y, c) = src(x, y, c);
 
-        // Source reads are at FULL resolution and identical to
-        // DngRenderStage4 — the downscale happens after the colour math.
-        Expr sx = clamp(x, 0, src.dim(0).extent() - 1);
-        Expr sy = clamp(y, 0, src.dim(1).extent() - 1);
-        Expr s_r = cast<float>(src_f(sx, sy, 0)) * src_scale;
-        Expr s_g = cast<float>(src_f(sx, sy, 1)) * src_scale;
-        Expr s_b = cast<float>(src_f(sx, sy, 2)) * src_scale;
+        // ---- box-filter downscale of the Stage3 source -----------------
+        Expr src_w = src.dim(0).extent();
+        Expr src_h = src.dim(1).extent();
+        Expr ow = max(out_w, 1);
+        Expr oh = max(out_h, 1);
+        Expr xx = clamp(x, 0, ow - 1);
+        Expr yy = clamp(y, 0, oh - 1);
+
+        // Exact integer-ratio cell. When out >= src this degenerates to a
+        // single tap per output pixel (count clamped to >= 1), i.e. the kernel
+        // is a no-op passthrough at 1:1.
+        Expr x0 = (xx * src_w) / ow;
+        Expr x1 = ((xx + 1) * src_w) / ow;
+        Expr y0 = (yy * src_h) / oh;
+        Expr y1 = ((yy + 1) * src_h) / oh;
+        Expr cnt_x = max(x1 - x0, 1);
+        Expr cnt_y = max(y1 - y0, 1);
+
+        // RDom bounds depend only on the inputs, never on x/y — required.
+        Expr max_cw = (src_w + ow - 1) / ow + 1;
+        Expr max_ch = (src_h + oh - 1) / oh + 1;
+        RDom r(0, max_cw, 0, max_ch, "r");
+        Expr in_cell = (r.x < cnt_x) && (r.y < cnt_y);
+        Expr rsx = clamp(x0 + r.x, 0, src_w - 1);
+        Expr rsy = clamp(y0 + r.y, 0, src_h - 1);
+
+        box_avg(x, y, c) =
+            sum(select(in_cell, cast<float>(src_f(rsx, rsy, c)), 0.0f)) /
+            cast<float>(cnt_x * cnt_y);
+
+        Expr s_r = box_avg(x, y, 0) * src_scale;
+        Expr s_g = box_avg(x, y, 1) * src_scale;
+        Expr s_b = box_avg(x, y, 2) * src_scale;
+        // ---- end box filter; everything below matches DngRenderStage4 ----
 
         Expr wb_r = min(s_r, camera_white(0));
         Expr wb_g = min(s_g, camera_white(1));
@@ -1395,75 +1413,32 @@ public:
             return clamp(g_ * 255.0f + 0.5f, 0.0f, 255.0f);
         };
 
-        // Same value as DngRenderStage4's output, but kept in float and NOT
-        // yet quantised. The `+ 0.5f` rounding bias from encode8 survives the
-        // averaging, so the single truncating cast below is a round-to-nearest.
-        rendered_rgb(x, y) = Tuple(encode8(f_r), encode8(f_g), encode8(f_b));
-
-        // ---- box-filter downscale of the rendered result ----------------
-        Expr src_w = src.dim(0).extent();
-        Expr src_h = src.dim(1).extent();
-        Expr dw = max(dst_width, 1);
-        Expr dh = max(dst_height, 1);
-        Expr xx = clamp(x, 0, dw - 1);
-        Expr yy = clamp(y, 0, dh - 1);
-
-        // Exact integer-ratio cell. When the requested size is >= the source
-        // size this degenerates to a single tap per output pixel, i.e. the
-        // kernel is a plain passthrough render at 1:1.
-        Expr x0 = (xx * src_w) / dw;
-        Expr x1 = ((xx + 1) * src_w) / dw;
-        Expr y0 = (yy * src_h) / dh;
-        Expr y1 = ((yy + 1) * src_h) / dh;
-        Expr cnt_x = max(x1 - x0, 1);
-        Expr cnt_y = max(y1 - y0, 1);
-
-        // RDom bounds depend only on the inputs, never on x/y — required.
-        Expr max_cw = (src_w + dw - 1) / dw + 1;
-        Expr max_ch = (src_h + dh - 1) / dh + 1;
-        RDom r(0, max_cw, 0, max_ch, "r");
-        Expr in_cell = (r.x < cnt_x) && (r.y < cnt_y);
-        Expr rsx = clamp(x0 + r.x, 0, src_w - 1);
-        Expr rsy = clamp(y0 + r.y, 0, src_h - 1);
-
-        // One Tuple-valued update, so CSE evaluates the render pipeline once
-        // per source pixel and shares it across R/G/B.
-        box_acc(x, y) = Tuple(0.0f, 0.0f, 0.0f);
-        box_acc(x, y) = Tuple(
-            box_acc(x, y)[0] + select(in_cell, rendered_rgb(rsx, rsy)[0], 0.0f),
-            box_acc(x, y)[1] + select(in_cell, rendered_rgb(rsx, rsy)[1], 0.0f),
-            box_acc(x, y)[2] + select(in_cell, rendered_rgb(rsx, rsy)[2], 0.0f));
-
-        Expr inv_area = 1.0f / cast<float>(cnt_x * cnt_y);
-        Expr o_r = cast<uint8_t>(clamp(box_acc(x, y)[0] * inv_area, 0.0f, 255.0f));
-        Expr o_g = cast<uint8_t>(clamp(box_acc(x, y)[1] * inv_area, 0.0f, 255.0f));
-        Expr o_b = cast<uint8_t>(clamp(box_acc(x, y)[2] * inv_area, 0.0f, 255.0f));
+        rendered_rgb(x, y) = Tuple(cast<uint8_t>(encode8(f_r)),
+                                   cast<uint8_t>(encode8(f_g)),
+                                   cast<uint8_t>(encode8(f_b)));
 
         if (uses_vulkan_planar_layout(get_target())) {
-            dst(x, y, c) = select(c == 0, o_r,
-                                  c == 1, o_g,
-                                          o_b);
+            dst(x, y, c) = select(c == 0, rendered_rgb(x, y)[0],
+                                  c == 1, rendered_rgb(x, y)[1],
+                                          rendered_rgb(x, y)[2]);
         } else {
-            dst(x, y, c) = select(c == 0, o_r,
-                                  c == 1, o_g,
-                                  c == 2, o_b,
+            dst(x, y, c) = select(c == 0, rendered_rgb(x, y)[0],
+                                  c == 1, rendered_rgb(x, y)[1],
+                                  c == 2, rendered_rgb(x, y)[2],
                                           cast<uint8_t>(255));
         }
     }
 
     void schedule() {
         Var x("x"), y("y"), c("c");
-        // `rendered_rgb` stays inline inside box_acc's update so that no
-        // full-resolution float intermediate is ever materialised (that would
-        // be ~3x the size of the RGBA output we are trying to shrink).
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
             dst.bound(c, 0, 4)
                .reorder(c, x, y)
                .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
                .unroll(c);
-            box_acc.compute_at(dst, xo).gpu_threads(x, y);
-            box_acc.update(0).gpu_threads(x, y);
+            rendered_rgb.compute_at(dst, xo)
+                        .gpu_threads(x, y);
         } else {
             Var yo("yo"), yi("yi");
             dst.bound(c, 0, 4)
@@ -1471,7 +1446,7 @@ public:
                .split(y, yo, yi, 32)
                .parallel(yo)
                .unroll(c);
-            box_acc.compute_at(dst, yi);
+            rendered_rgb.compute_at(dst, yo);
         }
     }
 };
