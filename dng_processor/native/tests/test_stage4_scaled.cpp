@@ -7,24 +7,26 @@
 // This test gates that separate AOT on its own, with no DNG sample and no
 // dng_sdk dependency.
 //
-// Method
-// ------
-// The scaled kernel box-averages the Stage3 source down to the requested
-// output size and *then* runs the render math. So the semantically equivalent
-// reference is: box-average the same source on the CPU, then run the existing,
-// already-gated `dng_render_stage4` kernel on that smaller source. The two
-// results must agree to within u16 re-quantisation of the averaged source.
+// Method (contract AC7)
+// ---------------------
+// The scaled kernel runs the full colour math at source resolution and box-
+// averages the rendered result down. So the reference is: run the production
+// `dng_render_stage4` AOT at full resolution, then box-average its 8-bit RGBA
+// output down to the target size in plain C++. That CPU downscale is written
+// from scratch here (nested loops over the exact integer-ratio cell) and
+// shares no code with the Halide generator, so a bug in the generator's cell
+// geometry cannot hide behind a matching bug in the reference.
 //
-// The CPU box downscale is written from scratch here (plain nested loops over
-// the exact integer-ratio cell) and shares no code with the Halide generator,
-// so a bug in the generator's cell geometry cannot hide.
+// The residual between the two is only the quantisation ordering: the kernel
+// averages in float and quantises once, the reference quantises first and then
+// averages 8-bit values.
 //
 // Falsifiability (red -> green)
 // -----------------------------
 // Run with `--mutate-reference` to replace the CPU box downscale with
 // nearest-neighbour point sampling. Everything else is unchanged. The gate
 // MUST fail in that mode; if it passes, the test is not measuring what it
-// claims to. See the README block printed at the end of a run.
+// claims to.
 //
 // Usage:
 //   test_stage4_scaled [--mutate-reference] [--psnr-threshold <db>]
@@ -158,14 +160,17 @@ Buffer<uint16_t> make_source(int w, int h) {
     return src;
 }
 
-// Independent CPU reference downscale, written directly against the intended
-// contract: output pixel x covers source columns [x*W/ow, (x+1)*W/ow).
+// Independent CPU reference: box-average the production kernel's full-res
+// 8-bit RGBA output down to (ow, oh). Written directly against the stated cell
+// convention -- output pixel x covers source columns [x*W/ow, (x+1)*W/ow) --
+// and sharing no code with the Halide generator.
+//
 // `mutate` swaps the box average for nearest-neighbour point sampling, which
 // must break the gate.
-Buffer<uint16_t> cpu_downscale(const Buffer<uint16_t> &src, int ow, int oh, bool mutate) {
+Buffer<uint8_t> cpu_downscale_rgba(const Buffer<uint8_t> &src, int ow, int oh, bool mutate) {
     const int w = src.dim(0).extent();
     const int h = src.dim(1).extent();
-    Buffer<uint16_t> out = Buffer<uint16_t>::make_interleaved(ow, oh, 3);
+    Buffer<uint8_t> out = Buffer<uint8_t>::make_interleaved(ow, oh, 4);
 
     for (int y = 0; y < oh; ++y) {
         const int y0 = static_cast<int>((static_cast<int64_t>(y) * h) / oh);
@@ -190,9 +195,10 @@ Buffer<uint16_t> cpu_downscale(const Buffer<uint16_t> &src, int ow, int oh, bool
                 const double n = static_cast<double>(x1 - x0) * static_cast<double>(y1 - y0);
                 double avg = acc / n;
                 if (avg < 0.0) avg = 0.0;
-                if (avg > 65535.0) avg = 65535.0;
-                out(x, y, c) = static_cast<uint16_t>(avg + 0.5);
+                if (avg > 255.0) avg = 255.0;
+                out(x, y, c) = static_cast<uint8_t>(avg + 0.5);
             }
+            out(x, y, 3) = 255;
         }
     }
     return out;
@@ -264,14 +270,15 @@ bool run_case(const Case &tc, RenderParams &p, double threshold, bool mutate) {
     }
     got.copy_to_host();
 
-    Buffer<uint16_t> small_src = cpu_downscale(src, tc.out_w, tc.out_h, mutate);
-    Buffer<uint8_t> ref = Buffer<uint8_t>::make_interleaved(tc.out_w, tc.out_h, 4);
-    rc = call_stage4(small_src, p, ref);
+    // Reference: production kernel at full res, then CPU box downscale.
+    Buffer<uint8_t> full = Buffer<uint8_t>::make_interleaved(tc.src_w, tc.src_h, 4);
+    rc = call_stage4(src, p, full);
     if (rc != 0) {
-        printf("  FAIL: dng_render_stage4 (reference) returned %d\n", rc);
+        printf("  FAIL: dng_render_stage4 (full-res reference) returned %d\n", rc);
         return false;
     }
-    ref.copy_to_host();
+    full.copy_to_host();
+    Buffer<uint8_t> ref = cpu_downscale_rgba(full, tc.out_w, tc.out_h, mutate);
 
     // Contract check: the kernel must fill the whole requested output and set
     // alpha = 255 everywhere (same RGBA8 semantics as dng_render_stage4).
@@ -287,7 +294,8 @@ bool run_case(const Case &tc, RenderParams &p, double threshold, bool mutate) {
     int max_abs = 0;
     const double psnr = rgb_psnr(got, ref, &max_abs);
     const bool pass = psnr >= threshold;
-    printf("  PSNR = %.2f dB (threshold %.2f), maxAbs = %d -> %s\n",
+    printf("[STAGE4_SCALED] case=%s src=%dx%d out=%dx%d psnr=%.2f threshold=%.2f maxabs=%d result=%s\n",
+           tc.name, tc.src_w, tc.src_h, tc.out_w, tc.out_h,
            psnr, threshold, max_abs, pass ? "PASS" : "FAIL");
     return pass;
 }
@@ -318,6 +326,9 @@ int main(int argc, char **argv) {
     RenderParams params = make_render_params();
 
     const Case cases[] = {
+        // Required by AC3: long edge 1024. 2048*1024/3072 = 682.67, so 683 is
+        // the nearest integer and lands within +/-1 px of the exact aspect.
+        {"longedge-1024", 3072, 2048, 1024, 683},
         // Exact integer ratio (4:1) -- every cell is 4x4.
         {"integer-ratio", 1024, 768, 256, 192},
         // Non-integer ratio -- neighbouring cells differ in size by 1 px,
@@ -342,6 +353,6 @@ int main(int argc, char **argv) {
         return all_pass ? 1 : 0;
     }
 
-    printf("\n=== %s ===\n", all_pass ? "ALL CASES PASS" : "FAILURE");
+    printf("[STAGE4_SCALED] OVERALL=%s\n", all_pass ? "PASS" : "FAIL");
     return all_pass ? 0 : 1;
 }
