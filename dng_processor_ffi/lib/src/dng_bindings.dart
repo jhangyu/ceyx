@@ -107,7 +107,7 @@ class DngNativeBindings {
   // not have it). Lookup is guarded in the constructor below — an unguarded
   // lookup of a missing symbol would throw in the constructor and kill ALL
   // decoding, not just sized calls.
-  DngDecodeAndProcessSizedDart? dngDecodeAndProcessSized;
+  DngDecodeAndProcessSizedDart? _dngDecodeAndProcessSized;
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
   late final DngDecoderSetPipelineCachePathDart dngDecoderSetPipelineCachePath;
@@ -132,8 +132,13 @@ class DngNativeBindings {
   late final ffi.Pointer<ffi.NativeFunction<DngFreeHalideBufferNative>>
   dngFreeHalideBufferPtr;
 
+  /// Guarded access to the additive sized-decode entry. Null when the loaded
+  /// dylib does not export `dng_decode_and_process_sized`.
+  DngDecodeAndProcessSizedDart? get dngDecodeAndProcessSized =>
+      _dngDecodeAndProcessSized;
+
   /// Whether the loaded dylib exports `dng_decode_and_process_sized`.
-  bool get sizedDecodeAvailable => dngDecodeAndProcessSized != null;
+  bool get sizedDecodeAvailable => _dngDecodeAndProcessSized != null;
 
   DngNativeBindings._(this._lib) {
     dngDecodeAndProcess = _lib
@@ -142,7 +147,7 @@ class DngNativeBindings {
         );
 
     try {
-      dngDecodeAndProcessSized = _lib
+      _dngDecodeAndProcessSized = _lib
           .lookupFunction<
             DngDecodeAndProcessSizedNative,
             DngDecodeAndProcessSizedDart
@@ -150,7 +155,7 @@ class DngNativeBindings {
     } catch (_) {
       // Symbol absent in this build of the dylib — sizedDecodeAvailable
       // stays false and callers fall back to dngDecodeAndProcess.
-      dngDecodeAndProcessSized = null;
+      _dngDecodeAndProcessSized = null;
     }
 
     dngDecoderWarmupForSize = _lib
@@ -253,12 +258,13 @@ class DngNativeBindings {
   static ffi.DynamicLibrary openFirstForTesting(List<String> paths) =>
       _openFirst(paths);
 
-  /// Test-only entry point that loads bindings from an explicit dylib path,
-  /// bypassing the platform-specific candidate search in [load]. Exists so
-  /// tests can exercise the guarded `dng_decode_and_process_sized` lookup
-  /// against the actual shipped dylib without depending on the app-bundle /
-  /// script-relative search paths that only resolve at runtime.
-  factory DngNativeBindings.loadForTesting(String path) =>
+  /// Load bindings from an explicit dylib path, bypassing the
+  /// platform-specific candidate search in [load]. Useful for host apps with
+  /// non-standard library layouts, and for tests that need to exercise the
+  /// guarded `dng_decode_and_process_sized` lookup against a specific dylib
+  /// without depending on the app-bundle / script-relative search paths that
+  /// only resolve at runtime.
+  factory DngNativeBindings.fromPath(String path) =>
       DngNativeBindings._(_openFirst([path]));
 
   /// Best-effort ABSOLUTE path of the image that [lib] was actually loaded

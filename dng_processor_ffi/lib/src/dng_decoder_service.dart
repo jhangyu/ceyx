@@ -127,16 +127,30 @@ class DngDecoderService {
   NativeFinalizer? _rgbaFinalizer;
   bool _initialized = false;
 
-  DngDecoderService();
+  /// Optional explicit dylib path, bypassing the platform candidate search
+  /// in [DngNativeBindings.load]. Primarily for tests and host apps with a
+  /// non-standard library layout; production callers should leave this null.
+  final String? _libraryPath;
+
+  DngDecoderService({String? libraryPath}) : _libraryPath = libraryPath;
 
   /// Initialize the service by loading the native library.
   void initialize() {
     if (_initialized) return;
-    _bindings = DngNativeBindings.load();
+    _bindings = _libraryPath == null
+        ? DngNativeBindings.load()
+        : DngNativeBindings.fromPath(_libraryPath);
     // _rgbaFinalizer is intentionally NOT created here; it is lazily created in
     // _decodeZeroCopy so that worker-isolate services (which only call
     // _decodeToTransferable) do not allocate a finalizer they will never use.
     _initialized = true;
+  }
+
+  /// Whether the loaded native library exports `dng_decode_and_process_sized`.
+  /// Initializes the service if needed.
+  bool get sizedDecodeAvailable {
+    if (!_initialized) initialize();
+    return _bindings.sizedDecodeAvailable;
   }
 
   /// Warm native resources for the common 24MP decode path off the UI isolate.
@@ -192,13 +206,15 @@ class DngDecoderService {
   /// bytes, transfers those bytes with [TransferableTypedData], then frees the
   /// native result inside the worker isolate.
   ///
-  /// [maxDim] requests a decode whose longest output edge is approximately
-  /// [maxDim] pixels. It is honored only when the loaded native library
-  /// exports `dng_decode_and_process_sized`; otherwise (or when null) the
-  /// existing full-resolution entry point is used unchanged.
+  /// [maxDim] is a REQUEST for a decode whose longest output edge is
+  /// approximately [maxDim] pixels — it is silently ignored (falling back to
+  /// today's full-resolution entry point) whenever the loaded native library
+  /// does not export `dng_decode_and_process_sized`, or when [maxDim] is
+  /// null. Callers must read the returned [DngImage.width]/[DngImage.height]
+  /// rather than assuming the request was honored.
   Future<DngImage> decodeOnWorker(String filePath, {int? maxDim}) async {
     final result = await Isolate.run(
-      () => _decodeFileToTransferable(filePath, maxDim),
+      () => _decodeFileToTransferable(filePath, _libraryPath, maxDim),
     );
     return result.toImage();
   }
@@ -289,10 +305,11 @@ class DngDecoderService {
 
   static _DecodeWorkerResult _decodeFileToTransferable(
     String filePath,
+    String? libraryPath,
     int? maxDim,
   ) {
-    final service = DngDecoderService()..initialize();
-    return service._decodeToTransferable(filePath, maxDim);
+    final service = DngDecoderService(libraryPath: libraryPath)..initialize();
+    return service._decodeToTransferable(filePath, maxDim: maxDim);
   }
 
   DngImage _decodeZeroCopy(String filePath) {
@@ -365,7 +382,10 @@ class DngDecoderService {
     }
   }
 
-  _DecodeWorkerResult _decodeToTransferable(String filePath, int? maxDim) {
+  _DecodeWorkerResult _decodeToTransferable(
+    String filePath, {
+    int? maxDim,
+  }) {
     if (!_initialized) {
       initialize();
     }
@@ -374,7 +394,8 @@ class DngDecoderService {
     Pointer<DngResult> resultPtr = nullptr;
 
     try {
-      resultPtr = (maxDim != null && _bindings.sizedDecodeAvailable)
+      resultPtr =
+          (maxDim != null && maxDim > 0 && _bindings.sizedDecodeAvailable)
           ? _bindings.dngDecodeAndProcessSized!(pathPtr.cast(), maxDim)
           : _bindings.dngDecodeAndProcess(pathPtr.cast());
 
