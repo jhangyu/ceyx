@@ -587,6 +587,18 @@ add_custom_command(
 )
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 
+# Sized decode (targetWidth): box-filter-downscaling Stage4 variant. Emitted
+# from the SAME generator binary via -g/-f, exactly like the Android variant
+# below, so that dng_render_stage4 itself stays byte-identical (its output SHAs
+# are pinned gate artifacts — Gotcha #99).
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled.h
+    COMMAND dng_render_generator -g dng_render_stage4_scaled -f dng_render_stage4_scaled -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS dng_render_generator
+    COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled)..."
+)
+add_custom_target(dng_render_scaled_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
+
 # Phase 14: Vulkan three-channel-split Stage4 generator (was Android-only; see
 # the DNG_STAGE4_SPLIT_KERNEL note above).
 # Eliminates Tuple + dim(2) codegen that triggers Halide v21 SPIR-V R==G bug.
@@ -642,6 +654,7 @@ if(DNG_HOST_GENERATORS_ONLY)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     )
@@ -965,6 +978,28 @@ add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
 add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
 if(APPLE)
     target_link_libraries(test_device_handoff ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# Sized decode (targetWidth) R1: standalone gate for the box-filter-scaled
+# Stage4 AOT. Self-contained — synthesises a Stage3-shaped source and its
+# render parameters, so it needs no DNG sample and no dng_sdk. It compares
+# dng_render_stage4_scaled(full src) against dng_render_stage4(CPU box
+# downscale of the same src) and gates the PSNR.
+add_executable(test_stage4_scaled tests/test_stage4_scaled.cpp)
+target_include_directories(test_stage4_scaled PRIVATE
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_stage4_scaled
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
+add_dependencies(test_stage4_scaled halide_runtime_target)
+add_dependencies(test_stage4_scaled dng_render_aot_target)
+add_dependencies(test_stage4_scaled dng_render_scaled_aot_target)
+if(APPLE)
+    target_link_libraries(test_stage4_scaled ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 
