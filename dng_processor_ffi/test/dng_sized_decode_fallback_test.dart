@@ -100,4 +100,23 @@ void main() {
     },
     timeout: const Timeout(Duration(minutes: 2)),
   );
+
+  test(
+    'decodeOnWorker succeeds after a zero-copy decode() has run first '
+    '(regression: _rgbaFinalizer variant of the `this`-capture bug)',
+    () async {
+      // decode() (zero-copy path) lazily creates _rgbaFinalizer, a
+      // NativeFinalizer — a second non-sendable field that `this`-capture
+      // would drag into the isolate message alongside _bindings._lib. This
+      // reproduces the reviewer's probe.log CASE_C shape.
+      final service = DngDecoderService(libraryPath: dylibPath);
+      service.decode(samplePath);
+
+      final image = await service.decodeOnWorker(samplePath);
+
+      expect(image.width, greaterThan(0));
+      expect(image.height, greaterThan(0));
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
 }
