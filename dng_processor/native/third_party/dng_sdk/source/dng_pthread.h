@@ -46,6 +46,12 @@
 
 #include <stdlib.h>
 
+// struct timespec is declared by the CRT on every toolchain this code is built
+// with today. In 2012 MSVC lacked it, so this file declared its own
+// dng_timespec and text-substituted the name via a macro; on a modern UCRT that
+// macro rewrites <time.h>'s own declaration and collides. Use the CRT type.
+#include <time.h>
+
 #if _MSC_VER >= 1600
 
 // Get this included so ETIMEDOUT is predefined.
@@ -61,12 +67,6 @@ extern "C"
 /*****************************************************************************/
 
 #define DNG_ETIMEDOUT       60              /* Operation timed out */
-
-struct dng_timespec {
-	long tv_sec;
-	long tv_nsec;
-};
-
 
 typedef unsigned long dng_pthread_t;
 
@@ -116,7 +116,7 @@ int dng_pthread_mutex_unlock(dng_pthread_mutex_t *mutex);
 int dng_pthread_cond_init(dng_pthread_cond_t *cond, void * /* attrs */);
 int dng_pthread_cond_destroy(dng_pthread_cond_t *cond);
 int dng_pthread_cond_wait(dng_pthread_cond_t *cond, dng_pthread_mutex_t *mutex);
-int dng_pthread_cond_timedwait(dng_pthread_cond_t *cond, dng_pthread_mutex_t *mutex, struct dng_timespec *latest_time);
+int dng_pthread_cond_timedwait(dng_pthread_cond_t *cond, dng_pthread_mutex_t *mutex, struct timespec *latest_time);
 int dng_pthread_cond_signal(dng_pthread_cond_t *cond);
 int dng_pthread_cond_broadcast(dng_pthread_cond_t *cond);
 
@@ -178,8 +178,6 @@ void dng_pthread_terminate();
 
 #undef PTHREAD_ONCE_INIT
 #define PTHREAD_ONCE_INIT DNG_PTHREAD_ONCE_INIT
-
-#define timespec dng_timespec
 
 /* If it is defined on Windows, it probably has the wrong value... */
 #if defined(WIN32) || !defined(ETIMEDOUT)

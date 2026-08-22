@@ -365,11 +365,27 @@ set(HALIDE_DIR ${THIRD_PARTY_DIR}/halide)
 # We only need Halide headers for AOT-generated .h includes.
 if(NOT DNG_CROSS_BUILD)
     list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
-    find_package(Halide REQUIRED)
+    # COMPONENTS Halide (not the bare form): HalideConfig.cmake defaults to
+    # requiring the optional PNG/JPEG components when none are named, which
+    # hard-fails configure on machines without system libpng/libjpeg even
+    # though nothing in this project uses Halide's PNG/JPEG image-IO helpers.
+    find_package(Halide REQUIRED COMPONENTS Halide)
 
     # W6 M-4: DngHalideGenerator.cpp (legacy dng_pipeline all-in-one kernel) archived.
     # The standalone halide_runtime.a below replaces its runtime-anchor role.
     # Source retained in src/ for reference; not compiled.
+
+    if(WIN32)
+        # The prebuilt Halide v21 Windows distribution ships /MD (dynamic CRT)
+        # libs, but the windows-vulkan preset forces /MT (static CRT, see the
+        # CMP0091 comment at the top of this file) for the shipped artifact.
+        # lld-link's /failifmismatch rejects linking MT objects against an MD
+        # lib, so give the generator executables below (build-time-only tools,
+        # never shipped) /MD to match Halide_GenGen.lib/Halide.lib, then
+        # restore /MT afterwards for dng_decoder_native and everything else.
+        set(DNG_SAVED_MSVC_RUNTIME_LIBRARY ${CMAKE_MSVC_RUNTIME_LIBRARY})
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    endif()
 
     add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
     target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
@@ -406,6 +422,44 @@ if(NOT DNG_CROSS_BUILD)
     add_executable(dng_opcode_polynomial3_generator
         ${SRC_DIR}/DngOpcodePolynomial3Generator.cpp)
     target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator)
+
+    if(WIN32)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY ${DNG_SAVED_MSVC_RUNTIME_LIBRARY})
+
+        # The Halide v21 Windows distribution ships shared-only CMake targets
+        # (no Halide-static-targets.cmake), so Halide::Generator resolves to an
+        # import lib and the generators need Halide.dll at *run* time. The AOT
+        # custom commands below run them from the build tree, where the DLL is
+        # neither on PATH nor beside the .exe, so they die with
+        # STATUS_DLL_NOT_FOUND (0xC0000135). Stage the DLL beside them once via
+        # a single target every generator depends on; a per-generator POST_BUILD
+        # copy would have parallel ninja jobs writing the same file at once.
+        set(DNG_STAGED_HALIDE_DLL ${CMAKE_CURRENT_BINARY_DIR}/Halide.dll)
+        add_custom_command(
+            OUTPUT ${DNG_STAGED_HALIDE_DLL}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${HALIDE_DIR}/bin/Release/Halide.dll ${DNG_STAGED_HALIDE_DLL}
+            DEPENDS ${HALIDE_DIR}/bin/Release/Halide.dll
+            COMMENT "Staging Halide.dll next to the Halide generators..."
+        )
+        add_custom_target(dng_stage_halide_dll DEPENDS ${DNG_STAGED_HALIDE_DLL})
+
+        set(DNG_HALIDE_GENERATORS
+            dng_warp_generator
+            dng_demosaic_generator
+            dng_demosaic_warp_generator
+            dng_render_generator
+            dng_opcode_polynomial_generator
+            dng_opcode_polynomial3_generator)
+        if(DNG_DIAGNOSTIC_BUILD)
+            list(APPEND DNG_HALIDE_GENERATORS
+                dng_warp_strict_float_generator
+                dng_warp_debug_generator)
+        endif()
+        foreach(_dng_gen IN LISTS DNG_HALIDE_GENERATORS)
+            add_dependencies(${_dng_gen} dng_stage_halide_dll)
+        endforeach()
+    endif()
 
 endif() # NOT DNG_CROSS_BUILD
 

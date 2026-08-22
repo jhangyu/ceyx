@@ -313,8 +313,8 @@ int dng_pthread_create(dng_pthread_t *thread, const pthread_attr_t *attrs, void 
 	{
 		uintptr_t result;
 		unsigned threadID;
-		std::auto_ptr<trampoline_args> args(new (std::nothrow) trampoline_args);
-		std::auto_ptr<void *> resultHolder(new (std::nothrow) (void *));
+		std::unique_ptr<trampoline_args> args(new (std::nothrow) trampoline_args);
+		std::unique_ptr<void *> resultHolder(new (std::nothrow) (void *));
 
 		if (args.get() == NULL || resultHolder.get () == NULL)
 			return -1; // ENOMEM
@@ -659,11 +659,11 @@ int dng_pthread_cond_wait(dng_pthread_cond_t *cond, dng_pthread_mutex_t *mutex)
 
 /*****************************************************************************/
 
-int dng_pthread_cond_timedwait(dng_pthread_cond_t *cond, dng_pthread_mutex_t *mutex, struct dng_timespec *latest_time)
+int dng_pthread_cond_timedwait(dng_pthread_cond_t *cond, dng_pthread_mutex_t *mutex, struct timespec *latest_time)
 {
 	ValidateCond(cond);
-	
-	struct dng_timespec sys_timespec;
+
+	struct timespec sys_timespec;
 	
 	dng_pthread_now (&sys_timespec);
 
