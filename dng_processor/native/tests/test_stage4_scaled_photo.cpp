@@ -68,7 +68,30 @@ using Halide::Runtime::Buffer;
 
 namespace {
 
-double g_hess_h = 2048.0;  // central-difference step for the row C Hessian
+// Central-difference step (u16 units) for the row C Hessian.
+//
+// DEFAULT IS THE CONVERGED VALUE, DELIBERATELY. Row C is strongly
+// step-dependent, because the second difference reads an 8-bit quantised F and
+// that noise is amplified by 1/h^2. Sweep at 1024x681:
+//
+//     h  =    512    1024    2048    4096    8192
+//   PSNR =  36.57   44.76   49.50   51.14   51.30 dB
+//
+// Monotone convergence upward as the quantisation noise is suppressed;
+// 4096->8192 moves only +0.16 dB. At the old default of 2048 the row reads
+// 49.50 dB at 1024 and 37.79 dB at 256 — i.e. WORSE than doing nothing, and it
+// reverses the verdict on the one decision-relevant case (256 must cross the
+// 40 dB bar to matter, and at 2048 it lands 2.2 dB below it). It also clamps
+// there (lo=6 hi=46 at 256), where at 8192 there is no clamping at all.
+//
+// So a default of 2048 would hand anyone re-running this the opposite
+// conclusion from the reported one, with nothing on screen to say they were on
+// a different step. `--hess-h` remains available to re-probe stability.
+//
+// Caveat that survives the fix: a wide-baseline central difference measures a
+// smoothed curvature rather than the true local one, so 51.30 dB is a best
+// case for the method, not a pure second-order estimate.
+double g_hess_h = 8192.0;
 
 struct Rgba {
     int w = 0, h = 0;
