@@ -355,7 +355,22 @@ int main(int argc, char **argv) {
                got.width, got.height, expW, expH, got.rgba_bytes,
                got.rgba_bytes / (1024.0 * 1024.0));
 
-        // AC5: long edge within 1 px of the request.
+        // A request at or above the sensor long edge must CLAMP to full
+        // resolution, never upscale. That is a property worth covering
+        // permanently, so it is a first-class expectation here rather than a
+        // failure: without this branch the harness reports FAIL on correct
+        // behaviour, and whoever runs it next reads that as a real defect.
+        const uint32_t fullLong = std::max(full.width, full.height);
+        const bool clamped = static_cast<uint32_t>(maxDim) >= fullLong;
+        const uint32_t wantLong =
+            clamped ? fullLong : static_cast<uint32_t>(maxDim);
+        if (clamped) {
+            printf("  [clamped] maxDim %d >= sensor long edge %u -> expect full "
+                   "resolution, no upscale\n",
+                   maxDim, fullLong);
+        }
+
+        // AC5: long edge within 1 px of what the request resolves to.
         const uint32_t gotLong = std::max(got.width, got.height);
         const uint32_t expLong = std::max(expW, expH);
         bool casePass = true;
@@ -366,22 +381,40 @@ int main(int argc, char **argv) {
             casePass = false;
         }
         if (std::abs(static_cast<int64_t>(gotLong) -
-                     static_cast<int64_t>(maxDim)) > 1) {
-            printf("  FAIL AC5: long edge %u does not honour maxDim %d (+/-1)\n",
-                   gotLong, maxDim);
+                     static_cast<int64_t>(wantLong)) > 1) {
+            printf("  FAIL AC5: long edge %u does not honour maxDim %d "
+                   "(expected %u, +/-1)\n",
+                   gotLong, maxDim, wantLong);
+            casePass = false;
+        }
+        if (clamped && (got.width != full.width || got.height != full.height)) {
+            printf("  FAIL AC5: clamped request returned %ux%u, expected the "
+                   "full-resolution %ux%u -- an upscale or resize was attempted\n",
+                   got.width, got.height, full.width, full.height);
             casePass = false;
         }
 
-        // AC6: output buffer shrinks in proportion to the pixel count.
+        // AC6: output buffer shrinks in proportion to the pixel count. A
+        // clamped request is full resolution by definition, so "smaller than
+        // full-res" does not apply to it — it must be exactly equal instead.
         const double pixelRatio =
             (static_cast<double>(got.width) * got.height) /
             (static_cast<double>(full.width) * full.height);
-        const double byteRatio = static_cast<double>(got.rgba_bytes) /
-                                 static_cast<double>(full.rgba_bytes);
+        const double byteRatio = static_cast<double>(full.rgba_bytes) > 0.0
+                                     ? static_cast<double>(got.rgba_bytes) /
+                                           static_cast<double>(full.rgba_bytes)
+                                     : 0.0;
         printf("  AC6 pixel_ratio=%.5f byte_ratio=%.5f (%.1fx smaller)\n",
                pixelRatio, byteRatio,
                byteRatio > 0.0 ? 1.0 / byteRatio : 0.0);
-        if (got.rgba_bytes >= full.rgba_bytes) {
+        if (clamped) {
+            if (got.rgba_bytes != full.rgba_bytes) {
+                printf("  FAIL AC6: clamped request allocated %zu bytes, "
+                       "expected the full-resolution %zu\n",
+                       got.rgba_bytes, full.rgba_bytes);
+                casePass = false;
+            }
+        } else if (got.rgba_bytes >= full.rgba_bytes) {
             printf("  FAIL AC6: sized buffer is not smaller than full-res\n");
             casePass = false;
         }
