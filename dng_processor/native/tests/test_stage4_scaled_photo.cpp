@@ -68,6 +68,8 @@ using Halide::Runtime::Buffer;
 
 namespace {
 
+double g_hess_h = 2048.0;  // central-difference step for the row C Hessian
+
 struct Rgba {
     int w = 0, h = 0;
     std::vector<uint8_t> px;  // interleaved RGBA
@@ -219,6 +221,175 @@ Rgba boxDownscale8(const Rgba &src, int ow, int oh) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// CPU pre-average downscalers (rows C and D). No new Halide kernels: these
+// produce a smaller u16 Stage3 image, which is then rendered by the SAME
+// production dng_render_stage4 AOT at the small size. That is exactly what
+// "pre-average" means — the colour math runs at output resolution.
+// ---------------------------------------------------------------------------
+
+struct MeanVar {
+    Buffer<uint16_t> mean;
+    std::vector<float> var;  // interleaved 3-channel, camera-space, u16^2 units
+};
+
+// Box mean AND per-channel variance of each source cell, same exact
+// integer-ratio cell as the kernels use.
+MeanVar boxDownscaleU16Var(const Buffer<uint16_t> &src, int ow, int oh) {
+    const int w = src.dim(0).extent();
+    const int h = src.dim(1).extent();
+    MeanVar mv;
+    mv.mean = Buffer<uint16_t>::make_interleaved(ow, oh, 3);
+    mv.var.assign(static_cast<size_t>(ow) * oh * 3, 0.0f);
+
+    for (int y = 0; y < oh; ++y) {
+        const int y0 = static_cast<int>((static_cast<int64_t>(y) * h) / oh);
+        int y1 = static_cast<int>((static_cast<int64_t>(y + 1) * h) / oh);
+        if (y1 <= y0) y1 = y0 + 1;
+        for (int x = 0; x < ow; ++x) {
+            const int x0 = static_cast<int>((static_cast<int64_t>(x) * w) / ow);
+            int x1 = static_cast<int>((static_cast<int64_t>(x + 1) * w) / ow);
+            if (x1 <= x0) x1 = x0 + 1;
+            const double n = static_cast<double>(x1 - x0) * (y1 - y0);
+            for (int c = 0; c < 3; ++c) {
+                double s = 0.0, s2 = 0.0;
+                for (int sy = y0; sy < y1; ++sy)
+                    for (int sx = x0; sx < x1; ++sx) {
+                        const double v = src(sx, sy, c);
+                        s += v;
+                        s2 += v * v;
+                    }
+                const double m = s / n;
+                double var = s2 / n - m * m;
+                if (var < 0.0) var = 0.0;  // rounding
+                mv.mean(x, y, c) = static_cast<uint16_t>(
+                    std::min(65535.0, std::max(0.0, m + 0.5)));
+                mv.var[(static_cast<size_t>(y) * ow + x) * 3 + c] = static_cast<float>(var);
+            }
+        }
+    }
+    return mv;
+}
+
+double lanczos3(double x) {
+    if (x == 0.0) return 1.0;
+    const double a = std::fabs(x);
+    if (a >= 3.0) return 0.0;
+    const double pix = M_PI * a;
+    return (3.0 * std::sin(pix) * std::sin(pix / 3.0)) / (pix * pix);
+}
+
+// Separable Lanczos-3 downscale in LINEAR space on the u16 Stage3 data.
+// Support is widened by the downscale factor, which is what makes it a
+// resampling filter rather than a point sample.
+Buffer<uint16_t> lanczos3DownscaleU16(const Buffer<uint16_t> &src, int ow, int oh) {
+    const int w = src.dim(0).extent();
+    const int h = src.dim(1).extent();
+    const double sx = static_cast<double>(w) / ow;
+    const double sy = static_cast<double>(h) / oh;
+
+    // Horizontal pass into a float intermediate (ow x h x 3).
+    std::vector<float> tmp(static_cast<size_t>(ow) * h * 3, 0.0f);
+    const double supx = std::max(1.0, sx) * 3.0;
+    for (int x = 0; x < ow; ++x) {
+        const double centre = (x + 0.5) * sx - 0.5;
+        const int lo = static_cast<int>(std::ceil(centre - supx));
+        const int hi = static_cast<int>(std::floor(centre + supx));
+        std::vector<double> wts;
+        double wsum = 0.0;
+        for (int t = lo; t <= hi; ++t) {
+            const double wv = lanczos3((t - centre) / std::max(1.0, sx));
+            wts.push_back(wv);
+            wsum += wv;
+        }
+        if (wsum == 0.0) wsum = 1.0;
+        for (int y = 0; y < h; ++y)
+            for (int c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (int t = lo, i = 0; t <= hi; ++t, ++i) {
+                    const int st = std::min(w - 1, std::max(0, t));
+                    acc += wts[i] * src(st, y, c);
+                }
+                tmp[(static_cast<size_t>(y) * ow + x) * 3 + c] = static_cast<float>(acc / wsum);
+            }
+    }
+
+    // Vertical pass.
+    Buffer<uint16_t> out = Buffer<uint16_t>::make_interleaved(ow, oh, 3);
+    const double supy = std::max(1.0, sy) * 3.0;
+    for (int y = 0; y < oh; ++y) {
+        const double centre = (y + 0.5) * sy - 0.5;
+        const int lo = static_cast<int>(std::ceil(centre - supy));
+        const int hi = static_cast<int>(std::floor(centre + supy));
+        std::vector<double> wts;
+        double wsum = 0.0;
+        for (int t = lo; t <= hi; ++t) {
+            const double wv = lanczos3((t - centre) / std::max(1.0, sy));
+            wts.push_back(wv);
+            wsum += wv;
+        }
+        if (wsum == 0.0) wsum = 1.0;
+        for (int x = 0; x < ow; ++x)
+            for (int c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (int t = lo, i = 0; t <= hi; ++t, ++i) {
+                    const int st = std::min(h - 1, std::max(0, t));
+                    acc += wts[i] * tmp[(static_cast<size_t>(st) * ow + x) * 3 + c];
+                }
+                out(x, y, c) = static_cast<uint16_t>(
+                    std::min(65535.0, std::max(0.0, acc / wsum + 0.5)));
+            }
+    }
+    return out;
+}
+
+// Lanczos-3 downscale of an 8-bit RGBA image — used ONLY for the supplementary
+// Lanczos-vs-Lanczos column. AC7's reference is box and is unaffected by this.
+Rgba lanczos3Downscale8(const Rgba &src, int ow, int oh) {
+    const double sx = static_cast<double>(src.w) / ow;
+    const double sy = static_cast<double>(src.h) / oh;
+    std::vector<float> tmp(static_cast<size_t>(ow) * src.h * 3, 0.0f);
+    const double supx = std::max(1.0, sx) * 3.0;
+    for (int x = 0; x < ow; ++x) {
+        const double centre = (x + 0.5) * sx - 0.5;
+        const int lo = static_cast<int>(std::ceil(centre - supx));
+        const int hi = static_cast<int>(std::floor(centre + supx));
+        std::vector<double> wts;
+        double wsum = 0.0;
+        for (int t = lo; t <= hi; ++t) { const double wv = lanczos3((t - centre) / std::max(1.0, sx)); wts.push_back(wv); wsum += wv; }
+        if (wsum == 0.0) wsum = 1.0;
+        for (int y = 0; y < src.h; ++y)
+            for (int c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (int t = lo, i = 0; t <= hi; ++t, ++i)
+                    acc += wts[i] * src.at(std::min(src.w - 1, std::max(0, t)), y, c);
+                tmp[(static_cast<size_t>(y) * ow + x) * 3 + c] = static_cast<float>(acc / wsum);
+            }
+    }
+    Rgba out;
+    out.w = ow; out.h = oh;
+    out.px.assign(static_cast<size_t>(ow) * oh * 4, 255);
+    const double supy = std::max(1.0, sy) * 3.0;
+    for (int y = 0; y < oh; ++y) {
+        const double centre = (y + 0.5) * sy - 0.5;
+        const int lo = static_cast<int>(std::ceil(centre - supy));
+        const int hi = static_cast<int>(std::floor(centre + supy));
+        std::vector<double> wts;
+        double wsum = 0.0;
+        for (int t = lo; t <= hi; ++t) { const double wv = lanczos3((t - centre) / std::max(1.0, sy)); wts.push_back(wv); wsum += wv; }
+        if (wsum == 0.0) wsum = 1.0;
+        for (int x = 0; x < ow; ++x)
+            for (int c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (int t = lo, i = 0; t <= hi; ++t, ++i)
+                    acc += wts[i] * tmp[(static_cast<size_t>(std::min(src.h - 1, std::max(0, t))) * ow + x) * 3 + c];
+                out.px[(static_cast<size_t>(y) * ow + x) * 4 + c] =
+                    static_cast<uint8_t>(std::min(255.0, std::max(0.0, acc / wsum + 0.5)));
+            }
+    }
+    return out;
+}
+
 double psnrRgb(const Rgba &a, const Rgba &b, int *max_abs_out) {
     double sse = 0.0;
     int max_abs = 0;
@@ -332,6 +503,7 @@ int main(int argc, char **argv) {
         const std::string a = argv[i];
         if (a == "--max-dim" && i + 1 < argc) maxDim = atoi(argv[++i]);
         else if (a == "--out-dir" && i + 1 < argc) outDir = argv[++i];
+        else if (a == "--hess-h" && i + 1 < argc) g_hess_h = atof(argv[++i]);
     }
 
     printf("=== test_stage4_scaled_photo ===\n");
@@ -483,14 +655,163 @@ int main(int argc, char **argv) {
     printf("[PHOTO-AC7] variant=B-postavg dng=%s out=%dx%d PSNR=%.2f dB maxAbs=%d\n",
            dngPath, ow, oh, psnrB, maxB);
 
+    // ---- Row C: variance-corrected pre-average (CPU probe) --------------
+    //
+    // Second-order Taylor: F(x) averaged over a cell ~= F(mean) + 0.5 *
+    // sum_j d2F/dx_j2 * Var(x_j).
+    //
+    // The Hessian is measured by central differences through the WHOLE real
+    // pipeline (the production dng_render_stage4 AOT), differentiating with
+    // respect to CAMERA-space channels. That is deliberate and is what makes
+    // pairing it with camera-space variance correct: the 3x3 matrices, HueSat,
+    // Look, RGBTone and the encode gamma are all inside F, so the chain rule
+    // performs the variance propagation the lead's Var(y_i) = sum_j M_ij^2
+    // Var(x_j) formula describes -- rather than us applying that formula to a
+    // partial chain and hoping the rest is linear.
+    //
+    // APPROXIMATIONS, stated up front so they are the first suspects if this
+    // row underperforms:
+    //   1. DIAGONAL Hessian only. Off-diagonal terms d2F/dx_j dx_k and the
+    //      corresponding channel COVARIANCES are dropped. The Stage3 channels
+    //      of a demosaiced photo are strongly correlated, so this is the
+    //      largest approximation here.
+    //   2. Central differences read an 8-bit quantised F, so the second
+    //      difference carries +-~1 LSB of quantisation noise amplified by
+    //      1/h^2. h is chosen large to suppress it, which in turn makes the
+    //      estimate a wider-baseline (smoother) curvature than the true local
+    //      one.
+    //   3. Near the u16 ends the perturbed samples clamp, flattening the
+    //      measured curvature there.
+    Rgba varCorrected;
+    int clampedLo = 0, clampedHi = 0;
+    {
+        MeanVar mv = boxDownscaleU16Var(src, ow, oh);
+        mv.mean.set_host_dirty();
+        Buffer<uint8_t> baseBuf = Buffer<uint8_t>::make_interleaved(ow, oh, 4);
+        if (runFullRes(mv.mean, hp, baseBuf) != 0) { printf("FAIL: row C base render\n"); return 1; }
+        baseBuf.copy_to_host();
+        const Rgba base = fromBuffer(baseBuf);
+
+        const double hstep = g_hess_h;  // u16 units; --hess-h to probe stability
+        // hess[j] holds d2F_i/dx_j2 for all i, as an image.
+        std::vector<std::vector<float>> hess(3,
+            std::vector<float>(static_cast<size_t>(ow) * oh * 3, 0.0f));
+        for (int j = 0; j < 3; ++j) {
+            Buffer<uint16_t> up = Buffer<uint16_t>::make_interleaved(ow, oh, 3);
+            Buffer<uint16_t> dn = Buffer<uint16_t>::make_interleaved(ow, oh, 3);
+            for (int y = 0; y < oh; ++y)
+                for (int x = 0; x < ow; ++x)
+                    for (int c = 0; c < 3; ++c) {
+                        const double v = mv.mean(x, y, c);
+                        const double d = (c == j) ? hstep : 0.0;
+                        up(x, y, c) = static_cast<uint16_t>(std::min(65535.0, v + d));
+                        dn(x, y, c) = static_cast<uint16_t>(std::max(0.0, v - d));
+                    }
+            up.set_host_dirty();
+            dn.set_host_dirty();
+            Buffer<uint8_t> upB = Buffer<uint8_t>::make_interleaved(ow, oh, 4);
+            Buffer<uint8_t> dnB = Buffer<uint8_t>::make_interleaved(ow, oh, 4);
+            if (runFullRes(up, hp, upB) != 0 || runFullRes(dn, hp, dnB) != 0) {
+                printf("FAIL: row C perturbation render (j=%d)\n", j);
+                return 1;
+            }
+            upB.copy_to_host();
+            dnB.copy_to_host();
+            const Rgba U = fromBuffer(upB), D = fromBuffer(dnB);
+            for (int y = 0; y < oh; ++y)
+                for (int x = 0; x < ow; ++x)
+                    for (int i = 0; i < 3; ++i) {
+                        const double d2 = (static_cast<double>(U.at(x, y, i))
+                                           - 2.0 * base.at(x, y, i)
+                                           + static_cast<double>(D.at(x, y, i)))
+                                          / (hstep * hstep);
+                        hess[j][(static_cast<size_t>(y) * ow + x) * 3 + i] = static_cast<float>(d2);
+                    }
+        }
+
+        varCorrected.w = ow;
+        varCorrected.h = oh;
+        varCorrected.px.assign(static_cast<size_t>(ow) * oh * 4, 255);
+        for (int y = 0; y < oh; ++y)
+            for (int x = 0; x < ow; ++x)
+                for (int i = 0; i < 3; ++i) {
+                    double v = base.at(x, y, i);
+                    for (int j = 0; j < 3; ++j)
+                        v += 0.5 * hess[j][(static_cast<size_t>(y) * ow + x) * 3 + i] *
+                             mv.var[(static_cast<size_t>(y) * ow + x) * 3 + j];
+                    if (v < 0.0) { v = 0.0; ++clampedLo; }
+                    if (v > 255.0) { v = 255.0; ++clampedHi; }
+                    varCorrected.px[(static_cast<size_t>(y) * ow + x) * 4 + i] =
+                        static_cast<uint8_t>(v + 0.5);
+                }
+    }
+    int maxC = 0;
+    const double psnrC = psnrRgb(varCorrected, ref, &maxC);
+    printf("[PHOTO-AC7] variant=C-varcorr dng=%s out=%dx%d PSNR=%.2f dB maxAbs=%d "
+           "(clamped lo=%d hi=%d of %d)\n",
+           dngPath, ow, oh, psnrC, maxC, clampedLo, clampedHi, ow * oh * 3);
+
+    // ---- Row D: Lanczos-3 pre-average, linear space (CPU probe) ---------
+    //
+    // EXPECTATION STATED UP FRONT, not discovered afterwards: against a BOX
+    // reference this should score LOWER than box pre-average, because filter
+    // mismatch stacks on top of the ordering mismatch. The supplementary
+    // Lanczos-vs-Lanczos column below separates those two effects. The PNG is
+    // produced regardless -- the user may prefer its visible sharpness to its
+    // PSNR, and that is theirs to judge by eye.
+    Rgba varD;
+    {
+        Buffer<uint16_t> small = lanczos3DownscaleU16(src, ow, oh);
+        {   // Diagnostic: a correct linear-space resample must preserve the
+            // mean closely. A large drift means the filter is wrong, not that
+            // the reference mismatches.
+            MeanVar boxRef = boxDownscaleU16Var(src, ow, oh);
+            double mb = 0.0, ml = 0.0;
+            for (int y = 0; y < oh; ++y)
+                for (int x = 0; x < ow; ++x)
+                    for (int c = 0; c < 3; ++c) {
+                        mb += boxRef.mean(x, y, c);
+                        ml += small(x, y, c);
+                    }
+            const double n = static_cast<double>(ow) * oh * 3;
+            printf("  [rowD diag] mean u16: box=%.1f lanczos=%.1f (ratio %.4f)\n",
+                   mb / n, ml / n, (ml / n) / (mb / n));
+        }
+        small.set_host_dirty();
+        Buffer<uint8_t> dBuf = Buffer<uint8_t>::make_interleaved(ow, oh, 4);
+        if (runFullRes(small, hp, dBuf) != 0) { printf("FAIL: row D render\n"); return 1; }
+        dBuf.copy_to_host();
+        varD = fromBuffer(dBuf);
+    }
+    int maxD = 0;
+    const double psnrD = psnrRgb(varD, ref, &maxD);
+    printf("[PHOTO-AC7] variant=D-lanczos dng=%s out=%dx%d PSNR=%.2f dB maxAbs=%d\n",
+           dngPath, ow, oh, psnrD, maxD);
+
+    // Supplementary ONLY. NOT an AC7 measurement: AC7's reference is a box
+    // downscale and is frozen. This isolates ordering mismatch from filter
+    // mismatch by giving row D a matched-filter reference.
+    {
+        const Rgba refL = lanczos3Downscale8(full, ow, oh);
+        int m = 0;
+        const double p = psnrRgb(varD, refL, &m);
+        printf("[PHOTO-SUPP] variant=D-lanczos vs LANCZOS reference (NOT AC7) "
+               "out=%dx%d PSNR=%.2f dB maxAbs=%d\n", ow, oh, p, m);
+        writePpm(outDir + "/referenceLanczos_" + std::to_string(maxDim) + ".ppm", refL);
+    }
+
     // ---- viewable output -------------------------------------------------
     const std::string pre = outDir + "/";
     const std::string tag = "_" + std::to_string(maxDim);
     writePpm(pre + "variantA" + tag + ".ppm", varA);
     writePpm(pre + "variantB" + tag + ".ppm", varB);
+    writePpm(pre + "variantC" + tag + ".ppm", varCorrected);
+    writePpm(pre + "variantD" + tag + ".ppm", varD);
     writePpm(pre + "reference" + tag + ".ppm", ref);
     writePpm(pre + "diffA_x8" + tag + ".ppm", absDiff(varA, ref, 8));
     writePpm(pre + "diffB_x8" + tag + ".ppm", absDiff(varB, ref, 8));
+    writePpm(pre + "diffC_x8" + tag + ".ppm", absDiff(varCorrected, ref, 8));
+    writePpm(pre + "diffD_x8" + tag + ".ppm", absDiff(varD, ref, 8));
 
     const int win = std::min({256, ow, oh});
     int hx, hy, lx, ly;
@@ -498,9 +819,13 @@ int main(int argc, char **argv) {
     // Same window on all three images, so the crops are directly comparable.
     writePpm(pre + "cropDetail_variantA" + tag + ".ppm", crop(varA, hx, hy, win, win));
     writePpm(pre + "cropDetail_variantB" + tag + ".ppm", crop(varB, hx, hy, win, win));
+    writePpm(pre + "cropDetail_variantC" + tag + ".ppm", crop(varCorrected, hx, hy, win, win));
+    writePpm(pre + "cropDetail_variantD" + tag + ".ppm", crop(varD, hx, hy, win, win));
     writePpm(pre + "cropDetail_reference" + tag + ".ppm", crop(ref, hx, hy, win, win));
     writePpm(pre + "cropSmooth_variantA" + tag + ".ppm", crop(varA, lx, ly, win, win));
     writePpm(pre + "cropSmooth_variantB" + tag + ".ppm", crop(varB, lx, ly, win, win));
+    writePpm(pre + "cropSmooth_variantC" + tag + ".ppm", crop(varCorrected, lx, ly, win, win));
+    writePpm(pre + "cropSmooth_variantD" + tag + ".ppm", crop(varD, lx, ly, win, win));
     writePpm(pre + "cropSmooth_reference" + tag + ".ppm", crop(ref, lx, ly, win, win));
 
     // Per-crop PSNR, so the visual comparison has numbers attached.
@@ -508,14 +833,18 @@ int main(int argc, char **argv) {
         int m = 0;
         const Rgba refD = crop(ref, hx, hy, win, win);
         const Rgba refS = crop(ref, lx, ly, win, win);
-        printf("[PHOTO-AC7-CROP] region=detail  window=%dx%d@(%d,%d) A=%.2f dB",
-               win, win, hx, hy, psnrRgb(crop(varA, hx, hy, win, win), refD, &m));
-        printf(" (maxAbs=%d)", m);
-        printf(" B=%.2f dB\n", psnrRgb(crop(varB, hx, hy, win, win), refD, &m));
-        printf("[PHOTO-AC7-CROP] region=smooth  window=%dx%d@(%d,%d) A=%.2f dB",
-               win, win, lx, ly, psnrRgb(crop(varA, lx, ly, win, win), refS, &m));
-        printf(" (maxAbs=%d)", m);
-        printf(" B=%.2f dB\n", psnrRgb(crop(varB, lx, ly, win, win), refS, &m));
+        const double aD = psnrRgb(crop(varA, hx, hy, win, win), refD, &m);
+        const double bD = psnrRgb(crop(varB, hx, hy, win, win), refD, &m);
+        const double cD = psnrRgb(crop(varCorrected, hx, hy, win, win), refD, &m);
+        const double dD = psnrRgb(crop(varD, hx, hy, win, win), refD, &m);
+        printf("[PHOTO-AC7-CROP] region=detail window=%dx%d@(%d,%d) A=%.2f B=%.2f C=%.2f D=%.2f dB\n",
+               win, win, hx, hy, aD, bD, cD, dD);
+        const double aS = psnrRgb(crop(varA, lx, ly, win, win), refS, &m);
+        const double bS = psnrRgb(crop(varB, lx, ly, win, win), refS, &m);
+        const double cS = psnrRgb(crop(varCorrected, lx, ly, win, win), refS, &m);
+        const double dS = psnrRgb(crop(varD, lx, ly, win, win), refS, &m);
+        printf("[PHOTO-AC7-CROP] region=smooth window=%dx%d@(%d,%d) A=%.2f B=%.2f C=%.2f D=%.2f dB\n",
+               win, win, lx, ly, aS, bS, cS, dS);
     }
 
     printf("[PHOTO-AC7] images written to %s\n", outDir.c_str());
