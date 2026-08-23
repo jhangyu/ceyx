@@ -19,6 +19,22 @@
 //
 // Exit code is the machine verdict: 0 only when every assertion below
 // holds; 1 on any failure. Do not rely on stdout text alone.
+//
+// WHY THIS RUNS UNDER `dart run` AND NOT `flutter test`: it was confirmed
+// infeasible to exercise `load()`'s default candidate search inside
+// `flutter test`. A throwaway probe under `flutter test` showed
+// `Platform.script` resolves to a synthetic `<pkg>/main.dart` at the
+// package root (not under bin/), so load()'s script-relative candidates
+// (4a/4b) never reach `dng_processor/native/dist|build`; and
+// `Platform.resolvedExecutable` resolves to the Flutter SDK's own
+// `flutter_tester` binary under `bin/cache/artifacts/engine/...`, so the
+// execDir/../Frameworks candidate (2) resolves into the SDK's engine tree,
+// not the app bundle. The only candidate reachable inside `flutter test`
+// would be DNG_NATIVE_BUILD_DIR (3) via an ad-hoc env var — exactly the
+// per-invocation dependency the flutter test suite must not carry. A
+// standalone `dart run` probe with a committed runner script that sets its
+// own environment internally (see tool/run_prod_shape_probe.sh) has no such
+// problem: running the script is the whole interface.
 
 import 'dart:io';
 
