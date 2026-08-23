@@ -719,6 +719,16 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+# R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by
+# dng_render_halide.cpp on the non-split (macOS/Metal) branch only, so it is
+# linked only there. The split branch refuses sized requests instead.
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(dng_decoder_native
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    if(NOT DNG_CROSS_BUILD)
+        add_dependencies(dng_decoder_native dng_render_scaled_preavg_aot_target)
+    endif()
+endif()
 # W7: link the split Stage4 kernel wherever it is generated (Vulkan targets).
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(dng_decoder_native
@@ -981,6 +991,13 @@ if(DNG_USE_LIBJPEG)
 else()
     target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 endif()
+# R2 sized decode: this target compiles dng_render_halide.cpp directly, so it
+# needs the scaled kernel the sized dispatch calls (macOS/Metal branch only).
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_device_handoff
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    add_dependencies(test_device_handoff dng_render_scaled_preavg_aot_target)
+endif()
 add_dependencies(test_device_handoff halide_runtime_target)
 add_dependencies(test_device_handoff dng_demosaic_aot_target)
 add_dependencies(test_device_handoff dng_demosaic_warp_aot_target)
@@ -1063,6 +1080,51 @@ if(APPLE)
 endif()
 
 
+# R2 sized decode acceptance gate (AC5 extent / AC5-D crop-vs-scale / AC6 memory).
+# Drives the PRODUCTION sized entry (dng_pipeline_v2_decode_to_rgb_sized) and
+# compares against a same-ordering CPU reference rendered through the production
+# Stage4 AOT. Like test_stage4_scaled_photo it #includes dng_render_halide.cpp to
+# reach buildRenderParams, so that file must NOT be listed as a separate source
+# here or every symbol in it would be defined twice.
+add_executable(test_sized_decode tests/test_sized_decode.cpp
+    src/dng_pipeline_v2.cpp
+    src/dng_halide_device.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp)
+target_include_directories(test_sized_decode PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_sized_decode
+    dng_sdk
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_sized_decode ${JPEG_LIBRARIES})
+endif()
+add_dependencies(test_sized_decode halide_runtime_target)
+add_dependencies(test_sized_decode dng_demosaic_aot_target)
+add_dependencies(test_sized_decode dng_demosaic_warp_aot_target)
+add_dependencies(test_sized_decode dng_warp_aot_target)
+add_dependencies(test_sized_decode dng_render_aot_target)
+add_dependencies(test_sized_decode dng_render_scaled_preavg_aot_target)
+add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
+add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_sized_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
 # Color accuracy / visual regression test
 add_executable(test_color_accuracy tests/test_color_accuracy.cpp)
 target_include_directories(test_color_accuracy PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
@@ -1112,6 +1174,12 @@ if(DNG_USE_LIBJPEG)
     target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
 else()
     target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+endif()
+# R2 sized decode: same as test_device_handoff — compiles the render TU directly.
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_decode
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    add_dependencies(test_decode dng_render_scaled_preavg_aot_target)
 endif()
 add_dependencies(test_decode halide_runtime_target)
 add_dependencies(test_decode dng_demosaic_aot_target)

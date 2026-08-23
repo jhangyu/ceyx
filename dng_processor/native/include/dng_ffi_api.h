@@ -37,6 +37,22 @@ void dng_free_buffer(uint8_t *buffer);
 /// Returns a heap-allocated DngResult. Caller must free with dng_free_result().
 DngResult *dng_decode_and_process(const char *file_path);
 
+/// Decode a DNG file, capping the OUTPUT long edge at max_dim.
+/// The aspect ratio is preserved, so the result is at most max_dim on its
+/// longer side (the shorter side scales proportionally).
+///
+/// max_dim <= 0 means full resolution and behaves exactly like
+/// dng_decode_and_process. Sized decoding is only available for Bayer/CFA
+/// input on the GPU path; any other input silently-but-loudly (see the
+/// [PipelineV2] log line) falls back to full resolution, so callers must read
+/// the returned width/height rather than assuming they got what they asked for.
+///
+/// Additive export: older binaries lack this symbol, so callers should resolve
+/// it defensively and fall back to dng_decode_and_process.
+/// Returns a heap-allocated DngResult. Caller must free with dng_free_result().
+DngResult *dng_decode_and_process_sized(const char *file_path,
+                                        int32_t max_dim);
+
 /// Warm process-scoped native resources for a likely decode size.
 /// This warms shared lossless/lossy workspaces and lossy MapPolynomial state.
 /// Returns 0 on success, or a negative error code.

@@ -85,14 +85,17 @@ FFI_EXPORT int32_t dng_decoder_pipeline_cache_status(void) {
   return -1;  // unsupported on this build
 }
 
-FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
+// R2 sized decode: shared body for both exported entries. max_dim <= 0 is the
+// full-resolution path; the old export forwards with 0 so its behaviour is
+// unchanged by construction rather than by inspection.
+static DngResult *decodeAndProcessImpl(const char *file_path, int32_t max_dim) {
   DngResult *result =
       static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
   if (!result)
     return nullptr;
 
   DngPipelineV2Result pipeline;
-  if (!dng_pipeline_v2_decode_to_rgb(file_path, pipeline)) {
+  if (!dng_pipeline_v2_decode_to_rgb_sized(file_path, max_dim, pipeline)) {
     result->error_code = pipeline.error_code;
     result->decode_ms = pipeline.decode_ms;
     result->process_ms = pipeline.process_ms;
@@ -143,6 +146,15 @@ FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
   // (dirty-flag no-op when nothing changed; never affects the result).
   dngVkpcAutoSave();
   return result;
+}
+
+FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
+  return decodeAndProcessImpl(file_path, 0);
+}
+
+FFI_EXPORT DngResult *dng_decode_and_process_sized(const char *file_path,
+                                                   int32_t max_dim) {
+  return decodeAndProcessImpl(file_path, max_dim);
 }
 
 FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {

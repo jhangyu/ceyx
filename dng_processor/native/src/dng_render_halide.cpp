@@ -148,6 +148,11 @@ functions:
 #include "dng_render_stage4.h"
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
 #include "dng_render_stage4_android.h"
+#else
+// R2 sized decode: pre-average (Variant A) scaled Stage4 kernel. macOS/Metal
+// only — the split (Android/Vulkan) branch has no scaled AOT and refuses
+// sized requests instead (see runRenderStage4HalideAotFromDevice).
+#include "dng_render_stage4_scaled_preavg.h"
 #endif
 #if defined(__ANDROID__)
 #include <arm_neon.h>
@@ -359,6 +364,7 @@ dng_point computeOutputSize(const dng_negative& negative,
     }
     return dst_size;
 }
+
 
 struct RenderParams {
     dng_vector camera_white_vec;
@@ -1165,19 +1171,39 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 // Phase 8.2.2 - Stage3->Stage4 device handoff.
 // Android/Vulkan uses a host-side planar repack before Stage4. Other targets
 // keep the original device buffer handoff path.
+// R2 sized decode: src_w/src_h are the SOURCE crop extent (DefaultCropArea),
+// dst_w/dst_h the requested OUTPUT extent. When they differ the pre-average
+// scaled kernel runs; when equal the path is bit-identical to before.
+//
+// The distinction is load-bearing: the unscaled path crops the source to the
+// DESTINATION extent, so feeding a small dst_w/dst_h without this split would
+// silently emit a top-left CROP at exactly the requested size rather than a
+// downscale.
 bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          float src_scale,
                                          int crop_l,
                                          int crop_t,
+                                         int src_w,
+                                         int src_h,
                                          int dst_w,
                                          int dst_h,
                                          const RenderParams& params,
                                          uint8_t* dst,
                                          bool fuse_rgba = false) {
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
-        !dst || dst_w <= 0 || dst_h <= 0) {
+        !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
         return false;
     }
+
+    const bool scaled = (src_w != dst_w || src_h != dst_h);
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+    // Android/Vulkan has no scaled AOT (Gotcha #93/#96 unverifiable without a
+    // real device). Refuse rather than crop; the caller falls back to the host
+    // path, which resamples correctly via the SDK.
+    if (scaled) {
+        return false;
+    }
+#endif
 
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // Q2: these timepoints only feed the verbose-gated [Stage4-Perf] print
@@ -1238,9 +1264,20 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);
-    // 8.2.3 fix: physically shift the read pointer via crop(), then mutate
-    // dim[i].min back to 0 so src/dst share the [0..dst_w-1] coordinate system.
-    if (crop_l > 0 || crop_t > 0) {
+    if (scaled) {
+        // Sized path: crop to the SOURCE extent (not dst) — the box geometry is
+        // derived from the source extent against out_w/out_h, so the full source
+        // area must be visible to the kernel. Cropped unconditionally, including
+        // when crop_l/crop_t are 0, so the ratio matches DefaultCropArea exactly
+        // rather than whatever the producer buffer happens to be sized to.
+        src_buf.crop(0, crop_l, src_w);
+        src_buf.crop(1, crop_t, src_h);
+        halide_buffer_t* raw = src_buf.raw_buffer();
+        raw->dim[0].min = 0;
+        raw->dim[1].min = 0;
+    } else if (crop_l > 0 || crop_t > 0) {
+        // 8.2.3 fix: physically shift the read pointer via crop(), then mutate
+        // dim[i].min back to 0 so src/dst share the [0..dst_w-1] coordinate system.
         src_buf.crop(0, crop_l, dst_w);
         src_buf.crop(1, crop_t, dst_h);
         halide_buffer_t* raw = src_buf.raw_buffer();
@@ -1361,7 +1398,40 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     auto t2_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
 #else
-    const int result = dng_render_stage4(src_buf.raw_buffer(),
+    // R2 sized decode: identical argument tail, two kernels. The scaled kernel
+    // takes dst_w/dst_h as explicit scalars so its box geometry never depends
+    // on output bounds inference. scaled==false reproduces the previous call
+    // exactly.
+    const int result =
+        scaled
+        ? dng_render_stage4_scaled_preavg(src_buf.raw_buffer(),
+                                         src_scale,
+                                         dst_w,
+                                         dst_h,
+                                         exp_buf.raw_buffer(),
+                                         tone_buf.raw_buffer(),
+                                         gamma_buf.raw_buffer(),
+                                         cw_buf.raw_buffer(),
+                                         c2r_buf.raw_buffer(),
+                                         r2f_buf.raw_buffer(),
+                                         hs_table_buf.raw_buffer(),
+                                         hs_encode_buf.raw_buffer(),
+                                         hs_decode_buf.raw_buffer(),
+                                         params.huesat_hue_div,
+                                         params.huesat_sat_div,
+                                         params.huesat_val_div,
+                                         params.huesat_has_table,
+                                         params.huesat_has_encoding,
+                                         look_table_buf.raw_buffer(),
+                                         look_encode_buf.raw_buffer(),
+                                         look_decode_buf.raw_buffer(),
+                                         params.look_hue_div,
+                                         params.look_sat_div,
+                                         params.look_val_div,
+                                         params.look_has_table,
+                                         params.look_has_encoding,
+                                         dst_buf.raw_buffer())
+        : dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
                                          exp_buf.raw_buffer(),
                                          tone_buf.raw_buffer(),
@@ -1704,6 +1774,19 @@ bool runHalideFullOrSdkFallback(dng_host& host,
 
 }  // namespace
 
+// R2 sized decode: public accessor so dng_pipeline_v2.cpp can size the Stage4
+// output buffer by OUTPUT extent before the render runs. Same computation the
+// render path itself uses — deliberately not duplicated there. Defined outside
+// the anonymous namespace above so it has external linkage.
+void dng_render_stage4_output_size(const dng_negative& negative,
+                                   const dng_render& renderer,
+                                   uint32_t& out_w,
+                                   uint32_t& out_h) {
+    const dng_point dst_size = computeOutputSize(negative, renderer);
+    out_w = static_cast<uint32_t>(dst_size.h);
+    out_h = static_cast<uint32_t>(dst_size.v);
+}
+
 const char* renderHalideModeName(RenderHalideMode mode) {
     switch (mode) {
         case RenderHalideMode::SDK: return "sdk";
@@ -1914,11 +1997,10 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
-    // Device handoff only works without resample.
+    // R2 sized decode: a size mismatch no longer bails out — the source extent
+    // is passed through and the scaled kernel handles the downscale. The split
+    // (Android) branch still refuses inside the runner and falls back to host.
     const dng_rect src_area = negative.DefaultCropArea();
-    if (src_area.W() != out_w || src_area.H() != out_h) {
-        return false;
-    }
 
     // W7 (M-11): caller's vector stays RGB (W*H*3). macOS kernel writes RGBA into
     // persistent scratch; runRenderStage4HalideAotFromDevice strips to the caller's
@@ -1936,6 +2018,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     return runRenderStage4HalideAotFromDevice(
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
+        static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb.data());
 }
@@ -2047,10 +2130,9 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
+    // R2 sized decode: see the vector overload above — size mismatch dispatches
+    // the scaled kernel instead of bailing out.
     const dng_rect src_area = negative.DefaultCropArea();
-    if (src_area.W() != out_w || src_area.H() != out_h) {
-        return false;
-    }
 
     // Pool path: buffer is already committed — no resize, no page fault.
     // W7-B: fused path outputs RGBA8.
@@ -2068,6 +2150,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     return runRenderStage4HalideAotFromDevice(
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
+        static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb_ptr, config.fuse_rgba_output);
 }

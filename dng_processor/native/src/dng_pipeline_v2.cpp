@@ -467,6 +467,20 @@ class ScopedRgbCheckout {
 // otherwise an interleaved RGB8 buffer from the checkout-style RgbOutputPool.
 // Reuses an already-set ptr (e.g. a device-handoff fallback re-entering
 // runStage4ToRgb) to avoid leaking a previously checked-out buffer.
+// R2 sized decode: the single place that decides the Stage4 MaximumSize cap.
+// maxDim <= 0, or a maxDim at least as large as the input, yields exactly the
+// previous expression (max of input extents) — so the full-resolution path is
+// unchanged by construction rather than by inspection.
+uint32_t stage4MaximumSize(uint32_t inputWidth, uint32_t inputHeight,
+                           int32_t maxDim) {
+  const uint32_t full = std::max(inputWidth, inputHeight);
+  if (maxDim <= 0) {
+    return full;
+  }
+  const uint32_t requested = static_cast<uint32_t>(maxDim);
+  return requested < full ? requested : full;
+}
+
 bool acquireStage4OutputBuffer(const PipelineConfig &config,
                                uint32_t width, uint32_t height,
                                uint8_t *&ptr, size_t &size) {
@@ -846,6 +860,7 @@ bool runHalideStage3ForBayer(dng_host &host,
 bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     const PipelineConfig &config,
                     uint32_t inputWidth, uint32_t inputHeight,
+                    int32_t maxDim,
                     uint8_t *&stage4_out_ptr, size_t &stage4_out_size,
                     uint32_t &outW, uint32_t &outH);
 
@@ -860,6 +875,7 @@ bool runHalideStage3And4Fused(dng_host &host,
                                const PipelineConfig &config,
                                uint32_t inputWidth,
                                uint32_t inputHeight,
+                               int32_t maxDim,
                                DngPipelineStage3Timing *timing,
                                std::vector<uint16_t> *stage3Workspace,
                                uint8_t *&stage4_out_ptr,
@@ -911,22 +927,32 @@ bool runHalideStage3And4Fused(dng_host &host,
     return false;
 
   // CPU work while GPU runs Stage3 (latency hiding):
-  // 1. Pre-alloc Stage4 output buffer (no page fault on warm calls). W7-B: on
+  // 1. Setup Stage4 renderer. R2 sized decode: moved ahead of the output-buffer
+  //    acquire because the buffer is now sized by OUTPUT extent, which is not
+  //    known until the renderer's MaximumSize is set. Both are cheap CPU work
+  //    inside the same latency-hiding window, so the ordering swap costs
+  //    nothing.
+  dng_render renderer(host, negative);
+  renderer.SetMaximumSize(stage4MaximumSize(inputWidth, inputHeight, maxDim));
+  renderer.SetFinalPixelType(ttByte);
+  renderer.SetFinalSpace(dng_space_sRGB::Get());
+
+  // 2. Pre-alloc Stage4 output buffer (no page fault on warm calls). W7-B: on
   //    the Android fused path this is an RGBA8 checkout buffer; otherwise RGB8.
-  if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, stage4_out_ptr,
+  //    Sized by output extent: on the full-resolution path that equals the
+  //    input extent (unchanged); on the sized path it is the reason the RGBA
+  //    allocation shrinks with maxDim.
+  uint32_t plannedW = inputWidth;
+  uint32_t plannedH = inputHeight;
+  dng_render_stage4_output_size(negative, renderer, plannedW, plannedH);
+  if (!acquireStage4OutputBuffer(config, plannedW, plannedH, stage4_out_ptr,
                                  stage4_out_size))
     return false;
 
-  // 2. Stage3 stub: deferred to success/fallback paths (M-7).
+  // 3. Stage3 stub: deferred to success/fallback paths (M-7).
   //    No downstream consumer reads stage3Stub pixels on the device handoff
   //    success path; a minimal 1×1 stub saves ~146MB vs the full-size alloc.
   //    The fallback path allocates full-size when it needs real pixel data.
-
-  // 3. Setup Stage4 renderer
-  dng_render renderer(host, negative);
-  renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
-  renderer.SetFinalPixelType(ttByte);
-  renderer.SetFinalSpace(dng_space_sRGB::Get());
 
   // Try Stage4 from device buffer.  Stage3 GPU may still be running; the GPU
   // serial command queue (Metal/Vulkan) guarantees Stage4 won't read until Stage3 finishes.
@@ -989,7 +1015,7 @@ bool runHalideStage3And4Fused(dng_host &host,
     return false;
   negative.SetStage3Image(stage3Stub);
 
-  if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight,
+  if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight, maxDim,
                       stage4_out_ptr, stage4_out_size, outW, outH))
     return false;
 
@@ -1041,17 +1067,22 @@ bool runStage3WithConfig(dng_host &host,
 bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     const PipelineConfig &config,
                     uint32_t inputWidth, uint32_t inputHeight,
+                    int32_t maxDim,
                     uint8_t *&stage4_out_ptr, size_t &stage4_out_size,
                     uint32_t &outW, uint32_t &outH) {
   dng_render renderer(host, negative);
-  renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
+  renderer.SetMaximumSize(stage4MaximumSize(inputWidth, inputHeight, maxDim));
   renderer.SetFinalPixelType(ttByte);
   renderer.SetFinalSpace(dng_space_sRGB::Get());
 
   // Acquire pool buffer: warm pages stay committed → 0ms on warm paths.
   // W7-B: RGBA8 checkout buffer on the Android fused path, else RGB8. Reuses an
   // already-set stage4_out_ptr when re-entered from the device-handoff fallback.
-  if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, stage4_out_ptr,
+  // R2 sized decode: sized by OUTPUT extent (equals input on the full-res path).
+  uint32_t plannedW = inputWidth;
+  uint32_t plannedH = inputHeight;
+  dng_render_stage4_output_size(negative, renderer, plannedW, plannedH);
+  if (!acquireStage4OutputBuffer(config, plannedW, plannedH, stage4_out_ptr,
                                  stage4_out_size))
     return false;
 
@@ -1102,6 +1133,10 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
                                  stage4_out_size))
     return restoreHostStage2();
 
+  // R2 sized decode: this is the non-Bayer (lossy) route, which has no Stage3
+  // image and no scaled kernel, so it always renders full resolution. decodeStages
+  // zeroes the effective maxDim before reaching here and logs the fallback, so
+  // there is deliberately no maxDim to thread into this SetMaximumSize.
   dng_render renderer(host, negative);
   renderer.SetMaximumSize(std::max(inputWidth, inputHeight));
   renderer.SetFinalPixelType(ttByte);
@@ -1157,11 +1192,25 @@ bool decodeStages(ConcurrentDngHost &host,
                   const PipelineConfig &config,
                   dng_negative &negative,
                   const ParsedDngMetadata &metadata,
+                  int32_t maxDim,
                   const Clock::time_point &decodeStart,
                   DngPipelineV2Result &result) {
   const bool isBayer = metadata.isBayer;
   const uint32_t inputWidth = metadata.inputWidth;
   const uint32_t inputHeight = metadata.inputHeight;
+
+  // R2 sized decode: only the Bayer/CFA route builds a Stage3 image and can
+  // reach the scaled Stage4 kernel. Non-Bayer (lossy) input has no Stage3 image
+  // at all, so a sized request degrades to full resolution here — once, at the
+  // routing point, rather than at each downstream SetMaximumSize. Loud by
+  // design: a silently cropped or silently full-size result is the failure mode
+  // this whole path exists to avoid.
+  int32_t effectiveMaxDim = maxDim;
+  if (effectiveMaxDim > 0 && !isBayer) {
+    std::cerr << "[PipelineV2] sized decode unsupported for this path; "
+                 "falling back to full resolution\n";
+    effectiveMaxDim = 0;
+  }
 
   // Lazy actual-size prewarm: fire the batched polynomial3 kernel at the
   // real image dimensions now that they are known.  This ensures Metal has
@@ -1229,7 +1278,7 @@ bool decodeStages(ConcurrentDngHost &host,
   bool allDone = false;
   if (isBayer) {
     allDone = runHalideStage3And4Fused(
-        host, negative, config, inputWidth, inputHeight,
+        host, negative, config, inputWidth, inputHeight, effectiveMaxDim,
         &stage3Timing, &stage3Workspace,
         result.rgb_ptr, result.rgb_size, result.width, result.height);
   } else {
@@ -1268,7 +1317,7 @@ bool decodeStages(ConcurrentDngHost &host,
 
   const auto processStart = Clock::now();
   if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight,
-                      result.rgb_ptr, result.rgb_size,
+                      effectiveMaxDim, result.rgb_ptr, result.rgb_size,
                       result.width, result.height)) {
     result.error_code = kDngErrStage4Failed;
     return false;
@@ -1475,6 +1524,15 @@ bool dng_pipeline_v2_run_stage3(dng_host &host,
 
 bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
                                    DngPipelineV2Result &result) {
+  // R2 sized decode: the old entry is a thin forward. max_dim 0 makes every
+  // downstream cap resolve to the previous expression, so full-resolution
+  // behaviour is unchanged by construction.
+  return dng_pipeline_v2_decode_to_rgb_sized(file_path, 0, result);
+}
+
+bool dng_pipeline_v2_decode_to_rgb_sized(const char *file_path,
+                                         int32_t max_dim,
+                                         DngPipelineV2Result &result) {
   // L-4: signal pending decode so warmup yields between sub-steps.  Counter
   // is incremented before the mutex lock so warmup (which checks the counter
   // after releasing the mutex between steps) detects this decode immediately.
@@ -1541,7 +1599,8 @@ bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
       return false;
     }
     const bool ok =
-        decodeStages(host, config, *negative, metadata, decodeStart, result);
+        decodeStages(host, config, *negative, metadata, max_dim, decodeStart,
+                     result);
     // W7-B: on the fused path the orchestrators filled result.rgb_ptr with an
     // RGBA8 buffer from the checkout pool; expose it as rgba_ptr and null out
     // rgb_ptr so the FFI layer takes the zero-extra-pass path.

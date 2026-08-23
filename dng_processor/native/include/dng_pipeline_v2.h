@@ -62,6 +62,18 @@ struct DngPipelineStage3Timing {
 bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
                                    DngPipelineV2Result &result);
 
+// R2 sized decode. max_dim caps the OUTPUT long edge; the aspect ratio is
+// preserved by the SDK's own MaximumSize logic. max_dim <= 0 means
+// full resolution and is exactly equivalent to dng_pipeline_v2_decode_to_rgb
+// (which forwards here with 0).
+//
+// Only the Bayer/CFA Halide path can produce a scaled result on the GPU. A
+// sized request on any other path logs and falls back to full resolution
+// rather than returning a cropped or failed decode.
+bool dng_pipeline_v2_decode_to_rgb_sized(const char *file_path,
+                                         int32_t max_dim,
+                                         DngPipelineV2Result &result);
+
 bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height);
 
 bool dng_pipeline_v2_run_stage3(dng_host &host,

@@ -43,6 +43,15 @@ bool render_stage4_halide(dng_host& host,
                           uint32_t& out_w,
                           uint32_t& out_h);
 
+// R2 sized decode: the output extent the Stage4 render will produce for this
+// negative + renderer (honours renderer.MaximumSize()). Lets the pipeline size
+// its Stage4 output buffer by OUTPUT extent before the render runs, instead of
+// by input extent.
+void dng_render_stage4_output_size(const dng_negative& negative,
+                                   const dng_render& renderer,
+                                   uint32_t& out_w,
+                                   uint32_t& out_h);
+
 // Phase 8.2.2 — Stage3→Stage4 device-side handoff.
 // stage3_device_buf must be device-dirty (from demosaic_warp dispatch).
 // src_scale is typically 1.0f/65535.0f for uint16 Stage3 data.
