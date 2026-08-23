@@ -1006,7 +1006,8 @@ target_link_libraries(test_stage4_scaled
     Halide::Halide
     ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
 add_dependencies(test_stage4_scaled halide_runtime_target)
 add_dependencies(test_stage4_scaled dng_render_aot_target)
 add_dependencies(test_stage4_scaled dng_render_scaled_aot_target)

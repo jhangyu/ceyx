@@ -43,6 +43,7 @@
 
 #include "dng_render_stage4.h"
 #include "dng_render_stage4_scaled.h"
+#include "dng_render_stage4_scaled_preavg.h"
 
 using Halide::Runtime::Buffer;
 
@@ -57,6 +58,11 @@ namespace {
 // 60-67 dB on the smooth one, i.e. that design's AC7 failure is
 // content-dependent, not content-independent. Default behaviour is unchanged.
 float g_checker_amplitude = 0.12f;
+
+// Amended AC7 (2026-08-23 user ruling): shipped pre-average kernel vs a
+// same-ordering CPU reference. The old 40 dB vs box-of-full-res criterion is
+// waived and now applies only to the non-shipped post-average kernel below.
+constexpr double kPreAvgThreshold = 55.0;
 
 constexpr int kTableSize = 4098;  // matches the generator's table_interp domain
 constexpr int kHueDiv = 2;
@@ -275,6 +281,51 @@ int call_stage4_scaled(Buffer<uint16_t> &src, int ow, int oh, RenderParams &p,
                                     dst);
 }
 
+int call_stage4_scaled_preavg(Buffer<uint16_t> &src, int ow, int oh, RenderParams &p,
+                              Buffer<uint8_t> &dst) {
+    return dng_render_stage4_scaled_preavg(src, 1.0f / 65535.0f, ow, oh,
+                                    p.exp_ramp, p.tone_curve, p.encode_gamma,
+                                    p.camera_white, p.camera_to_rgb, p.rgb_to_final,
+                                    p.huesat_table, p.huesat_encode, p.huesat_decode,
+                                    kHueDiv, kSatDiv, kValDiv, /*has_table=*/0, /*has_encoding=*/0,
+                                    p.look_table, p.look_encode, p.look_decode,
+                                    kHueDiv, kSatDiv, kValDiv, /*has_table=*/0, /*has_encoding=*/0,
+                                    dst);
+}
+
+// Source-side box downscale of the u16 Stage3 input. Rendering THIS through
+// the production kernel is the same-ordering reference for the pre-average
+// kernel. `mutate` swaps the box average for nearest-neighbour point sampling,
+// which must break the gate.
+Buffer<uint16_t> cpu_downscale_u16(const Buffer<uint16_t> &src, int ow, int oh, bool mutate) {
+    const int w = src.dim(0).extent();
+    const int h = src.dim(1).extent();
+    Buffer<uint16_t> out = Buffer<uint16_t>::make_interleaved(ow, oh, 3);
+    for (int y = 0; y < oh; ++y) {
+        const int y0 = static_cast<int>((static_cast<int64_t>(y) * h) / oh);
+        int y1 = static_cast<int>((static_cast<int64_t>(y + 1) * h) / oh);
+        if (y1 <= y0) y1 = y0 + 1;
+        for (int x = 0; x < ow; ++x) {
+            const int x0 = static_cast<int>((static_cast<int64_t>(x) * w) / ow);
+            int x1 = static_cast<int>((static_cast<int64_t>(x + 1) * w) / ow);
+            if (x1 <= x0) x1 = x0 + 1;
+            for (int c = 0; c < 3; ++c) {
+                if (mutate) { out(x, y, c) = src(x0, y0, c); continue; }
+                double acc = 0.0;
+                for (int sy = y0; sy < y1; ++sy)
+                    for (int sx = x0; sx < x1; ++sx)
+                        acc += static_cast<double>(src(sx, sy, c));
+                const double n = static_cast<double>(x1 - x0) * (y1 - y0);
+                double avg = acc / n;
+                if (avg < 0.0) avg = 0.0;
+                if (avg > 65535.0) avg = 65535.0;
+                out(x, y, c) = static_cast<uint16_t>(avg + 0.5);
+            }
+        }
+    }
+    return out;
+}
+
 // PSNR over the RGB channels only (alpha is a constant 255 in both).
 double rgb_psnr(const Buffer<uint8_t> &a, const Buffer<uint8_t> &b, int *max_abs_out) {
     const int w = a.dim(0).extent();
@@ -341,12 +392,63 @@ bool run_case(const Case &tc, RenderParams &p, double threshold, bool mutate) {
 
     int max_abs = 0;
     const double psnr = rgb_psnr(got, ref, &max_abs);
-    const bool pass = psnr >= threshold;
-    printf("[STAGE4_SCALED] case=%s src=%dx%d out=%dx%d psnr=%.2f threshold=%.2f maxabs=%d result=%s\n",
+    const bool pass_post = psnr >= threshold;
+    printf("[STAGE4_SCALED] kernel=postavg case=%s src=%dx%d out=%dx%d psnr=%.2f threshold=%.2f maxabs=%d result=%s\n",
            tc.name, tc.src_w, tc.src_h, tc.out_w, tc.out_h,
-           psnr, threshold, max_abs, pass ? "PASS" : "FAIL");
+           psnr, threshold, max_abs, pass_post ? "PASS" : "FAIL");
 
-    // ---- INFORMATIONAL ONLY. NOT A GATE. --------------------------------
+    // ---- SHIPPED KERNEL GATE (amended AC7) -------------------------------
+    // 2026-08-23 user ruling: Variant A -- dng_render_stage4_scaled_preavg,
+    // the linear-space pre-average kernel -- ships for all sizes. The original
+    // "PSNR >= 40 dB vs a box downscale of the full-resolution 8-bit output"
+    // criterion is WAIVED (thumbnail PSNR exemption granted after inspecting
+    // the visuals) and replaced by this mechanical implementation-correctness
+    // check: the pre-average kernel against a SAME-ORDERING CPU reference at
+    // >= 55 dB.
+    //
+    // Same-ordering pairing is the rule: the gate reference and the kernel
+    // must share an averaging order, or the number measures the ordering gap
+    // rather than the implementation. Two kernels, two references, two
+    // thresholds -- do not cross them.
+    //
+    // Expect ~78-79 dB here. A result near the 55 dB floor is NOT a pass to
+    // celebrate; it means something regressed and should be investigated.
+    Buffer<uint8_t> gotPre = Buffer<uint8_t>::make_interleaved(tc.out_w, tc.out_h, 4);
+    if (call_stage4_scaled_preavg(src, tc.out_w, tc.out_h, p, gotPre) != 0) {
+        printf("  FAIL: dng_render_stage4_scaled_preavg returned nonzero\n");
+        return false;
+    }
+    gotPre.copy_to_host();
+
+    Buffer<uint16_t> smallSrc = cpu_downscale_u16(src, tc.out_w, tc.out_h, mutate);
+    Buffer<uint8_t> refPre = Buffer<uint8_t>::make_interleaved(tc.out_w, tc.out_h, 4);
+    if (call_stage4(smallSrc, p, refPre) != 0) {
+        printf("  FAIL: pre-average reference render returned nonzero\n");
+        return false;
+    }
+    refPre.copy_to_host();
+
+    for (int y = 0; y < tc.out_h; ++y)
+        for (int x = 0; x < tc.out_w; ++x)
+            if (gotPre(x, y, 3) != 255) {
+                printf("  FAIL: preavg alpha != 255 at (%d,%d): %d\n", x, y, gotPre(x, y, 3));
+                return false;
+            }
+
+    int max_abs_pre = 0;
+    const double psnr_pre = rgb_psnr(gotPre, refPre, &max_abs_pre);
+    const bool pass_pre = psnr_pre >= kPreAvgThreshold;
+    printf("[STAGE4_SCALED] kernel=preavg  case=%s src=%dx%d out=%dx%d psnr=%.2f threshold=%.2f maxabs=%d result=%s\n",
+           tc.name, tc.src_w, tc.src_h, tc.out_w, tc.out_h,
+           psnr_pre, kPreAvgThreshold, max_abs_pre, pass_pre ? "PASS" : "FAIL");
+
+    const bool pass = pass_post && pass_pre;
+
+    // ---- INFORMATIONAL ONLY. NOT A GATE, AND NO LONGER THE CRITERION. ---
+    // These probes characterise the ORIGINAL AC7 criterion, which the user
+    // waived on 2026-08-23. They are retained as historical characterisation
+    // of the averaging-order gap. The live gate is the preavg >= 55 dB check
+    // above. Do not mistake these numbers for a pass/fail criterion.
     // Runs after `pass` is decided and only prints; cannot affect the verdict
     // or the exit code. Skipped under --mutate-reference, where `ref` is
     // deliberately wrong.
