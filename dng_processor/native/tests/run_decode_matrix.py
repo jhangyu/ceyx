@@ -346,6 +346,10 @@ _DEFAULT_BGGR_SAMPLE = (
 )
 _CFA_PHASE_PASS_RE = re.compile(r"^\[CFA PHASE\] ALL PASS\s*$")
 _CFA_COLOR_RE = re.compile(r"^\[CFA COLOR\]\s+(.*)\[(PASS|FAIL)\]\s*$")
+# R2 sized decode gate (AC5 output extent / AC5-D crop-vs-scale / AC6 memory).
+_DEFAULT_SIZED_DECODE_BIN = "dng_processor/native/build/test_sized_decode"
+_SIZED_OVERALL_RE = re.compile(r"^OVERALL=(PASS|FAIL)\s*$")
+_SIZED_HANDOFF_FAILED_MARKER = "8.2.2 device handoff Stage4 failed"
 
 
 def _accumulate_opcode2_timing(dst: dict[str, float], payload: str) -> None:
@@ -1168,6 +1172,54 @@ def _run_android_device_handoff(
 # ---------------------------------------------------------------------------
 # CFA phase gates (2026-08-16)
 # ---------------------------------------------------------------------------
+
+def _run_sized_decode_case(cwd: Path, binary: Path, dng_path: str) -> CfaCheckResult:
+    """R2 sized decode gate: AC5 extent, AC5-D crop-vs-scale, AC6 memory.
+
+    Requires exit 0 AND the 'OVERALL=PASS' marker — exit code alone is not
+    enough of a contract for a tool asserting pixels.
+
+    Also asserts the device-handoff-failure line is ABSENT. Without that check
+    the harness could pass entirely on the host fallback path, gating a route
+    that is not the one production takes.
+    """
+    proc = subprocess.run(
+        [str(binary), dng_path],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = proc.stdout
+    lines = output.splitlines()
+    overall_pass = any(
+        (m := _SIZED_OVERALL_RE.match(line)) and m.group(1) == "PASS" for line in lines
+    )
+    handoff_fell_back = any(_SIZED_HANDOFF_FAILED_MARKER in line for line in lines)
+    if proc.returncode != 0 or not overall_pass or handoff_fell_back:
+        print(output, end="" if output.endswith("\n") else "\n")
+        return CfaCheckResult(
+            name="Sized decode (AC5 / AC5-D / AC6)",
+            status="FAIL",
+            detail=(
+                f"exit={proc.returncode} overall_pass={overall_pass} "
+                f"device_handoff_fell_back_to_host={handoff_fell_back}"
+            ),
+        )
+    for line in lines:
+        if "AC5-D PSNR" in line or line.startswith("  output "):
+            print(f"[SIZED GATE] {line.strip()}")
+    return CfaCheckResult(
+        name="Sized decode (AC5 / AC5-D / AC6)",
+        status="PASS",
+        detail=(
+            "maxDim 200/1024/2560: output extent exact, PSNR >= 55 dB vs the "
+            "same-ordering CPU reference (proves scale, not crop), device "
+            "handoff never fell back to host"
+        ),
+    )
+
 
 def _run_cfa_phase_case(cwd: Path, binary: Path) -> CfaCheckResult:
     """Run the four-Bayer-phase synthetic unit check (test_cfa_phase).
@@ -2411,6 +2463,24 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--sized-decode-harness",
+        default="",
+        help=(
+            "R2 sized-decode gate binary (relative to repo-root). Auto-enabled "
+            f"when the default build output exists ({_DEFAULT_SIZED_DECODE_BIN}). "
+            "Gates maxDim 200/1024/2560 on output extent, on PSNR >= 55 dB "
+            "against a same-ordering CPU reference (which is what distinguishes "
+            "a correct downscale from a same-sized CROP), and on the device "
+            "handoff not falling back to the host path."
+        ),
+    )
+    ap.add_argument(
+        "--no-sized-decode-harness",
+        action="store_true",
+        default=False,
+        help="Disable the sized-decode gate even if the default binary exists.",
+    )
+    ap.add_argument(
         "--bggr-sample",
         default="",
         help=(
@@ -3072,6 +3142,28 @@ def main() -> int:
                 cfa_results.append(_run_cfa_color_case(
                     root, cfa_color_bin, bggr_sample, args.bggr_min_b_minus_r
                 ))
+
+        # R2 sized decode gate. Same auto-enable/SKIP contract as the harnesses
+        # above: a gate nobody knows to invoke is a gate that silently stops
+        # being run, so it is registered here rather than left standalone.
+        requested_sized = bool(args.sized_decode_harness)
+        if not args.no_sized_decode_harness:
+            sized_bin = (
+                root / (args.sized_decode_harness or _DEFAULT_SIZED_DECODE_BIN)
+            ).resolve()
+            if not sized_bin.exists():
+                if requested_sized:
+                    ap.error(f"Sized decode harness not found: {sized_bin}")
+                print(f"[SKIP] Sized decode harness not built; skipping: {sized_bin}")
+                cfa_results.append(CfaCheckResult(
+                    name="Sized decode (AC5 / AC5-D / AC6)",
+                    status="SKIP",
+                    detail=f"binary not built: {sized_bin}",
+                ))
+            else:
+                cfa_results.append(
+                    _run_sized_decode_case(root, sized_bin, lossless)
+                )
 
     if any(c.status == "FAIL" for c in cfa_results):
         gate_failed = True
