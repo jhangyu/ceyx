@@ -587,6 +587,30 @@ add_custom_command(
 )
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 
+# Sized decode (targetWidth): box-filter-downscaling Stage4 variant. Emitted
+# from the SAME generator binary via -g/-f, exactly like the Android variant
+# below, so that dng_render_stage4 itself stays byte-identical (its output SHAs
+# are pinned gate artifacts — Gotcha #99).
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled.h
+    COMMAND dng_render_generator -g dng_render_stage4_scaled -f dng_render_stage4_scaled -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS dng_render_generator
+    COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled)..."
+)
+add_custom_target(dng_render_scaled_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
+
+# Variant A of the sized kernel: box-averages the Stage3 source BEFORE the
+# colour math (the variant above averages after it). The two co-exist on
+# purpose so the averaging-order trade-off can be measured side by side on a
+# real photograph; see the class comments in DngRenderGenerator.cpp.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg.h
+    COMMAND dng_render_generator -g dng_render_stage4_scaled_preavg -f dng_render_stage4_scaled_preavg -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS dng_render_generator
+    COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled, pre-average)..."
+)
+add_custom_target(dng_render_scaled_preavg_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+
 # Phase 14: Vulkan three-channel-split Stage4 generator (was Android-only; see
 # the DNG_STAGE4_SPLIT_KERNEL note above).
 # Eliminates Tuple + dim(2) codegen that triggers Halide v21 SPIR-V R==G bug.
@@ -642,6 +666,7 @@ if(DNG_HOST_GENERATORS_ONLY)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     )
@@ -965,6 +990,76 @@ add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
 add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
 if(APPLE)
     target_link_libraries(test_device_handoff ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# Sized decode (targetWidth) R1: standalone gate for the box-filter-scaled
+# Stage4 AOT. Self-contained — synthesises a Stage3-shaped source and its
+# render parameters, so it needs no DNG sample and no dng_sdk. It compares
+# dng_render_stage4_scaled(full src) against dng_render_stage4(CPU box
+# downscale of the same src) and gates the PSNR.
+add_executable(test_stage4_scaled tests/test_stage4_scaled.cpp)
+target_include_directories(test_stage4_scaled PRIVATE
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_stage4_scaled
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+add_dependencies(test_stage4_scaled halide_runtime_target)
+add_dependencies(test_stage4_scaled dng_render_aot_target)
+add_dependencies(test_stage4_scaled dng_render_scaled_aot_target)
+add_dependencies(test_stage4_scaled dng_render_scaled_preavg_aot_target)
+if(APPLE)
+    target_link_libraries(test_stage4_scaled ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# Real-photograph AC7 measurement for both sized-kernel variants, plus viewable
+# image output. NOTE: tests/test_stage4_scaled_photo.cpp #includes
+# src/dng_render_halide.cpp directly (to reach the production buildRenderParams
+# without editing a production source), so that file must NOT be listed here as
+# a separate source or every symbol in it would be defined twice.
+add_executable(test_stage4_scaled_photo tests/test_stage4_scaled_photo.cpp
+    src/dng_pipeline_v2.cpp
+    src/dng_halide_device.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp)
+target_include_directories(test_stage4_scaled_photo PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_stage4_scaled_photo
+    dng_sdk
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_stage4_scaled_photo ${JPEG_LIBRARIES})
+endif()
+add_dependencies(test_stage4_scaled_photo halide_runtime_target)
+add_dependencies(test_stage4_scaled_photo dng_demosaic_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_demosaic_warp_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_warp_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_render_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_render_scaled_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_render_scaled_preavg_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_opcode_polynomial_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_stage4_scaled_photo ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 
