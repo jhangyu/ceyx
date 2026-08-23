@@ -27,19 +27,27 @@
 // gate, not a gate").
 //
 //   --expect=sized (DEFAULT, the R2 landing gate): requires
-//     sizedDecodeAvailable == true AND sized(maxDim:200)'s long edge is
-//     within +/-1px of 200 AND sized dims differ from the full-resolution
+//     sizedDecodeAvailable == true AND sized(maxDim:N)'s long edge is
+//     within +/-1px of N AND sized dims differ from the full-resolution
 //     baseline. Run with no env override (or DNG_PROBE_LIB_DIR pointed at
 //     the current shipped dylib) — this is EXPECTED TO FAIL (exit 1) against
 //     a dylib built before the sized symbol landed; that failure is the red
 //     proof that the gate is load-bearing, not a bug in the probe.
 //
 //   --expect=fallback (AC4 mode): requires sizedDecodeAvailable == false
-//     AND sized(maxDim:200) dims == baseline dims (silent fallback engaged).
+//     AND sized(maxDim:N) dims == baseline dims (silent fallback engaged).
 //     Run this against an old dylib snapshot via
 //     `DNG_PROBE_LIB_DIR=<path-to-dir-containing-old-dylib>` (see
 //     tool/run_prod_shape_probe.sh) to re-prove AC4 after the shipped dylib
 //     is replaced with one that has the new symbol.
+//
+// --maxdim=N (default 200): the requested longest-output-edge size passed
+//   to decodeOnWorker. AC5 requires three sizes (200 / 1024 / 2560) each
+//   "解一次" (one decode per run) — this probe deliberately does NOT loop
+//   over multiple sizes internally; run the script three times with three
+//   different --maxdim values instead, so each run's full stderr (including
+//   any native device-handoff-failure log line) is attributable to exactly
+//   one size.
 //
 // Exit code is the machine verdict: 0 only when every assertion for the
 // selected mode holds; 1 on any failure. Do not rely on stdout text alone.
@@ -64,7 +72,7 @@ import 'dart:io';
 
 import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
 
-const int _requestedMaxDim = 200;
+const int _defaultMaxDim = 200;
 const int _maxDimToleranceOnLongEdge = 1;
 
 enum _Expect { sized, fallback }
@@ -72,7 +80,8 @@ enum _Expect { sized, fallback }
 Never _usageAndExit() {
   stderr.writeln(
     'usage: prod_shape_probe.dart <path-to-sample.dng> '
-    '[--expect=sized|--expect=fallback]  (default: --expect=sized)',
+    '[--expect=sized|--expect=fallback] [--maxdim=N]  '
+    '(default: --expect=sized, maxdim=200)',
   );
   exit(1);
 }
@@ -80,6 +89,7 @@ Never _usageAndExit() {
 Future<void> main(List<String> args) async {
   String? sample;
   var expect = _Expect.sized;
+  var maxDim = _defaultMaxDim;
 
   for (final arg in args) {
     if (arg.startsWith('--expect=')) {
@@ -92,6 +102,14 @@ Future<void> main(List<String> args) async {
         stderr.writeln('PROD_SHAPE_PROBE: FAIL unknown --expect value "$value"');
         exit(1);
       }
+    } else if (arg.startsWith('--maxdim=')) {
+      final value = arg.substring('--maxdim='.length);
+      final parsed = int.tryParse(value);
+      if (parsed == null || parsed <= 0) {
+        stderr.writeln('PROD_SHAPE_PROBE: FAIL invalid --maxdim value "$value"');
+        exit(1);
+      }
+      maxDim = parsed;
     } else if (!arg.startsWith('--')) {
       sample = arg;
     }
@@ -113,7 +131,7 @@ Future<void> main(List<String> args) async {
     }
 
     final available = service.sizedDecodeAvailable;
-    final sized = await service.decodeOnWorker(sample, maxDim: _requestedMaxDim);
+    final sized = await service.decodeOnWorker(samplePath, maxDim: maxDim);
     final sameShapeAsBaseline =
         sized.width == baseline.width && sized.height == baseline.height;
     final sizedLongEdge = sized.width > sized.height ? sized.width : sized.height;
@@ -121,7 +139,7 @@ Future<void> main(List<String> args) async {
     final modeLabel = expect == _Expect.sized ? 'sized' : 'fallback';
     final summary =
         'mode=$modeLabel baseline=${baseline.width}x${baseline.height} '
-        'sized(maxDim:$_requestedMaxDim)=${sized.width}x${sized.height} '
+        'sized(maxDim:$maxDim)=${sized.width}x${sized.height} '
         'sizedDecodeAvailable=$available';
 
     if (expect == _Expect.sized) {
@@ -136,17 +154,17 @@ Future<void> main(List<String> args) async {
       if (sameShapeAsBaseline) {
         stderr.writeln(
           'PROD_SHAPE_PROBE: FAIL --expect=sized but sized(maxDim:'
-          '$_requestedMaxDim) matches baseline dimensions exactly '
+          '$maxDim) matches baseline dimensions exactly '
           '($summary) — sized dispatch did not engage (silent fallback)',
         );
         exit(1);
       }
-      final delta = (sizedLongEdge - _requestedMaxDim).abs();
+      final delta = (sizedLongEdge - maxDim).abs();
       if (delta > _maxDimToleranceOnLongEdge) {
         stderr.writeln(
           'PROD_SHAPE_PROBE: FAIL --expect=sized but sized long edge '
           '$sizedLongEdge is not within '
-          '+/-$_maxDimToleranceOnLongEdge px of $_requestedMaxDim '
+          '+/-$_maxDimToleranceOnLongEdge px of $maxDim '
           '($summary)',
         );
         exit(1);
@@ -163,7 +181,7 @@ Future<void> main(List<String> args) async {
       if (!sameShapeAsBaseline) {
         stderr.writeln(
           'PROD_SHAPE_PROBE: FAIL --expect=fallback but sized(maxDim:'
-          '$_requestedMaxDim) dimensions differ from baseline ($summary) — '
+          '$maxDim) dimensions differ from baseline ($summary) — '
           'fallback did not engage',
         );
         exit(1);
