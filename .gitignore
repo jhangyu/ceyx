@@ -55,7 +55,8 @@ dng_processor/native/third_party/libjpeg-turbo/ChangeLog.md
 
 # Non-code project files (docs, logs, images, project management)
 /docs/
-/image_samples/
+/image_samples/*
+!/image_samples/raw_corpus/
 /memory.md
 /task.md
 /handover.md
@@ -77,3 +78,7 @@ AGENTS.md
 .claudito/
 graphify-out/
 dng_processor/native/scripts/tmp/
+
+# RAW corpus: binaries untracked, manifest/README tracked (Phase 17 Task 4)
+image_samples/raw_corpus/*
+!image_samples/raw_corpus/README.md
