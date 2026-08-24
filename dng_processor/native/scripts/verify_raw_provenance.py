@@ -40,6 +40,76 @@ def git_head(repo):
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def parse_patch_files(patch_text):
+    """Yields (target_relpath, added_lines, removed_lines) per file in a
+    unified diff. added/removed are the literal content lines (leading
+    '+'/'-' stripped), excluding the '+++'/'---' header lines themselves and
+    blank lines (blank-line changes are too common to be a useful marker)."""
+    current_path = None
+    added, removed = [], []
+    for line in patch_text.splitlines():
+        if line.startswith("+++ b/") or line.startswith("+++ "):
+            if current_path is not None:
+                yield current_path, added, removed
+            current_path = line[len("+++ "):].split("\t")[0]
+            if current_path.startswith("b/"):
+                current_path = current_path[2:]
+            added, removed = [], []
+        elif line.startswith("+++") or line.startswith("---"):
+            continue
+        elif line.startswith("+"):
+            content = line[1:].strip()
+            if content:
+                added.append(content)
+        elif line.startswith("-"):
+            content = line[1:].strip()
+            if content:
+                removed.append(content)
+    if current_path is not None:
+        yield current_path, added, removed
+
+
+def check_patch_applied(patch_path, reverse):
+    """Verifies the vendored RawSpeed3 tree reflects this patch's diff.
+
+    For a forward-applied patch, the added lines must be present in the
+    current source file (and, as a weaker signal, the removed lines absent).
+    For a patch stored/applied in reverse (see REVERSE_APPLIED_PATCHES),
+    the roles invert: the patch's "added" lines must be ABSENT (never
+    applied forward) and its "removed" lines must be PRESENT (the tree is
+    in the pre-patch state the reverse-apply restores).
+    """
+    patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    for relpath, added, removed in parse_patch_files(patch_text):
+        target = RAWSPEED / relpath
+        if not target.is_file():
+            return False, "target file missing: " + relpath
+        # Exact-line, not substring, membership: a removed line can be a
+        # literal substring of a still-present (differently reformatted)
+        # added line (e.g. "if (x) {" inside "} else if (x) {"), which would
+        # falsely read as "still un-patched" under substring matching.
+        file_lines = {ln.strip() for ln in
+                      target.read_text(encoding="utf-8", errors="replace").splitlines()}
+        added_set, removed_set = set(added), set(removed)
+        # Lines that appear as both an added and a removed line (identical
+        # after stripping, e.g. only their indentation changed, or the same
+        # line recurs unmodified elsewhere in the hunk) are not a reliable
+        # forward/reverse discriminator either way; drop them from both
+        # sides before checking.
+        common = added_set & removed_set
+        added_set -= common
+        removed_set -= common
+        want_present = removed_set if reverse else added_set
+        want_absent = added_set if reverse else removed_set
+        for marker in want_present:
+            if marker not in file_lines:
+                return False, relpath + " missing expected line: " + marker[:80]
+        for marker in want_absent:
+            if marker in file_lines:
+                return False, relpath + " still contains un-patched line: " + marker[:80]
+    return True, ""
+
+
 def main():
     if not PROVENANCE.is_file():
         fail("missing " + str(PROVENANCE))
@@ -59,12 +129,33 @@ def main():
 
     patch_dir = VENDOR / "RawSpeed3" / "patches"
     patches = sorted(patch_dir.glob("*.patch")) if patch_dir.is_dir() else []
+    # R2 fix (F5, round-1 review): hashing the .patch *file* only proves the
+    # patch text on disk is unchanged; it says nothing about whether the
+    # vendored RawSpeed3 tree the patch targets actually has it applied (or,
+    # for the one patch stored reversed relative to its own diff direction,
+    # un-applied). A tree with zero patches applied, or one applied in the
+    # wrong direction, previously still printed ALL PASS. Instrument note
+    # (round-1 review): `git apply --check` inside this stripped-`.git`
+    # vendor tree returns rc=0 in BOTH directions for every patch here — do
+    # not use it. This check instead parses each patch's own diff hunks and
+    # greps the literal added/removed lines against the current vendored
+    # source file, which is direction-discriminating and patch-content
+    # driven (not a hardcoded marker list that could silently drift from the
+    # patch files).
+    REVERSE_APPLIED_PATCHES = {"01.CameraMeta-extensibility.patch"}
     for patch in patches:
         digest = hashlib.sha256(patch.read_bytes()).hexdigest()
         if digest not in text:
             fail("patch " + patch.name + " sha256 " + digest + " not recorded")
+            continue
+        print("[Provenance] patch " + patch.name + " sha256 -> PASS")
+        reverse = patch.name in REVERSE_APPLIED_PATCHES
+        ok, detail = check_patch_applied(patch, reverse)
+        if ok:
+            state = "reverse-applied (pre-state)" if reverse else "forward-applied"
+            print("[Provenance] patch " + patch.name + " tree state (" + state + ") -> PASS")
         else:
-            print("[Provenance] patch " + patch.name + " -> PASS")
+            fail("patch " + patch.name + " does not appear applied in the vendored tree: " + detail)
 
     for lic in REQUIRED_LICENSES:
         if lic not in text:

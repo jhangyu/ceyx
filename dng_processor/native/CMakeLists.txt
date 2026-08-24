@@ -381,6 +381,27 @@ set(HALIDE_DIR ${THIRD_PARTY_DIR}/halide)
 # We only need Halide headers for AOT-generated .h includes.
 if(NOT DNG_CROSS_BUILD)
     list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
+    # R2 fix (F4, round-1 review, second half): find_package(ZLIB), called
+    # from inside the RawSpeed3 subdirectory further below (deliberately
+    # placed after this find_package(Halide) call within THIS configure),
+    # always caches its find results (ZLIB_INCLUDE_DIR, ZLIB_LIBRARY_DEBUG,
+    # ZLIB_LIBRARY_RELEASE, ...) -- find_package() caching is unconditional
+    # CMake behavior, unrelated to the CACHE/FORCE choices made further
+    # below in the generic-RAW block. On the *next* configure, those
+    # entries are already present in CMakeCache.txt when find_package(Halide)
+    # runs here, i.e. BEFORE RawSpeed3 gets to run again -- reproducing the
+    # exact undefined `_uncompress` AOT-generator link failure that placing
+    # RawSpeed3's add_subdirectory() after this find_package(Halide) call
+    # was meant to avoid (see comment above; mechanically reproduced this
+    # round via a reconfigure-in-place proof). Force a clean zlib cache
+    # slate immediately before every find_package(Halide) call, fresh
+    # configure or not, so Halide always resolves zlib the same way a
+    # fresh build dir would.
+    foreach(_dng_zlib_cache_var
+            ZLIB_INCLUDE_DIR ZLIB_LIBRARY ZLIB_LIBRARY_DEBUG ZLIB_LIBRARY_RELEASE
+            ZLIB_FOUND FIND_PACKAGE_MESSAGE_DETAILS_ZLIB)
+        unset(${_dng_zlib_cache_var} CACHE)
+    endforeach()
     # COMPONENTS Halide (not the bare form): HalideConfig.cmake defaults to
     # requiring the optional PNG/JPEG components when none are named, which
     # hard-fails configure on machines without system libpng/libjpeg even
@@ -403,41 +424,61 @@ if(NOT DNG_CROSS_BUILD)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
     endif()
 
+    # R2 fix (F4, round-1 review, third leg — the actual root cause):
+    # HalideConfig.cmake (third_party/halide/lib/cmake/Halide/HalideConfig.cmake)
+    # never calls find_dependency(ZLIB) for the plain `Halide` component (only
+    # for the unused PNG/JPEG components), so `Halide::Generator`'s link
+    # closure never carries an explicit zlib dependency; these generator
+    # executables `-force_load` the vendored static libHalide.a, which pulls
+    # in LLVM's Compression.cpp.o/CRC.cpp.o (referencing zlib's
+    # `_uncompress`/`_compress2`/`_compressBound`/`_crc32`) unconditionally.
+    # Whether that resolves at link time turned out to depend on ambient
+    # linker/SDK state that differs between a fresh configure and a
+    # reconfigure-in-place (mechanically reproduced this round: identical
+    # link.txt succeeded after a fresh configure+build, then failed with
+    # undefined `_uncompress`/`_crc32` after reconfiguring the SAME build
+    # dir and relinking — confirmed by manually re-running the captured
+    # link.txt command, which fails deterministically without `-lz` and
+    # succeeds deterministically with it added). Linking `ZLIB::ZLIB`
+    # explicitly (already resolved earlier in this file, ~line 107) removes
+    # the dependency on that ambient state entirely, on top of (not instead
+    # of) the ZLIB-cache-slate reset above and the ordering-after-Halide
+    # placement of the generic-RAW block.
     add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
     target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_warp_generator PRIVATE Halide::Generator)
+    target_link_libraries(dng_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     add_executable(dng_demosaic_generator ${SRC_DIR}/DngDemosaicGenerator.cpp)
     target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator)
+    target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
     target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator)
+    target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # Research & diagnostic generators (only built if DNG_DIAGNOSTIC_BUILD=ON)
     if(DNG_DIAGNOSTIC_BUILD)
         add_executable(dng_warp_strict_float_generator ${SRC_DIR}/research/DngWarpStrictFloatGenerator.cpp)
         target_include_directories(dng_warp_strict_float_generator PRIVATE ${INC_DIR})
-        target_link_libraries(dng_warp_strict_float_generator PRIVATE Halide::Generator)
+        target_link_libraries(dng_warp_strict_float_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
         add_executable(dng_warp_debug_generator ${SRC_DIR}/research/DngWarpDebugGenerator.cpp)
         target_include_directories(dng_warp_debug_generator PRIVATE ${INC_DIR})
-        target_link_libraries(dng_warp_debug_generator PRIVATE Halide::Generator)
+        target_link_libraries(dng_warp_debug_generator PRIVATE Halide::Generator ZLIB::ZLIB)
     endif()
 
     add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
     target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_render_generator PRIVATE Halide::Generator)
+    target_link_libraries(dng_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # Phase 10 Sprint C1: MapPolynomial AOT generator (Stage 2 OpcodeList2 GPU).
     add_executable(dng_opcode_polynomial_generator
         ${SRC_DIR}/DngOpcodePolynomialGenerator.cpp)
-    target_link_libraries(dng_opcode_polynomial_generator PRIVATE Halide::Generator)
+    target_link_libraries(dng_opcode_polynomial_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     add_executable(dng_opcode_polynomial3_generator
         ${SRC_DIR}/DngOpcodePolynomial3Generator.cpp)
-    target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator)
+    target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     if(WIN32)
         set(CMAKE_MSVC_RUNTIME_LIBRARY ${DNG_SAVED_MSVC_RUNTIME_LIBRARY})
@@ -991,6 +1032,34 @@ target_link_libraries(test_cfa_color PRIVATE dng_decoder_native)
 add_executable(test_raw_contract_abi tests/test_raw_contract_abi.cpp)
 target_include_directories(test_raw_contract_abi PRIVATE ${INC_DIR})
 
+# P17 R2/T5: magic-byte RawFileRouter test. src/raw_file_router.cpp is
+# already swept into dng_decoder_native by the file(GLOB_RECURSE
+# NATIVE_SOURCES ...) above (~line 348); no LibRaw/DNG SDK/Halide
+# dependency, not gated by DNG_ENABLE_GENERIC_RAW.
+add_executable(test_raw_file_router
+    tests/test_raw_file_router.cpp
+    src/raw_file_router.cpp)
+target_include_directories(test_raw_file_router PRIVATE ${INC_DIR})
+
+# P17 R2/T3: layout classification + RawGpuInput validator test.
+# src/raw_contract_validate.cpp is already swept into dng_decoder_native by
+# the GLOB_RECURSE above.
+add_executable(test_raw_layout_contract
+    tests/test_raw_layout_contract.cpp
+    src/raw_contract_validate.cpp)
+target_include_directories(test_raw_layout_contract PRIVATE ${INC_DIR})
+
+# P17 R2/T8: shared Stage4 core + LibRaw RenderParams builder test.
+# src/raw_render_params_builder.cpp is already swept into
+# dng_decoder_native by the GLOB_RECURSE above.
+add_executable(test_raw_render_params tests/test_raw_render_params.cpp)
+target_include_directories(test_raw_render_params PRIVATE ${INC_DIR})
+target_link_libraries(test_raw_render_params PRIVATE dng_decoder_native dng_sdk)
+if(APPLE)
+    target_link_libraries(test_raw_render_params PRIVATE
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
 # P17 T1: Generic RAW frontend (LibRaw + bundled RawSpeed3) wiring, deferred
 # until after Halide is fully configured (see option() comment above).
 if(DNG_ENABLE_GENERIC_RAW)
@@ -1012,22 +1081,42 @@ if(DNG_ENABLE_GENERIC_RAW)
 
     # RawSpeed3 build policy (spec section 6.6): no OpenMP, no tools/tests/
     # benchmarks/fuzzers, and no standalone RawSpeed target exposed to the app.
-    set(WITH_OPENMP OFF CACHE BOOL "" FORCE)
-    set(RAWSPEED_ENABLE_WERROR OFF CACHE BOOL "" FORCE)
-    set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(BUILD_BENCHMARKING OFF CACHE BOOL "" FORCE)
-    set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
-    set(USE_XMLLINT OFF CACHE BOOL "" FORCE)
-    set(USE_BUNDLED_PUGIXML ON CACHE BOOL "" FORCE)
+    #
+    # R2 fix (F4, round-1 review): these used to be `CACHE ... FORCE` entries.
+    # A CMake cache is read at the *start* of every configure, including the
+    # second and later ones over the same build dir — so cached values here
+    # would already be set BEFORE find_package(Halide) on any reconfigure,
+    # reproducing the exact zlib/`_uncompress` link corruption this whole
+    # block is deferred (until after Halide) to avoid in the first place.
+    # Plain (non-cache) `set()` is directory-scoped and inherited by
+    # add_subdirectory() children, and this project's cmake_minimum_required
+    # is 3.14 (>= 3.13), so CMP0077 already defaults to NEW: the RawSpeed3 /
+    # LibRaw-cmake subprojects' own option()/set(... CACHE) calls see these
+    # normal variables and do not override them. No cache residue, so a
+    # reconfigure starts from the same pre-find_package(Halide) state as a
+    # fresh configure. See PROVENANCE.md "Local modifications" for the
+    # policy-floor and pugixml-download notes below (F6).
+    if(POLICY CMP0077)
+        cmake_policy(SET CMP0077 NEW)
+    endif()
+    set(WITH_OPENMP OFF)
+    set(RAWSPEED_ENABLE_WERROR OFF)
+    set(BUILD_TOOLS OFF)
+    set(BUILD_TESTING OFF)
+    set(BUILD_BENCHMARKING OFF)
+    set(BUILD_FUZZERS OFF)
+    set(USE_XMLLINT OFF)
+    set(USE_BUNDLED_PUGIXML ON)
     # RawSpeed3's own Pugixml.cmake fetches a hash-pinned tarball
     # (pugixml-1.9.tar.gz, SHA512-verified) when not found locally; see
     # third_party/libraw/RawSpeed3/rawspeed/cmake/Modules/Pugixml.cmake.in.
-    set(ALLOW_DOWNLOADING_PUGIXML ON CACHE BOOL "" FORCE)
+    set(ALLOW_DOWNLOADING_PUGIXML ON)
     # pugixml-1.9's own CMakeLists.txt predates CMake 3.5's minimum-version
     # policy floor; this only relaxes the sub-build's own cmake_minimum_required
-    # check, not this project's.
-    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+    # check, not this project's. CMAKE_POLICY_VERSION_MINIMUM is a plain CMake
+    # variable (not an option()-backed cache entry), so a non-cache set() here
+    # is honored identically to a cached one, without the reconfigure hazard.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
     # Builds the `rawspeed` static target from RawSpeed3's own (real) CMake
     # build. This library is never linked into any Halide/AOT target and is
@@ -1043,11 +1132,33 @@ if(DNG_ENABLE_GENERIC_RAW)
     # knows the legacy RawSpeed v1 codec path (ENABLE_RAWSPEED), so
     # RawSpeed3 support is NOT part of the overlay and is glued on below —
     # this is a documented local modification, see PROVENANCE.md.
+    # LIBRAW_PATH is a genuine exception to the non-cache conversion above:
+    # unlike every other variable in this block, LibRaw-cmake's own
+    # CMakeLists.txt (third_party/libraw-cmake/CMakeLists.txt:36) sets it
+    # via a raw `set(LIBRAW_PATH ... CACHE STRING doc)` (no FORCE) rather
+    # than via option() — that call is governed by CMP0126 ("set(CACHE)
+    # does not remove a normal variable of the same name"), not CMP0077.
+    # LibRaw-cmake's own cmake_minimum_required() tops out below CMake 3.21
+    # (where CMP0126 was introduced), so CMP0126 defaults OLD in that
+    # subdirectory scope: its own set(CACHE) call unconditionally deletes
+    # any same-named *normal* variable in scope and reinitializes the cache
+    # entry to its own default (its own CMAKE_CURRENT_SOURCE_DIR) — verified
+    # by reproducing a fresh-configure failure at
+    # third_party/libraw-cmake/CMakeLists.txt:47 (`file(READ
+    # ${LIBRAW_PATH}/libraw/libraw_version.h ...)` pointed at
+    # third_party/libraw-cmake/libraw/... instead of third_party/libraw/...)
+    # when this was made a plain set() like the others. Keeping this one
+    # variable CACHE FORCE pre-empts that: our forced cache entry already
+    # exists by the time LibRaw-cmake's non-FORCE `set(... CACHE ...)` runs,
+    # so it is a no-op (existing cache entries are left alone without
+    # FORCE) and our value is used. This is unrelated to the F4 hazard
+    # (LIBRAW_PATH is a path string never consulted by zlib/Halide
+    # discovery), so caching it does not reintroduce the reconfigure bug.
     set(LIBRAW_PATH ${LIBRAW_DIR} CACHE STRING "" FORCE)
-    set(ENABLE_RAWSPEED OFF CACHE BOOL "" FORCE)
-    set(ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
-    set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(LIBRAW_INSTALL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_RAWSPEED OFF)
+    set(ENABLE_OPENMP OFF)
+    set(ENABLE_EXAMPLES OFF)
+    set(LIBRAW_INSTALL OFF)
     add_subdirectory(${LIBRAW_CMAKE_OVERLAY_DIR} libraw-cmake-build EXCLUDE_FROM_ALL)
 
     # --- RawSpeed3 C-API glue (local modification, see PROVENANCE.md) ---

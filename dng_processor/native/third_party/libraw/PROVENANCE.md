@@ -144,6 +144,52 @@ which would make it impossible to track this PROVENANCE.md file inside
 `third_party/libraw/`. `verify_raw_provenance.py` reads `.vendor-rev` in
 preference to `git rev-parse HEAD`.
 
+**`CMAKE_POLICY_VERSION_MINIMUM` policy floor (CMake-only, R2 F6)**: pugixml
+1.9's own `CMakeLists.txt` predates CMake's minimum-supported-version floor
+(introduced 3.5+), so its `cmake_minimum_required()` call fails under modern
+CMake unless `CMAKE_POLICY_VERSION_MINIMUM` is set. `dng_processor/native/CMakeLists.txt`
+sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` (as a normal, non-cache variable — see
+R2 F4 fix below) for the duration of the RawSpeed3/LibRaw generic-RAW block.
+This is a project-wide-visible CMake variable while set (it is not
+target-scoped), but only relaxes the *sub-build's* own version-floor check;
+it does not change this project's own `cmake_minimum_required(VERSION 3.14)`
+or any policy this project itself relies on.
+
+**pugixml is downloaded at configure time, not vendored (R2 F6)**: contrary
+to what the "No other local modification" line below previously implied,
+pugixml is **not** part of this project's vendored/offline source tree.
+RawSpeed3's own `cmake/Modules/Pugixml.cmake.in` uses CMake's
+`ExternalProject`/`FetchContent` machinery (gated by
+`ALLOW_DOWNLOADING_PUGIXML=ON`, set in `dng_processor/native/CMakeLists.txt`)
+to fetch and hash-verify:
+- URL: `https://github.com/zeux/pugixml/releases/download/v1.9/pugixml-1.9.tar.gz`
+- Pinned hash: `SHA512=853a9d985aae537391c6524d5413ef4de237d99d96cc58ea7fe7152f786df1e408cdacd2e4387697e23c3e67cdc1d42b29de554501309eae16d86edd0e24785f`
+
+This means a from-scratch configure of `DNG_ENABLE_GENERIC_RAW=ON` requires
+network access to `github.com` the first time (subsequent configures reuse
+the already-fetched/extracted source in the build directory). This is a
+self-containment / offline-CI gap against spec section 11.3 (identical
+source revisions across five platforms implicitly assumes no network
+dependency at configure time); vendoring pugixml 1.9 at the pinned hash
+above as a fourth pinned dependency, instead of relying on the download, is
+tracked as a follow-up.
+
+R2 F4 fix note: the CACHE-forced `set(... CACHE ... FORCE)` variables that
+used to configure RawSpeed3/LibRaw-cmake (`WITH_OPENMP`,
+`RAWSPEED_ENABLE_WERROR`, `BUILD_TOOLS`, `BUILD_TESTING`,
+`BUILD_BENCHMARKING`, `BUILD_FUZZERS`, `USE_XMLLINT`, `USE_BUNDLED_PUGIXML`,
+`ALLOW_DOWNLOADING_PUGIXML`, `CMAKE_POLICY_VERSION_MINIMUM`, `LIBRAW_PATH`,
+`ENABLE_RAWSPEED`, `ENABLE_OPENMP`, `ENABLE_EXAMPLES`, `LIBRAW_INSTALL`) were
+persisted into `CMakeCache.txt` and therefore applied on every subsequent
+configure *before* `find_package(Halide)` — reproducing the exact
+Halide/zlib `_uncompress` link corruption the deferred-`add_subdirectory`
+placement above was meant to avoid, on the second and later configures over
+the same build directory. These are now plain (non-cache) `set()` calls,
+directory-scoped and inherited by `add_subdirectory()`, relying on CMP0077
+(NEW by default since this project's `cmake_minimum_required(VERSION 3.14)`
+>= 3.13) so the subprojects' own `option()`/cache `set()` calls honor them
+without leaving cache residue.
+
 No other local modification. Any future local edit must be listed here with
 a diff and a rationale.
 
