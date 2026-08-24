@@ -52,6 +52,62 @@ RawDevelopParams makeDevelop() {
     return d;
 }
 
+// Element-wise curve comparison at the same 1e-5 bound used for the matrices.
+// The max diff is always printed, pass or fail: a bare FAIL would say the
+// curves differ without saying by how much, which is the difference between a
+// rounding artifact and a genuinely different transfer function.
+void reportCurve(const char* name, bool precondition,
+                 const std::vector<float>& got, const std::vector<float>& want) {
+    if (!precondition || got.size() != want.size() || got.empty()) {
+        report(name, false, "precondition failed or size mismatch");
+        return;
+    }
+    double max_diff = 0.0;
+    size_t at = 0;
+    for (size_t i = 0; i < got.size(); ++i) {
+        const double d = std::fabs(static_cast<double>(got[i]) -
+                                   static_cast<double>(want[i]));
+        if (d > max_diff) { max_diff = d; at = i; }
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail),
+                  "max_abs_diff=%.7f at index %zu of %zu, tolerance=0.0000100",
+                  max_diff, at, got.size());
+    report(name, max_diff < 1e-5, detail);
+}
+
+// For the two curves that legitimately differ between the routes: gate on what
+// the Stage4 kernel actually requires of a transfer table -- finite, within
+// [0,1], non-decreasing -- and always print the divergence from the DNG path so
+// a future change to either route shows up as a moved number rather than
+// silence.
+void reportCurveSanity(const char* name, bool precondition,
+                       const std::vector<float>& got,
+                       const std::vector<float>& dng_ref) {
+    if (!precondition || got.empty()) {
+        report(name, false, "precondition failed or empty");
+        return;
+    }
+    bool ok = true;
+    for (size_t i = 0; i < got.size(); ++i) {
+        if (!std::isfinite(got[i]) || got[i] < -1e-6f || got[i] > 1.0f + 1e-6f) ok = false;
+        if (i && got[i] < got[i - 1] - 1e-6f) ok = false;   // non-decreasing
+    }
+    double max_diff = 0.0;
+    const size_t n = got.size() < dng_ref.size() ? got.size() : dng_ref.size();
+    for (size_t i = 0; i < n; ++i) {
+        max_diff = std::fmax(max_diff, std::fabs(static_cast<double>(got[i]) -
+                                                 static_cast<double>(dng_ref[i])));
+    }
+    char detail[200];
+    std::snprintf(detail, sizeof(detail),
+                  "finite, in [0,1], non-decreasing; diverges from DNG path by "
+                  "max_abs_diff=%.7f (EXPECTED: DNG-only baseline exposure + "
+                  "profile tone curve, spec 4.1.9)",
+                  max_diff);
+    report(name, ok, detail);
+}
+
 bool isIdentityCurve(const std::vector<float>& t) {
     if (t.size() < 2) return false;
     for (size_t i = 1; i < t.size(); ++i) {
@@ -133,6 +189,40 @@ int main() {
                 same = std::fabs(raw_params.rgb_to_final[i] - dng_params.rgb_to_final[i]) < 1e-5f;
             }
             report("dng-equivalence", same, "camera_white and rgb_to_final agree");
+
+            // Curve tables: turn "correct by construction" into a gated fact.
+            // Shapes must match unconditionally -- the Stage4 kernel indexes
+            // these, so a size mismatch is a hard defect on either route.
+            const bool shapes_ok =
+                ok &&
+                raw_params.exp_ramp.size() == dng_params.exp_ramp.size() &&
+                raw_params.tone_curve.size() == dng_params.tone_curve.size() &&
+                raw_params.encode_gamma.size() == dng_params.encode_gamma.size();
+            report("curve-shapes", shapes_ok, "exp_ramp/tone_curve/encode_gamma sizes match the DNG path");
+
+            // encode_gamma IS shared: both routes take the sRGB transfer
+            // function from the same colour space, so this is gated at 1e-5
+            // and in practice agrees to 0.0.
+            reportCurve("curve-encode-gamma", shapes_ok, raw_params.encode_gamma,
+                        dng_params.encode_gamma);
+
+            // exp_ramp and tone_curve are NOT shared, and must not be gated on
+            // equality. Production folds in DNG-only metadata that the plain-C
+            // contract does not carry (measured on this very sample by
+            // scripts/tmp/t8_curve_cause_probe.cpp):
+            //   TotalBaselineExposure = 0.35   -> generic route has no equivalent
+            //   renderer.Shadows()    = 5.0    -> production black = 0.005
+            //   renderer.ToneCurve()  deviates from identity by 0.31684
+            // That last figure alone accounts for the entire observed tone
+            // divergence. Forcing equality would mean inventing a baseline
+            // exposure and a camera-profile tone curve for non-DNG files, which
+            // is exactly what spec 4.1.9 forbids. So these two are gated on what
+            // the Stage4 kernel actually requires, and their divergence from the
+            // DNG path is PRINTED every run rather than hidden.
+            reportCurveSanity("curve-exp-ramp", shapes_ok, raw_params.exp_ramp,
+                              dng_params.exp_ramp);
+            reportCurveSanity("curve-tone", shapes_ok, raw_params.tone_curve,
+                              dng_params.tone_curve);
         }
     }
 
