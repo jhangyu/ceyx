@@ -140,6 +140,34 @@
       "expect_error": "kRawErrLayoutUnsupported",
       "license": "Generated from sony_a7r4_bayer by verify_raw_corpus.py --generate-malformed.",
       "notes": "CFA pattern region zeroed."
+    },
+    {
+      "id": "frontend_switch_lossless_dng",
+      "path": "image_samples/lossless_dng_sample.dng",
+      "sha256": "",
+      "vendor": "sony",
+      "camera": "ILCE-7C",
+      "extension": "dng",
+      "expect_route": "frontend_only",
+      "expect_layout": "bayer2x2",
+      "expect_backend": "rawspeed3",
+      "expect_error": "kRawSuccess",
+      "license": "Existing in-repo DNG regression sample; not redistributed by this manifest.",
+      "notes": "NOT a router corpus sample: expect_route is frontend_only, and the RawFileRouter still sends every DNG to the Adobe DNG SDK route. This entry exists solely to exercise LibRawFrontendContext's forced-backend switch, which needs one file that LibRaw will actually hand to RawSpeed3. LibRaw decodes it via lossless_dng_load_raw(), whose decoder_flags carry LIBRAW_DECODER_TRYRAWSPEED3, so forced kRawSpeed3 reports rawspeed3 and forced kLibRawNative reports libraw_native on the SAME file. No RAW sample in this checkout can do that: see scripts/tmp/verify/t6_finding_rawspeed3_eligibility.md. Replace this entry once a real RawSpeed3-eligible generic RAW (compressed ARW/CR3/NEF/RAF) is supplied."
+    },
+    {
+      "id": "local_sony_bayer",
+      "path": "image_samples/raw_sample.arw",
+      "sha256": "",
+      "vendor": "sony",
+      "camera": "(local ARW sample)",
+      "extension": "arw",
+      "expect_route": "generic",
+      "expect_layout": "bayer2x2",
+      "expect_backend": "libraw_native",
+      "expect_error": "kRawSuccess",
+      "license": "Owner-supplied sample already present in image_samples/; keep untracked.",
+      "notes": "P17 T6: the only RAW sample actually present in this checkout (image_samples/raw_corpus/ holds no binaries). expect_backend was pre-registered as rawspeed3 (scripts/tmp/verify/t6_prereg.md) and that prediction was REFUTED by measurement: this is an uncompressed ILCE-7C ARW handled by unpacked_load_raw(), whose decoder_flags = LIBRAW_DECODER_FLATDATA only (third_party/libraw/src/utils/decoder_info.cpp:163-167). LibRaw gates its RawSpeed3 branch on LIBRAW_DECODER_TRYRAWSPEED3 (src/decoders/unpack.cpp:124), so RawSpeed3 is never offered this file no matter what rawparams.use_rawspeed says. Evidence: scripts/tmp/verify/t6_backend_probe.txt."
     }
   ]
 }
