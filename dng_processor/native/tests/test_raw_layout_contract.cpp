@@ -6,6 +6,7 @@
 // class and that raw_validate_gpu_input returns kRawErrLayoutUnsupported.
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 #include "raw_contract_validate.h"
 #include "raw_pipeline_contract.h"
@@ -152,6 +153,34 @@ int main() {
         expectClass("xtrans_6x6", f.input.layout, kRawLayoutClassXTrans6x6);
     }
     {
+        // Parking-lot FIX 2 (round-2-handoff.md): a scrambled X-Trans tile
+        // with the correct 8R/20G/8B counts must still be rejected, because
+        // the color-key COUNTS alone do not identify a valid X-Trans
+        // arrangement. std::swap() of two differently-colored cells is a
+        // permutation, so it preserves the per-color counts by construction
+        // while breaking the periodic canonical arrangement.
+        Fixture f;
+        makeXTrans(f.pattern, 0, 0);
+        f.input.layout.cfa_repeat_width = 6;
+        f.input.layout.cfa_repeat_height = 6;
+        f.input.layout.cfa_pattern_count = 36;
+        std::swap(f.pattern[0], f.pattern[2]);  // row0: G<->R, counts unchanged
+        expectClass("xtrans_scrambled_a", f.input.layout, kRawLayoutClassOtherCfa);
+        expectValidate("xtrans_scrambled_a_unsupported", f.input,
+                       kRawErrLayoutUnsupported);
+    }
+    {
+        Fixture f;
+        makeXTrans(f.pattern, 0, 0);
+        f.input.layout.cfa_repeat_width = 6;
+        f.input.layout.cfa_repeat_height = 6;
+        f.input.layout.cfa_pattern_count = 36;
+        std::swap(f.pattern[5], f.pattern[30]);  // row0 col5 (B) <-> row5 col0 (R)
+        expectClass("xtrans_scrambled_b", f.input.layout, kRawLayoutClassOtherCfa);
+        expectValidate("xtrans_scrambled_b_unsupported", f.input,
+                       kRawErrLayoutUnsupported);
+    }
+    {
         Fixture f;
         f.input.layout.sample_model = kRawSampleModelMonochrome;
         f.input.layout.cfa_pattern = nullptr;
@@ -257,6 +286,19 @@ int main() {
       expectValidate("byte_size_short_by_one", f.input, kRawErrMetadataInvalid); }
     { Fixture f; f.plane.row_stride_bytes = INT64_MAX / 2; f.plane.height = 8;
       expectValidate("size_overflow_row_stride", f.input, kRawErrSizeOverflow); }
+    { // Parking-lot FIX 1 (round-2-handoff.md): the "needed" byte-size
+      // computation sums two products that are each individually bounded
+      // (rows_bytes = row_stride*height and cols_bytes = pixel_stride*width
+      // both pass the earlier mulChecked() gate below), but the *addition*
+      // of the two near-INT64_MAX results previously had no guard at all,
+      // which is undefined behaviour on signed overflow (UBSan-proven).
+      // 3e18 * 3 stays just under INT64_MAX individually, but
+      // 6e18 + 6e18 (using height-1/width-1) exceeds INT64_MAX.
+      Fixture f;
+      f.plane.width = 3; f.plane.height = 3;
+      f.plane.row_stride_bytes = 3000000000000000000LL;
+      f.plane.pixel_stride_bytes = 3000000000000000000LL;
+      expectValidate("size_overflow_needed_sum", f.input, kRawErrSizeOverflow); }
     { Fixture f; f.input.default_crop = RawRect{0, 0, Fixture::kW + 1, Fixture::kH};
       expectValidate("crop_outside_extent", f.input, kRawErrMetadataInvalid); }
     { Fixture f; f.input.active_area = RawRect{-1, 0, Fixture::kW, Fixture::kH};

@@ -29,6 +29,71 @@ bool mulChecked(int64_t a, int64_t b, int64_t* out) {
     return true;
 }
 
+// a+b with an explicit overflow guard; mirrors mulChecked() above. The
+// per-plane "needed" byte count sums two already-bounded multiplication
+// results plus the sample size — each multiplicand is individually safe
+// (bounded by the row/col mulChecked() calls above), but the *sum* of two
+// near-INT64_MAX products can still overflow, and that addition was
+// previously unguarded (UBSan-proven, parking-lot blocker: docs/logs/2026-08-25/round-2-handoff.md).
+bool addChecked(int64_t a, int64_t b, int64_t* out) {
+    if (a < 0 || b < 0) return false;
+    if (a > INT64_MAX - b) return false;
+    *out = a + b;
+    return true;
+}
+
+// Canonical Fujifilm X-Trans 6x6 CFA arrangement, 0=Red 1=Green 2=Blue.
+// This is the standard tile used by LibRaw/dcraw (xtrans_abs) and matches
+// the fixture already exercised by test_raw_layout_contract.cpp's
+// kXTransLetters at shift (0,0). Counts (8 red / 20 green / 8 blue) alone
+// are necessary but not sufficient to identify a valid X-Trans mosaic: a
+// scrambled pattern can reproduce the same counts while violating the
+// actual sensor arrangement. The spec (section 3.3) does not transcribe the
+// exact arrangement rule, so this validator checks structural equality
+// against the canonical tile's periodic family instead of re-deriving a
+// row/column parity rule from scratch.
+const int kCanonicalXTrans[6][6] = {
+    {1, 1, 0, 1, 1, 2},
+    {1, 1, 2, 1, 1, 0},
+    {2, 0, 1, 0, 2, 1},
+    {1, 1, 2, 1, 1, 0},
+    {1, 1, 0, 1, 1, 2},
+    {0, 2, 1, 2, 0, 1},
+};
+
+int xtransColorIndex(RawColorKey k) {
+    switch (k) {
+        case kRawColorKeyRed: return 0;
+        case kRawColorKeyGreen: case kRawColorKeyFujiGreen: return 1;
+        case kRawColorKeyBlue: return 2;
+        default: return -1;
+    }
+}
+
+// A real X-Trans sensor pattern is periodic: the 6x6 tile repeats across
+// the whole sensor, so whichever 6x6 window a decoder/adapter reports is
+// just some toroidal (row, col) phase shift of the same infinite mosaic.
+// We accept any of the 36 phase shifts of the canonical tile above and
+// reject everything else (including patterns with the correct 8/20/8
+// per-color counts but a scrambled interior, which is exactly the
+// parking-lot defect this closes).
+bool isCanonicalXTransArrangement(const RawColorKey* pattern) {
+    for (int shift_r = 0; shift_r < 6; ++shift_r) {
+        for (int shift_c = 0; shift_c < 6; ++shift_c) {
+            bool match = true;
+            for (int r = 0; r < 6 && match; ++r) {
+                for (int c = 0; c < 6; ++c) {
+                    const int idx = xtransColorIndex(pattern[r * 6 + c]);
+                    const int want = kCanonicalXTrans[(r + shift_r) % 6][(c + shift_c) % 6];
+                    if (idx != want) { match = false; break; }
+                }
+            }
+            if (match) return true;
+        }
+    }
+    return false;
+}
+
 bool rectInside(const RawRect& r, uint32_t w, uint32_t h) {
     if (r.width == 0 || r.height == 0) return false;
     if (r.x < 0 || r.y < 0) return false;
@@ -85,7 +150,8 @@ RawLayoutClass raw_classify_layout(const RawLayoutDescriptor* layout) {
         return kRawLayoutClassBayer2x2;
     }
     if (rw == 6 && rh == 6 && others == 0 &&
-        greens == 20 && reds == 8 && blues == 8) {
+        greens == 20 && reds == 8 && blues == 8 &&
+        isCanonicalXTransArrangement(layout->cfa_pattern)) {
         return kRawLayoutClassXTrans6x6;
     }
     return kRawLayoutClassOtherCfa;
@@ -177,10 +243,22 @@ RawErrorCode raw_validate_gpu_input(const RawGpuInput* input,
             return failWith(reason_out, reason_cap, kRawErrMetadataInvalid, msg);
         }
 
-        const int64_t needed =
-            static_cast<int64_t>(v.height - 1) * v.row_stride_bytes +
-            static_cast<int64_t>(v.width - 1) * v.pixel_stride_bytes +
-            static_cast<int64_t>(sample);
+        // ponytail: the two multiplications below are individually bounded
+        // by the mulChecked() calls above (height-1 < height, width-1 <
+        // width, same non-negative multiplicands), so they cannot overflow
+        // on their own. The bug was the *addition*: two products each close
+        // to INT64_MAX can still overflow when summed, which was previously
+        // unguarded (UBSan-proven; parking-lot blocker, round-2-handoff.md).
+        // Every step here is explicitly checked, in spec section 9 priority
+        // order (overflow before the metadata/coverage check below).
+        int64_t rows_extent = 0, cols_extent = 0, needed = 0;
+        if (!mulChecked(static_cast<int64_t>(v.height - 1), v.row_stride_bytes, &rows_extent) ||
+            !mulChecked(static_cast<int64_t>(v.width - 1), v.pixel_stride_bytes, &cols_extent) ||
+            !addChecked(rows_extent, cols_extent, &needed) ||
+            !addChecked(needed, static_cast<int64_t>(sample), &needed)) {
+            return failWith(reason_out, reason_cap, kRawErrSizeOverflow,
+                            "plane byte-size computation overflows");
+        }
         if (static_cast<int64_t>(v.byte_size) < needed) {
             std::snprintf(msg, sizeof(msg),
                           "byte_size %zu does not cover the last pixel (needs %lld)",
