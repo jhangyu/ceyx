@@ -144,6 +144,7 @@ functions:
 #include "dng_matrix.h"
 #include "dng_pixel_buffer.h"
 #include "dng_pipeline_config.h"
+#include "dng_render_params.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -366,45 +367,8 @@ dng_point computeOutputSize(const dng_negative& negative,
 }
 
 
-struct RenderParams {
-    dng_vector camera_white_vec;
-    dng_matrix camera_to_rgb_mat;
-    dng_matrix rgb_to_final_mat;
-    dng_1d_table exp_table_ref;
-    dng_1d_table tone_table_ref;
-    dng_1d_table gamma_table_ref;
-    AutoPtr<dng_hue_sat_map> huesat_map_ref;
-    AutoPtr<dng_hue_sat_map> look_map_ref;
-    AutoPtr<dng_1d_table> huesat_encode_ref;
-    AutoPtr<dng_1d_table> huesat_decode_ref;
-    AutoPtr<dng_1d_table> look_encode_ref;
-    AutoPtr<dng_1d_table> look_decode_ref;
-
-    float camera_white[3] = {1.0f, 1.0f, 1.0f};
-    float camera_to_rgb[9] = {};
-    float rgb_to_final[9] = {};
-    std::vector<float> exp_ramp;
-    std::vector<float> tone_curve;
-    std::vector<float> encode_gamma;
-
-    std::vector<float> huesat_table;
-    std::vector<float> huesat_encode;
-    std::vector<float> huesat_decode;
-    int32_t huesat_hue_div = 0;
-    int32_t huesat_sat_div = 0;
-    int32_t huesat_val_div = 0;
-    int32_t huesat_has_table = 0;
-    int32_t huesat_has_encoding = 0;
-
-    std::vector<float> look_table;
-    std::vector<float> look_encode;
-    std::vector<float> look_decode;
-    int32_t look_hue_div = 0;
-    int32_t look_sat_div = 0;
-    int32_t look_val_div = 0;
-    int32_t look_has_table = 0;
-    int32_t look_has_encoding = 0;
-};
+// struct RenderParams moved to include/dng_render_params.h (Phase 17 Task 8,
+// extract-only: no member added, removed, reordered or re-defaulted).
 
 void copyRenderSettings(const dng_render& src, dng_render& dst) {
     dst.SetWhiteXY(src.WhiteXY());
@@ -660,6 +624,10 @@ void toIdentityHueSat(std::vector<float>& table) {
     };
 }
 
+}  // namespace
+// T8 extract-only: moved out of the anonymous namespace so the LibRaw builder
+// can make "identity" explicit (spec 7.1.4). Body unchanged.
+
 void toIdentityHueSatMap(std::vector<float>& table,
                          int32_t& hue_div,
                          int32_t& sat_div,
@@ -671,6 +639,8 @@ void toIdentityHueSatMap(std::vector<float>& table,
     val_div = 2;
     has_table = 0;
 }
+
+namespace {  // T8: reopen the file-local namespace.
 
 void promoteHueSatMapTo3D(std::vector<float>& table,
                           int32_t& val_div) {
@@ -728,6 +698,9 @@ void ensureSafeHueSatMap(std::vector<float>& table,
     promoteHueSatMapTo3D(table, val_div);
 }
 
+}  // namespace
+// T8 extract-only: moved out of the anonymous namespace. Body unchanged.
+
 void toIdentityCurve(std::vector<float>& table) {
     table.resize(dng_1d_table::kTableSize + 2);
     for (int i = 0; i <= dng_1d_table::kTableSize; ++i) {
@@ -736,6 +709,8 @@ void toIdentityCurve(std::vector<float>& table) {
     }
     table[static_cast<size_t>(dng_1d_table::kTableSize + 1)] = 1.0f;
 }
+
+namespace {  // T8: reopen the file-local namespace.
 
 void copyHueSatMap(const dng_hue_sat_map& map,
                    std::vector<float>& out,
@@ -764,6 +739,14 @@ void copyHueSatMap(const dng_hue_sat_map& map,
         out[2 * n + i] = deltas[i].fValScale;
     }
 }
+
+}  // namespace
+// T8 extract-only: buildRenderParams, runRenderStage4HalideAot and
+// runRenderStage4HalideAotFromDevice are one contiguous block moved out of the
+// anonymous namespace so the LibRaw frontend can reach THE shared Stage4 core.
+// Bodies unchanged; the `fuse_rgba` default arguments now live on the
+// declarations in include/dng_render_params.h (a default may be given only once
+// per TU). The namespace reopens after the last of the three.
 
 bool buildRenderParams(dng_host& host,
                        dng_negative& negative,
@@ -941,7 +924,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int dst_h,
                               const RenderParams& params,
                               uint8_t* dst,
-                              bool fuse_rgba = false) {
+                              bool fuse_rgba) {
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
         return false;
     }
@@ -1189,7 +1172,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int dst_h,
                                          const RenderParams& params,
                                          uint8_t* dst,
-                                         bool fuse_rgba = false) {
+                                         bool fuse_rgba) {
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
         return false;
@@ -1520,6 +1503,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 
     return true;
 }
+
+namespace {  // T8: reopen the file-local namespace after the extracted core.
 
 bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
