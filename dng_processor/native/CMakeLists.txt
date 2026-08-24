@@ -351,6 +351,18 @@ file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
 # placed under src/research/ is automatically excluded without updating regex.
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/research/.*")
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp$")
+# P17 T9: the generic-RAW Halide generators are named Raw*Generator.cpp, which
+# the Dng-prefixed filter above does not match. Without this they get swept
+# into dng_decoder_native by the GLOB_RECURSE and fail to compile (Halide
+# Generator API + Halide.h are generator-only).
+list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Raw[A-Z][A-Za-z0-9]*Generator\\.cpp$")
+# P17 T6: src/libraw_frontend.cpp includes libraw/libraw.h, which is only on an
+# include path when DNG_ENABLE_GENERIC_RAW is ON (libraw_vendored, below).
+# The GLOB_RECURSE above would otherwise sweep it into dng_decoder_native in
+# OFF builds too and break them.
+if(NOT DNG_ENABLE_GENERIC_RAW)
+    list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/libraw_frontend\\.cpp$")
+endif()
 # W6 H-3: bridge .cpp moved from dng_sdk_custom/source/ into src/;
 # now auto-discovered by file(GLOB_RECURSE) above.
 # Only add target if there are sources, dummy for now to avoid target creation error
@@ -452,6 +464,13 @@ if(NOT DNG_CROSS_BUILD)
     target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
     target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
+    # P17 T9: fused normalize + Bayer demosaic generator for the generic RAW
+    # route. New generator on purpose: dng_demosaic_bilinear's AOT output is a
+    # pinned regression artifact and the DNG route must not normalize twice.
+    add_executable(raw_bayer_demosaic_generator ${SRC_DIR}/RawBayerDemosaicGenerator.cpp)
+    target_include_directories(raw_bayer_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR})
+    target_link_libraries(raw_bayer_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+
     add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
     target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
     target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
@@ -507,7 +526,8 @@ if(NOT DNG_CROSS_BUILD)
             dng_demosaic_warp_generator
             dng_render_generator
             dng_opcode_polynomial_generator
-            dng_opcode_polynomial3_generator)
+            dng_opcode_polynomial3_generator
+            raw_bayer_demosaic_generator)
         if(DNG_DIAGNOSTIC_BUILD)
             list(APPEND DNG_HALIDE_GENERATORS
                 dng_warp_strict_float_generator
@@ -628,6 +648,17 @@ add_custom_command(
 )
 add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
 
+# P17 T9: generic-RAW fused normalize + Bayer demosaic AOT kernel.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic.h
+    COMMAND raw_bayer_demosaic_generator -g raw_bayer_demosaic -f raw_bayer_demosaic
+            -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS raw_bayer_demosaic_generator
+    COMMENT "Generating Halide AOT generic Bayer normalize+demosaic..."
+)
+add_custom_target(raw_bayer_demosaic_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
+
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
     COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime$<$<BOOL:${DNG_DEMOSAIC_WARP_STRICT_FLOAT}>:-strict_float> fast_codegen=$<IF:$<BOOL:${DNG_DEMOSAIC_WARP_FAST_CODEGEN}>,true,false>
@@ -726,6 +757,7 @@ if(DNG_HOST_GENERATORS_ONLY)
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
     )
     if(DNG_STAGE4_SPLIT_KERNEL)
         list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
@@ -754,6 +786,9 @@ if(NOT DNG_CROSS_BUILD)
     endif()
     add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
     add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
+    # P17 T9: src/raw_demosaic_reference.cpp (auto-globbed above) calls the
+    # raw_bayer_demosaic AOT entry, so the dylib depends on and links it.
+    add_dependencies(dng_decoder_native raw_bayer_demosaic_aot_target)
 endif()
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
@@ -775,7 +810,8 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by
 # dng_render_halide.cpp on the non-split (macOS/Metal) branch only, so it is
 # linked only there. The split branch refuses sized requests instead.
@@ -1209,6 +1245,23 @@ if(DNG_ENABLE_GENERIC_RAW)
     target_include_directories(libraw_vendored INTERFACE ${LIBRAW_DIR})
     target_link_libraries(libraw_vendored INTERFACE raw)
     target_compile_definitions(libraw_vendored INTERFACE DNG_ENABLE_GENERIC_RAW=1)
+
+    # P17 T6: the single generic decoder owner. src/libraw_frontend.cpp is
+    # already in NATIVE_SOURCES via GLOB_RECURSE (~line 348, filtered out when
+    # this option is OFF), so dng_decoder_native only needs LibRaw's usage
+    # requirements here. Keyword-less signature deliberately, to match the
+    # existing target_link_libraries(dng_decoder_native dng_sdk) at ~line 368
+    # (CMake forbids mixing plain and PRIVATE/PUBLIC forms on one target).
+    if(TARGET dng_decoder_native)
+        target_link_libraries(dng_decoder_native libraw_vendored)
+    endif()
+
+    add_executable(test_libraw_frontend
+        tests/test_libraw_frontend.cpp
+        src/libraw_frontend.cpp
+        src/raw_contract_validate.cpp)
+    target_include_directories(test_libraw_frontend PRIVATE ${INC_DIR})
+    target_link_libraries(test_libraw_frontend PRIVATE libraw_vendored)
 endif()
 
 # P17 T1: CPU-only LibRaw smoke test. Links neither Halide nor
@@ -1485,6 +1538,21 @@ add_dependencies(test_cfa_phase halide_runtime_target)
 add_dependencies(test_cfa_phase dng_demosaic_aot_target)
 if(APPLE)
     target_link_libraries(test_cfa_phase ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# P17 T9: fused normalize + Bayer demosaic AOT kernel vs same-algorithm CPU
+# reference (>=99 dB / max_abs<=1) plus the constant-field phase oracle.
+add_executable(test_raw_bayer_kernel
+    tests/test_raw_bayer_kernel.cpp
+    src/raw_demosaic_reference.cpp)
+target_include_directories(test_raw_bayer_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+add_dependencies(test_raw_bayer_kernel raw_bayer_demosaic_aot_target halide_runtime_target)
+target_link_libraries(test_raw_bayer_kernel
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
+if(APPLE)
+    target_link_libraries(test_raw_bayer_kernel
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # Debug demosaic test
