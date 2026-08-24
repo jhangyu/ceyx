@@ -65,6 +65,67 @@ bool fileExists(const std::string& path) {
     return f.good();
 }
 
+// Round-3 review finding F2: the frontend used to accept ANY non-null
+// raw_image. LibRaw aliases raw_image onto the 4-component imgdata.image for
+// the sRAW / legacy decoders (third_party/libraw/src/decoders/unpack.cpp:436,
+// raw_pitch = width*8), producing a borrowed view whose stride implies 8 bytes
+// per pixel while the view claims 2 — and raw_validate_gpu_input cannot catch
+// it, because an over-large stride passes every stride rule.
+//
+// No in-repo corpus file uses a legacy decoder, so the gate is covered as a
+// truth table over LibRaw's own allocation predicate (unpack.cpp:382). Cases
+// marked [F2] are the ones that the pre-fix `raw_image != nullptr` logic gets
+// wrong; the rest pin down what must keep being accepted.
+void checkAcceptanceGate() {
+    // Distinct, non-null addresses standing in for LibRaw's buffers.
+    unsigned short store_a = 0, store_b = 0;
+    const void* const kAllocA = &store_a;
+    const void* const kAllocB = &store_b;
+    const uint32_t kBayerFilters = 0x94949494u;   // RGGB
+    const uint32_t kXTransFilters = 9u;
+
+    struct Case {
+        const char* id;
+        const void* raw_alloc;
+        const void* raw_image;
+        uint32_t filters;
+        uint32_t colors;
+        bool expect_accept;
+    };
+
+    const Case cases[] = {
+        // Accepted: LibRaw's own Bayer branch (unpack.cpp:392-398).
+        {"gate-bayer-own-store", kAllocA, kAllocA, kBayerFilters, 3, true},
+        {"gate-xtrans-own-store", kAllocA, kAllocA, kXTransFilters, 3, true},
+        // Accepted: monochrome (colors == 1) is the second half of :382.
+        {"gate-monochrome", kAllocA, kAllocA, 0, 1, true},
+        // Accepted: RawSpeed3 assigns raw_image = rs3ret.pixeldata and leaves
+        // raw_alloc null (unpack.cpp:189). Also the phase-one reuse path
+        // (src/utils/phaseone_processing.cpp:35-37). Must NOT be rejected.
+        {"gate-rawspeed3-no-alloc", nullptr, kAllocA, kBayerFilters, 3, true},
+        // [F2] sRAW / legacy: raw_alloc = 0 and raw_image aliases the
+        // 4-component imgdata.image (unpack.cpp:429-437).
+        {"gate-sraw-alias-3color", nullptr, kAllocA, 0, 3, false},
+        {"gate-legacy-alias-4color", nullptr, kAllocA, 0, 4, false},
+        // [F2] a raw store exists but raw_image is not it: color3/color4/float
+        // allocations that leave a stale raw_image pointer behind.
+        {"gate-alloc-image-mismatch", kAllocB, kAllocA, kBayerFilters, 3, false},
+        // Pre-existing behaviour: nothing decoded into raw_image.
+        {"gate-null-raw-image", kAllocA, nullptr, kBayerFilters, 3, false},
+    };
+
+    for (const Case& c : cases) {
+        const bool got = raw_frontend_pixels_live_in_raw_image(
+            c.raw_alloc, c.raw_image, c.filters, c.colors);
+        char detail[192];
+        std::snprintf(detail, sizeof(detail),
+                      "alloc=%s image=%s filters=0x%x colors=%u -> accept=%d want=%d",
+                      c.raw_alloc ? "set" : "null", c.raw_image ? "set" : "null",
+                      c.filters, c.colors, got ? 1 : 0, c.expect_accept ? 1 : 0);
+        report("", c.id, got == c.expect_accept, detail);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -72,6 +133,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--manifest") == 0) manifest = argv[i + 1];
     }
+
+    // Corpus-independent: the F2 acceptance gate truth table.
+    checkAcceptanceGate();
 
     const std::vector<Sample> samples = loadManifest(manifest);
     if (samples.empty()) {

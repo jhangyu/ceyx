@@ -24,6 +24,41 @@
 // the V3 bit is OFF unless we set it. The timing helper is
 // dng_timing::elapsed_ms() (dng_timing_utils.h), not dng_now_ms().
 
+// F2 gate (round-3 review finding F2). LibRaw decides where a decoder's pixels
+// land in third_party/libraw/src/decoders/unpack.cpp:
+//   :382  else if (imgdata.idata.filters || P1.colors == 1)  -> raw_alloc is
+//         allocated AND raw_image = (ushort*)raw_alloc          (our case)
+//   :402  else (sRAW / legacy / Foveon)                       -> raw_alloc = 0
+//         and :436 raw_image = (ushort*)imgdata.image, a 4-COMPONENT buffer
+//         with S.raw_pitch = width*8. That view is internally inconsistent
+//         with pixel_stride_bytes = 2 and the validator cannot see it, because
+//         an over-large stride passes every stride rule.
+// The legacy branch is literally the `else` of the filters/colors predicate, so
+// clause 2 below is what structurally excludes it.
+//
+// Pinned-revision substitution (LibRaw df226ea): the review's fix text asks for
+// `raw_alloc != nullptr && raw_image == raw_alloc` verbatim. That is NOT
+// satisfiable at this revision for RawSpeed3-decoded files: unpack.cpp:189
+// assigns raw_image = rs3ret.pixeldata and never touches raw_alloc (grep of
+// src/: raw_alloc is only assigned at unpack.cpp:334/351/372/392/429/461/469
+// plus the DNG-SDK / x3f / fp_dng / phaseone glues). Requiring identity would
+// false-reject every RawSpeed3 Bayer decode, including the corpus case
+// frontend_switch_lossless_dng. phaseone_processing.cpp:37 likewise leaves
+// raw_alloc == 0 with valid raw_image pixels. So clause 3 is stated as the
+// contrapositive: IF LibRaw allocated a raw store, raw_image must BE that
+// store (rejects color3/color4/float allocations that leave a stale
+// raw_image); if there is no raw store, the pixels are owned elsewhere and
+// clause 2 decides.
+bool raw_frontend_pixels_live_in_raw_image(const void* raw_alloc,
+                                           const void* raw_image,
+                                           uint32_t filters,
+                                           uint32_t colors) {
+    if (raw_image == nullptr) return false;                       // clause 1
+    if (filters == 0 && colors != 1) return false;                // clause 2
+    if (raw_alloc != nullptr && raw_alloc != raw_image) return false;  // clause 3
+    return true;
+}
+
 struct LibRawFrontendContext::Impl {
     LibRaw processor;
     LibRawRawView view;
@@ -130,9 +165,14 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     // Step 5: pixels come only from imgdata.rawdata. P0 accepts U16 raw_image.
     const auto& rawdata = impl_->processor.imgdata.rawdata;
     const auto& sizes = impl_->processor.imgdata.sizes;
-    if (rawdata.raw_image == nullptr) {
+    if (!raw_frontend_pixels_live_in_raw_image(
+            impl_->processor.imgdata.rawdata.raw_alloc, rawdata.raw_image,
+            impl_->processor.imgdata.idata.filters,
+            static_cast<uint32_t>(impl_->processor.imgdata.idata.colors))) {
+        // color3/color4/float variants (P1+), and the sRAW / legacy decoders
+        // that alias raw_image onto the 4-component imgdata.image.
         impl_->processor.recycle();
-        return kRawErrLayoutUnsupported;   // color3/color4/float variants: P1+
+        return kRawErrLayoutUnsupported;
     }
 
     LibRawRawView view;

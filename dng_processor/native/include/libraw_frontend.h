@@ -51,6 +51,19 @@ struct LibRawRawView {
 // Ceiling handed to LibRaw before open_file (spec section 10.2).
 #define kRawMaxRawMemoryMb 4096
 
+// Acceptance gate for "the U16 mosaic pixels really live in rawdata.raw_image"
+// (round-3 review finding F2). Mirrors LibRaw's own allocation predicate in
+// third_party/libraw/src/decoders/unpack.cpp:382. Declared here (not a static
+// helper) because no in-repo corpus file exercises the sRAW / legacy alias
+// case, so the truth table is what the test can actually cover.
+//
+// Arguments are the raw values of imgdata.rawdata.raw_alloc,
+// imgdata.rawdata.raw_image, imgdata.idata.filters and imgdata.idata.colors.
+bool raw_frontend_pixels_live_in_raw_image(const void* raw_alloc,
+                                           const void* raw_image,
+                                           uint32_t filters,
+                                           uint32_t colors);
+
 class LibRawFrontendContext {
  public:
     LibRawFrontendContext();
