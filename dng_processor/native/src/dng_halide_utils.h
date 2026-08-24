@@ -65,6 +65,23 @@ inline Halide::Expr map_repeat_coord(Halide::Expr coord, Halide::Expr size) {
                           coord);
 }
 
+// Generalised CFA-aware edge clamp for repeats other than 2 (X-Trans is 6).
+// Deliberately a SEPARATE function: `map_repeat_coord` above must keep
+// emitting byte-identical IR, because the DNG demosaic/warp AOT outputs are
+// pinned regression artifacts (Gotcha #99).  Re-expressing the old helper in
+// terms of this one is therefore NOT acceptable, even though the bodies are
+// structurally identical with repeat_n == kCfaRepeat.
+inline Halide::Expr map_repeat_coord_n(Halide::Expr coord, Halide::Expr size,
+                                       int repeat_n) {
+    Halide::Expr repeat = Halide::min(Halide::Expr(repeat_n), size);
+    Halide::Expr start = size - repeat;
+    return Halide::select(coord < 0,
+                          positive_modulo(coord, repeat),
+                          coord >= size,
+                          start + positive_modulo(coord - start, repeat),
+                          coord);
+}
+
 inline Halide::Expr avg2_u16(Halide::Expr a, Halide::Expr b) {
     return Halide::cast<uint16_t>(
         (Halide::cast<uint32_t>(a) + Halide::cast<uint32_t>(b) +
