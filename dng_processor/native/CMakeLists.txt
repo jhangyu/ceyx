@@ -225,6 +225,22 @@ option(DNG_DIAGNOSTIC_BUILD
        "Build deprecated research generators (DngWarpStrictFloatGenerator, DngWarpDebugGenerator) for diagnostics"
        OFF)
 
+# =============================================================================
+# P17 T1: Generic RAW frontend (LibRaw + bundled RawSpeed3)
+# =============================================================================
+# Option declared here (with the other early options); the actual
+# add_subdirectory/target wiring is deferred to just above the libraw_smoke
+# target definition, AFTER the Halide find_package() below. RawSpeed3's own
+# CMakeLists.txt mutates several global CACHE variables (WITH_OPENMP,
+# CMAKE_POLICY_VERSION_MINIMUM, etc.) as a side effect of its own configure;
+# doing that before find_package(Halide REQUIRED COMPONENTS Halide) was
+# observed to break the AOT generator executables' link against the system
+# zlib bundled inside Halide's compression support (undefined _uncompress).
+# Deferring the vendored subdirectories until after Halide is fully
+# configured avoids that ordering hazard without patching RawSpeed3 itself.
+option(DNG_ENABLE_GENERIC_RAW
+       "Build the generic (non-DNG) RAW frontend backed by LibRaw + RawSpeed3" ON)
+
 # --- Phase 14: Cross-compile and AOT target options ---
 option(DNG_HOST_GENERATORS_ONLY
        "Only build host-side Halide generators and run AOT (Stage 1 of cross-compile)"
@@ -968,6 +984,128 @@ target_link_libraries(dng_ffi_harness PRIVATE dng_decoder_native)
 add_executable(test_cfa_color tests/test_cfa_color.cpp)
 target_include_directories(test_cfa_color PRIVATE ${INC_DIR})
 target_link_libraries(test_cfa_color PRIVATE dng_decoder_native)
+
+# P17 T2: plain-C raw pipeline contract ABI test (raw_pipeline_contract.h).
+# Pure header test, no LibRaw/decoder dependency; not gated by
+# DNG_ENABLE_GENERIC_RAW.
+add_executable(test_raw_contract_abi tests/test_raw_contract_abi.cpp)
+target_include_directories(test_raw_contract_abi PRIVATE ${INC_DIR})
+
+# P17 T1: Generic RAW frontend (LibRaw + bundled RawSpeed3) wiring, deferred
+# until after Halide is fully configured (see option() comment above).
+if(DNG_ENABLE_GENERIC_RAW)
+    set(LIBRAW_DIR ${THIRD_PARTY_DIR}/libraw)
+    set(LIBRAW_CMAKE_OVERLAY_DIR ${THIRD_PARTY_DIR}/libraw-cmake)
+    if(NOT EXISTS ${LIBRAW_DIR}/libraw/libraw.h)
+        message(FATAL_ERROR
+            "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_DIR} is missing. Run "
+            "dng_processor/native/scripts/fetch_libraw_dist.sh first, or "
+            "configure with -DDNG_ENABLE_GENERIC_RAW=OFF.")
+    endif()
+    if(NOT EXISTS ${LIBRAW_CMAKE_OVERLAY_DIR}/CMakeLists.txt)
+        message(FATAL_ERROR
+            "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_CMAKE_OVERLAY_DIR} is missing "
+            "(LibRaw ships no CMakeLists.txt of its own; this project vendors the "
+            "community LibRaw-cmake overlay, see PROVENANCE.md). Run "
+            "dng_processor/native/scripts/fetch_libraw_dist.sh first.")
+    endif()
+
+    # RawSpeed3 build policy (spec section 6.6): no OpenMP, no tools/tests/
+    # benchmarks/fuzzers, and no standalone RawSpeed target exposed to the app.
+    set(WITH_OPENMP OFF CACHE BOOL "" FORCE)
+    set(RAWSPEED_ENABLE_WERROR OFF CACHE BOOL "" FORCE)
+    set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_BENCHMARKING OFF CACHE BOOL "" FORCE)
+    set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+    set(USE_XMLLINT OFF CACHE BOOL "" FORCE)
+    set(USE_BUNDLED_PUGIXML ON CACHE BOOL "" FORCE)
+    # RawSpeed3's own Pugixml.cmake fetches a hash-pinned tarball
+    # (pugixml-1.9.tar.gz, SHA512-verified) when not found locally; see
+    # third_party/libraw/RawSpeed3/rawspeed/cmake/Modules/Pugixml.cmake.in.
+    set(ALLOW_DOWNLOADING_PUGIXML ON CACHE BOOL "" FORCE)
+    # pugixml-1.9's own CMakeLists.txt predates CMake 3.5's minimum-version
+    # policy floor; this only relaxes the sub-build's own cmake_minimum_required
+    # check, not this project's.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
+    # Builds the `rawspeed` static target from RawSpeed3's own (real) CMake
+    # build. This library is never linked into any Halide/AOT target and is
+    # only ever consumed via the glue below, never exposed as a standalone
+    # dependency of dng_decoder_native (spec section 6.6.1/6.6.3).
+    add_subdirectory(${LIBRAW_DIR}/RawSpeed3/rawspeed rawspeed3-build EXCLUDE_FROM_ALL)
+
+    # LibRaw at the pinned revision ships no CMakeLists.txt of its own
+    # (see third_party/libraw/README.cmake: unmaintained by the LibRaw team
+    # since 2014). This project vendors the community LibRaw/LibRaw-cmake
+    # overlay as a third pinned dependency (see PROVENANCE.md) and points it
+    # at our vendored LibRaw source tree via LIBRAW_PATH. That overlay only
+    # knows the legacy RawSpeed v1 codec path (ENABLE_RAWSPEED), so
+    # RawSpeed3 support is NOT part of the overlay and is glued on below —
+    # this is a documented local modification, see PROVENANCE.md.
+    set(LIBRAW_PATH ${LIBRAW_DIR} CACHE STRING "" FORCE)
+    set(ENABLE_RAWSPEED OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
+    set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LIBRAW_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${LIBRAW_CMAKE_OVERLAY_DIR} libraw-cmake-build EXCLUDE_FROM_ALL)
+
+    # --- RawSpeed3 C-API glue (local modification, see PROVENANCE.md) ---
+    # Generates rawspeed3_c_api/cameras.cpp from RawSpeed3/rawspeed/data/cameras.xml
+    # at configure time (LibRaw's own documented build step, RawSpeed3/README.md).
+    set(RAWSPEED3_CAPI_DIR ${LIBRAW_DIR}/RawSpeed3/rawspeed3_c_api)
+    set(RAWSPEED3_CAMERAS_XML ${LIBRAW_DIR}/RawSpeed3/rawspeed/data/cameras.xml)
+    set(RAWSPEED3_CAMERAS_CPP ${CMAKE_CURRENT_BINARY_DIR}/rawspeed3-cameras/cameras.cpp)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rawspeed3-cameras)
+    execute_process(
+        COMMAND sh ${RAWSPEED3_CAPI_DIR}/rsxml2c.sh ${RAWSPEED3_CAMERAS_XML}
+        OUTPUT_FILE ${RAWSPEED3_CAMERAS_CPP}
+        RESULT_VARIABLE _rsxml2c_rc)
+    if(NOT _rsxml2c_rc EQUAL 0)
+        message(FATAL_ERROR "rsxml2c.sh failed to generate RawSpeed3 cameras.cpp (rc=${_rsxml2c_rc})")
+    endif()
+
+    # rawspeed3_capi.cpp expects pugixml at a fixed relative path
+    # (RawSpeed3/pugixml/pugixml.hpp, sibling of rawspeed3_c_api/) that only
+    # exists when pugixml is vendored alongside RawSpeed3 by hand. We instead
+    # let RawSpeed3's own CMake fetch a hash-pinned pugixml (see
+    # ALLOW_DOWNLOADING_PUGIXML above), so its source dir is elsewhere.
+    # Rather than patch the vendored .cpp, forward the expected include path
+    # to the real pugixml source dir via a generated shim header (CMake-only
+    # glue, documented in PROVENANCE.md "Local modifications").
+    get_target_property(_rawspeed3_pugixml_src pugixml SOURCE_DIR)
+    if(NOT _rawspeed3_pugixml_src)
+        message(FATAL_ERROR "Could not resolve pugixml SOURCE_DIR from RawSpeed3's pugixml target")
+    endif()
+    set(_rawspeed3_pugixml_shim ${CMAKE_CURRENT_BINARY_DIR}/rawspeed3-pugixml-shim)
+    file(MAKE_DIRECTORY ${_rawspeed3_pugixml_shim}/include_anchor)
+    file(MAKE_DIRECTORY ${_rawspeed3_pugixml_shim}/pugixml)
+    file(WRITE ${_rawspeed3_pugixml_shim}/pugixml/pugixml.hpp
+        "#include \"${_rawspeed3_pugixml_src}/src/pugixml.hpp\"\n")
+
+    # `raw` is exported by the overlay above; extend it in place with the
+    # RawSpeed3 C-API wrapper sources rather than forking the overlay.
+    target_sources(raw PRIVATE
+        ${RAWSPEED3_CAPI_DIR}/rawspeed3_capi.cpp
+        ${RAWSPEED3_CAMERAS_CPP})
+    target_include_directories(raw PRIVATE
+        ${RAWSPEED3_CAPI_DIR}
+        ${_rawspeed3_pugixml_shim}/include_anchor)
+    target_compile_definitions(raw PRIVATE USE_RAWSPEED3 USE_RAWSPEED_BITS)
+    target_link_libraries(raw PRIVATE rawspeed rawspeed_get_number_of_processor_cores)
+
+    add_library(libraw_vendored INTERFACE)
+    target_include_directories(libraw_vendored INTERFACE ${LIBRAW_DIR})
+    target_link_libraries(libraw_vendored INTERFACE raw)
+    target_compile_definitions(libraw_vendored INTERFACE DNG_ENABLE_GENERIC_RAW=1)
+endif()
+
+# P17 T1: CPU-only LibRaw smoke test. Links neither Halide nor
+# dng_decoder_native (spec: prove the dependency before any GPU work).
+if(DNG_ENABLE_GENERIC_RAW)
+    add_executable(libraw_smoke tests/libraw_smoke.cpp)
+    target_link_libraries(libraw_smoke PRIVATE libraw_vendored)
+endif()
 
 
 # W5-4 / TD-2: Device handoff path independent test.
