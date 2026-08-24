@@ -121,6 +121,17 @@ int main(int argc, char** argv) {
                     kRawSuccess, kRawRouteGeneric);
     }
     {
+        // IFD0 offset near UINT32_MAX must not wrap the uint32 bound check
+        // and read out of bounds; a clean rejection to generic is required.
+        std::vector<uint8_t> wrap_fe = makeTiff(true, true);
+        wrap_fe[4] = 0xFE; wrap_fe[5] = 0xFF; wrap_fe[6] = 0xFF; wrap_fe[7] = 0xFF;  // 0xFFFFFFFE
+        expectBytes("ifd0_offset_wrap_fe", wrap_fe, kRawSuccess, kRawRouteGeneric);
+
+        std::vector<uint8_t> wrap_ff = makeTiff(true, true);
+        wrap_ff[4] = 0xFF; wrap_ff[5] = 0xFF; wrap_ff[6] = 0xFF; wrap_ff[7] = 0xFF;  // 0xFFFFFFFF
+        expectBytes("ifd0_offset_wrap_ff", wrap_ff, kRawSuccess, kRawRouteGeneric);
+    }
+    {
         RawRoute route = kRawRouteUnknown;
         const RawErrorCode rc = raw_probe_file(nullptr, &route);
         char detail[96];

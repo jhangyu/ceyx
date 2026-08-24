@@ -34,11 +34,16 @@ bool startsWith(const uint8_t* h, size_t n, const char* magic, size_t magic_len,
 bool hasDngVersionTag(const uint8_t* h, size_t n, bool little_endian) {
     if (n < 8) return false;
     const uint32_t ifd0 = read32(h + 4, little_endian);
-    if (ifd0 < 8 || ifd0 + 2 > n) return false;
+    // Do the bound check in uint64_t: ifd0 + 2 in uint32_t wraps for
+    // ifd0 in {0xFFFFFFFE, 0xFFFFFFFF}, which would otherwise pass this
+    // check and let read16() below dereference an out-of-bounds address.
+    if (ifd0 < 8 || static_cast<uint64_t>(ifd0) + 2 > n) return false;
 
     const uint16_t count = read16(h + ifd0, little_endian);
     for (uint16_t i = 0; i < count; ++i) {
-        const size_t entry = static_cast<size_t>(ifd0) + 2 + static_cast<size_t>(i) * kTiffEntrySize;
+        // ifd0 and i are widened to size_t/uint64_t before the add, so this
+        // cannot wrap the way the check above could.
+        const uint64_t entry = static_cast<uint64_t>(ifd0) + 2 + static_cast<uint64_t>(i) * kTiffEntrySize;
         if (entry + kTiffEntrySize > n) return false;   // bounds check first
         if (read16(h + entry, little_endian) == kTagDngVersion) return true;
     }
