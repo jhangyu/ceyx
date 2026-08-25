@@ -10,12 +10,15 @@
 // the file-driven X-Trans cases SKIP. The synthetic X-Trans case below is the
 // runtime coverage of the X-Trans branch: it drives raw_pipeline_decode_to_rgba
 // with an in-memory canonical-tile mosaic and needs no corpus file.
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "dng_ffi_api.h"
@@ -893,6 +896,150 @@ int main(int argc, char** argv) {
         } else {
             report("bayer-unchanged", nullptr, bayer_hash_all_match, detail);
         }
+    }
+
+    // --- P19 T3: cross-backend consistency + informational timing ----------
+    // A new RawSpeed3 pin can regress a format by claiming a file it decodes
+    // WORSE. Decoding the same file through both backends and comparing the
+    // RGBA is the only check that sees that; "it decoded" does not.
+    for (const Sample& s : samples) {
+        if (s.expect_layout != "xtrans6x6" || s.expect_error != "kRawSuccess") continue;
+        if (!fileExists(s.path.c_str())) {
+            std::printf("[RawE2E] SKIP xtrans-cross-backend %s (missing file)\n",
+                        s.id.c_str());
+            continue;
+        }
+
+        RawDevelopParams develop{};
+        develop.exposure_ev = 0.0f;
+        develop.tone_curve_strength = 1.0f;
+        develop.output_space = kRawOutputColorSpaceSrgb;
+        develop.max_output_long_edge = 0;
+
+        RawPipelineResult rs{}, nat{};
+        const RawErrorCode rs_rc = raw_pipeline_decode_file_forced(
+            s.path.c_str(), develop, RawForcedBackend::kRawSpeed3, rs);
+        const RawErrorCode nat_rc = raw_pipeline_decode_file_forced(
+            s.path.c_str(), develop, RawForcedBackend::kLibRawNative, nat);
+
+        if (rs_rc != kRawSuccess || nat_rc != kRawSuccess) {
+            // Not a pass. A body RawSpeed3 declines is a legitimate outcome,
+            // but it is named, with its error code, so it can never be read
+            // as a green cell.
+            std::printf("[RawE2E] SKIP xtrans-cross-backend %s (%s rs=%s nat=%s)\n",
+                        s.id.c_str(),
+                        rs_rc != kRawSuccess ? "rawspeed3 declined" : "native failed",
+                        raw_error_name(rs_rc), raw_error_name(nat_rc));
+            if (rs.rgba_ptr) dng_rgba_output_release(rs.rgba_ptr);
+            if (nat.rgba_ptr) dng_rgba_output_release(nat.rgba_ptr);
+            continue;
+        }
+
+        // P19 T3 hardening (found by running this gate, not in the plan text):
+        // LibRaw's single unpack() call falls back to native SILENTLY inside
+        // itself when RawSpeed3 declines, even under RawForcedBackend::kRawSpeed3
+        // -- the "forced" flags only change what LibRaw offers to try, never
+        // guarantee it succeeds (src/decoders/unpack.cpp:112-222). Comparing two
+        // results that BOTH actually came from libraw_native would print PASS
+        // with identical=1 while proving nothing about cross-backend agreement --
+        // exactly the vacuous-gate failure mode the r2 review escalated. The
+        // frontend's own diagnostics (populated from LIBRAW_WARN_RAWSPEED3_PROCESSED,
+        // libraw_frontend.cpp:184-189) are the only way to see which decoder
+        // actually produced the pixels; check it before trusting the comparison.
+        if (rs.diag.unpack_backend != kRawDecoderBackendRawSpeed3) {
+            std::printf("[RawE2E] SKIP xtrans-cross-backend %s (rawspeed3 declined: "
+                        "forced kRawSpeed3 request silently fell back to %s inside "
+                        "unpack(), warnings=0x%08x)\n",
+                        s.id.c_str(), raw_backend_name(rs.diag.unpack_backend),
+                        rs.diag.rawspeed_warning_bits);
+            dng_rgba_output_release(rs.rgba_ptr);
+            dng_rgba_output_release(nat.rgba_ptr);
+            continue;
+        }
+
+        char detail[256];
+        if (rs.width != nat.width || rs.height != nat.height ||
+            rs.rgba_size != nat.rgba_size) {
+            std::snprintf(detail, sizeof(detail),
+                          "rs=%ux%u nat=%ux%u size %zu vs %zu",
+                          rs.width, rs.height, nat.width, nat.height,
+                          rs.rgba_size, nat.rgba_size);
+            report("xtrans-cross-backend dimensions", s.id.c_str(), false, detail);
+            dng_rgba_output_release(rs.rgba_ptr);
+            dng_rgba_output_release(nat.rgba_ptr);
+            continue;
+        }
+
+        // Byte-identity first: it is the strongest outcome and costs one memcmp.
+        const bool identical =
+            std::memcmp(rs.rgba_ptr, nat.rgba_ptr, rs.rgba_size) == 0;
+
+        double sum_sq = 0.0;
+        unsigned max_abs = 0;
+        for (size_t i = 0; i < rs.rgba_size; ++i) {
+            const int d = static_cast<int>(rs.rgba_ptr[i]) -
+                          static_cast<int>(nat.rgba_ptr[i]);
+            const unsigned a = static_cast<unsigned>(d < 0 ? -d : d);
+            if (a > max_abs) max_abs = a;
+            sum_sq += static_cast<double>(d) * static_cast<double>(d);
+        }
+        const double mse = sum_sq / static_cast<double>(rs.rgba_size);
+        const double psnr = (mse <= 0.0) ? 999.0
+                                         : 10.0 * std::log10((255.0 * 255.0) / mse);
+
+        std::snprintf(detail, sizeof(detail),
+                      "psnr=%.2f max_abs=%u rs=%ux%u nat=%ux%u identical=%d",
+                      psnr, max_abs, rs.width, rs.height, nat.width, nat.height,
+                      static_cast<int>(identical));
+        report("xtrans-cross-backend", s.id.c_str(),
+               identical || (psnr >= 99.0 && max_abs <= 1), detail);
+
+        dng_rgba_output_release(rs.rgba_ptr);
+        dng_rgba_output_release(nat.rgba_ptr);
+    }
+
+    // Informational only (spec section 6.3): recorded so a future regression has
+    // a number to compare against. Never gates a pass/fail.
+    for (const Sample& s : samples) {
+        if (s.expect_layout != "xtrans6x6" || s.expect_error != "kRawSuccess") continue;
+        if (!fileExists(s.path.c_str())) continue;
+
+        RawDevelopParams develop{};
+        develop.exposure_ev = 0.0f;
+        develop.tone_curve_strength = 1.0f;
+        develop.output_space = kRawOutputColorSpaceSrgb;
+        develop.max_output_long_edge = 0;
+
+        double ms[2][3] = {{0, 0, 0}, {0, 0, 0}};
+        const RawForcedBackend backends[2] = {RawForcedBackend::kRawSpeed3,
+                                              RawForcedBackend::kLibRawNative};
+        bool usable = true;
+        for (int b = 0; b < 2 && usable; ++b) {
+            for (int r = 0; r < 3 && usable; ++r) {
+                RawPipelineResult out{};
+                const auto t0 = std::chrono::high_resolution_clock::now();
+                const RawErrorCode rc = raw_pipeline_decode_file_forced(
+                    s.path.c_str(), develop, backends[b], out);
+                const auto t1 = std::chrono::high_resolution_clock::now();
+                ms[b][r] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+                if (rc != kRawSuccess) usable = false;
+            }
+        }
+        if (!usable) {
+            std::printf("[RawE2E] xtrans-timing %s skipped (a forced decode failed)\n",
+                        s.id.c_str());
+            continue;
+        }
+        // Median of three: sort the three samples and take the middle one.
+        for (int b = 0; b < 2; ++b) {
+            for (int i = 0; i < 3; ++i)
+                for (int j = i + 1; j < 3; ++j)
+                    if (ms[b][j] < ms[b][i]) std::swap(ms[b][i], ms[b][j]);
+        }
+        std::printf("[RawE2E] xtrans-timing %s rawspeed3_ms=%.2f "
+                    "libraw_native_ms=%.2f (informational)\n",
+                    s.id.c_str(), ms[0][1], ms[1][1]);
     }
 
     // Nothing may stay checked out, on success or failure.

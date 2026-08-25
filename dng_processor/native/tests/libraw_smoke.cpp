@@ -42,5 +42,20 @@ int main(int argc, char** argv) {
                 processor.imgdata.rawdata.ioparams.fuji_width,
                 processor.imgdata.idata.filters,
                 decoder_name);
+
+    // P19 T3 mandatory instrumentation (round-2 review): print process_warnings
+    // named bits to discriminate WHY a body did not flip to rawspeed3 -- e.g. a
+    // caught "Size mismatch" exception (-> RAWSPEED3_PROBLEM) vs the camera not
+    // being recognised by RawSpeed3's metadata table (-> RAWSPEED3_NOTLISTED)
+    // vs never having been offered to RawSpeed3 at all (neither bit set).
+    const unsigned pw = processor.imgdata.process_warnings;
+    std::printf("[LibRawSmoke] process_warnings=0x%08x rawspeed3_problem=%d "
+                "rawspeed3_unsupported=%d rawspeed3_processed=%d "
+                "rawspeed3_notlisted=%d\n",
+                pw,
+                (pw & LIBRAW_WARN_RAWSPEED3_PROBLEM) != 0,
+                (pw & LIBRAW_WARN_RAWSPEED_UNSUPPORTED) != 0,
+                (pw & LIBRAW_WARN_RAWSPEED3_PROCESSED) != 0,
+                (pw & LIBRAW_WARN_RAWSPEED3_NOTLISTED) != 0);
     return 0;
 }
