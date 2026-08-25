@@ -47,6 +47,11 @@ struct LibRawRawView {
     uint32_t white_level = 0;
     int32_t flip = 0;
     const char* cdesc = nullptr;            // e.g. "RGBG"
+    // 1 for a single-sample mosaic (rawdata.raw_image), 3 for full-colour
+    // interleaved pixels (rawdata.color3_image, the Foveon X3F case). The
+    // adapter reads this instead of inferring component count from `colors`,
+    // which describes the sensor, not the buffer.
+    uint32_t components_per_pixel = 1;
 };
 
 // Ceiling handed to LibRaw before open_file (spec section 10.2).
@@ -64,6 +69,28 @@ bool raw_frontend_pixels_live_in_raw_image(const void* raw_alloc,
                                            const void* raw_image,
                                            uint32_t filters,
                                            uint32_t colors);
+
+// Acceptance gate for "the pixels really live in rawdata.color3_image": the
+// Foveon X3F case, where LibRaw::x3f_load_raw() allocates raw_alloc, points
+// color3_image at it, and never assigns raw_image at all
+// (third_party/libraw/src/x3f/x3f_parse_process.cpp:588-640).
+//
+// A SIBLING of the function above, not a widening of it. That one's clause 3 is
+// deliberately a contrapositive guarding LibRaw's sRAW/legacy decoders, which
+// alias raw_image onto the 4-component imgdata.image; relaxing it to tolerate a
+// null raw_image would re-open exactly that case.
+//
+// True only when: color3_image is non-null, filters == 0 (a CFA word with a
+// 3-component buffer is a self-contradictory imgdata state), colors == 3
+// (colors == 4 is the color4_image/Quattro case this phase does not handle),
+// and any recorded raw store IS this buffer.
+//
+// Arguments are the raw values of imgdata.rawdata.raw_alloc,
+// imgdata.rawdata.color3_image, imgdata.idata.filters and imgdata.idata.colors.
+bool raw_frontend_pixels_live_in_color3_image(const void* raw_alloc,
+                                              const void* color3_image,
+                                              uint32_t filters,
+                                              uint32_t colors);
 
 class LibRawFrontendContext {
  public:

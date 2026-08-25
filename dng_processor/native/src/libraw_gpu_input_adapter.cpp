@@ -310,7 +310,12 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
         layout.sample_model = (v.colors == 1)   ? kRawSampleModelMonochrome
                             : (v.colors >= 3)   ? kRawSampleModelLinearRgb
                                                 : kRawSampleModelUnknown;
-        layout.components_per_pixel = v.colors ? v.colors : 1;
+        // From the BUFFER the frontend actually accepted, not from `colors`
+        // (which describes the sensor). For X3F both say 3; for a future
+        // 4-component buffer they would not, and the contract must describe
+        // the memory the GPU will read.
+        layout.components_per_pixel =
+            v.components_per_pixel ? v.components_per_pixel : 1;
         layout.cfa_pattern = nullptr;
         layout.cfa_pattern_count = 0;
     }
@@ -327,10 +332,25 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     // All THREE LibRaw terms, including the per-channel cblack[0..3] that the
     // plan omits (round-4 finding F-R4-02) - see the header for the citation.
     const RawErrorCode black_rc = raw_black_pattern_from_libraw(
-        v.black_scalar, v.black_channel, channel_index, channel_w, channel_h,
+        (layout.sample_model == kRawSampleModelLinearRgb) ? 0u : v.black_scalar,
+        v.black_channel, channel_index, channel_w, channel_h,
         v.black_pattern, v.black_repeat_width, v.black_repeat_height,
         v.visible_left, v.visible_top, &out_input->black, reason_out, reason_cap);
     if (black_rc != kRawSuccess) return black_rc;
+
+    // P19: per-component black for non-CFA layouts. The spatial tile above was
+    // built with a ZERO scalar and no channel term for this branch (see the
+    // channel_w/channel_h == 0 arguments), so the whole black level lives here
+    // exactly once. Double-subtracting color.black is the failure mode this
+    // arrangement exists to make impossible.
+    for (int c = 0; c < 4; ++c) out_input->component_black[c] = 0.0f;
+    if (layout.sample_model == kRawSampleModelLinearRgb) {
+        for (int c = 0; c < 4; ++c) {
+            const uint32_t chan = v.black_channel ? v.black_channel[c] : 0u;
+            out_input->component_black[c] =
+                static_cast<float>(v.black_scalar) + static_cast<float>(chan);
+        }
+    }
 
     // --- white -------------------------------------------------------------
     if (v.white_level == 0) {

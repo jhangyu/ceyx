@@ -59,6 +59,18 @@ bool raw_frontend_pixels_live_in_raw_image(const void* raw_alloc,
     return true;
 }
 
+bool raw_frontend_pixels_live_in_color3_image(const void* raw_alloc,
+                                              const void* color3_image,
+                                              uint32_t filters,
+                                              uint32_t colors) {
+    if (color3_image == nullptr) return false;             // clause 1
+    if (filters != 0) return false;                        // clause 2
+    if (colors != 3) return false;                         // clause 3
+    if (raw_alloc != nullptr && raw_alloc != color3_image)
+        return false;                                      // clause 4
+    return true;
+}
+
 struct LibRawFrontendContext::Impl {
     LibRaw processor;
     LibRawRawView view;
@@ -188,26 +200,43 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
                                      ? kRawDecoderBackendRawSpeed3
                                      : kRawDecoderBackendLibRawNative;
 
-    // Step 5: pixels come only from imgdata.rawdata. P0 accepts U16 raw_image.
+    // Step 5: pixels come only from imgdata.rawdata. Two accepted homes:
+    // the single-sample mosaic in raw_image (every CFA decoder) and the
+    // full-colour interleaved buffer in color3_image (Foveon X3F, P19 W2).
     const auto& rawdata = impl_->processor.imgdata.rawdata;
     const auto& sizes = impl_->processor.imgdata.sizes;
-    if (!raw_frontend_pixels_live_in_raw_image(
-            impl_->processor.imgdata.rawdata.raw_alloc, rawdata.raw_image,
-            impl_->processor.imgdata.idata.filters,
-            static_cast<uint32_t>(impl_->processor.imgdata.idata.colors))) {
-        // color3/color4/float variants (P1+), and the sRAW / legacy decoders
-        // that alias raw_image onto the 4-component imgdata.image.
+    const uint32_t libraw_filters = impl_->processor.imgdata.idata.filters;
+    const uint32_t libraw_colors =
+        static_cast<uint32_t>(impl_->processor.imgdata.idata.colors);
+
+    const bool mosaic = raw_frontend_pixels_live_in_raw_image(
+        rawdata.raw_alloc, rawdata.raw_image, libraw_filters, libraw_colors);
+    const bool color3 = !mosaic && raw_frontend_pixels_live_in_color3_image(
+        rawdata.raw_alloc, rawdata.color3_image, libraw_filters, libraw_colors);
+
+    if (!mosaic && !color3) {
+        // color4/float variants (P1+), and the sRAW / legacy decoders that
+        // alias raw_image onto the 4-component imgdata.image.
         impl_->processor.recycle();
         return kRawErrLayoutUnsupported;
     }
 
     LibRawRawView view;
-    view.plane.data = rawdata.raw_image;
+    if (mosaic) {
+        view.plane.data = rawdata.raw_image;
+        view.plane.pixel_stride_bytes = 2;
+        view.components_per_pixel = 1;
+    } else {
+        // x3f_load_raw sets S.raw_pitch = raw_width * 3 * sizeof(ushort), so
+        // the stride below is still read from raw_pitch and never recomputed
+        // (spec section 6.4.2) - it simply already accounts for 3 components.
+        view.plane.data = rawdata.color3_image;
+        view.plane.pixel_stride_bytes = 6;
+        view.components_per_pixel = 3;
+    }
     view.plane.width = sizes.raw_width;
     view.plane.height = sizes.raw_height;
-    // Stride from raw_pitch, never width*2 (spec section 6.4.2).
     view.plane.row_stride_bytes = static_cast<int64_t>(sizes.raw_pitch);
-    view.plane.pixel_stride_bytes = 2;
     view.plane.byte_size =
         static_cast<size_t>(sizes.raw_pitch) * static_cast<size_t>(sizes.raw_height);
 

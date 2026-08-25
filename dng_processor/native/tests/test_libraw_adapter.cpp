@@ -610,6 +610,44 @@ int main(int argc, char** argv) {
                     "(no Bayer sample decoded by two different backends)\n");
     }
 
+    {
+        // P19: for linear RGB the black scalar rides in component_black, and
+        // raw_black_pattern_from_libraw is called with NO channel term and a
+        // ZERO scalar -- otherwise color.black is subtracted twice and the
+        // shadows are crushed. Exact expected values, not "non-zero".
+        const uint32_t black_scalar = 256u;
+        const uint32_t channel_black[4] = {8u, 4u, 12u, 0u};
+
+        RawBlackLevelPattern tile{};
+        char reason[256] = {0};
+        const RawErrorCode rc = raw_black_pattern_from_libraw(
+            /*black_scalar=*/0u, /*channel_black=*/nullptr,
+            /*channel_index=*/nullptr, /*cfa_w=*/0u, /*cfa_h=*/0u,
+            /*spatial_black=*/nullptr, /*spatial_w=*/0u, /*spatial_h=*/0u,
+            /*left_margin=*/0u, /*top_margin=*/0u, &tile, reason, sizeof(reason));
+
+        float component_black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int c = 0; c < 4; ++c) {
+            component_black[c] = static_cast<float>(black_scalar + channel_black[c]);
+        }
+
+        char detail[256];
+        std::snprintf(detail, sizeof(detail),
+                      "rc=%s tile=%ux%u tile0=%.1f cb=[%.1f,%.1f,%.1f,%.1f] reason=\"%s\"",
+                      raw_error_name(rc), tile.repeat_width, tile.repeat_height,
+                      tile.values[0], component_black[0], component_black[1],
+                      component_black[2], component_black[3], reason);
+        report("linear-rgb-component-black", nullptr,
+               rc == kRawSuccess &&
+                   tile.repeat_width == 1 && tile.repeat_height == 1 &&
+                   tile.values[0] == 0.0f &&
+                   component_black[0] == 264.0f &&
+                   component_black[1] == 260.0f &&
+                   component_black[2] == 268.0f &&
+                   component_black[3] == 256.0f,
+               detail);
+    }
+
     if (checked == 0) {
         std::printf("[LibRawAdapter] FAIL no corpus files were present\n");
         return 1;

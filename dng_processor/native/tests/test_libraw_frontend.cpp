@@ -226,6 +226,44 @@ int main(int argc, char** argv) {
                     "(no Bayer sample present)\n");
     }
 
+    {
+        // P19: X3F pixels land in rawdata.color3_image, never rawdata.raw_image
+        // (third_party/libraw/src/x3f/x3f_parse_process.cpp:588-640). This
+        // truth table is the whole acceptance rule, and it needs no sample file
+        // -- which is the point, because this checkout has no .x3f.
+        int dummy_alloc = 0;
+        int dummy = 0;
+        void* alloc = &dummy_alloc;
+        void* other = &dummy;   // any distinct address
+
+        const struct {
+            const char* name;
+            const void* raw_alloc;
+            const void* color3;
+            uint32_t filters;
+            uint32_t colors;
+            bool want;
+        } cases[] = {
+            {"x3f_normal",          alloc,   alloc,   0u, 3u, true},
+            {"null_color3",         alloc,   nullptr, 0u, 3u, false},
+            {"alloc_elsewhere",     other,   alloc,   0u, 3u, false},
+            {"no_alloc_recorded",   nullptr, alloc,   0u, 3u, true},
+            {"cfa_contradiction",   alloc,   alloc,   9u, 3u, false},
+            {"bayer_contradiction", alloc,   alloc,   0x94949494u, 3u, false},
+            {"four_components",     alloc,   alloc,   0u, 4u, false},
+            {"one_component",       alloc,   alloc,   0u, 1u, false},
+        };
+
+        for (const auto& c : cases) {
+            const bool got = raw_frontend_pixels_live_in_color3_image(
+                c.raw_alloc, c.color3, c.filters, c.colors);
+            char detail[160];
+            std::snprintf(detail, sizeof(detail), "case=%s got=%d want=%d",
+                          c.name, static_cast<int>(got), static_cast<int>(c.want));
+            report("color3-predicate-truth-table", nullptr, got == c.want, detail);
+        }
+    }
+
     if (checked == 0) {
         std::printf("[LibRawFrontend] FAIL no corpus files were present\n");
         return 1;
