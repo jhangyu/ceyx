@@ -163,11 +163,19 @@ class DngDecoderService {
     return _bindings.rawDecodeAvailable;
   }
 
-  /// Diagnostics for THIS ISOLATE's most recent generic-RAW decode.
+  /// Diagnostics for the most recent generic-RAW decode observed on the
+  /// current OS thread.
   ///
-  /// Native state is `thread_local` (raw_ffi_api.cpp:19), so this is null
-  /// after [decodeOnWorker] — the decode happened on another isolate. That is
-  /// expected, not an error.
+  /// Native state is `thread_local` (raw_ffi_api.cpp:19), NOT per-isolate.
+  /// After [decodeOnWorker], reading this on the calling isolate is
+  /// unreliable in either direction: depending on OS thread reuse, it may
+  /// return null, the worker's values, or — if this thread previously ran a
+  /// decode itself — an unrelated earlier decode's values. Provenance is not
+  /// verifiable from Dart, so callers must not rely on this after a worker
+  /// decode. Also note a failed decode does not clear the native scratch
+  /// state, so a subsequent read can still surface an earlier successful
+  /// decode's diagnostics. Only a same-isolate read taken immediately after a
+  /// successful [decode] call is meaningful.
   RawDiagnostics? get lastRawDiagnostics {
     if (!_initialized) initialize();
     return _bindings.lastRawDiagnostics();
@@ -243,8 +251,12 @@ class DngDecoderService {
   /// does not export `dng_decode_and_process_sized`, or when [maxDim] is
   /// null. Callers must read the returned [DngImage.width]/[DngImage.height]
   /// rather than assuming the request was honored.
-  /// On the generic RAW route `maxDim` maps directly to the native `max_dim`
-  /// parameter; 0 and negatives mean full resolution.
+  /// On the generic RAW route, `maxDim` is forwarded to the native `max_dim`
+  /// parameter but is currently IGNORED by the native RAW route (no
+  /// downsampling is applied there yet — measured: requesting 800 on a
+  /// 6246x4170 RAF still returns full resolution). Callers must read the
+  /// returned [DngImage.width]/[DngImage.height] rather than assuming the
+  /// request was honored, exactly as for the DNG route above.
   Future<DngImage> decodeOnWorker(String filePath, {int? maxDim}) async {
     // Hoist to a local before the closure: referencing `_libraryPath`
     // directly inside Isolate.run's closure captures `this` (the whole

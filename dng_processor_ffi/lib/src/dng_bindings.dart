@@ -173,12 +173,18 @@ class DngNativeBindings {
   /// Whether the loaded dylib exports `dng_debug_pool_checked_out`.
   bool get poolStatsAvailable => _dngDebugPoolCheckedOut != null;
 
-  /// Diagnostics for THIS THREAD's most recent `raw_decode_and_process`.
+  /// Diagnostics for the most recent `raw_decode_and_process` call observed
+  /// on the current OS thread.
   ///
-  /// Native state is `thread_local` (raw_ffi_api.cpp:19), so a decode that ran
-  /// in a worker isolate leaves nothing readable here. Returns null when the
-  /// symbol is absent, or when native reports -1 (no decode has run on this
-  /// thread yet).
+  /// Native state is `thread_local` (raw_ffi_api.cpp:19), NOT per-isolate.
+  /// If a decode ran on a worker isolate, reading this from another isolate
+  /// is unreliable in either direction — depending on OS thread reuse it may
+  /// return null, the worker's values, or an earlier decode's values from
+  /// this same thread. Provenance is not verifiable from Dart. A failed
+  /// decode does not clear this state, so it can also surface an earlier
+  /// successful decode's diagnostics. Returns null when the symbol is
+  /// absent, or when native reports -1 (no decode has run on this thread
+  /// yet).
   RawDiagnostics? lastRawDiagnostics() {
     final fn = _rawLastDiagnostics;
     if (fn == null) return null;
