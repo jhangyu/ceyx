@@ -40,7 +40,7 @@
 // round. Including it is how the harness gets production-identical render
 // parameters without modifying a single production source file. This target
 // therefore must NOT also compile dng_render_halide.cpp separately.
-#include "../src/dng_render_halide.cpp"
+#include "../src/pipeline/dng_render_halide.cpp"
 
 #include <algorithm>
 #include <cmath>

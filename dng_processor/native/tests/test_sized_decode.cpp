@@ -47,7 +47,7 @@
  *   1  a case failed, or setup failed
  */
 
-#include "../src/dng_render_halide.cpp"
+#include "../src/pipeline/dng_render_halide.cpp"
 
 #include <algorithm>
 #include <cmath>
