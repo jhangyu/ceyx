@@ -25,6 +25,7 @@
 #include "dng_pipeline.h"
 #include "libraw_gpu_input_adapter.h"
 #include "raw_contract_validate.h"
+#include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 
 namespace {

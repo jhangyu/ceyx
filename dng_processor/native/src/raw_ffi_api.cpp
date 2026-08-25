@@ -3,8 +3,8 @@
 // whose values (<= -201) are disjoint from DngErrorCode.
 #include <cstdlib>
 
-#include "dng_ffi_api.h"
 #include "dng_pipeline.h"
+#include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 
 // Same export decoration as src/dng_ffi_api.cpp, so this entry survives any
