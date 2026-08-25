@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vendors LibRaw (with its bundled RawSpeed3) at the revisions pinned by
-# docs/raw_pipeline_contract_spec.md section 14. Idempotent.
+# docs/spec/raw_pipeline_contract_spec.md section 14. Idempotent.
 #
 # Each component is fetched via a throwaway git checkout, then its .git
 # directory is stripped and the resolved revision is recorded in a
