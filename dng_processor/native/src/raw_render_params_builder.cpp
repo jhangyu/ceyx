@@ -65,7 +65,7 @@ void sampleFunction(std::vector<float>& table, const dng_1d_function& fn) {
 
 }  // namespace
 
-bool buildRenderParamsFromRaw(const RawGpuInput& input,
+bool raw_build_render_params(const RawGpuInput& input,
                               const RawDevelopParams& develop,
                               RenderParams& params) {
     if (develop.output_space != kRawOutputColorSpaceSrgb) return false;

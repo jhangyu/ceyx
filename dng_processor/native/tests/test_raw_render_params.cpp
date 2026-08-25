@@ -1,4 +1,4 @@
-// buildRenderParamsFromRaw coverage.
+// raw_build_render_params coverage.
 //
 // The identity-table case is the one that matters most: LibRaw supplies no
 // HueSatMap or LookTable, and leaving those vectors uninitialised is explicitly
@@ -23,7 +23,7 @@ void report(const char* name, bool ok, const char* detail) {
     if (!ok) ++failures;
 }
 
-// Only the fields buildRenderParamsFromRaw actually reads are populated; the
+// Only the fields raw_build_render_params actually reads are populated; the
 // builder takes no plane data, so faking a plane view would assert nothing.
 RawGpuInput makeInput(bool matrix_valid) {
     RawGpuInput in{};
@@ -123,7 +123,7 @@ int main() {
         RenderParams params;
         const RawGpuInput in = makeInput(true);
         const RawDevelopParams dev = makeDevelop();
-        const bool ok = buildRenderParamsFromRaw(in, dev, params);
+        const bool ok = raw_build_render_params(in, dev, params);
         report("build-succeeds", ok, ok ? "returned true" : "returned false");
 
         // Identity tables, compared against the SAME helper the DNG path uses,
@@ -159,7 +159,7 @@ int main() {
         RenderParams params;
         const RawGpuInput in = makeInput(false);
         const RawDevelopParams dev = makeDevelop();
-        const bool rejected = !buildRenderParamsFromRaw(in, dev, params);
+        const bool rejected = !raw_build_render_params(in, dev, params);
         report("matrix-absent-rejected", rejected, "camera_to_pcs.valid==0");
     }
 
@@ -178,7 +178,7 @@ int main() {
             RawGpuInput in = makeInput(true);
             for (int i = 0; i < 3; ++i) in.as_shot_neutral[i] = dng_params.camera_white[i];
             RenderParams raw_params;
-            const bool ok = buildRenderParamsFromRaw(in, makeDevelop(), raw_params);
+            const bool ok = raw_build_render_params(in, makeDevelop(), raw_params);
             bool same = ok;
             for (int i = 0; same && i < 3; ++i) {
                 same = std::fabs(raw_params.camera_white[i] - dng_params.camera_white[i]) < 1e-5f;

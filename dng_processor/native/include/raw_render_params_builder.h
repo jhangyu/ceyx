@@ -12,7 +12,7 @@
 
 // Returns false when input.camera_to_pcs.valid == 0 (no invented matrix,
 // spec section 4.1.9) or when develop.output_space is not sRGB.
-bool buildRenderParamsFromRaw(const RawGpuInput& input,
+bool raw_build_render_params(const RawGpuInput& input,
                               const RawDevelopParams& develop,
                               RenderParams& params);
 

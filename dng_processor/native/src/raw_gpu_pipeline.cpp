@@ -173,7 +173,7 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     }
 
     RenderParams params;
-    if (!buildRenderParamsFromRaw(input, develop, params)) {
+    if (!raw_build_render_params(input, develop, params)) {
         return kRawErrMetadataInvalid;
     }
 
@@ -295,7 +295,7 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     }
 
     RenderParams params;
-    if (!buildRenderParamsFromRaw(input, develop, params)) {
+    if (!raw_build_render_params(input, develop, params)) {
         return kRawErrMetadataInvalid;
     }
 
@@ -413,7 +413,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     }
 
     RenderParams params;
-    if (!buildRenderParamsFromRaw(input, develop, params)) {
+    if (!raw_build_render_params(input, develop, params)) {
         return kRawErrMetadataInvalid;
     }
 
