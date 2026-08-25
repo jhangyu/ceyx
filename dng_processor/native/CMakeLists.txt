@@ -356,6 +356,11 @@ list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp
 # into dng_decoder_native by the GLOB_RECURSE and fail to compile (Halide
 # Generator API + Halide.h are generator-only).
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Raw[A-Z][A-Za-z0-9]*Generator\\.cpp$")
+# 2026-08-25 naming refactor: RectilinearWarpGenerator.cpp (formerly
+# DngWarpGenerator.cpp) does not match the Dng-prefixed filter above and gets
+# swept into dng_decoder_native by the GLOB_RECURSE, causing undefined Halide
+# Generator API symbols at dylib link time.
+list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Rectilinear[A-Z][A-Za-z0-9]*Generator\\.cpp$")
 # P17 R5 (F1): the CPU demosaic oracle is test-only. The kernel tests compile
 # it themselves; keeping it in the dylib exported the reference symbols from
 # the production ABI.
