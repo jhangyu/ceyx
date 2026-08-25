@@ -22,7 +22,7 @@
 #include <vector>
 
 #include "dng_ffi_api.h"
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 #include "libraw_gpu_input_adapter.h"
 #include "raw_contract_validate.h"
 #include "raw_gpu_pipeline.h"

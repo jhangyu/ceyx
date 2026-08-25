@@ -29,7 +29,7 @@
  * scores very high and a crop scores in the single digits.
  *
  * The decode under test is the real production entry
- * (dng_pipeline_v2_decode_to_rgb_sized), so the device-resident Stage3 handoff,
+ * (dng_pipeline_decode_to_rgb_sized), so the device-resident Stage3 handoff,
  * the crop-origin normalisation and the scaled dispatch are all exercised as
  * shipped — not re-implemented here.
  *
@@ -65,7 +65,7 @@
 #include <dng_image.h>
 #include <dng_render.h>
 
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 #include "dng_render_stage4.h"
 
 using Halide::Runtime::Buffer;
@@ -97,7 +97,7 @@ SizedResult decodeSized(const char *path, int32_t maxDim) {
     DngPipelineV2Result result;
     const auto t0 = std::chrono::steady_clock::now();
     const bool success =
-        dng_pipeline_v2_decode_to_rgb_sized(path, maxDim, result);
+        dng_pipeline_decode_to_rgb_sized(path, maxDim, result);
     out.wall_ms = std::chrono::duration<double, std::milli>(
                       std::chrono::steady_clock::now() - t0)
                       .count();
@@ -269,9 +269,9 @@ int main(int argc, char **argv) {
     }
 
     std::vector<uint16_t> stage3Workspace;
-    if (!dng_pipeline_v2_run_stage3(host, *negative, true, nullptr,
+    if (!dng_pipeline_run_stage3(host, *negative, true, nullptr,
                                     &stage3Workspace)) {
-        printf("FAIL: dng_pipeline_v2_run_stage3 failed\n");
+        printf("FAIL: dng_pipeline_run_stage3 failed\n");
         return 1;
     }
     const dng_image *s3 = negative->Stage3Image();

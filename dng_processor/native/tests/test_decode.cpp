@@ -50,7 +50,7 @@
 
 #include <dng_cfa_phase.h>
 #include <dng_mosaic_halide.h>
-#include <dng_pipeline_v2.h>
+#include <dng_pipeline.h>
 #include <dng_render_halide.h>
 #include <dng_warp_halide.h>
 
@@ -607,7 +607,7 @@ StagePSNR testDNG(dng_host& host,
         }
 
         // === Stage 2: BuildStage2Image ===
-        // Align with production FFI path (dng_pipeline_v2_decode_to_rgb):
+        // Align with production FFI path (dng_pipeline_decode_to_rgb):
         // 1) prewarm Metal polynomial3 pipeline at actual image size (lossy only)
         // 2) enable device handoff so MapPolynomial defers scatter_poly3_to_image
         const bool isBayer = (decodePath == StageContract::DecodePath::CFA_BAYER);
@@ -713,7 +713,7 @@ StagePSNR testDNG(dng_host& host,
             usedSharedStage3Pipeline = true;
             cout << "  [PipelineV2] Using shared Stage3 orchestration\n";
             DngPipelineStage3Timing sharedTiming;
-            if (!dng_pipeline_v2_run_stage3(host, *negative, true, &sharedTiming, &stage3Data)) {
+            if (!dng_pipeline_run_stage3(host, *negative, true, &sharedTiming, &stage3Data)) {
                 cerr << "ERROR: shared PipelineV2 Stage3 failed\n";
                 return failedResult;
             }
@@ -1145,7 +1145,7 @@ StagePSNR testDNG(dng_host& host,
         // very first acquire()+D2H write happens inside the timed Stage4 window
         // and pays a process-cold first-touch page-fault cost that a long-lived
         // production app process never pays repeatedly (it only pays this once,
-        // during its own startup dng_pipeline_v2_warmup_for_size() call). This
+        // during its own startup dng_pipeline_warmup_for_size() call). This
         // was flagged as a test-harness-only +4.6% nominal regression, not a
         // production defect (Task_g2_impl.md known limitation #2,
         // Task_round2_wrapup.md §4b). Mirroring that same warm-then-measure

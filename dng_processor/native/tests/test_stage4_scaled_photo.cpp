@@ -29,7 +29,7 @@
 // variants and the reference is where the box filter sits. Nothing else varies.
 //
 // THIS IS NOT THE PRODUCTION PATH. Neither scaled kernel is wired into
-// dng_pipeline_v2 — that is R2 work. This is a standalone harness that drives
+// dng_pipeline — that is R2 work. This is a standalone harness that drives
 // the AOT kernels directly. Do not read its output as shipped-pipeline output.
 //
 // Usage:
@@ -59,7 +59,7 @@
 #include <dng_pixel_buffer.h>
 #include <dng_render.h>
 
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 #include "dng_render_stage4.h"
 #include "dng_render_stage4_scaled.h"
 #include "dng_render_stage4_scaled_preavg.h"
@@ -552,8 +552,8 @@ int main(int argc, char **argv) {
     }
 
     std::vector<uint16_t> stage3Workspace;
-    if (!dng_pipeline_v2_run_stage3(host, *negative, true, nullptr, &stage3Workspace)) {
-        printf("FAIL: dng_pipeline_v2_run_stage3 failed\n");
+    if (!dng_pipeline_run_stage3(host, *negative, true, nullptr, &stage3Workspace)) {
+        printf("FAIL: dng_pipeline_run_stage3 failed\n");
         return 1;
     }
 

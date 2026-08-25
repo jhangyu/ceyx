@@ -10,7 +10,7 @@
 #   Lossless / Halide:   Halide bilinear/fused Stage3 + Halide Metal render
 #   Lossless / Halide Metal (standalone fallback):
 #                        同一 fixture + cmd，env 加 DNG_FUSED_DEMOSAIC_WARP=0，
-#                        強制 dng_pipeline_v2.cpp 走 !fused 分支（standalone
+#                        強制 dng_pipeline.cpp 走 !fused 分支（standalone
 #                        demosaic_bilinear_halide_aot + rectilinear_warp 兩顆
 #                        AOT kernel）。D-A (2026-07-05) 新增，補上此分支從未
 #                        被 matrix 覆蓋到的缺口；PSNR 門檻沿用 "Lossless /
@@ -1355,7 +1355,7 @@ def _build_markdown(
              "validation extraction is not separately timed by `test_decode` and is shown as `N/A`.")
     if ffi_results:
         L.append(">")
-        L.append("> **FFI timing note**: FFI timings are collected from `dng_pipeline_v2_decode_to_rgb()` "
+        L.append("> **FFI timing note**: FFI timings are collected from `dng_pipeline_decode_to_rgb()` "
                  "with a separate harness. Output-buffer ownership costs are now amortised by the "
                  "RGB output pool; FFI columns therefore reflect end-to-end decode + process + wall time.")
     L.append("")
@@ -2329,7 +2329,7 @@ def _build_cases(
     halide_env_lossless = {**extra_env, **timing_env}
     halide_env_lossy = {**extra_env, **timing_env}
     # D-A (2026-07-05): standalone-kernel fallback coverage. DNG_FUSED_DEMOSAIC_WARP=0
-    # forces dng_pipeline_v2.cpp's Stage3 host path to skip the fused
+    # forces dng_pipeline.cpp's Stage3 host path to skip the fused
     # demosaic+WarpRectilinear dispatch and fall through to the two standalone
     # AOT kernels (demosaic_bilinear_halide_aot + rectilinear_warp via
     # applyOpcodeList3) -- a real production branch taken for any DNG shape

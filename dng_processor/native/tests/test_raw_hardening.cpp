@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
 
 namespace {

@@ -46,7 +46,7 @@
 // POSIX setenv/unsetenv for env override within the same process
 #include <unistd.h>
 
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 
 using namespace std;
 
@@ -74,7 +74,7 @@ struct DecodeOutput {
 
 static DecodeOutput runDecode(const char* path) {
     DngPipelineV2Result result;
-    bool success = dng_pipeline_v2_decode_to_rgb(path, result);
+    bool success = dng_pipeline_decode_to_rgb(path, result);
     // W7 (M-11): fuse_rgba_output is now true on all platforms, so the pipeline
     // sets rgba_ptr (not rgb_ptr). Accept either and extract RGB for comparison.
     const uint8_t* src = result.rgb_ptr;
