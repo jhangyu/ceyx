@@ -273,17 +273,28 @@ void checkBlackFolding() {
     report("oversized-lcm-rejected", "cblack", rc == kRawErrLayoutUnsupported,
            detail);
 
-    // 7. ODD MARGINS. LibRaw indexes the spatial tile in VISIBLE coordinates;
-    //    the contract tile is PLANE-relative, so an odd margin rotates it. No
-    //    corpus file can reach this (all present samples crop at 0,0).
+    // 7. MARGINS. LibRaw indexes the spatial tile in VISIBLE coordinates; the
+    //    contract tile is PLANE-relative, so a margin rotates it. No corpus file
+    //    can reach any of this (all present samples crop at 0,0).
     checkOneBlackCase("odd-margin-spatial-2x2", 100, kZeroChan, kRggb, 2, 2,
                       kSp2x2, 2, 2, /*left*/ 1, /*top*/ 1, 2, 2);
     checkOneBlackCase("odd-margin-spatial-3x3", 0, kZeroChan, kRggb, 2, 2, kSp3x3,
-                      3, 3, /*left*/ 5, /*top*/ 2, 3, 3);
-    // Even margins must remain a no-op: this is the case the whole present
-    // corpus sits on, so if it ever shifts, the recorded hashes move.
-    checkOneBlackCase("even-margin-is-noop", 100, kChan, kRggb, 2, 2, kSp2x2, 2, 2,
-                      /*left*/ 4, /*top*/ 6, 2, 2);
+                      3, 3, /*left*/ 5, /*top*/ 0, 3, 3);
+
+    // 8. The distinction that a reader will otherwise get wrong: the CFA shift is
+    //    PARITY-only, but the black spatial shift is MODULO THE TILE DIMS. So an
+    //    EVEN margin is NOT automatically a no-op for black -- top=2 against a 3x3
+    //    tile gives 2 % 3 == 2 and still rotates. This case exists to make that
+    //    discoverable by name rather than incidental to another fixture.
+    checkOneBlackCase("even-top-margin-still-shifts-3x3", 0, kZeroChan, kRggb, 2, 2,
+                      kSp3x3, 3, 3, /*left*/ 0, /*top*/ 2, 3, 3);
+
+    // 9. ...whereas for a 2x2 tile an even margin IS a no-op. This is the case
+    //    the whole present corpus sits on, so if it ever shifts, recorded hashes
+    //    move. Contrast with case 8 deliberately: same "even" margin, opposite
+    //    outcome, because the period differs.
+    checkOneBlackCase("even-margin-is-noop-2x2", 100, kChan, kRggb, 2, 2, kSp2x2,
+                      2, 2, /*left*/ 4, /*top*/ 6, 2, 2);
 }
 
 // The CFA-origin half of the same ruling.

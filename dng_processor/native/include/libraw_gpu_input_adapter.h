@@ -100,6 +100,15 @@ uint32_t raw_bayer_channel_index_at_plane(uint32_t filters,
 // The per-channel term needs no separate shift: it follows channel_index, which
 // the caller has already placed in the plane origin.
 //
+// THE TWO SHIFTS HAVE DIFFERENT PERIODS - do not carry a parity assumption
+// across from the CFA pattern. raw_bayer_channel_index_at_plane shifts by margin
+// PARITY, because FC is 2-periodic. The spatial black term shifts by margin
+// MODULO THE TILE DIMS (cblack[5] x cblack[4]). So "the margin is even, the
+// shift is a no-op" is TRUE for cfa_pattern and FALSE in general here: top=2
+// against a 3x3 spatial tile gives 2 % 3 == 2 and still rotates. Pinned by the
+// test cases even-top-margin-still-shifts-3x3 and even-margin-is-noop-2x2, which
+// use the same "even" margin and disagree on purpose.
+//
 // The emitted tile is the element-wise sum over lcm(cfa, spatial) dimensions.
 // If that lcm exceeds the contract's 8x8 ceiling the function FAILS with
 // kRawErrLayoutUnsupported rather than truncating to a wrong tile.
