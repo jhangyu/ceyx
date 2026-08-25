@@ -38,8 +38,8 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
@@ -81,7 +81,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
@@ -95,7 +95,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
     # PSNR gate (Stage3->Stage4 device-dirty handoff vs host-copy fallback), mirroring
     # dng_ffi_harness_android above but for tests/test_device_handoff.cpp. Uses the
-    # Android/Vulkan Stage4 AOT variant (dng_render_stage4_android.a), not the Metal
+    # Android/Vulkan Stage4 AOT variant (dng_render_stage4_split.a), not the Metal
     # one linked by the macOS-only test_device_handoff target below.
     add_executable(test_device_handoff_android tests/test_device_handoff.cpp
         src/dng_pipeline.cpp
@@ -117,7 +117,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}

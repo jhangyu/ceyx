@@ -52,7 +52,7 @@ else()
 endif()
 
 # W7 (2026-08-21, Windows port, risk R2): the three-channel-split Stage4 kernel
-# (dng_render_stage4_android) exists to dodge the Halide v21 SPIR-V Tuple R==G
+# (dng_render_stage4_split) exists to dodge the Halide v21 SPIR-V Tuple R==G
 # bug — a *Vulkan* codegen defect, not an Android platform trait. Select it by
 # the AOT target's backend instead of by platform, so Windows-Vulkan inherits
 # the same workaround. Android is unaffected: both its presets resolve
@@ -190,22 +190,22 @@ add_custom_target(dng_render_scaled_preavg_aot_target DEPENDS ${HALIDE_OUTPUT_DI
 # Eliminates Tuple + dim(2) codegen that triggers Halide v21 SPIR-V R==G bug.
 if(DNG_STAGE4_SPLIT_KERNEL)
     add_custom_command(
-        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android.h
-        COMMAND dng_render_generator -g dng_render_stage4_android -f dng_render_stage4_android -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET} diag_stage=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE}
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split.h
+        COMMAND dng_render_generator -g dng_render_stage4_split -f dng_render_stage4_split -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET} diag_stage=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE}
         DEPENDS dng_render_generator
         COMMENT "Generating Halide AOT Stage4 Render (Android 3-channel split)..."
     )
-    add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
+    add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
 
     # P14-W4-4 GO/NO-GO probe: isolated interleaved flat-1D src-read AOT.
     # Separate kernel/signature; does not touch the production Stage4 kernel.
     add_custom_command(
-        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe.h
-        COMMAND dng_render_generator -g dng_render_stage4_android_probe -f dng_render_stage4_android_probe -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe.h
+        COMMAND dng_render_generator -g dng_render_stage4_split_probe -f dng_render_stage4_split_probe -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
         DEPENDS dng_render_generator
         COMMENT "Generating Halide AOT Stage4 Render PROBE (Android interleaved-src go/no-go)..."
     )
-    add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT})
+    add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
 endif()
 
 # Phase 10 Sprint C1: MapPolynomial AOT (Stage 2 OpcodeList2 GPU).
@@ -248,8 +248,8 @@ if(DNG_HOST_GENERATORS_ONLY)
         ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
     )
     if(DNG_STAGE4_SPLIT_KERNEL)
-        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
-        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT})
+        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
     endif()
     add_custom_target(dng_all_aot ALL DEPENDS ${_DNG_ALL_AOT_DEPS})
 endif()

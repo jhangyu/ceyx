@@ -116,7 +116,7 @@ functions:
 #include <vector>
 
 // W7b: which Stage4 AOT kernel variant this host bridge talks to. The 3-channel
-// split kernel (dng_render_stage4_android) exists to dodge the Halide v21
+// split kernel (dng_render_stage4_split) exists to dodge the Halide v21
 // SPIR-V Tuple R==G bug, so every Vulkan target needs it — Android and Windows
 // today. Mirrors CMake's DNG_STAGE4_SPLIT_KERNEL option (CMakeLists.txt:460).
 // Guards that are about the *kernel variant* (buffer shapes, RGBA scratch, D2H,
@@ -134,7 +134,7 @@ functions:
 #endif
 
 #include "HalideBuffer.h"
-#include "ConcurrentDngHost.h"
+#include "concurrent_dng_host.h"
 #include "dng_1d_function.h"
 #include "dng_1d_table.h"
 #include "dng_camera_profile.h"
@@ -148,7 +148,7 @@ functions:
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-#include "dng_render_stage4_android.h"
+#include "dng_render_stage4_split.h"
 #else
 // R2 sized decode: pre-average (Variant A) scaled Stage4 kernel. macOS/Metal
 // only — the split (Android/Vulkan) branch has no scaled AOT and refuses
@@ -1042,7 +1042,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
     // output geometry.
-    const int result = dng_render_stage4_android(
+    const int result = dng_render_stage4_split(
         src_rgb_buf.raw_buffer(),
         src_w,
         src_h,
@@ -1345,7 +1345,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
     // output geometry.
-    const int result = dng_render_stage4_android(
+    const int result = dng_render_stage4_split(
         &src_flat,
         sw,
         sh,
@@ -1828,7 +1828,7 @@ static void prewarm_stage4_impl(int width, int height,
     // first real decode skips the Vulkan pipeline-creation + first large
     // dispatch cold tax (matrix S4 ~440ms vs warm ~192ms). Mirrors the S3
     // prewarm: per-size cache + one identity-params dispatch on zeroed dummy
-    // buffers, result discarded. Drives the same dng_render_stage4_android AOT
+    // buffers, result discarded. Drives the same dng_render_stage4_split AOT
     // entry production uses (host-src vs device-src do not change the compiled
     // kernel / pipeline state).
     if (width <= 0 || height <= 0) {

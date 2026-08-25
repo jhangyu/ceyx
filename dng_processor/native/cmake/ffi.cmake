@@ -69,7 +69,7 @@ endif()
 # W7: link the split Stage4 kernel wherever it is generated (Vulkan targets).
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(dng_decoder_native
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
     target_compile_definitions(dng_decoder_native PRIVATE
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()

@@ -82,7 +82,7 @@ functions:
 #include <dng_pixel_buffer.h>
 #include <dng_render.h>
 
-#include "ConcurrentDngHost.h"
+#include "concurrent_dng_host.h"
 #include "dng_cfa_phase.h"
 #include "dng_error_codes.h"  // W5: unified DngErrorCode enum
 #include "dng_mosaic_halide.h"

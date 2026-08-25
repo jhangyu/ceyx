@@ -25,7 +25,7 @@
 //        These are read lazily at their call sites (cached via static const)
 //        to avoid impacting hot paths; they are catalogued here for
 //        discoverability rather than centrally loaded.
-//        Envs: DNG_STAGE1_TIMING (ConcurrentDngHost.h),
+//        Envs: DNG_STAGE1_TIMING (concurrent_dng_host.h),
 //              DNG_MAP_POLY_TIMING (dng_opcodelist2_halide.cpp),
 //              DNG_STAGE2_OL2_PREWARM (route/diagnostic hybrid; gates the
 //              Stage 2 Metal pre-warm shot — leave ON in production. Read
@@ -99,7 +99,7 @@ struct PipelineConfig {
   // (test_decode.cpp kOptimizedAreaThreads) cannot drift apart.
   // Q3a (Round 2 perf diag): this is a fixed upper bound for the largest
   // supported device tier, not a target — ConcurrentDngHost::
-  // PerformAreaTaskThreads() (ConcurrentDngHost.h) clamps whatever value
+  // PerformAreaTaskThreads() (concurrent_dng_host.h) clamps whatever value
   // resolves here (or via DNG_AREA_THREADS) down to
   // std::thread::hardware_concurrency(), so machines with fewer logical
   // cores never over-provision std::async workers per decode.

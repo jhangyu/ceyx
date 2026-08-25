@@ -54,7 +54,7 @@
 #include <dng_render_halide.h>
 #include <dng_warp_halide.h>
 
-#include "ConcurrentDngHost.h"
+#include "concurrent_dng_host.h"
 #include "dng_halide_device.h"
 #include "dng_opcodelist2_halide.h"
 #include "dng_pipeline_config.h"
