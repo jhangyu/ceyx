@@ -56,6 +56,7 @@ dng_processor/native/third_party/libjpeg-turbo/ChangeLog.md
 # Vendored LibRaw source + CMake wrapper
 dng_processor/native/third_party/libraw/
 dng_processor/native/third_party/libraw-cmake/
+!dng_processor/native/third_party/libraw/PROVENANCE.md
 
 # Session/tool scratch state (never tracked)
 .claude/tmp/
