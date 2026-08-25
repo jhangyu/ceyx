@@ -26,6 +26,7 @@ NATIVE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEST="${NATIVE_DIR}/third_party/libraw"
 RS_DEST="${DEST}/RawSpeed3/rawspeed"
 LIBRAW_CMAKE_DEST="${NATIVE_DIR}/third_party/libraw-cmake"
+PROJECT_PATCH_DIR="${NATIVE_DIR}/patches/libraw"
 
 # Fetches ${url} at ${rev} into ${dir} via a throwaway git checkout, unless
 # ${dir}/.vendor-rev already records ${rev}. Leaves ${dir}/.git in place so
@@ -87,6 +88,24 @@ if [ -d "${PATCH_DIR}" ] && [ -d "${RS_DEST}/.git" ]; then
       echo "[fetch] FAILED to apply $(basename "${p}") at RawSpeed ${RAWSPEED_REV}" >&2
       echo "[fetch] Pin a RawSpeed revision where the patch set applies cleanly," >&2
       echo "[fetch] and record the substitution in third_party/libraw/PROVENANCE.md." >&2
+      exit 1
+    fi
+  done
+fi
+
+# Project-authored LibRaw patches (see patches/libraw/README.md). Rooted at the
+# LibRaw tree, applied after LibRaw's own RawSpeed3 patch set. A patch that
+# neither applies nor is already applied is a hard failure: silently skipping it
+# would produce a tree that PROVENANCE.md misdescribes.
+if [ -d "${PROJECT_PATCH_DIR}" ] && [ -d "${DEST}/.git" ]; then
+  for p in "${PROJECT_PATCH_DIR}"/*.patch; do
+    [ -e "${p}" ] || continue
+    if git -C "${DEST}" apply --check "${p}" 2>/dev/null; then
+      git -C "${DEST}" apply "${p}"; echo "[fetch] applied project $(basename "${p}")"
+    elif git -C "${DEST}" apply --check --reverse "${p}" 2>/dev/null; then
+      echo "[fetch] project $(basename "${p}") already applied"
+    else
+      echo "[fetch] FAILED to apply project patch $(basename "${p}") at LibRaw ${LIBRAW_REV}" >&2
       exit 1
     fi
   done

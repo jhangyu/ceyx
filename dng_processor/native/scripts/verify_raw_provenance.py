@@ -17,6 +17,7 @@ VENDOR = NATIVE / "third_party" / "libraw"
 RAWSPEED = VENDOR / "RawSpeed3" / "rawspeed"
 LIBRAW_CMAKE = NATIVE / "third_party" / "libraw-cmake"
 PROVENANCE = VENDOR / "PROVENANCE.md"
+PROJECT_PATCH_DIR = NATIVE / "patches" / "libraw"
 REQUIRED_LICENSES = ["LibRaw", "RawSpeed", "pugixml", "zlib", "libjpeg"]
 
 failures = []
@@ -69,8 +70,8 @@ def parse_patch_files(patch_text):
         yield current_path, added, removed
 
 
-def check_patch_applied(patch_path, reverse):
-    """Verifies the vendored RawSpeed3 tree reflects this patch's diff.
+def check_patch_applied(patch_path, reverse, root=RAWSPEED):
+    """Verifies the vendored tree reflects this patch's diff.
 
     For a forward-applied patch, the added lines must be present in the
     current source file (and, as a weaker signal, the removed lines absent).
@@ -78,10 +79,14 @@ def check_patch_applied(patch_path, reverse):
     the roles invert: the patch's "added" lines must be ABSENT (never
     applied forward) and its "removed" lines must be PRESENT (the tree is
     in the pre-patch state the reverse-apply restores).
+
+    `root` is the tree the diff's a/ b/ paths are relative to: RawSpeed3's
+    own patches are rooted at RAWSPEED; project-authored LibRaw patches
+    (patches/libraw/) are rooted at VENDOR (the LibRaw tree).
     """
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     for relpath, added, removed in parse_patch_files(patch_text):
-        target = RAWSPEED / relpath
+        target = root / relpath
         if not target.is_file():
             return False, "target file missing: " + relpath
         # Exact-line, not substring, membership: a removed line can be a
@@ -156,6 +161,26 @@ def main():
             print("[Provenance] patch " + patch.name + " tree state (" + state + ") -> PASS")
         else:
             fail("patch " + patch.name + " does not appear applied in the vendored tree: " + detail)
+
+    # Project-authored LibRaw patches (patches/libraw/). Same two checks as the
+    # RawSpeed3 set: the patch text must be the one recorded, AND the vendored
+    # tree must actually reflect it. All of these are forward-applied; there is
+    # no reverse case, because we author them against the pinned tree.
+    project_patches = (sorted(PROJECT_PATCH_DIR.glob("*.patch"))
+                       if PROJECT_PATCH_DIR.is_dir() else [])
+    for patch in project_patches:
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        if digest not in text:
+            fail("project patch " + patch.name + " sha256 " + digest + " not recorded")
+            continue
+        print("[Provenance] project patch " + patch.name + " sha256 -> PASS")
+        ok, detail = check_patch_applied(patch, reverse=False, root=VENDOR)
+        if ok:
+            print("[Provenance] project patch " + patch.name +
+                  " tree state (forward-applied) -> PASS")
+        else:
+            fail("project patch " + patch.name +
+                 " does not appear applied in the vendored tree: " + detail)
 
     for lic in REQUIRED_LICENSES:
         if lic not in text:

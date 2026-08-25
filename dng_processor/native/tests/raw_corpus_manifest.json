@@ -52,10 +52,10 @@
       "extension": "raf",
       "expect_route": "generic",
       "expect_layout": "xtrans6x6",
-      "expect_backend": "libraw_native",
+      "expect_backend": "rawspeed3",
       "expect_error": "kRawSuccess",
       "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
-      "notes": "X-Trans generation 4."
+      "notes": "X-Trans generation 4. P19 T1: flipped from libraw_native to rawspeed3 by project patch 06 (LIBRAW_DECODER_TRYRAWSPEED3 on the Fuji decoders) at RawSpeed3 pin de70ef5f. Measurement: scripts/tmp/p19/t1_eligibility.txt."
     },
     {
       "id": "fuji_xt5_xtrans",
@@ -69,7 +69,7 @@
       "expect_backend": "libraw_native",
       "expect_error": "kRawSuccess",
       "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
-      "notes": "Different X-Trans generation from fuji_xt3_xtrans."
+      "notes": "Different X-Trans generation from fuji_xt3_xtrans. P19 T1: patch 06 (LIBRAW_DECODER_TRYRAWSPEED3) did NOT flip this sample at RawSpeed3 pin de70ef5f (2021-09-10) -- backend measured libraw_native both before and after (scripts/tmp/p19/t1_eligibility.txt), because that pin predates the X-T5 body (released 2022) and its cameras.xml has no matching camera entry. Expected to flip at the Task 3 re-pin to c835b05a."
     },
     {
       "id": "natural_libraw_fallback",

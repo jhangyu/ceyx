@@ -1,0 +1,20 @@
+--- a/src/utils/decoder_info.cpp
++++ b/src/utils/decoder_info.cpp
+@@ -63,10 +63,17 @@
+   else if (load_raw == &LibRaw::fuji_compressed_load_raw)
+   {
+     d_info->decoder_name = "fuji_compressed_load_raw()";
++    /* Phase 19 (project patch 06): offer compressed X-Trans to RawSpeed3 first.
++       LibRaw's unpack() already falls back to this native decoder when
++       RawSpeed3 reports not-supported or fails (unpack.cpp:107-135), so the
++       flag can only add a faster path, never remove a working one. */
++    d_info->decoder_flags = LIBRAW_DECODER_TRYRAWSPEED3;
+   }
+   else if (load_raw == &LibRaw::fuji_14bit_load_raw)
+   {
+     d_info->decoder_name = "fuji_14bit_load_raw()";
++    /* Phase 19 (project patch 06): same rationale as the branch above. */
++    d_info->decoder_flags = LIBRAW_DECODER_TRYRAWSPEED3;
+   }
+   else if (load_raw == &LibRaw::canon_load_raw)
+   {

@@ -87,6 +87,36 @@ Hashes below are for the RawSpeed3 patch set applied against RawSpeed commit
 | 04.clang-cl-compatibility.patch | 44646383fc16c83b7c068452968b2e73c391201a0a01053a2b924cc4250ba7f1 |
 | 05.no-phase-one-correction.patch | 048db1b2ed7735bfbb136a4f42ab726566ef0f31c5706899d72535cb7fe41313 |
 
+## Project-authored LibRaw patches
+
+Rooted at this LibRaw tree, applied by `scripts/fetch_libraw_dist.sh` after
+LibRaw's own RawSpeed3 patch set. Rationale and target files:
+`dng_processor/native/patches/libraw/README.md`.
+
+Phase 19 W1 motivation: LibRaw gates its RawSpeed3 branch on
+`LIBRAW_DECODER_TRYRAWSPEED3` (`src/decoders/unpack.cpp:124`) and the two Fuji
+branches (`src/utils/decoder_info.cpp:63-69`) set no flags, so no RAF was ever
+offered to RawSpeed3. Patch 06 sets the flag on those two decoders only; every
+other decoder keeps LibRaw's upstream flag choices.
+
+Measured gate inputs on the corpus RAF files (before/after patch 06, recorded
+in `dng_processor/native/scripts/tmp/p19/t1_eligibility.txt`):
+- fuji_xt3.raf: `fuji_width=0 filters=9 decoder=fuji_compressed_load_raw()` —
+  before: `backend=libraw_native`; after: see POST-PATCH section of the
+  eligibility file.
+- fuji_xt5.raf: `fuji_width=0 filters=9 decoder=fuji_compressed_load_raw()` —
+  before: `backend=libraw_native`; after: see POST-PATCH section of the
+  eligibility file.
+
+Both samples measured `fuji_width == 0`, so the `(!IO.fuji_width)` clause in
+`src/decoders/unpack.cpp:117` never blocks these files at the current
+RawSpeed3 pin `de70ef5f`; patch 07 (conditional, would relax that clause for
+`filters == 9` X-Trans) was **not created**.
+
+| Patch | SHA-256 |
+|---|---|
+| 06.fuji-tryrawspeed3.patch | 4da0ea93cbbb46aef4d52830612eb67212ee549e9f4aedacc572b99d6afa041f |
+
 ## Local modifications
 
 **RawSpeed3 C-API glue is not present in the LibRaw-cmake overlay** (that

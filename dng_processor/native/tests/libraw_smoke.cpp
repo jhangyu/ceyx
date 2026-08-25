@@ -27,10 +27,20 @@ int main(int argc, char** argv) {
     const bool rawspeed_used =
         (processor.imgdata.process_warnings & LIBRAW_WARN_RAWSPEED3_PROCESSED) != 0;
 
-    std::printf("[LibRawSmoke] unpack=ok backend=%s raw=%ux%u pitch=%u\n",
+    libraw_decoder_info_t dinfo;
+    const char* decoder_name = "(unknown)";
+    if (processor.get_decoder_info(&dinfo) == LIBRAW_SUCCESS && dinfo.decoder_name) {
+        decoder_name = dinfo.decoder_name;
+    }
+
+    std::printf("[LibRawSmoke] unpack=%s backend=%s raw=%dx%d pitch=%d "
+                "fuji_width=%d filters=%u decoder=%s\n",
+                "ok",
                 rawspeed_used ? "rawspeed3" : "libraw_native",
-                static_cast<unsigned>(processor.imgdata.sizes.raw_width),
-                static_cast<unsigned>(processor.imgdata.sizes.raw_height),
-                static_cast<unsigned>(processor.imgdata.sizes.raw_pitch));
+                processor.imgdata.sizes.raw_width, processor.imgdata.sizes.raw_height,
+                processor.imgdata.sizes.raw_pitch,
+                processor.imgdata.rawdata.ioparams.fuji_width,
+                processor.imgdata.idata.filters,
+                decoder_name);
     return 0;
 }
