@@ -553,6 +553,23 @@ int main(int argc, char** argv) {
                        input.layout.cfa_pattern_count == 36 &&
                        greens == 20 && reds == 8 && blues == 8,
                    detail);
+        } else if (s.expect_layout == "linear_rgb") {
+            // P19 T8 erratum: this manifest loop predates the linear-RGB
+            // route (Phase 17 assumed every non-CFA layout must fail), so the
+            // generic else below asserts rc != kRawSuccess -- wrong for the
+            // new production layout. Same gap class already fixed in
+            // test_raw_end_to_end.cpp's manifest loop; the plan's Task 8 file
+            // list omitted this file.
+            std::snprintf(detail, sizeof(detail),
+                          "class=%s comps=%u planes=%u rc=%s",
+                          raw_layout_class_name(cls),
+                          input.layout.components_per_pixel,
+                          input.layout.plane_count, raw_error_name(rc));
+            report("", s.id.c_str(),
+                   rc == kRawSuccess && cls == kRawLayoutClassLinearRgb &&
+                       input.layout.components_per_pixel == 3 &&
+                       input.layout.plane_count == 1,
+                   detail);
         } else {
             std::snprintf(detail, sizeof(detail), "class=%s rc=%s want=%s",
                           raw_layout_class_name(cls), raw_error_name(rc),
