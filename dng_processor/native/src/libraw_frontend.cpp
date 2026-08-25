@@ -64,7 +64,13 @@ struct LibRawFrontendContext::Impl {
     LibRawRawView view;
     RawDecodeDiagnostics diag{};
     RawForcedBackend forced = RawForcedBackend::kAuto;
+    int (*cancel_poll)(void*) = nullptr;
+    void* cancel_user = nullptr;
     bool open = false;
+
+    bool cancelled() const {
+        return cancel_poll && cancel_poll(cancel_user) != 0;
+    }
 };
 
 LibRawFrontendContext::LibRawFrontendContext() : impl_(new Impl()) {}
@@ -79,6 +85,11 @@ LibRawFrontendContext::~LibRawFrontendContext() {
 
 void LibRawFrontendContext::set_forced_backend(RawForcedBackend backend) {
     impl_->forced = backend;
+}
+
+void LibRawFrontendContext::set_cancel_hook(int (*poll)(void*), void* user_data) {
+    impl_->cancel_poll = poll;
+    impl_->cancel_user = user_data;
 }
 
 bool LibRawFrontendContext::is_open() const { return impl_->open; }
@@ -140,6 +151,14 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
         return kRawErrParseFailed;
     }
 
+    // Cancellation poll between open_file and unpack (spec section 10.4). This
+    // is the cheapest place to abort: the header is parsed but the pixel
+    // allocation has not happened yet. There is no lock here by design.
+    if (impl_->cancelled()) {
+        impl_->processor.recycle();
+        return kRawErrKernelFailed;
+    }
+
     // Step 3: ONE unpack() call. LibRaw tries RawSpeed3 when eligible and falls
     // back to the selected native load_raw inside this same call. The project
     // must never split this into tryRawSpeed()/tryLibRaw() (spec section 6.2).
@@ -152,6 +171,13 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
             static_cast<uint32_t>(impl_->processor.imgdata.process_warnings);
         impl_->processor.recycle();
         return kRawErrUnpackFailed;
+    }
+
+    // Second poll, after unpack: the pixels exist but nothing has borrowed them
+    // yet and no GPU command has been issued, so recycling here is safe.
+    if (impl_->cancelled()) {
+        impl_->processor.recycle();
+        return kRawErrKernelFailed;
     }
 
     // Step 4: which decoder actually produced the pixels.

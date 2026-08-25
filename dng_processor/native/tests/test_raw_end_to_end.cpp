@@ -210,15 +210,114 @@ bool writeHashes(const char* path, const std::map<std::string, std::string>& has
     return out.good();
 }
 
+// ---------------------------------------------------------------------------
+// Synthetic X-Trans frame, shared by the routing case, the FujiGreen
+// kernel-contract case (round-6 should-fix S-R6-01) and the pixel-exact case
+// (round-6 nit N2). Every caller drives the SAME 72x48 mosaic through the SAME
+// public entry, so the only variable between runs is the 6x6 colour tile.
+// ---------------------------------------------------------------------------
+constexpr int kSynthW = 72;      // both multiples of the 6x6 tile
+constexpr int kSynthH = 48;
+
+// Canonical Fujifilm arrangement, i.e. what raw_classify_layout accepts as
+// kRawLayoutClassXTrans6x6. Same tile as src/raw_contract_validate.cpp's
+// kCanonicalXTrans (R=0, G=1, B=2).
+const RawColorKey kCanonicalTile[36] = {
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyRed,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyBlue,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyBlue,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyRed,
+    kRawColorKeyBlue,  kRawColorKeyRed,   kRawColorKeyGreen,
+    kRawColorKeyRed,   kRawColorKeyBlue,  kRawColorKeyGreen,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyBlue,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyRed,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyRed,
+    kRawColorKeyGreen, kRawColorKeyGreen, kRawColorKeyBlue,
+    kRawColorKeyRed,   kRawColorKeyBlue,  kRawColorKeyGreen,
+    kRawColorKeyBlue,  kRawColorKeyRed,   kRawColorKeyGreen,
+};
+
+// Deterministic non-uniform mosaic: the same expression the Task 12 case used,
+// so its recorded behaviour is unchanged.
+void fillSyntheticMosaic(uint16_t* storage) {
+    for (int y = 0; y < kSynthH; ++y) {
+        for (int x = 0; x < kSynthW; ++x) {
+            storage[y * kSynthW + x] =
+                static_cast<uint16_t>(600 + ((x * 37 + y * 91) % 9000));
+        }
+    }
+}
+
+// Runs the synthetic frame with the given 36-entry tile. On success `rgba`
+// holds a COPY of the pool buffer (the pool buffer itself is released before
+// returning, so no checkout survives this helper on any path).
+RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
+                                std::vector<uint8_t>& rgba,
+                                uint32_t& out_w, uint32_t& out_h,
+                                RawDecodeDiagnostics& diag) {
+    static uint16_t storage[kSynthW * kSynthH];
+    fillSyntheticMosaic(storage);
+
+    RawPlaneView plane{};
+    plane.data = storage;
+    plane.byte_size = sizeof(storage);
+    plane.width = kSynthW; plane.height = kSynthH;
+    plane.row_stride_bytes = kSynthW * 2; plane.pixel_stride_bytes = 2;
+
+    RawGpuInput in{};
+    in.planes = &plane; in.plane_count = 1;
+    in.layout.sample_model = kRawSampleModelCfa;
+    in.layout.sample_type = kRawSampleTypeU16;
+    in.layout.plane_count = 1;
+    in.layout.components_per_pixel = 1;
+    in.layout.cfa_repeat_width = 6;
+    in.layout.cfa_repeat_height = 6;
+    in.layout.cfa_pattern = tile;
+    in.layout.cfa_pattern_count = 36;
+    in.active_area = RawRect{0, 0, kSynthW, kSynthH};
+    in.default_crop = RawRect{0, 0, kSynthW, kSynthH};
+    in.orientation = kRawOrientationTopLeft;
+    in.black.repeat_width = 1; in.black.repeat_height = 1;
+    in.black.values[0] = 512.0f;
+    for (int i = 0; i < 4; ++i) {
+        in.white_level[i] = 16383.0f;
+        in.as_shot_neutral[i] = 1.0f;
+    }
+    in.camera_to_pcs.valid = 1;
+    in.camera_to_pcs.out_rows = 3; in.camera_to_pcs.in_cols = 3;
+    for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+
+    RawDevelopParams develop{};
+    develop.tone_curve_strength = 1.0f;
+    develop.output_space = kRawOutputColorSpaceSrgb;
+
+    RawPipelineResult out;
+    const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+    rgba.clear();
+    out_w = out.width;
+    out_h = out.height;
+    diag = out.diag;
+    if (out.rgba_ptr) {
+        rgba.assign(out.rgba_ptr, out.rgba_ptr + out.rgba_size);
+        dng_rgba_output_release(out.rgba_ptr);
+    }
+    return rc;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const char* manifest = "dng_processor/native/tests/raw_corpus_manifest.json";
     const char* hashes_path = "dng_processor/native/tests/raw_bayer_output_hashes.json";
     bool record_hashes = false;
+    // Prints the observed RGBA at the N2 coordinates in source form. Recording
+    // is a separate, explicit run: the assertion never self-heals.
+    bool record_pixels = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--record-hashes") == 0) {
             record_hashes = true;
+        } else if (std::strcmp(argv[i], "--record-pixels") == 0) {
+            record_pixels = true;
         } else if (i + 1 < argc && std::strcmp(argv[i], "--manifest") == 0) {
             manifest = argv[++i];
         } else if (i + 1 < argc && std::strcmp(argv[i], "--hashes") == 0) {
@@ -598,6 +697,159 @@ int main(int argc, char** argv) {
                    out.diag.cfa_repeat_height == 6,
                detail);
         if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+    }
+
+    // Round-6 should-fix S-R6-01: the validator blesses a canonical tile whose
+    // green sites are spelled kRawColorKeyFujiGreen (7) - see
+    // tests/test_raw_layout_contract.cpp:258-270 - but the X-Trans kernel only
+    // tests channels {0,1,2}, so before the fix key 7 matched nothing and the
+    // green plane collapsed. The predicate is byte-for-byte equality with the
+    // plain-Green spelling of the SAME arrangement: strictly stronger than
+    // "green is non-zero" and with no threshold to tune. FujiGreen IS green at
+    // 6x6 (the S4 carve-out), so the two descriptors denote the same image and
+    // any difference at all is a defect.
+    {
+        RawColorKey fuji_tile[36];
+        for (int i = 0; i < 36; ++i) {
+            fuji_tile[i] = (kCanonicalTile[i] == kRawColorKeyGreen)
+                               ? kRawColorKeyFujiGreen
+                               : kCanonicalTile[i];
+        }
+
+        std::vector<uint8_t> plain_rgba, fuji_rgba;
+        uint32_t pw = 0, ph = 0, fw = 0, fh = 0;
+        RawDecodeDiagnostics pdiag{}, fdiag{};
+        const RawErrorCode plain_rc =
+            runSyntheticXTrans(kCanonicalTile, plain_rgba, pw, ph, pdiag);
+        const RawErrorCode fuji_rc =
+            runSyntheticXTrans(fuji_tile, fuji_rgba, fw, fh, fdiag);
+
+        size_t diff_bytes = 0;
+        const size_t common = plain_rgba.size() < fuji_rgba.size()
+                                  ? plain_rgba.size() : fuji_rgba.size();
+        for (size_t i = 0; i < common; ++i) {
+            if (plain_rgba[i] != fuji_rgba[i]) ++diff_bytes;
+        }
+        diff_bytes += (plain_rgba.size() > fuji_rgba.size()
+                           ? plain_rgba.size() - fuji_rgba.size()
+                           : fuji_rgba.size() - plain_rgba.size());
+
+        // Reported so a regression says WHY, not just that it differs: the
+        // known failure mode is a green plane of zeros.
+        double green_mean = 0.0;
+        if (!fuji_rgba.empty()) {
+            double sum = 0.0;
+            size_t n = 0;
+            for (size_t i = 1; i < fuji_rgba.size(); i += 4) { sum += fuji_rgba[i]; ++n; }
+            green_mean = n ? sum / static_cast<double>(n) : 0.0;
+        }
+
+        char detail[240];
+        std::snprintf(detail, sizeof(detail),
+                      "plain_rc=%s fuji_rc=%s bytes=%zu/%zu diff_bytes=%zu "
+                      "fuji_green_mean=%.2f",
+                      raw_error_name(plain_rc), raw_error_name(fuji_rc),
+                      plain_rgba.size(), fuji_rgba.size(), diff_bytes, green_mean);
+        report("xtrans-fujigreen-equivalence", nullptr,
+               plain_rc == kRawSuccess && fuji_rc == kRawSuccess &&
+                   !plain_rgba.empty() && plain_rgba.size() == fuji_rgba.size() &&
+                   diff_bytes == 0,
+               detail);
+    }
+
+    // The other half of S-R6-01: a colour key the kernel has no channel for
+    // must be REJECTED, never silently dropped. kRawColorKeyWhite (6) is an
+    // RGBW key, meaningless in a 6x6 X-Trans tile. This is a regression guard,
+    // not a red: the validator may already reject it today, and either rejecter
+    // satisfies the contract as long as nothing reaches a kernel.
+    {
+        RawColorKey bad_tile[36];
+        for (int i = 0; i < 36; ++i) bad_tile[i] = kCanonicalTile[i];
+        bad_tile[14] = kRawColorKeyWhite;
+
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        RawDecodeDiagnostics diag{};
+        const RawErrorCode rc = runSyntheticXTrans(bad_tile, rgba, w, h, diag);
+        char detail[200];
+        std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
+                      raw_error_name(rc), rgba.empty() ? "null" : "NON-NULL");
+        report("xtrans-bad-colorkey-rejected", nullptr,
+               rc == kRawErrLayoutUnsupported && rgba.empty(), detail);
+    }
+
+    // Round-6 nit N2: the xtrans-synthetic predicate above (rc, size, alpha,
+    // varies) provably cannot tell a wrong-phase tile from the right one - the
+    // reviewer's probe changed 3806 of 13824 output bytes by shifting the tile
+    // and every assertion still passed (scripts/tmp/verify/r6rev_probe_run.txt).
+    // These eight coordinates are asserted EXACTLY, which is what makes a
+    // phase-permuting but otherwise total kernel defect fail loudly. The
+    // coordinates were fixed before the values were read
+    // (scripts/tmp/verify/r7_t13_prereg.md section 3); the values are golden
+    // constants, and their discriminating power is demonstrated, not assumed,
+    // by scripts/tmp/r7_t13_pixel_probe.cpp re-evaluating this same assertion
+    // against the shifted-tile counterfactual.
+    {
+        struct PixelExpectation { int x, y; uint8_t r, g, b, a; };
+        // Kept byte-identical to scripts/tmp/verify/r7_t13_goldens.txt, which is
+        // what the discrimination probe reads.
+        static const PixelExpectation kExpect[] = {
+            {6,  6,   64,  66,  66, 255},
+            {7,  6,   69,  67,  66, 255},
+            {8,  6,   68,  68,  69, 255},
+            {6,  7,   67,  70,  70, 255},
+            {7,  7,   72,  70,  70, 255},
+            {8,  7,   69,  73,  72, 255},
+            {35, 23, 129, 129, 129, 255},
+            {36, 24, 130, 131, 131, 255},
+        };
+
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        RawDecodeDiagnostics diag{};
+        const RawErrorCode rc = runSyntheticXTrans(kCanonicalTile, rgba, w, h, diag);
+
+        if (record_pixels) {
+            std::printf("[RawE2E] RECORD xtrans-synthetic-pixels rc=%s %ux%u\n",
+                        raw_error_name(rc), w, h);
+            for (const PixelExpectation& e : kExpect) {
+                const size_t at = (static_cast<size_t>(e.y) * w + e.x) * 4;
+                if (at + 3 >= rgba.size()) continue;
+                std::printf("            {%2d, %2d, %3u, %3u, %3u, %3u},\n",
+                            e.x, e.y, rgba[at], rgba[at + 1], rgba[at + 2],
+                            rgba[at + 3]);
+            }
+        }
+
+        int mismatches = 0;
+        char first_bad[120] = "none";
+        if (rc == kRawSuccess && w == kSynthW && h == kSynthH) {
+            for (const PixelExpectation& e : kExpect) {
+                const size_t at = (static_cast<size_t>(e.y) * w + e.x) * 4;
+                if (at + 3 >= rgba.size()) { ++mismatches; continue; }
+                if (rgba[at] != e.r || rgba[at + 1] != e.g ||
+                    rgba[at + 2] != e.b || rgba[at + 3] != e.a) {
+                    if (mismatches == 0) {
+                        std::snprintf(first_bad, sizeof(first_bad),
+                                      "(%d,%d) got=%u,%u,%u,%u want=%u,%u,%u,%u",
+                                      e.x, e.y, rgba[at], rgba[at + 1],
+                                      rgba[at + 2], rgba[at + 3],
+                                      e.r, e.g, e.b, e.a);
+                    }
+                    ++mismatches;
+                }
+            }
+        } else {
+            mismatches = static_cast<int>(sizeof(kExpect) / sizeof(kExpect[0]));
+        }
+
+        char detail[220];
+        std::snprintf(detail, sizeof(detail),
+                      "rc=%s checked=%zu mismatches=%d first=%s",
+                      raw_error_name(rc),
+                      sizeof(kExpect) / sizeof(kExpect[0]), mismatches, first_bad);
+        report("xtrans-synthetic-pixels", nullptr,
+               rc == kRawSuccess && mismatches == 0, detail);
     }
 
     // A corrupted X-Trans pattern must fail explicitly, not render garbage.

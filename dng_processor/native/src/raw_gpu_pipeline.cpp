@@ -1,7 +1,9 @@
 #include "raw_gpu_pipeline.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include "HalideBuffer.h"
 #include "dng_ffi_api.h"
@@ -42,6 +44,32 @@ class RgbaCheckoutGuard {
     uint8_t* ptr_;
     size_t bytes_;
 };
+
+// Trust-boundary extent check (spec section 10.1). Every product is formed in
+// uint64_t, because the whole point is to catch the value that would wrap the
+// narrower type the allocator uses. Returns false when the extent must never
+// reach an allocator.
+bool extentWithinCeiling(uint64_t width, uint64_t height, const char* what) {
+    const uint64_t pixels = width * height;
+    // width and height are 32-bit fields, so their product cannot overflow
+    // uint64_t; the ceiling below is what keeps pixels*4 (the RGBA product) far
+    // inside both uint64_t and size_t.
+    if (pixels > static_cast<uint64_t>(kRawMaxPixelCount)) {
+        std::fprintf(stderr,
+                     "[RawPipeline] declared %s extent %llux%llu = %llu pixels "
+                     "exceeds the %lld ceiling\n",
+                     what, static_cast<unsigned long long>(width),
+                     static_cast<unsigned long long>(height),
+                     static_cast<unsigned long long>(pixels),
+                     static_cast<long long>(kRawMaxPixelCount));
+        return false;
+    }
+    return true;
+}
+
+bool cancelRequested(const RawCancelToken& cancel) {
+    return cancel.callback && cancel.callback(cancel.user_data) != 0;
+}
 
 RawGpuBackend currentGpuBackend() {
 #if defined(__APPLE__)
@@ -179,9 +207,30 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     if (!input.layout.cfa_pattern || input.layout.cfa_pattern_count != 36) {
         return kRawErrLayoutUnsupported;
     }
+    // The kernel's channel test is `own == c` for c in {0,1,2} only, so the
+    // copy must NORMALISE, not transcribe: kRawColorKeyFujiGreen (7) is green
+    // at 6x6 (the S4 carve-out in raw_contract_validate.cpp's
+    // xtransColorIndex), and handing the raw 7 to the kernel matched no channel
+    // at all - every green site was discarded and the green plane collapsed to
+    // zero for a tile the validator explicitly blesses (round-6 review finding
+    // F1 / S-R6-01, measured: fuji_green_mean=0.00). Anything outside {0,1,2}
+    // after that mapping is a key the kernel has no channel for, and is
+    // rejected rather than silently reinterpreted: the kernel contract is total
+    // or it is a guess.
     int32_t cfa[36];
     for (int i = 0; i < 36; ++i) {
-        cfa[i] = static_cast<int32_t>(input.layout.cfa_pattern[i]);
+        const RawColorKey key = input.layout.cfa_pattern[i];
+        const int32_t channel = (key == kRawColorKeyFujiGreen)
+                                    ? static_cast<int32_t>(kRawColorKeyGreen)
+                                    : static_cast<int32_t>(key);
+        if (channel < 0 || channel > 2) {
+            std::fprintf(stderr,
+                         "[RawPipeline] X-Trans tile slot %d carries colour key "
+                         "%d, which no kernel channel matches\n",
+                         i, static_cast<int>(key));
+            return kRawErrLayoutUnsupported;
+        }
+        cfa[i] = channel;
     }
 
     const RawPlaneView& plane = input.planes[0];
@@ -267,6 +316,24 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
                                          const RawDevelopParams& develop,
                                          RawPipelineResult& out) {
+    // Trust-boundary ceiling FIRST, before the validator and before anything
+    // allocates (spec section 10.1, precedence per section 9): a declared
+    // extent this large must never reach an allocator, whatever else is wrong
+    // with the file. The crop is checked too because it drives the RGBA
+    // allocation independently of the source plane.
+    for (size_t i = 0; input.planes && i < input.plane_count; ++i) {
+        if (!extentWithinCeiling(input.planes[i].width, input.planes[i].height,
+                                 "plane")) {
+            out.error = kRawErrSizeOverflow;
+            return out.error;
+        }
+    }
+    if (!extentWithinCeiling(input.default_crop.width, input.default_crop.height,
+                             "crop")) {
+        out.error = kRawErrSizeOverflow;
+        return out.error;
+    }
+
     char reason[256] = {0};
     const RawErrorCode validated = raw_validate_gpu_input(&input, reason, sizeof(reason));
     raw_contract_print("RawGpuPipeline", &input, validated, reason, stdout);
@@ -284,7 +351,16 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
 
     // No CPU render fallback exists (spec section 2.6), so an unavailable GPU
     // is an explicit error rather than a slower path.
-    if (!dng_halide_gpu_available()) {
+    //
+    // Placement note (deviation from the plan's step 4b, lead-approved): the
+    // plan puts this immediately after the pixel ceiling, i.e. BEFORE the
+    // validator. It stays here, after the validator, because moving it would
+    // change error precedence for malformed input - a corrupt file decoded with
+    // the test override set would report kRawErrGpuUnavailable instead of its
+    // real metadata/layout error, and the malformed matrix depends on those
+    // specific codes. The ceiling above is genuinely first, as the plan
+    // requires, because it is the check that must precede all allocation.
+    if (!raw_pipeline_gpu_available()) {
         std::fprintf(stderr, "[RawPipeline] GPU capability gate FAILED: "
                              "backend=%s\n", dng_halide_gpu_backend_name());
         out.diag.gpu_backend = kRawGpuBackendNone;
@@ -319,6 +395,7 @@ namespace {
 RawErrorCode decodeFileImpl(const char* file_path,
                             const RawDevelopParams& develop,
                             RawForcedBackend forced,
+                            const RawCancelToken& cancel,
                             RawPipelineResult& out) {
     out = RawPipelineResult{};
     const double t0 = nowMs();
@@ -364,10 +441,24 @@ RawErrorCode decodeFileImpl(const char* file_path,
         return out.error;
     }
 
+    // Poll 1 of 4 (spec section 10.4): after the probe, before the decoder is
+    // opened. Nothing has been allocated yet, so this is a free abort. The DNG
+    // route above returns before this point on purpose - its cancellation and
+    // teardown behaviour is unchanged by this round.
+    if (cancelRequested(cancel)) {
+        out.error = kRawErrKernelFailed;
+        out.diag.total_ms = nowMs() - t0;
+        return out.error;
+    }
+
     // The context is a local of THIS function on purpose: its scope extends
     // past the GPU wait below, which is the ownership guarantee of spec 5.1.5.
     LibRawFrontendContext ctx;
     ctx.set_forced_backend(forced);
+    // Polls 2 and 3 happen inside open_and_unpack (between open_file and
+    // unpack, and after unpack); a cancellation there surfaces as
+    // kRawErrKernelFailed with the processor already recycled.
+    ctx.set_cancel_hook(cancel.callback, cancel.user_data);
     const RawErrorCode unpack_rc = ctx.open_and_unpack(file_path);
     out.diag = ctx.diagnostics();
     out.diag.gpu_backend = currentGpuBackend();
@@ -397,6 +488,18 @@ RawErrorCode decodeFileImpl(const char* file_path,
         return out.error;
     }
 
+    // Poll 4 of 4: the last point at which cancellation is honoured. Once
+    // raw_pipeline_decode_to_rgba is entered, cancellation is deliberately NOT
+    // observed: the shared Stage4 call blocks until the GPU command completes,
+    // and returning earlier would let ctx destruct - freeing the borrowed
+    // pixels a Metal command is still reading (spec section 5.2.5). Cancelling
+    // mid-dispatch would trade a slow decode for a use-after-free.
+    if (cancelRequested(cancel)) {
+        out.error = kRawErrKernelFailed;
+        out.diag.total_ms = nowMs() - t0;
+        return out.error;
+    }
+
     const RawDecodeDiagnostics unpack_diag = out.diag;
     const RawErrorCode rc = raw_pipeline_decode_to_rgba(input, effective, out);
     out.diag.frontend = unpack_diag.frontend;
@@ -417,12 +520,34 @@ RawErrorCode decodeFileImpl(const char* file_path,
 RawErrorCode raw_pipeline_decode_file(const char* file_path,
                                       const RawDevelopParams& develop,
                                       RawPipelineResult& out) {
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, out);
+    const RawCancelToken none;
+    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none, out);
 }
 
 RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
                                              const RawDevelopParams& develop,
                                              RawForcedBackend forced,
                                              RawPipelineResult& out) {
-    return decodeFileImpl(file_path, develop, forced, out);
+    const RawCancelToken none;
+    return decodeFileImpl(file_path, develop, forced, none, out);
+}
+
+int raw_pipeline_gpu_available() {
+    // Test override first: the GPU-mandatory contract (spec section 2.6) is
+    // unreachable on working hardware otherwise, and an untested error branch
+    // is an untested error branch. Read once per decode, through the same
+    // getenv discipline PipelineConfig already uses, and consulted nowhere
+    // else.
+    const char* forced = std::getenv("DNG_RAW_FORCE_GPU_UNAVAILABLE");
+    if (forced && forced[0] == '1') return 0;
+    // One probe, not a second opinion: this is the same capability gate the DNG
+    // route's requireGpuBackend already calls.
+    return dng_halide_gpu_available() ? 1 : 0;
+}
+
+RawErrorCode raw_pipeline_decode_file_cancellable(const char* file_path,
+                                                  const RawDevelopParams& develop,
+                                                  const RawCancelToken& cancel,
+                                                  RawPipelineResult& out) {
+    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel, out);
 }

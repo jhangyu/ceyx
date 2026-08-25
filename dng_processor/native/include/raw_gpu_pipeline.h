@@ -43,4 +43,37 @@ RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
                                              RawForcedBackend forced,
                                              RawPipelineResult& out);
 
+// Absolute ceiling on width*height, checked BEFORE any allocation
+// (spec section 10.1). 2^30 pixels covers every shipping sensor with headroom.
+#define kRawMaxPixelCount 1073741824
+
+// 1 when a GPU backend is usable, 0 otherwise. Returns 0 unconditionally when
+// the environment variable DNG_RAW_FORCE_GPU_UNAVAILABLE is set to "1", which
+// is the only way to exercise the GPU-mandatory contract (spec section 2.6) on
+// a machine that does have a GPU. There is no CPU render fallback, so an
+// unusable GPU must be a clean, specific failure and never a different code
+// path.
+int raw_pipeline_gpu_available();
+
+// Non-zero return requests cancellation. Polled between open_file and unpack,
+// after unpack, and before GPU dispatch. Deliberately a plain function pointer:
+// no lock on the hot path.
+typedef int (*RawCancelCallback)(void* user_data);
+
+struct RawCancelToken {
+    RawCancelCallback callback = nullptr;
+    void* user_data = nullptr;
+};
+
+// Cancellable form. A cancellation seen at any poll point returns
+// kRawErrKernelFailed with no GPU work started. Cancellation is deliberately
+// NOT honoured once the dispatch is entered: the shared Stage4 call blocks
+// until the GPU command completes, and returning earlier would free borrowed
+// decoder pixels the GPU is still reading (spec section 5.2.5). The last poll
+// therefore sits immediately before the dispatch.
+RawErrorCode raw_pipeline_decode_file_cancellable(const char* file_path,
+                                                  const RawDevelopParams& develop,
+                                                  const RawCancelToken& cancel,
+                                                  RawPipelineResult& out);
+
 #endif  // RAW_GPU_PIPELINE_H_

@@ -74,6 +74,17 @@ class LibRawFrontendContext {
 
     void set_forced_backend(RawForcedBackend backend);
 
+    // Cancellation poll (spec section 10.4). A non-zero return from `poll`
+    // aborts the decode; open_and_unpack then reports kRawErrKernelFailed with
+    // the processor recycled and nothing borrowed.
+    //
+    // Deliberately a plain function pointer rather than the GPU layer's
+    // RawCancelToken: that type lives in raw_gpu_pipeline.h, which already
+    // includes THIS header, so sharing the struct would close an include cycle.
+    // A bare pointer also keeps the promise that the poll adds no lock to the
+    // hot path.
+    void set_cancel_hook(int (*poll)(void* user_data), void* user_data);
+
     // Steps 1-6 of the normative sequence in spec section 6.2.
     RawErrorCode open_and_unpack(const char* file_path);
 
