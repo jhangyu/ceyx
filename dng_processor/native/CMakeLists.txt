@@ -1335,6 +1335,20 @@ if(DNG_ENABLE_GENERIC_RAW)
     endif()
 endif()
 
+# P17 T13: malformed input, resource limits, cancellation, GPU-mandatory.
+# Links the production dylib so the shared RGBA pool under test is the real one.
+if(DNG_ENABLE_GENERIC_RAW)
+    add_executable(test_raw_hardening tests/test_raw_hardening.cpp)
+    target_include_directories(test_raw_hardening
+        PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+    target_link_libraries(test_raw_hardening dng_decoder_native libraw_vendored)
+    if(APPLE)
+        target_link_libraries(test_raw_hardening
+            ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY}
+            ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    endif()
+endif()
+
 # P17 T1: CPU-only LibRaw smoke test. Links neither Halide nor
 # dng_decoder_native (spec: prove the dependency before any GPU work).
 if(DNG_ENABLE_GENERIC_RAW)
