@@ -131,7 +131,7 @@ def main() -> int:
         description="Build and run the Phase 14 W0 Android Vulkan ADB contract gate."
     )
     parser.add_argument("--repo-root", default=str(default_root), help="Repository root")
-    parser.add_argument("--native-dir", default="", help="Native dir; default: <repo>/dng_processor/native")
+    parser.add_argument("--native-dir", default="", help="Native dir; default: <repo>/native")
     parser.add_argument("--android-ndk", default=os.environ.get("ANDROID_NDK_HOME"), help="Android NDK root")
     parser.add_argument("--android-abi", default="arm64-v8a", help="Android ABI")
     parser.add_argument("--android-platform", default="android-24", help="Android platform")
@@ -144,7 +144,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).expanduser().resolve()
-    native_dir = Path(args.native_dir).expanduser().resolve() if args.native_dir else repo_root / "dng_processor" / "native"
+    native_dir = Path(args.native_dir).expanduser().resolve() if args.native_dir else repo_root / "native"
     sample = Path(args.sample)
     if not sample.is_absolute():
         sample = repo_root / sample

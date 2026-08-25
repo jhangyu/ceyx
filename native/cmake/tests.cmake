@@ -259,7 +259,7 @@ if(DNG_ENABLE_GENERIC_RAW)
     if(NOT EXISTS ${LIBRAW_DIR}/libraw/libraw.h)
         message(FATAL_ERROR
             "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_DIR} is missing. Run "
-            "dng_processor/native/scripts/fetch_libraw_dist.sh first, or "
+            "native/scripts/fetch_libraw_dist.sh first, or "
             "configure with -DDNG_ENABLE_GENERIC_RAW=OFF.")
     endif()
     if(NOT EXISTS ${LIBRAW_CMAKE_OVERLAY_DIR}/CMakeLists.txt)
@@ -267,7 +267,7 @@ if(DNG_ENABLE_GENERIC_RAW)
             "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_CMAKE_OVERLAY_DIR} is missing "
             "(LibRaw ships no CMakeLists.txt of its own; this project vendors the "
             "community LibRaw-cmake overlay, see PROVENANCE.md). Run "
-            "dng_processor/native/scripts/fetch_libraw_dist.sh first.")
+            "native/scripts/fetch_libraw_dist.sh first.")
     endif()
 
     # RawSpeed3 build policy (spec section 6.6): no OpenMP, no tools/tests/

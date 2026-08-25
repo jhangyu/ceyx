@@ -75,7 +75,7 @@ fs::path defaultArtifactDir() {
     if (cwd.filename() == "artifacts") {
         return cwd;
     }
-    if (fs::exists(cwd / "dng_processor") && fs::exists(cwd / ".git")) {
+    if (fs::exists(cwd / "native") && fs::exists(cwd / ".git")) {
         return cwd / "artifacts";
     }
     return cwd;

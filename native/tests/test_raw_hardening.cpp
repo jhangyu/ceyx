@@ -122,7 +122,7 @@ int cancelAtLastPoll(void* user) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const char* manifest = "dng_processor/native/tests/raw_corpus_manifest.json";
+    const char* manifest = "native/tests/raw_corpus_manifest.json";
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--manifest") == 0) manifest = argv[i + 1];
     }
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
                                                   : base + kase[1];
             if (path.empty() || !fileExists(path)) {
                 std::printf("[RawHardening] SKIP %s (missing fixture; run "
-                            "python3 dng_processor/native/scripts/tmp/"
+                            "python3 native/scripts/tmp/"
                             "r7_t13_gen_fixtures.py)\n", kase[0]);
                 continue;
             }

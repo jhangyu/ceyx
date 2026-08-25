@@ -137,8 +137,18 @@ def run_with_watchdog(cmd: list[str], cwd: Path, idle_timeout_sec: int, native_d
             return 124
 
 
-def app_dir_from_native_dir(native_dir: Path) -> Path:
+def repo_root_from_native_dir(native_dir: Path) -> Path:
+    # Post-restructure layout: <repo>/native/ and <repo>/app/ are siblings.
     return native_dir.parent
+
+
+def app_dir_from_native_dir(native_dir: Path) -> Path:
+    return repo_root_from_native_dir(native_dir) / "app"
+
+
+def dylib_from_native_dir(native_dir: Path) -> Path:
+    # Derived from native_dir directly, NOT via app_dir.
+    return native_dir / "build" / "libdng_decoder_native.dylib"
 
 
 def configuration_for_mode(mode: str) -> str:
@@ -149,8 +159,8 @@ def configuration_for_mode(mode: str) -> str:
     }[mode]
 
 
-def embed_macos_dylib(app_dir: Path, app_bundle: Optional[Path] = None) -> int:
-    native_dylib = app_dir / "native" / "build" / "libdng_decoder_native.dylib"
+def embed_macos_dylib(native_dir: Path, app_bundle: Optional[Path] = None) -> int:
+    native_dylib = dylib_from_native_dir(native_dir)
     if not native_dylib.exists():
         print(f"[ERROR] Missing native dylib: {native_dylib}", file=sys.stderr)
         return 1
@@ -179,10 +189,10 @@ def embed_macos_dylib(app_dir: Path, app_bundle: Optional[Path] = None) -> int:
     return 0
 
 
-def publish_macos_dist(app_dir: Path, mode: str) -> int:
+def publish_macos_dist(app_dir: Path, native_dir: Path, mode: str) -> int:
     config = configuration_for_mode(mode)
-    app_source = app_dir / "build" / "macos" / "Build" / "Products" / config / "dng_processor.app"
-    native_dylib = app_dir / "native" / "build" / "libdng_decoder_native.dylib"
+    app_source = app_dir / "build" / "macos" / "Build" / "Products" / config / "ceyx_example.app"
+    native_dylib = dylib_from_native_dir(native_dir)
     if not app_source.exists():
         print(f"[ERROR] Missing Flutter app bundle: {app_source}", file=sys.stderr)
         return 1
@@ -191,7 +201,7 @@ def publish_macos_dist(app_dir: Path, mode: str) -> int:
         return 1
 
     dist_dir = app_dir / "dist"
-    dist_app = dist_dir / "dng_processor.app"
+    dist_app = dist_dir / "ceyx_example.app"
     dist_dir.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(native_dylib, dist_dir / "libdng_decoder_native.dylib")
@@ -249,7 +259,7 @@ def publish_android_dist(app_dir: Path, mode: str) -> int:
             print(f"        {path}", file=sys.stderr)
         return 1
 
-    dest = app_dir / "dist" / "dng_processor.apk"
+    dest = app_dir / "dist" / "ceyx_example.apk"
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(apk_source, dest)
     print("[OK] Android artifact published")
@@ -411,8 +421,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--native-dir",
-        default="dng_processor/native",
-        help="Path to native project root (default: dng_processor/native)",
+        default="native",
+        help="Path to native project root (default: native)",
     )
     parser.add_argument(
         "--build-dir",
@@ -458,7 +468,7 @@ def main() -> int:
     parser.add_argument(
         "--build-android-app",
         action="store_true",
-        help="After native build, run flutter build apk and publish dist/dng_processor.apk.",
+        help="After native build, run flutter build apk and publish dist/ceyx_example.apk.",
     )
     parser.add_argument(
         "--no-build-android-app",
@@ -548,10 +558,10 @@ def main() -> int:
 
     if args.embed_macos_dylib_only:
         app_bundle = Path(args.app_bundle).resolve() if args.app_bundle else None
-        return embed_macos_dylib(app_dir, app_bundle)
+        return embed_macos_dylib(native_dir, app_bundle)
 
     if args.publish_macos_dist_only:
-        return publish_macos_dist(app_dir, args.macos_mode)
+        return publish_macos_dist(app_dir, native_dir, args.macos_mode)
     if args.publish_android_dist_only:
         return publish_android_dist(app_dir, args.android_mode)
     if args.publish_web_dist_only:
@@ -631,14 +641,14 @@ def main() -> int:
         if code != 0:
             return code
         config = configuration_for_mode(args.macos_mode)
-        app_bundle = app_dir / "build" / "macos" / "Build" / "Products" / config / "dng_processor.app"
-        code = embed_macos_dylib(app_dir, app_bundle)
+        app_bundle = app_dir / "build" / "macos" / "Build" / "Products" / config / "ceyx_example.app"
+        code = embed_macos_dylib(native_dir, app_bundle)
         if code != 0:
             return code
         code = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app_bundle)]).returncode
         if code != 0:
             return code
-        code = publish_macos_dist(app_dir, args.macos_mode)
+        code = publish_macos_dist(app_dir, native_dir, args.macos_mode)
         if code != 0:
             return code
 

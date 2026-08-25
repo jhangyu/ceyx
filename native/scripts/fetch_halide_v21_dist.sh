@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fetch the vendored Halide v21.0.0 binary distribution into
-# dng_processor/native/third_party/halide/.
+# native/third_party/halide/.
 #
 # Provenance (was tracked in third_party/halide/VERSION before the 2026-07-05
 # history rewrite removed the ~540MB binary payload from git):

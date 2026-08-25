@@ -1,6 +1,6 @@
 #!/bin/bash
 # Re-fetch entry for the Halide v21.0.0 Vulkan runtime sources backing
-# dng_processor/native/halide_runtime_fork/ (see that directory's README
+# native/halide_runtime_fork/ (see that directory's README
 # "Maintenance debt" section). Originally written for spike G1
 # (source-level feasibility reading); reusable whenever a Halide version
 # bump requires re-diffing upstream/.

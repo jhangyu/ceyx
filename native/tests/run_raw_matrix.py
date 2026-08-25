@@ -51,8 +51,8 @@ def run(name, cmd):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest",
-                        default="dng_processor/native/tests/raw_corpus_manifest.json")
-    parser.add_argument("--build-dir", default="dng_processor/native/build")
+                        default="native/tests/raw_corpus_manifest.json")
+    parser.add_argument("--build-dir", default="native/build")
     parser.add_argument("--dng-repeat", type=int, default=1,
                         help="repeat count forwarded to run_decode_matrix.py's "
                              "--repeat; the RAW test binaries always run once "
@@ -70,16 +70,16 @@ def main():
     ok = True
 
     ok &= run("provenance",
-              [sys.executable, "dng_processor/native/scripts/verify_raw_provenance.py"])
+              [sys.executable, "native/scripts/verify_raw_provenance.py"])
     cases.append("provenance")
 
     ok &= run("corpus",
-              [sys.executable, "dng_processor/native/tests/verify_raw_corpus.py",
+              [sys.executable, "native/tests/verify_raw_corpus.py",
                "--manifest", args.manifest])
     cases.append("corpus")
 
     ok &= run("architecture-gates",
-              ["bash", "dng_processor/native/scripts/check_raw_architecture_gates.sh"])
+              ["bash", "native/scripts/check_raw_architecture_gates.sh"])
     cases.append("architecture-gates")
 
     build_dir = REPO / args.build_dir
@@ -105,7 +105,7 @@ def main():
         return 2
 
     ok &= run("dng-regression",
-              [sys.executable, "dng_processor/native/tests/run_decode_matrix.py",
+              [sys.executable, "native/tests/run_decode_matrix.py",
                "--repeat", str(args.dng_repeat)])
     cases.append("dng-regression")
 

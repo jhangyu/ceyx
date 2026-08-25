@@ -476,7 +476,7 @@ void checkMatrixDirection(const char* id, const LibRawRawView& v,
 }  // namespace
 
 int main(int argc, char** argv) {
-    const char* manifest = "dng_processor/native/tests/raw_corpus_manifest.json";
+    const char* manifest = "native/tests/raw_corpus_manifest.json";
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--manifest") == 0) manifest = argv[i + 1];
     }

@@ -45,7 +45,7 @@ int main() {
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "dng_android_vulkan_capability_probe";
     appInfo.applicationVersion = 1;
-    appInfo.pEngineName = "dng_processor";
+    appInfo.pEngineName = "ceyx";
     appInfo.engineVersion = 1;
     appInfo.apiVersion = VK_API_VERSION_1_0;
 

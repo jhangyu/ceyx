@@ -67,7 +67,7 @@ fs::path findRepoRoot() {
   while (true) {
     // Marker was rule.md until 2026-08-25, when it moved to docs/SOP/.
     if (fs::exists(current / "CLAUDE.md") &&
-        fs::exists(current / "dng_processor" / "native")) {
+        fs::exists(current / "native")) {
       return current;
     }
     if (current == current.parent_path()) {

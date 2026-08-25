@@ -390,8 +390,8 @@ RawErrorCode runSyntheticLinearRgb(std::vector<uint8_t>& rgba,
 }  // namespace
 
 int main(int argc, char** argv) {
-    const char* manifest = "dng_processor/native/tests/raw_corpus_manifest.json";
-    const char* hashes_path = "dng_processor/native/tests/raw_bayer_output_hashes.json";
+    const char* manifest = "native/tests/raw_corpus_manifest.json";
+    const char* hashes_path = "native/tests/raw_bayer_output_hashes.json";
     bool record_hashes = false;
     // Prints the observed RGBA at the N2 coordinates in source form. Recording
     // is a separate, explicit run: the assertion never self-heals.

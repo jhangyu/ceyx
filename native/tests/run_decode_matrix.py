@@ -46,8 +46,8 @@
 # harness_auto_enable: >
 #   The FFI (dng_ffi_harness) and device-handoff (test_device_handoff) cases
 #   are auto-enabled on macOS whenever their default build outputs exist
-#   (dng_processor/native/build/dng_ffi_harness,
-#   dng_processor/native/build/test_device_handoff) — no flag needed once
+#   (native/build/dng_ffi_harness,
+#   native/build/test_device_handoff) — no flag needed once
 #   both targets are built. Use --ffi-harness/--device-handoff-harness to
 #   point at a non-default binary, or --no-ffi-harness/
 #   --no-device-handoff-harness to opt out even if the default binary exists.
@@ -326,19 +326,19 @@ _HANDOFF_PSNR_RE = re.compile(
 )
 _KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
 _DEFAULT_ANDROID_TEST_DECODE = (
-    "dng_processor/native/build-android/android-arm64/test_decode_android"
+    "native/build-android/android-arm64/test_decode_android"
 )
-_DEFAULT_FFI_HARNESS = "dng_processor/native/build/dng_ffi_harness"
-_DEFAULT_DEVICE_HANDOFF_HARNESS = "dng_processor/native/build/test_device_handoff"
+_DEFAULT_FFI_HARNESS = "native/build/dng_ffi_harness"
+_DEFAULT_DEVICE_HANDOFF_HARNESS = "native/build/test_device_handoff"
 _DEFAULT_ANDROID_FFI_HARNESS = (
-    "dng_processor/native/build-android/android-arm64/dng_ffi_harness_android"
+    "native/build-android/android-arm64/dng_ffi_harness_android"
 )
 _DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS = (
-    "dng_processor/native/build-android/android-arm64/test_device_handoff_android"
+    "native/build-android/android-arm64/test_device_handoff_android"
 )
 # 2026-08-16 CFA phase gates.
-_DEFAULT_CFA_PHASE_BIN = "dng_processor/native/build/test_cfa_phase"
-_DEFAULT_CFA_COLOR_BIN = "dng_processor/native/build/test_cfa_color"
+_DEFAULT_CFA_PHASE_BIN = "native/build/test_cfa_phase"
+_DEFAULT_CFA_COLOR_BIN = "native/build/test_cfa_color"
 # BGGR sample lives outside the repo on purpose (user decision: do not copy
 # camera DNGs into the tree). Absent -> the case prints SKIP and does not fail.
 _DEFAULT_BGGR_SAMPLE = (
@@ -347,7 +347,7 @@ _DEFAULT_BGGR_SAMPLE = (
 _CFA_PHASE_PASS_RE = re.compile(r"^\[CFA PHASE\] ALL PASS\s*$")
 _CFA_COLOR_RE = re.compile(r"^\[CFA COLOR\]\s+(.*)\[(PASS|FAIL)\]\s*$")
 # R2 sized decode gate (AC5 output extent / AC5-D crop-vs-scale / AC6 memory).
-_DEFAULT_SIZED_DECODE_BIN = "dng_processor/native/build/test_sized_decode"
+_DEFAULT_SIZED_DECODE_BIN = "native/build/test_sized_decode"
 _SIZED_OVERALL_RE = re.compile(r"^OVERALL=(PASS|FAIL)\s*$")
 _SIZED_HANDOFF_FAILED_MARKER = "8.2.2 device handoff Stage4 failed"
 
@@ -2381,7 +2381,7 @@ def main() -> int:
     ap.add_argument("--repo-root", default=".", help="Repository root (default: .)")
     ap.add_argument(
         "--test-decode",
-        default="dng_processor/native/build/test_decode",
+        default="native/build/test_decode",
         help="Path to test_decode binary (relative to repo-root)",
     )
     ap.add_argument(
