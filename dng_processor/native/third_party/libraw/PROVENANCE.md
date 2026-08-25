@@ -309,3 +309,21 @@ tools/tests/benchmarks/fuzzers disabled. LibRaw is the only decoder facade
 linked into the app; no standalone RawSpeed library is exposed to any app or
 Halide target (spec section 6.6). LibRaw's exported CMake library target
 name (via the LibRaw-cmake overlay) is `raw` (aliased `libraw::libraw`).
+
+### Foveon X3F support (Phase 19 W2)
+
+`ENABLE_X3FTOOLS=ON` is set by `dng_processor/native/CMakeLists.txt` (plain
+non-cache `set()`, inside the `DNG_ENABLE_GENERIC_RAW` block), which makes the
+LibRaw-cmake overlay define `USE_X3FTOOLS` on the `raw` target.
+
+Verified at LibRaw pin `df226ea4178ccd74245f4f13c23adddfa01411c9` BEFORE
+enabling (inventory: `scripts/tmp/p19/t4_x3f_inventory.txt`): the decoder is
+already part of this LibRaw distribution as `src/x3f/x3f_parse_process.cpp`,
+`src/x3f/x3f_utils_patched.cpp` and `internal/x3f_tools.h`. **No import was
+required and no file was copied into the vendored tree.** The overlay's
+`file(GLOB_RECURSE ... src/*.cpp)` already compiled these sources; before this
+change their bodies were entirely inside `#ifdef USE_X3FTOOLS`.
+
+Upstream origin of that code: Kalpanika x3f-tools, redistributed by LibRaw
+(see `LICENSE.LGPL` / `COPYRIGHT` in this tree). Recorded in
+`docs/THIRD_PARTY_LICENSES.md`.

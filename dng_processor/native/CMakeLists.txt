@@ -1226,6 +1226,19 @@ if(DNG_ENABLE_GENERIC_RAW)
     set(ENABLE_OPENMP OFF)
     set(ENABLE_EXAMPLES OFF)
     set(LIBRAW_INSTALL OFF)
+    # P19 W2: LibRaw ships the Kalpanika x3f-tools Foveon decoder in src/x3f/,
+    # dead unless USE_X3FTOOLS is defined. The overlay declares
+    # option(ENABLE_X3FTOOLS ... OFF) and turns it into -DUSE_X3FTOOLS
+    # (third_party/libraw-cmake/CMakeLists.txt:90,349-351); its GLOB_RECURSE
+    # already sweeps src/x3f/*.cpp into the `raw` target either way, so this is
+    # purely the define.
+    #
+    # Plain non-cache set() on purpose (PROVENANCE.md "R2 F4 fix note"):
+    # a CACHE FORCE here would be replayed on every later configure BEFORE
+    # find_package(Halide), which is the exact ordering that corrupted the
+    # Halide/zlib link. CMP0077 (NEW since cmake_minimum_required 3.14) makes
+    # the subproject's option() honour this directory-scoped value.
+    set(ENABLE_X3FTOOLS ON)
     add_subdirectory(${LIBRAW_CMAKE_OVERLAY_DIR} libraw-cmake-build EXCLUDE_FROM_ALL)
 
     # --- RawSpeed3 C-API glue (local modification, see PROVENANCE.md) ---

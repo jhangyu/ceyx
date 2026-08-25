@@ -75,7 +75,11 @@ RawErrorCode raw_probe_bytes(const uint8_t* header, size_t header_size,
         startsWith(header, header_size, "ftypcr3", 7, 4) ||
         startsWith(header, header_size, "IIU\x00", 4) ||
         startsWith(header, header_size, "IIRO", 4) ||
-        startsWith(header, header_size, "IIRS", 4)) {
+        startsWith(header, header_size, "IIRS", 4) ||
+        // Foveon X3F (P19 W2). Same four-byte key LibRaw dispatches parse_x3f()
+        // on (third_party/libraw/src/metadata/identify.cpp:687); the container
+        // is not TIFF, so without this the probe fails before the frontend.
+        startsWith(header, header_size, "FOVb", 4)) {
         *out_route = kRawRouteGeneric;
         return kRawSuccess;
     }

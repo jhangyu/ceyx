@@ -105,6 +105,22 @@ int main(int argc, char** argv) {
         expectBytes("mrm_magic", mrm, kRawSuccess, kRawRouteGeneric);
     }
     {
+        // Foveon X3F: not a TIFF container, so without this magic the probe
+        // returns kRawErrProbeFailed and the file never reaches the frontend.
+        // The four bytes are LibRaw's own dispatch key (identify.cpp:687) and
+        // match X3F_FOVb == 0x62564f46 (internal/x3f_tools.h:75).
+        std::vector<uint8_t> x3f(kRawProbeHeaderBytes, 0);
+        std::memcpy(x3f.data(), "FOVb", 4);
+        expectBytes("x3f_fovb_magic", x3f, kRawSuccess, kRawRouteGeneric);
+    }
+    {
+        // A near-miss must NOT route generic: the comparison is all four bytes,
+        // not a three-byte prefix.
+        std::vector<uint8_t> almost(kRawProbeHeaderBytes, 0);
+        std::memcpy(almost.data(), "FOVa", 4);
+        expectBytes("x3f_fovb_near_miss", almost, kRawErrProbeFailed, kRawRouteUnknown);
+    }
+    {
         std::vector<uint8_t> junk(kRawProbeHeaderBytes, 0xA5);
         expectBytes("garbage_header", junk, kRawErrProbeFailed, kRawRouteUnknown);
     }
