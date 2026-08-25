@@ -485,6 +485,13 @@ if(NOT DNG_CROSS_BUILD)
     target_include_directories(raw_xtrans_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR})
     target_link_libraries(raw_xtrans_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
+    # P19 T7: normalize-only pre-pass for the generic-RAW linear-RGB (Foveon
+    # X3F) route. No demosaic, no neighbourhood access -- see the class
+    # comment in RawLinearRgbNormalizeGenerator.cpp.
+    add_executable(raw_linear_rgb_normalize_generator ${SRC_DIR}/RawLinearRgbNormalizeGenerator.cpp)
+    target_include_directories(raw_linear_rgb_normalize_generator PRIVATE ${INC_DIR} ${SRC_DIR})
+    target_link_libraries(raw_linear_rgb_normalize_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+
     add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
     target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
     target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
@@ -542,7 +549,8 @@ if(NOT DNG_CROSS_BUILD)
             dng_opcode_polynomial_generator
             dng_opcode_polynomial3_generator
             raw_bayer_demosaic_generator
-            raw_xtrans_demosaic_generator)
+            raw_xtrans_demosaic_generator
+            raw_linear_rgb_normalize_generator)
         if(DNG_DIAGNOSTIC_BUILD)
             list(APPEND DNG_HALIDE_GENERATORS
                 dng_warp_strict_float_generator
@@ -685,6 +693,17 @@ add_custom_command(
 add_custom_target(raw_xtrans_demosaic_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
 
+# P19 T7: generic-RAW linear-RGB normalize-only AOT kernel (no demosaic).
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize.h
+    COMMAND raw_linear_rgb_normalize_generator -g raw_linear_rgb_normalize -f raw_linear_rgb_normalize
+            -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS raw_linear_rgb_normalize_generator
+    COMMENT "Generating Halide AOT generic linear-RGB normalize..."
+)
+add_custom_target(raw_linear_rgb_normalize_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
+
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
     COMMAND dng_demosaic_warp_generator -g dng_demosaic_warp -f dng_demosaic_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime$<$<BOOL:${DNG_DEMOSAIC_WARP_STRICT_FLOAT}>:-strict_float> fast_codegen=$<IF:$<BOOL:${DNG_DEMOSAIC_WARP_FAST_CODEGEN}>,true,false>
@@ -785,6 +804,7 @@ if(DNG_HOST_GENERATORS_ONLY)
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
     )
     if(DNG_STAGE4_SPLIT_KERNEL)
         list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT})
@@ -819,6 +839,9 @@ if(NOT DNG_CROSS_BUILD)
     # P17 T11: the same reference TU also calls the raw_xtrans_demosaic AOT
     # entry.
     add_dependencies(dng_decoder_native raw_xtrans_demosaic_aot_target)
+    # P19 T7: generic-RAW linear-RGB normalize-only AOT kernel (Foveon X3F
+    # pre-pass ahead of the shared Stage4 handoff).
+    add_dependencies(dng_decoder_native raw_linear_rgb_normalize_aot_target)
 endif()
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
@@ -842,7 +865,8 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by
 # dng_render_halide.cpp on the non-split (macOS/Metal) branch only, so it is
 # linked only there. The split branch refuses sized requests instead.
@@ -1670,6 +1694,25 @@ target_link_libraries(test_raw_xtrans_kernel
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
 if(APPLE)
     target_link_libraries(test_raw_xtrans_kernel
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# P19 T7: linear-RGB normalize AOT kernel vs same-formula CPU reference
+# (>=99 dB / max_abs<=1), plus the constant-field oracle and a strided source.
+add_executable(test_raw_linear_rgb_kernel
+    tests/test_raw_linear_rgb_kernel.cpp
+    src/raw_demosaic_reference.cpp)
+target_include_directories(test_raw_linear_rgb_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+add_dependencies(test_raw_linear_rgb_kernel raw_linear_rgb_normalize_aot_target
+                 raw_bayer_demosaic_aot_target raw_xtrans_demosaic_aot_target
+                 halide_runtime_target)
+target_link_libraries(test_raw_linear_rgb_kernel
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
+if(APPLE)
+    target_link_libraries(test_raw_linear_rgb_kernel
         ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 

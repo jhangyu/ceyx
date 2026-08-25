@@ -7,6 +7,7 @@
 
 #include "HalideBuffer.h"
 #include "raw_bayer_demosaic.h"
+#include "raw_linear_rgb_normalize.h"
 #include "raw_xtrans_demosaic.h"
 
 namespace {
@@ -245,6 +246,72 @@ int raw_xtrans_demosaic_aot(const uint16_t* src, uint32_t width, uint32_t height
     dst_buf.set_host_dirty(false);
 
     if (raw_xtrans_demosaic(src_buf, cfa_buf, black_buf, inv_range, dst_buf) != 0) {
+        return 0;
+    }
+    if (dst_buf.copy_to_host() != 0) return 0;
+    return 1;
+}
+
+void raw_linear_rgb_normalize_reference(const uint16_t* src, uint32_t width,
+                                        uint32_t height, int64_t row_stride_bytes,
+                                        const float* component_black,
+                                        float inv_range, uint16_t* dst) {
+    // Literal transcription of the Halide expression in
+    // src/RawLinearRgbNormalizeGenerator.cpp, including both clamps and the
+    // floor(v + 0.5f) rounding. Any divergence here would make the >=99 dB gate
+    // compare two different algorithms instead of measuring codegen.
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(src);
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint16_t* row = reinterpret_cast<const uint16_t*>(
+            base + static_cast<int64_t>(y) * row_stride_bytes);
+        for (uint32_t x = 0; x < width; ++x) {
+            for (uint32_t c = 0; c < 3; ++c) {
+                const float level = component_black[c];
+                const float v =
+                    (static_cast<float>(row[x * 3 + c]) - level) * inv_range;
+                const float value = v < 0.0f ? 0.0f : (v > 65535.0f ? 65535.0f : v);
+                float rounded = std::floor(value + 0.5f);
+                if (rounded < 0.0f) rounded = 0.0f;
+                if (rounded > 65535.0f) rounded = 65535.0f;
+                dst[(static_cast<size_t>(y) * width + x) * 3 + c] =
+                    static_cast<uint16_t>(rounded);
+            }
+        }
+    }
+}
+
+int raw_linear_rgb_normalize_aot(const uint16_t* src, uint32_t width,
+                                 uint32_t height, int64_t row_stride_bytes,
+                                 const float* component_black,
+                                 float inv_range, uint16_t* dst) {
+    if (!src || !dst || !component_black || width == 0 || height == 0) return 0;
+
+    // Strided, borrowed wrap of the source: dim 0 is the interleaved component
+    // step (3 elements per pixel), dim 1 is the row step in ELEMENTS, dim 2 is
+    // the component. Same shape the GPU branch builds in raw_gpu_pipeline.cpp.
+    halide_dimension_t src_dims[3] = {
+        {0, static_cast<int32_t>(width), 3, 0},
+        {0, static_cast<int32_t>(height),
+         static_cast<int32_t>(row_stride_bytes / 2), 0},
+        {0, 3, 1, 0}};
+    Halide::Runtime::Buffer<const uint16_t> src_buf(src, 3, src_dims);
+
+    Halide::Runtime::Buffer<const float> black_buf(component_black, 3);
+
+    halide_dimension_t dst_dims[3] = {
+        {0, static_cast<int32_t>(width), 3, 0},
+        {0, static_cast<int32_t>(height), static_cast<int32_t>(width) * 3, 0},
+        {0, 3, 1, 0}};
+    Halide::Runtime::Buffer<uint16_t> dst_buf(dst, 3, dst_dims);
+
+    // GPU targets: the runtime only uploads an input buffer whose host_dirty
+    // flag is set, so without these the kernel reads freshly device-malloc'd
+    // (uninitialised) memory. Same handshake as raw_bayer_demosaic_aot above.
+    src_buf.set_host_dirty();
+    black_buf.set_host_dirty();
+    dst_buf.set_host_dirty(false);
+
+    if (raw_linear_rgb_normalize(src_buf, black_buf, inv_range, dst_buf) != 0) {
         return 0;
     }
     if (dst_buf.copy_to_host() != 0) return 0;

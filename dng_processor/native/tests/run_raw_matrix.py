@@ -28,6 +28,7 @@ TEST_BINARIES = [
     "test_raw_render_params",
     "test_raw_bayer_kernel",
     "test_raw_xtrans_kernel",
+    "test_raw_linear_rgb_kernel",
     "test_raw_end_to_end",
     "test_raw_hardening",
 ]

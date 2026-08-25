@@ -43,4 +43,20 @@ int raw_xtrans_demosaic_aot(const uint16_t* src, uint32_t width, uint32_t height
                             uint32_t black_repeat_height, float inv_range,
                             uint16_t* dst);
 
+// Linear RGB (Foveon X3F): normalize only, no demosaic. Every output element
+// reads the co-located input element, so there is no boundary rule.
+// `component_black` is 3 floats indexed by component number (NOT by colour
+// key). `src` may be strided; `dst` is tightly packed interleaved RGB16,
+// width*height*3 elements.
+void raw_linear_rgb_normalize_reference(const uint16_t* src, uint32_t width,
+                                        uint32_t height, int64_t row_stride_bytes,
+                                        const float* component_black,
+                                        float inv_range, uint16_t* dst);
+
+// Returns 1 on success, 0 on kernel failure.
+int raw_linear_rgb_normalize_aot(const uint16_t* src, uint32_t width,
+                                 uint32_t height, int64_t row_stride_bytes,
+                                 const float* component_black,
+                                 float inv_range, uint16_t* dst);
+
 #endif  // RAW_DEMOSAIC_REFERENCE_H_
