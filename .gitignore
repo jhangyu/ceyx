@@ -53,6 +53,14 @@ dng_processor/native/third_party/libjpeg-turbo/sharedlib/
 dng_processor/native/third_party/libjpeg-turbo/test/
 dng_processor/native/third_party/libjpeg-turbo/ChangeLog.md
 
+# Vendored LibRaw source + CMake wrapper
+dng_processor/native/third_party/libraw/
+dng_processor/native/third_party/libraw-cmake/
+
+# Session/tool scratch state (never tracked)
+.claude/tmp/
+.pi/
+
 # Non-code project files (docs, logs, images, project management)
 /docs/
 /image_samples/*
