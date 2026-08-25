@@ -6,7 +6,7 @@
 class dng_host;
 class dng_negative;
 
-struct DngPipelineV2Result {
+struct DngPipelineResult {
   // Pool-backed RGB buffer from the checkout-style RgbOutputPool. Populated
   // on the fuse_rgba_output=false path (test harness / rollback); null when
   // rgba_ptr is set. Must be returned via dng_rgb_output_release when freed.
@@ -60,7 +60,7 @@ struct DngPipelineStage3Timing {
 };
 
 bool dng_pipeline_decode_to_rgb(const char *file_path,
-                                   DngPipelineV2Result &result);
+                                   DngPipelineResult &result);
 
 // R2 sized decode. max_dim caps the OUTPUT long edge; the aspect ratio is
 // preserved by the SDK's own MaximumSize logic. max_dim <= 0 means
@@ -72,7 +72,7 @@ bool dng_pipeline_decode_to_rgb(const char *file_path,
 // rather than returning a cropped or failed decode.
 bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
                                          int32_t max_dim,
-                                         DngPipelineV2Result &result);
+                                         DngPipelineResult &result);
 
 bool dng_pipeline_warmup_for_size(int32_t width, int32_t height);
 

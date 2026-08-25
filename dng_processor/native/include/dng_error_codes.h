@@ -1,7 +1,7 @@
 // W5 (M-6): Unified error codes for the DNG pipeline + FFI layer.
 //
 // Single source of truth for all int32_t error_code values written into
-// DngResult / DngPipelineV2Result. Dart mirror: dng_decoder_service.dart
+// DngResult / DngPipelineResult. Dart mirror: dng_decoder_service.dart
 // (DngErrorCode enum). Any addition or value change here MUST be reflected
 // in the Dart mirror.
 //

@@ -44,7 +44,7 @@ DngResult *dng_decode_and_process(const char *file_path);
 /// max_dim <= 0 means full resolution and behaves exactly like
 /// dng_decode_and_process. Sized decoding is only available for Bayer/CFA
 /// input on the GPU path; any other input silently-but-loudly (see the
-/// [PipelineV2] log line) falls back to full resolution, so callers must read
+/// [Pipeline] log line) falls back to full resolution, so callers must read
 /// the returned width/height rather than assuming they got what they asked for.
 ///
 /// Additive export: older binaries lack this symbol, so callers should resolve

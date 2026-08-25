@@ -129,7 +129,7 @@ void resolveCfaPhase(const dng_negative &negative, int &red_x, int &red_y) {
   }
   if (pipelineVerbose()) {
     fprintf(stderr,
-            "[PipelineV2] CFA phase undetermined (%s); falling back to RGGB "
+            "[Pipeline] CFA phase undetermined (%s); falling back to RGGB "
             "(red_x=0, red_y=0)\n",
             reason ? reason : "unknown");
   }
@@ -184,7 +184,7 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
       applied = apply_warp_rectilinear_to_image(host, negative, warpOpcode, image,
                                                 WarpRectilinearMode::HALIDE_GPU);
       if (!applied) {
-        std::cerr << "[PipelineV2] WarpRectilinear HALIDE_GPU failed; "
+        std::cerr << "[Pipeline] WarpRectilinear HALIDE_GPU failed; "
                      "refusing CPU/SDK fallback\n";
         return false;
       }
@@ -492,7 +492,7 @@ bool acquireStage4OutputBuffer(const PipelineConfig &config,
     // share the same W/H (from ParsedDngMetadata), so this is a latent defense
     // against future callers that might re-enter with different dimensions.
     if (size < need) {
-      fprintf(stderr, "[PipelineV2] acquireStage4OutputBuffer: reuse buffer "
+      fprintf(stderr, "[Pipeline] acquireStage4OutputBuffer: reuse buffer "
               "size %zu < needed %zu; refusing reuse\n", size, need);
       return false;
     }
@@ -800,7 +800,7 @@ bool runHalideStage3ForBayer(dng_host &host,
     if (!demosaic_bilinear_halide_aot(stage2Ptr, static_cast<int>(width),
                                       static_cast<int>(height), stage3Ptr,
                                       cfaRedX, cfaRedY)) {
-      std::cerr << "[PipelineV2] Stage3 demosaic Halide AOT failed; "
+      std::cerr << "[Pipeline] Stage3 demosaic Halide AOT failed; "
                    "refusing CPU fallback\n";
       return false;
     }
@@ -998,7 +998,7 @@ bool runHalideStage3And4Fused(dng_host &host,
 
   // Stage4 device handoff failed (e.g. resample needed or params error).
   // Finish Stage3, build a Stage3 image, then run the normal GPU Stage4 path.
-  std::cerr << "[PipelineV2] 8.2.2 device handoff Stage4 failed; "
+  std::cerr << "[Pipeline] 8.2.2 device handoff Stage4 failed; "
                "using finish()+Stage4 host-copy path\n";
   // M-7: full-size alloc for fallback — the Stage3 data needs to be injected
   // into the negative for the normal Stage4 render path.
@@ -1058,7 +1058,7 @@ bool runStage3WithConfig(dng_host &host,
     if (runHalideStage3ForBayer(host, negative, config, timing, stage3_workspace)) {
       return true;
     }
-    std::cerr << "[PipelineV2] Halide Stage3 failed; refusing SDK CPU fallback\n";
+    std::cerr << "[Pipeline] Halide Stage3 failed; refusing SDK CPU fallback\n";
     return false;
   }
   return runSdkStage3(host, negative, timing);
@@ -1093,7 +1093,7 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   if (ok)
     return true;
 
-  std::cerr << "[PipelineV2] Stage4 Halide GPU failed; refusing SDK CPU fallback\n";
+  std::cerr << "[Pipeline] Stage4 Halide GPU failed; refusing SDK CPU fallback\n";
   return false;
 }
 
@@ -1166,7 +1166,7 @@ bool parseDngFile(ConcurrentDngHost &host,
                   AutoPtr<dng_negative> &negative,
                   ParsedDngMetadata &metadata,
                   Clock::time_point &decodeStart,
-                  DngPipelineV2Result &result) {
+                  DngPipelineResult &result) {
   info.Parse(host, stream);
   info.PostParse(host);
   if (!info.IsValidDNG() || info.fMainIndex >= info.fIFDCount) {
@@ -1194,7 +1194,7 @@ bool decodeStages(ConcurrentDngHost &host,
                   const ParsedDngMetadata &metadata,
                   int32_t maxDim,
                   const Clock::time_point &decodeStart,
-                  DngPipelineV2Result &result) {
+                  DngPipelineResult &result) {
   const bool isBayer = metadata.isBayer;
   const uint32_t inputWidth = metadata.inputWidth;
   const uint32_t inputHeight = metadata.inputHeight;
@@ -1207,7 +1207,7 @@ bool decodeStages(ConcurrentDngHost &host,
   // this whole path exists to avoid.
   int32_t effectiveMaxDim = maxDim;
   if (effectiveMaxDim > 0 && !isBayer) {
-    std::cerr << "[PipelineV2] sized decode unsupported for this path; "
+    std::cerr << "[Pipeline] sized decode unsupported for this path; "
                  "falling back to full resolution\n";
     effectiveMaxDim = 0;
   }
@@ -1241,7 +1241,7 @@ bool decodeStages(ConcurrentDngHost &host,
     // path, replaces the old DngOl2DispatchError throw-as-control-flow).
     if (halide_stage2_ol2_dispatch_failed()) {
       result.error_code = kDngErrOl2DispatchFailed;
-      std::cerr << "[PipelineV2] OL2 dispatch failed (status-return)\n";
+      std::cerr << "[Pipeline] OL2 dispatch failed (status-return)\n";
       return false;
     }
   }
@@ -1523,7 +1523,7 @@ bool dng_pipeline_run_stage3(dng_host &host,
 }
 
 bool dng_pipeline_decode_to_rgb(const char *file_path,
-                                   DngPipelineV2Result &result) {
+                                   DngPipelineResult &result) {
   // R2 sized decode: the old entry is a thin forward. max_dim 0 makes every
   // downstream cap resolve to the previous expression, so full-resolution
   // behaviour is unchanged by construction.
@@ -1532,7 +1532,7 @@ bool dng_pipeline_decode_to_rgb(const char *file_path,
 
 bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
                                          int32_t max_dim,
-                                         DngPipelineV2Result &result) {
+                                         DngPipelineResult &result) {
   // L-4: signal pending decode so warmup yields between sub-steps.  Counter
   // is incremented before the mutex lock so warmup (which checks the counter
   // after releasing the mutex between steps) detects this decode immediately.
@@ -1545,7 +1545,7 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
   } pendingGuard;
 
   std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
-  result = DngPipelineV2Result{};
+  result = DngPipelineResult{};
   if (!file_path || !file_path[0]) {
     result.error_code = kDngErrNullPath;
     return false;
@@ -1613,17 +1613,17 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     return ok;
   } catch (const dng_exception &e) {
     result.error_code = e.ErrorCode();
-    std::cerr << "[PipelineV2] DNG exception: " << result.error_code << "\n";
+    std::cerr << "[Pipeline] DNG exception: " << result.error_code << "\n";
     return false;
   // M-6: DngOl2DispatchError catch removed — dispatch failure is now handled
   // via halide_stage2_ol2_dispatch_failed() status-return in decodeStages().
   } catch (const std::exception &e) {
     result.error_code = kDngErrStdException;
-    std::cerr << "[PipelineV2] Exception: " << e.what() << "\n";
+    std::cerr << "[Pipeline] Exception: " << e.what() << "\n";
     return false;
   } catch (...) {
     result.error_code = kDngErrUnknownException;
-    std::cerr << "[PipelineV2] Unknown exception\n";
+    std::cerr << "[Pipeline] Unknown exception\n";
     return false;
   }
 }

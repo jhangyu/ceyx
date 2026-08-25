@@ -94,7 +94,7 @@ static DngResult *decodeAndProcessImpl(const char *file_path, int32_t max_dim) {
   if (!result)
     return nullptr;
 
-  DngPipelineV2Result pipeline;
+  DngPipelineResult pipeline;
   if (!dng_pipeline_decode_to_rgb_sized(file_path, max_dim, pipeline)) {
     result->error_code = pipeline.error_code;
     result->decode_ms = pipeline.decode_ms;
