@@ -189,13 +189,117 @@ int main() {
         expectValidate("monochrome_unsupported", f.input, kRawErrLayoutUnsupported);
     }
     {
-        Fixture f;
-        f.input.layout.sample_model = kRawSampleModelLinearRgb;
-        f.input.layout.components_per_pixel = 3;
-        f.input.layout.cfa_pattern = nullptr;
-        f.input.layout.cfa_pattern_count = 0;
+        // P19: linear RGB (Foveon X3F) is a PRODUCTION layout now. It needs its
+        // own fixture: the shared Fixture's storage is single-component, and a
+        // 3-component interleaved plane needs three times the bytes and a
+        // 6-byte pixel stride.
+        struct LinearRgbFixture {
+            // ponytail: local classes may not have static data members (a
+            // C++ rule independent of the language standard version), so the
+            // plan's `static constexpr` template fails to compile here; an
+            // unscoped enum is the local-class-safe way to get a compile-time
+            // constant usable as an array bound.
+            enum : uint32_t { kW = 64, kH = 48 };
+            uint16_t storage[kW * kH * 3]{};
+            RawPlaneView plane{};
+            RawGpuInput input{};
+
+            LinearRgbFixture() {
+                plane.data = storage;
+                plane.byte_size = sizeof(storage);
+                plane.width = kW;
+                plane.height = kH;
+                plane.row_stride_bytes = static_cast<int64_t>(kW) * 3 * 2;
+                plane.pixel_stride_bytes = 6;
+
+                input.planes = &plane;
+                input.plane_count = 1;
+                input.layout.sample_model = kRawSampleModelLinearRgb;
+                input.layout.sample_type = kRawSampleTypeU16;
+                input.layout.memory_layout = kRawMemoryLayoutInterleaved;
+                input.layout.geometry = kRawGeometryRectilinear;
+                input.layout.plane_count = 1;
+                input.layout.components_per_pixel = 3;
+                input.layout.cfa_repeat_width = 0;
+                input.layout.cfa_repeat_height = 0;
+                input.layout.cfa_pattern = nullptr;
+                input.layout.cfa_pattern_count = 0;
+                input.active_area = RawRect{0, 0, kW, kH};
+                input.default_crop = RawRect{0, 0, kW, kH};
+                input.orientation = kRawOrientationTopLeft;
+                input.black.repeat_width = 1;
+                input.black.repeat_height = 1;
+                input.black.values[0] = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    input.white_level[i] = 16383.0f;
+                    input.as_shot_neutral[i] = 1.0f;
+                }
+                input.component_black[0] = 256.0f;
+                input.component_black[1] = 256.0f;
+                input.component_black[2] = 256.0f;
+                input.component_black[3] = 0.0f;
+                input.camera_to_pcs.valid = 1;
+                input.camera_to_pcs.out_rows = 3;
+                input.camera_to_pcs.in_cols = 3;
+                for (int i = 0; i < 9; ++i)
+                    input.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+                input.decoder_backend = kRawDecoderBackendLibRawNative;
+            }
+        };
+
+        LinearRgbFixture f;
         expectClass("linear_rgb", f.input.layout, kRawLayoutClassLinearRgb);
-        expectValidate("linear_rgb_unsupported", f.input, kRawErrLayoutUnsupported);
+        expectValidate("linear_rgb_accepted", f.input, kRawSuccess);
+    }
+    {
+        // The acceptance is exact: 3 components, U16, interleaved, stride 6.
+        // Anything else is still an explicit refusal, never a silent reshape.
+        struct LinearRgbFixture4 {
+            enum : uint32_t { kW = 64, kH = 48 };
+            uint16_t storage[kW * kH * 4]{};
+            RawPlaneView plane{};
+            RawGpuInput input{};
+
+            LinearRgbFixture4() {
+                plane.data = storage;
+                plane.byte_size = sizeof(storage);
+                plane.width = kW;
+                plane.height = kH;
+                plane.row_stride_bytes = static_cast<int64_t>(kW) * 4 * 2;
+                plane.pixel_stride_bytes = 8;
+
+                input.planes = &plane;
+                input.plane_count = 1;
+                input.layout.sample_model = kRawSampleModelLinearRgb;
+                input.layout.sample_type = kRawSampleTypeU16;
+                input.layout.memory_layout = kRawMemoryLayoutInterleaved;
+                input.layout.geometry = kRawGeometryRectilinear;
+                input.layout.plane_count = 1;
+                input.layout.components_per_pixel = 4;   // the defect under test
+                input.layout.cfa_pattern = nullptr;
+                input.layout.cfa_pattern_count = 0;
+                input.active_area = RawRect{0, 0, kW, kH};
+                input.default_crop = RawRect{0, 0, kW, kH};
+                input.orientation = kRawOrientationTopLeft;
+                input.black.repeat_width = 1;
+                input.black.repeat_height = 1;
+                input.black.values[0] = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    input.white_level[i] = 16383.0f;
+                    input.as_shot_neutral[i] = 1.0f;
+                }
+                input.camera_to_pcs.valid = 1;
+                input.camera_to_pcs.out_rows = 3;
+                input.camera_to_pcs.in_cols = 3;
+                for (int i = 0; i < 9; ++i)
+                    input.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+                input.decoder_backend = kRawDecoderBackendLibRawNative;
+            }
+        };
+
+        LinearRgbFixture4 f;
+        expectValidate("linear_rgb_wrong_components", f.input,
+                       kRawErrLayoutUnsupported);
     }
     {
         Fixture f;

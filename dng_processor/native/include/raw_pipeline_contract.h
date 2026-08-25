@@ -18,6 +18,14 @@
 extern "C" {
 #endif
 
+/* Version of this plain-C surface. Bumped whenever a type, field or acceptance
+ * rule here changes; pinned by tests/test_raw_contract_abi.cpp so a silent
+ * change cannot pass review.
+ *   1 - Phase 17 (implicit): Bayer 2x2 and X-Trans 6x6 only.
+ *   2 - Phase 19: linear RGB accepted as a production layout; RawGpuInput
+ *       gains component_black[4]. */
+#define kRawContractVersion 2
+
 typedef enum RawSampleModel {
     kRawSampleModelCfa = 0,
     kRawSampleModelMonochrome = 1,
@@ -172,6 +180,19 @@ typedef struct RawGpuInput {
     /* Observability only. Nothing downstream may branch on this
      * (spec section 6.5). */
     RawDecoderBackend decoder_backend;
+
+    /* Per-COMPONENT black level, indexed by component number (0,1,2 for R,G,B),
+     * not by colour key. For non-CFA layouts (linear RGB) spatial position and
+     * colour channel do not coincide, so the spatial RawBlackLevelPattern above
+     * cannot express this without misdescribing the geometry.
+     *
+     * All-zero means "absent". Must be all-zero when
+     * layout.sample_model == kRawSampleModelCfa; the validator enforces that so
+     * a reader can never be misled about which black term applies.
+     * Units are raw code values, the same as RawBlackLevelPattern::values.
+     * Appended at the end of the struct on purpose: no existing field's offset
+     * changes (contract version 2). */
+    float component_black[4];
 } RawGpuInput;
 
 typedef enum RawOutputColorSpace {

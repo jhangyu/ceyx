@@ -174,7 +174,12 @@ RawLayoutClass raw_classify_layout(const RawLayoutDescriptor* layout) {
 }
 
 int raw_layout_class_is_production(RawLayoutClass cls) {
-    return (cls == kRawLayoutClassBayer2x2 || cls == kRawLayoutClassXTrans6x6) ? 1 : 0;
+    // Phase 17: Bayer 2x2 and X-Trans 6x6. Phase 19 adds linear RGB (Foveon
+    // X3F), which needs no demosaic and rides the shared Stage4 core after a
+    // normalize-only pass. Every other class stays an explicit refusal.
+    return (cls == kRawLayoutClassBayer2x2 ||
+            cls == kRawLayoutClassXTrans6x6 ||
+            cls == kRawLayoutClassLinearRgb) ? 1 : 0;
 }
 
 const char* raw_layout_class_name(RawLayoutClass cls) {
@@ -300,6 +305,13 @@ RawErrorCode raw_validate_gpu_input(const RawGpuInput* input,
             return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
                             "cfa_pattern_count != repeat_width * repeat_height");
         }
+        for (int c = 0; c < 4; ++c) {
+            if (input->component_black[c] != 0.0f) {
+                return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
+                                "component_black is set on a CFA layout, where "
+                                "the spatial black tile is the only black term");
+            }
+        }
     }
 
     if (input->orientation < kRawOrientationTopLeft ||
@@ -335,6 +347,18 @@ RawErrorCode raw_validate_gpu_input(const RawGpuInput* input,
         }
     }
 
+    for (int c = 0; c < 4; ++c) {
+        const float cb = input->component_black[c];
+        if (!std::isfinite(cb) || cb < 0.0f) {
+            return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
+                            "component_black is negative or not finite");
+        }
+        if (cb >= input->white_level[c]) {
+            return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
+                            "component_black is not below white level");
+        }
+    }
+
     const RawLayoutClass cls = raw_classify_layout(&input->layout);
 
     // Matrix presence is a metadata rule and runs before the "unsupported"
@@ -350,6 +374,31 @@ RawErrorCode raw_validate_gpu_input(const RawGpuInput* input,
                       "layout class '%s' has no production kernel in Phase 17",
                       raw_layout_class_name(cls));
         return failWith(reason_out, reason_cap, kRawErrLayoutUnsupported, msg);
+    }
+
+    // Shape rules are PER CLASS. Widening the mosaic rule into a single
+    // permissive test would have silently let a 3-component buffer reach the
+    // Bayer kernel, which reads one sample per pixel.
+    if (cls == kRawLayoutClassLinearRgb) {
+        if (input->plane_count != 1 || input->layout.plane_count != 1 ||
+            input->layout.components_per_pixel != 3 ||
+            input->layout.sample_type != kRawSampleTypeU16 ||
+            input->layout.memory_layout != kRawMemoryLayoutInterleaved) {
+            return failWith(reason_out, reason_cap, kRawErrLayoutUnsupported,
+                            "linear RGB accepts a single interleaved "
+                            "3-component U16 plane only");
+        }
+        if (input->layout.cfa_pattern != NULL ||
+            input->layout.cfa_pattern_count != 0) {
+            return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
+                            "linear RGB must carry no CFA pattern");
+        }
+        if (input->planes[0].pixel_stride_bytes != 6) {
+            return failWith(reason_out, reason_cap, kRawErrLayoutUnsupported,
+                            "linear RGB pixel_stride_bytes must be 6 "
+                            "(3 interleaved U16 components)");
+        }
+        return kRawSuccess;
     }
 
     if (input->plane_count != 1 || input->layout.plane_count != 1 ||

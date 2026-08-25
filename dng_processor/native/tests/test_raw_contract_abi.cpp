@@ -89,6 +89,17 @@ int main() {
     check("color_transform_capacity",
           sizeof(xform.m) / sizeof(xform.m[0]) == 12);
 
+    // P19: the contract version is bumped whenever the plain-C surface changes.
+    // Phase 17 shipped version 1 implicitly; Phase 19 adds the linear-RGB
+    // acceptance and RawGpuInput::component_black, so the value is 2.
+    check("contract_version", kRawContractVersion == 2);
+
+    RawGpuInput cb;
+    std::memset(&cb, 0, sizeof(cb));
+    check("component_black_capacity",
+          sizeof(cb.component_black) / sizeof(cb.component_black[0]) == 4 &&
+          cb.component_black[0] == 0.0f && cb.component_black[3] == 0.0f);
+
     if (failures != 0) {
         std::printf("[RawContractABI] FAIL (%d cases)\n", failures);
         return 1;
