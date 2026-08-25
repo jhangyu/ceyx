@@ -1,0 +1,827 @@
+# tests.cmake - Android cross-build and host test executables
+#
+# Extracted verbatim from native/CMakeLists.txt (pre-split lines 938-1753)
+# by the 2026-08-25 Ceyx restructure, Round 1 Stream 1B. Included via
+# include() (not add_subdirectory()) so variable scope and target resolution
+# stay identical to the monolith.
+
+# Re-guard (split mechanics): continuation of the `if(NOT DNG_HOST_GENERATORS_ONLY)`
+# block that ffi.cmake had to close at its end; see the note there.
+if(NOT DNG_HOST_GENERATORS_ONLY)
+
+# Phase 14 W0 acceptance smoke: Android cross-build test binary for ADB.
+# Full host test targets stay under the NOT DNG_CROSS_BUILD block below.
+if(ANDROID AND DNG_CROSS_BUILD)
+    add_executable(test_android_vulkan_capability
+        tests/android_vulkan_capability_probe.cpp)
+    target_link_libraries(test_android_vulkan_capability PRIVATE
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+
+    add_executable(test_decode_android tests/test_decode.cpp
+        src/dng_pipeline.cpp
+        src/dng_halide_device.cpp
+        src/dng_opcodelist2_halide.cpp
+        src/dng_mosaic_halide.cpp
+        src/dng_warp_halide.cpp
+        src/dng_render_halide.cpp)
+    target_include_directories(test_decode_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(test_decode_android PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android_probe${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    target_compile_definitions(test_decode_android PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_STAGE4_INTERLEAVED_SRC_PROBE)
+        target_compile_definitions(test_decode_android PRIVATE DNG_STAGE4_INTERLEAVED_SRC_PROBE=1)
+    endif()
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+    add_dependencies(test_decode_android test_android_vulkan_capability)
+
+    # P14-W4-4 measurement: Android cross-build of the production C ABI harness.
+    # Drives the FFI entry dng_decode_and_process -> dng_pipeline_decode_to_rgb
+    # -> decodeStages -> runHalideStage3And4Fused (the device-handoff path that
+    # test_decode_android bypasses). Lets us measure on cc5bf709 whether device
+    # handoff actually triggers and what [Stage4-Perf] FromDevice: reports.
+    # Measurement-only target; no kernel / device-ownership code is touched.
+    add_executable(dng_ffi_harness_android tests/dng_ffi_harness.cpp
+        src/dng_ffi_api.cpp
+        src/dng_pipeline.cpp
+        src/dng_halide_device.cpp
+        src/dng_opcodelist2_halide.cpp
+        src/dng_mosaic_halide.cpp
+        src/dng_warp_halide.cpp
+        src/dng_render_halide.cpp)
+    target_include_directories(dng_ffi_harness_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(dng_ffi_harness_android PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    target_compile_definitions(dng_ffi_harness_android PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(dng_ffi_harness_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+
+    # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
+    # PSNR gate (Stage3->Stage4 device-dirty handoff vs host-copy fallback), mirroring
+    # dng_ffi_harness_android above but for tests/test_device_handoff.cpp. Uses the
+    # Android/Vulkan Stage4 AOT variant (dng_render_stage4_android.a), not the Metal
+    # one linked by the macOS-only test_device_handoff target below.
+    add_executable(test_device_handoff_android tests/test_device_handoff.cpp
+        src/dng_pipeline.cpp
+        src/dng_halide_device.cpp
+        src/dng_opcodelist2_halide.cpp
+        src/dng_mosaic_halide.cpp
+        src/dng_warp_halide.cpp
+        src/dng_render_halide.cpp)
+    target_include_directories(test_device_handoff_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(test_device_handoff_android PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_android${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    target_compile_definitions(test_device_handoff_android PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(test_device_handoff_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+
+    # ------------------------------------------------------------------------
+    # R3-3: Halide Vulkan runtime fork (VkPipelineCache persistence).
+    # See native/halide_runtime_fork/README.md for the weak-override mechanism.
+    # The fork object is post-processed with llvm-objcopy --weaken: the fork TU
+    # and halide_runtime.a both define ~271 internal helper methods STRONG
+    # (LinkedList/BlockStorage/... — non-inline methods from src/runtime
+    # internal headers); weakening the fork object lets the archive win those
+    # (ABI-identical v21 sources) while the weak-vs-weak vulkan entry points
+    # resolve to the fork (objects precede archives on the link line —
+    # validated by scripts/tmp/r3_3_link_probe.sh disassembly evidence).
+    # ------------------------------------------------------------------------
+    if(DNG_VK_PIPELINE_CACHE)
+        set(DNG_VK_FORK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/halide_runtime_fork)
+        add_library(halide_vulkan_fork OBJECT ${DNG_VK_FORK_DIR}/vulkan.cpp)
+        target_include_directories(halide_vulkan_fork PRIVATE
+            ${DNG_VK_FORK_DIR}
+            ${DNG_VK_FORK_DIR}/upstream)
+        # Match the upstream Halide runtime build environment:
+        # runtime_internal.h rejects hosted compiles; COMPILING_HALIDE_RUNTIME
+        # makes HalideRuntime.h use runtime_internal.h typedefs.
+        target_compile_definitions(halide_vulkan_fork PRIVATE COMPILING_HALIDE_RUNTIME)
+        target_compile_options(halide_vulkan_fork PRIVATE
+            -ffreestanding -fno-exceptions -fno-rtti)
+
+        set(DNG_VK_FORK_WEAK_OBJ ${CMAKE_CURRENT_BINARY_DIR}/halide_vulkan_fork_weak.o)
+        add_custom_command(
+            OUTPUT ${DNG_VK_FORK_WEAK_OBJ}
+            COMMAND ${CMAKE_OBJCOPY} --weaken $<TARGET_OBJECTS:halide_vulkan_fork> ${DNG_VK_FORK_WEAK_OBJ}
+            DEPENDS halide_vulkan_fork $<TARGET_OBJECTS:halide_vulkan_fork>
+            COMMENT "R3-3: weakening Halide Vulkan fork object (avoid dup-strong collisions with halide_runtime.a)"
+            VERBATIM)
+        add_custom_target(halide_vulkan_fork_weak DEPENDS ${DNG_VK_FORK_WEAK_OBJ})
+
+        # dng_decoder_native (production .so) + the three Android test
+        # binaries link halide_runtime.a directly, so all four need the fork
+        # object — otherwise the FFI harness would benchmark the stock runtime.
+        foreach(_dng_vkpc_tgt
+                dng_decoder_native
+                dng_ffi_harness_android
+                test_decode_android
+                test_device_handoff_android)
+            if(TARGET ${_dng_vkpc_tgt})
+                target_sources(${_dng_vkpc_tgt} PRIVATE ${DNG_VK_FORK_WEAK_OBJ})
+                add_dependencies(${_dng_vkpc_tgt} halide_vulkan_fork_weak)
+            endif()
+        endforeach()
+    endif()
+endif()
+
+# =============================================================================
+# Test targets — only built for native host builds (not cross-compile, not
+# generator-only). Phase 14: guarded to prevent Android/cross-compile breakage.
+# =============================================================================
+if(NOT DNG_CROSS_BUILD)
+
+# P12-W0B-03: production C ABI verification harness.
+add_executable(dng_ffi_harness tests/dng_ffi_harness.cpp)
+target_include_directories(dng_ffi_harness PRIVATE ${INC_DIR})
+target_link_libraries(dng_ffi_harness PRIVATE dng_decoder_native)
+
+# 2026-08-16 CFA phase: end-to-end pixel color-correctness gate. Decodes a
+# real DNG through the production C ABI and asserts a known channel relation
+# (blue sky must have B >> R), which is the only observable a wrong Bayer
+# phase corrupts. Driven by run_decode_matrix.py against an external sample.
+add_executable(test_cfa_color tests/test_cfa_color.cpp)
+target_include_directories(test_cfa_color PRIVATE ${INC_DIR})
+target_link_libraries(test_cfa_color PRIVATE dng_decoder_native)
+
+# P17 T2: plain-C raw pipeline contract ABI test (raw_pipeline_contract.h).
+# Pure header test, no LibRaw/decoder dependency; not gated by
+# DNG_ENABLE_GENERIC_RAW.
+add_executable(test_raw_contract_abi tests/test_raw_contract_abi.cpp)
+target_include_directories(test_raw_contract_abi PRIVATE ${INC_DIR})
+
+# P17 R2/T5: magic-byte RawFileRouter test. src/raw_file_router.cpp is
+# already swept into dng_decoder_native by the file(GLOB_RECURSE
+# NATIVE_SOURCES ...) above (~line 348); no LibRaw/DNG SDK/Halide
+# dependency, not gated by DNG_ENABLE_GENERIC_RAW.
+add_executable(test_raw_file_router
+    tests/test_raw_file_router.cpp
+    src/raw_file_router.cpp)
+target_include_directories(test_raw_file_router PRIVATE ${INC_DIR})
+
+# P17 R2/T3: layout classification + RawGpuInput validator test.
+# src/raw_contract_validate.cpp is already swept into dng_decoder_native by
+# the GLOB_RECURSE above.
+add_executable(test_raw_layout_contract
+    tests/test_raw_layout_contract.cpp
+    src/raw_contract_validate.cpp)
+target_include_directories(test_raw_layout_contract PRIVATE ${INC_DIR})
+
+# P17 R2/T8: shared Stage4 core + LibRaw RenderParams builder test.
+# src/raw_render_params_builder.cpp is already swept into
+# dng_decoder_native by the GLOB_RECURSE above.
+add_executable(test_raw_render_params tests/test_raw_render_params.cpp)
+target_include_directories(test_raw_render_params PRIVATE ${INC_DIR})
+target_link_libraries(test_raw_render_params PRIVATE dng_decoder_native dng_sdk)
+if(APPLE)
+    target_link_libraries(test_raw_render_params PRIVATE
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# P17 T1: Generic RAW frontend (LibRaw + bundled RawSpeed3) wiring, deferred
+# until after Halide is fully configured (see option() comment above).
+if(DNG_ENABLE_GENERIC_RAW)
+    set(LIBRAW_DIR ${THIRD_PARTY_DIR}/libraw)
+    set(LIBRAW_CMAKE_OVERLAY_DIR ${THIRD_PARTY_DIR}/libraw-cmake)
+    if(NOT EXISTS ${LIBRAW_DIR}/libraw/libraw.h)
+        message(FATAL_ERROR
+            "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_DIR} is missing. Run "
+            "dng_processor/native/scripts/fetch_libraw_dist.sh first, or "
+            "configure with -DDNG_ENABLE_GENERIC_RAW=OFF.")
+    endif()
+    if(NOT EXISTS ${LIBRAW_CMAKE_OVERLAY_DIR}/CMakeLists.txt)
+        message(FATAL_ERROR
+            "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_CMAKE_OVERLAY_DIR} is missing "
+            "(LibRaw ships no CMakeLists.txt of its own; this project vendors the "
+            "community LibRaw-cmake overlay, see PROVENANCE.md). Run "
+            "dng_processor/native/scripts/fetch_libraw_dist.sh first.")
+    endif()
+
+    # RawSpeed3 build policy (spec section 6.6): no OpenMP, no tools/tests/
+    # benchmarks/fuzzers, and no standalone RawSpeed target exposed to the app.
+    #
+    # R2 fix (F4, round-1 review): these used to be `CACHE ... FORCE` entries.
+    # A CMake cache is read at the *start* of every configure, including the
+    # second and later ones over the same build dir — so cached values here
+    # would already be set BEFORE find_package(Halide) on any reconfigure,
+    # reproducing the exact zlib/`_uncompress` link corruption this whole
+    # block is deferred (until after Halide) to avoid in the first place.
+    # Plain (non-cache) `set()` is directory-scoped and inherited by
+    # add_subdirectory() children, and this project's cmake_minimum_required
+    # is 3.14 (>= 3.13), so CMP0077 already defaults to NEW: the RawSpeed3 /
+    # LibRaw-cmake subprojects' own option()/set(... CACHE) calls see these
+    # normal variables and do not override them. No cache residue, so a
+    # reconfigure starts from the same pre-find_package(Halide) state as a
+    # fresh configure. See PROVENANCE.md "Local modifications" for the
+    # policy-floor and pugixml-download notes below (F6).
+    if(POLICY CMP0077)
+        cmake_policy(SET CMP0077 NEW)
+    endif()
+    set(WITH_OPENMP OFF)
+    set(RAWSPEED_ENABLE_WERROR OFF)
+    set(BUILD_TOOLS OFF)
+    set(BUILD_TESTING OFF)
+    set(BUILD_BENCHMARKING OFF)
+    set(BUILD_FUZZERS OFF)
+    set(USE_XMLLINT OFF)
+    set(USE_BUNDLED_PUGIXML ON)
+    # RawSpeed3's own Pugixml.cmake fetches a hash-pinned tarball
+    # (pugixml-1.9.tar.gz, SHA512-verified) when not found locally; see
+    # third_party/libraw/RawSpeed3/rawspeed/cmake/Modules/Pugixml.cmake.in.
+    set(ALLOW_DOWNLOADING_PUGIXML ON)
+    # pugixml-1.9's own CMakeLists.txt predates CMake 3.5's minimum-version
+    # policy floor; this only relaxes the sub-build's own cmake_minimum_required
+    # check, not this project's. CMAKE_POLICY_VERSION_MINIMUM is a plain CMake
+    # variable (not an option()-backed cache entry), so a non-cache set() here
+    # is honored identically to a cached one, without the reconfigure hazard.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+    # Builds the `rawspeed` static target from RawSpeed3's own (real) CMake
+    # build. This library is never linked into any Halide/AOT target and is
+    # only ever consumed via the glue below, never exposed as a standalone
+    # dependency of dng_decoder_native (spec section 6.6.1/6.6.3).
+    add_subdirectory(${LIBRAW_DIR}/RawSpeed3/rawspeed rawspeed3-build EXCLUDE_FROM_ALL)
+
+    # LibRaw at the pinned revision ships no CMakeLists.txt of its own
+    # (see third_party/libraw/README.cmake: unmaintained by the LibRaw team
+    # since 2014). This project vendors the community LibRaw/LibRaw-cmake
+    # overlay as a third pinned dependency (see PROVENANCE.md) and points it
+    # at our vendored LibRaw source tree via LIBRAW_PATH. That overlay only
+    # knows the legacy RawSpeed v1 codec path (ENABLE_RAWSPEED), so
+    # RawSpeed3 support is NOT part of the overlay and is glued on below —
+    # this is a documented local modification, see PROVENANCE.md.
+    # LIBRAW_PATH is a genuine exception to the non-cache conversion above:
+    # unlike every other variable in this block, LibRaw-cmake's own
+    # CMakeLists.txt (third_party/libraw-cmake/CMakeLists.txt:36) sets it
+    # via a raw `set(LIBRAW_PATH ... CACHE STRING doc)` (no FORCE) rather
+    # than via option() — that call is governed by CMP0126 ("set(CACHE)
+    # does not remove a normal variable of the same name"), not CMP0077.
+    # LibRaw-cmake's own cmake_minimum_required() tops out below CMake 3.21
+    # (where CMP0126 was introduced), so CMP0126 defaults OLD in that
+    # subdirectory scope: its own set(CACHE) call unconditionally deletes
+    # any same-named *normal* variable in scope and reinitializes the cache
+    # entry to its own default (its own CMAKE_CURRENT_SOURCE_DIR) — verified
+    # by reproducing a fresh-configure failure at
+    # third_party/libraw-cmake/CMakeLists.txt:47 (`file(READ
+    # ${LIBRAW_PATH}/libraw/libraw_version.h ...)` pointed at
+    # third_party/libraw-cmake/libraw/... instead of third_party/libraw/...)
+    # when this was made a plain set() like the others. Keeping this one
+    # variable CACHE FORCE pre-empts that: our forced cache entry already
+    # exists by the time LibRaw-cmake's non-FORCE `set(... CACHE ...)` runs,
+    # so it is a no-op (existing cache entries are left alone without
+    # FORCE) and our value is used. This is unrelated to the F4 hazard
+    # (LIBRAW_PATH is a path string never consulted by zlib/Halide
+    # discovery), so caching it does not reintroduce the reconfigure bug.
+    set(LIBRAW_PATH ${LIBRAW_DIR} CACHE STRING "" FORCE)
+    set(ENABLE_RAWSPEED OFF)
+    set(ENABLE_OPENMP OFF)
+    set(ENABLE_EXAMPLES OFF)
+    set(LIBRAW_INSTALL OFF)
+    # P19 W2: LibRaw ships the Kalpanika x3f-tools Foveon decoder in src/x3f/,
+    # dead unless USE_X3FTOOLS is defined. The overlay declares
+    # option(ENABLE_X3FTOOLS ... OFF) and turns it into -DUSE_X3FTOOLS
+    # (third_party/libraw-cmake/CMakeLists.txt:90,349-351); its GLOB_RECURSE
+    # already sweeps src/x3f/*.cpp into the `raw` target either way, so this is
+    # purely the define.
+    #
+    # Plain non-cache set() on purpose (PROVENANCE.md "R2 F4 fix note"):
+    # a CACHE FORCE here would be replayed on every later configure BEFORE
+    # find_package(Halide), which is the exact ordering that corrupted the
+    # Halide/zlib link. CMP0077 (NEW since cmake_minimum_required 3.14) makes
+    # the subproject's option() honour this directory-scoped value.
+    set(ENABLE_X3FTOOLS ON)
+    add_subdirectory(${LIBRAW_CMAKE_OVERLAY_DIR} libraw-cmake-build EXCLUDE_FROM_ALL)
+
+    # --- RawSpeed3 C-API glue (local modification, see PROVENANCE.md) ---
+    # Generates rawspeed3_c_api/cameras.cpp from RawSpeed3/rawspeed/data/cameras.xml
+    # at configure time (LibRaw's own documented build step, RawSpeed3/README.md).
+    set(RAWSPEED3_CAPI_DIR ${LIBRAW_DIR}/RawSpeed3/rawspeed3_c_api)
+    set(RAWSPEED3_CAMERAS_XML ${LIBRAW_DIR}/RawSpeed3/rawspeed/data/cameras.xml)
+    set(RAWSPEED3_CAMERAS_CPP ${CMAKE_CURRENT_BINARY_DIR}/rawspeed3-cameras/cameras.cpp)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rawspeed3-cameras)
+    execute_process(
+        COMMAND sh ${RAWSPEED3_CAPI_DIR}/rsxml2c.sh ${RAWSPEED3_CAMERAS_XML}
+        OUTPUT_FILE ${RAWSPEED3_CAMERAS_CPP}
+        RESULT_VARIABLE _rsxml2c_rc)
+    if(NOT _rsxml2c_rc EQUAL 0)
+        message(FATAL_ERROR "rsxml2c.sh failed to generate RawSpeed3 cameras.cpp (rc=${_rsxml2c_rc})")
+    endif()
+
+    # rawspeed3_capi.cpp expects pugixml at a fixed relative path
+    # (RawSpeed3/pugixml/pugixml.hpp, sibling of rawspeed3_c_api/) that only
+    # exists when pugixml is vendored alongside RawSpeed3 by hand. We instead
+    # let RawSpeed3's own CMake fetch a hash-pinned pugixml (see
+    # ALLOW_DOWNLOADING_PUGIXML above), so its source dir is elsewhere.
+    # Rather than patch the vendored .cpp, forward the expected include path
+    # to the real pugixml source dir via a generated shim header (CMake-only
+    # glue, documented in PROVENANCE.md "Local modifications").
+    get_target_property(_rawspeed3_pugixml_src pugixml SOURCE_DIR)
+    if(NOT _rawspeed3_pugixml_src)
+        message(FATAL_ERROR "Could not resolve pugixml SOURCE_DIR from RawSpeed3's pugixml target")
+    endif()
+    set(_rawspeed3_pugixml_shim ${CMAKE_CURRENT_BINARY_DIR}/rawspeed3-pugixml-shim)
+    file(MAKE_DIRECTORY ${_rawspeed3_pugixml_shim}/include_anchor)
+    file(MAKE_DIRECTORY ${_rawspeed3_pugixml_shim}/pugixml)
+    file(WRITE ${_rawspeed3_pugixml_shim}/pugixml/pugixml.hpp
+        "#include \"${_rawspeed3_pugixml_src}/src/pugixml.hpp\"\n")
+
+    # `raw` is exported by the overlay above; extend it in place with the
+    # RawSpeed3 C-API wrapper sources rather than forking the overlay.
+    target_sources(raw PRIVATE
+        ${RAWSPEED3_CAPI_DIR}/rawspeed3_capi.cpp
+        ${RAWSPEED3_CAMERAS_CPP})
+    target_include_directories(raw PRIVATE
+        ${RAWSPEED3_CAPI_DIR}
+        ${_rawspeed3_pugixml_shim}/include_anchor)
+    target_compile_definitions(raw PRIVATE USE_RAWSPEED3 USE_RAWSPEED_BITS)
+    target_link_libraries(raw PRIVATE rawspeed rawspeed_get_number_of_processor_cores)
+
+    # P17 R5 (F1): the vendored LibRaw static lib was re-exported wholesale
+    # (431 symbols) by dng_decoder_native. Hidden visibility keeps LibRaw
+    # internal to the dylib; our own extern "C" ABI is unaffected (it lives in
+    # project TUs with default visibility). Property set here, not in the
+    # vendored overlay (third_party/ is read-only).
+    set_target_properties(raw PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    # RawSpeed3's core-count helper declares its symbol with an explicit
+    # __attribute__((visibility("default"))) (GetNumberOfProcessorCores.cpp),
+    # which -fvisibility=hidden cannot override — unexport it at link time
+    # on the dylib instead (vendored tree is read-only).
+    if(TARGET dng_decoder_native AND APPLE)
+        target_link_options(dng_decoder_native PRIVATE
+            "LINKER:-unexported_symbol,_rawspeed_get_number_of_processor_cores")
+    endif()
+
+    add_library(libraw_vendored INTERFACE)
+    target_include_directories(libraw_vendored INTERFACE ${LIBRAW_DIR})
+    target_link_libraries(libraw_vendored INTERFACE raw)
+    target_compile_definitions(libraw_vendored INTERFACE DNG_ENABLE_GENERIC_RAW=1)
+
+    # P17 T6: the single generic decoder owner. src/libraw_frontend.cpp is
+    # already in NATIVE_SOURCES via GLOB_RECURSE (~line 348, filtered out when
+    # this option is OFF), so dng_decoder_native only needs LibRaw's usage
+    # requirements here. Keyword-less signature deliberately, to match the
+    # existing target_link_libraries(dng_decoder_native dng_sdk) at ~line 368
+    # (CMake forbids mixing plain and PRIVATE/PUBLIC forms on one target).
+    if(TARGET dng_decoder_native)
+        target_link_libraries(dng_decoder_native libraw_vendored)
+    endif()
+
+    add_executable(test_libraw_frontend
+        tests/test_libraw_frontend.cpp
+        src/libraw_frontend.cpp
+        src/raw_contract_validate.cpp)
+    target_include_directories(test_libraw_frontend PRIVATE ${INC_DIR})
+    target_link_libraries(test_libraw_frontend PRIVATE libraw_vendored)
+
+    # P17 T7: the single LibRaw -> RawGpuInput adapter and its test.
+    # (F-R4-05: the round-4 EXISTS guard is gone — the sources are committed,
+    # and a guarded target drops silently with no red signal.)
+    add_executable(test_libraw_adapter
+        tests/test_libraw_adapter.cpp
+        src/libraw_frontend.cpp
+        src/libraw_gpu_input_adapter.cpp
+        src/raw_contract_validate.cpp)
+    target_include_directories(test_libraw_adapter PRIVATE ${INC_DIR})
+    target_link_libraries(test_libraw_adapter PRIVATE libraw_vendored)
+
+    # P17 T10: the generic RAW route end to end. Links the production dylib on
+    # purpose, so the exported C ABI and the SHARED RGBA pool are the ones under
+    # test rather than a second copy (spec 13.1).
+    add_executable(test_raw_end_to_end tests/test_raw_end_to_end.cpp)
+    target_include_directories(test_raw_end_to_end PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+    target_link_libraries(test_raw_end_to_end dng_decoder_native libraw_vendored)
+    if(APPLE)
+        target_link_libraries(test_raw_end_to_end
+            ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    endif()
+endif()
+
+# P17 T13: malformed input, resource limits, cancellation, GPU-mandatory.
+# Links the production dylib so the shared RGBA pool under test is the real one.
+if(DNG_ENABLE_GENERIC_RAW)
+    add_executable(test_raw_hardening tests/test_raw_hardening.cpp)
+    target_include_directories(test_raw_hardening
+        PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+    target_link_libraries(test_raw_hardening dng_decoder_native libraw_vendored)
+    if(APPLE)
+        target_link_libraries(test_raw_hardening
+            ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY}
+            ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    endif()
+endif()
+
+# P17 T1: CPU-only LibRaw smoke test. Links neither Halide nor
+# dng_decoder_native (spec: prove the dependency before any GPU work).
+if(DNG_ENABLE_GENERIC_RAW)
+    add_executable(libraw_smoke tests/libraw_smoke.cpp)
+    target_link_libraries(libraw_smoke PRIVATE libraw_vendored)
+endif()
+
+
+# W5-4 / TD-2: Device handoff path independent test.
+# Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
+# handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.
+add_executable(test_device_handoff tests/test_device_handoff.cpp
+    src/dng_pipeline.cpp
+    src/dng_halide_device.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp
+    src/dng_render_halide.cpp)
+target_include_directories(test_device_handoff PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+endif()
+# R2 sized decode: this target compiles dng_render_halide.cpp directly, so it
+# needs the scaled kernel the sized dispatch calls (macOS/Metal branch only).
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_device_handoff
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    add_dependencies(test_device_handoff dng_render_scaled_preavg_aot_target)
+endif()
+add_dependencies(test_device_handoff halide_runtime_target)
+add_dependencies(test_device_handoff dng_demosaic_aot_target)
+add_dependencies(test_device_handoff dng_demosaic_warp_aot_target)
+add_dependencies(test_device_handoff dng_warp_aot_target)
+add_dependencies(test_device_handoff dng_render_aot_target)
+add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
+add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_device_handoff ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# Sized decode (targetWidth) R1: standalone gate for the box-filter-scaled
+# Stage4 AOT. Self-contained — synthesises a Stage3-shaped source and its
+# render parameters, so it needs no DNG sample and no dng_sdk. It compares
+# dng_render_stage4_scaled(full src) against dng_render_stage4(CPU box
+# downscale of the same src) and gates the PSNR.
+add_executable(test_stage4_scaled tests/test_stage4_scaled.cpp)
+target_include_directories(test_stage4_scaled PRIVATE
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_stage4_scaled
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+add_dependencies(test_stage4_scaled halide_runtime_target)
+add_dependencies(test_stage4_scaled dng_render_aot_target)
+add_dependencies(test_stage4_scaled dng_render_scaled_aot_target)
+add_dependencies(test_stage4_scaled dng_render_scaled_preavg_aot_target)
+if(APPLE)
+    target_link_libraries(test_stage4_scaled ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# Real-photograph AC7 measurement for both sized-kernel variants, plus viewable
+# image output. NOTE: tests/test_stage4_scaled_photo.cpp #includes
+# src/dng_render_halide.cpp directly (to reach the production buildRenderParams
+# without editing a production source), so that file must NOT be listed here as
+# a separate source or every symbol in it would be defined twice.
+add_executable(test_stage4_scaled_photo tests/test_stage4_scaled_photo.cpp
+    src/dng_pipeline.cpp
+    src/dng_halide_device.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp)
+target_include_directories(test_stage4_scaled_photo PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_stage4_scaled_photo
+    dng_sdk
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_stage4_scaled_photo ${JPEG_LIBRARIES})
+endif()
+add_dependencies(test_stage4_scaled_photo halide_runtime_target)
+add_dependencies(test_stage4_scaled_photo dng_demosaic_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_demosaic_warp_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_warp_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_render_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_render_scaled_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_render_scaled_preavg_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_opcode_polynomial_aot_target)
+add_dependencies(test_stage4_scaled_photo dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_stage4_scaled_photo ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# R2 sized decode acceptance gate (AC5 extent / AC5-D crop-vs-scale / AC6 memory).
+# Drives the PRODUCTION sized entry (dng_pipeline_decode_to_rgb_sized) and
+# compares against a same-ordering CPU reference rendered through the production
+# Stage4 AOT. Like test_stage4_scaled_photo it #includes dng_render_halide.cpp to
+# reach buildRenderParams, so that file must NOT be listed as a separate source
+# here or every symbol in it would be defined twice.
+add_executable(test_sized_decode tests/test_sized_decode.cpp
+    src/dng_pipeline.cpp
+    src/dng_halide_device.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp)
+target_include_directories(test_sized_decode PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_sized_decode
+    dng_sdk
+    Halide::Halide
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_sized_decode ${JPEG_LIBRARIES})
+endif()
+add_dependencies(test_sized_decode halide_runtime_target)
+add_dependencies(test_sized_decode dng_demosaic_aot_target)
+add_dependencies(test_sized_decode dng_demosaic_warp_aot_target)
+add_dependencies(test_sized_decode dng_warp_aot_target)
+add_dependencies(test_sized_decode dng_render_aot_target)
+add_dependencies(test_sized_decode dng_render_scaled_preavg_aot_target)
+add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
+add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_sized_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+
+# Color accuracy / visual regression test
+add_executable(test_color_accuracy tests/test_color_accuracy.cpp)
+target_include_directories(test_color_accuracy PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_color_accuracy dng_sdk)
+if(APPLE)
+    target_link_libraries(test_color_accuracy ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+add_executable(test_dng_layout tests/test_dng_layout.cpp)
+target_include_directories(test_dng_layout PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_dng_layout dng_sdk)
+if(APPLE)
+    target_link_libraries(test_dng_layout ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# Tile testing tool
+add_executable(test_dng_tiles tests/test_dng_tiles.cpp)
+target_include_directories(test_dng_tiles PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_dng_tiles dng_sdk)
+if(APPLE)
+    target_link_libraries(test_dng_tiles ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+
+add_executable(test_dng_preview tests/test_dng_preview.cpp)
+target_include_directories(test_dng_preview PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
+target_link_libraries(test_dng_preview dng_sdk)
+if(APPLE)
+    target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+# DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
+add_executable(test_decode tests/test_decode.cpp
+    src/dng_pipeline.cpp
+    src/dng_halide_device.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_warp_halide.cpp
+    src/dng_render_halide.cpp)
+target_include_directories(test_decode PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+endif()
+# R2 sized decode: same as test_device_handoff — compiles the render TU directly.
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_decode
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    add_dependencies(test_decode dng_render_scaled_preavg_aot_target)
+endif()
+add_dependencies(test_decode halide_runtime_target)
+add_dependencies(test_decode dng_demosaic_aot_target)
+add_dependencies(test_decode dng_demosaic_warp_aot_target)
+add_dependencies(test_decode dng_warp_aot_target)
+add_dependencies(test_decode dng_render_aot_target)
+add_dependencies(test_decode dng_opcode_polynomial_aot_target)
+add_dependencies(test_decode dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# Phase 5.3: Halide Demosaic PSNR Test
+# 2026-08-16: dng_opcodelist2_halide.cpp / dng_halide_device.cpp added to the
+# source list. libdng_sdk's dng_opcode_list::Apply references the Stage2
+# OpcodeList2 Halide bridge symbols unconditionally, so this target had been
+# failing to link since that bridge landed (no test_demosaic_halide binary was
+# ever produced). Linking the bridge in restores the target; the polynomial
+# AOT archives below satisfy the bridge's own kernel references.
+add_executable(test_demosaic_halide tests/test_demosaic_halide.cpp
+    src/dng_mosaic_halide.cpp
+    src/dng_opcodelist2_halide.cpp
+    src/dng_halide_device.cpp)
+target_include_directories(test_demosaic_halide PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+# W6 M-4: halide_runtime.a provides Metal/Vulkan runtime symbols for all -no_runtime AOT kernels.
+target_link_libraries(test_demosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+add_dependencies(test_demosaic_halide halide_runtime_target)
+add_dependencies(test_demosaic_halide dng_warp_aot_target)
+add_dependencies(test_demosaic_halide dng_demosaic_aot_target)
+add_dependencies(test_demosaic_halide dng_opcode_polynomial_aot_target)
+add_dependencies(test_demosaic_halide dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_demosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# 2026-08-16 CFA phase: all-four-Bayer-phases unit check on a synthetic
+# mosaic. Covers both the Halide AOT kernel and the CPU reference demosaic
+# plus get_cfa_pattern's phase expansion. No DNG fixture required.
+add_executable(test_cfa_phase tests/test_cfa_phase.cpp
+    src/dng_mosaic_halide.cpp)
+target_include_directories(test_cfa_phase PRIVATE
+    ${INC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+# dng_sdk: the resolver case feeds dng_resolve_cfa_phase a synthetic dng_mosaic_info.
+target_link_libraries(test_cfa_phase dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
+add_dependencies(test_cfa_phase halide_runtime_target)
+add_dependencies(test_cfa_phase dng_demosaic_aot_target)
+if(APPLE)
+    target_link_libraries(test_cfa_phase ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# P17 T9: fused normalize + Bayer demosaic AOT kernel vs same-algorithm CPU
+# reference (>=99 dB / max_abs<=1) plus the constant-field phase oracle.
+add_executable(test_raw_bayer_kernel
+    tests/test_raw_bayer_kernel.cpp
+    src/raw_demosaic_reference.cpp)
+target_include_directories(test_raw_bayer_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+add_dependencies(test_raw_bayer_kernel raw_bayer_demosaic_aot_target
+                 raw_xtrans_demosaic_aot_target halide_runtime_target)
+target_link_libraries(test_raw_bayer_kernel
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
+if(APPLE)
+    target_link_libraries(test_raw_bayer_kernel
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# P17 T11: fused normalize + X-Trans 6x6 demosaic AOT kernel vs same-formula
+# CPU reference (>=99 dB / max_abs<=1), plus the 5x5 coverage property and the
+# constant-field oracle.
+add_executable(test_raw_xtrans_kernel
+    tests/test_raw_xtrans_kernel.cpp
+    src/raw_demosaic_reference.cpp)
+target_include_directories(test_raw_xtrans_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+add_dependencies(test_raw_xtrans_kernel raw_xtrans_demosaic_aot_target
+                 raw_bayer_demosaic_aot_target halide_runtime_target)
+target_link_libraries(test_raw_xtrans_kernel
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
+if(APPLE)
+    target_link_libraries(test_raw_xtrans_kernel
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# P19 T7: linear-RGB normalize AOT kernel vs same-formula CPU reference
+# (>=99 dB / max_abs<=1), plus the constant-field oracle and a strided source.
+add_executable(test_raw_linear_rgb_kernel
+    tests/test_raw_linear_rgb_kernel.cpp
+    src/raw_demosaic_reference.cpp)
+target_include_directories(test_raw_linear_rgb_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+add_dependencies(test_raw_linear_rgb_kernel raw_linear_rgb_normalize_aot_target
+                 raw_bayer_demosaic_aot_target raw_xtrans_demosaic_aot_target
+                 halide_runtime_target)
+target_link_libraries(test_raw_linear_rgb_kernel
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
+if(APPLE)
+    target_link_libraries(test_raw_linear_rgb_kernel
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# Debug demosaic test
+add_executable(test_demosaic_debug tests/test_demosaic_debug.cpp
+    src/dng_mosaic_halide.cpp)
+target_include_directories(test_demosaic_debug PRIVATE
+    ${INC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+# W6 M-4: same standalone runtime as test_demosaic_halide above.
+target_link_libraries(test_demosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
+add_dependencies(test_demosaic_debug halide_runtime_target)
+add_dependencies(test_demosaic_debug dng_warp_aot_target)
+add_dependencies(test_demosaic_debug dng_demosaic_aot_target)
+if(APPLE)
+    target_link_libraries(test_demosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+
+# Phase 5.1: Halide Render PSNR Test (placeholder - needs DNG SDK data)
+add_executable(test_render_halide tests/test_render_halide.cpp)
+target_include_directories(test_render_halide PRIVATE
+    ${INC_DIR}
+    ${DNG_SDK_DIR})
+target_link_libraries(test_render_halide dng_sdk)
+if(APPLE)
+    target_link_libraries(test_render_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+
+endif() # NOT DNG_CROSS_BUILD (test targets)
+
+endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)
