@@ -1,5 +1,5 @@
 /**
- * test_mosaic_halide.cpp - Test Halide demosaic against DNG SDK baseline
+ * test_demosaic_halide.cpp - Test Halide demosaic against DNG SDK baseline
  *
  * Phase 5.3 - Demosaic PSNR Test
  *

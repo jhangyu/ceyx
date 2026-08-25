@@ -43,7 +43,7 @@ def print_known_issue_hints(lines: list[str], suspected_step: str) -> None:
     if "Generating Halide AOT Rectilinear Warp" in suspected_step:
         print(
             "[HINT] Warp AOT is the current long-running step. If this repeats often, "
-            "check DngWarpGenerator schedule complexity (tile/unroll/vectorize) to reduce codegen load.",
+            "check RectilinearWarpGenerator schedule complexity (tile/unroll/vectorize) to reduce codegen load.",
             file=sys.stderr,
         )
 

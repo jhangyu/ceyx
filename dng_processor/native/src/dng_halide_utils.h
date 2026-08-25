@@ -8,12 +8,12 @@
 // top of:
 //   - dng_processor/native/src/DngDemosaicGenerator.cpp
 //   - dng_processor/native/src/DngDemosaicWarpGenerator.cpp
-//   - dng_processor/native/src/DngWarpGenerator.cpp
+//   - dng_processor/native/src/RectilinearWarpGenerator.cpp
 //
 // `map_repeat_coord` had already drifted between copies:
 //   * DngDemosaicGenerator.cpp           used `Expr(kCfaRepeat)` (= 2)
 //   * DngDemosaicWarpGenerator.cpp       used a bare `Expr(2)` literal
-//   * (DngWarpGenerator.cpp did not need it)
+//   * (RectilinearWarpGenerator.cpp did not need it)
 // The unified helper here keeps the named `kCfaRepeat` constant so the
 // intent (Bayer CFA 2x2 tile repeat at the buffer edge) is explicit.
 //

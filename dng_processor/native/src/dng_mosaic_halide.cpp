@@ -15,7 +15,7 @@ functions:
     description: "Default demosaic entry; tries AOT unless disabled, then CPU reference if the AOT wrapper returns failure."
     lines: "236-244"
   - name: "demosaic_bilinear_compat"
-    description: "Compatibility entry that dispatches to bilinear demosaic; called only from Stage3 demosaic test tools (test_mosaic_halide.cpp, test_mosaic_debug.cpp)."
+    description: "Compatibility entry that dispatches to bilinear demosaic; called only from Stage3 demosaic test tools (test_demosaic_halide.cpp, test_demosaic_debug.cpp)."
     lines: "217-222"
   - name: "get_cfa_pattern"
     description: "Expands a (red_x, red_y) CFA phase into the 2x2 Bayer color-key pattern."

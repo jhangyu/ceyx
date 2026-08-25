@@ -222,7 +222,7 @@ option(DNG_DEMOSAIC_WARP_STRICT_FLOAT
 
 
 option(DNG_DIAGNOSTIC_BUILD
-       "Build deprecated research generators (DngWarpStrictFloatGenerator, DngWarpDebugGenerator) for diagnostics"
+       "Build deprecated research generators (RectilinearWarpStrictFloatGenerator, RectilinearWarpDebugGenerator) for diagnostics"
        OFF)
 
 # =============================================================================
@@ -463,9 +463,9 @@ if(NOT DNG_CROSS_BUILD)
     # the dependency on that ambient state entirely, on top of (not instead
     # of) the ZLIB-cache-slate reset above and the ordering-after-Halide
     # placement of the generic-RAW block.
-    add_executable(dng_warp_generator ${SRC_DIR}/DngWarpGenerator.cpp)
-    target_include_directories(dng_warp_generator PRIVATE ${INC_DIR})
-    target_link_libraries(dng_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+    add_executable(rectilinear_warp_generator ${SRC_DIR}/RectilinearWarpGenerator.cpp)
+    target_include_directories(rectilinear_warp_generator PRIVATE ${INC_DIR})
+    target_link_libraries(rectilinear_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     add_executable(dng_demosaic_generator ${SRC_DIR}/DngDemosaicGenerator.cpp)
     target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
@@ -498,13 +498,13 @@ if(NOT DNG_CROSS_BUILD)
 
     # Research & diagnostic generators (only built if DNG_DIAGNOSTIC_BUILD=ON)
     if(DNG_DIAGNOSTIC_BUILD)
-        add_executable(dng_warp_strict_float_generator ${SRC_DIR}/research/DngWarpStrictFloatGenerator.cpp)
-        target_include_directories(dng_warp_strict_float_generator PRIVATE ${INC_DIR})
-        target_link_libraries(dng_warp_strict_float_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+        add_executable(rectilinear_warp_strict_float_generator ${SRC_DIR}/research/RectilinearWarpStrictFloatGenerator.cpp)
+        target_include_directories(rectilinear_warp_strict_float_generator PRIVATE ${INC_DIR})
+        target_link_libraries(rectilinear_warp_strict_float_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
-        add_executable(dng_warp_debug_generator ${SRC_DIR}/research/DngWarpDebugGenerator.cpp)
-        target_include_directories(dng_warp_debug_generator PRIVATE ${INC_DIR})
-        target_link_libraries(dng_warp_debug_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+        add_executable(rectilinear_warp_debug_generator ${SRC_DIR}/research/RectilinearWarpDebugGenerator.cpp)
+        target_include_directories(rectilinear_warp_debug_generator PRIVATE ${INC_DIR})
+        target_link_libraries(rectilinear_warp_debug_generator PRIVATE Halide::Generator ZLIB::ZLIB)
     endif()
 
     add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
@@ -542,7 +542,7 @@ if(NOT DNG_CROSS_BUILD)
         add_custom_target(dng_stage_halide_dll DEPENDS ${DNG_STAGED_HALIDE_DLL})
 
         set(DNG_HALIDE_GENERATORS
-            dng_warp_generator
+            rectilinear_warp_generator
             dng_demosaic_generator
             dng_demosaic_warp_generator
             dng_render_generator
@@ -553,8 +553,8 @@ if(NOT DNG_CROSS_BUILD)
             raw_linear_rgb_normalize_generator)
         if(DNG_DIAGNOSTIC_BUILD)
             list(APPEND DNG_HALIDE_GENERATORS
-                dng_warp_strict_float_generator
-                dng_warp_debug_generator)
+                rectilinear_warp_strict_float_generator
+                rectilinear_warp_debug_generator)
         endif()
         foreach(_dng_gen IN LISTS DNG_HALIDE_GENERATORS)
             add_dependencies(${_dng_gen} dng_stage_halide_dll)
@@ -657,8 +657,8 @@ add_custom_target(halide_runtime_target DEPENDS ${HALIDE_OUTPUT_DIR}/halide_runt
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp.h
-    COMMAND dng_warp_generator -g rectilinear_warp -f rectilinear_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
-    DEPENDS dng_warp_generator
+    COMMAND rectilinear_warp_generator -g rectilinear_warp -f rectilinear_warp -o ${HALIDE_OUTPUT_DIR} target=${AOT_TARGET}-no_runtime
+    DEPENDS rectilinear_warp_generator
     COMMENT "Generating Halide AOT Rectilinear Warp..."
 )
 add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT})
@@ -1620,28 +1620,28 @@ endif()
 # 2026-08-16: dng_opcodelist2_halide.cpp / dng_halide_device.cpp added to the
 # source list. libdng_sdk's dng_opcode_list::Apply references the Stage2
 # OpcodeList2 Halide bridge symbols unconditionally, so this target had been
-# failing to link since that bridge landed (no test_mosaic_halide binary was
+# failing to link since that bridge landed (no test_demosaic_halide binary was
 # ever produced). Linking the bridge in restores the target; the polynomial
 # AOT archives below satisfy the bridge's own kernel references.
-add_executable(test_mosaic_halide tests/test_mosaic_halide.cpp
+add_executable(test_demosaic_halide tests/test_demosaic_halide.cpp
     src/dng_mosaic_halide.cpp
     src/dng_opcodelist2_halide.cpp
     src/dng_halide_device.cpp)
-target_include_directories(test_mosaic_halide PRIVATE
+target_include_directories(test_demosaic_halide PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
 # W6 M-4: halide_runtime.a provides Metal/Vulkan runtime symbols for all -no_runtime AOT kernels.
-target_link_libraries(test_mosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
-add_dependencies(test_mosaic_halide halide_runtime_target)
-add_dependencies(test_mosaic_halide dng_warp_aot_target)
-add_dependencies(test_mosaic_halide dng_demosaic_aot_target)
-add_dependencies(test_mosaic_halide dng_opcode_polynomial_aot_target)
-add_dependencies(test_mosaic_halide dng_opcode_polynomial3_aot_target)
+target_link_libraries(test_demosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+add_dependencies(test_demosaic_halide halide_runtime_target)
+add_dependencies(test_demosaic_halide dng_warp_aot_target)
+add_dependencies(test_demosaic_halide dng_demosaic_aot_target)
+add_dependencies(test_demosaic_halide dng_opcode_polynomial_aot_target)
+add_dependencies(test_demosaic_halide dng_opcode_polynomial3_aot_target)
 if(APPLE)
-    target_link_libraries(test_mosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    target_link_libraries(test_demosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # 2026-08-16 CFA phase: all-four-Bayer-phases unit check on a synthetic
@@ -1717,20 +1717,20 @@ if(APPLE)
 endif()
 
 # Debug demosaic test
-add_executable(test_mosaic_debug tests/test_mosaic_debug.cpp
+add_executable(test_demosaic_debug tests/test_demosaic_debug.cpp
     src/dng_mosaic_halide.cpp)
-target_include_directories(test_mosaic_debug PRIVATE
+target_include_directories(test_demosaic_debug PRIVATE
     ${INC_DIR}
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-# W6 M-4: same standalone runtime as test_mosaic_halide above.
-target_link_libraries(test_mosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
-add_dependencies(test_mosaic_debug halide_runtime_target)
-add_dependencies(test_mosaic_debug dng_warp_aot_target)
-add_dependencies(test_mosaic_debug dng_demosaic_aot_target)
+# W6 M-4: same standalone runtime as test_demosaic_halide above.
+target_link_libraries(test_demosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
+add_dependencies(test_demosaic_debug halide_runtime_target)
+add_dependencies(test_demosaic_debug dng_warp_aot_target)
+add_dependencies(test_demosaic_debug dng_demosaic_aot_target)
 if(APPLE)
-    target_link_libraries(test_mosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    target_link_libraries(test_demosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
 
 # Phase 5.1: Halide Render PSNR Test (placeholder - needs DNG SDK data)

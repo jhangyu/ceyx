@@ -1,5 +1,5 @@
 /**
- * test_mosaic_debug.cpp - Debug demosaic by comparing pixel values
+ * test_demosaic_debug.cpp - Debug demosaic by comparing pixel values
  */
 
 #include <iostream>

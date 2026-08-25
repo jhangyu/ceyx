@@ -1,6 +1,6 @@
 // Phase 8.1.6 Stage E B2-V2 — Halide-side per-pixel intermediate dump.
 //
-// MIRROR FROM DngWarpGenerator.cpp lines 76-138 (Phase 8.1.6 D-1, polynomial
+// MIRROR FROM RectilinearWarpGenerator.cpp lines 76-138 (Phase 8.1.6 D-1, polynomial
 // path only; precompute_coords / pre_* inputs are intentionally omitted).
 // If production polynomial formula ever changes, sync this generator block
 // for block and update the line range above.
@@ -16,9 +16,9 @@
 //     buffers is also driving the dst pixel value.
 //
 // CMake (B3-A) will compile this generator twice: once with target=`host`
-// emitting `dng_warp_debug_cpu.{a,h}`, and once with the production AOT
+// emitting `rectilinear_warp_debug_cpu.{a,h}`, and once with the production AOT
 // target (`host-metal-no_asserts-no_bounds_query`-no_runtime) emitting
-// `dng_warp_debug_metal.{a,h}`.
+// `rectilinear_warp_debug_metal.{a,h}`.
 //
 // See: docs/logs/2026-05-09/phase8_1_6_stageE/v2_probe_design.md
 
@@ -108,7 +108,7 @@ public:
         Expr plane = select(planes <= 1, 0, select(c < planes, c, 0));
         plane = clamp(plane, 0, rad.dim(1).extent() - 1);
 
-        // === MIRROR FROM DngWarpGenerator.cpp (else-branch polynomial) ===
+        // === MIRROR FROM RectilinearWarpGenerator.cpp (else-branch polynomial) ===
         Expr diff_x = cast<float>(x) - center_x;
         Expr diff_y = cast<float>(y) - center_y;
 
@@ -282,4 +282,4 @@ public:
     }
 };
 
-HALIDE_REGISTER_GENERATOR(RectilinearWarpDebug, dng_warp_debug)
+HALIDE_REGISTER_GENERATOR(RectilinearWarpDebug, rectilinear_warp_debug)

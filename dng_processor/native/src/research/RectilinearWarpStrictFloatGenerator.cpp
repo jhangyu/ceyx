@@ -19,7 +19,7 @@ constexpr int kResampleSubsampleCount2D = 1 << kResampleSubsampleBits2D;
 
 // Phase 8.1.6 Stage E A1 — strict_float variant of RectilinearWarp.
 //
-// Identical to DngWarpGenerator.cpp except for the R/B plane radial polynomial
+// Identical to RectilinearWarpGenerator.cpp except for the R/B plane radial polynomial
 // computation, which is wrapped in Halide::strict_float() to forbid Metal MSL
 // FMA contraction (chromatic aberration drift root cause; see
 // docs/logs/2026-05-09/phase8_1_6_stageE/a1_strict_float_design.md §3).
