@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
+import 'raw_bindings.dart';
+
 /*
 ---
 file_summary: "dart:ffi 綁定設定，處理不同平台的動態函式庫載入"
@@ -64,6 +66,18 @@ typedef DngFreeHalideBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
 typedef DngFreeRgbaBufferNative = ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
 typedef DngFreeRgbaBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
 
+// Generic RAW entry (Phase 17 native, Phase 18 binding). Reuses the FROZEN
+// DngResult layout, so no struct change is needed. max_dim <= 0 means full
+// resolution (dng_ffi_api.h:114, raw_ffi_api.cpp:24). Additive export: older
+// dylibs lack it, so the lookup MUST be guarded.
+typedef RawDecodeAndProcessNative =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+    );
+typedef RawDecodeAndProcessDart =
+    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath, int maxDim);
+
 typedef DngDecoderWarmupForSizeNative =
     ffi.Int32 Function(ffi.Int32 width, ffi.Int32 height);
 typedef DngDecoderWarmupForSizeDart = int Function(int width, int height);
@@ -108,6 +122,12 @@ class DngNativeBindings {
   // lookup of a missing symbol would throw in the constructor and kill ALL
   // decoding, not just sized calls.
   DngDecodeAndProcessSizedDart? _dngDecodeAndProcessSized;
+
+  // Guarded RAW entries — null when the loaded dylib predates Phase 17 or was
+  // built with -DDNG_ENABLE_GENERIC_RAW=OFF.
+  RawDecodeAndProcessDart? _rawDecodeAndProcess;
+  RawLastDiagnosticsDart? _rawLastDiagnostics;
+  DngDebugPoolCheckedOutDart? _dngDebugPoolCheckedOut;
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
   late final DngDecoderSetPipelineCachePathDart dngDecoderSetPipelineCachePath;
@@ -140,6 +160,41 @@ class DngNativeBindings {
   /// Whether the loaded dylib exports `dng_decode_and_process_sized`.
   bool get sizedDecodeAvailable => _dngDecodeAndProcessSized != null;
 
+  /// Guarded access to the generic RAW entry. Null when the loaded dylib does
+  /// not export `raw_decode_and_process`.
+  RawDecodeAndProcessDart? get rawDecodeAndProcess => _rawDecodeAndProcess;
+
+  /// Whether the loaded dylib exports `raw_decode_and_process`.
+  bool get rawDecodeAvailable => _rawDecodeAndProcess != null;
+
+  /// Whether the loaded dylib exports `raw_last_diagnostics`.
+  bool get rawDiagnosticsAvailable => _rawLastDiagnostics != null;
+
+  /// Whether the loaded dylib exports `dng_debug_pool_checked_out`.
+  bool get poolStatsAvailable => _dngDebugPoolCheckedOut != null;
+
+  /// Diagnostics for THIS THREAD's most recent `raw_decode_and_process`.
+  ///
+  /// Native state is `thread_local` (raw_ffi_api.cpp:19), so a decode that ran
+  /// in a worker isolate leaves nothing readable here. Returns null when the
+  /// symbol is absent, or when native reports -1 (no decode has run on this
+  /// thread yet).
+  RawDiagnostics? lastRawDiagnostics() {
+    final fn = _rawLastDiagnostics;
+    if (fn == null) return null;
+    final scratch = calloc<RawDecodeDiagnostics>();
+    try {
+      if (fn(scratch) != 0) return null;
+      return RawDiagnostics.fromStruct(scratch.ref);
+    } finally {
+      calloc.free(scratch);
+    }
+  }
+
+  /// Number of RGBA pool buffers currently checked out (0 when everything has
+  /// been freed). Null when the dylib does not export the debug symbol.
+  int? poolCheckedOut() => _dngDebugPoolCheckedOut?.call();
+
   DngNativeBindings._(this._lib) {
     dngDecodeAndProcess = _lib
         .lookupFunction<DngDecodeAndProcessNative, DngDecodeAndProcessDart>(
@@ -156,6 +211,36 @@ class DngNativeBindings {
       // Symbol absent in this build of the dylib — sizedDecodeAvailable
       // stays false and callers fall back to dngDecodeAndProcess.
       _dngDecodeAndProcessSized = null;
+    }
+
+    try {
+      _rawDecodeAndProcess = _lib
+          .lookupFunction<RawDecodeAndProcessNative, RawDecodeAndProcessDart>(
+            'raw_decode_and_process',
+          );
+    } catch (_) {
+      // Symbol absent -> rawDecodeAvailable stays false and the service
+      // throws RawUnavailableException instead of crashing.
+      _rawDecodeAndProcess = null;
+    }
+
+    try {
+      _rawLastDiagnostics = _lib
+          .lookupFunction<RawLastDiagnosticsNative, RawLastDiagnosticsDart>(
+            'raw_last_diagnostics',
+          );
+    } catch (_) {
+      _rawLastDiagnostics = null;
+    }
+
+    try {
+      _dngDebugPoolCheckedOut = _lib
+          .lookupFunction<
+            DngDebugPoolCheckedOutNative,
+            DngDebugPoolCheckedOutDart
+          >('dng_debug_pool_checked_out');
+    } catch (_) {
+      _dngDebugPoolCheckedOut = null;
     }
 
     dngDecoderWarmupForSize = _lib
