@@ -312,7 +312,8 @@ def build_android(args, native_dir: Path, cores: int) -> int:
 
     # Verify AOT artifacts
     expected_aot = [
-        "dng_pipeline.a", "dng_pipeline.h",
+        # dng_pipeline.a/.h dropped: that kernel was retired 2026-07-02 (4ec5664).
+        "halide_runtime.a",
         "dng_demosaic_bilinear.a", "dng_demosaic_bilinear.h",
         "dng_demosaic_warp.a", "dng_demosaic_warp.h",
         "rectilinear_warp.a", "rectilinear_warp.h",

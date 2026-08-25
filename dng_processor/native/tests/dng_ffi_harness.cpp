@@ -65,7 +65,8 @@ bool isWithin(const fs::path &child, const fs::path &parent) {
 fs::path findRepoRoot() {
   fs::path current = fs::current_path();
   while (true) {
-    if (fs::exists(current / "rule.md") &&
+    // Marker was rule.md until 2026-08-25, when it moved to docs/SOP/.
+    if (fs::exists(current / "CLAUDE.md") &&
         fs::exists(current / "dng_processor" / "native")) {
       return current;
     }
