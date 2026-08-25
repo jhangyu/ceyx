@@ -25,7 +25,7 @@ int main() {
           kRawErrUnpackFailed == -204 && kRawErrLayoutUnsupported == -205 &&
           kRawErrMetadataInvalid == -206 && kRawErrGpuUnavailable == -207 &&
           kRawErrKernelFailed == -208 && kRawErrAllocationFailed == -209 &&
-          kRawErrSizeOverflow == -210);
+          kRawErrSizeOverflow == -210 && kRawErrCancelled == -211);
 
     check("sample_model_values",
           kRawSampleModelCfa == 0 && kRawSampleModelMonochrome == 1 &&
@@ -69,6 +69,7 @@ int main() {
           std::strcmp(raw_error_name(kRawErrLayoutUnsupported),
                       "kRawErrLayoutUnsupported") == 0 &&
           std::strcmp(raw_error_name(kRawSuccess), "kRawSuccess") == 0 &&
+          std::strcmp(raw_error_name(kRawErrCancelled), "kRawErrCancelled") == 0 &&
           std::strcmp(raw_error_name(static_cast<RawErrorCode>(-999)),
                       "kRawErrUnknown") == 0);
 

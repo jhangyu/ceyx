@@ -333,6 +333,11 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
         out.error = kRawErrSizeOverflow;
         return out.error;
     }
+    if (!extentWithinCeiling(input.active_area.width, input.active_area.height,
+                             "active_area")) {
+        out.error = kRawErrSizeOverflow;
+        return out.error;
+    }
 
     char reason[256] = {0};
     const RawErrorCode validated = raw_validate_gpu_input(&input, reason, sizeof(reason));
@@ -446,7 +451,7 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // route above returns before this point on purpose - its cancellation and
     // teardown behaviour is unchanged by this round.
     if (cancelRequested(cancel)) {
-        out.error = kRawErrKernelFailed;
+        out.error = kRawErrCancelled;
         out.diag.total_ms = nowMs() - t0;
         return out.error;
     }
@@ -457,7 +462,7 @@ RawErrorCode decodeFileImpl(const char* file_path,
     ctx.set_forced_backend(forced);
     // Polls 2 and 3 happen inside open_and_unpack (between open_file and
     // unpack, and after unpack); a cancellation there surfaces as
-    // kRawErrKernelFailed with the processor already recycled.
+    // kRawErrCancelled with the processor already recycled.
     ctx.set_cancel_hook(cancel.callback, cancel.user_data);
     const RawErrorCode unpack_rc = ctx.open_and_unpack(file_path);
     out.diag = ctx.diagnostics();
@@ -495,7 +500,7 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // pixels a Metal command is still reading (spec section 5.2.5). Cancelling
     // mid-dispatch would trade a slow decode for a use-after-free.
     if (cancelRequested(cancel)) {
-        out.error = kRawErrKernelFailed;
+        out.error = kRawErrCancelled;
         out.diag.total_ms = nowMs() - t0;
         return out.error;
     }

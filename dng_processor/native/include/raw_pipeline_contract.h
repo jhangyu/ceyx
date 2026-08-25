@@ -99,7 +99,8 @@ typedef enum RawErrorCode {
     kRawErrGpuUnavailable = -207,
     kRawErrKernelFailed = -208,
     kRawErrAllocationFailed = -209,
-    kRawErrSizeOverflow = -210
+    kRawErrSizeOverflow = -210,
+    kRawErrCancelled = -211
 } RawErrorCode;
 
 /* Read-only borrowed view. Never owns the buffer (spec section 5.1.2). */
@@ -213,6 +214,7 @@ static inline const char* raw_error_name(RawErrorCode code) {
         case kRawErrKernelFailed: return "kRawErrKernelFailed";
         case kRawErrAllocationFailed: return "kRawErrAllocationFailed";
         case kRawErrSizeOverflow: return "kRawErrSizeOverflow";
+        case kRawErrCancelled: return "kRawErrCancelled";
         default: return "kRawErrUnknown";
     }
 }

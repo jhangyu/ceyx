@@ -156,7 +156,7 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     // allocation has not happened yet. There is no lock here by design.
     if (impl_->cancelled()) {
         impl_->processor.recycle();
-        return kRawErrKernelFailed;
+        return kRawErrCancelled;
     }
 
     // Step 3: ONE unpack() call. LibRaw tries RawSpeed3 when eligible and falls
@@ -177,7 +177,7 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     // yet and no GPU command has been issued, so recycling here is safe.
     if (impl_->cancelled()) {
         impl_->processor.recycle();
-        return kRawErrKernelFailed;
+        return kRawErrCancelled;
     }
 
     // Step 4: which decoder actually produced the pixels.

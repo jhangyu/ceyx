@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
                       out_early.rgba_ptr ? "NON-NULL" : "null",
                       dng_rgba_output_checked_out_count());
         report("cancel-before-dispatch",
-               rc_early == kRawErrKernelFailed && out_early.rgba_ptr == nullptr &&
+               rc_early == kRawErrCancelled && out_early.rgba_ptr == nullptr &&
                    dng_rgba_output_checked_out_count() == 0,
                detail);
         if (out_early.rgba_ptr) dng_rgba_output_release(out_early.rgba_ptr);
@@ -275,9 +275,9 @@ int main(int argc, char** argv) {
         // The token must have survived to the pre-dispatch poll (otherwise the
         // later poll points are dead code), the verdict must be the specific
         // cancellation error, and nothing may be left half-populated.
-        report("cancel-after-dispatch",
+        report("cancel-at-last-pre-dispatch-poll",
                counter.calls >= kPreDispatchPollOrdinal &&
-                   rc_late == kRawErrKernelFailed &&
+                   rc_late == kRawErrCancelled &&
                    out_late.rgba_ptr == nullptr && late_pool == 0,
                detail);
         if (out_late.rgba_ptr) dng_rgba_output_release(out_late.rgba_ptr);
