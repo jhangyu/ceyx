@@ -79,6 +79,9 @@ AGENTS.md
 graphify-out/
 dng_processor/native/scripts/tmp/
 
+# Untracked dylib snapshots used as symbol-absent test fixtures (Phase 18 Task 1)
+/tmp/
+
 # RAW corpus: binaries untracked, manifest/README tracked (Phase 17 Task 4)
 image_samples/raw_corpus/*
 !image_samples/raw_corpus/README.md
