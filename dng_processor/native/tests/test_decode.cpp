@@ -711,10 +711,10 @@ StagePSNR testDNG(dng_host& host,
         bool usedSharedStage3Pipeline = false;
         if (useHalideDemosaic && useSharedStage3Pipeline) {
             usedSharedStage3Pipeline = true;
-            cout << "  [PipelineV2] Using shared Stage3 orchestration\n";
+            cout << "  [Pipeline] Using shared Stage3 orchestration\n";
             DngPipelineStage3Timing sharedTiming;
             if (!dng_pipeline_run_stage3(host, *negative, true, &sharedTiming, &stage3Data)) {
-                cerr << "ERROR: shared PipelineV2 Stage3 failed\n";
+                cerr << "ERROR: shared Pipeline Stage3 failed\n";
                 return failedResult;
             }
             timing.stage3_extract_stage2_ms = sharedTiming.extract_stage2_ms;

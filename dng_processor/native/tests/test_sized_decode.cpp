@@ -94,7 +94,7 @@ struct SizedResult {
 // Run the production sized decode and take an owned RGB copy.
 SizedResult decodeSized(const char *path, int32_t maxDim) {
     SizedResult out;
-    DngPipelineV2Result result;
+    DngPipelineResult result;
     const auto t0 = std::chrono::steady_clock::now();
     const bool success =
         dng_pipeline_decode_to_rgb_sized(path, maxDim, result);

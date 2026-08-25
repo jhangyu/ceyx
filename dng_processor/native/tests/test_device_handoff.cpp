@@ -73,7 +73,7 @@ struct DecodeOutput {
 };
 
 static DecodeOutput runDecode(const char* path) {
-    DngPipelineV2Result result;
+    DngPipelineResult result;
     bool success = dng_pipeline_decode_to_rgb(path, result);
     // W7 (M-11): fuse_rgba_output is now true on all platforms, so the pipeline
     // sets rgba_ptr (not rgb_ptr). Accept either and extract RGB for comparison.
