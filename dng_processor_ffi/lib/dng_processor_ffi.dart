@@ -16,6 +16,25 @@ library;
 export 'src/dng_decoder_service.dart'
     show DngImage, DngErrorCode, DngDecodeException, DngDecoderService;
 
+export 'src/raw_route.dart'
+    show
+        DecodeRoute,
+        decodeRouteForPath,
+        decodeExtensionOf,
+        kRawExtensions,
+        kSupportedDecodeExtensions;
+
+export 'src/raw_error_codes.dart'
+    show RawErrorCode, RawDecodeException, RawUnavailableException;
+
+export 'src/raw_bindings.dart'
+    show
+        RawDiagnostics,
+        RawFrontend,
+        RawDecoderBackend,
+        RawGpuBackend,
+        RawSampleModel;
+
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.
 const String dngNativeLibraryTag = 'dng_processor_ffi-0.0.1';

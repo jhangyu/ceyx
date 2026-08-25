@@ -7,6 +7,23 @@
 library;
 
 export 'src/dng_decoder_service.dart'
-    show DngImage, DngErrorCode, DngDecodeException, DngDecoderService;
+    show
+        DngImage,
+        DngErrorCode,
+        DngDecodeException,
+        DngDecoderService,
+        DecodeRoute,
+        decodeRouteForPath,
+        decodeExtensionOf,
+        kRawExtensions,
+        kSupportedDecodeExtensions,
+        RawErrorCode,
+        RawDecodeException,
+        RawUnavailableException,
+        RawDiagnostics,
+        RawFrontend,
+        RawDecoderBackend,
+        RawGpuBackend,
+        RawSampleModel;
 
 export 'src/dng_image_widget.dart' show dngImageToUiImage, DngImageWidget;

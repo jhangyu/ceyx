@@ -4,6 +4,9 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'dng_bindings.dart';
+import 'raw_bindings.dart';
+import 'raw_error_codes.dart';
+import 'raw_route.dart';
 
 /*
 ---
@@ -153,6 +156,34 @@ class DngDecoderService {
     return _bindings.sizedDecodeAvailable;
   }
 
+  /// Whether the loaded native library exports `raw_decode_and_process`.
+  /// Initializes the service if needed.
+  bool get rawDecodeAvailable {
+    if (!_initialized) initialize();
+    return _bindings.rawDecodeAvailable;
+  }
+
+  /// Diagnostics for THIS ISOLATE's most recent generic-RAW decode.
+  ///
+  /// Native state is `thread_local` (raw_ffi_api.cpp:19), so this is null
+  /// after [decodeOnWorker] — the decode happened on another isolate. That is
+  /// expected, not an error.
+  RawDiagnostics? get lastRawDiagnostics {
+    if (!_initialized) initialize();
+    return _bindings.lastRawDiagnostics();
+  }
+
+  /// RGBA pool buffers currently checked out process-wide; 0 when everything
+  /// has been freed. Null when the dylib lacks the debug symbol.
+  ///
+  /// Note: a zero-copy [decode] keeps its buffer checked out until the
+  /// returned [DngImage] is garbage collected, so a non-zero value right
+  /// after a successful [decode] is correct, not a leak.
+  int? get poolCheckedOut {
+    if (!_initialized) initialize();
+    return _bindings.poolCheckedOut();
+  }
+
   /// Warm native resources for the common 24MP decode path off the UI isolate.
   Future<void> warmupForSize({int width = 6000, int height = 4000}) async {
     final result = await Isolate.run(() {
@@ -212,6 +243,8 @@ class DngDecoderService {
   /// does not export `dng_decode_and_process_sized`, or when [maxDim] is
   /// null. Callers must read the returned [DngImage.width]/[DngImage.height]
   /// rather than assuming the request was honored.
+  /// On the generic RAW route `maxDim` maps directly to the native `max_dim`
+  /// parameter; 0 and negatives mean full resolution.
   Future<DngImage> decodeOnWorker(String filePath, {int? maxDim}) async {
     // Hoist to a local before the closure: referencing `_libraryPath`
     // directly inside Isolate.run's closure captures `this` (the whole
@@ -306,8 +339,25 @@ class DngDecoderService {
   ///
   /// Throws [DngDecodeException] on failure.
   DngImage decode(String filePath) {
-    return _decodeZeroCopy(filePath);
+    if (!_initialized) {
+      initialize();
+    }
+    switch (decodeRouteForPath(filePath)) {
+      case DecodeRoute.dng:
+        return _decodeZeroCopy(filePath);
+      case DecodeRoute.raw:
+        return _decodeRawZeroCopy(filePath);
+      case DecodeRoute.unsupported:
+        throw DngDecodeException(
+          DngErrorCode.parseFailed,
+          _unsupportedMessage(filePath),
+        );
+    }
   }
+
+  static String _unsupportedMessage(String filePath) =>
+      "Unsupported file extension '${decodeExtensionOf(filePath)}' for "
+      '$filePath; supported: ${kSupportedDecodeExtensions.join(', ')}';
 
   static _DecodeWorkerResult _decodeFileToTransferable(
     String filePath,
@@ -328,63 +378,151 @@ class DngDecoderService {
 
     try {
       resultPtr = _bindings.dngDecodeAndProcess(pathPtr.cast());
-
-      if (resultPtr == nullptr) {
-        throw DngDecodeException(-1, 'Native function returned null');
-      }
-
-      final result = resultPtr.ref;
-
-      if (result.errorCode != 0) {
-        final code = result.errorCode;
-        throw DngDecodeException(code, _messageForErrorCode(code));
-      }
-
-      if (result.rgbaData == nullptr) {
-        throw DngDecodeException(
-          -1,
-          'RGBA buffer is null despite success code',
-        );
-      }
-
-      final width = result.width;
-      final height = result.height;
-      final bufferSize = width * height * 4;
-
-      // Phase 6.4 Zero-copy: Instead of copying, we view the native memory directly.
-      final rgbaData = result.rgbaData.asTypedList(bufferSize);
-
-      // Create the DngImage container which wraps the zero-copy list
-      final image = DngImage(
-        rgbaData: rgbaData,
-        width: width,
-        height: height,
-        decodeMs: result.decodeMs,
-        processMs: result.processMs,
-      );
-
-      // Lazily create the service-owned finalizer on the first zero-copy decode.
-      // Using ??= keeps it alive for the entire service lifetime once created
-      // (Gotcha #45: per-call finalizer risks GC before DngImage is collected).
-      _rgbaFinalizer ??= NativeFinalizer(_bindings.dngFreeRgbaBufferPtr.cast());
-
-      // Attach the service-owned NativeFinalizer to the DngImage.
-      // When `image` is garbage collected, Dart calls `dng_free_rgba_buffer`
-      // on the native pointer captured here.
-      _rgbaFinalizer!.attach(image, result.rgbaData.cast(), detach: image);
-
-      // Since we handed ownership of `rgbaData` over to the Finalizer,
-      // we must set it to null in the result struct so `dng_free_result`
-      // does not delete it when freeing the struct itself!
-      result.rgbaData = nullptr;
-
-      return image;
+      return _finishZeroCopy(resultPtr, isRaw: false);
     } finally {
-      // Always free the native result struct (which no longer owns the rgbaData on success)
+      // Always free the native result struct (which no longer owns the
+      // rgbaData on success).
       if (resultPtr != nullptr) {
         _bindings.dngFreeResult(resultPtr);
       }
       malloc.free(pathPtr);
+    }
+  }
+
+  /// Generic-RAW twin of [_decodeZeroCopy]. Same pool, same free function,
+  /// same finalizer — only the entry point and the error scale differ.
+  DngImage _decodeRawZeroCopy(String filePath) {
+    if (!_initialized) {
+      initialize();
+    }
+
+    final rawDecode = _bindings.rawDecodeAndProcess;
+    if (rawDecode == null) {
+      // Spec §4: typed exception, never a crash and never a silent fallback
+      // to the DNG parser.
+      throw RawUnavailableException(filePath);
+    }
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+
+    try {
+      // max_dim == 0 means full resolution (dng_ffi_api.h:114).
+      resultPtr = rawDecode(pathPtr.cast(), 0);
+      return _finishZeroCopy(resultPtr, isRaw: true);
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// Shared success/failure handling for both zero-copy routes.
+  ///
+  /// On success the native RGBA buffer is wrapped without a memcpy, ownership
+  /// is transferred to the service-owned NativeFinalizer, and
+  /// `result.rgbaData` is cleared so the caller's `dng_free_result` cannot
+  /// double-free it.
+  DngImage _finishZeroCopy(
+    Pointer<DngResult> resultPtr, {
+    required bool isRaw,
+  }) {
+    if (resultPtr == nullptr) {
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.allocationFailed,
+          RawErrorCode.name(RawErrorCode.allocationFailed),
+          'Native raw_decode_and_process returned null',
+        );
+      }
+      throw DngDecodeException(-1, 'Native function returned null');
+    }
+
+    final result = resultPtr.ref;
+
+    if (result.errorCode != 0) {
+      _throwDecodeError(result.errorCode, isRaw: isRaw);
+    }
+
+    if (result.rgbaData == nullptr) {
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.allocationFailed,
+          RawErrorCode.name(RawErrorCode.allocationFailed),
+          'RGBA buffer is null despite kRawSuccess',
+        );
+      }
+      throw DngDecodeException(-1, 'RGBA buffer is null despite success code');
+    }
+
+    final width = result.width;
+    final height = result.height;
+    final bufferSize = width * height * 4;
+
+    // Zero-copy: view the native memory directly instead of copying.
+    final rgbaData = result.rgbaData.asTypedList(bufferSize);
+
+    final image = DngImage(
+      rgbaData: rgbaData,
+      width: width,
+      height: height,
+      decodeMs: result.decodeMs,
+      processMs: result.processMs,
+    );
+
+    // Lazily create the service-owned finalizer (Gotcha #45: a per-call
+    // finalizer risks being collected before the DngImage it guards).
+    _rgbaFinalizer ??= NativeFinalizer(_bindings.dngFreeRgbaBufferPtr.cast());
+    _rgbaFinalizer!.attach(image, result.rgbaData.cast(), detach: image);
+
+    // Ownership handed to the finalizer — clear the struct field so
+    // dng_free_result does not free the same pointer again.
+    result.rgbaData = nullptr;
+
+    return image;
+  }
+
+  /// Map a native `DngResult.error_code` onto the right exception type.
+  /// RAW codes (<= -201) are disjoint from DNG codes by contract
+  /// (raw_pipeline_contract.h:12-13).
+  Never _throwDecodeError(int code, {required bool isRaw}) {
+    if (isRaw || RawErrorCode.isRawError(code)) {
+      throw RawDecodeException(
+        code,
+        RawErrorCode.name(code),
+        _messageForRawErrorCode(code),
+      );
+    }
+    throw DngDecodeException(code, _messageForErrorCode(code));
+  }
+
+  String _messageForRawErrorCode(int code) {
+    switch (code) {
+      case RawErrorCode.nullPath:
+        return 'Null or empty file path';
+      case RawErrorCode.probeFailed:
+        return 'Container probe failed (not a recognised RAW/TIFF header)';
+      case RawErrorCode.parseFailed:
+        return 'RAW container parse failed';
+      case RawErrorCode.unpackFailed:
+        return 'RAW sample unpack failed';
+      case RawErrorCode.layoutUnsupported:
+        return 'Sensor layout not supported by this build';
+      case RawErrorCode.metadataInvalid:
+        return 'RAW metadata invalid or inconsistent';
+      case RawErrorCode.gpuUnavailable:
+        return 'GPU (Metal/Vulkan) unavailable';
+      case RawErrorCode.kernelFailed:
+        return 'GPU kernel dispatch failed';
+      case RawErrorCode.allocationFailed:
+        return 'Native allocation failed';
+      case RawErrorCode.sizeOverflow:
+        return 'Image dimensions exceed the supported pixel ceiling';
+      case RawErrorCode.cancelled:
+        return 'Decode cancelled by request';
+      default:
+        return 'Unknown RAW error (code: $code)';
     }
   }
 
@@ -395,7 +533,20 @@ class DngDecoderService {
     if (!_initialized) {
       initialize();
     }
+    switch (decodeRouteForPath(filePath)) {
+      case DecodeRoute.dng:
+        return _decodeDngToTransferable(filePath, maxDim);
+      case DecodeRoute.raw:
+        return _decodeRawToTransferable(filePath, maxDim);
+      case DecodeRoute.unsupported:
+        throw DngDecodeException(
+          DngErrorCode.parseFailed,
+          _unsupportedMessage(filePath),
+        );
+    }
+  }
 
+  _DecodeWorkerResult _decodeDngToTransferable(String filePath, int? maxDim) {
     final pathPtr = filePath.toNativeUtf8();
     Pointer<DngResult> resultPtr = nullptr;
 
@@ -404,51 +555,89 @@ class DngDecoderService {
           (maxDim != null && maxDim > 0 && _bindings.sizedDecodeAvailable)
           ? _bindings.dngDecodeAndProcessSized!(pathPtr.cast(), maxDim)
           : _bindings.dngDecodeAndProcess(pathPtr.cast());
-
-      if (resultPtr == nullptr) {
-        throw DngDecodeException(-1, 'Native function returned null');
-      }
-
-      final result = resultPtr.ref;
-
-      if (result.errorCode != 0) {
-        final code = result.errorCode;
-        throw DngDecodeException(code, _messageForErrorCode(code));
-      }
-
-      if (result.rgbaData == nullptr) {
-        throw DngDecodeException(
-          -1,
-          'RGBA buffer is null despite success code',
-        );
-      }
-
-      final width = result.width;
-      final height = result.height;
-      final bufferSize = width * height * 4;
-      // Copy native RGBA into Dart-owned bytes. We do NOT use zero-copy here
-      // because TransferableTypedData cannot carry a native-backed typed list
-      // across isolate boundaries safely.
-      final rgbaCopy = Uint8List.fromList(
-        result.rgbaData.asTypedList(bufferSize),
-      );
-
-      return _DecodeWorkerResult(
-        rgbaData: TransferableTypedData.fromList([rgbaCopy]),
-        width: width,
-        height: height,
-        decodeMs: result.decodeMs,
-        processMs: result.processMs,
-      );
+      return _finishTransferable(resultPtr, isRaw: false);
     } finally {
-      // dng_free_result frees BOTH the DngResult struct and its rgba_data
-      // (rgba_data was NOT cleared above, unlike _decodeZeroCopy).
-      // No separate dngFreeRgbaBuffer call is needed — no memory leak.
+      // dng_free_result frees BOTH the struct and its rgba_data (rgba_data
+      // was NOT cleared, unlike the zero-copy path). No leak, no extra call.
       if (resultPtr != nullptr) {
         _bindings.dngFreeResult(resultPtr);
       }
       malloc.free(pathPtr);
     }
+  }
+
+  _DecodeWorkerResult _decodeRawToTransferable(String filePath, int? maxDim) {
+    final rawDecode = _bindings.rawDecodeAndProcess;
+    if (rawDecode == null) {
+      throw RawUnavailableException(filePath);
+    }
+
+    // 0 and negatives mean "no request" -> full resolution, matching the DNG
+    // sized-decode contract.
+    final requested = (maxDim != null && maxDim > 0) ? maxDim : 0;
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+
+    try {
+      resultPtr = rawDecode(pathPtr.cast(), requested);
+      return _finishTransferable(resultPtr, isRaw: true);
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  _DecodeWorkerResult _finishTransferable(
+    Pointer<DngResult> resultPtr, {
+    required bool isRaw,
+  }) {
+    if (resultPtr == nullptr) {
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.allocationFailed,
+          RawErrorCode.name(RawErrorCode.allocationFailed),
+          'Native raw_decode_and_process returned null',
+        );
+      }
+      throw DngDecodeException(-1, 'Native function returned null');
+    }
+
+    final result = resultPtr.ref;
+
+    if (result.errorCode != 0) {
+      _throwDecodeError(result.errorCode, isRaw: isRaw);
+    }
+
+    if (result.rgbaData == nullptr) {
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.allocationFailed,
+          RawErrorCode.name(RawErrorCode.allocationFailed),
+          'RGBA buffer is null despite kRawSuccess',
+        );
+      }
+      throw DngDecodeException(-1, 'RGBA buffer is null despite success code');
+    }
+
+    final width = result.width;
+    final height = result.height;
+    final bufferSize = width * height * 4;
+    // Copy into Dart-owned bytes: TransferableTypedData cannot carry a
+    // native-backed typed list across isolate boundaries safely.
+    final rgbaCopy = Uint8List.fromList(
+      result.rgbaData.asTypedList(bufferSize),
+    );
+
+    return _DecodeWorkerResult(
+      rgbaData: TransferableTypedData.fromList([rgbaCopy]),
+      width: width,
+      height: height,
+      decodeMs: result.decodeMs,
+      processMs: result.processMs,
+    );
   }
 
   // W5 (M-6): messages aligned with unified DngErrorCode enum.
