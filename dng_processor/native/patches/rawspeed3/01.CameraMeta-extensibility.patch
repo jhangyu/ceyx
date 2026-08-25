@@ -1,0 +1,13 @@
+diff --git a/src/librawspeed/metadata/CameraMetaData.h b/src/librawspeed/metadata/CameraMetaData.h
+index 636eab8..bd51234 100644
+--- a/src/librawspeed/metadata/CameraMetaData.h
++++ b/src/librawspeed/metadata/CameraMetaData.h
+@@ -73,7 +73,7 @@ public:
+   void disableMake(std::string_view make) const;
+   void disableCamera(std::string_view make, std::string_view model) const;
+ 
+-private:
++protected:
+   const Camera* addCamera(std::unique_ptr<Camera> cam);
+ };
+ 

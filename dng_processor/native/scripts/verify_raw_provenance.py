@@ -147,7 +147,13 @@ def main():
     # source file, which is direction-discriminating and patch-content
     # driven (not a hardcoded marker list that could silently drift from the
     # patch files).
-    REVERSE_APPLIED_PATCHES = {"01.CameraMeta-extensibility.patch"}
+    # Which of LibRaw's patches are stored in the direction OPPOSITE to how the
+    # vendored tree needs them. This is a property of the RawSpeed3 PIN, not a
+    # constant: it was {"01.CameraMeta-extensibility.patch"} at de70ef5f and is
+    # re-determined at every re-pin (Phase 19 Task 2, Step 5). At c835b05a all
+    # four surviving patches were re-generated as forward diffs against the new
+    # pin, so the set is empty.
+    REVERSE_APPLIED_PATCHES = set()
     for patch in patches:
         digest = hashlib.sha256(patch.read_bytes()).hexdigest()
         if digest not in text:

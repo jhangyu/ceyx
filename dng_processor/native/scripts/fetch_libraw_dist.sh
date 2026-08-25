@@ -12,7 +12,7 @@
 set -euo pipefail
 
 LIBRAW_REV="df226ea4178ccd74245f4f13c23adddfa01411c9"
-RAWSPEED_REV="de70ef5fbc62cde91009c8cff7a206272abe631e"
+RAWSPEED_REV="c835b05aecfacb7343f7c424abd620aa12116c3f"
 # LibRaw ships no CMakeLists.txt of its own at the pinned revision (see
 # third_party/libraw/README.cmake). This project vendors the community
 # LibRaw/LibRaw-cmake overlay as a third pinned dependency; see PROVENANCE.md.
@@ -70,6 +70,26 @@ clone_at "${RAWSPEED_URL}"     "${RAWSPEED_REV}"     "${RS_DEST}"
 clone_at "${LIBRAW_CMAKE_URL}" "${LIBRAW_CMAKE_REV}" "${LIBRAW_CMAKE_DEST}"
 
 PATCH_DIR="${DEST}/RawSpeed3/patches"
+# LibRaw ships its RawSpeed3 patch set INSIDE its own source tree, so
+# ${PATCH_DIR} is wiped and restored to LibRaw's originals by every LibRaw
+# re-clone above. LibRaw states its patches are valid only for one specific
+# RawSpeed commit-id (RawSpeed3/README.md), and Phase 19 re-pinned RawSpeed3
+# five years forward, so the set had to be re-ported. Keeping the re-ports as
+# in-place edits of ${PATCH_DIR} would make them unreproducible (destroyed by
+# the next fetch) -- exactly the "vendored edit recorded nowhere" this project
+# forbids. Instead the re-ported set is a tracked project directory and is
+# overlaid here, REPLACING LibRaw's originals wholesale: the replacement is
+# total (not a merge) so that a patch dropped as upstream-fixed stays dropped
+# rather than reappearing from LibRaw's tree. See third_party/libraw/
+# PROVENANCE.md "RawSpeed3 re-pin (Phase 19 W1)".
+RAWSPEED_PATCH_SRC="${NATIVE_DIR}/patches/rawspeed3"
+if [ -d "${RAWSPEED_PATCH_SRC}" ]; then
+  rm -rf "${PATCH_DIR}"
+  mkdir -p "${PATCH_DIR}"
+  cp "${RAWSPEED_PATCH_SRC}"/*.patch "${PATCH_DIR}/"
+  echo "[fetch] overlaid re-ported RawSpeed3 patch set from ${RAWSPEED_PATCH_SRC}"
+fi
+
 if [ -d "${PATCH_DIR}" ] && [ -d "${RS_DEST}/.git" ]; then
   for p in "${PATCH_DIR}"/*.patch; do
     [ -e "${p}" ] || continue

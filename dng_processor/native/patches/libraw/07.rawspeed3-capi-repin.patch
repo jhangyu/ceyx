@@ -1,0 +1,29 @@
+Phase 19 Task 2 (W1 re-pin): adapt LibRaw's RawSpeed3 C-API shim to the
+c835b05a RawSpeed3 API.
+
+`RawImageData::getDataUncropped(x, y)` existed at the old pin de70ef5f
+(2021) and has since been removed upstream. Its replacement is the typed
+accessor family added in the Array2DRef refactor; the byte-level, uncropped
+view is `RawImageData::getByteDataAsUncroppedArray2DRef()`
+(RawSpeed3/rawspeed/src/librawspeed/common/RawImage.h:135-136, dispatching to
+getU16DataAsUncroppedArray2DRef / getF32DataAsUncroppedArray2DRef at
+RawImage.h:330-339). Element (0,0) of that view is the same address that
+getDataUncropped(0,0) returned: the first byte of the uncropped image, which
+is what `rawspeed3_capi.h`'s `const void *pixeldata` is documented to hold and
+what LibRaw reads together with the separately-reported `pitch`.
+
+This is a mechanical API-name substitution; the value handed to LibRaw is
+unchanged.
+
+diff --git a/RawSpeed3/rawspeed3_c_api/rawspeed3_capi.cpp b/RawSpeed3/rawspeed3_c_api/rawspeed3_capi.cpp
+--- a/RawSpeed3/rawspeed3_c_api/rawspeed3_capi.cpp
++++ b/RawSpeed3/rawspeed3_c_api/rawspeed3_capi.cpp
+@@ -178,7 +178,7 @@
+         resultp->cpp = r->getCpp();
+         resultp->bpp = r->getBpp();
+         resultp->pitch = r->pitch;
+-        resultp->pixeldata = r->getDataUncropped(0,0);
++        resultp->pixeldata = &(r->getByteDataAsUncroppedArray2DRef()(0, 0));
+         const auto errors = r->getErrors();
+         resultp->status = errors.empty()? rawspeed3_ok : rawspeed3_ok_warnings;
+         return resultp->status;

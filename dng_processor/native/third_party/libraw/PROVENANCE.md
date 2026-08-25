@@ -11,13 +11,19 @@ reads.
 | Component | Source | Revision | License |
 |---|---|---|---|
 | LibRaw | https://github.com/LibRaw/LibRaw.git | df226ea4178ccd74245f4f13c23adddfa01411c9 | LGPL-2.1 (elected; CDDL-1.0 also offered upstream) |
-| RawSpeed | https://github.com/darktable-org/rawspeed.git | de70ef5fbc62cde91009c8cff7a206272abe631e | LGPL-2.1 |
+| RawSpeed | https://github.com/darktable-org/rawspeed.git | c835b05aecfacb7343f7c424abd620aa12116c3f | LGPL-2.1 |
 | LibRaw-cmake | https://github.com/LibRaw/LibRaw-cmake.git | eb98e4325aef2ce85d2eb031c2ff18640ca616d3 | MIT |
 | pugixml | bundled by RawSpeed at the above revision | (as vendored) | MIT |
 | zlib | project third_party | (existing project vendoring) | zlib |
 | libjpeg-turbo | project third_party | (existing project vendoring) | IJG / BSD-3 |
 
 ## Revision pin substitutions from the original plan
+
+> **Superseded for RawSpeed by Phase 19 W1.** The section below records the
+> Phase 17 decision to fall back from `c835b05a` to `de70ef5f`. Phase 19 moved
+> the pin forward to `c835b05a` after re-porting the patch set; see
+> "RawSpeed3 re-pin (Phase 19 W1)" below. The Phase 17 reasoning is kept
+> because it explains why the patch set needed re-porting at all.
 
 The implementation plan (`docs/superpowers/plans/2026-08-24-multi-raw-halide-pipeline.md`,
 section 14) pinned RawSpeed at `c835b05aecfacb7343f7c424abd620aa12116c3f`. At that
@@ -75,17 +81,26 @@ Header layout note: the correct header path exported by this pin is
 
 ## Applied patches
 
-Hashes below are for the RawSpeed3 patch set applied against RawSpeed commit
-`de70ef5fbc62cde91009c8cff7a206272abe631e`. Patch 01 is applied in reverse
-(see "Revision pin substitutions" above); 02-05 apply forward.
+Hashes below are for the RawSpeed3 patch set as **re-ported by Phase 19 W1**
+against RawSpeed commit `c835b05aecfacb7343f7c424abd620aa12116c3f`. All four
+surviving patches apply **forward** at this pin (no reverse case remains, so
+`verify_raw_provenance.py`'s `REVERSE_APPLIED_PATCHES` is empty).
+`04.clang-cl-compatibility.patch` is **dropped (upstream)** and is therefore
+absent from the table. See "RawSpeed3 re-pin (Phase 19 W1)" below.
+
+The re-ported patch files are project-owned and live in
+`dng_processor/native/patches/rawspeed3/`; `fetch_libraw_dist.sh` overlays them
+onto `RawSpeed3/patches/` after cloning LibRaw, replacing LibRaw's originals
+wholesale. They cannot be stored only in `RawSpeed3/patches/` because that
+directory sits inside the LibRaw source tree and is wiped and restored to
+LibRaw's originals by every LibRaw re-clone.
 
 | Patch | SHA-256 |
 |---|---|
-| 01.CameraMeta-extensibility.patch | fcbebe0d0e03ee3849fab63d5f115697fc5bcda124cdf56efe1f0de00826db0a |
-| 02.Makernotes-processing.patch | 865a63f2d42adfcb0728a556ca63c4822326d445f802e614e48e382aecf5cc7f |
-| 03.remove-limits-and-logging.patch | d7924108af23bcbd3a95cebdd29465b00172695f9a4bbf4a6de8f756af5394c4 |
-| 04.clang-cl-compatibility.patch | 44646383fc16c83b7c068452968b2e73c391201a0a01053a2b924cc4250ba7f1 |
-| 05.no-phase-one-correction.patch | 048db1b2ed7735bfbb136a4f42ab726566ef0f31c5706899d72535cb7fe41313 |
+| 01.CameraMeta-extensibility.patch | 2138a5221522011662097a21acc7b8abc792e1a2ad3f5772cb1c1dcb262070b1 |
+| 02.Makernotes-processing.patch | ce6245bbc12a8493add42444c51a4217bd177ff203c40f18cd610ec539d717fc |
+| 03.remove-limits-and-logging.patch | dea6e247b55b52ef97112fcc791a581b9f568c7d76a87f03f98216034c53e14b |
+| 05.no-phase-one-correction.patch | 7d972f23760337b48b36ba8d7b913fee1c0821bc9254b530690955be1a3ea24a |
 
 ## Project-authored LibRaw patches
 
@@ -113,9 +128,73 @@ Both samples measured `fuji_width == 0`, so the `(!IO.fuji_width)` clause in
 RawSpeed3 pin `de70ef5f`; patch 07 (conditional, would relax that clause for
 `filters == 9` X-Trans) was **not created**.
 
+Patch 07 (Phase 19 Task 2) adapts LibRaw's RawSpeed3 C-API shim to the
+re-pinned RawSpeed3 API; see "RawSpeed3 re-pin (Phase 19 W1)" below. Note this
+is a different patch 07 from the one contemplated (and not created) above: the
+`(!IO.fuji_width)` clause still never blocks these files, so no fuji-rotated
+gate patch exists.
+
 | Patch | SHA-256 |
 |---|---|
 | 06.fuji-tryrawspeed3.patch | 4da0ea93cbbb46aef4d52830612eb67212ee549e9f4aedacc572b99d6afa041f |
+| 07.rawspeed3-capi-repin.patch | 5fdd081ed321538f3d4b2d14ab77c428bda0a02e114c4f37037b208988049a0a |
+
+## RawSpeed3 re-pin (Phase 19 W1)
+
+The Phase 17 pin `de70ef5fbc62cde91009c8cff7a206272abe631e` (2021-09-10)
+predates the Fujifilm X-T5, so its `cameras.xml` cannot claim that body and
+RawSpeed3 declined the file regardless of LibRaw's dispatch flags. Phase 19
+re-pins RawSpeed3 to upstream develop at
+`c835b05aecfacb7343f7c424abd620aa12116c3f` (2026-07-28), which carries
+`RafDecoder` + `FujiDecompressor` and compressed X-T3/X-T5 entries
+(`RawSpeed3/rawspeed/data/cameras.xml:16511` plain and `:16530` `mode="compressed"`).
+
+LibRaw declares its five patches commit-specific (`RawSpeed3/README.md`). All
+five failed to apply at the new pin (`git apply --check` in both directions;
+captured in `scripts/tmp/p19/t2_patch_status_pre.txt`). Re-port outcome:
+
+| Patch | Direction at de70ef5f | Direction at c835b05a | Adjustment |
+|---|---|---|---|
+| 01.CameraMeta-extensibility.patch | reverse | forward | Re-ported to a new blocker. Upstream **adopted the patch's intent**: `metadata/CameraMetaData.h:46` now reads `// NOTE: *NOT* `final`, could be derived from by downstream.` and line 47 is `class CameraMetaData {`, so the `final` half is obsolete. But upstream moved `addCamera()` into a `private:` section (`CameraMetaData.h:76-77`), which blocks `rawspeed3_capi.cpp`'s `CameraMetaDataFromMem : public CameraMetaData` exactly as `final` used to (build errors at `rawspeed3_capi.cpp:241` and `:248`). The re-ported patch widens that `private:` to `protected:` — same purpose (subclass extensibility), new blocker. |
+| 02.Makernotes-processing.patch | forward | forward | Re-ported: intent unchanged (skip `LSI1` makernotes; bail to an empty IFD when the declared IFD size exceeds the entry's byte count). Context drift plus one API change — `ByteStream::hasPrefix()` now takes a `std::string_view` (`io/ByteStream.h:145`), so the `("LSI1\0", 5)` / `("AOC\0", 4)` literals are wrapped in `std::string_view(...)`. The `UINT32_MAX`-offset "virtual/empty IFD" contract the patch depends on is still honoured (`tiff/TiffIFD.cpp:114-117`). |
+| 03.remove-limits-and-logging.patch | forward | forward | Re-ported: same 15 files / 19 sites as at `de70ef5f`, context drift only. Two API renames absorbed: the log priority enum is now scoped (`DEBUG_PRIO::INFO` / `DEBUG_PRIO::EXTRA`), and several decompressor guards now spell the zero-area test `!mRaw->dim.hasPositiveArea()`. Scope deliberately **not** widened: upstream has added further max-dimension sites since 2021 (45 `Unexpected image dimensions found` sites tree-wide vs 19 here); a re-port preserves the original patch's scope rather than extending it. |
+| 04.clang-cl-compatibility.patch | forward | **dropped (upstream)** | Both hunks are fixed upstream. Hunk 1 worked around `typename = std::enable_if_t<std::is_pod<T>::value>` as a defaulted template parameter; upstream deleted that parameter entirely — the template now reads `template <typename T, typename ActualAllocator = std::allocator<T>>` (`adt/DefaultInitAllocatorAdaptor.h:28-29`, also moved from `common/`), and `std::is_pod` no longer occurs anywhere in the tree (`grep -rn 'is_pod' src/librawspeed/` → no matches). Hunk 2 worked around comparing a pointer with a container iterator (`&wavelet == channel.wavelets.begin()`, ill-formed on MSVC's class-type iterators); upstream now writes `&wavelet == &*channel.wavelets.begin()` (`decompressors/VC5Decompressor.cpp:420-421`), a pointer-to-pointer comparison that is valid on every implementation. |
+| 05.no-phase-one-correction.patch | forward | forward | Re-ported: context drift only. The double-correction hazard is unchanged — `IiqDecoder::CorrectPhaseOneC` still exists (`decoders/IiqDecoder.cpp:282`) and is still called unconditionally after decompression (`:271-272`); the patch compiles that call out so LibRaw's own PhaseOne correction is not applied twice. |
+
+C-API shim adaptation: one build error required a change to the vendored
+`rawspeed3_capi.cpp`, delivered as project patch
+`patches/libraw/07.rawspeed3-capi-repin.patch` (the vendored file is not edited
+in place):
+- `error: no member named 'getDataUncropped' in 'rawspeed::RawImageData'`
+  (`rawspeed3_capi.cpp:181`). Upstream removed `getDataUncropped(x, y)` in the
+  Array2DRef refactor; the equivalent uncropped byte view is
+  `getByteDataAsUncroppedArray2DRef()` (`common/RawImage.h:135-136`, dispatching
+  at `RawImage.h:330-339`), so the call becomes
+  `&(r->getByteDataAsUncroppedArray2DRef()(0, 0))`, the same address as before.
+- The two `error: 'addCamera' is a private member` errors
+  (`rawspeed3_capi.cpp:241`, `:248`) are resolved by the re-ported patch 01
+  above, not by a shim change.
+- No `CMakeLists.txt` change was needed: the `rawspeed` and
+  `rawspeed_get_number_of_processor_cores` targets, the `pugixml` target and
+  its `SOURCE_DIR` property, and `rsxml2c.sh` all still exist at the new pin.
+
+`rawspeed3_c_api/cameras.cpp` regenerates at configure time from the new pin's
+`data/cameras.xml` (`CMakeLists.txt` `execute_process` calling `rsxml2c.sh`), so
+a configure-inclusive build is required after any re-pin. Verified: the
+regenerated `build/rawspeed3-cameras/cameras.cpp` contains 8 `X-T5` and 16
+`X-T3` occurrences.
+
+Measured backend on the corpus RAF files after the re-pin:
+`dng_processor/native/scripts/tmp/p19/t2_eligibility.txt`. `fuji_xt3.raf` reads
+`backend=rawspeed3`; `fuji_xt5.raf` still reads `backend=libraw_native` even
+though the body is now in `cameras.xml` and the regenerated camera table. This
+is a recorded finding for Phase 19 Task 3, not a re-pin failure — the re-pin's
+success criteria are the build and the gates. Leading (but **unverified**)
+hypothesis: LibRaw throws `"Size mismatch"` when RawSpeed's reported dimensions
+differ from its own (`src/decoders/unpack.cpp:170-171`) and silently falls back
+to the native decoder; discriminating that from
+`LIBRAW_WARN_RAWSPEED3_NOTLISTED` needs the `process_warnings` bits, which
+`libraw_smoke` does not yet print.
 
 ## Local modifications
 
