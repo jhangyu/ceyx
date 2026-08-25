@@ -13,6 +13,7 @@
 #include "raw_contract_validate.h"
 #include "raw_file_router.h"
 #include "raw_render_params_builder.h"
+#include "raw_xtrans_demosaic.h"
 
 namespace {
 
@@ -163,6 +164,104 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     return kRawSuccess;
 }
 
+// Structurally identical to runBayerBranch: same borrowed stride-aware wrap,
+// same interleaved RGB16 device-dirty intermediate, the SAME shared Stage4
+// entry, the same RGBA pool checkout and the same ownership ordering. The only
+// differences are which AOT kernel runs and that the validated 6x6 CFA tile is
+// passed instead of the Bayer red-site phase.
+RawErrorCode runXTransBranch(const RawGpuInput& input,
+                             const RawDevelopParams& develop,
+                             RawPipelineResult& out) {
+    // Driven by the VALIDATED descriptor only: never by a decoder's mosaic
+    // shorthand and never by a camera make/model test (spec section 6.4.5).
+    // raw_classify_layout has already accepted the arrangement; this guard is
+    // the local precondition of the fixed-size copy below.
+    if (!input.layout.cfa_pattern || input.layout.cfa_pattern_count != 36) {
+        return kRawErrLayoutUnsupported;
+    }
+    int32_t cfa[36];
+    for (int i = 0; i < 36; ++i) {
+        cfa[i] = static_cast<int32_t>(input.layout.cfa_pattern[i]);
+    }
+
+    const RawPlaneView& plane = input.planes[0];
+    const uint32_t w = plane.width;
+    const uint32_t h = plane.height;
+    if (w == 0 || h == 0 || !plane.data) return kRawErrMetadataInvalid;
+
+    const RawRect& crop = input.default_crop;
+    if (crop.width == 0 || crop.height == 0 ||
+        crop.x < 0 || crop.y < 0 ||
+        static_cast<uint32_t>(crop.x) + crop.width > w ||
+        static_cast<uint32_t>(crop.y) + crop.height > h) {
+        return kRawErrMetadataInvalid;
+    }
+
+    halide_dimension_t src_dims[2] = {
+        {0, static_cast<int32_t>(w), 1, 0},
+        {0, static_cast<int32_t>(h),
+         static_cast<int32_t>(plane.row_stride_bytes / 2), 0}};
+    Halide::Runtime::Buffer<const uint16_t> src_buf(
+        static_cast<const uint16_t*>(plane.data), 2, src_dims);
+
+    // The kernel indexes the tile as cfa(x % 6, y % 6) with dim 0 stride 1, so
+    // the row-major descriptor array wraps directly (src/raw_demosaic_
+    // reference.cpp:228 builds the identical buffer for the same kernel).
+    Halide::Runtime::Buffer<const int32_t> cfa_buf(cfa, 6, 6);
+
+    const uint32_t bw = input.black.repeat_width ? input.black.repeat_width : 1;
+    const uint32_t bh = input.black.repeat_height ? input.black.repeat_height : 1;
+    Halide::Runtime::Buffer<const float> black_buf(
+        input.black.values, static_cast<int>(bw), static_cast<int>(bh));
+
+    Halide::Runtime::Buffer<uint16_t> stage3 =
+        Halide::Runtime::Buffer<uint16_t>::make_interleaved(
+            static_cast<int>(w), static_cast<int>(h), 3);
+
+    src_buf.set_host_dirty();
+    cfa_buf.set_host_dirty();
+    black_buf.set_host_dirty();
+    stage3.set_host_dirty(false);
+
+    const double gpu_t0 = nowMs();
+    if (raw_xtrans_demosaic(src_buf, cfa_buf, black_buf,
+                            computeInvRange(input), stage3) != 0) {
+        return kRawErrKernelFailed;
+    }
+
+    RenderParams params;
+    if (!buildRenderParamsFromRaw(input, develop, params)) {
+        return kRawErrMetadataInvalid;
+    }
+
+    const uint32_t out_w = crop.width;
+    const uint32_t out_h = crop.height;
+    const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
+
+    RgbaCheckoutGuard rgba(rgba_bytes);
+    if (!rgba.get()) return kRawErrAllocationFailed;
+
+    // Same shared Stage4 call as the Bayer branch: no second render path.
+    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
+                                            1.0f / 65535.0f,
+                                            crop.x, crop.y,
+                                            static_cast<int>(out_w),
+                                            static_cast<int>(out_h),
+                                            static_cast<int>(out_w),
+                                            static_cast<int>(out_h),
+                                            params, rgba.get(),
+                                            /*fuse_rgba=*/true)) {
+        return kRawErrKernelFailed;
+    }
+
+    out.diag.gpu_process_ms = nowMs() - gpu_t0;
+    out.width = out_w;
+    out.height = out_h;
+    out.rgba_size = rgba_bytes;
+    out.rgba_ptr = rgba.release();   // ownership moves to the caller
+    return kRawSuccess;
+}
+
 }  // namespace
 
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
@@ -202,11 +301,7 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
             rc = runBayerBranch(input, develop, out);
             break;
         case kRawLayoutClassXTrans6x6:
-            // Task 12 wires the X-Trans kernel. Until then this is an explicit,
-            // tested failure - never a Bayer misroute.
-            std::fprintf(stderr,
-                         "[RawPipeline] layout class 'xtrans6x6' has no kernel yet\n");
-            rc = kRawErrLayoutUnsupported;
+            rc = runXTransBranch(input, develop, out);
             break;
         default:
             std::fprintf(stderr, "[RawPipeline] layout class '%s' unsupported\n",

@@ -1,9 +1,15 @@
 // Generic RAW route, end to end: router -> LibRaw frontend -> adapter ->
 // fused normalize+demosaic -> shared Stage4 -> RGBA pool -> FFI.
 //
-// Task 10 ships Bayer. X-Trans is asserted here as an EXPLICIT
-// kRawErrLayoutUnsupported, so an accidental Bayer misroute fails loudly rather
-// than producing plausible-looking garbage. Task 12 flips those cases.
+// Task 12 ships X-Trans as a product route, so the former
+// "xtrans-unsupported" expectation is now a success expectation, and every
+// remaining layout class is asserted to route to an explicit
+// kRawErrLayoutUnsupported instead of reaching any kernel.
+//
+// No RAF sample exists in this checkout (both manifest entries are absent), so
+// the file-driven X-Trans cases SKIP. The synthetic X-Trans case below is the
+// runtime coverage of the X-Trans branch: it drives raw_pipeline_decode_to_rgba
+// with an in-memory canonical-tile mosaic and needs no corpus file.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -14,6 +20,7 @@
 
 #include "dng_ffi_api.h"
 #include "dng_pipeline_v2.h"
+#include "libraw_gpu_input_adapter.h"
 #include "raw_contract_validate.h"
 #include "raw_gpu_pipeline.h"
 
@@ -247,6 +254,12 @@ int main(int argc, char** argv) {
     const std::map<std::string, std::string> baseline = loadHashes(hashes_path);
     std::map<std::string, std::string> recorded;
     std::string first_bayer;
+    std::string first_xtrans;
+    // Aggregate for the bayer-unchanged gate below: a vacuous PASS would be
+    // worse than no line at all, so the count of actually-compared samples is
+    // tracked next to the verdict.
+    int bayer_hash_compared = 0;
+    bool bayer_hash_all_match = true;
 
     for (const Sample& s : samples) {
         if (s.id.rfind("malformed_", 0) == 0) continue;   // Task 13 owns these
@@ -328,16 +341,34 @@ int main(int argc, char** argv) {
                     std::snprintf(detail, sizeof(detail), "sha256=%s want=%s",
                                   digest.c_str(), it->second.c_str());
                     report("hash", s.id.c_str(), digest == it->second, detail);
+                    ++bayer_hash_compared;
+                    if (digest != it->second) bayer_hash_all_match = false;
                 }
             }
 
             if (first_bayer.empty()) first_bayer = s.path;
-        } else if (s.expect_layout == "xtrans6x6") {
-            std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
-                          raw_error_name(rc), result.rgba_ptr ? "NON-NULL" : "null");
-            report("xtrans-unsupported", s.id.c_str(),
-                   rc == kRawErrLayoutUnsupported && result.rgba_ptr == nullptr,
+        } else if (s.expect_layout == "xtrans6x6" && s.expect_error == "kRawSuccess") {
+            const bool alpha_ok = rc == kRawSuccess && result.rgba_ptr &&
+                alphaAll255(result.rgba_ptr,
+                            static_cast<size_t>(result.width) * result.height);
+            std::snprintf(detail, sizeof(detail),
+                          "class=xtrans6x6 size=%ux%u alpha=%s backend=%s repack=%lld rc=%s",
+                          result.width, result.height, alpha_ok ? "255" : "BAD",
+                          raw_backend_name(result.diag.unpack_backend),
+                          static_cast<long long>(result.diag.raw_repack_bytes),
+                          raw_error_name(rc));
+            report("", s.id.c_str(),
+                   alpha_ok && result.diag.cfa_repeat_width == 6 &&
+                       result.diag.cfa_repeat_height == 6 &&
+                       result.diag.raw_repack_bytes == 0,
                    detail);
+            if (first_xtrans.empty()) first_xtrans = s.path;
+        } else if (s.expect_layout == "xtrans6x6") {
+            std::snprintf(detail, sizeof(detail), "error=%s want=%s rgba=%s",
+                          raw_error_name(rc), s.expect_error.c_str(),
+                          result.rgba_ptr ? "NON-NULL" : "null");
+            report("xtrans-expected-failure", s.id.c_str(),
+                   rc != kRawSuccess && result.rgba_ptr == nullptr, detail);
         } else {
             std::snprintf(detail, sizeof(detail), "error=%s want=%s",
                           raw_error_name(rc), s.expect_error.c_str());
@@ -383,6 +414,233 @@ int main(int argc, char** argv) {
         report("dng-delegation", nullptr, ok, detail);
         if (via_raw) dng_free_result(via_raw);
         if (via_dng) dng_free_result(via_dng);
+    }
+
+    // Forced native fallback on X-Trans too.
+    if (!first_xtrans.empty()) {
+        RawDevelopParams develop{};
+        develop.tone_curve_strength = 1.0f;
+        develop.output_space = kRawOutputColorSpaceSrgb;
+        RawPipelineResult forced;
+        const RawErrorCode rc =
+            raw_pipeline_decode_file_forced(first_xtrans.c_str(), develop,
+                                            RawForcedBackend::kLibRawNative, forced);
+        char detail[200];
+        std::snprintf(detail, sizeof(detail), "backend=%s size=%ux%u rc=%s",
+                      raw_backend_name(forced.diag.unpack_backend),
+                      forced.width, forced.height, raw_error_name(rc));
+        report("xtrans-forced-fallback", "first_xtrans",
+               rc == kRawSuccess && forced.rgba_ptr != nullptr &&
+                   forced.diag.unpack_backend == kRawDecoderBackendLibRawNative,
+               detail);
+        if (forced.rgba_ptr) dng_rgba_output_release(forced.rgba_ptr);
+    } else {
+        std::printf("[RawE2E] SKIP xtrans-forced-fallback (no X-Trans sample "
+                    "file present)\n");
+    }
+
+    // Every non-production class must route to kRawErrLayoutUnsupported, and
+    // none of them may reach a kernel. Synthetic inputs, so this runs even when
+    // no exotic sample file is on disk.
+    {
+        struct Case { const char* name; RawSampleModel model; uint32_t comps;
+                      uint32_t repeat_w; uint32_t repeat_h; };
+        const Case cases[] = {
+            {"monochrome",   kRawSampleModelMonochrome,   1, 0, 0},
+            {"linear_rgb",   kRawSampleModelLinearRgb,    3, 0, 0},
+            {"linear_ycbcr", kRawSampleModelLinearYCbCr,  3, 0, 0},
+            {"other_cfa",    kRawSampleModelCfa,          1, 4, 4},
+            {"layered",      kRawSampleModelLayered,      3, 0, 0},
+            {"multi_frame",  kRawSampleModelMultiFrame,   1, 0, 0},
+        };
+
+        static uint16_t storage[64 * 48];
+        static RawColorKey quad[16];
+        for (int i = 0; i < 16; ++i) {
+            const int qr = (i / 4) / 2, qc = (i % 4) / 2;
+            quad[i] = (qr == 0 && qc == 0) ? kRawColorKeyRed
+                    : (qr == 1 && qc == 1) ? kRawColorKeyBlue : kRawColorKeyGreen;
+        }
+
+        for (const Case& kase : cases) {
+            RawPlaneView plane{};
+            plane.data = storage;
+            plane.byte_size = sizeof(storage);
+            plane.width = 64; plane.height = 48;
+            plane.row_stride_bytes = 128; plane.pixel_stride_bytes = 2;
+
+            RawGpuInput in{};
+            in.planes = &plane; in.plane_count = 1;
+            in.layout.sample_model = kase.model;
+            in.layout.sample_type = kRawSampleTypeU16;
+            in.layout.plane_count = 1;
+            in.layout.components_per_pixel = kase.comps;
+            in.layout.cfa_repeat_width = kase.repeat_w;
+            in.layout.cfa_repeat_height = kase.repeat_h;
+            in.layout.cfa_pattern = kase.repeat_w ? quad : nullptr;
+            in.layout.cfa_pattern_count = kase.repeat_w ? 16 : 0;
+            in.active_area = RawRect{0, 0, 64, 48};
+            in.default_crop = RawRect{0, 0, 64, 48};
+            in.orientation = kRawOrientationTopLeft;
+            in.black.repeat_width = 1; in.black.repeat_height = 1;
+            in.black.values[0] = 512.0f;
+            for (int i = 0; i < 4; ++i) {
+                in.white_level[i] = 16383.0f;
+                in.as_shot_neutral[i] = 1.0f;
+            }
+            in.camera_to_pcs.valid = 1;
+            in.camera_to_pcs.out_rows = 3; in.camera_to_pcs.in_cols = 3;
+            for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+
+            RawDevelopParams develop{};
+            develop.tone_curve_strength = 1.0f;
+            develop.output_space = kRawOutputColorSpaceSrgb;
+            RawPipelineResult out;
+            const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+
+            char detail[200];
+            std::snprintf(detail, sizeof(detail), "class=%s error=%s rgba=%s",
+                          kase.name, raw_error_name(rc),
+                          out.rgba_ptr ? "NON-NULL" : "null");
+            report("layout-routing", nullptr,
+                   rc == kRawErrLayoutUnsupported && out.rgba_ptr == nullptr, detail);
+            if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+        }
+    }
+
+    // Synthetic X-Trans product route. No RAF file exists in this checkout, so
+    // without this case the X-Trans branch would ship with zero runtime
+    // coverage: this is the case that is RED before the branch is wired (the
+    // dispatch returned kRawErrLayoutUnsupported for this class) and GREEN
+    // after. The tile is the canonical Fujifilm arrangement, i.e. what
+    // raw_classify_layout accepts as kRawLayoutClassXTrans6x6.
+    {
+        const int kW = 72, kH = 48;            // both multiples of the 6x6 tile
+        static uint16_t storage[kW * kH];
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                storage[y * kW + x] =
+                    static_cast<uint16_t>(600 + ((x * 37 + y * 91) % 9000));
+            }
+        }
+        // Same tile as src/raw_contract_validate.cpp's kCanonicalXTrans
+        // (R=0, G=1, B=2), spelled with the contract's enum.
+        const int tile[36] = {
+            1, 1, 0, 1, 1, 2,
+            1, 1, 2, 1, 1, 0,
+            2, 0, 1, 0, 2, 1,
+            1, 1, 2, 1, 1, 0,
+            1, 1, 0, 1, 1, 2,
+            0, 2, 1, 2, 0, 1,
+        };
+        static RawColorKey cfa[36];
+        for (int i = 0; i < 36; ++i) cfa[i] = static_cast<RawColorKey>(tile[i]);
+
+        RawPlaneView plane{};
+        plane.data = storage;
+        plane.byte_size = sizeof(storage);
+        plane.width = kW; plane.height = kH;
+        plane.row_stride_bytes = kW * 2; plane.pixel_stride_bytes = 2;
+
+        RawGpuInput in{};
+        in.planes = &plane; in.plane_count = 1;
+        in.layout.sample_model = kRawSampleModelCfa;
+        in.layout.sample_type = kRawSampleTypeU16;
+        in.layout.plane_count = 1;
+        in.layout.components_per_pixel = 1;
+        in.layout.cfa_repeat_width = 6;
+        in.layout.cfa_repeat_height = 6;
+        in.layout.cfa_pattern = cfa;
+        in.layout.cfa_pattern_count = 36;
+        in.active_area = RawRect{0, 0, kW, kH};
+        in.default_crop = RawRect{0, 0, kW, kH};
+        in.orientation = kRawOrientationTopLeft;
+        in.black.repeat_width = 1; in.black.repeat_height = 1;
+        in.black.values[0] = 512.0f;
+        for (int i = 0; i < 4; ++i) {
+            in.white_level[i] = 16383.0f;
+            in.as_shot_neutral[i] = 1.0f;
+        }
+        in.camera_to_pcs.valid = 1;
+        in.camera_to_pcs.out_rows = 3; in.camera_to_pcs.in_cols = 3;
+        for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+
+        RawDevelopParams develop{};
+        develop.tone_curve_strength = 1.0f;
+        develop.output_space = kRawOutputColorSpaceSrgb;
+        RawPipelineResult out;
+        const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+
+        const bool alpha_ok = rc == kRawSuccess && out.rgba_ptr &&
+            alphaAll255(out.rgba_ptr,
+                        static_cast<size_t>(out.width) * out.height);
+        // A uniform frame would also satisfy alpha/size, so the output is
+        // additionally required to carry more than one distinct RGB value.
+        bool varies = false;
+        if (rc == kRawSuccess && out.rgba_ptr && out.rgba_size >= 8) {
+            for (size_t i = 4; i < out.rgba_size && !varies; i += 4) {
+                varies = out.rgba_ptr[i] != out.rgba_ptr[0] ||
+                         out.rgba_ptr[i + 1] != out.rgba_ptr[1] ||
+                         out.rgba_ptr[i + 2] != out.rgba_ptr[2];
+            }
+        }
+        char detail[240];
+        std::snprintf(detail, sizeof(detail),
+                      "class=xtrans6x6 size=%ux%u alpha=%s varies=%d "
+                      "cfa_repeat=%ux%u rc=%s",
+                      out.width, out.height, alpha_ok ? "255" : "BAD",
+                      varies ? 1 : 0, out.diag.cfa_repeat_width,
+                      out.diag.cfa_repeat_height, raw_error_name(rc));
+        report("xtrans-synthetic", nullptr,
+               alpha_ok && varies && out.width == static_cast<uint32_t>(kW) &&
+                   out.height == static_cast<uint32_t>(kH) &&
+                   out.diag.cfa_repeat_width == 6 &&
+                   out.diag.cfa_repeat_height == 6,
+               detail);
+        if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+    }
+
+    // A corrupted X-Trans pattern must fail explicitly, not render garbage.
+    if (!first_xtrans.empty()) {
+        LibRawFrontendContext ctx;
+        if (ctx.open_and_unpack(first_xtrans.c_str()) == kRawSuccess) {
+            LibRawGpuInputAdapter adapter;
+            RawGpuInput in{};
+            RawDevelopParams dev{};
+            char reason[256] = {0};
+            adapter.build(ctx, &in, &dev, reason, sizeof(reason));
+
+            RawColorKey corrupted[36];
+            for (int i = 0; i < 36; ++i) corrupted[i] = in.layout.cfa_pattern[i];
+            corrupted[7] = kRawColorKeyUnknown;
+            in.layout.cfa_pattern = corrupted;
+
+            RawPipelineResult out;
+            const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, dev, out);
+            char detail[160];
+            std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
+                          raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null");
+            report("bad-cfa-explicit-failure", nullptr,
+                   rc == kRawErrLayoutUnsupported && out.rgba_ptr == nullptr, detail);
+            if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+        }
+    } else {
+        std::printf("[RawE2E] SKIP bad-cfa-explicit-failure (no X-Trans sample "
+                    "file present)\n");
+    }
+
+    // The Bayer route must not have moved a single byte. The per-sample `hash`
+    // lines above are the evidence; this is the named aggregate verdict.
+    if (!record_hashes) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "compared=%d all_match=%d",
+                      bayer_hash_compared, bayer_hash_all_match ? 1 : 0);
+        if (bayer_hash_compared == 0) {
+            std::printf("[RawE2E] SKIP bayer-unchanged (%s: no Bayer sample "
+                        "with a recorded baseline was present)\n", detail);
+        } else {
+            report("bayer-unchanged", nullptr, bayer_hash_all_match, detail);
+        }
     }
 
     // Nothing may stay checked out, on success or failure.
