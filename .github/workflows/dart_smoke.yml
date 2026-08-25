@@ -5,7 +5,8 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "dng_processor/**"
+      - "app/**"
+      - "plugin/**"
       - ".github/workflows/dart_smoke.yml"
 
 concurrency:
@@ -19,7 +20,7 @@ jobs:
     timeout-minutes: 30
     env:
       REPO_ROOT: ${{ github.workspace }}
-      FLUTTER_DIR: ${{ github.workspace }}/dng_processor
+      FLUTTER_DIR: ${{ github.workspace }}/app
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
       - name: Checkout
@@ -34,15 +35,15 @@ jobs:
           cache: true
 
       - name: Flutter pub get
-        working-directory: ${{ github.workspace }}/dng_processor
+        working-directory: ${{ github.workspace }}/app
         run: flutter pub get
 
       - name: dart analyze
-        working-directory: ${{ github.workspace }}/dng_processor
+        working-directory: ${{ github.workspace }}/app
         run: dart analyze
 
       - name: flutter test (if present)
-        working-directory: ${{ github.workspace }}/dng_processor
+        working-directory: ${{ github.workspace }}/app
         run: |
           if [ -d test ] && find test -name "*_test.dart" -print -quit | grep -q .; then
             flutter test
@@ -58,7 +59,7 @@ jobs:
           path: ${{ github.workspace }}/artifacts/native
 
       - name: Optional FFI smoke (requires sample DNG + native dylib)
-        working-directory: ${{ github.workspace }}/dng_processor
+        working-directory: ${{ github.workspace }}/app
         env:
           DNG_NATIVE_BUILD_DIR: ${{ github.workspace }}/artifacts/native
         run: |

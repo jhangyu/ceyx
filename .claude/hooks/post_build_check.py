@@ -48,7 +48,7 @@ print("\n[post-hook] Build 完成，執行 PSNR / 效能回退確認...")
 
 try:
     result = subprocess.run(
-        ["python3", "dng_processor/native/tests/run_decode_matrix.py"],
+        ["python3", "native/tests/run_decode_matrix.py"],
         capture_output=True,
         text=True,
         timeout=300,

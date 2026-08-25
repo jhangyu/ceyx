@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "dng_processor/native/**"
+      - "native/**"
       - ".github/workflows/native_build.yml"
 
 concurrency:
@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 60
     env:
       REPO_ROOT: ${{ github.workspace }}
-      NATIVE_DIR: ${{ github.workspace }}/dng_processor/native
+      NATIVE_DIR: ${{ github.workspace }}/native
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
       - name: Checkout
@@ -41,8 +41,8 @@ jobs:
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/dng_processor/native/build
-          key: native-build-${{ runner.os }}-${{ hashFiles('dng_processor/native/CMakeLists.txt') }}
+          path: ${{ github.workspace }}/native/build
+          key: native-build-${{ runner.os }}-${{ hashFiles('native/CMakeLists.txt') }}
           restore-keys: |
             native-build-${{ runner.os }}-
 
@@ -53,7 +53,7 @@ jobs:
         id: native_build
         working-directory: ${{ github.workspace }}
         run: |
-          python3 dng_processor/native/scripts/build_native_watchdog.py --target dng_decoder_native
+          python3 native/scripts/build_native_watchdog.py --target dng_decoder_native
 
       - name: Collect AOT build metrics (observation-only)
         if: ${{ always() }}

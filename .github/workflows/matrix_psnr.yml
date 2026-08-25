@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "dng_processor/native/**"
+      - "native/**"
       - ".github/workflows/matrix_psnr.yml"
 
 concurrency:
@@ -20,7 +20,7 @@ jobs:
     needs: []
     env:
       REPO_ROOT: ${{ github.workspace }}
-      NATIVE_DIR: ${{ github.workspace }}/dng_processor/native
+      NATIVE_DIR: ${{ github.workspace }}/native
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
       - name: Checkout
@@ -63,13 +63,13 @@ jobs:
         if: steps.samples.outputs.available == 'true'
         working-directory: ${{ github.workspace }}
         run: |
-          python3 dng_processor/native/scripts/build_native_watchdog.py --target test_decode
+          python3 native/scripts/build_native_watchdog.py --target test_decode
 
       - name: Build test_device_handoff target
         if: steps.samples.outputs.available == 'true'
         working-directory: ${{ github.workspace }}
         run: |
-          python3 dng_processor/native/scripts/build_native_watchdog.py \
+          python3 native/scripts/build_native_watchdog.py \
             --target test_device_handoff --skip-configure
 
       - name: Run run_decode_matrix.py (PSNR gate enforced by W5)
@@ -77,9 +77,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p "${ARTIFACT_DIR}"
-          python3 dng_processor/native/tests/run_decode_matrix.py \
+          python3 native/tests/run_decode_matrix.py \
             --repeat 1 \
-            --device-handoff-harness dng_processor/native/build/test_device_handoff
+            --device-handoff-harness native/build/test_device_handoff
 
       - name: Upload PSNR matrix artifacts
         if: always() && steps.samples.outputs.available == 'true'

@@ -33,13 +33,13 @@ file_path = tool_input.get("file_path", "")
 
 # Check if this is a native C++ file edit
 if tool_name in ("Edit", "Write"):
-    native_pattern = r"dng_processor/native/.*\.(cpp|h|c|mm)$"
+    native_pattern = r"(?:^|/)native/(src|include|tests)/.*\.(cpp|h|c|mm)$"
     if re.search(native_pattern, file_path):
         try:
             result = subprocess.run(
                 [
                     "python3",
-                    "dng_processor/native/scripts/build_native_watchdog.py",
+                    "native/scripts/build_native_watchdog.py",
                     "--skip-configure",
                     "--target",
                     "test_decode",
