@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/dng_bindings.dart';
+import 'package:ceyx/src/dng_bindings.dart';
 
 /// D4 (2026-08-17): `_openFirst` used to keep only the LAST candidate's error,
 /// which hid the real failure cause during the libjpeg/App-Sandbox blocker

@@ -1,5 +1,5 @@
 Private, unpublished package (publish_to: none).
 
 The vendored binaries in this package are builds of the sources under
-../dng_processor/native. Third-party components linked into them (Adobe DNG
+../native. Third-party components linked into them (Adobe DNG
 SDK, Halide, libjpeg-turbo, zlib) are covered by ../THIRD_PARTY_LICENSES.md.

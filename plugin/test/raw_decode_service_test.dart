@@ -2,8 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
-import 'package:dng_processor_ffi/src/raw_error_codes.dart';
+import 'package:ceyx/src/dng_decoder_service.dart';
+import 'package:ceyx/src/raw_error_codes.dart';
 
 /// Service-layer contract for the generic RAW route (Phase 18 spec §3.2, §4).
 ///
@@ -12,7 +12,7 @@ import 'package:dng_processor_ffi/src/raw_error_codes.dart';
 /// RGBA pool checked out for the rest of the file. Every pool==0 assertion is
 /// therefore declared BEFORE the first zero-copy decode. Do not reorder.
 ///
-/// flutter test runs with cwd == package root (dng_processor_ffi/).
+/// flutter test runs with cwd == package root (plugin/).
 void main() {
   final dylibPath = File(
     'macos/Libraries/libdng_decoder_native.dylib',

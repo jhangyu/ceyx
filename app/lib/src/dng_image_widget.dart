@@ -3,7 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
-import 'package:dng_processor_ffi/dng_processor_ffi.dart';
+import 'package:ceyx/ceyx.dart';
 
 /// Converts a [DngImage] (RGBA buffer) to a Flutter [ui.Image].
 Future<ui.Image> dngImageToUiImage(DngImage dngImage) {

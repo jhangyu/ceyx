@@ -1,4 +1,4 @@
-# dng_processor
+# ceyx_example
 
 Flutter UI and Dart FFI frontend for the native DNG decoder.
 
@@ -31,9 +31,9 @@ are published to a shallow `dist/` tree:
 
 ```text
 dist/
-├── dng_processor.app
+├── ceyx_example.app
 ├── libdng_decoder_native.dylib
-├── dng_processor.apk
+├── ceyx_example.apk
 └── web/
 ```
 

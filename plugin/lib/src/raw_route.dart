@@ -1,7 +1,7 @@
 /// Extension-based decode routing for the Dart layer.
 ///
 /// IMPORTANT — this list is NOT a mirror of a native list. The native router
-/// `dng_processor/native/src/raw_file_router.cpp` decides DNG vs generic by
+/// `native/src/raw_file_router.cpp` decides DNG vs generic by
 /// probing magic bytes (`raw_probe_bytes`), and holds no extension table at
 /// all. This const is the app-level PRE-FILTER: it decides which FFI entry
 /// point Dart calls and which files the picker offers. The authoritative

@@ -2,8 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/dng_bindings.dart';
-import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
+import 'package:ceyx/src/dng_bindings.dart';
+import 'package:ceyx/src/dng_decoder_service.dart';
 
 /// Covers the guarded lookup skeleton for `dng_decode_and_process_sized`
 /// (2026-08-23 handover,
@@ -36,7 +36,7 @@ import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
 /// particular sizedDecodeAvailable value) and stay bound to the shipped
 /// dylib, unchanged.
 ///
-/// flutter test runs with cwd == package root (dng_processor_ffi/), so all
+/// flutter test runs with cwd == package root (plugin/), so all
 /// paths below are resolved relative to Directory.current.
 void main() {
   final dylibPath = File(

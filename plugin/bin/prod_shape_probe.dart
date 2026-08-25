@@ -6,8 +6,8 @@
 // Exercises the EXACT shape production callers use — default constructor,
 // no `libraryPath:` override — because `libraryPath:` bypasses the real
 // `DngNativeBindings.load()` candidate search this probe exists to cover:
-//   dng_processor/lib/main.dart:59 field, :79 initialize(), :163
-//   decodeOnWorker; dng_processor/bin/benchmark_zero_copy.dart:33/62.
+//   ceyx_example/lib/main.dart:59 field, :79 initialize(), :163
+//   decodeOnWorker; app/bin/benchmark_zero_copy.dart:33/62.
 //
 // COVERAGE LIMIT: this probe is run via
 // tool/run_prod_shape_probe.sh, which sets DNG_NATIVE_BUILD_DIR so
@@ -57,7 +57,7 @@
 // `flutter test`. A throwaway probe under `flutter test` showed
 // `Platform.script` resolves to a synthetic `<pkg>/main.dart` at the
 // package root (not under bin/), so load()'s script-relative candidates
-// (4a/4b) never reach `dng_processor/native/dist|build`; and
+// (4a/4b) never reach `native/dist|build`; and
 // `Platform.resolvedExecutable` resolves to the Flutter SDK's own
 // `flutter_tester` binary under `bin/cache/artifacts/engine/...`, so the
 // execDir/../Frameworks candidate (2) resolves into the SDK's engine tree,
@@ -70,7 +70,7 @@
 
 import 'dart:io';
 
-import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
+import 'package:ceyx/src/dng_decoder_service.dart';
 
 const int _defaultMaxDim = 200;
 const int _maxDimToleranceOnLongEdge = 1;

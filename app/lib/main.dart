@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'dng_processor.dart';
+import 'ceyx_example.dart';
 
 /*
 ---
@@ -121,7 +121,7 @@ class _DngHomePageState extends State<DngHomePage> {
 
   Future<void> _pickAndDecode() async {
     // Pick a RAW or DNG file. The accepted list is derived from
-    // kSupportedDecodeExtensions (dng_processor_ffi/lib/src/raw_route.dart)
+    // kSupportedDecodeExtensions (plugin/lib/src/raw_route.dart)
     // so the picker can never drift from the decoder's routing table.
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,

@@ -1,4 +1,4 @@
-name: dng_processor
+name: ceyx_example
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -45,9 +45,9 @@ dependencies:
   # It lives in a separate package because this project is an app project —
   # its android/ and macos/ are app-shaped, so it cannot declare
   # `flutter: plugin: platforms:` itself without breaking host app builds.
-  # See ../dng_processor_ffi/README.md.
-  dng_processor_ffi:
-    path: ../dng_processor_ffi
+  # See ../plugin/README.md.
+  ceyx:
+    path: ../plugin
 
 dev_dependencies:
   flutter_test:

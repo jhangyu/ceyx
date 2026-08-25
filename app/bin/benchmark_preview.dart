@@ -2,7 +2,7 @@
 
 import 'dart:async';
 import 'dart:io';
-import 'package:dng_processor_ffi/dng_processor_ffi.dart';
+import 'package:ceyx/ceyx.dart';
 import 'package:path/path.dart' as p;
 
 /// Benchmark: preview JPEG extraction via DngDecoderService worker isolate.

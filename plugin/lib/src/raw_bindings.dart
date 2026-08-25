@@ -2,7 +2,7 @@ import 'dart:ffi' as ffi;
 
 /// FFI mirror of the generic-RAW diagnostics contract.
 ///
-/// Source of truth: `dng_processor/native/include/raw_pipeline_contract.h`
+/// Source of truth: `native/include/raw_pipeline_contract.h`
 /// (struct `RawDecodeDiagnostics`, lines 189-202). Field ORDER and WIDTH are
 /// the contract; `test/raw_bindings_layout_test.dart` asserts both the size
 /// and live field values after a real decode, because a size check alone

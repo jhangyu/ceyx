@@ -4,7 +4,7 @@
 # tooling only needs this file to discover the bundled-library path, it does
 # not generate any Dart<->C++ registration for it.
 #
-# Mirrors the macOS (dng_processor_ffi.podspec, `vendored_libraries`) and
+# Mirrors the macOS (ceyx.podspec, `vendored_libraries`) and
 # Android (build.gradle, `jniLibs`) packaging-only siblings in this package.
 #
 # The Flutter tooling requires CMake 3.14+ (same floor as every other
@@ -12,7 +12,7 @@
 # raise this, it would break older Visual Studio toolchains.
 cmake_minimum_required(VERSION 3.14)
 
-project(dng_processor_ffi_library LANGUAGES CXX)
+project(ceyx_library LANGUAGES CXX)
 
 # ---------------------------------------------------------------------------
 # CRITICAL: variable name contract
@@ -24,10 +24,10 @@ project(dng_processor_ffi_library LANGUAGES CXX)
 #     list(APPEND PLUGIN_BUNDLED_LIBRARIES ${${ffi_plugin}_bundled_libraries})
 #   endforeach(ffi_plugin)
 #
-# `${ffi_plugin}` resolves to the pubspec package name `dng_processor_ffi`, so
+# `${ffi_plugin}` resolves to the pubspec package name `ceyx`, so
 # the dereferenced variable name at that call site is literally
-# `dng_processor_ffi_bundled_libraries`. If this file sets any other name (a
-# typo, wrong case, missing package prefix), `${dng_processor_ffi_bundled_libraries}`
+# `ceyx_bundled_libraries`. If this file sets any other name (a
+# typo, wrong case, missing package prefix), `${ceyx_bundled_libraries}`
 # is simply empty in the parent scope — CMake does not error, `flutter build
 # windows` succeeds, and the DLL is silently never copied next to the exe.
 # The failure only shows up later as a runtime `DynamicLibrary.open` error
@@ -45,7 +45,7 @@ project(dng_processor_ffi_library LANGUAGES CXX)
 # will fail loudly (missing file) if a Windows build is attempted before W12
 # lands — that is the intended, non-silent failure mode once this variable is
 # wired correctly.
-set(dng_processor_ffi_bundled_libraries
+set(ceyx_bundled_libraries
   "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/dng_decoder_native.dll"
   PARENT_SCOPE
 )

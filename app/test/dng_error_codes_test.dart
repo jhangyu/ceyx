@@ -1,6 +1,6 @@
 // W5 (M-6) regression test: keeps the Dart mirror `DngErrorCode`
-// (package:dng_processor_ffi's dng_decoder_service.dart) in lockstep with the
-// C source of truth `dng_processor/native/include/dng_error_codes.h`.
+// (package:ceyx's dng_decoder_service.dart) in lockstep with the
+// C source of truth `native/include/dng_error_codes.h`.
 //
 // This test does NOT load the native dylib (pure Dart constant check),
 // so it is safe to run in CI / any environment without a native build.
@@ -10,7 +10,7 @@
 // "Any addition or value change here MUST be reflected in the Dart
 // mirror" comment.
 import 'package:flutter_test/flutter_test.dart';
-import 'package:dng_processor/dng_processor.dart';
+import 'package:ceyx_example/ceyx_example.dart';
 
 void main() {
   group('DngErrorCode Dart/C mirror contract', () {

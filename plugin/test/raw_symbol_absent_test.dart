@@ -2,9 +2,9 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/dng_bindings.dart';
-import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
-import 'package:dng_processor_ffi/src/raw_error_codes.dart';
+import 'package:ceyx/src/dng_bindings.dart';
+import 'package:ceyx/src/dng_decoder_service.dart';
+import 'package:ceyx/src/raw_error_codes.dart';
 
 /// Spec §4: symbol absent (OFF build or old dylib) must produce a typed
 /// RawUnavailableException — not a crash, and not a silent fallback to the

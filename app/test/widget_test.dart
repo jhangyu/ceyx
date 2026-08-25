@@ -17,7 +17,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor/main.dart';
+import 'package:ceyx_example/main.dart';
 
 void main() {
   testWidgets('DngProcessorApp renders home scaffold chrome', (

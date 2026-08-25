@@ -8,8 +8,8 @@
 /// * Android — Gradle packs `android/src/main/jniLibs/<abi>/
 ///             libdng_decoder_native.so` into the APK.
 ///
-/// Host apps should depend on this package rather than on `dng_processor`:
-/// `dng_processor` is a Flutter *app* project whose harness dependencies
+/// Host apps should depend on this package rather than on `ceyx_example`:
+/// `ceyx_example` is a Flutter *app* project whose harness dependencies
 /// (file_picker, path_provider) leak into any app that depends on it.
 library;
 
@@ -37,4 +37,4 @@ export 'src/raw_bindings.dart'
 
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.
-const String dngNativeLibraryTag = 'dng_processor_ffi-0.0.1';
+const String dngNativeLibraryTag = 'ceyx-0.0.1';

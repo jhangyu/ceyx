@@ -2,7 +2,7 @@
 
 import 'dart:async';
 import 'dart:io';
-import 'package:dng_processor_ffi/dng_processor_ffi.dart';
+import 'package:ceyx/ceyx.dart';
 
 /// W5-5 / TD-9: Assert that the decoded image has valid dimensions and no
 /// error code. Exits with code 1 on assertion failure so CI can detect regressions.

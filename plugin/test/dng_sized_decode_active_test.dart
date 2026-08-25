@@ -2,8 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/dng_bindings.dart';
-import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
+import 'package:ceyx/src/dng_bindings.dart';
+import 'package:ceyx/src/dng_decoder_service.dart';
 
 /// Covers the sized-decode ACTIVE path — sized symbol present, sized entry
 /// exercised end-to-end. Complements dng_sized_decode_fallback_test.dart,
@@ -27,7 +27,7 @@ import 'package:dng_processor_ffi/src/dng_decoder_service.dart';
 /// becomes available and the `_bindings.sizedDecodeAvailable` gate in
 /// `_decodeToTransferable` starts evaluating true.
 ///
-/// flutter test runs with cwd == package root (dng_processor_ffi/), so all
+/// flutter test runs with cwd == package root (plugin/), so all
 /// paths below are resolved relative to Directory.current.
 void main() {
   final dylibPath = File(

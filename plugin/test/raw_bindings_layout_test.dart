@@ -4,14 +4,14 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/dng_bindings.dart';
-import 'package:dng_processor_ffi/src/raw_bindings.dart';
+import 'package:ceyx/src/dng_bindings.dart';
+import 'package:ceyx/src/raw_bindings.dart';
 
 /// Guards the C<->Dart layout of RawDecodeDiagnostics
-/// (dng_processor/native/include/raw_pipeline_contract.h:189-202) and the
+/// (native/include/raw_pipeline_contract.h:189-202) and the
 /// guarded lookup of the RAW symbols.
 ///
-/// flutter test runs with cwd == package root (dng_processor_ffi/), so all
+/// flutter test runs with cwd == package root (plugin/), so all
 /// paths below are resolved relative to Directory.current.
 void main() {
   final dylibPath = File(

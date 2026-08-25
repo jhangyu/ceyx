@@ -4,7 +4,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:dng_processor_ffi/dng_processor_ffi.dart';
+import 'package:ceyx/ceyx.dart';
 
 /// Phase 18 acceptance harness (spec §5 criterion 1) for the generic RAW
 /// route: dimensions, first-pixel checksum, native diagnostics, and RGBA pool

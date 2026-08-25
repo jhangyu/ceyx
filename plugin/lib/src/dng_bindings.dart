@@ -414,7 +414,7 @@ class DngNativeBindings {
       // Priority:
       //   1. System default (DYLD_LIBRARY_PATH) — no path prefix needed
       //   2. App bundle Frameworks/ — production distribution, populated by the
-      //      `dng_processor_ffi` plugin pod (see dng_processor_ffi/README.md)
+      //      `ceyx` plugin pod (see plugin/README.md)
       //   3. DNG_NATIVE_BUILD_DIR env override — CI / custom build directories
       //   4. Platform.script-relative — dart run from repo root (e.g. dart run bin/*)
       //
@@ -428,13 +428,14 @@ class DngNativeBindings {
       final scriptDir = Platform.script.toFilePath(windows: false);
       final scriptParent = File(scriptDir).parent.path;
       // When running `dart run bin/benchmark_*.dart` the script is at
-      // <repo>/dng_processor/bin/benchmark_*.dart → parent = dng_processor/bin
-      // so ../native/build reaches dng_processor/native/build.
+      // <repo>/app/bin/benchmark_*.dart → parent = <repo>/app/bin, and
+      // native/ now sits at the repo root (2026-08-26 layout move), so the
+      // repo root is TWO levels up: ../../native/{dist,build}.
       final scriptRelativeDist =
-          File('$scriptParent/../native/dist/libdng_decoder_native.dylib')
+          File('$scriptParent/../../native/dist/libdng_decoder_native.dylib')
               .path;
       final scriptRelativeBuild =
-          File('$scriptParent/../native/build/libdng_decoder_native.dylib')
+          File('$scriptParent/../../native/build/libdng_decoder_native.dylib')
               .path;
 
       // DNG_NATIVE_BUILD_DIR env override (path to the CMake build directory).

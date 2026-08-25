@@ -1,6 +1,6 @@
 /// Dart mirror of the generic-RAW error contract.
 ///
-/// Source of truth: `dng_processor/native/include/raw_pipeline_contract.h`
+/// Source of truth: `native/include/raw_pipeline_contract.h`
 /// (enum `RawErrorCode` and `raw_error_name()`). Any value or spelling change
 /// there MUST be reflected here — `test/raw_error_codes_test.dart` enforces it.
 ///

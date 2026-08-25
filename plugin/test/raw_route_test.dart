@@ -1,7 +1,7 @@
 // Pure-Dart routing contract. Loads no dylib, so it runs anywhere.
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/raw_route.dart';
+import 'package:ceyx/src/raw_route.dart';
 
 void main() {
   group('decodeExtensionOf', () {

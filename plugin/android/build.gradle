@@ -5,13 +5,13 @@
 // by the host application's build (Flutter's plugin loader includes this
 // directory as a subproject), so pinning an AGP version here would risk
 // clashing with the host's toolchain.
-group = 'com.example.dng_processor_ffi'
+group = 'com.example.ceyx'
 version = '1.0'
 
 apply plugin: 'com.android.library'
 
 android {
-    namespace = 'com.example.dng_processor_ffi'
+    namespace = 'com.example.ceyx'
     compileSdk = 36
 
     defaultConfig {

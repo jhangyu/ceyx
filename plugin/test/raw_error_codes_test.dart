@@ -1,8 +1,8 @@
 // Keeps the Dart mirror RawErrorCode in lockstep with the C source of truth
-// dng_processor/native/include/raw_pipeline_contract.h. Pure Dart: no dylib.
+// native/include/raw_pipeline_contract.h. Pure Dart: no dylib.
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:dng_processor_ffi/src/raw_error_codes.dart';
+import 'package:ceyx/src/raw_error_codes.dart';
 
 void main() {
   group('RawErrorCode Dart/C mirror contract', () {

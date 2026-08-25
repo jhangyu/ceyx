@@ -1,14 +1,14 @@
-# dng_processor_ffi
+# ceyx
 
 Packaging-only Flutter FFI plugin. It ships **no Dart API**; it exists so that a
 host app's build system bundles the prebuilt `dng_decoder_native` library.
 
-Why it is a separate package: `dng_processor` is a Flutter *app* project (its
+Why it is a separate package: `ceyx_example` is a Flutter *app* project (its
 `android/` is an app Gradle root with `include(":app")`, its `macos/` is a
 Runner project). A Flutter plugin's platform directories must be library-shaped,
-so `dng_processor` cannot declare `flutter: plugin: platforms:` without breaking
+so `ceyx_example` cannot declare `flutter: plugin: platforms:` without breaking
 any host app that depends on it. This package carries the plugin declaration
-instead, and `dng_processor` depends on it — Flutter resolves plugins across the
+instead, and `ceyx_example` depends on it — Flutter resolves plugins across the
 whole transitive package graph, so host apps get the bundling automatically.
 
 | Platform | Mechanism | Artifact |
@@ -38,15 +38,15 @@ whole transitive package graph, so host apps get the bundling automatically.
 
 ## Refreshing the binaries
 
-After rebuilding the native library in `dng_processor/native`:
+After rebuilding the native library in `native`:
 
 ```bash
-cp dng_processor/native/build/libdng_decoder_native.dylib \
-   dng_processor_ffi/macos/Libraries/
-cp dng_processor/native/build-android/android-arm64/libdng_decoder_native.so \
-   dng_processor_ffi/android/src/main/jniLibs/arm64-v8a/
-copy dng_processor\native\build-windows\dng_decoder_native.dll ^
-   dng_processor_ffi\windows\Libraries\
+cp native/build/libdng_decoder_native.dylib \
+   plugin/macos/Libraries/
+cp native/build-android/android-arm64/libdng_decoder_native.so \
+   plugin/android/src/main/jniLibs/arm64-v8a/
+copy native\build-windows\dng_decoder_native.dll ^
+   plugin\windows\Libraries\
 ```
 
 The macOS dylib must keep the install name `@rpath/libdng_decoder_native.dylib`
@@ -56,6 +56,6 @@ The macOS dylib must keep the install name `@rpath/libdng_decoder_native.dylib`
 The Windows DLL must be named exactly `dng_decoder_native.dll` -- the Dart
 bindings open it by that bare filename
 (`DynamicLibrary.open('dng_decoder_native.dll')`,
-`dng_processor_ffi/lib/src/dng_bindings.dart:338-339`), relying on Windows'
+`plugin/lib/src/dng_bindings.dart:338-339`), relying on Windows'
 "application directory first" DLL search order rather than an explicit path
 list (unlike the macOS side's `_openFirst` candidate search).
