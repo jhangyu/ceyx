@@ -96,14 +96,27 @@ if [ -d "${PATCH_DIR}" ] && [ -d "${RS_DEST}/.git" ]; then
     if git -C "${RS_DEST}" apply --check "${p}" 2>/dev/null; then
       git -C "${RS_DEST}" apply "${p}"; echo "[fetch] applied $(basename "${p}")"
     elif git -C "${RS_DEST}" apply --check --reverse "${p}" 2>/dev/null; then
-      # At this RawSpeed revision the tree already matches the patch's
-      # post-state (e.g. class already has `final`), but LibRaw's patch
-      # exists to REMOVE that qualifier for subclass extensibility (see
-      # third_party/libraw/PROVENANCE.md "Revision pin substitutions").
-      # A reverse-check success here means we must apply --reverse to reach
-      # the actually-required pre-state, not skip it as a no-op.
-      git -C "${RS_DEST}" apply --reverse "${p}"
-      echo "[fetch] applied (reverse) $(basename "${p}")"
+      # The tree already matches this patch's post-state, so there is nothing
+      # to do: SKIP, exactly as the project-patch loop below does.
+      #
+      # This branch used to run `git apply --reverse` instead. That was correct
+      # only for the pre-Phase-19 arrangement, where LibRaw's own patch 01 was
+      # stored INVERTED relative to its intent (its diff added `final`, while
+      # its purpose was to remove it), so reaching the desired state genuinely
+      # meant reverse-applying. Since the Phase 19 re-pin, every patch in
+      # ${PATCH_DIR} is overlaid from patches/rawspeed3/ and is forward-authored
+      # against the pinned revision: applying it FORWARD is what reaches the
+      # desired state, and REVERSE_APPLIED_PATCHES in verify_raw_provenance.py
+      # is empty to match.
+      #
+      # For a forward-authored patch, reverse-check success means "already
+      # applied", and reverse-applying it would UNDO our own change while
+      # printing a success line and exiting 0. The realistic trigger is a future
+      # re-pin in which upstream adopts one of our changes (upstream already did
+      # exactly this once, with patch 01's `final` removal): the forward check
+      # would then fail, the reverse check would pass, and the old code would
+      # silently flip e.g. `protected:` back to `private:`.
+      echo "[fetch] $(basename "${p}") already applied"
     else
       echo "[fetch] FAILED to apply $(basename "${p}") at RawSpeed ${RAWSPEED_REV}" >&2
       echo "[fetch] Pin a RawSpeed revision where the patch set applies cleanly," >&2
