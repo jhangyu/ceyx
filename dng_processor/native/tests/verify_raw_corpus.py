@@ -72,11 +72,14 @@ def check_categories(samples, failures):
     malformed = [s for s in samples if s["id"].startswith("malformed_")]
     if len(malformed) < 3:
         failures.append("need >=3 malformed fixtures, manifest has %d" % len(malformed))
+    if not [s for s in samples if s["expect_backend"] == "rawspeed3"]:
+        failures.append("need >=1 sample with expect_backend == 'rawspeed3'")
 
 
 def generate_malformed(samples):
     base = next((s for s in samples
                  if s["expect_layout"] == "bayer2x2"
+                 and s.get("expect_route") == "generic"
                  and (REPO / s["path"]).is_file()), None)
     if base is None:
         print("[Corpus] FAIL cannot generate: no present Bayer sample")

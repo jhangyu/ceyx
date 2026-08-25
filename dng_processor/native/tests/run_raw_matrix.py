@@ -52,9 +52,14 @@ def main():
     parser.add_argument("--manifest",
                         default="dng_processor/native/tests/raw_corpus_manifest.json")
     parser.add_argument("--build-dir", default="dng_processor/native/build")
-    parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--dng-repeat", type=int, default=1,
+                        help="repeat count forwarded to run_decode_matrix.py's "
+                             "--repeat; the RAW test binaries always run once "
+                             "by design and are unaffected by this flag")
     parser.add_argument("--skip-dng", action="store_true",
-                        help="iteration only; a gate run must not use this")
+                        help="iteration only; a gate run must not use this. "
+                             "Forces a non-zero (2) exit code so the omission "
+                             "cannot be mistaken for a passing gate.")
     args = parser.parse_args()
 
     samples = load_corpus(REPO / args.manifest)
@@ -92,11 +97,16 @@ def main():
 
     if args.skip_dng:
         print("[RawMatrix] WARNING --skip-dng was used; this is NOT a gate run")
-    else:
-        ok &= run("dng-regression",
-                  [sys.executable, "dng_processor/native/tests/run_decode_matrix.py",
-                   "--repeat", str(args.repeat)])
-        cases.append("dng-regression")
+        if not ok:
+            print("[RawMatrix] FAIL (%d cases attempted)" % len(cases))
+            return 1
+        print("[RawMatrix] ALL PASS (%d cases, DNG-REGRESSION-SKIPPED)" % len(cases))
+        return 2
+
+    ok &= run("dng-regression",
+              [sys.executable, "dng_processor/native/tests/run_decode_matrix.py",
+               "--repeat", str(args.dng_repeat)])
+    cases.append("dng-regression")
 
     if not ok:
         print("[RawMatrix] FAIL (%d cases attempted)" % len(cases))
