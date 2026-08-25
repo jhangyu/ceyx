@@ -6,7 +6,7 @@
  * DngResult as the DNG route and reuses dng_free_result/dng_free_rgba_buffer
  * for teardown, so this header includes dng_ffi_api.h rather than duplicating
  * the struct: the ABI is shared by design, and duplicating it would create two
- * definitions to keep in sync with dng_processor_ffi/lib/src/dng_bindings.dart.
+ * definitions to keep in sync with plugin/lib/src/dng_bindings.dart.
  *
  * The full definition of RawDecodeDiagnostics lives in raw_pipeline_contract.h;
  * this header only forward-declares it, exactly as dng_ffi_api.h used to.
