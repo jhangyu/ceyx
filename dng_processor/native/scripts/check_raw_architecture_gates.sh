@@ -78,7 +78,14 @@ GPU_API=(
 )
 rule4_hits=0
 for header in "${GPU_API[@]}"; do
-    [ -f "${header}" ] || continue
+    if [ ! -f "${header}" ]; then
+        # P3 (round-8 parking lot): a missing GPU-API header is a coverage
+        # regression, not a skip - silently continuing would let rule4's
+        # surface shrink without anyone noticing. Fail loudly with the path.
+        echo "[ArchGate] FAIL rule4 (missing GPU API header): ${header}"
+        rule4_hits=$((rule4_hits + 1))
+        continue
+    fi
     # Deviation from the plan's literal pattern (round-8, finding F4 recurrence):
     # 'LibRaw[^F]|libraw_data_t|rawspeed' substring-matched the contract's own
     # backend-identity vocabulary (enum names like kRawFrontendLibRaw, fields
@@ -86,9 +93,16 @@ for header in "${GPU_API[@]}"; do
     # is REQUIRED to carry for rule8 observability - not an actual LibRaw/
     # RawSpeed decoder type leaking in. Tightened to whole-word matches plus
     # comment-line exclusion so only real type/API references trip the gate.
-    if grep -nE '\bLibRaw\b|libraw_data_t|\brawspeed\b' "${header}" \
-        | grep -vE '^[0-9]+:[[:space:]]*(//|\*)' \
-        | grep -v 'RawForcedBackend'; then
+    # N2 (round-8 nit): the lowercase LibRaw typedef family
+    # (libraw_data_t, libraw_output_params_t, libraw_processed_image_t, ...)
+    # is matched generically instead of enumerating each struct name.
+    # N1 (round-8 nit): the earlier third pipeline stage
+    # ('grep -v RawForcedBackend') is removed - the comment-line exclusion
+    # above already removes all three real hits in the current tree, so the
+    # extra stage was dead and would have silently hidden a genuine future
+    # leak that happened to share a line with RawForcedBackend.
+    if grep -nE '\bLibRaw\b|\blibraw_[a-z_]+_t\b|\brawspeed\b' "${header}" \
+        | grep -vE '^[0-9]+:[[:space:]]*(//|\*)'; then
         rule4_hits=$((rule4_hits + 1))
     fi
 done
