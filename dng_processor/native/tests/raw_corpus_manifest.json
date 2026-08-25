@@ -46,13 +46,13 @@
     {
       "id": "fuji_xt3_xtrans",
       "path": "image_samples/raw_corpus/fuji_xt3.raf",
-      "sha256": "",
+      "sha256": "95b33021160b239ceb1a09d46a1b29cb60cb7dd47581feb126b337c219091754",
       "vendor": "fujifilm",
       "camera": "X-T3",
       "extension": "raf",
       "expect_route": "generic",
       "expect_layout": "xtrans6x6",
-      "expect_backend": "rawspeed3",
+      "expect_backend": "libraw_native",
       "expect_error": "kRawSuccess",
       "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
       "notes": "X-Trans generation 4."
@@ -60,13 +60,13 @@
     {
       "id": "fuji_xt5_xtrans",
       "path": "image_samples/raw_corpus/fuji_xt5.raf",
-      "sha256": "",
+      "sha256": "cddd7ae0c43f9280876e5fdcbdf8878718972ebd3d034d8affc8cfc6752d33dc",
       "vendor": "fujifilm",
       "camera": "X-T5",
       "extension": "raf",
       "expect_route": "generic",
       "expect_layout": "xtrans6x6",
-      "expect_backend": "rawspeed3",
+      "expect_backend": "libraw_native",
       "expect_error": "kRawSuccess",
       "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
       "notes": "Different X-Trans generation from fuji_xt3_xtrans."
@@ -144,7 +144,7 @@
     {
       "id": "frontend_switch_lossless_dng",
       "path": "image_samples/lossless_dng_sample.dng",
-      "sha256": "",
+      "sha256": "9babdda53f66efa2269dd92f510dccfae22fe5943040d7e8b0aef59459599ba1",
       "vendor": "sony",
       "camera": "ILCE-7C",
       "extension": "dng",
@@ -158,7 +158,7 @@
     {
       "id": "local_sony_bayer",
       "path": "image_samples/raw_sample.arw",
-      "sha256": "",
+      "sha256": "644b98aa9ea5355c1794c7b6a0d407514ec576a784120f0a5316592a20029e0d",
       "vendor": "sony",
       "camera": "(local ARW sample)",
       "extension": "arw",
