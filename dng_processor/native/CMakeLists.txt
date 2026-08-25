@@ -593,7 +593,7 @@ else()
     elseif(WIN32)
         # W6a (2026-08-21, Windows port): same strict Vulkan device contract as
         # Android, x86-64 host. The pipeline has no CPU fallback route
-        # (dng_pipeline_v2.cpp requireGpuBackend), so a GPU feature is mandatory
+        # (dng_pipeline.cpp requireGpuBackend), so a GPU feature is mandatory
         # rather than optional here.
         set(AOT_TARGET "x86-64-windows-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
     else()
@@ -945,7 +945,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${LOG_LIBRARY})
 
     add_executable(test_decode_android tests/test_decode.cpp
-        src/dng_pipeline_v2.cpp
+        src/dng_pipeline.cpp
         src/dng_halide_device.cpp
         src/dng_opcodelist2_halide.cpp
         src/dng_mosaic_halide.cpp
@@ -981,14 +981,14 @@ if(ANDROID AND DNG_CROSS_BUILD)
     add_dependencies(test_decode_android test_android_vulkan_capability)
 
     # P14-W4-4 measurement: Android cross-build of the production C ABI harness.
-    # Drives the FFI entry dng_decode_and_process -> dng_pipeline_v2_decode_to_rgb
+    # Drives the FFI entry dng_decode_and_process -> dng_pipeline_decode_to_rgb
     # -> decodeStages -> runHalideStage3And4Fused (the device-handoff path that
     # test_decode_android bypasses). Lets us measure on cc5bf709 whether device
     # handoff actually triggers and what [Stage4-Perf] FromDevice: reports.
     # Measurement-only target; no kernel / device-ownership code is touched.
     add_executable(dng_ffi_harness_android tests/dng_ffi_harness.cpp
         src/dng_ffi_api.cpp
-        src/dng_pipeline_v2.cpp
+        src/dng_pipeline.cpp
         src/dng_halide_device.cpp
         src/dng_opcodelist2_halide.cpp
         src/dng_mosaic_halide.cpp
@@ -1024,7 +1024,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # Android/Vulkan Stage4 AOT variant (dng_render_stage4_android.a), not the Metal
     # one linked by the macOS-only test_device_handoff target below.
     add_executable(test_device_handoff_android tests/test_device_handoff.cpp
-        src/dng_pipeline_v2.cpp
+        src/dng_pipeline.cpp
         src/dng_halide_device.cpp
         src/dng_opcodelist2_halide.cpp
         src/dng_mosaic_halide.cpp
@@ -1403,7 +1403,7 @@ endif()
 # Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
 # handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.
 add_executable(test_device_handoff tests/test_device_handoff.cpp
-    src/dng_pipeline_v2.cpp
+    src/dng_pipeline.cpp
     src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
     src/dng_mosaic_halide.cpp
@@ -1469,7 +1469,7 @@ endif()
 # without editing a production source), so that file must NOT be listed here as
 # a separate source or every symbol in it would be defined twice.
 add_executable(test_stage4_scaled_photo tests/test_stage4_scaled_photo.cpp
-    src/dng_pipeline_v2.cpp
+    src/dng_pipeline.cpp
     src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
     src/dng_mosaic_halide.cpp
@@ -1510,13 +1510,13 @@ endif()
 
 
 # R2 sized decode acceptance gate (AC5 extent / AC5-D crop-vs-scale / AC6 memory).
-# Drives the PRODUCTION sized entry (dng_pipeline_v2_decode_to_rgb_sized) and
+# Drives the PRODUCTION sized entry (dng_pipeline_decode_to_rgb_sized) and
 # compares against a same-ordering CPU reference rendered through the production
 # Stage4 AOT. Like test_stage4_scaled_photo it #includes dng_render_halide.cpp to
 # reach buildRenderParams, so that file must NOT be listed as a separate source
 # here or every symbol in it would be defined twice.
 add_executable(test_sized_decode tests/test_sized_decode.cpp
-    src/dng_pipeline_v2.cpp
+    src/dng_pipeline.cpp
     src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
     src/dng_mosaic_halide.cpp
@@ -1587,7 +1587,7 @@ endif()
 
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
-    src/dng_pipeline_v2.cpp
+    src/dng_pipeline.cpp
     src/dng_halide_device.cpp
     src/dng_opcodelist2_halide.cpp
     src/dng_mosaic_halide.cpp

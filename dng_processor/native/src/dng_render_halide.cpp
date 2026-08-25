@@ -174,9 +174,9 @@ using Halide::Runtime::Buffer;
 
 // Q2 (Round 2 perf diag): runtime gate for this file's per-decode diagnostic
 // stderr prints (and the chrono::now() calls that exist only to time them).
-// Mirrors the pipelineVerbose() lazy-cache pattern in dng_pipeline_v2.cpp
+// Mirrors the pipelineVerbose() lazy-cache pattern in dng_pipeline.cpp
 // (same DNG_PIPELINE_VERBOSE env; a separate TU-local static since that
-// function lives in dng_pipeline_v2.cpp's own anonymous namespace and isn't
+// function lives in dng_pipeline.cpp's own anonymous namespace and isn't
 // exported via a header).
 bool pipelineVerbose() {
     static const bool cached = []() {
@@ -324,7 +324,7 @@ void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
 // W7 (M-11): persistent scratch for the macOS RGBA→RGB strip path (legacy
 // vector callers). Avoids a fresh 96MB allocation + first-touch page-fault per
 // decode (same Gotcha #62 pattern). Grow-only; safe because all decodes are
-// serialized by pipelineSingleFlightMutex in dng_pipeline_v2.cpp.
+// serialized by pipelineSingleFlightMutex in dng_pipeline.cpp.
 // ponytail: simple static, upgrade to Stage4ScratchPool pattern if concurrent decode needed.
 static std::unique_ptr<uint8_t[]> s_rgba_strip_scratch;
 static size_t s_rgba_strip_scratch_cap = 0;
@@ -1759,7 +1759,7 @@ bool runHalideFullOrSdkFallback(dng_host& host,
 
 }  // namespace
 
-// R2 sized decode: public accessor so dng_pipeline_v2.cpp can size the Stage4
+// R2 sized decode: public accessor so dng_pipeline.cpp can size the Stage4
 // output buffer by OUTPUT extent before the render runs. Same computation the
 // render path itself uses — deliberately not duplicated there. Defined outside
 // the anonymous namespace above so it has external linkage.

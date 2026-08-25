@@ -86,7 +86,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
 // W6-3 / TD-21 legacy overloads: kept for test_decode.cpp and other
 // non-production callers that have no PipelineConfig handy.  Internally
 // they call PipelineConfig::loadFromEnv() once and forward.  Production
-// hot paths in dng_pipeline_v2.cpp must NOT use these — pass the
+// hot paths in dng_pipeline.cpp must NOT use these — pass the
 // existing per-decode config explicitly to keep env reads at 1 per decode.
 inline bool render_stage4_halide(dng_host& host,
                                   dng_negative& negative,

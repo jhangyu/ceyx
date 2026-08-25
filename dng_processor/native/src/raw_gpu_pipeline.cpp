@@ -8,7 +8,7 @@
 #include "HalideBuffer.h"
 #include "dng_ffi_api.h"
 #include "dng_halide_device.h"
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 #include "dng_render_params.h"
 #include "libraw_gpu_input_adapter.h"
 #include "raw_bayer_demosaic.h"

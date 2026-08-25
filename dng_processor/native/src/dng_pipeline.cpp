@@ -38,15 +38,15 @@ functions:
   - name: "pipelineSingleFlightMutex"
     description: "File-scope std::mutex accessor; serializes warmup vs decode."
     lines: "1143-1146"
-  - name: "dng_pipeline_v2_warmup_for_size"
+  - name: "dng_pipeline_warmup_for_size"
     description: "Idle-time warm hook; locks single-flight mutex and primes pipeline pools."
     lines: "1148-1174"
-  - name: "dng_pipeline_v2_run_stage3 / dng_pipeline_v2_decode_to_rgb"
+  - name: "dng_pipeline_run_stage3 / dng_pipeline_decode_to_rgb"
     description: "M-2 public Stage3 delegates to runStage3WithConfig; decode_to_rgb with L-11 once-per-process GPU banner."
     lines: "1177-1261"
 ---
 */
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 
 #include <chrono>
 #include <cstring>
@@ -198,7 +198,7 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
 }
 
 // Phase 10 Sprint D-B F1: process-level mmap pool for Stage3 workspace.
-// Avoids ~262ms eager zero-fill in FFI path (dng_pipeline_v2_decode_to_rgb).
+// Avoids ~262ms eager zero-fill in FFI path (dng_pipeline_decode_to_rgb).
 // test_decode harness passes a pre-sized vector; pool is bypassed in that case.
 class Stage3WorkspacePool {
  public:
@@ -329,7 +329,7 @@ RgbOutputPool &rgbOutputPool() {
   return pool;
 }
 
-// W7-B (P15): checkout-style RGBA output pool. See dng_pipeline_v2.h for the
+// W7-B (P15): checkout-style RGBA output pool. See dng_pipeline.h for the
 // rationale (distinct per-decode buffers so a zero-copy buffer handed to Dart
 // is not clobbered by the next decode). Mirrors the FFI W7-A RgbaPool that it
 // supersedes; consolidating here gives a single owner so both the Android
@@ -1040,7 +1040,7 @@ bool runSdkStage3(dng_host &host,
 
 // M-2: internal Stage3 orchestration with explicit PipelineConfig, avoiding
 // a redundant PipelineConfig::loadFromEnv() when the caller (decodeStages)
-// already holds a config. The public dng_pipeline_v2_run_stage3 delegates
+// already holds a config. The public dng_pipeline_run_stage3 delegates
 // here after loading config for backward-compatible external callers.
 bool runStage3WithConfig(dng_host &host,
                          dng_negative &negative,
@@ -1334,7 +1334,7 @@ bool decodeStages(ConcurrentDngHost &host,
 } // namespace
 
 // W7-B (P15): public shared RGBA output pool accessors (declared in
-// dng_pipeline_v2.h). Forward to the anonymous-namespace singleton, whose names
+// dng_pipeline.h). Forward to the anonymous-namespace singleton, whose names
 // remain in scope for the rest of this translation unit.
 uint8_t *dng_rgba_output_acquire(size_t bytes) {
   return rgbaOutputPool().acquire(bytes);
@@ -1385,7 +1385,7 @@ static std::atomic<int> &pendingDecodeCount() {
 extern "C" __attribute__((weak)) int dng_vk_pipeline_cache_prepare(void);
 #endif
 
-bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
+bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
   // L-4: warmup lock split — each sub-step acquires and releases
   // pipelineSingleFlightMutex independently so a pending decode can
   // interleave between steps rather than blocking for the full warmup
@@ -1512,7 +1512,7 @@ bool dng_pipeline_v2_warmup_for_size(int32_t width, int32_t height) {
 // M-2: public API preserved for external callers (test_decode.cpp etc.).
 // Loads PipelineConfig from env and delegates to the anonymous-namespace
 // runStage3WithConfig helper.
-bool dng_pipeline_v2_run_stage3(dng_host &host,
+bool dng_pipeline_run_stage3(dng_host &host,
                                 dng_negative &negative,
                                 bool use_halide_bayer,
                                 DngPipelineStage3Timing *timing,
@@ -1522,15 +1522,15 @@ bool dng_pipeline_v2_run_stage3(dng_host &host,
                              timing, stage3_workspace);
 }
 
-bool dng_pipeline_v2_decode_to_rgb(const char *file_path,
+bool dng_pipeline_decode_to_rgb(const char *file_path,
                                    DngPipelineV2Result &result) {
   // R2 sized decode: the old entry is a thin forward. max_dim 0 makes every
   // downstream cap resolve to the previous expression, so full-resolution
   // behaviour is unchanged by construction.
-  return dng_pipeline_v2_decode_to_rgb_sized(file_path, 0, result);
+  return dng_pipeline_decode_to_rgb_sized(file_path, 0, result);
 }
 
-bool dng_pipeline_v2_decode_to_rgb_sized(const char *file_path,
+bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
                                          int32_t max_dim,
                                          DngPipelineV2Result &result) {
   // L-4: signal pending decode so warmup yields between sub-steps.  Counter

@@ -49,7 +49,7 @@
 #include "dng_halide_device.h"
 #include "dng_opcode_polynomial.h"
 #include "dng_opcode_polynomial3.h"
-// PipelineConfig::stage2OL2HalideEnabled() is the canonical reader for
+// PipelineConfig::stage2Opcodelist2HalideEnabled() is the canonical reader for
 // DNG_STAGE2_OL2_HALIDE; this bridge defers to it (source-of-truth:
 // dng_pipeline_config.h, RouteConfig category).
 #include "dng_pipeline_config.h"
@@ -110,11 +110,11 @@ static void scatter_poly3_to_image(const uint16_t *scratch,
 namespace {
 
 // DNG_STAGE2_OL2_HALIDE — RouteConfig (production kill-switch).
-// source-of-truth: dng_pipeline_config.h (PipelineConfig::stage2OL2HalideEnabled).
+// source-of-truth: dng_pipeline_config.h (PipelineConfig::stage2Opcodelist2HalideEnabled).
 // This wrapper exists so callers below can keep their local name; do NOT
 // re-read the env here.
-bool stage2_ol2_halide_enabled() {
-    return PipelineConfig::stage2OL2HalideEnabled();
+bool stage2_opcodelist2_halide_enabled() {
+    return PipelineConfig::stage2Opcodelist2HalideEnabled();
 }
 
 // DNG_STAGE2_OL2_PREWARM — RouteConfig/DiagnosticConfig hybrid.
@@ -188,7 +188,7 @@ std::string g_ol2_dispatch_failure_msg;  // NOT thread-safe to read without pipe
 // `base` remains valid until halide_stage2_ol2_device_handoff_copy_to_host()
 // completes or halide_stage2_ol2_clear_device_handoff() is called.  This is
 // structurally enforced by the pipeline single-flight mutex
-// (pipelineSingleFlightMutex in dng_pipeline_v2.cpp).
+// (pipelineSingleFlightMutex in dng_pipeline.cpp).
 struct WritebackTarget {
     uint16_t *base = nullptr;
     int32_t col_step = 0;
@@ -890,7 +890,7 @@ void emit_cold_subdivide_log(
 // ---------------------------------------------------------------------------
 
 void halide_prewarm_polynomial3_for_size(int width, int height) {
-    if (!ol2_prewarm_enabled() || !stage2_ol2_halide_enabled()) {
+    if (!ol2_prewarm_enabled() || !stage2_opcodelist2_halide_enabled()) {
         return;
     }
     if (width <= 0 || height <= 0) {
@@ -1081,7 +1081,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
                                            dng_opcode_list &list,
                                            uint32_t start_index,
                                            dng_image &image) {
-    if (!stage2_ol2_halide_enabled()) {
+    if (!stage2_opcodelist2_halide_enabled()) {
         return 0;
     }
     ol2_selftest_strided_gather();  // W8/L-6: opt-in, no-op unless DNG_OL2_SELFTEST=1
@@ -1217,7 +1217,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
 bool halide_try_dispatch_opcode2(dng_host & /* host */,
                                  dng_opcode &opcode,
                                  dng_image &image) {
-    if (!stage2_ol2_halide_enabled()) {
+    if (!stage2_opcodelist2_halide_enabled()) {
         return false;
     }
 

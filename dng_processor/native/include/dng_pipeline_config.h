@@ -15,10 +15,10 @@
 //              DNG_STAGE3_STAGE4_DEVICE_HANDOFF,
 //              DNG_STAGE2_STAGE4_DEVICE_HANDOFF,
 //              DNG_STAGE2_OL2_HALIDE (source-of-truth lives here; see
-//              stage2OL2HalideEnabled() and dng_opcodelist2_halide.cpp),
+//              stage2Opcodelist2HalideEnabled() and dng_opcodelist2_halide.cpp),
 //              DNG_FUSE_RGBA (7.1 testing/rollback override for the fused
 //              RGBA8 output feature; =0 forces the legacy RGB8 path. Consulted
-//              by dng_pipeline_v2_decode_to_rgb to set the internal
+//              by dng_pipeline_decode_to_rgb to set the internal
 //              fuse_rgba_output toggle; see route.fuse_rgba below).
 //   2. DiagnosticConfig:
 //        Observability / timing flags. Default OFF; flip ON to log timings.
@@ -31,7 +31,7 @@
 //              Stage 2 Metal pre-warm shot — leave ON in production. Read
 //              at ol2_prewarm_enabled() in dng_opcodelist2_halide.cpp; the
 //              actual prewarm dispatch happens in
-//              dng_pipeline_v2.cpp::dng_pipeline_v2_decode_to_rgb just
+//              dng_pipeline.cpp::dng_pipeline_decode_to_rgb just
 //              before BuildStage2Image (see W6-6 / TD-29)),
 //              DNG_STAGE2_SDK_TIMING (vendor — read in
 //              third_party/dng_sdk/source/, NOT modified here),
@@ -40,7 +40,7 @@
 //              dng_halide_device.cpp; see dng_halide_device.h).
 //              DNG_PIPELINE_VERBOSE (gates [Stage4-Diag]/[Stage4-Perf]/
 //              [Pipeline] GPU backend informational stderr banners. Lazy-cached
-//              via pipelineVerbose() in dng_pipeline_v2.cpp, with a separate
+//              via pipelineVerbose() in dng_pipeline.cpp, with a separate
 //              TU-local cache of the same env in dng_render_halide.cpp by
 //              design, since that helper isn't exported via a header).
 //   3. ResearchConfig:
@@ -51,8 +51,8 @@
 //              precomputed-coords WarpRectilinear DIAG bridge in
 //              dng_warp_halide.cpp. That bridge has been removed from the
 //              production decode path; no source consults this env anymore.
-//              The src/research/ generators (DngWarpStrictFloatGenerator /
-//              DngWarpDebugGenerator) and their opt-in CMake option/target
+//              The src/research/ generators (RectilinearWarpStrictFloatGenerator /
+//              RectilinearWarpDebugGenerator) and their opt-in CMake option/target
 //              are retained for standalone A/B research only.
 //
 // Notes:
@@ -69,12 +69,12 @@ struct PipelineConfig {
     bool stage2_stage4_device_handoff = true;
     // Phase 10 Sprint C3: enable Halide GPU dispatch for Stage 2 OpcodeList2
     // MapPolynomial. dng_opcodelist2_halide.cpp consults
-    // PipelineConfig::stage2OL2HalideEnabled() for the canonical value (see
-    // // source-of-truth: dng_pipeline_config.h comment there).
-    bool stage2_ol2_halide = true;
+    // PipelineConfig::stage2Opcodelist2HalideEnabled() for the canonical value
+    // (see source-of-truth: dng_pipeline_config.h comment there).
+    bool stage2_opcodelist2_halide = true;
     // 7.1: testing/rollback override for the fused RGBA8 output feature.
     // DNG_FUSE_RGBA=0 forces the legacy RGB8 path; default true. Consulted by
-    // dng_pipeline_v2_decode_to_rgb, which funnels this into fuse_rgba_output.
+    // dng_pipeline_decode_to_rgb, which funnels this into fuse_rgba_output.
     bool fuse_rgba = true;
   };
 
@@ -84,7 +84,7 @@ struct PipelineConfig {
   // output (alpha=255) directly into the caller buffer instead of interleaved
   // RGB8, eliminating the separate FFI rgb_to_rgba pass and one ~72MB
   // read/write of the RGB intermediate. Set only by
-  // dng_pipeline_v2_decode_to_rgb on Android (Vulkan host-side repack path);
+  // dng_pipeline_decode_to_rgb on Android (Vulkan host-side repack path);
   // test_decode and macOS leave it false so RGB output is preserved. This is an
   // internal output-format toggle, NOT an env-driven route kill-switch, so it
   // lives outside RouteConfig and is not read by loadFromEnv().
@@ -113,17 +113,17 @@ struct PipelineConfig {
         !envExplicitZero("DNG_STAGE3_STAGE4_DEVICE_HANDOFF");
     config.route.stage2_stage4_device_handoff =
         !envExplicitZero("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
-    config.route.stage2_ol2_halide = stage2OL2HalideEnabled();
+    config.route.stage2_opcodelist2_halide = stage2Opcodelist2HalideEnabled();
     config.route.fuse_rgba = !envExplicitZero("DNG_FUSE_RGBA");
 
     config.threads.area_threads = envPositiveU32("DNG_AREA_THREADS");
     return config;
   }
 
-  // Canonical reader for DNG_STAGE2_OL2_HALIDE. Lives here so the Stage 2 OL2
-  // bridge (dng_opcodelist2_halide.cpp) and PipelineConfig agree on a single
-  // source of truth. Lazy-cached so repeated calls are cheap.
-  static bool stage2OL2HalideEnabled() {
+  // Canonical reader for DNG_STAGE2_OL2_HALIDE. Lives here so the Stage 2
+  // OpcodeList2 bridge (dng_opcodelist2_halide.cpp) and PipelineConfig agree on
+  // a single source of truth. Lazy-cached so repeated calls are cheap.
+  static bool stage2Opcodelist2HalideEnabled() {
     static const bool cached = !envExplicitZero("DNG_STAGE2_OL2_HALIDE");
     return cached;
   }

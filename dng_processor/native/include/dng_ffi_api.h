@@ -69,10 +69,6 @@ void dng_free_result(DngResult *result);
 /// Used for zero-copy memory management from Dart via NativeFinalizer.
 void dng_free_rgba_buffer(void *ptr);
 
-/// Deprecated alias for dng_free_rgba_buffer().
-/// Kept for ABI compatibility with older Dart builds.
-void dng_free_halide_buffer(void *ptr);
-
 /// W5-#15: Debug/stats — number of RGBA pool buffers currently checked out.
 /// Returns 0 when all decode results have been properly freed.
 /// Used by dng_ffi_harness to machine-check the H-1 leak guarantee.

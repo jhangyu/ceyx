@@ -15,7 +15,7 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// Pipeline error codes (written by dng_pipeline_v2.cpp)
+// Pipeline error codes (written by dng_pipeline.cpp)
 // ---------------------------------------------------------------------------
 enum DngErrorCode {
   kDngSuccess                        =    0,
@@ -37,6 +37,6 @@ enum DngErrorCode {
 // OpcodeList2 GPU dispatch failure is now reported via the
 // halide_stage2_ol2_dispatch_failed() status-return flag
 // (dng_opcodelist2_halide.h).  The SDK opcode loop (dng_opcode_list.cpp)
-// checks the flag after each dispatch call and breaks; dng_pipeline_v2.cpp
+// checks the flag after each dispatch call and breaks; dng_pipeline.cpp
 // checks it after BuildStage2Image() and maps to kDngErrOl2DispatchFailed.
 // ---------------------------------------------------------------------------

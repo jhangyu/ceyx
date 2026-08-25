@@ -23,7 +23,7 @@
 //      self-cycle the allocation-pool list.
 //   4. New extern "C" exports: dng_vk_pipeline_cache_set_path / _save /
 //      _status / _loaded_bytes / _prepare (used by dng_ffi_api.cpp and
-//      dng_pipeline_v2.cpp via weak references).
+//      dng_pipeline.cpp via weak references).
 // =============================================================================
 
 #include "HalideRuntimeVulkan.h"

@@ -4,7 +4,7 @@
 #include <cstdlib>
 
 #include "dng_ffi_api.h"
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
 
 // Same export decoration as src/dng_ffi_api.cpp, so this entry survives any

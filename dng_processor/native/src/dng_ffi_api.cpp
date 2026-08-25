@@ -9,7 +9,7 @@
 #include <dng_exceptions.h>
 #include <iostream>
 
-#include "dng_pipeline_v2.h"
+#include "dng_pipeline.h"
 
 #if defined(_WIN32)
 #define FFI_EXPORT __declspec(dllexport)
@@ -23,7 +23,7 @@
 // the RGBA buffer as-is. G2 (Round 2): BOTH platforms now write RGBA8
 // in-kernel (alpha=255) — the Android planar→RGBA host repack is retired.
 // The ~96 MB RGBA buffer is pool-backed (checkout-style pool in
-// dng_pipeline_v2.cpp) to avoid page-faults on warm decodes.
+// dng_pipeline.cpp) to avoid page-faults on warm decodes.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ __attribute__((weak)) int dng_vk_pipeline_cache_status(void);
 namespace {
 // Best-effort flush; must never affect the caller's result (red line:
 // cache I/O failure on any path must never fail a decode).
-inline void dngVkpcAutoSave() {
+inline void dngAutoSaveVkPipelineCache() {
 #if defined(__ANDROID__)
   if (&dng_vk_pipeline_cache_save != nullptr) {
     (void)dng_vk_pipeline_cache_save();
@@ -95,7 +95,7 @@ static DngResult *decodeAndProcessImpl(const char *file_path, int32_t max_dim) {
     return nullptr;
 
   DngPipelineV2Result pipeline;
-  if (!dng_pipeline_v2_decode_to_rgb_sized(file_path, max_dim, pipeline)) {
+  if (!dng_pipeline_decode_to_rgb_sized(file_path, max_dim, pipeline)) {
     result->error_code = pipeline.error_code;
     result->decode_ms = pipeline.decode_ms;
     result->process_ms = pipeline.process_ms;
@@ -144,7 +144,7 @@ static DngResult *decodeAndProcessImpl(const char *file_path, int32_t max_dim) {
 
   // R3-3: flush any newly created pipeline state to the persistent cache
   // (dirty-flag no-op when nothing changed; never affects the result).
-  dngVkpcAutoSave();
+  dngAutoSaveVkPipelineCache();
   return result;
 }
 
@@ -161,10 +161,10 @@ FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
   if (width <= 0 || height <= 0) {
     return -1;
   }
-  const int32_t rc = dng_pipeline_v2_warmup_for_size(width, height) ? 0 : -2;
+  const int32_t rc = dng_pipeline_warmup_for_size(width, height) ? 0 : -2;
   // R3-3: warmup compiles all production pipelines — persist them so the
   // NEXT launch skips compilation. Save failure never fails the warmup.
-  dngVkpcAutoSave();
+  dngAutoSaveVkPipelineCache();
   return rc;
 }
 
@@ -241,10 +241,6 @@ FFI_EXPORT void dng_free_rgba_buffer(void *ptr) {
   // delete[] fallback. See dng_free_result comment above.
   uint8_t *p = static_cast<uint8_t *>(ptr);
   dng_rgba_output_release(p);
-}
-
-FFI_EXPORT void dng_free_halide_buffer(void *ptr) {
-  dng_free_rgba_buffer(ptr);
 }
 
 FFI_EXPORT size_t dng_debug_pool_checked_out(void) {

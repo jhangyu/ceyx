@@ -4,7 +4,7 @@
 // W5 (2026-08-21, Windows port): Vulkan is the GPU backend on both Android
 // and Windows (see CMakeLists.txt AOT_TARGET), so every __ANDROID__ guard in
 // this file is really a "Vulkan backend" guard. There is no CPU fallback route
-// in the pipeline (dng_pipeline_v2.cpp requireGpuBackend), so a platform that
+// in the pipeline (dng_pipeline.cpp requireGpuBackend), so a platform that
 // falls through to kUnsupported cannot decode at all.
 #if defined(__APPLE__)
 #include "HalideRuntimeMetal.h"

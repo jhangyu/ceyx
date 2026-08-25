@@ -48,7 +48,7 @@ self-cycle the pool list).
   force-disables. Verbose evidence lines (`[VkPCache] ...`) require
   `DNG_PIPELINE_VERBOSE=1`.
 - **Prewarm skip (R3-3 Option B, user-approved)**: on a validated cross-launch
-  cache HIT (status bit 4), `dng_pipeline_v2_warmup_for_size` skips the
+  cache HIT (status bit 4), `dng_pipeline_warmup_for_size` skips the
   full-size S3/S4 prewarm dispatches (via `dng_vk_pipeline_cache_prepare()`).
   `DNG_VK_SKIP_PREWARM_ON_HIT=0` restores the full prewarm while keeping the
   cache active; control / corrupted / driver-mismatched cache all run the
