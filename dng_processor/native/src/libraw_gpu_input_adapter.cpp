@@ -68,6 +68,37 @@ uint32_t raw_bayer_channel_index_at_plane(uint32_t filters,
                          static_cast<int>((plane_col + left_margin) & 1u));
 }
 
+RawErrorCode raw_bayer_filters_check_2x2(uint32_t filters, char* reason_out,
+                                         size_t reason_cap) {
+    if (filters == 1) {
+        if (reason_out && reason_cap) {
+            std::snprintf(reason_out, reason_cap,
+                          "filters==1 selects LibRaw's 16x16 CFA table "
+                          "(utils_dcraw.cpp:41-42), not a 2x2 mosaic");
+        }
+        return kRawErrLayoutUnsupported;
+    }
+    // The word covers rows 0..7; a 2x2 summary is faithful only if every one of
+    // those rows equals the row of the same parity.
+    for (int row = 2; row < 8; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            const uint32_t got = bayerKeyIndex(filters, row, col);
+            const uint32_t want = bayerKeyIndex(filters, row & 1, col);
+            if (got != want) {
+                if (reason_out && reason_cap) {
+                    std::snprintf(reason_out, reason_cap,
+                                  "filters word 0x%08x is not 2-row periodic "
+                                  "(row %d col %d is %u, row %d col %d is %u); a "
+                                  "2x2 tile would mis-colour half the rows",
+                                  filters, row, col, got, row & 1, col, want);
+                }
+                return kRawErrLayoutUnsupported;
+            }
+        }
+    }
+    return kRawSuccess;
+}
+
 RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
                                            const uint32_t* channel_black,
                                            const uint8_t* channel_index,
@@ -245,6 +276,14 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
         layout.cfa_pattern = cfa_pattern_;
         layout.cfa_pattern_count = 36;
     } else if (v.filters != 0) {
+        // The 2x2 summary below is only faithful if the word really is 2-row
+        // periodic; five vendored bodies are not (round-5 finding S3, citations
+        // in the header). Reject those by name rather than leaning on the
+        // colour-descriptor check that happens to catch them today.
+        const RawErrorCode periodic_rc =
+            raw_bayer_filters_check_2x2(v.filters, reason_out, reason_cap);
+        if (periodic_rc != kRawSuccess) return periodic_rc;
+
         // PLANE-relative, not visible-relative: LibRaw's filters word is indexed
         // in visible coordinates, so it is shifted by the margin parity here
         // (round-5 origin ruling; derivation and citations in the header).

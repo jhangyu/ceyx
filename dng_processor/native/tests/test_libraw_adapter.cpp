@@ -347,6 +347,64 @@ void checkBayerPlaneOrigin() {
     }
 }
 
+// S3 (round-5 review): the 2x2 Bayer branch summarises an 8-row dcraw word with
+// two rows, which is only faithful for a genuinely 2-row-periodic word. The
+// vendored tree holds four 4-row-periodic words plus filters==1 (a 16x16 table),
+// which today are rejected only incidentally by the colour-descriptor rules.
+// No corpus file carries any of them, so this synthetic case is the only
+// coverage - same situation as the flip table and the cblack folding above.
+void checkFiltersPeriodicity() {
+    struct Row { uint32_t filters; bool want_ok; const char* why; };
+    static const Row rows[] = {
+        {0x94949494u, true,  "RGGB, 2-row periodic"},
+        {0x61616161u, true,  "BGGR, 2-row periodic"},
+        {0x49494949u, true,  "GRBG, 2-row periodic"},
+        {0x16161616u, true,  "GBRG, 2-row periodic"},
+        {0x9c9c9c9cu, true,  "RGBE (DSC-F828) IS 2-row periodic; the fourth "
+                             "colour is S4's problem, not this guard's"},
+        {0xe1e4e1e4u, false, "PowerShot 600, identify.cpp:1987, 4-row periodic"},
+        {0x1e4e1e4eu, false, "PowerShot A5, identify.cpp:1997, 4-row periodic"},
+        {0x1b4e4b1eu, false, "PowerShot A50, identify.cpp:2005, 4-row periodic"},
+        {0x1e4b4e1bu, false, "PowerShot Pro70, identify.cpp:2012, 4-row periodic"},
+        {1u,          false, "filters==1, identify.cpp:2856, 16x16 table"},
+    };
+    for (const Row& r : rows) {
+        char reason[256] = {0};
+        const RawErrorCode rc =
+            raw_bayer_filters_check_2x2(r.filters, reason, sizeof(reason));
+
+        // Independent oracle: decode the word with dcraw's own bit expression
+        // (transcribed here, not called through the adapter helper) and ask
+        // whether rows 0..7 really do repeat with period 2. filters==1 is a
+        // table selector rather than a packed word, so it is excluded by name
+        // in the oracle exactly as the implementation excludes it.
+        bool oracle_ok = (r.filters != 1u);
+        for (int row = 2; row < 8 && oracle_ok; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                const uint32_t got =
+                    (r.filters >> ((((row << 1) & 14) + (col & 1)) << 1)) & 3u;
+                const uint32_t want =
+                    (r.filters >> (((((row & 1) << 1) & 14) + (col & 1)) << 1)) & 3u;
+                if (got != want) { oracle_ok = false; break; }
+            }
+        }
+
+        const bool got_ok = (rc == kRawSuccess);
+        // A rejection must also NAME itself: a silent kRawErrLayoutUnsupported
+        // with an empty reason is the failure mode this finding is about.
+        const bool reason_ok = got_ok ? true : (reason[0] != '\0');
+        char detail[384];
+        std::snprintf(detail, sizeof(detail),
+                      "filters=0x%08x rc=%s want=%s oracle=%s reason=\"%s\" (%s)",
+                      r.filters, raw_error_name(rc), r.want_ok ? "ok" : "reject",
+                      oracle_ok ? "ok" : "reject", reason, r.why);
+        report("filters-2x2-periodicity", "cfa",
+               got_ok == r.want_ok && oracle_ok == r.want_ok && reason_ok &&
+                   (got_ok || rc == kRawErrLayoutUnsupported),
+               detail);
+    }
+}
+
 // camera_to_pcs direction. See docs/logs/2026-08-25/r5-camera-to-pcs-ruling.md.
 bool nearIdentity3x3(const float m[9], float tol) {
     for (int r = 0; r < 3; ++r) {
@@ -428,6 +486,7 @@ int main(int argc, char** argv) {
     checkFlipTable();
     checkBlackFolding();
     checkBayerPlaneOrigin();
+    checkFiltersPeriodicity();
     checkMatrixInverse();
 
     const std::vector<Sample> samples = loadManifest(manifest);

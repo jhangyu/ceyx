@@ -67,6 +67,38 @@ uint32_t raw_bayer_channel_index_at_plane(uint32_t filters,
                                           uint32_t plane_row,
                                           uint32_t plane_col);
 
+// PRECONDITION CHECK for the 2x2 Bayer branch (round-5 finding S3).
+//
+// The dcraw bit index used by raw_bayer_channel_index_at_plane addresses an
+// 8-ROW by 2-column table (bit position (((row << 1) & 14) + (col & 1)) << 1,
+// i.e. one nibble per row for rows 0..7), but the adapter reads only rows 0 and
+// 1 and then declares cfa_repeat_height == 2. That is a PRECONDITION, not a
+// property of the word, and the vendored tree contains real counter-examples:
+//   third_party/libraw/src/metadata/identify.cpp:1987  0xe1e4e1e4 (PowerShot 600)
+//   third_party/libraw/src/metadata/identify.cpp:1997  0x1e4e1e4e (PowerShot A5)
+//   third_party/libraw/src/metadata/identify.cpp:2005  0x1b4e4b1e (PowerShot A50)
+//   third_party/libraw/src/metadata/identify.cpp:2012  0x1e4b4e1b (PowerShot Pro70)
+// all of which are genuinely 4-row periodic (0x1e4e1e4e decodes to row0=(2,3),
+// row1=(0,1), row2=(2,3), row3=(1,0)), plus identify.cpp:2856 which sets
+// filters == 1, selecting LibRaw's 16x16 table in
+// third_party/libraw/src/utils/utils_dcraw.cpp:41-42 rather than a packed word.
+//
+// Those five are rejected today only INCIDENTALLY and downstream: identify.cpp
+// :1278 gives them cdesc "GMCY" (colors != 3) or "RBTG" (identify.cpp:2857), so
+// the colour keys fail raw_classify_layout's others == 0 / Unknown rules. That
+// safety is real but unintentional; any future body with a three-colour cdesc
+// and a >2-row-periodic word would silently get a wrong 2x2 phase on half its
+// rows - the same "guessed phase silently mis-colours" failure that
+// raw_gpu_pipeline.cpp refuses for a MISSING phase. This function makes the
+// precondition explicit and fails loud instead.
+//
+// Returns kRawSuccess when rows 2..7 of the word agree with rows 0/1 by parity
+// (so a 2x2 tile is a faithful summary), otherwise kRawErrLayoutUnsupported
+// with a named reason in reason_out. filters == 1 is rejected by name.
+// Not called for filters == 9 (X-Trans), which never enters the 2x2 branch.
+RawErrorCode raw_bayer_filters_check_2x2(uint32_t filters, char* reason_out,
+                                         size_t reason_cap);
+
 // Folds LibRaw's THREE black-level terms into one repeating tile.
 //
 // After open_file() + unpack() LibRaw has not run adjust_bl(), so the effective

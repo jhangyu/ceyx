@@ -135,11 +135,27 @@ RawLayoutClass raw_classify_layout(const RawLayoutDescriptor* layout) {
         }
     }
 
+    // kRawColorKeyFujiGreen is LibRaw's FOURTH-COLOUR slot, and what that fourth
+    // colour physically is depends on the tile size (round-5 finding S4):
+    //   - in a 6x6 X-Trans tile it is a second green, so counting it as green is
+    //     correct and is what xtransColorIndex() above already does;
+    //   - in a 2x2 it is Emerald. LibRaw sets cdesc "RGBE" for the Sony DSC-F828
+    //     (third_party/libraw/src/metadata/identify.cpp:2971) and the adapter maps
+    //     'E' to this key (libraw_gpu_input_adapter.cpp:38). Counting it as green
+    //     there scores reds=1/greens=2/blues=1, classifies a four-colour sensor as
+    //     Bayer2x2, and demosaics Emerald AS Green - a silent mis-colour, which is
+    //     newly reachable now that Bayer2x2 is wired to a real kernel.
+    // So it is green only for the 6x6 family; anywhere else it is an "other",
+    // which routes to other_cfa and then to a loud kRawErrLayoutUnsupported.
+    const bool fuji_green_is_green = (rw == 6 && rh == 6);
     int reds = 0, greens = 0, blues = 0, others = 0;
     for (size_t i = 0; i < layout->cfa_pattern_count; ++i) {
         switch (layout->cfa_pattern[i]) {
             case kRawColorKeyRed: ++reds; break;
-            case kRawColorKeyGreen: case kRawColorKeyFujiGreen: ++greens; break;
+            case kRawColorKeyGreen: ++greens; break;
+            case kRawColorKeyFujiGreen:
+                if (fuji_green_is_green) ++greens; else ++others;
+                break;
             case kRawColorKeyBlue: ++blues; break;
             default: ++others; break;
         }

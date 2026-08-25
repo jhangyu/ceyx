@@ -235,6 +235,67 @@ int main() {
         expectClass("cmy_2x2", f.input.layout, kRawLayoutClassOtherCfa);
     }
     {
+        // S4 (round-5 review). LibRaw sets cdesc "RGBE" for the Sony DSC-F828
+        // (third_party/libraw/src/metadata/identify.cpp:2971) with filters
+        // 0x9c9c9c9c, whose FC indices over the 2x2 are {0,3}/{1,2} -> keys
+        // R, E / G, B once cdesc is applied (libraw_gpu_input_adapter.cpp:38
+        // maps 'E' to kRawColorKeyFujiGreen). Emerald is a FOURTH colour, not a
+        // green: if this classifies as Bayer2x2 the kernel demosaics Emerald AS
+        // Green and the image is silently mis-coloured. It must land in
+        // other_cfa and then fail loud. No corpus file has an RGBE body, so this
+        // synthetic descriptor is the only coverage.
+        Fixture f;
+        f.pattern[0] = kRawColorKeyRed;    f.pattern[1] = kRawColorKeyFujiGreen;
+        f.pattern[2] = kRawColorKeyGreen;  f.pattern[3] = kRawColorKeyBlue;
+        expectClass("rgbe_2x2", f.input.layout, kRawLayoutClassOtherCfa);
+        expectValidate("rgbe_2x2_unsupported", f.input, kRawErrLayoutUnsupported);
+        int32_t rx = 0, ry = 0;
+        report("rgbe_2x2_no_phase",
+               raw_bayer_phase_from_pattern(&f.input.layout, &rx, &ry) == 0,
+               "phase_rejected");
+    }
+    {
+        // The other half of S4's negative space: FujiGreen must STILL count as
+        // green for the 6x6 X-Trans family, where it genuinely is one. The
+        // canonical fixture above uses plain Green, so without this case the
+        // carve-out has no coverage and could be narrowed to nothing unnoticed.
+        Fixture f;
+        makeXTrans(f.pattern, 0, 0);
+        for (int i = 0; i < 36; ++i) {
+            if (f.pattern[i] == kRawColorKeyGreen) f.pattern[i] = kRawColorKeyFujiGreen;
+        }
+        f.input.layout.cfa_repeat_width = 6;
+        f.input.layout.cfa_repeat_height = 6;
+        f.input.layout.cfa_pattern_count = 36;
+        expectClass("xtrans_fujigreen_6x6", f.input.layout, kRawLayoutClassXTrans6x6);
+    }
+    {
+        // S4 regression sweep: classification of everything that is NOT an
+        // RGBE-style 2x2 must be byte-for-byte the same decision as before the
+        // FujiGreen change. Held as one explicit table so a future narrowing of
+        // the rule reports "which layout moved", not just "some test failed".
+        Fixture f;
+        const struct { const char* name; int rx; int ry; } phases[4] = {
+            {"sweep_bayer_rggb", 0, 0}, {"sweep_bayer_grbg", 1, 0},
+            {"sweep_bayer_gbrg", 0, 1}, {"sweep_bayer_bggr", 1, 1}};
+        for (const auto& p : phases) {
+            makeBayer(f.pattern, p.rx, p.ry);
+            expectClass(p.name, f.input.layout, kRawLayoutClassBayer2x2);
+        }
+        makeXTrans(f.pattern, 0, 0);
+        f.input.layout.cfa_repeat_width = 6;
+        f.input.layout.cfa_repeat_height = 6;
+        f.input.layout.cfa_pattern_count = 36;
+        expectClass("sweep_xtrans_canonical", f.input.layout, kRawLayoutClassXTrans6x6);
+        // Task 12 routes exotic CFAs on the other_cfa verdict; keep it reachable.
+        f.input.layout.cfa_repeat_width = 2;
+        f.input.layout.cfa_repeat_height = 2;
+        f.input.layout.cfa_pattern_count = 4;
+        f.pattern[0] = kRawColorKeyRed;   f.pattern[1] = kRawColorKeyGreen;
+        f.pattern[2] = kRawColorKeyBlue;  f.pattern[3] = kRawColorKeyWhite;
+        expectClass("sweep_rgbw_2x2", f.input.layout, kRawLayoutClassOtherCfa);
+    }
+    {
         Fixture f;
         f.input.layout.sample_model = kRawSampleModelLayered;
         f.input.layout.cfa_pattern = nullptr;
