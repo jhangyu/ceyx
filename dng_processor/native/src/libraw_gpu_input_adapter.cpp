@@ -175,6 +175,15 @@ RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
     return kRawSuccess;
 }
 
+void raw_component_black_from_libraw(uint32_t black_scalar,
+                                     const uint32_t* channel_black,
+                                     float out[4]) {
+    for (int c = 0; c < 4; ++c) {
+        const uint32_t chan = channel_black ? channel_black[c] : 0u;
+        out[c] = static_cast<float>(black_scalar) + static_cast<float>(chan);
+    }
+}
+
 bool raw_invert_3x3(const float in9[9], float out9[9]) {
     if (!in9 || !out9) return false;
     double m[9];
@@ -345,11 +354,8 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     // arrangement exists to make impossible.
     for (int c = 0; c < 4; ++c) out_input->component_black[c] = 0.0f;
     if (layout.sample_model == kRawSampleModelLinearRgb) {
-        for (int c = 0; c < 4; ++c) {
-            const uint32_t chan = v.black_channel ? v.black_channel[c] : 0u;
-            out_input->component_black[c] =
-                static_cast<float>(v.black_scalar) + static_cast<float>(chan);
-        }
+        raw_component_black_from_libraw(v.black_scalar, v.black_channel,
+                                        out_input->component_black);
     }
 
     // --- white -------------------------------------------------------------

@@ -2,10 +2,39 @@
 // These values are consumed by every later task, so a silent renumbering here
 // is a cross-task bug. Output contract: one line per case, final
 // "[RawContractABI] ALL PASS"; exit 0 only when every case passed.
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
 #include "raw_pipeline_contract.h"
+
+// P19 (round-5 review F-R5-02): "offsets are pinned by this file" was an
+// aspirational comment, not an in-repo guard -- grep -c offsetof was 0. These
+// static_asserts are the guard: every existing RawGpuInput member offset is
+// pinned so a future mid-struct insertion (as opposed to the append-only rule
+// contract version 2 relies on) fails to COMPILE, not just to match an
+// out-of-band dump. Values derived from the struct's own field order and
+// natural (LP64, no packing pragma) alignment, then cross-checked against the
+// reviewer's independent clang -fdump-record-layouts-complete dump
+// (scripts/tmp/p19/r5_review.md): both agree on every value below.
+static_assert(offsetof(RawGpuInput, planes) == 0, "planes offset moved");
+static_assert(offsetof(RawGpuInput, plane_count) == 8, "plane_count offset moved");
+static_assert(offsetof(RawGpuInput, layout) == 16, "layout offset moved");
+static_assert(offsetof(RawGpuInput, active_area) == 64, "active_area offset moved");
+static_assert(offsetof(RawGpuInput, default_crop) == 80, "default_crop offset moved");
+static_assert(offsetof(RawGpuInput, orientation) == 96, "orientation offset moved");
+static_assert(offsetof(RawGpuInput, black) == 100, "black offset moved");
+static_assert(offsetof(RawGpuInput, white_level) == 364, "white_level offset moved");
+static_assert(offsetof(RawGpuInput, as_shot_neutral) == 380,
+             "as_shot_neutral offset moved");
+static_assert(offsetof(RawGpuInput, camera_to_pcs) == 396,
+             "camera_to_pcs offset moved");
+static_assert(offsetof(RawGpuInput, decoder_backend) == 456,
+             "decoder_backend offset moved");
+// P19: appended at the end, contract version 2 (raw_pipeline_contract.h).
+static_assert(offsetof(RawGpuInput, component_black) == 460,
+             "component_black offset moved - must stay APPENDED, never inserted");
+static_assert(sizeof(RawGpuInput) == 480, "RawGpuInput size changed");
 
 namespace {
 

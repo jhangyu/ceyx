@@ -154,6 +154,17 @@ RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
                                            RawBlackLevelPattern* out,
                                            char* reason_out, size_t reason_cap);
 
+// P19: per-COMPONENT black for a non-CFA (linear RGB) layout (round-5 review
+// finding F-R5-01 - this is the seam that makes the arithmetic reachable from
+// a test without a real .x3f sample). The spatial tile built alongside this
+// call must use a ZERO scalar and no channel term (raw_black_pattern_from_libraw
+// called with channel_index == nullptr, cfa_w == cfa_h == 0), so the whole
+// black level lives here exactly once - out[c] = black_scalar + channel[c],
+// with channel[c] treated as 0 when channel_black is null.
+void raw_component_black_from_libraw(uint32_t black_scalar,
+                                     const uint32_t* channel_black,
+                                     float out[4]);
+
 // Row-major 3x3 inverse. Returns false (leaving out9 untouched) when any input
 // is non-finite or the matrix is not invertible. Used to turn LibRaw's
 // camera-from-XYZ cam_xyz into the camera-to-PCS direction the contract field

@@ -611,13 +611,28 @@ int main(int argc, char** argv) {
     }
 
     {
-        // P19: for linear RGB the black scalar rides in component_black, and
-        // raw_black_pattern_from_libraw is called with NO channel term and a
-        // ZERO scalar -- otherwise color.black is subtracted twice and the
-        // shadows are crushed. Exact expected values, not "non-zero".
+        // P19 (round-5 review F-R5-01): the original version of this case
+        // computed component_black[c] = black_scalar + channel_black[c]
+        // ITSELF and then asserted its own arithmetic -- deleting the
+        // adapter's population code left it green, zero executable coverage.
+        // Fixed by extracting the exact expression the adapter uses into a
+        // shared, header-declared seam (raw_component_black_from_libraw,
+        // libraw_gpu_input_adapter.cpp) and calling THAT here. No .x3f sample
+        // exists to drive this through LibRawGpuInputAdapter::build() end to
+        // end (SKIP-by-name discipline, corpus has no Foveon file), so the
+        // shared-function call is the strongest coverage reachable this round;
+        // Task 8's E2E harness is expected to add the real-file path.
         const uint32_t black_scalar = 256u;
         const uint32_t channel_black[4] = {8u, 4u, 12u, 0u};
 
+        float component_black[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+        raw_component_black_from_libraw(black_scalar, channel_black, component_black);
+
+        // The spatial tile alongside it must be seeded with a ZERO scalar and
+        // no channel term (channel_index == nullptr, cfa_w == cfa_h == 0) --
+        // otherwise color.black is subtracted twice and the shadows are
+        // crushed. Kept as its own assertion: it is the OTHER half of the
+        // arrangement raw_component_black_from_libraw's contract depends on.
         RawBlackLevelPattern tile{};
         char reason[256] = {0};
         const RawErrorCode rc = raw_black_pattern_from_libraw(
@@ -625,11 +640,6 @@ int main(int argc, char** argv) {
             /*channel_index=*/nullptr, /*cfa_w=*/0u, /*cfa_h=*/0u,
             /*spatial_black=*/nullptr, /*spatial_w=*/0u, /*spatial_h=*/0u,
             /*left_margin=*/0u, /*top_margin=*/0u, &tile, reason, sizeof(reason));
-
-        float component_black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (int c = 0; c < 4; ++c) {
-            component_black[c] = static_cast<float>(black_scalar + channel_black[c]);
-        }
 
         char detail[256];
         std::snprintf(detail, sizeof(detail),
@@ -646,6 +656,69 @@ int main(int argc, char** argv) {
                    component_black[2] == 268.0f &&
                    component_black[3] == 256.0f,
                detail);
+
+        // channel_black == nullptr must be treated as all-zero, not crash or
+        // read garbage -- this is the branch the real adapter takes for any
+        // decoder that leaves color.cblack[0..3] untouched.
+        float null_channel_black[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+        raw_component_black_from_libraw(black_scalar, nullptr, null_channel_black);
+        char detail2[128];
+        std::snprintf(detail2, sizeof(detail2), "cb=[%.1f,%.1f,%.1f,%.1f]",
+                      null_channel_black[0], null_channel_black[1],
+                      null_channel_black[2], null_channel_black[3]);
+        report("linear-rgb-component-black-null-channel", nullptr,
+               null_channel_black[0] == 256.0f && null_channel_black[1] == 256.0f &&
+                   null_channel_black[2] == 256.0f && null_channel_black[3] == 256.0f,
+               detail2);
+    }
+
+    {
+        // F-R5-01 (part 2): also exercise the surrounding adapter code that
+        // WRITES component_black into a real, adapter-built descriptor. Every
+        // corpus sample today is Bayer or X-Trans (sample_model == CFA), so
+        // this pins the OTHER half of libraw_gpu_input_adapter.cpp's new
+        // logic: the unconditional zero-init and the linear_rgb gate that
+        // must NOT fire for a CFA layout. It cannot reach the linear_rgb
+        // branch itself without a real .x3f file (none exists in this
+        // checkout; SKIP-by-name), which is why the direct seam-function
+        // calls above carry the arithmetic correctness gate.
+        bool any_cfa_checked = false;
+        for (const Sample& s : samples) {
+            if (s.id.rfind("malformed_", 0) == 0) continue;
+            if (!fileExists(s.path)) continue;
+            if (s.expect_layout != "bayer2x2" && s.expect_layout != "xtrans6x6") continue;
+
+            LibRawFrontendContext ctx;
+            if (ctx.open_and_unpack(s.path.c_str()) != kRawSuccess) continue;
+
+            LibRawGpuInputAdapter adapter;
+            RawGpuInput input{};
+            RawDevelopParams develop{};
+            char reason[256] = {0};
+            if (adapter.build(ctx, &input, &develop, reason, sizeof(reason)) !=
+                kRawSuccess) {
+                continue;
+            }
+
+            char detail[192];
+            std::snprintf(detail, sizeof(detail),
+                          "sample_model=%d cb=[%.1f,%.1f,%.1f,%.1f]",
+                          static_cast<int>(input.layout.sample_model),
+                          input.component_black[0], input.component_black[1],
+                          input.component_black[2], input.component_black[3]);
+            report("component-black-zero-for-cfa", s.id.c_str(),
+                   input.layout.sample_model == kRawSampleModelCfa &&
+                       input.component_black[0] == 0.0f &&
+                       input.component_black[1] == 0.0f &&
+                       input.component_black[2] == 0.0f &&
+                       input.component_black[3] == 0.0f,
+                   detail);
+            any_cfa_checked = true;
+        }
+        if (!any_cfa_checked) {
+            std::printf("[LibRawAdapter] SKIP component-black-zero-for-cfa "
+                        "(no CFA sample built successfully)\n");
+        }
     }
 
     if (checked == 0) {
