@@ -35,6 +35,15 @@ void main() {
       }
     });
 
+    test('x3f routes to the RAW entry point', () {
+      // Foveon X3F. Correct only because raw_file_router.cpp routes the
+      // FOVb magic (P19 T4) — this list's documented invariant is that it
+      // matches the native router.
+      expect(decodeRouteForPath('sigma_sd_quattro.x3f'), DecodeRoute.raw);
+      expect(decodeRouteForPath('SIGMA_SD_QUATTRO.X3F'), DecodeRoute.raw,
+          reason: 'extension matching is case-insensitive');
+    });
+
     test('dng routes to the existing DNG entry', () {
       expect(decodeRouteForPath('a.dng'), DecodeRoute.dng);
       expect(decodeRouteForPath('A.DNG'), DecodeRoute.dng);

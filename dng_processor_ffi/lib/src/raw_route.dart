@@ -13,6 +13,9 @@
 library;
 
 /// Generic-RAW extensions handled by `raw_decode_and_process`.
+///
+/// 'x3f' added in Phase 19 alongside the native router's FOVb magic
+/// (`raw_file_router.cpp`, P19 Task 4) — Foveon X3F.
 const List<String> kRawExtensions = <String>[
   'arw',
   'cr3',
@@ -22,6 +25,7 @@ const List<String> kRawExtensions = <String>[
   'orf',
   'pef',
   'srw',
+  'x3f',
 ];
 
 /// Everything the decoder service accepts: DNG plus the generic RAW list.
