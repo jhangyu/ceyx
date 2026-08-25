@@ -130,7 +130,6 @@ endif()
 add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
 target_include_directories(dng_decoder_native PUBLIC
     ${INC_DIR}
-    ${SRC_DIR}
     ${SRC_DIR}/pipeline
     ${DNG_SDK_DIR})
 if(DNG_USE_LIBJPEG)

@@ -19,12 +19,12 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${LOG_LIBRARY})
 
     add_executable(test_decode_android tests/test_decode.cpp
-        src/dng_pipeline.cpp
-        src/dng_halide_device.cpp
-        src/dng_opcodelist2_halide.cpp
-        src/dng_mosaic_halide.cpp
-        src/dng_warp_halide.cpp
-        src/dng_render_halide.cpp)
+        src/pipeline/dng_pipeline.cpp
+        src/pipeline/dng_halide_device.cpp
+        src/pipeline/dng_opcodelist2_halide.cpp
+        src/pipeline/dng_mosaic_halide.cpp
+        src/pipeline/dng_warp_halide.cpp
+        src/pipeline/dng_render_halide.cpp)
     target_include_directories(test_decode_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
@@ -61,13 +61,13 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # handoff actually triggers and what [Stage4-Perf] FromDevice: reports.
     # Measurement-only target; no kernel / device-ownership code is touched.
     add_executable(dng_ffi_harness_android tests/dng_ffi_harness.cpp
-        src/dng_ffi_api.cpp
-        src/dng_pipeline.cpp
-        src/dng_halide_device.cpp
-        src/dng_opcodelist2_halide.cpp
-        src/dng_mosaic_halide.cpp
-        src/dng_warp_halide.cpp
-        src/dng_render_halide.cpp)
+        src/ffi/dng_ffi_api.cpp
+        src/pipeline/dng_pipeline.cpp
+        src/pipeline/dng_halide_device.cpp
+        src/pipeline/dng_opcodelist2_halide.cpp
+        src/pipeline/dng_mosaic_halide.cpp
+        src/pipeline/dng_warp_halide.cpp
+        src/pipeline/dng_render_halide.cpp)
     target_include_directories(dng_ffi_harness_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
@@ -98,12 +98,12 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # Android/Vulkan Stage4 AOT variant (dng_render_stage4_split.a), not the Metal
     # one linked by the macOS-only test_device_handoff target below.
     add_executable(test_device_handoff_android tests/test_device_handoff.cpp
-        src/dng_pipeline.cpp
-        src/dng_halide_device.cpp
-        src/dng_opcodelist2_halide.cpp
-        src/dng_mosaic_halide.cpp
-        src/dng_warp_halide.cpp
-        src/dng_render_halide.cpp)
+        src/pipeline/dng_pipeline.cpp
+        src/pipeline/dng_halide_device.cpp
+        src/pipeline/dng_opcodelist2_halide.cpp
+        src/pipeline/dng_mosaic_halide.cpp
+        src/pipeline/dng_warp_halide.cpp
+        src/pipeline/dng_render_halide.cpp)
     target_include_directories(test_device_handoff_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
@@ -202,25 +202,25 @@ target_link_libraries(test_cfa_color PRIVATE dng_decoder_native)
 add_executable(test_raw_contract_abi tests/test_raw_contract_abi.cpp)
 target_include_directories(test_raw_contract_abi PRIVATE ${INC_DIR})
 
-# P17 R2/T5: magic-byte RawFileRouter test. src/raw_file_router.cpp is
+# P17 R2/T5: magic-byte RawFileRouter test. src/pipeline/raw_file_router.cpp is
 # already swept into dng_decoder_native by the file(GLOB_RECURSE
 # NATIVE_SOURCES ...) above (~line 348); no LibRaw/DNG SDK/Halide
 # dependency, not gated by DNG_ENABLE_GENERIC_RAW.
 add_executable(test_raw_file_router
     tests/test_raw_file_router.cpp
-    src/raw_file_router.cpp)
+    src/pipeline/raw_file_router.cpp)
 target_include_directories(test_raw_file_router PRIVATE ${INC_DIR})
 
 # P17 R2/T3: layout classification + RawGpuInput validator test.
-# src/raw_contract_validate.cpp is already swept into dng_decoder_native by
+# src/pipeline/raw_contract_validate.cpp is already swept into dng_decoder_native by
 # the GLOB_RECURSE above.
 add_executable(test_raw_layout_contract
     tests/test_raw_layout_contract.cpp
-    src/raw_contract_validate.cpp)
+    src/pipeline/raw_contract_validate.cpp)
 target_include_directories(test_raw_layout_contract PRIVATE ${INC_DIR})
 
 # P17 R2/T8: shared Stage4 core + LibRaw RenderParams builder test.
-# src/raw_render_params_builder.cpp is already swept into
+# src/pipeline/raw_render_params_builder.cpp is already swept into
 # dng_decoder_native by the GLOB_RECURSE above.
 add_executable(test_raw_render_params tests/test_raw_render_params.cpp)
 target_include_directories(test_raw_render_params PRIVATE ${INC_DIR})
@@ -411,7 +411,7 @@ if(DNG_ENABLE_GENERIC_RAW)
     target_link_libraries(libraw_vendored INTERFACE raw)
     target_compile_definitions(libraw_vendored INTERFACE DNG_ENABLE_GENERIC_RAW=1)
 
-    # P17 T6: the single generic decoder owner. src/libraw_frontend.cpp is
+    # P17 T6: the single generic decoder owner. src/pipeline/libraw_frontend.cpp is
     # already in NATIVE_SOURCES via GLOB_RECURSE (~line 348, filtered out when
     # this option is OFF), so dng_decoder_native only needs LibRaw's usage
     # requirements here. Keyword-less signature deliberately, to match the
@@ -423,8 +423,8 @@ if(DNG_ENABLE_GENERIC_RAW)
 
     add_executable(test_libraw_frontend
         tests/test_libraw_frontend.cpp
-        src/libraw_frontend.cpp
-        src/raw_contract_validate.cpp)
+        src/pipeline/libraw_frontend.cpp
+        src/pipeline/raw_contract_validate.cpp)
     target_include_directories(test_libraw_frontend PRIVATE ${INC_DIR})
     target_link_libraries(test_libraw_frontend PRIVATE libraw_vendored)
 
@@ -433,9 +433,9 @@ if(DNG_ENABLE_GENERIC_RAW)
     # and a guarded target drops silently with no red signal.)
     add_executable(test_libraw_adapter
         tests/test_libraw_adapter.cpp
-        src/libraw_frontend.cpp
-        src/libraw_gpu_input_adapter.cpp
-        src/raw_contract_validate.cpp)
+        src/pipeline/libraw_frontend.cpp
+        src/pipeline/libraw_gpu_input_adapter.cpp
+        src/pipeline/raw_contract_validate.cpp)
     target_include_directories(test_libraw_adapter PRIVATE ${INC_DIR})
     target_link_libraries(test_libraw_adapter PRIVATE libraw_vendored)
 
@@ -477,12 +477,12 @@ endif()
 # Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
 # handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.
 add_executable(test_device_handoff tests/test_device_handoff.cpp
-    src/dng_pipeline.cpp
-    src/dng_halide_device.cpp
-    src/dng_opcodelist2_halide.cpp
-    src/dng_mosaic_halide.cpp
-    src/dng_warp_halide.cpp
-    src/dng_render_halide.cpp)
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/dng_render_halide.cpp)
 target_include_directories(test_device_handoff PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -539,15 +539,15 @@ endif()
 
 # Real-photograph AC7 measurement for both sized-kernel variants, plus viewable
 # image output. NOTE: tests/test_stage4_scaled_photo.cpp #includes
-# src/dng_render_halide.cpp directly (to reach the production buildRenderParams
+# src/pipeline/dng_render_halide.cpp directly (to reach the production buildRenderParams
 # without editing a production source), so that file must NOT be listed here as
 # a separate source or every symbol in it would be defined twice.
 add_executable(test_stage4_scaled_photo tests/test_stage4_scaled_photo.cpp
-    src/dng_pipeline.cpp
-    src/dng_halide_device.cpp
-    src/dng_opcodelist2_halide.cpp
-    src/dng_mosaic_halide.cpp
-    src/dng_warp_halide.cpp)
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp)
 target_include_directories(test_stage4_scaled_photo PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -590,11 +590,11 @@ endif()
 # reach buildRenderParams, so that file must NOT be listed as a separate source
 # here or every symbol in it would be defined twice.
 add_executable(test_sized_decode tests/test_sized_decode.cpp
-    src/dng_pipeline.cpp
-    src/dng_halide_device.cpp
-    src/dng_opcodelist2_halide.cpp
-    src/dng_mosaic_halide.cpp
-    src/dng_warp_halide.cpp)
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp)
 target_include_directories(test_sized_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -661,15 +661,16 @@ endif()
 
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
-    src/dng_pipeline.cpp
-    src/dng_halide_device.cpp
-    src/dng_opcodelist2_halide.cpp
-    src/dng_mosaic_halide.cpp
-    src/dng_warp_halide.cpp
-    src/dng_render_halide.cpp)
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/dng_render_halide.cpp)
 target_include_directories(test_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
+    ${SRC_DIR}/pipeline
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
@@ -703,9 +704,9 @@ endif()
 # ever produced). Linking the bridge in restores the target; the polynomial
 # AOT archives below satisfy the bridge's own kernel references.
 add_executable(test_demosaic_halide tests/test_demosaic_halide.cpp
-    src/dng_mosaic_halide.cpp
-    src/dng_opcodelist2_halide.cpp
-    src/dng_halide_device.cpp)
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_halide_device.cpp)
 target_include_directories(test_demosaic_halide PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -727,7 +728,7 @@ endif()
 # mosaic. Covers both the Halide AOT kernel and the CPU reference demosaic
 # plus get_cfa_pattern's phase expansion. No DNG fixture required.
 add_executable(test_cfa_phase tests/test_cfa_phase.cpp
-    src/dng_mosaic_halide.cpp)
+    src/pipeline/dng_mosaic_halide.cpp)
 target_include_directories(test_cfa_phase PRIVATE
     ${INC_DIR}
     ${DNG_SDK_DIR}
@@ -745,7 +746,7 @@ endif()
 # reference (>=99 dB / max_abs<=1) plus the constant-field phase oracle.
 add_executable(test_raw_bayer_kernel
     tests/test_raw_bayer_kernel.cpp
-    src/raw_demosaic_reference.cpp)
+    src/pipeline/raw_demosaic_reference.cpp)
 target_include_directories(test_raw_bayer_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
 add_dependencies(test_raw_bayer_kernel raw_bayer_demosaic_aot_target
                  raw_xtrans_demosaic_aot_target halide_runtime_target)
@@ -763,7 +764,7 @@ endif()
 # constant-field oracle.
 add_executable(test_raw_xtrans_kernel
     tests/test_raw_xtrans_kernel.cpp
-    src/raw_demosaic_reference.cpp)
+    src/pipeline/raw_demosaic_reference.cpp)
 target_include_directories(test_raw_xtrans_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
 add_dependencies(test_raw_xtrans_kernel raw_xtrans_demosaic_aot_target
                  raw_bayer_demosaic_aot_target halide_runtime_target)
@@ -780,7 +781,7 @@ endif()
 # (>=99 dB / max_abs<=1), plus the constant-field oracle and a strided source.
 add_executable(test_raw_linear_rgb_kernel
     tests/test_raw_linear_rgb_kernel.cpp
-    src/raw_demosaic_reference.cpp)
+    src/pipeline/raw_demosaic_reference.cpp)
 target_include_directories(test_raw_linear_rgb_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
 add_dependencies(test_raw_linear_rgb_kernel raw_linear_rgb_normalize_aot_target
                  raw_bayer_demosaic_aot_target raw_xtrans_demosaic_aot_target
@@ -797,7 +798,7 @@ endif()
 
 # Debug demosaic test
 add_executable(test_demosaic_debug tests/test_demosaic_debug.cpp
-    src/dng_mosaic_halide.cpp)
+    src/pipeline/dng_mosaic_halide.cpp)
 target_include_directories(test_demosaic_debug PRIVATE
     ${INC_DIR}
     ${DNG_SDK_DIR}
