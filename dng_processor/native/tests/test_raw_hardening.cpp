@@ -181,6 +181,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    // P19 T8: an X3F that routes generic but cannot be parsed. Same three
+    // assertions as every other malformed fixture: not success, rgba null,
+    // zero pool checkouts left behind.
+    {
+        const std::string bad_x3f = "image_samples/raw_corpus/malformed.x3f";
+        expectCleanFailure("malformed_x3f", bad_x3f.c_str());
+    }
+
     // 4. Oversized declared dimensions must be refused before allocation.
     {
         static uint16_t storage[64];

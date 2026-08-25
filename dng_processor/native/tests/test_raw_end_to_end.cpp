@@ -307,6 +307,85 @@ RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
     return rc;
 }
 
+// P19: synthetic linear-RGB frame. This is the runtime coverage of the Foveon
+// branch: it drives raw_pipeline_decode_to_rgba with an in-memory 3-component
+// interleaved buffer and needs no corpus file, so the branch has deterministic
+// per-component correctness coverage independent of whether a real .x3f
+// sample is present.
+//
+// On success `rgba` holds a COPY of the pool buffer; the pool buffer itself is
+// released before returning, so no checkout survives this helper on any path.
+RawErrorCode runSyntheticLinearRgb(std::vector<uint8_t>& rgba,
+                                   uint32_t& out_w, uint32_t& out_h,
+                                   RawDecodeDiagnostics& diag) {
+    static uint16_t storage[kSynthW * kSynthH * 3];
+    for (int y = 0; y < kSynthH; ++y) {
+        for (int x = 0; x < kSynthW; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                // Deterministic and per-component distinct, so a branch that
+                // reads the wrong component produces a visibly wrong pixel
+                // rather than a plausible one.
+                storage[(y * kSynthW + x) * 3 + c] =
+                    static_cast<uint16_t>(600 + ((x * 37 + y * 91 + c * 1301) % 9000));
+            }
+        }
+    }
+
+    RawPlaneView plane{};
+    plane.data = storage;
+    plane.byte_size = sizeof(storage);
+    plane.width = kSynthW; plane.height = kSynthH;
+    plane.row_stride_bytes = static_cast<int64_t>(kSynthW) * 3 * 2;
+    plane.pixel_stride_bytes = 6;
+
+    RawGpuInput in{};
+    in.planes = &plane; in.plane_count = 1;
+    in.layout.sample_model = kRawSampleModelLinearRgb;
+    in.layout.sample_type = kRawSampleTypeU16;
+    in.layout.memory_layout = kRawMemoryLayoutInterleaved;
+    in.layout.geometry = kRawGeometryRectilinear;
+    in.layout.plane_count = 1;
+    in.layout.components_per_pixel = 3;
+    in.layout.cfa_repeat_width = 0;
+    in.layout.cfa_repeat_height = 0;
+    in.layout.cfa_pattern = nullptr;
+    in.layout.cfa_pattern_count = 0;
+    in.active_area = RawRect{0, 0, kSynthW, kSynthH};
+    in.default_crop = RawRect{0, 0, kSynthW, kSynthH};
+    in.orientation = kRawOrientationTopLeft;
+    // Spatial tile is a 1x1 ZERO for this layout; the black level lives in
+    // component_black exactly once (see the adapter, P19 T6).
+    in.black.repeat_width = 1; in.black.repeat_height = 1;
+    in.black.values[0] = 0.0f;
+    in.component_black[0] = 512.0f;
+    in.component_black[1] = 520.0f;
+    in.component_black[2] = 500.0f;
+    in.component_black[3] = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        in.white_level[i] = 16383.0f;
+        in.as_shot_neutral[i] = 1.0f;
+    }
+    in.camera_to_pcs.valid = 1;
+    in.camera_to_pcs.out_rows = 3; in.camera_to_pcs.in_cols = 3;
+    for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+
+    RawDevelopParams develop{};
+    develop.tone_curve_strength = 1.0f;
+    develop.output_space = kRawOutputColorSpaceSrgb;
+
+    RawPipelineResult out;
+    const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+    rgba.clear();
+    out_w = out.width;
+    out_h = out.height;
+    diag = out.diag;
+    if (out.rgba_ptr) {
+        rgba.assign(out.rgba_ptr, out.rgba_ptr + out.rgba_size);
+        dng_rgba_output_release(out.rgba_ptr);
+    }
+    return rc;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -465,6 +544,24 @@ int main(int argc, char** argv) {
                        result.diag.raw_repack_bytes == 0,
                    detail);
             if (first_xtrans.empty()) first_xtrans = s.path;
+        } else if (s.expect_layout == "linear_rgb" && s.expect_error == "kRawSuccess") {
+            // P19 T8: real .x3f corpus case. Same predicate shape as the
+            // Bayer/X-Trans success branches; no alpha check duplicated here
+            // beyond the pool/size sanity because the synthetic case above
+            // already carries the per-component-correctness burden.
+            const bool alpha_ok = rc == kRawSuccess && result.rgba_ptr &&
+                alphaAll255(result.rgba_ptr,
+                            static_cast<size_t>(result.width) * result.height);
+            std::snprintf(detail, sizeof(detail),
+                          "class=linear_rgb size=%ux%u alpha=%s backend=%s repack=%lld rc=%s",
+                          result.width, result.height, alpha_ok ? "255" : "BAD",
+                          raw_backend_name(result.diag.unpack_backend),
+                          static_cast<long long>(result.diag.raw_repack_bytes),
+                          raw_error_name(rc));
+            report("", s.id.c_str(),
+                   alpha_ok && result.width > 0 && result.height > 0 &&
+                       result.diag.raw_repack_bytes == 0,
+                   detail);
         } else if (s.expect_layout == "xtrans6x6") {
             std::snprintf(detail, sizeof(detail), "error=%s want=%s rgba=%s",
                           raw_error_name(rc), s.expect_error.c_str(),
@@ -700,6 +797,55 @@ int main(int argc, char** argv) {
                    out.diag.cfa_repeat_height == 6,
                detail);
         if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+    }
+
+    // P19 T8: synthetic linear-RGB (Foveon X3F) product route. This is the
+    // case that is RED before runLinearRgbBranch is wired (the dispatch
+    // returned kRawErrLayoutUnsupported for kRawLayoutClassLinearRgb) and
+    // GREEN after -- the runtime coverage the real .x3f corpus case
+    // complements.
+    {
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        RawDecodeDiagnostics diag{};
+        const RawErrorCode rc = runSyntheticLinearRgb(rgba, w, h, diag);
+
+        bool alpha_ok = !rgba.empty();
+        for (size_t i = 3; alpha_ok && i < rgba.size(); i += 4) {
+            if (rgba[i] != 255) alpha_ok = false;
+        }
+        char detail[256];
+        std::snprintf(detail, sizeof(detail),
+                      "class=linear_rgb size=%ux%u bytes=%zu alpha=%s rc=%s",
+                      w, h, rgba.size(), alpha_ok ? "255" : "BAD",
+                      raw_error_name(rc));
+        report("linear-rgb-synthetic", nullptr,
+               rc == kRawSuccess && w == kSynthW && h == kSynthH &&
+                   rgba.size() == static_cast<size_t>(kSynthW) * kSynthH * 4 &&
+                   alpha_ok,
+               detail);
+
+        // A size-and-alpha predicate passes on an all-black frame, so assert
+        // the pixels carry actual signal AND per-component variation -- the
+        // failure mode of a branch that reads component 0 three times.
+        unsigned long long sum_r = 0, sum_g = 0, sum_b = 0;
+        unsigned nonzero = 0;
+        for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+            sum_r += rgba[i]; sum_g += rgba[i + 1]; sum_b += rgba[i + 2];
+            if (rgba[i] || rgba[i + 1] || rgba[i + 2]) ++nonzero;
+        }
+        const size_t pixels = rgba.size() / 4;
+        std::snprintf(detail, sizeof(detail),
+                      "nonzero=%u/%zu mean_r=%.1f mean_g=%.1f mean_b=%.1f",
+                      nonzero, pixels,
+                      pixels ? static_cast<double>(sum_r) / pixels : 0.0,
+                      pixels ? static_cast<double>(sum_g) / pixels : 0.0,
+                      pixels ? static_cast<double>(sum_b) / pixels : 0.0);
+        report("linear-rgb-synthetic-pixels", nullptr,
+               rc == kRawSuccess && pixels > 0 &&
+                   nonzero > pixels / 2 &&
+                   sum_r != sum_g && sum_g != sum_b,
+               detail);
     }
 
     // Round-6 should-fix S-R6-01: the validator blesses a canonical tile whose

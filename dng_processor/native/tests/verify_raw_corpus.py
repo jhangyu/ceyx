@@ -105,6 +105,20 @@ def generate_malformed(samples):
         out.write_bytes(payload)
         print("[Corpus] generated %s sha256=%s"
               % (out.name, hashlib.sha256(payload).hexdigest()))
+
+    # P19: synthetic malformed X3F. Deliberately NOT derived from the Bayer
+    # sample: it must carry the FOVb magic so the router sends it generic and
+    # the failure lands in parse/unpack, which is the path under test.
+    x3f = bytearray(b"FOVb")
+    state = 0x13579BDF
+    for _ in range(4096):
+        state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+        x3f.append((state >> 16) & 0xFF)
+    x3f_out = REPO / "image_samples" / "raw_corpus" / "malformed.x3f"
+    x3f_out.write_bytes(bytes(x3f))
+    print("[Corpus] generated %s sha256=%s"
+          % (x3f_out.name, hashlib.sha256(bytes(x3f)).hexdigest()))
+
     print("[Corpus] copy the printed digests into raw_corpus_manifest.json")
     return 0
 

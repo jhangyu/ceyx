@@ -14,6 +14,7 @@
 #include "raw_bayer_demosaic.h"
 #include "raw_contract_validate.h"
 #include "raw_file_router.h"
+#include "raw_linear_rgb_normalize.h"
 #include "raw_render_params_builder.h"
 #include "raw_xtrans_demosaic.h"
 
@@ -86,6 +87,21 @@ float computeInvRange(const RawGpuInput& input) {
     float black_max = 0.0f;
     for (uint32_t i = 0; i < bw * bh; ++i) {
         if (input.black.values[i] > black_max) black_max = input.black.values[i];
+    }
+    const float range = input.white_level[0] - black_max;
+    return range > 0.0f ? 65535.0f / range : 1.0f;
+}
+
+// Linear-RGB counterpart. Deliberately a separate function rather than a branch
+// inside computeInvRange: the two take their black level from DIFFERENT contract
+// fields (spatial tile vs per-component vector), so a shared function would have
+// to consult the layout class -- exactly the hidden coupling the dispatch rule
+// forbids. For this layout the spatial tile is a 1x1 zero by construction
+// (libraw_gpu_input_adapter.cpp), so reading it here would under-scale the image.
+float computeInvRangeLinearRgb(const RawGpuInput& input) {
+    float black_max = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        if (input.component_black[c] > black_max) black_max = input.component_black[c];
     }
     const float range = input.white_level[0] - black_max;
     return range > 0.0f ? 65535.0f / range : 1.0f;
@@ -311,6 +327,124 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     return kRawSuccess;
 }
 
+// The third sibling of runBayerBranch/runXTransBranch: same borrowed stride-aware
+// wrap, same interleaved RGB16 device-dirty intermediate, the SAME shared Stage4
+// entry, the same RGBA pool checkout and the same ownership ordering.
+//
+// Three differences, all forced by the input already being full-colour: the
+// source wrap is 3-D (dim 0 stride 3, dim 2 stride 1) rather than a 2-D mosaic;
+// the kernel is the normalize-only pre-pass; and the black term is the
+// per-component vector. There is NO demosaic here -- an X3F pixel already
+// carries all three components (spec section 4.2).
+//
+// [F-R5-03] Explicit dispatch decision: raw_frontend_pixels_live_in_color3_image
+// (libraw_frontend.cpp) accepts ANY LibRaw decode with filters==0 && colors==3,
+// not only Foveon bodies -- a hypothetical RawSpeed3 cpp==3 output (raw_alloc
+// == nullptr, e.g. a fully demosaiced/linear buffer some vendor decoder hands
+// back) would satisfy the same predicate and arrive here too. This branch
+// ACCEPTS that case rather than rejecting it, because nothing below is
+// Foveon-specific: the black term is
+// raw_component_black_from_libraw(v.black_scalar, v.black_channel, ...)
+// (libraw_gpu_input_adapter.cpp:356-358), i.e. whatever per-channel black
+// LibRaw reports for THAT file's decoder, not a Foveon constant; the white
+// level is the file's own v.white_level; and the colour matrix is the file's
+// own cam_xyz. A three-component interleaved U16 buffer with correct
+// per-component black/white/matrix metadata is colorimetrically identical
+// whether LibRaw's decoder happened to be x3f_load_raw or some other
+// colors==3 path -- there is no Foveon-only default anywhere in this branch
+// for a non-Foveon file to wrongly inherit. Phase 17 refused color3 dispatch
+// entirely (no branch existed); this phase's decision is to accept it
+// generically, keyed on the LAYOUT the validator already blessed (the linear
+// RGB layout class below), never on decoder_backend/make/model.
+RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
+                                const RawDevelopParams& develop,
+                                RawPipelineResult& out) {
+    const RawPlaneView& plane = input.planes[0];
+    const uint32_t w = plane.width;
+    const uint32_t h = plane.height;
+    if (w == 0 || h == 0 || !plane.data) return kRawErrMetadataInvalid;
+
+    // [R6 parking, r6_review.md] The borrowed wrap below divides
+    // row_stride_bytes by 2 (U16 elements). An odd stride would silently
+    // truncate that division; guard it explicitly rather than inherit the
+    // sibling branches' unguarded pattern silently.
+    if ((plane.row_stride_bytes % 2) != 0) return kRawErrMetadataInvalid;
+
+    const RawRect& crop = input.default_crop;
+    if (crop.width == 0 || crop.height == 0 ||
+        crop.x < 0 || crop.y < 0 ||
+        static_cast<uint32_t>(crop.x) + crop.width > w ||
+        static_cast<uint32_t>(crop.y) + crop.height > h) {
+        return kRawErrMetadataInvalid;
+    }
+
+    // Borrowed, stride-aware 3-D wrap: no host copy. row_stride_bytes comes
+    // from the decoder's pitch and already accounts for the three components.
+    halide_dimension_t src_dims[3] = {
+        {0, static_cast<int32_t>(w), 3, 0},
+        {0, static_cast<int32_t>(h),
+         static_cast<int32_t>(plane.row_stride_bytes / 2), 0},
+        {0, 3, 1, 0}};
+    Halide::Runtime::Buffer<const uint16_t> src_buf(
+        static_cast<const uint16_t*>(plane.data), 3, src_dims);
+
+    // Per-COMPONENT black, three entries. The kernel indexes black(c) with
+    // c in {0,1,2}, matching the dst channel order. component_black[c] >=
+    // white_level[c] cannot reach this point: raw_validate_gpu_input rejects
+    // it before dispatch (raw_contract_validate.cpp:356-359) and the reason
+    // string is already surfaced by raw_pipeline_decode_to_rgba's
+    // "[RawPipeline] contract FAIL" fprintf below the validator call.
+    float black3[3] = {input.component_black[0], input.component_black[1],
+                       input.component_black[2]};
+    Halide::Runtime::Buffer<const float> black_buf(black3, 3);
+
+    Halide::Runtime::Buffer<uint16_t> stage3 =
+        Halide::Runtime::Buffer<uint16_t>::make_interleaved(
+            static_cast<int>(w), static_cast<int>(h), 3);
+
+    src_buf.set_host_dirty();
+    black_buf.set_host_dirty();
+    stage3.set_host_dirty(false);
+
+    const double gpu_t0 = nowMs();
+    if (raw_linear_rgb_normalize(src_buf, black_buf,
+                                 computeInvRangeLinearRgb(input), stage3) != 0) {
+        return kRawErrKernelFailed;
+    }
+
+    RenderParams params;
+    if (!buildRenderParamsFromRaw(input, develop, params)) {
+        return kRawErrMetadataInvalid;
+    }
+
+    const uint32_t out_w = crop.width;
+    const uint32_t out_h = crop.height;
+    const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
+
+    RgbaCheckoutGuard rgba(rgba_bytes);
+    if (!rgba.get()) return kRawErrAllocationFailed;
+
+    // Same shared Stage4 call as the other two branches: no second render path.
+    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
+                                            1.0f / 65535.0f,
+                                            crop.x, crop.y,
+                                            static_cast<int>(out_w),
+                                            static_cast<int>(out_h),
+                                            static_cast<int>(out_w),
+                                            static_cast<int>(out_h),
+                                            params, rgba.get(),
+                                            /*fuse_rgba=*/true)) {
+        return kRawErrKernelFailed;
+    }
+
+    out.diag.gpu_process_ms = nowMs() - gpu_t0;
+    out.width = out_w;
+    out.height = out_h;
+    out.rgba_size = rgba_bytes;
+    out.rgba_ptr = rgba.release();   // ownership moves to the caller
+    return kRawSuccess;
+}
+
 }  // namespace
 
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
@@ -383,6 +517,9 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
             break;
         case kRawLayoutClassXTrans6x6:
             rc = runXTransBranch(input, develop, out);
+            break;
+        case kRawLayoutClassLinearRgb:
+            rc = runLinearRgbBranch(input, develop, out);
             break;
         default:
             std::fprintf(stderr, "[RawPipeline] layout class '%s' unsupported\n",
