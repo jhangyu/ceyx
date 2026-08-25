@@ -72,8 +72,6 @@ dng_processor/native/third_party/libraw-cmake/
 /rule.md
 /file_index.md
 /unit_test.md
-/update_code_index_rule.md
-/dng_color_metadata_spec.md
 /AGENTS.md
 /package.json
 /package-lock.json
