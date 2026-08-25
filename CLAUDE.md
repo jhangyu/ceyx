@@ -93,7 +93,7 @@ flutter test
 
 ## Architecture
 
-### 4-Stage DNG Pipeline (`dng_pipeline_v2.cpp`)
+### 4-Stage DNG Pipeline (`dng_pipeline.cpp`)
 
 | Stage | Role | Technology |
 |-------|------|------------|
@@ -113,7 +113,7 @@ dng_ffi_api.cpp  (extern "C" API)
 dng_bindings.dart  (dart:ffi struct + lookupFunction)
   └── dng_decoder_service.dart  (DngDecoderService.decode)
         - Zero-copy: wraps native RGBA buffer as Dart typed list (no memcpy)
-        - NativeFinalizer calls dng_free_halide_buffer() on GC
+        - NativeFinalizer calls dng_free_rgba_buffer() on GC
         ↓
 dng_image_widget.dart  (Flutter render)
 ```
@@ -124,7 +124,7 @@ dng_image_widget.dart  (Flutter render)
 
 - `DngDemosaicWarpGenerator` → `dng_demosaic_warp.a` (Stage 3 fused)
 - `DngDemosaicGenerator` → `dng_demosaic_bilinear.a` (Stage 3 fallback)
-- `DngWarpGenerator` → `rectilinear_warp.a` (standalone warp fallback)
+- `RectilinearWarpGenerator` → `rectilinear_warp.a` (standalone warp fallback)
 - `DngRenderGenerator` → `dng_render_stage4.a` (Stage 4)
 
 ## Key Gotchas (from memory.md)
