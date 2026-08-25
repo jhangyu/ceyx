@@ -230,6 +230,27 @@ if(APPLE)
         ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
 
+# -----------------------------------------------------------------------------
+# B1 fix (2026-08-26, round-1 review): the LibRaw/RawSpeed3 wiring below is NOT
+# a test dependency — it supplies dng_decoder_native's own usage requirements
+# (libraw/ include path, the `raw` static lib, DNG_ENABLE_GENERIC_RAW=1) for
+# src/libraw_frontend.cpp, which pipeline.cmake keeps in NATIVE_SOURCES
+# whenever DNG_ENABLE_GENERIC_RAW is ON (default ON, CMakeLists.txt:91) —
+# cross builds included. It was nevertheless sitting inside the host-only
+# `if(NOT DNG_CROSS_BUILD)` block, so the Android leg of the bare watchdog run
+# compiled libraw_frontend.cpp with no libraw include path
+# ("fatal error: 'libraw/libraw.h' file not found").
+#
+# The block therefore has to run for cross builds too, so the host-only guard
+# is closed here and reopened just below, after the wiring. It is deliberately
+# NOT moved to third_party.cmake: that fragment is include()d first
+# (CMakeLists.txt:61), i.e. BEFORE find_package(Halide) (generators.cmake:36),
+# and running RawSpeed3's add_subdirectory() before Halide is configured is the
+# documented zlib/`_uncompress` link hazard this block was deferred to avoid
+# (see the option() comment at CMakeLists.txt:78-92). Keeping it in place keeps
+# the host command order byte-identical; only the cross path gains it.
+endif() # NOT DNG_CROSS_BUILD (host test targets, part 1 of 2)
+
 # P17 T1: Generic RAW frontend (LibRaw + bundled RawSpeed3) wiring, deferred
 # until after Halide is fully configured (see option() comment above).
 if(DNG_ENABLE_GENERIC_RAW)
@@ -287,6 +308,66 @@ if(DNG_ENABLE_GENERIC_RAW)
     # variable (not an option()-backed cache entry), so a non-cache set() here
     # is honored identically to a cached one, without the reconfigure hazard.
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+    # --- B1 (2026-08-26): cross-compile (NDK) prerequisites -----------------
+    # Neither vendored subproject is cross-compile-ready out of the box, and
+    # neither is patched here (third_party/ is read-only); both are steered
+    # through knobs they already expose.
+    if(DNG_CROSS_BUILD)
+        # RawSpeed3 probes the CPU it is *configuring on* via three try_run()s
+        # (cmake/Modules/cpu-{cache-line,page,large-page}-size.cmake), which
+        # CMake refuses in cross mode. Upstream's own binary-distribution
+        # switch takes the hardcoded branch of all three (64 / 4096 / 4096) and
+        # additionally stops CpuMarch.cmake:4 probing `-march=native`, which is
+        # meaningless for a cross build; it selects `-mtune=generic` instead.
+        # Preferred over hand-seeding RAWSPEED_*_EXITCODE cache entries: the
+        # values are then upstream's, not ours. They are inert for us anyway —
+        # RAWSPEED_PAGESIZE/LARGEPAGESIZE have zero uses in src/librawspeed
+        # (config.h.in constants only) and RAWSPEED_CACHELINESIZE has exactly
+        # one, an alignas() in VC5Decompressor.cpp:859 — so no assumption about
+        # the device's real page size is baked in.
+        set(BINARY_PACKAGE_BUILD ON)
+
+        # Both subprojects call a bare find_package(JPEG) (RawSpeed3
+        # cmake/src-dependencies.cmake:161, LibRaw-cmake CMakeLists.txt:189)
+        # and hard-error when it fails. The NDK sysroot ships no libjpeg, but
+        # third_party.cmake has already built the vendored libjpeg-turbo for
+        # this ABI and left JPEG_INCLUDE_DIRS/JPEG_LIBRARIES pointing at it —
+        # so supply a find module that hands those over. RawSpeed3 then builds
+        # its own JPEG::JPEG from them (src-dependencies.cmake:167-173).
+        #
+        # A find module is used deliberately INSTEAD of seeding the standard
+        # JPEG_LIBRARY / JPEG_INCLUDE_DIR *cache* entries: cache entries are
+        # replayed at the start of every later configure, so the QUIET
+        # find_package(JPEG) at third_party.cmake:83 would then report success
+        # and skip building vendored libjpeg-turbo altogether — the same
+        # reconfigure-poisoning class as the F4 zlib/Halide hazard above.
+        # Same generated-shim technique as the pugixml shim further down.
+        set(_dng_jpeg_shim_dir ${CMAKE_CURRENT_BINARY_DIR}/android-find-shims)
+        file(MAKE_DIRECTORY ${_dng_jpeg_shim_dir})
+        # JPEG_VERSION is required, not optional: LibRaw-cmake evaluates
+        # `if(${JPEG_VERSION} LESS 80)` unquoted (CMakeLists.txt:191), which is
+        # a hard CMake syntax error when the variable is empty. 62 is the
+        # honest value — the vendored libjpeg-turbo is built in libjpeg 6.2 API
+        # mode (WITH_JPEG7=0/WITH_JPEG8=0, jconfig.h JPEG_LIB_VERSION 62), so
+        # LibRaw's JPEG8-gated DNG lossy codec (LIBRAW_USE_DNGLOSSYCODEC) is
+        # OFF on Android while it is ON in the host build. That gate is off
+        # this product's critical path: DNG files never reach LibRaw at all —
+        # the router delegates them to the DNG SDK entry
+        # (src/pipeline/raw_gpu_pipeline.cpp:561-566).
+        file(WRITE ${_dng_jpeg_shim_dir}/FindJPEG.cmake
+"# Generated by cmake/tests.cmake for cross (NDK) builds; resolves JPEG to the
+# vendored libjpeg-turbo built by cmake/third_party.cmake in this build tree.
+set(JPEG_FOUND TRUE)
+set(JPEG_INCLUDE_DIRS \"${JPEG_INCLUDE_DIRS}\")
+list(GET JPEG_INCLUDE_DIRS 0 JPEG_INCLUDE_DIR)
+set(JPEG_LIBRARIES \"${JPEG_LIBRARIES}\")
+set(JPEG_LIBRARY \"${JPEG_LIBRARIES}\")
+set(JPEG_VERSION 62)
+set(JPEG_VERSION_STRING \"62\")
+")
+        set(CMAKE_MODULE_PATH ${_dng_jpeg_shim_dir} ${CMAKE_MODULE_PATH})
+    endif()
 
     # Builds the `rawspeed` static target from RawSpeed3's own (real) CMake
     # build. This library is never linked into any Halide/AOT target and is
@@ -420,6 +501,34 @@ if(DNG_ENABLE_GENERIC_RAW)
     if(TARGET dng_decoder_native)
         target_link_libraries(dng_decoder_native libraw_vendored)
     endif()
+endif() # DNG_ENABLE_GENERIC_RAW (LibRaw/RawSpeed3 wiring — all builds)
+
+# TEMPORARY B1 PROBE — removed before commit.
+if(DNG_B1_PROBE AND TARGET dng_decoder_native)
+    get_target_property(_b1_libs dng_decoder_native LINK_LIBRARIES)
+    message(STATUS "B1_PROBE_LINK_LIBRARIES=${_b1_libs}")
+    if(TARGET libraw_vendored)
+        get_target_property(_b1_inc libraw_vendored INTERFACE_INCLUDE_DIRECTORIES)
+        get_target_property(_b1_def libraw_vendored INTERFACE_COMPILE_DEFINITIONS)
+        message(STATUS "B1_PROBE_LIBRAW_VENDORED_INCLUDES=${_b1_inc}")
+        message(STATUS "B1_PROBE_LIBRAW_VENDORED_DEFS=${_b1_def}")
+    else()
+        message(STATUS "B1_PROBE_LIBRAW_VENDORED=ABSENT")
+    endif()
+    if(TARGET raw)
+        get_target_property(_b1_raw_type raw TYPE)
+        message(STATUS "B1_PROBE_RAW_TARGET_TYPE=${_b1_raw_type}")
+    else()
+        message(STATUS "B1_PROBE_RAW_TARGET=ABSENT")
+    endif()
+endif()
+
+# B1 fix: host-only guard reopened; everything from here on is test-target
+# territory again. The `endif()` at the very bottom of this file closes it, and
+# the `endif()` closing the DNG_ENABLE_GENERIC_RAW block below now closes the
+# reopened `if(DNG_ENABLE_GENERIC_RAW)` on the next line.
+if(NOT DNG_CROSS_BUILD)
+if(DNG_ENABLE_GENERIC_RAW)
 
     add_executable(test_libraw_frontend
         tests/test_libraw_frontend.cpp
