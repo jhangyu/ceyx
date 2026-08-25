@@ -194,7 +194,7 @@ def main():
         else:
             print("[Provenance] license " + lic + " -> PASS")
 
-    licenses_doc = REPO / "docs" / "THIRD_PARTY_LICENSES.md"
+    licenses_doc = REPO / "docs" / "legal" / "THIRD_PARTY_LICENSES.md"
     if not licenses_doc.is_file():
         fail("missing " + str(licenses_doc))
     else:

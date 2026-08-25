@@ -4,7 +4,7 @@ Patches applied to `third_party/dng_sdk/source/` (the LIVE compiled vendor tree)
 
 These diffs are maintained for traceability and to aid future SDK upgrades.
 For the full patch index (including timing instrumentation patches), see
-`docs/sdk_patch_index.md`.
+`docs/reference/sdk_patch_index.md`.
 
 ## Bridge-Related Patches
 
@@ -44,4 +44,4 @@ From the `dng_processor/native/` directory:
 
 - When upgrading the Adobe DNG SDK, replay these patches and re-run the
   decode matrix (`run_decode_matrix.py --repeat 3`) before trusting results.
-- Update `docs/sdk_patch_index.md` when adding or modifying patches.
+- Update `docs/reference/sdk_patch_index.md` when adding or modifying patches.
