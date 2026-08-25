@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 每次新對話開始，依序讀取這些文件再開始工作：
 
-1. `rule.md` — 開發 SOP（含 Unified Task Log 推進法）
-2. `memory.md` — 架構決策與避坑記錄
-3. `task.md` — 任務清單，重點看頂部「🔴 現在進行中」區塊
-4. `handover.md` — 上一輪的中斷點與下一步
-5. `plan.md` — 高階里程碑與 Phase 狀態
-6. `file_index.md` — 全專案檔案地圖（**先查這裡，不要全局搜尋**）
+1. `docs/SOP/rule.md` — 開發 SOP（含 Unified Task Log 推進法）
+2. `docs/SOP/memory.md` — 架構決策與避坑記錄
+3. `docs/SOP/task.md` — 任務清單，重點看頂部「🔴 現在進行中」區塊
+4. `docs/SOP/handover.md` — 上一輪的中斷點與下一步
+5. `docs/SOP/plan.md` — 高階里程碑與 Phase 狀態
+6. `docs/SOP/file_index.md` — 全專案檔案地圖（**先查這裡，不要全局搜尋**）
 
 讀完後輸出一份簡短「現狀確認」，說明對當前斷點的理解，再等指示。
 
@@ -127,7 +127,7 @@ dng_image_widget.dart  (Flutter render)
 - `RectilinearWarpGenerator` → `rectilinear_warp.a` (standalone warp fallback)
 - `DngRenderGenerator` → `dng_render_stage4.a` (Stage 4)
 
-## Key Gotchas (from memory.md)
+## Key Gotchas (from docs/SOP/memory.md)
 
 - **Device handoff crop origin**: After `src_buf.crop()`, must mutate `raw_buffer()->dim.min = 0` to match generator's hard-coded `clamp(x, 0, ext-1)`. Do NOT use `set_min`/`translate` (triggers `device_deallocate`).
 - **Halide device handoff**: Pass `device`-dirty `halide_buffer_t*` between AOT kernels without `copy_to_host`; Metal serial queue guarantees ordering.
@@ -140,9 +140,9 @@ All task logs go in `docs/logs/YYYY-MM-DD/Task_<name>.md`. Do not create ad-hoc 
 
 ### Subagent / Bash 執行規範
 
-詳見 [rule.md Appendix D](rule.md#appendix-d-測試與編譯腳本強制規範-2026-04-10-新增) 與 [rule.md Appendix C](rule.md#appendix-c-測試契約檢查規則-2026-04-09-新增)。
+詳見 [rule.md Appendix D](docs/SOP/rule.md#appendix-d-測試與編譯腳本強制規範-2026-04-10-新增) 與 [rule.md Appendix C](docs/SOP/rule.md#appendix-c-測試契約檢查規則-2026-04-09-新增)。
 
-**關鍵摘要（同步維護於 rule.md）**：
+**關鍵摘要（同步維護於 docs/SOP/rule.md）**：
 - 禁止 inline script / heredoc / env 前綴 / git 寫操作
 - 一次性腳本落檔 `dng_processor/native/scripts/tmp/`，禁止 `/tmp/`
 - 既有測試入口（build_native_watchdog / run_decode_matrix / compare_psnr）優先

@@ -65,13 +65,6 @@ dng_processor/native/third_party/libraw-cmake/
 /docs/
 /image_samples/*
 !/image_samples/raw_corpus/
-/memory.md
-/task.md
-/handover.md
-/plan.md
-/rule.md
-/file_index.md
-/unit_test.md
 /AGENTS.md
 /package.json
 /package-lock.json
