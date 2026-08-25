@@ -33,6 +33,40 @@ RawColorKey raw_color_key_from_libraw(uint32_t libraw_index, uint32_t colors,
 // a plan defect (round-4 finding F-R4-01), upheld deviation.
 RawOrientation raw_orientation_from_libraw_flip(int32_t flip);
 
+// LibRaw colour index (what FC returns) at a PLANE-RELATIVE coordinate.
+//
+// CONTRACT ORIGIN RULING (team-lead, round 5): RawLayoutDescriptor::cfa_pattern
+// and RawGpuInput::black describe planes[0] starting at ITS OWN (0,0), so the
+// descriptor is self-describing for the buffer the GPU layer consumes and does
+// not require default_crop to be interpreted.
+//
+// LibRaw's `filters` word is NOT in that origin - it is VISIBLE-relative.
+// Verified at three independent sites in the vendored tree:
+//   1. third_party/libraw/src/preprocessing/raw2image.cpp:144-148 pairs
+//      fcol(row, col) with raw_image[(row + top_margin) * pitch + col +
+//      left_margin], so the row/col handed to FC are visible-origin.
+//   2. third_party/libraw/src/utils/utils_dcraw.cpp:41-42 adds the margins back
+//      for the filters==1 table (filter[(row+top_margin)&15][...]), which is only
+//      coherent if the incoming row/col are visible-relative.
+//   3. third_party/libraw/src/metadata/identify.cpp:2946-2949 rewrites `filters`
+//      itself by XOR-ing (left_margin & 1) and (top_margin << 1) for a Panasonic
+//      body - LibRaw normalising the word against margin parity, which only makes
+//      sense in visible coordinates.
+// So the colour at plane (r, c) is FC(r - top_margin, c - left_margin); since FC
+// is 2-periodic and -x is congruent to x mod 2, that is FC((r + top_margin) & 1,
+// (c + left_margin) & 1). With even margins the shift is a no-op, which is why no
+// present corpus file (crop 0,0) can observe it.
+//
+// The X-Trans branch needs NO such shift and that is verified, not assumed:
+// identify.cpp:2548-2551 builds the visible-relative `xtrans` FROM `xtrans_abs`
+// by adding the margins, so `xtrans_abs` - the array the adapter reads - is
+// already the absolute raw-plane tile.
+uint32_t raw_bayer_channel_index_at_plane(uint32_t filters,
+                                          uint32_t left_margin,
+                                          uint32_t top_margin,
+                                          uint32_t plane_row,
+                                          uint32_t plane_col);
+
 // Folds LibRaw's THREE black-level terms into one repeating tile.
 //
 // After open_file() + unpack() LibRaw has not run adjust_bl(), so the effective
@@ -53,9 +87,18 @@ RawOrientation raw_orientation_from_libraw_flip(int32_t flip);
 // reasoning as raw_frontend_pixels_live_in_raw_image).
 //
 // channel_index is the per-site LibRaw colour index tile (what FC returns),
-// cfa_w x cfa_h row-major; null/zero dims means "no CFA" and the per-channel
-// term is skipped. channel_black is cblack[0..3]. spatial_black is &cblack[6]
-// with spatial_w == cblack[5] and spatial_h == cblack[4], row-major.
+// cfa_w x cfa_h row-major, and must ALREADY be in the plane origin (build it
+// with raw_bayer_channel_index_at_plane, or from xtrans_abs). channel_black is
+// cblack[0..3]. spatial_black is &cblack[6] with spatial_w == cblack[5] and
+// spatial_h == cblack[4], row-major.
+//
+// left_margin / top_margin shift the SPATIAL term into the plane origin. That
+// term is visible-relative for the same reason the CFA pattern is:
+// subtract_black.cpp:38-51 walks q over imgdata.image, whose dimensions are
+// S.iheight x S.iwidth, and open.cpp:356-357 sets iwidth/iheight from the
+// VISIBLE width/height - so cblack[6 + ...] is indexed by visible row/col.
+// The per-channel term needs no separate shift: it follows channel_index, which
+// the caller has already placed in the plane origin.
 //
 // The emitted tile is the element-wise sum over lcm(cfa, spatial) dimensions.
 // If that lcm exceeds the contract's 8x8 ceiling the function FAILS with
@@ -66,6 +109,7 @@ RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
                                            uint32_t cfa_w, uint32_t cfa_h,
                                            const uint32_t* spatial_black,
                                            uint32_t spatial_w, uint32_t spatial_h,
+                                           uint32_t left_margin, uint32_t top_margin,
                                            RawBlackLevelPattern* out,
                                            char* reason_out, size_t reason_cap);
 

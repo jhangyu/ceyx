@@ -150,13 +150,22 @@ void checkFlipTable() {
 // transcribed straight from third_party/libraw/src/preprocessing/
 // subtract_black.cpp:31-51 (adjust_bl() has NOT run, so color.black is still a
 // separate term). Deliberately NOT written in terms of the adapter's helper.
+// row/col are PLANE coordinates; LibRaw's spatial tile is indexed in VISIBLE
+// coordinates (subtract_black.cpp:38-51 walks imgdata.image, sized iheight x
+// iwidth, and open.cpp:356-357 sets those from the visible width/height), so the
+// margins are subtracted here to get back to LibRaw's own index.
 uint32_t librawEffectiveBlack(uint32_t scalar, const uint32_t cb[4],
                               const uint8_t* cfa, uint32_t cfa_w, uint32_t cfa_h,
                               const uint32_t* sp, uint32_t sp_w, uint32_t sp_h,
+                              uint32_t left_margin, uint32_t top_margin,
                               uint32_t row, uint32_t col) {
     uint32_t v = scalar;
     if (cfa && cfa_w && cfa_h) v += cb[cfa[(row % cfa_h) * cfa_w + (col % cfa_w)]];
-    if (sp && sp_w && sp_h) v += sp[(row % sp_h) * sp_w + (col % sp_w)];
+    if (sp && sp_w && sp_h) {
+        const uint32_t sr = (row + sp_h - (top_margin % sp_h)) % sp_h;
+        const uint32_t sc = (col + sp_w - (left_margin % sp_w)) % sp_w;
+        v += sp[sr * sp_w + sc];
+    }
     return v;
 }
 
@@ -170,12 +179,13 @@ float tileAt(const RawBlackLevelPattern& b, uint32_t row, uint32_t col) {
 void checkOneBlackCase(const char* name, uint32_t scalar, const uint32_t cb[4],
                        const uint8_t* cfa, uint32_t cfa_w, uint32_t cfa_h,
                        const uint32_t* sp, uint32_t sp_w, uint32_t sp_h,
+                       uint32_t left_margin, uint32_t top_margin,
                        uint32_t want_tile_w, uint32_t want_tile_h) {
     RawBlackLevelPattern black{};
     char reason[256] = {0};
     const RawErrorCode rc = raw_black_pattern_from_libraw(
-        scalar, cb, cfa, cfa_w, cfa_h, sp, sp_w, sp_h, &black, reason,
-        sizeof(reason));
+        scalar, cb, cfa, cfa_w, cfa_h, sp, sp_w, sp_h, left_margin, top_margin,
+        &black, reason, sizeof(reason));
 
     const bool dims_ok = (rc == kRawSuccess) && black.repeat_width == want_tile_w &&
                          black.repeat_height == want_tile_h;
@@ -189,7 +199,8 @@ void checkOneBlackCase(const char* name, uint32_t scalar, const uint32_t cb[4],
         for (uint32_t r = 0; ok && r < 24; ++r) {
             for (uint32_t c = 0; c < 24; ++c) {
                 const float want = static_cast<float>(librawEffectiveBlack(
-                    scalar, cb, cfa, cfa_w, cfa_h, sp, sp_w, sp_h, r, c));
+                    scalar, cb, cfa, cfa_w, cfa_h, sp, sp_w, sp_h, left_margin,
+                    top_margin, r, c));
                 const float got = tileAt(black, r, c);
                 if (got != want) {
                     ok = false;
@@ -224,43 +235,105 @@ void checkBlackFolding() {
 
     // 1. per-channel only. This is the case the pre-fix adapter got wrong: it
     //    emitted a flat 1x1 tile of `scalar`.
-    checkOneBlackCase("channel-only", 100, kChan, kRggb, 2, 2, nullptr, 0, 0, 2, 2);
+    checkOneBlackCase("channel-only", 100, kChan, kRggb, 2, 2, nullptr, 0, 0, 0, 0, 2, 2);
 
     // 2. per-channel + 2x2 spatial: both terms, same period.
     static const uint32_t kSp2x2[4] = {1, 2, 3, 4};
     checkOneBlackCase("channel-plus-spatial-2x2", 100, kChan, kRggb, 2, 2, kSp2x2,
-                      2, 2, 2, 2);
+                      2, 2, 0, 0, 2, 2);
 
     // 3. co-prime periods: 2x2 CFA against a 3x3 spatial tile -> lcm 6x6.
     static const uint32_t kSp3x3[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
     checkOneBlackCase("channel-2x2-spatial-3x3-lcm", 50, kChan, kRggb, 2, 2, kSp3x3,
-                      3, 3, 6, 6);
+                      3, 3, 0, 0, 6, 6);
 
     // 4. X-Trans 6x6 channel tile against a 2x2 spatial tile -> lcm 6x6, which
     //    is 36 entries and still inside the 64-entry values[] array.
     static uint8_t xtrans[36];
     for (int i = 0; i < 36; ++i) xtrans[i] = static_cast<uint8_t>(i % 3);
     checkOneBlackCase("xtrans-6x6-spatial-2x2", 512, kChan, xtrans, 6, 6, kSp2x2,
-                      2, 2, 6, 6);
+                      2, 2, 0, 0, 6, 6);
 
     // 5. all-zero cblack[0..3] must NOT enlarge the tile: this is what keeps the
     //    present corpus byte-identical to round 4.
     checkOneBlackCase("zero-channel-stays-1x1", 800, kZeroChan, kRggb, 2, 2,
-                      nullptr, 0, 0, 1, 1);
+                      nullptr, 0, 0, 0, 0, 1, 1);
     checkOneBlackCase("zero-channel-keeps-spatial", 800, kZeroChan, kRggb, 2, 2,
-                      kSp2x2, 2, 2, 2, 2);
+                      kSp2x2, 2, 2, 0, 0, 2, 2);
 
     // 6. a combined period that does not fit must FAIL LOUD, never truncate.
     static const uint32_t kSp4x4[16] = {0};
     RawBlackLevelPattern black{};
     char reason[256] = {0};
     const RawErrorCode rc = raw_black_pattern_from_libraw(
-        0, kChan, xtrans, 6, 6, kSp4x4, 4, 4, &black, reason, sizeof(reason));
+        0, kChan, xtrans, 6, 6, kSp4x4, 4, 4, 0, 0, &black, reason, sizeof(reason));
     char detail[320];
     std::snprintf(detail, sizeof(detail), "6x6 CFA vs 4x4 spatial -> rc=%s (%s)",
                   raw_error_name(rc), reason);
     report("oversized-lcm-rejected", "cblack", rc == kRawErrLayoutUnsupported,
            detail);
+
+    // 7. ODD MARGINS. LibRaw indexes the spatial tile in VISIBLE coordinates;
+    //    the contract tile is PLANE-relative, so an odd margin rotates it. No
+    //    corpus file can reach this (all present samples crop at 0,0).
+    checkOneBlackCase("odd-margin-spatial-2x2", 100, kZeroChan, kRggb, 2, 2,
+                      kSp2x2, 2, 2, /*left*/ 1, /*top*/ 1, 2, 2);
+    checkOneBlackCase("odd-margin-spatial-3x3", 0, kZeroChan, kRggb, 2, 2, kSp3x3,
+                      3, 3, /*left*/ 5, /*top*/ 2, 3, 3);
+    // Even margins must remain a no-op: this is the case the whole present
+    // corpus sits on, so if it ever shifts, the recorded hashes move.
+    checkOneBlackCase("even-margin-is-noop", 100, kChan, kRggb, 2, 2, kSp2x2, 2, 2,
+                      /*left*/ 4, /*top*/ 6, 2, 2);
+}
+
+// The CFA-origin half of the same ruling.
+void checkBayerPlaneOrigin() {
+    // RGGB as LibRaw encodes it: FC gives 0,1,1,2 over the 2x2, i.e. R G / G B
+    // once cdesc "RGBG" is applied.
+    const uint32_t kRggbFilters = 0x94949494u;
+
+    struct Row { uint32_t left, top; uint32_t want[4]; const char* why; };
+    static const Row rows[] = {
+        {0, 0, {0, 1, 1, 2}, "no margin: plane == visible"},
+        {1, 0, {1, 0, 2, 1}, "odd left: columns swap"},
+        {0, 1, {1, 2, 0, 1}, "odd top: rows swap"},
+        {1, 1, {2, 1, 1, 0}, "both odd: diagonal swap"},
+        {2, 4, {0, 1, 1, 2}, "even margins: no-op"},
+        {13, 7, {2, 1, 1, 0}, "large odd margins: parity only"},
+    };
+    for (const Row& r : rows) {
+        uint32_t got[4];
+        for (uint32_t row = 0; row < 2; ++row) {
+            for (uint32_t col = 0; col < 2; ++col) {
+                got[row * 2 + col] = raw_bayer_channel_index_at_plane(
+                    kRggbFilters, r.left, r.top, row, col);
+            }
+        }
+        // Independent oracle: LibRaw's own FC on the visible coordinate that
+        // this plane site maps to. Not a copy of the adapter's expression.
+        bool ok = true;
+        for (uint32_t row = 0; row < 2 && ok; ++row) {
+            for (uint32_t col = 0; col < 2; ++col) {
+                const int vr = static_cast<int>(row) - static_cast<int>(r.top);
+                const int vc = static_cast<int>(col) - static_cast<int>(r.left);
+                const int vrp = ((vr % 2) + 2) % 2;
+                const int vcp = ((vc % 2) + 2) % 2;
+                const uint32_t oracle =
+                    (kRggbFilters >> ((((vrp << 1) & 14) + (vcp & 1)) << 1)) & 3u;
+                if (got[row * 2 + col] != oracle ||
+                    got[row * 2 + col] != r.want[row * 2 + col]) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        char detail[256];
+        std::snprintf(detail, sizeof(detail),
+                      "margins l=%u t=%u -> {%u,%u,%u,%u} want {%u,%u,%u,%u} (%s)",
+                      r.left, r.top, got[0], got[1], got[2], got[3], r.want[0],
+                      r.want[1], r.want[2], r.want[3], r.why);
+        report("bayer-plane-origin", "cfa", ok, detail);
+    }
 }
 
 // camera_to_pcs direction. See docs/logs/2026-08-25/r5-camera-to-pcs-ruling.md.
@@ -343,6 +416,7 @@ int main(int argc, char** argv) {
     // every sample is missing (checked==0 still fails the run below).
     checkFlipTable();
     checkBlackFolding();
+    checkBayerPlaneOrigin();
     checkMatrixInverse();
 
     const std::vector<Sample> samples = loadManifest(manifest);

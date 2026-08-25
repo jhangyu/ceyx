@@ -57,12 +57,24 @@ RawOrientation raw_orientation_from_libraw_flip(int32_t flip) {
     }
 }
 
+uint32_t raw_bayer_channel_index_at_plane(uint32_t filters,
+                                          uint32_t left_margin,
+                                          uint32_t top_margin,
+                                          uint32_t plane_row,
+                                          uint32_t plane_col) {
+    // colour at plane (r,c) == FC(r - top_margin, c - left_margin); FC is
+    // 2-periodic and -x == x (mod 2), so adding the margin is the same shift.
+    return bayerKeyIndex(filters, static_cast<int>((plane_row + top_margin) & 1u),
+                         static_cast<int>((plane_col + left_margin) & 1u));
+}
+
 RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
                                            const uint32_t* channel_black,
                                            const uint8_t* channel_index,
                                            uint32_t cfa_w, uint32_t cfa_h,
                                            const uint32_t* spatial_black,
                                            uint32_t spatial_w, uint32_t spatial_h,
+                                           uint32_t left_margin, uint32_t top_margin,
                                            RawBlackLevelPattern* out,
                                            char* reason_out, size_t reason_cap) {
     if (!out) return kRawErrMetadataInvalid;
@@ -105,6 +117,10 @@ RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
         return kRawErrLayoutUnsupported;
     }
 
+    // Plane-origin offsets for the visible-relative spatial term (see header).
+    const uint32_t row_shift = has_spatial ? (top_margin % sh) : 0u;
+    const uint32_t col_shift = has_spatial ? (left_margin % sw) : 0u;
+
     *out = RawBlackLevelPattern{};
     out->repeat_width = tile_w;
     out->repeat_height = tile_h;
@@ -112,10 +128,16 @@ RawErrorCode raw_black_pattern_from_libraw(uint32_t black_scalar,
         for (uint32_t c = 0; c < tile_w; ++c) {
             uint64_t v = black_scalar;
             if (has_channel) {
+                // channel_index is already plane-relative (caller's contract).
                 const uint32_t idx = channel_index[(r % ch) * cfa_w + (c % cw)];
                 if (idx < 4) v += channel_black[idx];
             }
-            if (has_spatial) v += spatial_black[(r % sh) * spatial_w + (c % sw)];
+            if (has_spatial) {
+                // visible row/col of this plane site, without going negative.
+                const uint32_t sr = (r + sh - row_shift) % sh;
+                const uint32_t sc = (c + sw - col_shift) % sw;
+                v += spatial_black[sr * spatial_w + sc];
+            }
             out->values[r * tile_w + c] = static_cast<float>(v);
         }
     }
@@ -200,6 +222,10 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
             }
             return kRawErrMetadataInvalid;
         }
+        // No margin shift here, and that is verified rather than assumed:
+        // identify.cpp:2548-2551 derives the visible-relative `xtrans` FROM
+        // `xtrans_abs` by adding top_margin/left_margin, so `xtrans_abs` (what
+        // the frontend hands us) is already the absolute raw-plane tile.
         for (int i = 0; i < 36; ++i) {
             // xtrans_abs is a signed char array; a negative entry would wrap to
             // a huge unsigned value, which raw_color_key_from_libraw rejects as
@@ -219,9 +245,13 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
         layout.cfa_pattern = cfa_pattern_;
         layout.cfa_pattern_count = 36;
     } else if (v.filters != 0) {
-        for (int row = 0; row < 2; ++row) {
-            for (int col = 0; col < 2; ++col) {
-                const uint32_t idx = bayerKeyIndex(v.filters, row, col);
+        // PLANE-relative, not visible-relative: LibRaw's filters word is indexed
+        // in visible coordinates, so it is shifted by the margin parity here
+        // (round-5 origin ruling; derivation and citations in the header).
+        for (uint32_t row = 0; row < 2; ++row) {
+            for (uint32_t col = 0; col < 2; ++col) {
+                const uint32_t idx = raw_bayer_channel_index_at_plane(
+                    v.filters, v.visible_left, v.visible_top, row, col);
                 cfa_pattern_[row * 2 + col] =
                     raw_color_key_from_libraw(idx, v.colors, v.cdesc);
                 channel_index[row * 2 + col] = static_cast<uint8_t>(idx);
@@ -260,7 +290,7 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     const RawErrorCode black_rc = raw_black_pattern_from_libraw(
         v.black_scalar, v.black_channel, channel_index, channel_w, channel_h,
         v.black_pattern, v.black_repeat_width, v.black_repeat_height,
-        &out_input->black, reason_out, reason_cap);
+        v.visible_left, v.visible_top, &out_input->black, reason_out, reason_cap);
     if (black_rc != kRawSuccess) return black_rc;
 
     // --- white -------------------------------------------------------------
