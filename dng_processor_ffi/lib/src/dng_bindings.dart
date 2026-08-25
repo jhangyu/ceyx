@@ -60,9 +60,6 @@ typedef DngDecodeAndProcessSizedDart =
 typedef DngFreeResultNative = ffi.Void Function(ffi.Pointer<DngResult> result);
 typedef DngFreeResultDart = void Function(ffi.Pointer<DngResult> result);
 
-typedef DngFreeHalideBufferNative =
-    ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
-typedef DngFreeHalideBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
 typedef DngFreeRgbaBufferNative = ffi.Void Function(ffi.Pointer<ffi.Void> ptr);
 typedef DngFreeRgbaBufferDart = void Function(ffi.Pointer<ffi.Void> ptr);
 
@@ -95,21 +92,21 @@ typedef DngDecoderSavePipelineCacheDart = int Function();
 typedef DngDecoderPipelineCacheStatusNative = ffi.Int32 Function();
 typedef DngDecoderPipelineCacheStatusDart = int Function();
 
-typedef dng_extract_preview_jpeg_func =
+typedef DngExtractPreviewJpegNative =
     ffi.Int32 Function(
       ffi.Pointer<Utf8> filePath,
       ffi.Pointer<ffi.Pointer<ffi.Uint8>> outBuffer,
       ffi.Pointer<ffi.Int32> outSize,
     );
-typedef DngExtractPreviewJpeg =
+typedef DngExtractPreviewJpegDart =
     int Function(
       ffi.Pointer<Utf8> filePath,
       ffi.Pointer<ffi.Pointer<ffi.Uint8>> outBuffer,
       ffi.Pointer<ffi.Int32> outSize,
     );
 
-typedef dng_free_buffer_func = ffi.Void Function(ffi.Pointer<ffi.Uint8> buffer);
-typedef DngFreeBuffer = void Function(ffi.Pointer<ffi.Uint8> buffer);
+typedef DngFreeBufferNative = ffi.Void Function(ffi.Pointer<ffi.Uint8> buffer);
+typedef DngFreeBufferDart = void Function(ffi.Pointer<ffi.Uint8> buffer);
 
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
@@ -134,11 +131,10 @@ class DngNativeBindings {
   late final DngDecoderSavePipelineCacheDart dngDecoderSavePipelineCache;
   late final DngDecoderPipelineCacheStatusDart dngDecoderPipelineCacheStatus;
   late final DngFreeResultDart dngFreeResult;
-  late final DngFreeHalideBufferDart dngFreeHalideBuffer;
   late final DngFreeRgbaBufferDart dngFreeRgbaBuffer;
 
-  late final DngExtractPreviewJpeg extractPreviewJpeg;
-  late final DngFreeBuffer freeBuffer;
+  late final DngExtractPreviewJpegDart extractPreviewJpeg;
+  late final DngFreeBufferDart freeBuffer;
 
   /// Pointer to the C `dng_free_result` function for NativeFinalizer (if we were finalizing the whole result)
   late final ffi.Pointer<ffi.NativeFunction<DngFreeResultNative>>
@@ -147,10 +143,6 @@ class DngNativeBindings {
   /// Pointer to the C `dng_free_rgba_buffer` function for NativeFinalizer
   late final ffi.Pointer<ffi.NativeFunction<DngFreeRgbaBufferNative>>
   dngFreeRgbaBufferPtr;
-
-  /// Deprecated pointer to the C `dng_free_halide_buffer` alias.
-  late final ffi.Pointer<ffi.NativeFunction<DngFreeHalideBufferNative>>
-  dngFreeHalideBufferPtr;
 
   /// Guarded access to the additive sized-decode entry. Null when the loaded
   /// dylib does not export `dng_decode_and_process_sized`.
@@ -276,10 +268,6 @@ class DngNativeBindings {
       'dng_free_result',
     );
 
-    dngFreeHalideBuffer = _lib
-        .lookupFunction<DngFreeHalideBufferNative, DngFreeHalideBufferDart>(
-          'dng_free_halide_buffer',
-        );
     dngFreeRgbaBuffer = _lib
         .lookupFunction<DngFreeRgbaBufferNative, DngFreeRgbaBufferDart>(
           'dng_free_rgba_buffer',
@@ -294,18 +282,13 @@ class DngNativeBindings {
           'dng_free_rgba_buffer',
         );
 
-    dngFreeHalideBufferPtr = _lib
-        .lookup<ffi.NativeFunction<DngFreeHalideBufferNative>>(
-          'dng_free_halide_buffer',
-        );
-
     extractPreviewJpeg = _lib
-        .lookup<ffi.NativeFunction<dng_extract_preview_jpeg_func>>(
+        .lookup<ffi.NativeFunction<DngExtractPreviewJpegNative>>(
           'dng_extract_preview_jpeg',
         )
         .asFunction();
     freeBuffer = _lib
-        .lookup<ffi.NativeFunction<dng_free_buffer_func>>('dng_free_buffer')
+        .lookup<ffi.NativeFunction<DngFreeBufferNative>>('dng_free_buffer')
         .asFunction();
   }
 
