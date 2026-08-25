@@ -213,6 +213,7 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     view.black_pattern = (view.black_repeat_width && view.black_repeat_height)
                              ? reinterpret_cast<const uint32_t*>(&color.cblack[6])
                              : nullptr;
+    view.black_channel = reinterpret_cast<const uint32_t*>(&color.cblack[0]);
 
     impl_->view = view;
     impl_->open = true;

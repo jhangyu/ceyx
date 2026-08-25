@@ -106,6 +106,17 @@ int32_t dng_decoder_save_pipeline_cache(void);
 /// Returns -1 when unsupported on this build.
 int32_t dng_decoder_pipeline_cache_status(void);
 
+/* Generic (non-DNG) RAW decode. Returns the SAME DngResult layout as
+ * dng_decode_and_process, so no Dart struct change is needed; free it with
+ * dng_free_result(). max_dim <= 0 means full resolution.
+ * error_code carries a RawErrorCode (<= -201) on failure. */
+struct RawDecodeDiagnostics;
+DngResult *raw_decode_and_process(const char *file_path, int32_t max_dim);
+
+/* Diagnostics for the calling thread's most recent raw_decode_and_process.
+ * Returns 0 on success, -1 when out is null or no decode has run. */
+int32_t raw_last_diagnostics(struct RawDecodeDiagnostics *out);
+
 #ifdef __cplusplus
 }
 #endif

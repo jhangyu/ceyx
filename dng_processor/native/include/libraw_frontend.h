@@ -43,6 +43,7 @@ struct LibRawRawView {
     uint32_t black_repeat_width = 0;
     uint32_t black_repeat_height = 0;
     uint32_t black_scalar = 0;
+    const uint32_t* black_channel = nullptr;   // color.cblack[0..3], per-CFA-channel black
     uint32_t white_level = 0;
     int32_t flip = 0;
     const char* cdesc = nullptr;            // e.g. "RGBG"
