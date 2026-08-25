@@ -21,7 +21,7 @@ list(REMOVE_ITEM DNG_SOURCES "${DNG_SDK_DIR}/dng_xmp_sdk.cpp" "${DNG_SDK_DIR}/dn
     # Production/test_decode call the AOT entry directly and fail fast if GPU is unsupported.
 
 # Inject our XMP stubs into the base DNG SDK library so its internal references resolve
-list(APPEND DNG_SOURCES "${SRC_DIR}/dng_xmp_stub.cpp")
+list(APPEND DNG_SOURCES "${SRC_DIR}/pipeline/dng_xmp_stub.cpp")
 
 add_library(dng_sdk STATIC ${DNG_SOURCES})
 # Route A adoption (P16, 2026-06-12): pin the SDK render reference to IEEE stepwise.
@@ -81,10 +81,18 @@ else()
 endif()
 
 # Native library
+# 2026-08-26 Ceyx restructure Round 2: pipeline sources live under src/pipeline/,
+# FFI sources under src/ffi/, generator sources moved entirely out of SRC_DIR to
+# native/generators/. GLOB_RECURSE already recurses into subdirectories, and every
+# EXCLUDE REGEX below is anchored with a ".*/" prefix (path-independent basename
+# match), so the resulting NATIVE_SOURCES set is unchanged by the move — verified
+# by target-dump diff in the acceptance step, not just by inspection.
 file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
 # W7-4 (TD-17): Exclude entire research/ subdirectory from production dylib.
 # Complements the Generator filter below — any new WarpUtils.cpp or helper
 # placed under src/research/ is automatically excluded without updating regex.
+# (Round 2: research/ and the Generator*.cpp files no longer exist under SRC_DIR
+# at all post-move, so these three filters are now no-ops kept for safety/history.)
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/research/.*")
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp$")
 # P17 T9: the generic-RAW Halide generators are named Raw*Generator.cpp, which
@@ -123,6 +131,7 @@ add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
 target_include_directories(dng_decoder_native PUBLIC
     ${INC_DIR}
     ${SRC_DIR}
+    ${SRC_DIR}/pipeline
     ${DNG_SDK_DIR})
 if(DNG_USE_LIBJPEG)
     target_link_libraries(dng_decoder_native dng_sdk ${JPEG_LIBRARIES})
