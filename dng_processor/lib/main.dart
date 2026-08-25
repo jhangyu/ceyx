@@ -120,11 +120,18 @@ class _DngHomePageState extends State<DngHomePage> {
   }
 
   Future<void> _pickAndDecode() async {
-    // Pick a DNG file
+    // Pick a RAW or DNG file. The accepted list is derived from
+    // kSupportedDecodeExtensions (dng_processor_ffi/lib/src/raw_route.dart)
+    // so the picker can never drift from the decoder's routing table.
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['dng', 'DNG'],
-      dialogTitle: 'Select a DNG file',
+      allowedExtensions: <String>[
+        for (final ext in kSupportedDecodeExtensions) ...<String>[
+          ext,
+          ext.toUpperCase(),
+        ],
+      ],
+      dialogTitle: 'Select a RAW or DNG file',
     );
 
     if (result == null || result.files.isEmpty) return;
@@ -141,18 +148,24 @@ class _DngHomePageState extends State<DngHomePage> {
       _filePath = path;
     });
 
-    // Attempt to extract the fast preview JPEG first — runs on a worker
-    // isolate so the UI can render the spinner frame before the FFI call.
-    try {
-      final preview = await _decoder.getPreviewJpegOnWorker(path);
-      if (preview != null) {
-        setState(() {
-          _previewBytes = preview;
-          _showingPreview = true;
-        });
+    // Attempt the fast preview JPEG first — runs on a worker isolate so the
+    // UI can render the spinner frame before the FFI call.
+    //
+    // DNG only: dng_extract_preview_jpeg is a DNG SDK entry with no
+    // generic-RAW equivalent in Phase 18, so for a RAW file it would spend a
+    // worker isolate just to return null.
+    if (decodeRouteForPath(path) == DecodeRoute.dng) {
+      try {
+        final preview = await _decoder.getPreviewJpegOnWorker(path);
+        if (preview != null) {
+          setState(() {
+            _previewBytes = preview;
+            _showingPreview = true;
+          });
+        }
+      } catch (e) {
+        debugPrint('Failed to extract preview: $e');
       }
-    } catch (e) {
-      debugPrint('Failed to extract preview: $e');
     }
 
     // Process the full RAW image
