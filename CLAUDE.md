@@ -22,22 +22,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # 首次 clone 後必跑一次：抓 vendored Halide v21 binary distribution
 # （~540MB，未 tracked——2026-07-05 起因 GitHub 100MB 單檔限制移出 git）
-dng_processor/native/scripts/fetch_halide_v21_dist.sh
+native/scripts/fetch_halide_v21_dist.sh
 
 # 完整 configure + build（預設 target: test_decode）
-python3 dng_processor/native/scripts/build_native_watchdog.py
+python3 native/scripts/build_native_watchdog.py
 
 # 指定 target
-python3 dng_processor/native/scripts/build_native_watchdog.py --target dng_decoder_native
+python3 native/scripts/build_native_watchdog.py --target dng_decoder_native
 
 # 跳過 configure 加速迭代
-python3 dng_processor/native/scripts/build_native_watchdog.py --skip-configure --target test_decode
+python3 native/scripts/build_native_watchdog.py --skip-configure --target test_decode
 ```
 
 ### Manual CMake
 
 ```bash
-cd dng_processor/native
+cd native
 cmake -S . -B build
 cmake --build build --target <target> -j$(nproc)
 ```
@@ -45,7 +45,7 @@ cmake --build build --target <target> -j$(nproc)
 ### Flutter
 
 ```bash
-cd dng_processor
+cd app
 flutter run          # macOS app
 flutter build macos  # release build
 ```
@@ -54,22 +54,22 @@ flutter build macos  # release build
 
 ```bash
 # 4-stage decode + PSNR
-./dng_processor/native/build/test_decode image_samples/lossless_dng_sample.dng
+./native/build/test_decode image_samples/lossless_dng_sample.dng
 
 # 4-case regression matrix (lossless/lossy × stage1/full)
-python3 dng_processor/native/tests/run_decode_matrix.py
-python3 dng_processor/native/tests/run_decode_matrix.py --repeat 3
+python3 native/tests/run_decode_matrix.py
+python3 native/tests/run_decode_matrix.py --repeat 3
 
 # FFI + device-handoff harness cases (production C ABI + Metal device handoff
 # gate). Auto-enabled by run_decode_matrix.py whenever the default binaries
 # below exist — no flag needed once both targets are built:
-python3 dng_processor/native/scripts/build_native_watchdog.py --skip-configure --target dng_ffi_harness
-python3 dng_processor/native/scripts/build_native_watchdog.py --skip-configure --target test_device_handoff
-python3 dng_processor/native/tests/run_decode_matrix.py --repeat 3
-# `dng_ffi_harness` (dng_processor/native/tests/dng_ffi_harness.cpp) drives the
+python3 native/scripts/build_native_watchdog.py --skip-configure --target dng_ffi_harness
+python3 native/scripts/build_native_watchdog.py --skip-configure --target test_device_handoff
+python3 native/tests/run_decode_matrix.py --repeat 3
+# `dng_ffi_harness` (native/tests/dng_ffi_harness.cpp) drives the
 # extern "C" FFI entry (dng_decode_and_process) directly, gating contract
 # checks and RGB byte-exact match.
-# `test_device_handoff` (dng_processor/native/tests/test_device_handoff.cpp)
+# `test_device_handoff` (native/tests/test_device_handoff.cpp)
 # calls decode_to_rgb directly and gates the Metal device-handoff PSNR (ON vs
 # OFF) for the fused Stage3→Stage4 path.
 # To point at non-default binaries or opt out explicitly:
@@ -77,13 +77,13 @@ python3 dng_processor/native/tests/run_decode_matrix.py --repeat 3
 #   --device-handoff-harness <path> / --no-device-handoff-harness
 
 # PSNR comparison of two raw buffers
-python3 dng_processor/native/tests/compare_psnr.py \
+python3 native/tests/compare_psnr.py \
   --ref lossless_stage3_6048x4024_1p.raw \
   --test halide_demosaic_output.raw \
   --width 6048 --height 4024 --planes 3
 
 # Dart FFI smoke test
-cd dng_processor
+cd app
 dart run bin/benchmark_zero_copy.dart image_samples/lossless_dng_sample.dng
 dart run bin/benchmark_preview.dart image_samples/lossless_dng_sample.dng
 
@@ -144,6 +144,6 @@ All task logs go in `docs/logs/YYYY-MM-DD/Task_<name>.md`. Do not create ad-hoc 
 
 **關鍵摘要（同步維護於 docs/SOP/rule.md）**：
 - 禁止 inline script / heredoc / env 前綴 / git 寫操作
-- 一次性腳本落檔 `dng_processor/native/scripts/tmp/`，禁止 `/tmp/`
+- 一次性腳本落檔 `native/scripts/tmp/`，禁止 `/tmp/`
 - 既有測試入口（build_native_watchdog / run_decode_matrix / compare_psnr）優先
 

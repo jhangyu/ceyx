@@ -22,41 +22,41 @@ __pycache__/
 node_modules/
 
 # Build artifacts
-dng_processor/native/build/
-dng_processor/native/build-android/
-dng_processor/native/build_diag/
-dng_processor/native/.cache/
+native/build/
+native/build-android/
+native/build_diag/
+native/.cache/
 *.o
 *.a
 *.dylib
 preview_out.jpg
-dng_processor/native/compile_commands.json
+native/compile_commands.json
 
 # Vendored Halide v21 binary distribution (~540MB)
-# Fetch after clone: dng_processor/native/scripts/fetch_halide_v21_dist.sh
-dng_processor/native/third_party/halide/
+# Fetch after clone: native/scripts/fetch_halide_v21_dist.sh
+native/third_party/halide/
 
 # DNG SDK non-build artifacts (only source/*.cpp,*.h needed)
-dng_processor/native/third_party/dng_sdk/targets/
-dng_processor/native/third_party/dng_sdk/documents/
-dng_processor/native/third_party/dng_sdk/projects/
-dng_processor/native/third_party/dng_sdk/source/Makefile
+native/third_party/dng_sdk/targets/
+native/third_party/dng_sdk/documents/
+native/third_party/dng_sdk/projects/
+native/third_party/dng_sdk/source/Makefile
 
 # libjpeg-turbo non-build artifacts (only src/, simd/, cmakescripts/ needed)
-dng_processor/native/third_party/libjpeg-turbo/java/
-dng_processor/native/third_party/libjpeg-turbo/doc/
-dng_processor/native/third_party/libjpeg-turbo/testimages/
-dng_processor/native/third_party/libjpeg-turbo/fuzz/
-dng_processor/native/third_party/libjpeg-turbo/release/
-dng_processor/native/third_party/libjpeg-turbo/win/
-dng_processor/native/third_party/libjpeg-turbo/sharedlib/
-dng_processor/native/third_party/libjpeg-turbo/test/
-dng_processor/native/third_party/libjpeg-turbo/ChangeLog.md
+native/third_party/libjpeg-turbo/java/
+native/third_party/libjpeg-turbo/doc/
+native/third_party/libjpeg-turbo/testimages/
+native/third_party/libjpeg-turbo/fuzz/
+native/third_party/libjpeg-turbo/release/
+native/third_party/libjpeg-turbo/win/
+native/third_party/libjpeg-turbo/sharedlib/
+native/third_party/libjpeg-turbo/test/
+native/third_party/libjpeg-turbo/ChangeLog.md
 
 # Vendored LibRaw source + CMake wrapper
-dng_processor/native/third_party/libraw/
-dng_processor/native/third_party/libraw-cmake/
-!dng_processor/native/third_party/libraw/PROVENANCE.md
+native/third_party/libraw/
+native/third_party/libraw-cmake/
+!native/third_party/libraw/PROVENANCE.md
 
 # Session/tool scratch state (never tracked)
 .claude/tmp/
@@ -77,7 +77,7 @@ AGENTS.md
 .sisyphus/
 .claudito/
 graphify-out/
-dng_processor/native/scripts/tmp/
+native/scripts/tmp/
 
 # Untracked dylib snapshots used as symbol-absent test fixtures (Phase 18 Task 1)
 /tmp/

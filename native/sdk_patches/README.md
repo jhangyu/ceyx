@@ -35,7 +35,7 @@ via the `dng_sdk_custom/source/` include path overlay).
 
 ## Applying
 
-From the `dng_processor/native/` directory:
+From the `native/` directory:
 
     git apply sdk_patches/dng_lens_correction_h.patch
     git apply sdk_patches/dng_opcode_list_cpp.patch
