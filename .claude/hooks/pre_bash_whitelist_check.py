@@ -8,7 +8,7 @@
 - shell 控制流 (`for / while / until / if / case`)
 
 違規 → exit 2，blocking 並把 stderr 訊息回傳 Claude，要求改寫成
-`dng_processor/native/scripts/tmp/<name>.{py,sh}` 後再執行。
+`native/scripts/tmp/<name>.{py,sh}` 後再執行。
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def main() -> int:
         print(f"  • {item}", file=sys.stderr)
     print("", file=sys.stderr)
     print("修正方向：", file=sys.stderr)
-    print("  1. 寫成 wrapper script 落檔到 `dng_processor/native/scripts/tmp/<name>.{py,sh}`", file=sys.stderr)
+    print("  1. 寫成 wrapper script 落檔到 `native/scripts/tmp/<name>.{py,sh}`", file=sys.stderr)
     print("  2. 在 script 內處理 env / 迴圈 / heredoc / 多步驟邏輯", file=sys.stderr)
     print("  3. 再用既有白名單入口執行 wrapper（python3 scripts/tmp/... 或 bash scripts/tmp/...）", file=sys.stderr)
     print("", file=sys.stderr)

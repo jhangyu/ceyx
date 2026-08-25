@@ -30,7 +30,7 @@ try:
         tool_input = msg.get('tool_input') or tool.get('input') or {}
         file_path = tool_input.get('file_path', '')
         if file_path.startswith('/tmp/'):
-            print('❌ 禁止寫入 /tmp/ —— 請使用 dng_processor/native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
+            print('❌ 禁止寫入 /tmp/ —— 請使用 native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
             sys.exit(1)
 
     # Bash 工具檢查
@@ -41,12 +41,12 @@ try:
 
         # 檢查重定向到 /tmp (可以有多個空格, 無空格等變體)
         if re.search(r'(?:>|>>|\|)\s*/tmp(?:/|$|\s)', cmd):
-            print('❌ 禁止重定向到 /tmp/ —— 請使用 dng_processor/native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
+            print('❌ 禁止重定向到 /tmp/ —— 請使用 native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
             sys.exit(1)
 
         # 檢查工具寫入 /tmp (tee, cp, mv, install 等)
         if re.search(r'\b(tee|cp|mv|install|cat|dd)\b.*\s/tmp(/|$|\s)', cmd):
-            print('❌ 禁止寫入 /tmp/ —— 請使用 dng_processor/native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
+            print('❌ 禁止寫入 /tmp/ —— 請使用 native/scripts/tmp/ 或其他專案內目錄', file=sys.stderr)
             sys.exit(1)
 
         # 檢查 cd /tmp (開頭或分隔符後)
