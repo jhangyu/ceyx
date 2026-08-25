@@ -7,6 +7,11 @@
 # Phase 14: In cross-build mode, skip Halide find_package and all generator targets.
 # We only need Halide headers for AOT-generated .h includes.
 if(NOT DNG_CROSS_BUILD)
+    # 2026-08-26 Ceyx restructure Round 2 Stream 2B: generator sources moved to
+    # native/generators/ (build-time-only tools, never shipped; see structure
+    # audit M3). GEN_DIR points the add_executable() calls below there; the
+    # generators still #include "dng_halide_utils.h" from the same directory.
+    set(GEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/generators)
     list(APPEND CMAKE_PREFIX_PATH ${HALIDE_DIR})
     # R2 fix (F4, round-1 review, second half): find_package(ZLIB), called
     # from inside the RawSpeed3 subdirectory further below (deliberately
@@ -71,61 +76,63 @@ if(NOT DNG_CROSS_BUILD)
     # the dependency on that ambient state entirely, on top of (not instead
     # of) the ZLIB-cache-slate reset above and the ordering-after-Halide
     # placement of the generic-RAW block.
-    add_executable(rectilinear_warp_generator ${SRC_DIR}/RectilinearWarpGenerator.cpp)
-    target_include_directories(rectilinear_warp_generator PRIVATE ${INC_DIR})
+    add_executable(rectilinear_warp_generator ${GEN_DIR}/RectilinearWarpGenerator.cpp)
+    target_include_directories(rectilinear_warp_generator PRIVATE ${INC_DIR} ${GEN_DIR})
     target_link_libraries(rectilinear_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
-    add_executable(dng_demosaic_generator ${SRC_DIR}/DngDemosaicGenerator.cpp)
-    target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR})
+    add_executable(dng_demosaic_generator ${GEN_DIR}/DngDemosaicGenerator.cpp)
+    target_include_directories(dng_demosaic_generator PRIVATE ${INC_DIR} ${GEN_DIR})
     target_link_libraries(dng_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # P17 T9: fused normalize + Bayer demosaic generator for the generic RAW
     # route. New generator on purpose: dng_demosaic_bilinear's AOT output is a
     # pinned regression artifact and the DNG route must not normalize twice.
-    add_executable(raw_bayer_demosaic_generator ${SRC_DIR}/RawBayerDemosaicGenerator.cpp)
-    target_include_directories(raw_bayer_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR})
+    add_executable(raw_bayer_demosaic_generator ${GEN_DIR}/RawBayerDemosaicGenerator.cpp)
+    target_include_directories(raw_bayer_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
     target_link_libraries(raw_bayer_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # P17 T11: fused normalize + X-Trans 6x6 demosaic generator for the
     # generic RAW route. Separate kernel from the Bayer one: the CFA is a
     # runtime 6x6 buffer, not a 2x2 phase pair.
-    add_executable(raw_xtrans_demosaic_generator ${SRC_DIR}/RawXTransDemosaicGenerator.cpp)
-    target_include_directories(raw_xtrans_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR})
+    add_executable(raw_xtrans_demosaic_generator ${GEN_DIR}/RawXTransDemosaicGenerator.cpp)
+    target_include_directories(raw_xtrans_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
     target_link_libraries(raw_xtrans_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # P19 T7: normalize-only pre-pass for the generic-RAW linear-RGB (Foveon
     # X3F) route. No demosaic, no neighbourhood access -- see the class
     # comment in RawLinearRgbNormalizeGenerator.cpp.
-    add_executable(raw_linear_rgb_normalize_generator ${SRC_DIR}/RawLinearRgbNormalizeGenerator.cpp)
-    target_include_directories(raw_linear_rgb_normalize_generator PRIVATE ${INC_DIR} ${SRC_DIR})
+    add_executable(raw_linear_rgb_normalize_generator ${GEN_DIR}/RawLinearRgbNormalizeGenerator.cpp)
+    target_include_directories(raw_linear_rgb_normalize_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
     target_link_libraries(raw_linear_rgb_normalize_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
-    add_executable(dng_demosaic_warp_generator ${SRC_DIR}/DngDemosaicWarpGenerator.cpp)
-    target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR})
+    add_executable(dng_demosaic_warp_generator ${GEN_DIR}/DngDemosaicWarpGenerator.cpp)
+    target_include_directories(dng_demosaic_warp_generator PRIVATE ${INC_DIR} ${GEN_DIR})
     target_link_libraries(dng_demosaic_warp_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # Research & diagnostic generators (only built if DNG_DIAGNOSTIC_BUILD=ON)
     if(DNG_DIAGNOSTIC_BUILD)
-        add_executable(rectilinear_warp_strict_float_generator ${SRC_DIR}/research/RectilinearWarpStrictFloatGenerator.cpp)
-        target_include_directories(rectilinear_warp_strict_float_generator PRIVATE ${INC_DIR})
+        add_executable(rectilinear_warp_strict_float_generator ${GEN_DIR}/research/RectilinearWarpStrictFloatGenerator.cpp)
+        target_include_directories(rectilinear_warp_strict_float_generator PRIVATE ${INC_DIR} ${GEN_DIR})
         target_link_libraries(rectilinear_warp_strict_float_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
-        add_executable(rectilinear_warp_debug_generator ${SRC_DIR}/research/RectilinearWarpDebugGenerator.cpp)
-        target_include_directories(rectilinear_warp_debug_generator PRIVATE ${INC_DIR})
+        add_executable(rectilinear_warp_debug_generator ${GEN_DIR}/research/RectilinearWarpDebugGenerator.cpp)
+        target_include_directories(rectilinear_warp_debug_generator PRIVATE ${INC_DIR} ${GEN_DIR})
         target_link_libraries(rectilinear_warp_debug_generator PRIVATE Halide::Generator ZLIB::ZLIB)
     endif()
 
-    add_executable(dng_render_generator ${SRC_DIR}/DngRenderGenerator.cpp)
-    target_include_directories(dng_render_generator PRIVATE ${INC_DIR})
+    add_executable(dng_render_generator ${GEN_DIR}/DngRenderGenerator.cpp)
+    target_include_directories(dng_render_generator PRIVATE ${INC_DIR} ${GEN_DIR})
     target_link_libraries(dng_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     # Phase 10 Sprint C1: MapPolynomial AOT generator (Stage 2 OpcodeList2 GPU).
     add_executable(dng_opcode_polynomial_generator
-        ${SRC_DIR}/DngOpcodePolynomialGenerator.cpp)
+        ${GEN_DIR}/DngOpcodePolynomialGenerator.cpp)
+    target_include_directories(dng_opcode_polynomial_generator PRIVATE ${GEN_DIR})
     target_link_libraries(dng_opcode_polynomial_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     add_executable(dng_opcode_polynomial3_generator
-        ${SRC_DIR}/DngOpcodePolynomial3Generator.cpp)
+        ${GEN_DIR}/DngOpcodePolynomial3Generator.cpp)
+    target_include_directories(dng_opcode_polynomial3_generator PRIVATE ${GEN_DIR})
     target_link_libraries(dng_opcode_polynomial3_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
     if(WIN32)
