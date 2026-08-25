@@ -356,12 +356,19 @@ list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp
 # into dng_decoder_native by the GLOB_RECURSE and fail to compile (Halide
 # Generator API + Halide.h are generator-only).
 list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Raw[A-Z][A-Za-z0-9]*Generator\\.cpp$")
+# P17 R5 (F1): the CPU demosaic oracle is test-only. The kernel tests compile
+# it themselves; keeping it in the dylib exported the reference symbols from
+# the production ABI.
+list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/raw_demosaic_reference\\.cpp$")
 # P17 T6: src/libraw_frontend.cpp includes libraw/libraw.h, which is only on an
 # include path when DNG_ENABLE_GENERIC_RAW is ON (libraw_vendored, below).
 # The GLOB_RECURSE above would otherwise sweep it into dng_decoder_native in
 # OFF builds too and break them.
 if(NOT DNG_ENABLE_GENERIC_RAW)
     list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/libraw_(frontend|gpu_input_adapter)\\.cpp$")
+    # P17 T10: the generic RAW route and its C ABI call into the frontend TUs
+    # filtered out above, so they must drop out of OFF builds together.
+    list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/raw_(gpu_pipeline|ffi_api)\\.cpp$")
 endif()
 # W6 H-3: bridge .cpp moved from dng_sdk_custom/source/ into src/;
 # now auto-discovered by file(GLOB_RECURSE) above.
@@ -1265,6 +1272,24 @@ if(DNG_ENABLE_GENERIC_RAW)
     target_compile_definitions(raw PRIVATE USE_RAWSPEED3 USE_RAWSPEED_BITS)
     target_link_libraries(raw PRIVATE rawspeed rawspeed_get_number_of_processor_cores)
 
+    # P17 R5 (F1): the vendored LibRaw static lib was re-exported wholesale
+    # (431 symbols) by dng_decoder_native. Hidden visibility keeps LibRaw
+    # internal to the dylib; our own extern "C" ABI is unaffected (it lives in
+    # project TUs with default visibility). Property set here, not in the
+    # vendored overlay (third_party/ is read-only).
+    set_target_properties(raw PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    # RawSpeed3's core-count helper declares its symbol with an explicit
+    # __attribute__((visibility("default"))) (GetNumberOfProcessorCores.cpp),
+    # which -fvisibility=hidden cannot override — unexport it at link time
+    # on the dylib instead (vendored tree is read-only).
+    if(TARGET dng_decoder_native AND APPLE)
+        target_link_options(dng_decoder_native PRIVATE
+            "LINKER:-unexported_symbol,_rawspeed_get_number_of_processor_cores")
+    endif()
+
     add_library(libraw_vendored INTERFACE)
     target_include_directories(libraw_vendored INTERFACE ${LIBRAW_DIR})
     target_link_libraries(libraw_vendored INTERFACE raw)
@@ -1288,16 +1313,25 @@ if(DNG_ENABLE_GENERIC_RAW)
     target_link_libraries(test_libraw_frontend PRIVATE libraw_vendored)
 
     # P17 T7: the single LibRaw -> RawGpuInput adapter and its test.
-    # EXISTS guard: the CMake wiring landed ahead of the T7 sources (round-4
-    # in-flight); re-configure after the files appear picks the target up.
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_libraw_adapter.cpp)
-        add_executable(test_libraw_adapter
-            tests/test_libraw_adapter.cpp
-            src/libraw_frontend.cpp
-            src/libraw_gpu_input_adapter.cpp
-            src/raw_contract_validate.cpp)
-        target_include_directories(test_libraw_adapter PRIVATE ${INC_DIR})
-        target_link_libraries(test_libraw_adapter PRIVATE libraw_vendored)
+    # (F-R4-05: the round-4 EXISTS guard is gone — the sources are committed,
+    # and a guarded target drops silently with no red signal.)
+    add_executable(test_libraw_adapter
+        tests/test_libraw_adapter.cpp
+        src/libraw_frontend.cpp
+        src/libraw_gpu_input_adapter.cpp
+        src/raw_contract_validate.cpp)
+    target_include_directories(test_libraw_adapter PRIVATE ${INC_DIR})
+    target_link_libraries(test_libraw_adapter PRIVATE libraw_vendored)
+
+    # P17 T10: the generic RAW route end to end. Links the production dylib on
+    # purpose, so the exported C ABI and the SHARED RGBA pool are the ones under
+    # test rather than a second copy (spec 13.1).
+    add_executable(test_raw_end_to_end tests/test_raw_end_to_end.cpp)
+    target_include_directories(test_raw_end_to_end PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+    target_link_libraries(test_raw_end_to_end dng_decoder_native libraw_vendored)
+    if(APPLE)
+        target_link_libraries(test_raw_end_to_end
+            ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
     endif()
 endif()
 
