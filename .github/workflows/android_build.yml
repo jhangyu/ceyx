@@ -1,0 +1,151 @@
+name: Android Build (Vulkan cross-compile)
+
+on:
+  workflow_dispatch:
+  push:
+    # ci/** so the lead can verify this workflow from a bootstrap branch
+    # before any of it lands on main (a workflow file only becomes
+    # dispatchable/visible to GitHub once it exists on a ref that runs it).
+    branches:
+      - "ci/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - "native/**"
+      - ".github/workflows/android_build.yml"
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    # Runner choice (2026-08-26, CI/CD bootstrap task #2):
+    #   ubuntu-latest, not a macOS runner.
+    #   - Cost: GitHub-hosted Ubuntu minutes bill at the 1x multiplier vs
+    #     macOS's 10x. Nothing in this build needs Xcode/Metal: Stage 1 (host
+    #     Halide generators) only needs a C++ host toolchain plus the vendored
+    #     Halide distribution, and Stage 2 (NDK cross-compile) runs the same
+    #     way on any host OS.
+    #   - Stage 1 needs the HOST Halide v21 distribution matching the
+    #     runner's OS/arch. native/scripts/fetch_halide_v21_dist.sh's OS_NAME
+    #     case explicitly supports Linux hosts (arm-64-linux / x86-64-linux),
+    #     so an Ubuntu host is not blocked on the Halide side.
+    #   - The Stage 2 NDK toolchain is pinned via nttld/setup-ndk below
+    #     (rather than relying on whichever NDK revision happens to be
+    #     preinstalled on the runner image) so the arm64-v8a / android-24
+    #     target this build produces does not silently drift when GitHub
+    #     bumps the default runner image's bundled NDK.
+    name: Android arm64-v8a Vulkan cross-compile (dng_decoder_native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # contents: write is only needed for the tag-triggered release-attach
+    # step below; harmless no-op on push/pull_request runs that don't reach it.
+    permissions:
+      contents: write
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      NATIVE_DIR: ${{ github.workspace }}/native
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build prerequisites (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build build-essential libjpeg-dev zlib1g-dev
+
+      - name: Set up Android NDK
+        id: setup_ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Cache vendored Halide v21 distribution (host, Linux)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+
+      - name: Fetch vendored Halide v21 distribution (host)
+        working-directory: ${{ github.workspace }}
+        run: native/scripts/fetch_halide_v21_dist.sh
+
+      - name: Build dng_decoder_native for Android
+        # Two-stage cross-compile driven entirely by the sanctioned entry
+        # point (native/scripts/build_native_watchdog.py --platform android):
+        #   Stage 1 (host): builds the Halide generators natively and runs
+        #     AOT codegen for the strict Android Vulkan target
+        #     (arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-...), matching
+        #     native/CMakePresets.json's "android-vulkan-stage1" preset.
+        #   Stage 2 (NDK cross-compile): configures with the NDK toolchain
+        #     file and DNG_PREBUILT_AOT_DIR pointing at Stage 1's output,
+        #     matching the "android-vulkan" preset, then builds
+        #     dng_decoder_native (-> libdng_decoder_native.so).
+        # --idle-timeout-sec is raised above the script's 60s default as a
+        # margin for CI hosts, which can be slower/noisier than local dev
+        # machines during long Halide codegen steps.
+        working-directory: ${{ github.workspace }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          python3 native/scripts/build_native_watchdog.py \
+            --platform android \
+            --target dng_decoder_native \
+            --android-ndk "${ANDROID_NDK_HOME}" \
+            --idle-timeout-sec 180
+
+      - name: Stage native artifacts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}/native"
+          find "${NATIVE_DIR}/build-android/android-arm64" -maxdepth 1 \
+            -name "libdng_decoder_native*.so" \
+            -exec cp {} "${ARTIFACT_DIR}/native/" \; || true
+          ls -la "${ARTIFACT_DIR}/native" || true
+
+      - name: Fail if no shared library was produced
+        run: |
+          shopt -s nullglob
+          libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
+          if [ ${#libs[@]} -eq 0 ]; then
+            echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
+            exit 1
+          fi
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-android-arm64-v8a
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Attach artifact to GitHub Release (tag push only)
+        # AC5: this workflow deliberately owns its own release-attach step
+        # instead of a separate shared release.yml, to avoid a file jointly
+        # owned by this workflow and the macOS workflow (ci-macos-sonnet owns
+        # .github/workflows/*.yml except this one). softprops/action-gh-release
+        # over raw `gh release upload` because it: (a) creates the Release for
+        # the pushed tag if it doesn't exist yet, (b) uploads/overwrites named
+        # assets idempotently on reruns, and (c) is safe to invoke from
+        # multiple independent workflows targeting the same tag — each run
+        # only uploads its own `files:` glob, so this job's .so upload and the
+        # macOS workflow's parallel .dylib upload do not race or clobber each
+        # other's assets on the same Release.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/artifacts/native/libdng_decoder_native*.so
+          fail_on_unmatched_files: true
