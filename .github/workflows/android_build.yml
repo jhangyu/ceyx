@@ -83,6 +83,32 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: native/scripts/fetch_halide_v21_dist.sh
 
+      # native/third_party/libraw is gitignored; DNG_ENABLE_GENERIC_RAW
+      # defaults ON (native/CMakeLists.txt) and cmake/tests.cmake hard-fails
+      # configure without it, on EVERY build (host generators or Android
+      # cross-compile), so this has to run before Stage 1. Not disabling the
+      # feature to route around the missing vendor tree: that would drop the
+      # generic RAW frontend from the shipped binary, not just fix CI.
+      - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
+        # Cached like Halide: fetch_libraw_dist.sh does three git clones from
+        # public GitHub plus patch application, all deterministic given the
+        # pinned revisions in the script and the project-authored patch sets
+        # applied on top, so a cache hit reproduces byte-identical output.
+        # Keyed on the script AND both patch directories (not just the
+        # script) because the pinned revisions live in the script but the
+        # patches applied on top of them are separate tracked files that can
+        # change independently and must invalidate the cache.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+
+      - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
+        working-directory: ${{ github.workspace }}
+        run: native/scripts/fetch_libraw_dist.sh
+
       - name: Build dng_decoder_native for Android
         # Two-stage cross-compile driven entirely by the sanctioned entry
         # point (native/scripts/build_native_watchdog.py --platform android):
