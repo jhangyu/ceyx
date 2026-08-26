@@ -21,7 +21,11 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   s.platform = :osx, '11.0'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 
-  # The dylib's install name is @rpath/libdng_decoder_native.dylib, so once
-  # CocoaPods embeds it in Frameworks/ the loader resolves it normally.
-  s.vendored_libraries = 'Libraries/libdng_decoder_native.dylib'
+  # libdng_decoder_native.dylib links liblcms2/libjpeg (LibRaw's colour
+  # management + JPEG deps) via find_package(), which resolves to Homebrew on
+  # the build machine. native/cmake/pipeline.cmake's POST_BUILD step vendors
+  # those two next to the dylib and repoints all three to @rpath/<name>, so
+  # once CocoaPods embeds all three in Frameworks/ the loader resolves them
+  # without requiring Homebrew on the host machine.
+  s.vendored_libraries = 'Libraries/libdng_decoder_native.dylib', 'Libraries/liblcms2.2.dylib', 'Libraries/libjpeg.8.dylib'
 end

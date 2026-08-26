@@ -138,4 +138,15 @@ else()
     target_link_libraries(dng_decoder_native dng_sdk)
 endif()
 
+if(APPLE)
+    # This dylib ships inside distributed app bundles; find_package()-resolved
+    # deps (lcms2, libjpeg-turbo) point at absolute Homebrew paths that only
+    # exist on this dev machine. Vendor them next to the built dylib and
+    # repoint load commands at @rpath so the bundle is self-contained.
+    add_custom_command(TARGET dng_decoder_native POST_BUILD
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos_dylib_deps.py
+                $<TARGET_FILE:dng_decoder_native>
+        COMMENT "Vendoring Homebrew deps into dng_decoder_native")
+endif()
+
 endif() # NOT DNG_HOST_GENERATORS_ONLY
