@@ -139,5 +139,13 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           ASSET="${ARTIFACT_DIR}/native/libdng_decoder_native-macos-${{ matrix.label }}.dylib"
           cp "${ARTIFACT_DIR}/native/libdng_decoder_native.dylib" "$ASSET"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          # Both matrix legs (apple-silicon, intel) run this step concurrently
+          # for the same tag, so "view, then create if missing" is a TOCTOU
+          # race: both can observe "not found" and both call `gh release
+          # create`, and the loser fails with "release already exists". The
+          # `|| true` tolerates that specific loser outcome — either way the
+          # release now exists (created by whichever leg won), which is all
+          # the following upload needs. If create fails for an unrelated
+          # reason, the upload step below fails loudly and surfaces it.
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes || true
           gh release upload "$TAG" "$ASSET" --clobber
