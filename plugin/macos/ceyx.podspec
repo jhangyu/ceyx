@@ -18,7 +18,7 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   s.source_files     = 'Classes/**/*'
   s.dependency 'FlutterMacOS'
 
-  s.platform = :osx, '10.15'
+  s.platform = :osx, '13.5'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 
   # The dylib's install name is @rpath/libdng_decoder_native.dylib, so once
