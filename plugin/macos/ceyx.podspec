@@ -11,14 +11,14 @@ Pod::Spec.new do |s|
 Bundles libdng_decoder_native.dylib into the host app's Frameworks directory so
 package:ceyx_example can dlopen it without a dev-machine CMake build tree.
                        DESC
-  s.homepage         = 'https://github.com/jhangyu/flutter_dng_decoder'
+  s.homepage         = 'https://github.com/jhangyu/ceyx'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'flutter_dng_decoder' => 'noreply@example.com' }
+  s.author           = { 'ceyx' => 'noreply@example.com' }
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
   s.dependency 'FlutterMacOS'
 
-  s.platform = :osx, '13.5'
+  s.platform = :osx, '11.0'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 
   # The dylib's install name is @rpath/libdng_decoder_native.dylib, so once
