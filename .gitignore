@@ -63,13 +63,16 @@ native/third_party/libraw-cmake/
 .pi/
 
 # Non-code project files (docs, logs, images, project management)
-# Exception: the third-party license index must ship with the source. It is a
+# Exception 1: the third-party license index must ship with the source. It is a
 # distribution artifact required by the vendored components' licenses, and
 # native/scripts/verify_raw_provenance.py fails without it.
+# Exception 2: docs/images/ holds the screenshots README.md embeds. Without it
+# the published README renders broken image links.
 /docs/*
 !/docs/legal/
 /docs/legal/*
 !/docs/legal/THIRD_PARTY_LICENSES.md
+!/docs/images/
 /image_samples/*
 !/image_samples/raw_corpus/
 /AGENTS.md

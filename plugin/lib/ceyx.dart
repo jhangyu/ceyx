@@ -37,4 +37,4 @@ export 'src/raw_bindings.dart'
 
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.
-const String dngNativeLibraryTag = 'ceyx-0.0.1';
+const String dngNativeLibraryTag = 'ceyx-0.1.0';

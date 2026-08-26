@@ -5,7 +5,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'ceyx'
-  s.version          = '0.0.1'
+  s.version          = '0.1.0'
   s.summary          = 'Prebuilt dng_decoder_native library for host apps.'
   s.description      = <<-DESC
 Bundles libdng_decoder_native.dylib into the host app's Frameworks directory so

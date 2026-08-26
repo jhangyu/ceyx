@@ -5,5 +5,5 @@
 // inconsistently. This one symbol keeps the pod target a normal, buildable
 // target; nothing calls it.
 const char* ceyx_packaging_tag(void) {
-  return "ceyx-0.0.1";
+  return "ceyx-0.1.0";
 }
