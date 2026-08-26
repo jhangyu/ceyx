@@ -87,6 +87,29 @@ jobs:
       - name: Fetch vendored Halide v21 distribution
         run: native/scripts/fetch_halide_v21_dist.sh
 
+      # Configure fails without this (cmake/tests.cmake requires LibRaw
+      # unless DNG_ENABLE_GENERIC_RAW=OFF, which we will not disable just to
+      # skip a fetch step — see fetch_libraw_dist.sh for what it vendors).
+      # Cached like the Halide distribution: the script is idempotent (each
+      # component checks a .vendor-rev sidecar and skips its clone when the
+      # pinned revision already matches), so restoring third_party/libraw and
+      # third_party/libraw-cmake from cache lets the script no-op instead of
+      # doing three separate network clones + patch-apply passes per run.
+      # ~7.5MB is small, but network clones are the part worth avoiding
+      # (latency/flakiness), not the bytes. Key includes the patch files
+      # because a patch-set change requires re-applying, not just re-cloning.
+      - name: Cache vendored LibRaw distribution
+        id: cache-libraw
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
+
+      - name: Fetch vendored LibRaw distribution
+        run: native/scripts/fetch_libraw_dist.sh
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
