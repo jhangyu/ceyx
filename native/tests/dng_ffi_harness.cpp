@@ -65,9 +65,12 @@ bool isWithin(const fs::path &child, const fs::path &parent) {
 fs::path findRepoRoot() {
   fs::path current = fs::current_path();
   while (true) {
-    // Marker was rule.md until 2026-08-25, when it moved to docs/SOP/.
-    if (fs::exists(current / "CLAUDE.md") &&
-        fs::exists(current / "native")) {
+    // Marker history: rule.md until 2026-08-25, then CLAUDE.md until
+    // 2026-08-26. Both were untracked development aids, so a fresh clone had
+    // no marker and this walk fell off the filesystem root. Anchor on the two
+    // top-level source trees instead — they are always present in a checkout.
+    if (fs::exists(current / "native") &&
+        fs::exists(current / "plugin")) {
       return current;
     }
     if (current == current.parent_path()) {

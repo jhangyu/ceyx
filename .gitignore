@@ -79,8 +79,12 @@ native/third_party/libraw-cmake/
 /package.json
 /package-lock.json
 
-# Claude Code agent files (auto-generated, not code)
+# AI coding-agent workspace files. Local development aids, not part of the
+# engine, and meaningless to anyone consuming this repository.
 AGENTS.md
+/CLAUDE.md
+/.claude/
+/skills/
 
 # Tooling / generated
 .sisyphus/

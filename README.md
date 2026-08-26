@@ -677,7 +677,7 @@ python3 native/scripts/verify_raw_provenance.py
 | `native/` | The C++ engine: pipeline (`src/pipeline/`), FFI surface (`src/ffi/`, `include/`), Halide generators (`generators/`), CMake config (`cmake/`), vendored dependencies (`third_party/`), build and verification scripts (`scripts/`), tests (`tests/`) |
 | `plugin/` | The `ceyx` Flutter FFI plugin: Dart bindings and decoder service (`lib/`), plus per-platform native packaging glue |
 | `app/` | The Flutter demo application that exercises the plugin end to end |
-| `docs/` | `SOP/` (plan, task log, architecture memory, file index), `logs/` (dated task logs), `legal/` (third-party licenses), `images/` (screenshots) |
+| `docs/` | `legal/` (third-party license index) and `images/` (README screenshots). Development planning and task logs live under `docs/SOP/` and `docs/logs/` locally but are not published; source comments referring to them are internal cross-references. |
 | `image_samples/` | Sample RAW and DNG files used by tests and manual verification |
 
 ## Licensing and third-party attribution
