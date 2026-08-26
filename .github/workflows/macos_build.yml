@@ -4,18 +4,27 @@ name: macOS Native Build
 # "it builds" (produces a .dylib) — decode-correctness / PSNR gating is
 # out of scope here because the sample DNGs are gitignored and not present
 # in the repository (see docs/logs/2026-08-26/Task_cicd_bootstrap.md).
+#
+# Trigger note (2026-08-26): push.paths is intentionally NOT applied to the
+# push trigger below. GitHub's path-filter matching semantics for tag pushes
+# aren't something we could verify without a real run, so rather than risk a
+# tag push silently not triggering the release-attach step (AC5), the push
+# trigger runs on every push to main/ci/** and every `v*` tag, unfiltered.
+# pull_request keeps a paths filter since no tag is ever involved there.
 on:
   push:
-    branches: [main]
-    paths:
-      - "native/**"
-      - ".github/workflows/macos_build.yml"
+    branches: [main, "ci/**"]
+    tags: ["v*"]
   pull_request:
     branches: [main]
     paths:
       - "native/**"
       - ".github/workflows/macos_build.yml"
   workflow_dispatch:
+
+# Needed by the release-attach step (gh release create/upload) on tag pushes.
+permissions:
+  contents: write
 
 concurrency:
   group: macos-build-${{ github.ref }}
@@ -115,3 +124,20 @@ jobs:
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 14
+
+      # AC5: attach the built dylib to the GitHub Release for this tag.
+      # Uses the `gh` CLI, which is preinstalled on GitHub-hosted runners
+      # (macos-13/macos-14 images ship it) — chosen over a third-party
+      # action (e.g. softprops/action-gh-release) to avoid an extra
+      # dependency for what `gh release create`/`gh release upload` already
+      # do directly with the runner-provided GITHUB_TOKEN.
+      - name: Attach artifact to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ASSET="${ARTIFACT_DIR}/native/libdng_decoder_native-macos-${{ matrix.label }}.dylib"
+          cp "${ARTIFACT_DIR}/native/libdng_decoder_native.dylib" "$ASSET"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" "$ASSET" --clobber
