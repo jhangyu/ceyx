@@ -1,0 +1,117 @@
+name: macOS Native Build
+
+# Builds dng_decoder_native for both macOS CPU architectures. CI only verifies
+# "it builds" (produces a .dylib) — decode-correctness / PSNR gating is
+# out of scope here because the sample DNGs are gitignored and not present
+# in the repository (see docs/logs/2026-08-26/Task_cicd_bootstrap.md).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "native/**"
+      - ".github/workflows/macos_build.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "native/**"
+      - ".github/workflows/macos_build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build dng_decoder_native (${{ matrix.label }})
+    # AC2 decision (2026-08-26): GitHub still offers a dedicated Intel macOS
+    # runner image (macos-13) as of this writing, so the Intel job below
+    # builds natively on macos-13 rather than cross-compiling x86_64 on an
+    # Apple-silicon host. Cross-compiling would additionally require an
+    # x86_64 build of the vendored libjpeg-turbo (native/cmake/third_party.cmake
+    # probes `brew --prefix jpeg-turbo`, which on an arm64 runner only yields
+    # an arm64 static archive) — out of scope for this task since it touches
+    # native/ dependency acquisition. If GitHub retires macos-13 for this
+    # repository's plan, replace the `intel` matrix entry's `runs-on` with an
+    # Apple-silicon runner plus `-DDNG_AOT_TARGET_OVERRIDE=x86-64-osx-metal-no_asserts-no_bounds_query`
+    # and `-DCMAKE_OSX_ARCHITECTURES=x86_64`, and first resolve the
+    # libjpeg-turbo architecture mismatch above.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: apple-silicon
+            runner: macos-14
+            arch_tag: arm64
+          - label: intel
+            runner: macos-13
+            arch_tag: x86_64
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      NATIVE_DIR: ${{ github.workspace }}/native
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build prerequisites (Homebrew)
+        run: |
+          brew update
+          brew install cmake ninja jpeg-turbo
+
+      - name: Cache vendored Halide v21 distribution
+        id: cache-halide
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+
+      - name: Fetch vendored Halide v21 distribution
+        run: native/scripts/fetch_halide_v21_dist.sh
+
+      - name: Cache CMake build directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/build
+          key: native-build-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/CMakeLists.txt') }}
+          restore-keys: |
+            native-build-${{ runner.os }}-${{ matrix.arch_tag }}-
+
+      - name: Build dng_decoder_native via watchdog
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/build_native_watchdog.py \
+            --target dng_decoder_native \
+            --idle-timeout-sec 180
+
+      - name: Verify dylib was produced
+        run: |
+          DYLIB="${NATIVE_DIR}/build/libdng_decoder_native.dylib"
+          if [ ! -f "$DYLIB" ]; then
+            echo "::error::Expected dylib not found at $DYLIB"
+            exit 1
+          fi
+          file "$DYLIB"
+
+      - name: Stage native artifact
+        run: |
+          mkdir -p "${ARTIFACT_DIR}/native"
+          cp "${NATIVE_DIR}/build/libdng_decoder_native.dylib" "${ARTIFACT_DIR}/native/"
+          ls -la "${ARTIFACT_DIR}/native"
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-macos-${{ matrix.label }}
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 14

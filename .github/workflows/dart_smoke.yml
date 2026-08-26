@@ -1,13 +1,13 @@
-name: Dart / Flutter Smoke (placeholder)
+name: Dart / Flutter Smoke (manual only)
 
+# Manual-dispatch only (2026-08-26): the FFI smoke step needs
+# image_samples/lossless_dng_sample.dng, which is gitignored and not present
+# in the repository, so this cannot run unattended on every PR without
+# always short-circuiting. Trigger by hand from the Actions tab once sample
+# assets are available in the runner environment. See
+# docs/logs/2026-08-26/Task_cicd_bootstrap.md AC7.
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - "app/**"
-      - "plugin/**"
-      - ".github/workflows/dart_smoke.yml"
 
 concurrency:
   group: dart-smoke-${{ github.ref }}
