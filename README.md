@@ -185,15 +185,15 @@ Minolta.
 
 ```mermaid
 flowchart LR
-    A["RAW file bytes"] --> B["Stage 1: parse metadata, decompress tiles"]
-    B --> C["Stage 2: OpcodeList2 linearize, black subtract, lens correct"]
-    C --> D["Stage 3: demosaic + fused WarpRectilinear"]
-    D --> E["Stage 4: colour matrix, tone map, RGBA8 encode"]
-    E --> F["extern C dng_decode_and_process"]
-    F --> G["dart:ffi DngResult"]
-    G --> H["DngDecoderService"]
-    H --> I["Zero-copy Uint8List view"]
-    I --> J["Flutter widget"]
+    A[/"RAW file bytes"/] --> B[["Stage 1: parse metadata, decompress tiles"]]
+    B --> C[["Stage 2: OpcodeList2 linearize, black subtract, lens correct"]]
+    C --> D{{"Stage 3: demosaic + fused WarpRectilinear"}}
+    D --> E{{"Stage 4: colour matrix, tone map, RGBA8 encode"}}
+    E --> F[["extern C dng_decode_and_process"]]
+    F --> G[("dart:ffi DngResult")]
+    G --> H[["DngDecoderService"]]
+    H --> I[("Zero-copy Uint8List view")]
+    I --> J(["Flutter widget"])
 
     classDef input fill:#e2e8f0,stroke:#94a3b8,stroke-width:2px,color:#1e293b
     classDef cpu fill:#fde68a,stroke:#fbbf24,stroke-width:2px,color:#1e293b
@@ -208,7 +208,8 @@ flowchart LR
     class H,I,J dart
 ```
 
-<sub>Amber = CPU (Adobe DNG SDK) · Sky = GPU (Halide AOT) · Violet = FFI boundary · Emerald = Dart/Flutter</sub>
+<sub>**Colour** — amber: CPU (Adobe DNG SDK) · sky: GPU (Halide AOT) · violet: FFI boundary · emerald: Dart/Flutter<br/>
+**Shape** — parallelogram: file input · subroutine box: library/API call · hexagon: GPU kernel · cylinder: memory buffer · stadium: UI terminal</sub>
 
 ### Dual-frontend routing
 
@@ -217,14 +218,14 @@ the container and unpacks samples — not which kernels process the pixels.
 
 ```mermaid
 flowchart TD
-    A["Input file"] --> P["raw_probe_file: TIFF + DNGVersion tag, or RAF / MRW / CR3 / IIQ / X3F magic"]
-    P -->|kRawRouteDng| DNGR["Adobe DNG SDK: parse, decompress, OpcodeList2"]
-    P -->|kRawRouteGeneric| GENR["LibRaw open_and_unpack, RawSpeed3 preferred"]
-    DNGR --> L1["Bayer 2x2"]
-    GENR --> L2["Bayer 2x2 / X-Trans 6x6 / linear RGB"]
-    L1 --> GPU["Shared Halide AOT GPU core"]
+    A[/"Input file"/] --> P{"raw_probe_file"}
+    P -->|kRawRouteDng| DNGR[["Adobe DNG SDK: parse, decompress, OpcodeList2"]]
+    P -->|kRawRouteGeneric| GENR[["LibRaw open_and_unpack, RawSpeed3 preferred"]]
+    DNGR --> L1("Bayer 2x2")
+    GENR --> L2("Bayer 2x2 / X-Trans 6x6 / linear RGB")
+    L1 --> GPU{{"Shared Halide AOT GPU core"}}
     L2 --> GPU
-    GPU --> OUT["RGBA8 buffer"]
+    GPU --> OUT[("RGBA8 buffer")]
 
     classDef input fill:#e2e8f0,stroke:#94a3b8,stroke-width:2px,color:#1e293b
     classDef probe fill:#ddd6fe,stroke:#a78bfa,stroke-width:2px,color:#1e293b
@@ -241,7 +242,8 @@ flowchart TD
     class OUT output
 ```
 
-<sub>Violet = route probe · Amber = CPU frontends · Teal = sensor layout class · Sky = shared GPU core · Rose = output</sub>
+<sub>**Colour** — violet: route probe · amber: CPU frontends · teal: sensor layout class · sky: shared GPU core · rose: output<br/>
+**Shape** — diamond: routing decision · subroutine box: library call · rounded: classification · hexagon: GPU kernel · cylinder: memory buffer</sub>
 
 ### GPU device handoff
 
