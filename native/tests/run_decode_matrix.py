@@ -463,6 +463,59 @@ def _libcxx_path(ndk_path: Path, abi: str) -> Optional[Path]:
     return matches[0] if matches else None
 
 
+def _candidate_ndk_roots() -> list[Path]:
+    """Scan known Android SDK locations for installed NDK versions.
+
+    Used only as a last-resort fallback when neither --android-ndk nor
+    ANDROID_NDK_HOME name an NDK root. A candidate is valid when it contains
+    build/cmake/android.toolchain.cmake (same check as the CLI-supplied path
+    below).
+    """
+    sdk_roots: list[Path] = []
+    for env_var in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
+        val = os.environ.get(env_var)
+        if val:
+            sdk_roots.append(Path(val).expanduser())
+    sdk_roots.append(Path.home() / "Library" / "Android" / "sdk")
+    sdk_roots.append(Path("/opt/homebrew/share/android-commandlinetools"))
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for sdk_root in sdk_roots:
+        ndk_dir = sdk_root / "ndk"
+        if not ndk_dir.is_dir():
+            continue
+        for entry in sorted(ndk_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            resolved = entry.resolve()
+            if resolved in seen:
+                continue
+            toolchain = entry / "build" / "cmake" / "android.toolchain.cmake"
+            if toolchain.exists():
+                candidates.append(entry)
+                seen.add(resolved)
+    return candidates
+
+
+def _select_ndk_candidate(candidates: list[Path]) -> Optional[Path]:
+    """Prefer the r27 series (matches the toolchain the shipped .so was built
+    with); otherwise fall back to the highest version found."""
+    if not candidates:
+        return None
+
+    def sort_key(path: Path) -> tuple:
+        name = path.name
+        is_r27 = name.startswith("27.")
+        try:
+            version_tuple = tuple(int(part) for part in name.split("."))
+        except ValueError:
+            version_tuple = (0,)
+        return (is_r27, version_tuple)
+
+    return sorted(candidates, key=sort_key, reverse=True)[0]
+
+
 def _adb_stage_binaries(
     adb: str,
     serial: str,
@@ -2649,8 +2702,19 @@ def main() -> int:
         args.platform == "all" and default_android_bin.exists()
     )
     macos_enabled = args.platform in ("all", "macos")
-    if args.platform == "all" and not android_enabled and not requested_android_test_decode:
-        print(f"[INFO] Android binary not found; skipping Android: {default_android_bin}")
+    if args.platform == "all" and not android_enabled:
+        if requested_android_test_decode:
+            # An explicit --android-test-decode path is a statement of
+            # intent, not a best-effort probe. Silently falling back to
+            # macOS-only here reopens the dead-gate failure mode (missing
+            # binary + no output + green report), so hard-fail instead of
+            # printing [SKIP] and continuing.
+            ap.error(
+                f"--android-test-decode explicitly requested but not found: "
+                f"{default_android_bin}"
+            )
+        else:
+            print(f"[SKIP] Android binary not found; skipping Android: {default_android_bin}")
 
     # `--platform all` (default) is a best-effort "test whatever is
     # available" mode: if the Android binary exists but no ADB device is
@@ -2659,7 +2723,7 @@ def main() -> int:
     # `--platform android` request is unaffected and still hard-fails below
     # (via _resolve_serial / ap.error) when no device is available.
     if args.platform == "all" and android_enabled and not _adb_device_attached(args.adb):
-        print("[INFO] no ADB device attached; skipping Android cases")
+        print("[SKIP] no ADB device attached; skipping Android cases")
         android_enabled = False
 
     # Validate macOS binary only when macOS testing is enabled
@@ -2839,15 +2903,43 @@ def main() -> int:
                 shared_libs.append(candidate)
                 seen_libs.add(resolved)
 
+        # test_decode_android links libc++_shared.so; it must always be
+        # staged, flag or no flag. Resolve an NDK root: explicit
+        # --android-ndk / ANDROID_NDK_HOME first (validated strictly, no
+        # fallback if the caller named one), else auto-detect by scanning
+        # known Android SDK ndk/ directories.
         if args.android_ndk:
             ndk_path = Path(args.android_ndk).expanduser().resolve()
-            libcxx = _libcxx_path(ndk_path, args.android_abi)
-            if not libcxx or not libcxx.exists():
-                ap.error(f"libc++_shared.so not found in NDK for ABI {args.android_abi}")
-            resolved = libcxx.resolve()
-            if resolved not in seen_libs:
-                shared_libs.append(libcxx)
-                seen_libs.add(resolved)
+            toolchain = ndk_path / "build" / "cmake" / "android.toolchain.cmake"
+            if not toolchain.exists():
+                ap.error(
+                    f"Invalid --android-ndk root (missing {toolchain}); pass "
+                    "a valid NDK root, e.g. "
+                    "/opt/homebrew/share/android-commandlinetools/ndk/27.0.12077973"
+                )
+        else:
+            auto_candidates = _candidate_ndk_roots()
+            ndk_path = _select_ndk_candidate(auto_candidates)
+            if ndk_path is None:
+                ap.error(
+                    "Cannot stage libc++_shared.so: no --android-ndk given, "
+                    "ANDROID_NDK_HOME is unset, and no NDK with "
+                    "build/cmake/android.toolchain.cmake was found under a "
+                    "known Android SDK ndk/ directory. Pass "
+                    "--android-ndk /path/to/ndk."
+                )
+            print(f"[INFO] Auto-detected Android NDK: {ndk_path}")
+
+        libcxx = _libcxx_path(ndk_path, args.android_abi)
+        if not libcxx or not libcxx.exists():
+            ap.error(
+                f"libc++_shared.so not found in NDK {ndk_path} for ABI "
+                f"{args.android_abi}; pass a different --android-ndk."
+            )
+        resolved = libcxx.resolve()
+        if resolved not in seen_libs:
+            shared_libs.append(libcxx)
+            seen_libs.add(resolved)
 
         # Probe binary (optional but recommended)
         probe_bin = android_bin.parent / "test_android_vulkan_capability"
@@ -2874,6 +2966,8 @@ def main() -> int:
             except RuntimeError as exc:
                 print(f"  ERROR: {exc}")
                 raise SystemExit(1)
+        else:
+            print(f"[SKIP] Vulkan capability probe binary not found; skipping probe: {probe_bin}")
 
         # Build and run Android cases
         remote_lossless = f"{args.android_remote_dir}/samples/{Path(lossless).name}"
@@ -2886,7 +2980,7 @@ def main() -> int:
             include_lossy=args.android_include_lossy,
         )
         if not args.android_include_lossy:
-            print("[INFO] Android lossy DNG case skipped (JPEG decode is disabled in current Android SDK build)")
+            print("[SKIP] Android lossy DNG case skipped (JPEG decode is disabled in current Android SDK build)")
 
         for case_name, baseline_args, test_args, baseline_env, test_env in android_cases:
             android_runs: list[RunResult] = []
@@ -2926,7 +3020,7 @@ def main() -> int:
             and default_android_ffi_bin is not None
             and not default_android_ffi_bin.exists()
         ):
-            print(f"[INFO] Android FFI harness binary not found; skipping: {default_android_ffi_bin}")
+            print(f"[SKIP] Android FFI harness binary not found; skipping: {default_android_ffi_bin}")
             args.android_ffi_harness = ""
 
         if args.android_ffi_harness:
@@ -2961,7 +3055,7 @@ def main() -> int:
                 android_ffi_agg_results.append(FfiAggResult(sample_name=sample_name, runs=ffi_runs))
 
         # --- Android device handoff harness (auto-enable; no CMake target
-        # exists yet as of 2026-07-04 so this normally [INFO]-skips) ---
+        # exists yet as of 2026-07-04 so this normally [SKIP]s) ---
         requested_android_handoff_harness = args.android_device_handoff_harness
         if not args.no_android_device_handoff_harness and not args.android_device_handoff_harness:
             args.android_device_handoff_harness = _DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS
@@ -2978,7 +3072,7 @@ def main() -> int:
             and not default_android_handoff_bin.exists()
         ):
             print(
-                "[INFO] Android device handoff harness binary not found "
+                "[SKIP] Android device handoff harness binary not found "
                 f"(no CMake cross-compile target yet); skipping: {default_android_handoff_bin}"
             )
             args.android_device_handoff_harness = ""
@@ -3003,7 +3097,7 @@ def main() -> int:
                 raise SystemExit(1)
 
     # --- Harness auto-enable (same pattern as Android: default path, skip
-    # silently with an [INFO] note when the binary hasn't been built yet) ---
+    # with a [SKIP] note when the binary hasn't been built yet) ---
     requested_device_handoff_harness = args.device_handoff_harness
     if not args.no_device_handoff_harness and not args.device_handoff_harness:
         args.device_handoff_harness = _DEFAULT_DEVICE_HANDOFF_HARNESS
@@ -3017,7 +3111,7 @@ def main() -> int:
         and default_handoff_bin is not None
         and not default_handoff_bin.exists()
     ):
-        print(f"[INFO] Device handoff harness binary not found; skipping: {default_handoff_bin}")
+        print(f"[SKIP] Device handoff harness binary not found; skipping: {default_handoff_bin}")
         args.device_handoff_harness = ""
 
     requested_ffi_harness = args.ffi_harness
@@ -3033,7 +3127,7 @@ def main() -> int:
         and default_ffi_bin is not None
         and not default_ffi_bin.exists()
     ):
-        print(f"[INFO] FFI harness binary not found; skipping: {default_ffi_bin}")
+        print(f"[SKIP] FFI harness binary not found; skipping: {default_ffi_bin}")
         args.ffi_harness = ""
 
     # handoff_results is initialized above (before the Android block) so
@@ -3089,7 +3183,7 @@ def main() -> int:
 
     # --- CFA phase gates (2026-08-16) ---
     # Same auto-enable pattern as the FFI / handoff harnesses: run when the
-    # default binary exists, [INFO]-skip when it does not.
+    # default binary exists, [SKIP] when it does not.
     cfa_results: list[CfaCheckResult] = []
     if macos_enabled:
         requested_cfa_phase = args.cfa_phase_harness

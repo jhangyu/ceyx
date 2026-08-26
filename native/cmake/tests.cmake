@@ -294,7 +294,190 @@ if(DNG_ENABLE_GENERIC_RAW)
     if(POLICY CMP0077)
         cmake_policy(SET CMP0077 NEW)
     endif()
-    set(WITH_OPENMP OFF)
+
+    # --- Desktop OpenMP (RAW decode accel round, 2026-08-27) ---------------
+    # User ruling: OpenMP ON for desktop (macOS/Linux/Windows), OFF for mobile
+    # (iOS/Android) per the P17 five-platform policy. DNG_CROSS_BUILD is this
+    # project's mobile/cross switch; ANDROID/IOS are belt-and-braces so the
+    # intent survives someone cross-compiling without setting DNG_CROSS_BUILD.
+    #
+    # This unlocks parallelism that already exists in both vendored trees but
+    # was compiled out: LibRaw's `#pragma omp parallel for` over Fuji strips
+    # (src/decoders/fuji_compressed.cpp) and RawSpeed3's FujiDecompressor
+    # `#pragma omp parallel`. Project patch 09 keeps a std::thread pool in the
+    # `#else` branch, so mobile and any OpenMP-less toolchain stay parallel too.
+    if(DNG_CROSS_BUILD OR ANDROID OR IOS)
+        set(CEYX_ENABLE_DESKTOP_OPENMP OFF)
+    else()
+        set(CEYX_ENABLE_DESKTOP_OPENMP ON)
+    endif()
+
+    if(CEYX_ENABLE_DESKTOP_OPENMP AND APPLE)
+        # Apple clang rejects a bare `-fopenmp` and ships no libomp, so
+        # find_package(OpenMP) fails on a stock toolchain unless it is handed
+        # the Homebrew runtime explicitly. Discover the prefix rather than
+        # hard-coding it, so this keeps working on Intel Homebrew
+        # (/usr/local), a non-default HOMEBREW_PREFIX, or a CI image.
+        #
+        # CAUTION (measured 2026-08-27): `brew --prefix libomp` prints a
+        # plausible path even when the formula is NOT installed, so the EXISTS
+        # check below is load-bearing, not defensive padding. Probing by
+        # printed path alone yields a false positive and then a silent
+        # non-OpenMP build.
+        set(_ceyx_libomp_prefix "")
+
+        # Vendored copy first: native/third_party/libomp/ is committed (756 KB)
+        # so a blank checkout builds with full OpenMP and no Homebrew
+        # prerequisite. See its PROVENANCE.md.
+        #
+        # BUT it is an arm64-only dylib, not a fat binary. Preferring it
+        # unconditionally would break x86_64 (Intel Mac) builds that work today
+        # via Homebrew — the link would fail on an architecture mismatch. So
+        # accept it only when it actually contains the architecture being built
+        # for, and otherwise fall through to the prefix search below.
+        set(_ceyx_vendored_omp_dir "${THIRD_PARTY_DIR}/libomp")
+        if(EXISTS "${_ceyx_vendored_omp_dir}/include/omp.h"
+           AND EXISTS "${_ceyx_vendored_omp_dir}/lib/libomp.dylib")
+            # Target arch: CMAKE_OSX_ARCHITECTURES when set (possibly a list),
+            # otherwise the host processor.
+            set(_ceyx_want_archs "${CMAKE_OSX_ARCHITECTURES}")
+            if(NOT _ceyx_want_archs)
+                set(_ceyx_want_archs "${CMAKE_SYSTEM_PROCESSOR}")
+            endif()
+            execute_process(COMMAND lipo -archs
+                                    "${_ceyx_vendored_omp_dir}/lib/libomp.dylib"
+                            OUTPUT_VARIABLE _ceyx_have_archs
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET RESULT_VARIABLE _ceyx_lipo_rc)
+            set(_ceyx_arch_ok TRUE)
+            if(NOT _ceyx_lipo_rc EQUAL 0)
+                # Cannot prove compatibility -> do not gamble on a link failure.
+                set(_ceyx_arch_ok FALSE)
+            else()
+                foreach(_want IN LISTS _ceyx_want_archs)
+                    if(NOT "${_ceyx_have_archs}" MATCHES "(^| )${_want}( |$)")
+                        set(_ceyx_arch_ok FALSE)
+                    endif()
+                endforeach()
+            endif()
+            if(_ceyx_arch_ok)
+                set(_ceyx_libomp_prefix "${_ceyx_vendored_omp_dir}")
+                message(STATUS
+                    "[ceyx] desktop OpenMP: using VENDORED libomp "
+                    "(${_ceyx_have_archs}) at ${_ceyx_vendored_omp_dir}")
+            else()
+                message(STATUS
+                    "[ceyx] vendored libomp has archs '${_ceyx_have_archs}' but "
+                    "this build targets '${_ceyx_want_archs}'; falling back to a "
+                    "system libomp. Install one (brew install libomp) or add the "
+                    "missing slice to native/third_party/libomp/lib/libomp.dylib.")
+            endif()
+        endif()
+
+        foreach(_candidate IN ITEMS "$ENV{HOMEBREW_PREFIX}/opt/libomp"
+                                    "/opt/homebrew/opt/libomp"
+                                    "/usr/local/opt/libomp")
+            if(NOT _ceyx_libomp_prefix AND EXISTS "${_candidate}/include/omp.h")
+                set(_ceyx_libomp_prefix "${_candidate}")
+            endif()
+        endforeach()
+        if(NOT _ceyx_libomp_prefix)
+            find_program(_ceyx_brew NAMES brew)
+            if(_ceyx_brew)
+                execute_process(COMMAND "${_ceyx_brew}" --prefix libomp
+                                OUTPUT_VARIABLE _brew_libomp
+                                OUTPUT_STRIP_TRAILING_WHITESPACE
+                                ERROR_QUIET RESULT_VARIABLE _brew_rc)
+                if(_brew_rc EQUAL 0 AND EXISTS "${_brew_libomp}/include/omp.h")
+                    set(_ceyx_libomp_prefix "${_brew_libomp}")
+                endif()
+            endif()
+        endif()
+
+        if(_ceyx_libomp_prefix)
+            # Hint variables consumed by FindOpenMP. Plain set() on purpose:
+            # same directory-scope rationale as the R2/F4 note above, and these
+            # must be visible to both subprojects' own find_package(OpenMP).
+            if(EXISTS "${_ceyx_libomp_prefix}/lib/libomp.dylib")
+                # --- ONE OpenMP runtime image, project-wide (2026-08-27) ---
+                # Vendor libomp into the build dir HERE, at configure time, and
+                # point every consumer at that copy.
+                #
+                # Why this is not gold-plating: scripts/bundle_macos_dylib_deps.py
+                # runs POST_BUILD on dng_decoder_native and rewrites its Homebrew
+                # deps to @rpath/<name>, vendoring a copy alongside. Once OpenMP
+                # is on, libomp becomes such a dep, so the DYLIB would load
+                # build/libomp.dylib (install name @rpath/libomp.dylib) while the
+                # TEST EXECUTABLES, linking FindOpenMP's result directly, would
+                # load /opt/homebrew/.../libomp.dylib. dyld keys images by install
+                # name, so both get mapped: two OpenMP runtimes, two independent
+                # sets of thread-team state, in one process.
+                #
+                # That is not a theoretical hazard -- it segfaulted
+                # test_raw_end_to_end in every OpenMP worker thread
+                # (tmp/verify/fuji_51..56). Linking the already-@rpath copy makes
+                # the executables and the dylib name the SAME image, which is
+                # both the fix and the reason the dylib stays self-contained for
+                # distribution.
+                set(_ceyx_libomp_src "${_ceyx_libomp_prefix}/lib/libomp.dylib")
+                set(_ceyx_libomp_vendored "${CMAKE_BINARY_DIR}/libomp.dylib")
+                if(NOT EXISTS "${_ceyx_libomp_vendored}"
+                   OR "${_ceyx_libomp_src}" IS_NEWER_THAN "${_ceyx_libomp_vendored}")
+                    file(COPY "${_ceyx_libomp_src}"
+                         DESTINATION "${CMAKE_BINARY_DIR}"
+                         FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                                          GROUP_READ GROUP_EXECUTE
+                                          WORLD_READ WORLD_EXECUTE)
+                    execute_process(COMMAND install_name_tool -id "@rpath/libomp.dylib"
+                                            "${_ceyx_libomp_vendored}"
+                                    RESULT_VARIABLE _ceyx_omp_id_rc)
+                    # install_name_tool invalidates the signature; ad-hoc re-sign
+                    # or the image will not load under the hardened runtime.
+                    execute_process(COMMAND codesign --force --sign -
+                                            "${_ceyx_libomp_vendored}"
+                                    RESULT_VARIABLE _ceyx_omp_sign_rc)
+                    if(NOT _ceyx_omp_id_rc EQUAL 0 OR NOT _ceyx_omp_sign_rc EQUAL 0)
+                        message(FATAL_ERROR
+                            "[ceyx] failed to vendor libomp (install_name_tool "
+                            "rc=${_ceyx_omp_id_rc}, codesign rc=${_ceyx_omp_sign_rc}). "
+                            "Refusing to continue: a partially-vendored libomp "
+                            "reintroduces the duplicate-OpenMP-runtime crash.")
+                    endif()
+                    message(STATUS "[ceyx] vendored libomp -> ${_ceyx_libomp_vendored} (@rpath/libomp.dylib)")
+                endif()
+                set(OpenMP_omp_LIBRARY "${_ceyx_libomp_vendored}")
+            else()
+                # Static libomp: linked into each image, so there is no shared
+                # runtime to duplicate and no install name to reconcile.
+                set(OpenMP_omp_LIBRARY "${_ceyx_libomp_prefix}/lib/libomp.a")
+            endif()
+            set(OpenMP_CXX_FLAGS
+                "-Xpreprocessor -fopenmp -I${_ceyx_libomp_prefix}/include")
+            set(OpenMP_CXX_LIB_NAMES "omp")
+            set(OpenMP_C_FLAGS
+                "-Xpreprocessor -fopenmp -I${_ceyx_libomp_prefix}/include")
+            set(OpenMP_C_LIB_NAMES "omp")
+            message(STATUS
+                "[ceyx] desktop OpenMP: using libomp at ${_ceyx_libomp_prefix}")
+        else()
+            # Do not pretend. LibRaw's ENABLE_OPENMP silently no-ops when
+            # find_package(OpenMP) fails (libraw-cmake CMakeLists.txt:212-214
+            # has no REQUIRED and no erroring else), which would produce a
+            # green build that is serial at runtime. Turn the request off
+            # explicitly and say so, so the build log states the truth.
+            set(CEYX_ENABLE_DESKTOP_OPENMP OFF)
+            message(WARNING
+                "[ceyx] desktop OpenMP requested but no libomp found "
+                "(brew install libomp). Building WITHOUT OpenMP; the Fuji "
+                "decoders fall back to project patch 09's std::thread pool.")
+        endif()
+    endif()
+
+    if(CEYX_ENABLE_DESKTOP_OPENMP)
+        set(WITH_OPENMP ON)
+    else()
+        set(WITH_OPENMP OFF)
+    endif()
     set(RAWSPEED_ENABLE_WERROR OFF)
     set(BUILD_TOOLS OFF)
     set(BUILD_TESTING OFF)
@@ -411,7 +594,23 @@ set(JPEG_VERSION_STRING \"62\")
     # discovery), so caching it does not reintroduce the reconfigure bug.
     set(LIBRAW_PATH ${LIBRAW_DIR} CACHE STRING "" FORCE)
     set(ENABLE_RAWSPEED OFF)
-    set(ENABLE_OPENMP OFF)
+    # Desktop OpenMP (RAW decode accel round, 2026-08-27): unlocks LibRaw's
+    # existing `#pragma omp parallel for` over Fuji strips. Gated by the same
+    # CEYX_ENABLE_DESKTOP_OPENMP computed above (desktop ON / mobile OFF, and
+    # forced OFF if no libomp was found) so LibRaw and RawSpeed3 can never
+    # disagree about whether OpenMP is in play. The OpenMP hint variables set
+    # above are still in scope here and are what let libraw-cmake's
+    # find_package(OpenMP) (CMakeLists.txt:213) succeed under Apple clang.
+    #
+    # NOTE: unlike RawSpeed3 (which SEND_ERRORs when OpenMP is missing),
+    # libraw-cmake silently builds serial, so the only trustworthy evidence
+    # that this took effect is the "compiled with OpenMP support ... YES" line
+    # at libraw-cmake/CMakeLists.txt:385 plus a timing measurement.
+    if(CEYX_ENABLE_DESKTOP_OPENMP)
+        set(ENABLE_OPENMP ON)
+    else()
+        set(ENABLE_OPENMP OFF)
+    endif()
     set(ENABLE_EXAMPLES OFF)
     set(LIBRAW_INSTALL OFF)
     # P19 W2: LibRaw ships the Kalpanika x3f-tools Foveon decoder in src/x3f/,
@@ -861,10 +1060,17 @@ add_executable(test_raw_bayer_kernel
     tests/test_raw_bayer_kernel.cpp
     src/pipeline/raw_demosaic_reference.cpp)
 target_include_directories(test_raw_bayer_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+# raw_linear_rgb_normalize: not used by this test's own code, but the shared
+# src/pipeline/raw_demosaic_reference.cpp gained a call into that AOT kernel in
+# P19. Only test_raw_linear_rgb_kernel (added in P19) was given the library and
+# dependency; these two P17 targets compile the same source and so fail to link
+# with undefined _raw_linear_rgb_normalize. Mirrors tests.cmake:1001-1008.
 add_dependencies(test_raw_bayer_kernel raw_bayer_demosaic_aot_target
-                 raw_xtrans_demosaic_aot_target halide_runtime_target)
+                 raw_xtrans_demosaic_aot_target
+                 raw_linear_rgb_normalize_aot_target halide_runtime_target)
 target_link_libraries(test_raw_bayer_kernel
     ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
 if(APPLE)
@@ -879,10 +1085,14 @@ add_executable(test_raw_xtrans_kernel
     tests/test_raw_xtrans_kernel.cpp
     src/pipeline/raw_demosaic_reference.cpp)
 target_include_directories(test_raw_xtrans_kernel PRIVATE ${INC_DIR} ${HALIDE_OUTPUT_DIR} ${HALIDE_DIR}/include)
+# Same P19 shared-source gap as test_raw_bayer_kernel above; mirrors
+# tests.cmake:1001-1008.
 add_dependencies(test_raw_xtrans_kernel raw_xtrans_demosaic_aot_target
-                 raw_bayer_demosaic_aot_target halide_runtime_target)
+                 raw_bayer_demosaic_aot_target
+                 raw_linear_rgb_normalize_aot_target halide_runtime_target)
 target_link_libraries(test_raw_xtrans_kernel
     ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
 if(APPLE)

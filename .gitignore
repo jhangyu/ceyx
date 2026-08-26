@@ -61,6 +61,13 @@ native/third_party/libraw/
 native/third_party/libraw-cmake/
 !native/third_party/libraw/PROVENANCE.md
 
+# Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
+# native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
+# would otherwise sweep the library, silently leaving a blank checkout without
+# OpenMP -- which is the exact prerequisite-free build this directory exists to
+# provide. The negation must name the file, since `*.dylib` matches at any depth.
+!native/third_party/libomp/lib/libomp.dylib
+
 # Session/tool scratch state (never tracked)
 .claude/tmp/
 .pi/
@@ -101,3 +108,7 @@ native/scripts/tmp/
 # RAW corpus: binaries untracked, manifest/README tracked (Phase 17 Task 4)
 image_samples/raw_corpus/*
 !image_samples/raw_corpus/README.md
+
+# TSan side-build (Foveon accel round) and root scratch probes — untracked residue, never committed
+/native/build-tsan-x3f/
+/scripts/

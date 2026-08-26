@@ -138,6 +138,8 @@ gate patch exists.
 |---|---|
 | 06.fuji-tryrawspeed3.patch | 4da0ea93cbbb46aef4d52830612eb67212ee549e9f4aedacc572b99d6afa041f |
 | 07.rawspeed3-capi-repin.patch | 5fdd081ed321538f3d4b2d14ab77c428bda0a02e114c4f37037b208988049a0a |
+| 08.x3f-parallel-lut.patch | d08e3b24dade3589db605c7010341593448421aff62ae07e96ec780615672652 |
+| 09.fuji-stdthread-parallel.patch | 2e2e885328f9bf4e6e66b4f4f300540d17953646fec5d21cfa586b953d51e25f |
 
 ## RawSpeed3 re-pin (Phase 19 W1)
 

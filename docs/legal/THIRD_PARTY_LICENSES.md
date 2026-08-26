@@ -127,3 +127,30 @@ mechanically by `native/scripts/verify_raw_provenance.py`.
   `USE_X3FTOOLS`, so this code now ships live in `dng_decoder_native`.
   Permissive license; no source-offer obligation beyond what LibRaw's own
   entry already provides.
+
+## LLVM OpenMP runtime (libomp)
+
+- Source: LLVM OpenMP runtime https://openmp.llvm.org/, version **22.1.8**,
+  taken from the Homebrew `libomp` bottle and **committed directly** to this
+  repository at `native/third_party/libomp/` (756 KB: `lib/libomp.dylib`,
+  `include/omp.h`, `LICENSE.TXT`). No fetch script — see that directory's
+  `PROVENANCE.md` for digests and the arm64-only caveat.
+- License: **Apache License v2.0 with LLVM Exceptions**, per the bundled
+  `native/third_party/libomp/LICENSE.TXT`. Note `brew info libomp` reports
+  "License: MIT", which does not match the shipped licence text; the file
+  bundled with the binary is authoritative and is what is redistributed here.
+- Redistribution obligations (Apache-2.0 §4): the licence text ships in-tree at
+  `native/third_party/libomp/LICENSE.TXT`, and the binary is unmodified — no
+  "Modifications" notice is required. The LLVM Exception removes the
+  obligation to attribute in object-code form when the runtime is merely
+  linked, but the licence file is retained regardless. No source-offer
+  obligation (not a copyleft licence).
+- Build policy: desktop only. `CEYX_ENABLE_DESKTOP_OPENMP`
+  (`native/cmake/tests.cmake`) is ON for macOS/Linux/Windows and OFF for
+  iOS/Android, so **libomp is not redistributed in mobile builds**; those use
+  the `std::thread` pool from project patch 09 instead.
+- **Shipping note:** `libdng_decoder_native.dylib` links
+  `@rpath/libomp.dylib`, so a packaged macOS app must include `libomp.dylib`
+  in its `Frameworks/` directory alongside `liblcms2`/`libjpeg`. The build
+  stages this copy automatically for dev/test builds; app packaging is
+  tracked separately.

@@ -1,0 +1,280 @@
+--- a/src/x3f/x3f_utils_patched.cpp
++++ b/src/x3f/x3f_utils_patched.cpp
+@@ -42,6 +42,10 @@
+ #endif
+ 
+ #include "../../internal/x3f_tools.h"
++
++/* CEYX X2: 3-plane parallel TRUE decode (see true_decode below). */
++#include <exception>
++#include <thread>
+ 
+ /* extern */ int legacy_offset = 0;
+ /* extern */ bool_t auto_legacy_offset = 1;
+@@ -908,6 +912,109 @@
+   return BS->bits[BS->bit_offset++];
+ }
+ 
++/* ---- CEYX X3: 256-entry Huffman LUT for the TRUE engine ---------------
++   The TRUE coding tree is built with new_huffman_tree(&TRU->tree, 8), so no
++   code is longer than 8 bits and a single 256-entry table resolves every
++   symbol in one lookup instead of one get_bit() call per tree level.
++
++   The table is only ever a FAST PATH: any index that does not resolve inside
++   8 bits, any leaf whose diff width is out of range, and any position too
++   close to the end of the compressed block fall back to the original
++   get_true_diff() bit-by-bit walk, so the decoded values are identical by
++   construction (including the "invalid code -> return 0" behaviour).
++
++   It deliberately lives in this .cpp as a local type rather than as a new
++   field of x3f_hufftree_t, so internal/x3f_tools.h stays untouched. */
++
++#define CEYX_TRUE_LUT_BITS 8
++#define CEYX_TRUE_LUT_SIZE (1 << CEYX_TRUE_LUT_BITS)
++/* Widest diff field the fast path will emit; wider leaves escape to the slow
++   path. 16 keeps len(<=8) + bits(<=16) + bit_offset(<=7) inside 32 bits. */
++#define CEYX_TRUE_LUT_MAX_DIFF_BITS 16
++
++typedef struct ceyx_true_lut_s
++{
++  /* Number of bits the Huffman code consumes; 0 means "escape to slow path". */
++  uint8_t len[CEYX_TRUE_LUT_SIZE];
++  /* Leaf value = width in bits of the diff field that follows the code. */
++  uint8_t diff_bits[CEYX_TRUE_LUT_SIZE];
++} ceyx_true_lut_t;
++
++static void ceyx_build_true_lut(const x3f_hufftree_t *HTP, ceyx_true_lut_t *lut)
++{
++  int i;
++
++  for (i = 0; i < CEYX_TRUE_LUT_SIZE; i++)
++  {
++    const x3f_huffnode_t *node = &HTP->nodes[0];
++    int depth = 0;
++
++    lut->len[i] = 0;
++    lut->diff_bits[i] = 0;
++
++    while (node != NULL &&
++           (node->branch[0] != NULL || node->branch[1] != NULL) &&
++           depth < CEYX_TRUE_LUT_BITS)
++    {
++      const int bit = (i >> (CEYX_TRUE_LUT_BITS - 1 - depth)) & 1;
++      node = node->branch[bit];
++      depth++;
++    }
++
++    if (node == NULL || depth == 0 || depth > CEYX_TRUE_LUT_BITS)
++      continue; /* invalid code / degenerate root: escape */
++    if (node->branch[0] != NULL || node->branch[1] != NULL)
++      continue; /* still internal after 8 bits: escape */
++    if (node->leaf == UNDEFINED_LEAF ||
++        node->leaf > (uint32_t)CEYX_TRUE_LUT_MAX_DIFF_BITS)
++      continue; /* out of the fast path's modelled range: escape */
++
++    lut->len[i] = (uint8_t)depth;
++    lut->diff_bits[i] = (uint8_t)node->leaf;
++  }
++}
++
++/* Canonical bit position of BS: (byte, offset-in-byte, MSB first). */
++static inline void ceyx_bs_pos(const bit_state_t *BS, uint8_t **byte, int *off)
++{
++  if (BS->bit_offset == 8)
++  {
++    *byte = BS->next_address;
++    *off = 0;
++  }
++  else
++  {
++    *byte = BS->next_address - 1;
++    *off = BS->bit_offset;
++  }
++}
++
++/* Write a canonical (byte, offset) position back into BS, leaving it in exactly
++   the state the equivalent run of get_bit() calls would have produced.
++   Only used when the fast path escapes, so the 8-bit expansion here is off the
++   hot path. */
++static inline void ceyx_bs_store(bit_state_t *BS, uint8_t *byte, int off)
++{
++  if (off == 0)
++  {
++    BS->next_address = byte;
++    BS->bit_offset = 8;
++  }
++  else
++  {
++    uint8_t b = *byte;
++    int i;
++
++    for (i = 7; i >= 0; i--)
++    {
++      BS->bits[i] = b & 1;
++      b = (uint8_t)(b >> 1);
++    }
++    BS->next_address = byte + 1;
++    BS->bit_offset = (uint8_t)off;
++  }
++}
++
+ /* Decode use the TRUE algorithm */
+ 
+ static int32_t get_true_diff(bit_state_t *BS, x3f_hufftree_t *HTP)
+@@ -948,6 +1055,68 @@
+   }
+ 
+   return diff;
++}
++
++/* CEYX X3: LUT fast path over get_true_diff(). `end` is one past the last
++   readable byte of the compressed block; when the fast path cannot guarantee
++   its 4-byte lookahead stays inside it, the original walk runs instead.
++
++   The bit position is carried in plain (byte, off) locals owned by the caller's
++   row loop, so the hot path never touches bit_state_t's per-bit cache array;
++   the position is only materialised into `*BS` when escaping to the slow
++   walk, and read back from it afterwards. */
++static inline int32_t ceyx_get_true_diff_lut(bit_state_t *BS,
++                                             x3f_hufftree_t *HTP,
++                                             const ceyx_true_lut_t *lut,
++                                             const uint8_t *end,
++                                             uint8_t **pbyte, int *poff)
++{
++  uint8_t *byte = *pbyte;
++  const int off = *poff;
++
++  if (byte + 4 <= end)
++  {
++    const uint32_t w = ((uint32_t)byte[0] << 24) | ((uint32_t)byte[1] << 16) |
++                       ((uint32_t)byte[2] << 8) | (uint32_t)byte[3];
++    const uint32_t idx = (w >> (24 - off)) & 0xff;
++    const int len = lut->len[idx];
++
++    if (len != 0)
++    {
++      const int bits = lut->diff_bits[idx];
++      const int total = len + bits;
++
++      if (off + total <= 32)
++      {
++        const int abs_off = off + total;
++        int32_t diff = 0;
++
++        *pbyte = byte + (abs_off >> 3);
++        *poff = abs_off & 7;
++
++        if (bits != 0)
++        {
++          const uint32_t v = (w >> (32 - abs_off)) & ((1u << bits) - 1u);
++
++          diff = (int32_t)v;
++          /* first_bit == 0 in the original loop */
++          if ((v >> (bits - 1)) == 0)
++            diff -= (1 << bits) - 1;
++        }
++
++        return diff;
++      }
++    }
++  }
++
++  {
++    int32_t diff;
++
++    ceyx_bs_store(BS, byte, off);
++    diff = get_true_diff(BS, HTP);
++    ceyx_bs_pos(BS, pbyte, poff);
++    return diff;
++  }
+ }
+ 
+ /* This code (that decodes one of the X3F color planes, really is a
+@@ -961,7 +1130,8 @@
+ 
+ /* TODO: write more about the compression */
+ 
+-static void true_decode_one_color(x3f_image_data_t *ID, int color)
++static void true_decode_one_color(x3f_image_data_t *ID, int color,
++                                  const ceyx_true_lut_t *ceyx_lut)
+ {
+   x3f_true_t *TRU = ID->tru;
+   x3f_quattro_t *Q = ID->quattro;
+@@ -979,6 +1149,15 @@
+ 
+   set_bit_state(&BS, TRU->plane_address[color]);
+ 
++  /* CEYX X3: one past the last readable byte of the compressed block, used to
++     bound the LUT fast path's 4-byte lookahead, plus the row loop's own copy
++     of the bit position (see ceyx_get_true_diff_lut). */
++  const uint8_t *ceyx_end = (const uint8_t *)ID->data + ID->data_size;
++  uint8_t *ceyx_byte;
++  int ceyx_off;
++
++  ceyx_bs_pos(&BS, &ceyx_byte, &ceyx_off);
++
+   row_start_acc[0][0] = seed;
+   row_start_acc[0][1] = seed;
+   row_start_acc[1][0] = seed;
+@@ -1014,7 +1193,8 @@
+     for (col = 0; col < (int)cols; col++)
+     {
+       bool_t odd_col = col & 1;
+-      int32_t diff = get_true_diff(&BS, tree);
++      int32_t diff = ceyx_get_true_diff_lut(&BS, tree, ceyx_lut, ceyx_end,
++                                            &ceyx_byte, &ceyx_off);
+       int32_t prev = col < 2 ? row_start_acc[odd_row][odd_col] : acc[odd_col];
+       int32_t value = prev + diff;
+ 
+@@ -1032,16 +1212,50 @@
+   }
+ }
+ 
++/* CEYX X2: the three TRUE colour planes are decoded in parallel.
++   Each plane owns every piece of mutable state it touches: its own
++   bit_state_t, its own row_start_acc/acc, its own bitstream
++   (TRU->plane_address[color], disjoint 16-byte-aligned regions) and its own
++   output slots (interleaved `color` lane of TRU->x3rgb16, or Q->top16 for the
++   binned Quattro plane 2). The only shared state is read-only: the Huffman
++   tree, the LUT built from it, and the image dimensions.
++
++   true_decode_one_color() can throw LIBRAW_EXCEPTION_IO_CORRUPT, and an
++   exception escaping a std::thread would call std::terminate, so each worker
++   captures its exception and the joiner rethrows the first one - preserving
++   the serial version's error behaviour. */
+ static void true_decode(x3f_info_t * /*I*/, x3f_directory_entry_t *DE)
+ {
+   x3f_directory_entry_header_t *DEH = &DE->header;
+   x3f_image_data_t *ID = &DEH->data_subsection.image_data;
+   int color;
+ 
++  ceyx_true_lut_t lut;
++  ceyx_build_true_lut(&ID->tru->tree, &lut);
++
++  std::exception_ptr errors[3] = {nullptr, nullptr, nullptr};
++  std::thread workers[3];
++
+   for (color = 0; color < 3; color++)
+   {
+-    true_decode_one_color(ID, color);
++    workers[color] = std::thread([ID, color, &lut, &errors]() {
++      try
++      {
++        true_decode_one_color(ID, color, &lut);
++      }
++      catch (...)
++      {
++        errors[color] = std::current_exception();
++      }
++    });
+   }
++
++  for (color = 0; color < 3; color++)
++    workers[color].join();
++
++  for (color = 0; color < 3; color++)
++    if (errors[color])
++      std::rethrow_exception(errors[color]);
+ }
+ 
+ /* Decode use the huffman tree */

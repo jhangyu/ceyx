@@ -11,6 +11,8 @@ unique in this project's provenance record.
 | Patch | Target file | Purpose |
 |---|---|---|
 | 06.fuji-tryrawspeed3.patch | `src/utils/decoder_info.cpp` | Sets `LIBRAW_DECODER_TRYRAWSPEED3` on `fuji_compressed_load_raw` and `fuji_14bit_load_raw` so RAF files are offered to RawSpeed3 first (Phase 19 W1). |
+| 08.x3f-parallel-lut.patch | `src/x3f/x3f_utils_patched.cpp` | Foveon X3F TRUE-engine acceleration: 3-plane std::thread parallel decode + 256-entry Huffman LUT fast path with verbatim tree-walk fallback (RAW decode accel round, 2026-08-27). |
+| 09.fuji-stdthread-parallel.patch | `src/decoders/fuji_compressed.cpp` | Fuji compressed RAF (lossless + lossy) block-parallel decode via bounded std::thread pool in the non-OpenMP branch, plus a real mutex for datastream sites unguarded outside OpenMP builds (RAW decode accel round, 2026-08-27). |
 
 Patch 07 (`07.fuji-rotated-gate.patch`, conditional, would exempt `filters == 9`
 X-Trans from the `!IO.fuji_width` clause of the RawSpeed3 gate in

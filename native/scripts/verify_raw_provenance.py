@@ -84,6 +84,22 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED):
     own patches are rooted at RAWSPEED; project-authored LibRaw patches
     (patches/libraw/) are rooted at VENDOR (the LibRaw tree).
     """
+    # Authoritative test first: a forward-applied patch reverse-applies
+    # cleanly (`git apply -R --check`). The line-set heuristic below cannot
+    # distinguish "removed line eliminated" from "identical line legitimately
+    # present elsewhere in the file" (e.g. a call site removed in one hunk
+    # while other call sites are deliberately untouched), so it only runs as
+    # a fallback when git is unavailable.
+    if not reverse:
+        try:
+            rc = subprocess.run(
+                ["git", "apply", "--check", "--reverse", str(patch_path)],
+                cwd=str(root), capture_output=True, text=True,
+            ).returncode
+            if rc == 0:
+                return True, ""
+        except (OSError, subprocess.SubprocessError):
+            pass  # fall through to the line heuristic
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     for relpath, added, removed in parse_patch_files(patch_text):
         target = root / relpath

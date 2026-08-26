@@ -1,0 +1,233 @@
+--- a/src/decoders/fuji_compressed.cpp
++++ b/src/decoders/fuji_compressed.cpp
+@@ -27,6 +27,43 @@
+ #define _min(a, b) ((a) < (b) ? (a) : (b))
+ #define _max(a, b) ((a) > (b) ? (a) : (b))
+ 
++/* Ceyx project patch 09: block-parallel Fuji strip decode.
++
++   Upstream parallelises fuji_decode_loop() only under OpenMP. This project
++   builds OpenMP ON for desktop and OFF for mobile/iOS/Android
++   (CEYX_ENABLE_DESKTOP_OPENMP, native/cmake/tests.cmake), so BOTH paths must
++   work: the OpenMP branch is upstream's, and the std::thread pool in the
++   #else branch keeps the 11-way strip parallelism of an X-T5 lossy RAF on any
++   toolchain without OpenMP. The pool is confined to a single unpack() call
++   and always joins before returning. */
++#ifndef LIBRAW_USE_OPENMP
++#include <atomic>
++#include <exception>
++#include <thread>
++#include <vector>
++#endif
++
++/* Deliberately NOT inside the #ifndef above: the datastream sites this guards
++   are unsynchronised in upstream's OpenMP build too, and this project now
++   ships that build.
++
++   Upstream wraps only the seek+read pair in fuji_fill_buffer() in an
++   `omp critical`. It leaves init_fuji_block()'s input->size() and both
++   derror() calls unguarded, even though derror() probes the stream (eof/tell)
++   and increments unpacker_data.data_error, all shared across strip workers.
++
++   A std::mutex rather than another `omp critical` on purpose: derror() can
++   throw LIBRAW_EXCEPTION_IO_EOF, and an exception must not escape an OpenMP
++   structured block, so `omp critical` is not a legal way to guard it. A
++   lock_guard unwinds correctly. No deadlock against the omp critical region:
++   the two never nest (init_fuji_block releases this mutex before calling
++   fuji_fill_buffer), and they are only ever taken one at a time.
++
++   Cost is negligible: a 64 KiB refill roughly once per XTRANS_BUF_SIZE bytes
++   of input, against the entropy decoding it serialises with. */
++#include <mutex>
++static std::mutex fuji_decode_stream_mutex;
++
+ struct int_pair
+ {
+   int value1;
+@@ -237,13 +274,14 @@
+ #endif
+     {
+ #ifndef LIBRAW_USE_OPENMP
+-      info->input->lock();
++      /* Ceyx project patch 09: input->lock()/unlock() are no-ops in a
++         non-OpenMP build, so hold the decoder's own mutex across the
++         seek+read pair.  Scoped to this block, mirroring the extent of the
++         omp critical region used by the OpenMP build. */
++      std::lock_guard<std::mutex> stream_guard(fuji_decode_stream_mutex);
+ #endif
+       info->input->seek(info->cur_buf_offset, SEEK_SET);
+       info->cur_buf_size = info->input->read(info->cur_buf, 1, _min(info->max_read_size, XTRANS_BUF_SIZE));
+-#ifndef LIBRAW_USE_OPENMP
+-      info->input->unlock();
+-#endif
+       if (info->cur_buf_size < 1) // nothing read
+       {
+         if (info->fillbytes > 0)
+@@ -280,7 +318,14 @@
+ {
+   info->linealloc = (ushort *)calloc(sizeof(ushort), _ltotal * (params->line_width + 2));
+ 
+-  INT64 fsize = libraw_internal_data.internal_data.input->size();
++  /* Ceyx project patch 09: init_fuji_block() runs on the strip workers under
++     BOTH the OpenMP and std::thread paths, so this datastream query is
++     guarded unconditionally. Upstream leaves it unguarded. */
++  INT64 fsize;
++  {
++    std::lock_guard<std::mutex> stream_guard(fuji_decode_stream_mutex);
++    fsize = libraw_internal_data.internal_data.input->size();
++  }
+   info->max_read_size = _min(unsigned(fsize - raw_offset), dsize); // Data size may be incorrect?
+   info->fillbytes = 1;
+ 
+@@ -854,7 +899,15 @@
+   fuji_extend_blue(info->linebuf, line_width);
+ 
+   if (errcnt)
++  {
++    /* Ceyx project patch 09: derror() probes the datastream (eof/tell) and
++       bumps unpacker_data.data_error, both shared across strip workers.
++       Guarded unconditionally -- upstream's OpenMP build leaves this racy.
++       A std::mutex, not `omp critical`: derror() can throw, and exceptions
++       may not escape an OpenMP structured block. */
++    std::lock_guard<std::mutex> stream_guard(fuji_decode_stream_mutex);
+     derror();
++  }
+ }
+ 
+ void LibRaw::fuji_bayer_decode_block(fuji_compressed_block *info, const fuji_compressed_params *params, int /*cur_line*/)
+@@ -1008,7 +1061,15 @@
+   fuji_extend_blue(info->linebuf, line_width);
+ 
+   if (errcnt)
++  {
++    /* Ceyx project patch 09: derror() probes the datastream (eof/tell) and
++       bumps unpacker_data.data_error, both shared across strip workers.
++       Guarded unconditionally -- upstream's OpenMP build leaves this racy.
++       A std::mutex, not `omp critical`: derror() can throw, and exceptions
++       may not escape an OpenMP structured block. */
++    std::lock_guard<std::mutex> stream_guard(fuji_decode_stream_mutex);
+     derror();
++  }
+ }
+ 
+ void LibRaw::fuji_decode_strip(fuji_compressed_params *params, int cur_block, INT64 raw_offset, unsigned dsize,
+@@ -1151,12 +1212,11 @@
+ void LibRaw::fuji_decode_loop(fuji_compressed_params *common_info, int count, INT64 *raw_block_offsets,
+                               unsigned *block_sizes, uchar *q_bases)
+ {
+-  int cur_block;
+   const int lineStep = (libraw_internal_data.unpacker_data.fuji_total_lines + 0xF) & ~0xF;
+ #ifdef LIBRAW_USE_OPENMP
++  int cur_block;
+   unsigned errcnt = 0;
+ #pragma omp parallel for private(cur_block) shared(errcnt)
+-#endif
+   for (cur_block = 0; cur_block < count; cur_block++)
+   {
+     try
+@@ -1166,17 +1226,100 @@
+     }
+     catch (...)
+     {
+-#ifdef LIBRAW_USE_OPENMP
+ #pragma omp atomic
+ 		  errcnt++;
+-#else
+-		  throw;
+-#endif
+ 	  }
+   }
+-#ifdef LIBRAW_USE_OPENMP
+   if (errcnt)
+ 		  throw LIBRAW_EXCEPTION_IO_EOF;
++#else
++  /* Ceyx project patch 09: std::thread replacement for the OpenMP loop above.
++     Strips are independent by construction -- each one owns its
++     fuji_compressed_block (and, when lossy, its own copy of
++     fuji_compressed_params, fuji_decode_strip() above), reads a disjoint byte
++     range of the input, and writes a disjoint column band of
++     imgdata.rawdata.raw_image via copy_line_to_xtrans()/copy_line_to_bayer().
++     That is the same independence the OpenMP loop already relies on; the only
++     genuinely shared resources are the datastream and derror(), both of which
++     are now under fuji_decode_stream_mutex.
++
++     The pool is bounded by the strip count, is created and joined inside this
++     one call, and never outlives unpack(). Exceptions cannot cross a
++     std::thread boundary, so the first one is captured and rethrown on the
++     calling thread after every worker has been joined -- preserving the
++     serial contract that a failed strip surfaces as a throw from
++     fuji_compressed_load_raw(). */
++  auto decode_one = [&](int cur_block) {
++    fuji_decode_strip(common_info, cur_block, raw_block_offsets[cur_block], block_sizes[cur_block],
++                      q_bases ? q_bases + cur_block * lineStep : 0);
++  };
++
++  unsigned hw = std::thread::hardware_concurrency();
++  int nthreads = int(hw ? hw : 1u);
++  if (nthreads > count)
++    nthreads = count;
++  if (nthreads < 1)
++    nthreads = 1;
++
++  if (nthreads == 1)
++  {
++    /* Single strip (or a single-core host): stay on the original serial path
++       so the degenerate case gains no thread-creation overhead and keeps
++       propagating its exception directly. */
++    for (int cur_block = 0; cur_block < count; cur_block++)
++      decode_one(cur_block);
++    return;
++  }
++
++  std::atomic<int> next_block(0);
++  std::atomic<bool> aborted(false);
++  std::mutex err_mutex;
++  std::exception_ptr first_error;
++
++  auto worker = [&]() {
++    for (;;)
++    {
++      if (aborted.load(std::memory_order_relaxed))
++        return;
++      const int cur_block = next_block.fetch_add(1, std::memory_order_relaxed);
++      if (cur_block >= count)
++        return;
++      try
++      {
++        decode_one(cur_block);
++      }
++      catch (...)
++      {
++        std::lock_guard<std::mutex> err_guard(err_mutex);
++        if (!first_error)
++          first_error = std::current_exception();
++        aborted.store(true, std::memory_order_relaxed);
++        return;
++      }
++    }
++  };
++
++  std::vector<std::thread> pool;
++  pool.reserve(size_t(nthreads - 1));
++  try
++  {
++    for (int i = 0; i < nthreads - 1; i++)
++      pool.emplace_back(worker);
++  }
++  catch (...)
++  {
++    /* Thread creation failed: the strips already claimed are still decoded by
++       the loop below, so this degrades to fewer workers rather than to a
++       partial image. */
++  }
++
++  worker(); // the calling thread is a worker too, never an idle waiter
++
++  for (size_t i = 0; i < pool.size(); i++)
++    pool[i].join(); // unconditional: no thread may outlive this call
++
++  if (first_error)
++    std::rethrow_exception(first_error);
+ #endif
+ }
+ 
