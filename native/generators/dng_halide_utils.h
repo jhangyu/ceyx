@@ -6,9 +6,9 @@
 //
 // Prior to W6 these helpers were duplicated verbatim (or nearly so) at the
 // top of:
-//   - dng_processor/native/src/DngDemosaicGenerator.cpp
-//   - dng_processor/native/src/DngDemosaicWarpGenerator.cpp
-//   - dng_processor/native/src/RectilinearWarpGenerator.cpp
+//   - native/generators/DngDemosaicGenerator.cpp
+//   - native/generators/DngDemosaicWarpGenerator.cpp
+//   - native/generators/RectilinearWarpGenerator.cpp
 //
 // `map_repeat_coord` had already drifted between copies:
 //   * DngDemosaicGenerator.cpp           used `Expr(kCfaRepeat)` (= 2)
