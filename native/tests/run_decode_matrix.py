@@ -858,7 +858,8 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
     merged = os.environ.copy()
     merged.update(env)
     proc = subprocess.run(
-        [harness, dng_path, "1", "--save-raw", str(artifact_dir)],
+        [harness, dng_path, "1", "--save-raw", str(artifact_dir),
+         "--repo-root", str(cwd)],
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

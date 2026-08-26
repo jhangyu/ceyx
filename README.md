@@ -617,6 +617,9 @@ point via `decodeRouteForPath`, and throws `DngDecodeException` (DNG route) or
 
 ## Testing and QA tooling
 
+The sample files below are **not** included in a clone — `image_samples/` ships only a
+README. Point these commands at your own DNG and RAW files.
+
 ```bash
 # Single-file 4-stage decode + PSNR
 ./native/build/test_decode image_samples/lossless_dng_sample.dng
@@ -674,11 +677,11 @@ python3 native/scripts/verify_raw_provenance.py
 
 | Directory | Contents |
 |---|---|
-| `native/` | The C++ engine: pipeline (`src/pipeline/`), FFI surface (`src/ffi/`, `include/`), Halide generators (`generators/`), CMake config (`cmake/`), vendored dependencies (`third_party/`), build and verification scripts (`scripts/`), tests (`tests/`) |
-| `plugin/` | The `ceyx` Flutter FFI plugin: Dart bindings and decoder service (`lib/`), plus per-platform native packaging glue |
-| `app/` | The Flutter demo application that exercises the plugin end to end |
-| `docs/` | `legal/` (third-party license index) and `images/` (README screenshots). Development planning and task logs live under `docs/SOP/` and `docs/logs/` locally but are not published; source comments referring to them are internal cross-references. |
-| `image_samples/` | Sample RAW and DNG files used by tests and manual verification |
+| `native/` | The C++ engine: pipeline (`src/pipeline/`), FFI surface (`src/ffi/`, `include/`), Halide generators (`generators/`), CMake config (`cmake/`), vendored dependencies (`third_party/`), the forked Halide Vulkan runtime used for Android pipeline-cache persistence (`halide_runtime_fork/`), patches applied to vendored sources (`patches/`, `sdk_patches/`), build and verification scripts (`scripts/`), tests (`tests/`) |
+| `plugin/` | The `ceyx` Flutter FFI plugin: Dart bindings and decoder service (`lib/`), benchmark entry points (`bin/`), Dart tests (`test/`), and per-platform native packaging glue (`macos/`, `android/`, `windows/`) |
+| `app/` | The Flutter demo application that exercises the plugin end to end, with per-platform runner shells |
+| `docs/` | `legal/` (third-party license index) and `images/` (README screenshots) — that is all a clone contains. Development planning and task logs live under `docs/SOP/` and `docs/logs/` locally but are not published, so source comments citing those paths are internal cross-references you will not be able to follow. |
+| `image_samples/` | **Contains no sample images.** The RAW and DNG files the test commands reference are untracked; only `raw_corpus/README.md`, which describes the corpus layout, is published. Supply your own files. |
 
 ## Licensing and third-party attribution
 

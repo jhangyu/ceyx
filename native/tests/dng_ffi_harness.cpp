@@ -3,17 +3,17 @@
 file_summary: "Production C ABI decode harness with contract-first RGB verification."
 functions:
   - name: "resolveArtifactDir"
-    description: "Restrict binary artifacts to the repository artifacts directory."
-    lines: "79-96"
+    description: "Restrict binary artifacts to the repository artifacts directory. Repo root is caller-supplied via --repo-root, not inferred from cwd."
+    lines: "66-94"
   - name: "validateContract"
     description: "Validate the interleaved RGBA8 FFI result before any RGB comparison."
-    lines: "98-142"
+    lines: "96-140"
   - name: "writeAndCompareRgb"
     description: "Stream RGBA-to-RGB output and optionally compare the Halide test render."
-    lines: "144-220"
+    lines: "142-220"
   - name: "main"
     description: "Parse arguments, invoke the production C ABI, verify, and free results."
-    lines: "224-275"
+    lines: "224-308"
 ---
 */
 
@@ -37,7 +37,8 @@ using Clock = std::chrono::steady_clock;
 
 void printUsage(const char *program) {
   std::cerr << "Usage: " << program
-            << " <dng_path> <repeat_count> [--save-raw <artifact_dir>]\n";
+            << " <dng_path> <repeat_count>"
+               " [--save-raw <artifact_dir> --repo-root <repo_root>]\n";
 }
 
 bool parseRepeatCount(const char *text, int *repeatCount) {
@@ -62,28 +63,21 @@ bool isWithin(const fs::path &child, const fs::path &parent) {
   return true;
 }
 
-fs::path findRepoRoot() {
-  fs::path current = fs::current_path();
-  while (true) {
-    // Marker history: rule.md until 2026-08-25, then CLAUDE.md until
-    // 2026-08-26. Both were untracked development aids, so a fresh clone had
-    // no marker and this walk fell off the filesystem root. Anchor on the two
-    // top-level source trees instead — they are always present in a checkout.
-    if (fs::exists(current / "native") &&
-        fs::exists(current / "plugin")) {
-      return current;
-    }
-    if (current == current.parent_path()) {
-      return {};
-    }
-    current = current.parent_path();
-  }
-}
-
-bool resolveArtifactDir(const fs::path &requested, fs::path *artifactDir) {
-  const fs::path repoRoot = findRepoRoot();
+bool resolveArtifactDir(const fs::path &requested, const fs::path &repoRoot,
+                        fs::path *artifactDir) {
+  // The repo root used to be guessed by walking up from the current working
+  // directory looking for a marker file. That was cwd-dependent and broke
+  // twice when the marker (rule.md, then CLAUDE.md) changed or was absent in
+  // a fresh clone. The caller (run_decode_matrix.py) already knows the repo
+  // root — it resolves `--repo-root` for itself — so it is passed explicitly
+  // via `--repo-root` instead of being inferred here.
   if (repoRoot.empty()) {
-    std::cerr << "ERROR: could not locate repo root from current directory\n";
+    std::cerr << "ERROR: --repo-root is required when --save-raw is used\n";
+    return false;
+  }
+  if (!fs::exists(repoRoot) || !fs::is_directory(repoRoot)) {
+    std::cerr << "ERROR: --repo-root does not exist or is not a directory: "
+              << repoRoot << "\n";
     return false;
   }
 
@@ -228,7 +222,7 @@ bool writeAndCompareRgb(const DngResult &result, const fs::path &artifactDir,
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3 && argc != 5) {
+  if (argc != 3 && argc != 7) {
     printUsage(argv[0]);
     return 2;
   }
@@ -240,10 +234,11 @@ int main(int argc, char **argv) {
   }
 
   fs::path artifactDir;
-  const bool saveRaw = argc == 5;
+  const bool saveRaw = argc == 7;
   if (saveRaw) {
     if (std::string(argv[3]) != "--save-raw" ||
-        !resolveArtifactDir(argv[4], &artifactDir)) {
+        std::string(argv[5]) != "--repo-root" ||
+        !resolveArtifactDir(argv[4], fs::path(argv[6]), &artifactDir)) {
       printUsage(argv[0]);
       return 2;
     }
