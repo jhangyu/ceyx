@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 NATIVE = Path(__file__).resolve().parent.parent
-REPO = NATIVE.parent.parent
+REPO = NATIVE.parent
 VENDOR = NATIVE / "third_party" / "libraw"
 RAWSPEED = VENDOR / "RawSpeed3" / "rawspeed"
 LIBRAW_CMAKE = NATIVE / "third_party" / "libraw-cmake"
