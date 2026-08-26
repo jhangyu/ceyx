@@ -28,6 +28,10 @@ if(ANDROID AND DNG_CROSS_BUILD)
     target_include_directories(test_decode_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
+        # test_decode.cpp includes "concurrent_dng_host.h" unqualified, so the
+        # pipeline dir must be on the path here exactly as it is for the host
+        # test_decode target below.
+        ${SRC_DIR}/pipeline
         ${DNG_SDK_DIR}
         ${HALIDE_OUTPUT_DIR}
         ${HALIDE_DIR}/include)

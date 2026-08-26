@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).resolve().parent / "raw_corpus_manifest.json"
 
 REQUIRED_KEYS = ["id", "path", "sha256", "vendor", "camera", "extension",

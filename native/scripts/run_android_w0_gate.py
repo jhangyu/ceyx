@@ -37,7 +37,8 @@ def run(cmd: list[str], cwd: Optional[Path] = None, check: bool = True) -> subpr
 
 
 def repo_root_from_script() -> Path:
-    return Path(__file__).resolve().parents[3]
+    # <repo>/native/scripts/<this file> — parents[2] is the repository root.
+    return Path(__file__).resolve().parents[2]
 
 
 def parse_attached_devices(adb: str) -> tuple[list[str], str]:
