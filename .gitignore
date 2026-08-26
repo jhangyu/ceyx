@@ -43,14 +43,17 @@ native/third_party/dng_sdk/projects/
 native/third_party/dng_sdk/source/Makefile
 
 # libjpeg-turbo non-build artifacts (only src/, simd/, cmakescripts/ needed)
+# release/ and test/ are NOT excluded: the vendored CMakeLists unconditionally
+# configure_file()s 15 templates out of them (CMakeLists.txt:1903-1912,
+# cmakescripts/BuildPackages.cmake:42-166), so excluding them made a fresh
+# clone impossible to configure — CI on a clean checkout exposed this on
+# 2026-08-26. Together they are ~124KB of text.
 native/third_party/libjpeg-turbo/java/
 native/third_party/libjpeg-turbo/doc/
 native/third_party/libjpeg-turbo/testimages/
 native/third_party/libjpeg-turbo/fuzz/
-native/third_party/libjpeg-turbo/release/
 native/third_party/libjpeg-turbo/win/
 native/third_party/libjpeg-turbo/sharedlib/
-native/third_party/libjpeg-turbo/test/
 native/third_party/libjpeg-turbo/ChangeLog.md
 
 # Vendored LibRaw source + CMake wrapper
