@@ -194,7 +194,21 @@ flowchart LR
     G --> H["DngDecoderService"]
     H --> I["Zero-copy Uint8List view"]
     I --> J["Flutter widget"]
+
+    classDef input fill:#e2e8f0,stroke:#94a3b8,stroke-width:2px,color:#1e293b
+    classDef cpu fill:#fde68a,stroke:#fbbf24,stroke-width:2px,color:#1e293b
+    classDef gpu fill:#bae6fd,stroke:#38bdf8,stroke-width:2px,color:#1e293b
+    classDef ffi fill:#ddd6fe,stroke:#a78bfa,stroke-width:2px,color:#1e293b
+    classDef dart fill:#a7f3d0,stroke:#34d399,stroke-width:2px,color:#1e293b
+
+    class A input
+    class B,C cpu
+    class D,E gpu
+    class F,G ffi
+    class H,I,J dart
 ```
+
+<sub>Amber = CPU (Adobe DNG SDK) · Sky = GPU (Halide AOT) · Violet = FFI boundary · Emerald = Dart/Flutter</sub>
 
 ### Dual-frontend routing
 
@@ -211,7 +225,23 @@ flowchart TD
     L1 --> GPU["Shared Halide AOT GPU core"]
     L2 --> GPU
     GPU --> OUT["RGBA8 buffer"]
+
+    classDef input fill:#e2e8f0,stroke:#94a3b8,stroke-width:2px,color:#1e293b
+    classDef probe fill:#ddd6fe,stroke:#a78bfa,stroke-width:2px,color:#1e293b
+    classDef cpu fill:#fde68a,stroke:#fbbf24,stroke-width:2px,color:#1e293b
+    classDef layout fill:#99f6e4,stroke:#2dd4bf,stroke-width:2px,color:#1e293b
+    classDef gpu fill:#bae6fd,stroke:#38bdf8,stroke-width:2px,color:#1e293b
+    classDef output fill:#fecdd3,stroke:#fb7185,stroke-width:2px,color:#1e293b
+
+    class A input
+    class P probe
+    class DNGR,GENR cpu
+    class L1,L2 layout
+    class GPU gpu
+    class OUT output
 ```
+
+<sub>Violet = route probe · Amber = CPU frontends · Teal = sensor layout class · Sky = shared GPU core · Rose = output</sub>
 
 ### GPU device handoff
 
@@ -222,6 +252,13 @@ entry point with the same device-dirty intermediate, so this is not a DNG-only
 optimization.
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {
+  "actorBkg": "#bae6fd", "actorBorder": "#38bdf8", "actorTextColor": "#1e293b",
+  "signalColor": "#a78bfa", "signalTextColor": "#1e293b",
+  "noteBkgColor": "#fde68a", "noteBorderColor": "#fbbf24", "noteTextColor": "#1e293b",
+  "activationBkgColor": "#a7f3d0", "activationBorderColor": "#34d399",
+  "sequenceNumberColor": "#1e293b", "lineColor": "#94a3b8"
+}}}%%
 sequenceDiagram
     participant S3 as Stage 3 kernel
     participant GPU as GPU device memory
