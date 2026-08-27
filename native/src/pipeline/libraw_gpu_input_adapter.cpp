@@ -95,6 +95,17 @@ int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
                                   RawColorTransform* out, char* reason_out,
                                   size_t reason_cap);
 
+// Stage 2 (design section 2.2): the white-balance source-selection sentinel
+// chain. Declared here (not in the header, which is outside this change's file
+// ownership) and mirrored in test_libraw_adapter.cpp so the guards can be driven
+// with synthetic metadata -- no corpus file reaches the pre_mul / identity /
+// as_shot_wb_applied branches, so a corpus-only test would leave them
+// unexercised while reporting green (the 2026-07-10 allowlist lesson).
+void raw_white_balance_from_libraw(const float* cam_mul, const float* pre_mul,
+                                   uint32_t as_shot_wb_applied, uint32_t colors,
+                                   float out_neutral[4], char* reason_out,
+                                   size_t reason_cap);
+
 RawColorKey raw_color_key_from_libraw(uint32_t libraw_index, uint32_t colors,
                                       const char* cdesc) {
     if (!cdesc || libraw_index >= 4) return kRawColorKeyUnknown;
@@ -443,22 +454,12 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     }
 
     // --- white balance -----------------------------------------------------
-    const float* mul = nullptr;
-    if (v.cam_mul && v.cam_mul[0] > 0.0f && v.cam_mul[1] > 0.0f) mul = v.cam_mul;
-    else if (v.pre_mul && v.pre_mul[0] > 0.0f && v.pre_mul[1] > 0.0f) mul = v.pre_mul;
-
-    for (int c = 0; c < 4; ++c) out_input->as_shot_neutral[c] = 1.0f;
-    if (mul) {
-        for (int c = 0; c < 4; ++c) {
-            if (mul[c] > 0.0f && std::isfinite(mul[c])) {
-                out_input->as_shot_neutral[c] = mul[1] / mul[c];
-            }
-        }
-    } else if (reason_out && reason_cap) {
-        // Identity is a legal outcome, not a guess at a matrix; record why.
-        std::snprintf(reason_out, reason_cap,
-                      "no usable cam_mul/pre_mul; white balance left at identity");
-    }
+    // Full design section 2.2 sentinel chain lives in the free function so the
+    // as_shot_wb_applied / pre_mul / identity guards can be driven synthetically
+    // (no corpus file reaches them).
+    raw_white_balance_from_libraw(v.cam_mul, v.pre_mul, v.as_shot_wb_applied,
+                                  v.colors, out_input->as_shot_neutral, reason_out,
+                                  reason_cap);
 
     // --- colour matrix -----------------------------------------------------
     raw_camera_to_pcs_from_libraw(v.rgb_cam, v.cam_xyz, v.raw_color, v.colors,
@@ -516,6 +517,20 @@ int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
     if (!out) return kRawCameraMatrixRouteNone;
     RawColorTransform& xf = *out;
     xf.valid = 0;   // never substitute an identity (spec section 4.1.9)
+
+    // AC-2.3 (design section 2.3): 4-colour sensors (CMYG / RGBE / Foveon
+    // Quattro) have no supported 3x3 camera->PCS path. rgb_cam is genuinely 3x4
+    // and cam_xyz's 4th camera row would be dropped, so either route yields a
+    // colour-wrong render reporting success. Fail explicitly rather than
+    // fall through to the cam_xyz fallback (which colors == 4 otherwise passes).
+    if (colors >= 4) {
+        if (reason_out && reason_cap && reason_out[0] == '\0') {
+            std::snprintf(reason_out, reason_cap,
+                          "colors=%u: 4-colour sensors (CMYG/RGBE/Quattro) are "
+                          "not supported; no camera matrix emitted", colors);
+        }
+        return kRawCameraMatrixRouteNone;
+    }
 
     float pcs_white[3];
     raw_pcs_white(pcs_white);
@@ -633,5 +648,72 @@ int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
                       raw_color, colors);
     }
     return kRawCameraMatrixRouteNone;
+}
+
+// Design section 2.2 white-balance source-selection sentinel chain. Produces the
+// selected 4-channel multiplier vector m, then the DNG-style as_shot_neutral,
+// out_neutral[c] = m[1] / m[c] (green is the reference channel, exactly as the
+// pre-Stage-2 code used it, so a file with a usable cam_mul renders identically).
+//
+//   if (as_shot_wb_applied)                             m = {1,1,1,1}
+//   else if (cam_mul[0] > 1e-5 && cam_mul[2] > 1e-5)    m = cam_mul
+//   else if (pre_mul[0] > 1e-5 && pre_mul[1] > 1e-5)    m = pre_mul  // + reason
+//   else                                                m = {1,1,1,1} // + reason
+//   if (m[1] == 0) m[1] = 1
+//   if (m[3] == 0) m[3] = (colors < 4) ? m[1] : 1
+//
+// cam_mul[0] < -0.5 is LibRaw's legacy auto-WB marker (a negative sentinel), so
+// it fails the `> 1e-5` test and falls through to pre_mul -- the same channels
+// [0]/[2] LibRaw's own scale_colors sentinel checks (the pre-Stage-2 code tested
+// [0]/[1], which wrongly accepted a cam_mul whose blue channel was unparsed).
+void raw_white_balance_from_libraw(const float* cam_mul, const float* pre_mul,
+                                   uint32_t as_shot_wb_applied, uint32_t colors,
+                                   float out_neutral[4], char* reason_out,
+                                   size_t reason_cap) {
+    const bool write_reason = reason_out && reason_cap && reason_out[0] == '\0';
+
+    float m[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    const bool cam_mul_usable =
+        cam_mul && std::isfinite(cam_mul[0]) && std::isfinite(cam_mul[2]) &&
+        cam_mul[0] > 1e-5f && cam_mul[2] > 1e-5f;
+    const bool pre_mul_usable =
+        pre_mul && std::isfinite(pre_mul[0]) && std::isfinite(pre_mul[1]) &&
+        pre_mul[0] > 1e-5f && pre_mul[1] > 1e-5f;
+
+    if (as_shot_wb_applied) {
+        // WB already folded upstream (Nikon sRAW / small-raw). Multiplying by
+        // cam_mul again double-applies it and the frame goes hard magenta.
+        m[0] = m[1] = m[2] = m[3] = 1.0f;
+    } else if (cam_mul_usable) {
+        for (int c = 0; c < 4; ++c) m[c] = cam_mul[c];
+    } else if (pre_mul_usable) {
+        for (int c = 0; c < 4; ++c) m[c] = pre_mul[c];
+        if (write_reason) {
+            std::snprintf(reason_out, reason_cap,
+                          "cam_mul unusable (channels [0]/[2] not both > 1e-5); "
+                          "fell back to pre_mul daylight white balance");
+        }
+    } else {
+        // Identity is a legal outcome, not a guess at a matrix; record why.
+        m[0] = m[1] = m[2] = m[3] = 1.0f;
+        if (write_reason) {
+            std::snprintf(reason_out, reason_cap,
+                          "no usable cam_mul or pre_mul; white balance left at "
+                          "identity");
+        }
+    }
+
+    // Reference (green) channel must be positive; a 4th channel of 0 is by design
+    // for a 3-colour cam_mul and takes the green gain rather than a 0 (which would
+    // be an infinite as_shot_neutral). colors == 4 keeps 1.0 (that render is
+    // rejected by the matrix's unsupported branch anyway).
+    if (m[1] == 0.0f) m[1] = 1.0f;
+    if (m[3] == 0.0f) m[3] = (colors < 4) ? m[1] : 1.0f;
+
+    for (int c = 0; c < 4; ++c) {
+        out_neutral[c] =
+            (m[c] > 0.0f && std::isfinite(m[c])) ? (m[1] / m[c]) : 1.0f;
+    }
 }
 

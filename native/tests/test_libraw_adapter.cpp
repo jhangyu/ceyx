@@ -33,6 +33,14 @@ int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
                                   uint32_t raw_color, uint32_t colors,
                                   RawColorTransform* out, char* reason_out,
                                   size_t reason_cap);
+// Stage 2 (design section 2.2) white-balance source-selection chain. Mirrored
+// from src/pipeline/libraw_gpu_input_adapter.cpp for the same reason as the
+// route function above: no corpus file reaches the pre_mul / identity /
+// as_shot_wb_applied guards.
+void raw_white_balance_from_libraw(const float* cam_mul, const float* pre_mul,
+                                   uint32_t as_shot_wb_applied, uint32_t colors,
+                                   float out_neutral[4], char* reason_out,
+                                   size_t reason_cap);
 
 namespace {
 
@@ -601,20 +609,28 @@ void checkRouteTable() {
                detail);
     }
 
-    // (e) colors == 4: rgb_cam is genuinely 3x4 and truncating it would be a
-    //     wrong-colour render reporting success, so the primary route must NOT
-    //     be taken. (The explicit unsupported branch is Stage 2 / AC-2.3; this
-    //     case pins the Stage 1 behaviour so that change is visible.)
+    // (e) AC-2.3. colors == 4 (CMYG / RGBE / Quattro): rgb_cam is genuinely 3x4
+    //     and cam_xyz would also yield a colour-wrong render, so the matrix must
+    //     fail explicitly -- valid == 0, route None, and a reason naming the
+    //     unsupported case ("4-colour"). This REPLACES the Stage 1 pin, which
+    //     only asserted route != 1 (it fell through to the cam_xyz fallback and
+    //     reported valid == 1). Observed RED against the pre-Stage-2 adapter:
+    //     that build returned route=2 valid=1 (cam_xyz fallback), see
+    //     tmp/verify/stage2_red_adapter.txt.
     {
         RawColorTransform xf{};
+        for (int i = 0; i < 9; ++i) xf.m[i] = -7.0f;
+        xf.valid = 1;
         reason[0] = '\0';
         const int route = raw_camera_to_pcs_from_libraw(
             kRgbCam, kCamXyz, /*raw_color=*/0, /*colors=*/4, &xf, reason,
             sizeof(reason));
+        const bool reason_has_4colour = std::strstr(reason, "4-colour") != nullptr;
         std::snprintf(detail, sizeof(detail),
-                      "route=%d want!=1 (colors==4 must not truncate rgb_cam's "
-                      "4th column)", route);
-        report("route-colors4-not-primary", "synthetic", route != 1, detail);
+                      "route=%d want=0 valid=%u want=0 reason=\"%s\" has_4colour=%d",
+                      route, xf.valid, reason, reason_has_4colour ? 1 : 0);
+        report("route-colors4-unsupported", "synthetic",
+               route == 0 && xf.valid == 0 && reason_has_4colour, detail);
     }
 
     // (f) NEITHER: clean failure with a reason. Never an invented identity.
@@ -634,6 +650,122 @@ void checkRouteTable() {
     }
 }
 
+// Stage 2 white-balance source-selection chain (design section 2.2, AC-2.1,
+// AC-2.2, AC-2.4). out_neutral[c] is the DNG-style as_shot_neutral = m[1]/m[c]
+// over the selected multiplier vector m. None of these guards is reachable from
+// the corpus (every present file has usable cam_mul and as_shot_wb_applied==0),
+// so these synthetic cases are the only coverage.
+void checkWhiteBalanceChain() {
+    char detail[320];
+
+    auto approx = [](float a, float b) { return std::fabs(a - b) < 1e-5f; };
+
+    // AC-2.1 a: as_shot_wb_applied == 1 forces neutral (1,1,1,1) even when a
+    // perfectly usable cam_mul is present (re-applying it double-applies WB).
+    // RED against the stub, which ignores as_shot_wb_applied and returns cam_mul
+    // -> (0.5,1,0.25,1).
+    {
+        const float cam_mul[4] = {2.0f, 1.0f, 4.0f, 1.0f};
+        float n[4] = {-1, -1, -1, -1};
+        char reason[256] = {0};
+        raw_white_balance_from_libraw(cam_mul, nullptr, /*as_shot_wb_applied=*/1,
+                                      /*colors=*/3, n, reason, sizeof(reason));
+        const bool ok = approx(n[0], 1) && approx(n[1], 1) && approx(n[2], 1) &&
+                        approx(n[3], 1);
+        std::snprintf(detail, sizeof(detail),
+                      "as_shot_wb_applied=1 -> neutral=(%.3f,%.3f,%.3f,%.3f) want=(1,1,1,1)",
+                      n[0], n[1], n[2], n[3]);
+        report("wb-as-shot-forces-identity", "synthetic", ok, detail);
+    }
+
+    // AC-2.1 b: legacy auto-WB marker cam_mul[0] < -0.5 -> treated as absent,
+    // pre_mul used. (Already handled by the stub's cam_mul[0] > 0 predicate; this
+    // pins it against the new [0]/[2] predicate too.)
+    {
+        const float cam_mul[4] = {-1.0f, 1.0f, 1.0f, 1.0f};
+        const float pre_mul[4] = {2.0f, 1.0f, 4.0f, 1.0f};
+        float n[4] = {-1, -1, -1, -1};
+        char reason[256] = {0};
+        raw_white_balance_from_libraw(cam_mul, pre_mul, 0, 3, n, reason,
+                                      sizeof(reason));
+        const bool ok = approx(n[0], 0.5f) && approx(n[1], 1) &&
+                        approx(n[2], 0.25f) && approx(n[3], 1) && reason[0] != '\0';
+        std::snprintf(detail, sizeof(detail),
+                      "cam_mul[0]<-0.5 -> pre_mul neutral=(%.3f,%.3f,%.3f,%.3f) "
+                      "want=(0.5,1,0.25,1) reason=\"%s\"",
+                      n[0], n[1], n[2], n[3], reason);
+        report("wb-legacy-marker-uses-pre_mul", "synthetic", ok, detail);
+    }
+
+    // AC-2.1 c: cam_mul all-zero -> unparsed -> pre_mul, with a reason.
+    {
+        const float cam_mul[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float pre_mul[4] = {2.0f, 1.0f, 4.0f, 1.0f};
+        float n[4] = {-1, -1, -1, -1};
+        char reason[256] = {0};
+        raw_white_balance_from_libraw(cam_mul, pre_mul, 0, 3, n, reason,
+                                      sizeof(reason));
+        const bool ok = approx(n[0], 0.5f) && approx(n[1], 1) &&
+                        approx(n[2], 0.25f) && reason[0] != '\0';
+        std::snprintf(detail, sizeof(detail),
+                      "cam_mul all-zero -> pre_mul neutral=(%.3f,%.3f,%.3f,%.3f) "
+                      "reason=\"%s\"", n[0], n[1], n[2], n[3], reason);
+        report("wb-zero-cam_mul-uses-pre_mul", "synthetic", ok, detail);
+    }
+
+    // AC-2.1 c (channel alignment): cam_mul[0]>0 and [1]>0 but [2] unparsed
+    // (<=1e-5). LibRaw's own sentinel tests channels [0]/[2]; the pre-Stage-2
+    // predicate tested [0]/[1] and would WRONGLY accept this cam_mul. RED against
+    // the stub -> (0.5,1,1,1); new chain falls to pre_mul -> (0.25,1,0.125,1).
+    {
+        const float cam_mul[4] = {2.0f, 1.0f, 0.0f, 1.0f};
+        const float pre_mul[4] = {4.0f, 1.0f, 8.0f, 1.0f};
+        float n[4] = {-1, -1, -1, -1};
+        char reason[256] = {0};
+        raw_white_balance_from_libraw(cam_mul, pre_mul, 0, 3, n, reason,
+                                      sizeof(reason));
+        const bool ok = approx(n[0], 0.25f) && approx(n[1], 1) &&
+                        approx(n[2], 0.125f) && reason[0] != '\0';
+        std::snprintf(detail, sizeof(detail),
+                      "cam_mul[2]<=1e-5 -> pre_mul neutral=(%.3f,%.3f,%.3f,%.3f) "
+                      "want=(0.25,1,0.125,1) reason=\"%s\"",
+                      n[0], n[1], n[2], n[3], reason);
+        report("wb-cam_mul-channel2-alignment", "synthetic", ok, detail);
+    }
+
+    // AC-2.1 d + AC-2.4: both cam_mul and pre_mul absent -> identity neutral AND
+    // a non-empty reason.
+    {
+        float n[4] = {-1, -1, -1, -1};
+        char reason[256] = {0};
+        raw_white_balance_from_libraw(nullptr, nullptr, 0, 3, n, reason,
+                                      sizeof(reason));
+        const bool ok = approx(n[0], 1) && approx(n[1], 1) && approx(n[2], 1) &&
+                        approx(n[3], 1) && reason[0] != '\0';
+        std::snprintf(detail, sizeof(detail),
+                      "both absent -> neutral=(%.3f,%.3f,%.3f,%.3f) reason=\"%s\"",
+                      n[0], n[1], n[2], n[3], reason);
+        report("wb-both-absent-identity-with-reason", "synthetic", ok, detail);
+    }
+
+    // AC-2.2: cam_mul[3] == 0 with colors == 3 -> the 4th channel takes the green
+    // gain (m[3] := m[1]), so out_neutral[3] == m[1]/m[1] == 1, never a 0 gain.
+    {
+        const float cam_mul[4] = {2.0f, 1.0f, 4.0f, 0.0f};
+        float n[4] = {-1, -1, -1, -1};
+        char reason[256] = {0};
+        raw_white_balance_from_libraw(cam_mul, nullptr, 0, /*colors=*/3, n, reason,
+                                      sizeof(reason));
+        const bool ok = approx(n[0], 0.5f) && approx(n[1], 1) &&
+                        approx(n[2], 0.25f) && approx(n[3], 1);
+        std::snprintf(detail, sizeof(detail),
+                      "cam_mul[3]==0,colors==3 -> neutral=(%.3f,%.3f,%.3f,%.3f) "
+                      "want=(0.5,1,0.25,1) [n[3] green gain, not 0]",
+                      n[0], n[1], n[2], n[3]);
+        report("wb-cam_mul3-zero-green-fill", "synthetic", ok, detail);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -650,6 +782,7 @@ int main(int argc, char** argv) {
     checkFiltersPeriodicity();
     checkMatrixInverse();
     checkRouteTable();
+    checkWhiteBalanceChain();
 
     const std::vector<Sample> samples = loadManifest(manifest);
     std::vector<std::string> bayer_paths;
