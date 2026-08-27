@@ -1,3 +1,7 @@
 {
+  "foveon_x3f_linear": "c15f620e8b90c065a7fe248ffa2e7ae21db335f81becdd6843c3869cbb84a082",
+  "foveon_x3f_linear_2": "d9d648f051c155830df05bb64d9b3b77d5023bc915c3d4cad1288e34e28b3971",
+  "fuji_xt3_xtrans": "2513df98f5af2a140fe0e2f9704bd7b36c3fb90af6b9d5e448058bb76e20f719",
+  "fuji_xt5_xtrans": "70a7da34b6d646d37b522efe2ac81fb85ad754b806819747713adbb9dc66bc35",
   "local_sony_bayer": "fb8facb5ef299f73c5320f102555d24b83b48b1fddd4ab80b8f2ccc55aad685d"
 }

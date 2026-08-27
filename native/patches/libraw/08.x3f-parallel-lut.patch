@@ -11,10 +11,11 @@
  
  /* extern */ int legacy_offset = 0;
  /* extern */ bool_t auto_legacy_offset = 1;
-@@ -908,6 +912,109 @@
+@@ -907,7 +911,132 @@
+ 
    return BS->bits[BS->bit_offset++];
  }
- 
++
 +/* ---- CEYX X3: 256-entry Huffman LUT for the TRUE engine ---------------
 +   The TRUE coding tree is built with new_huffman_tree(&TRU->tree, 8), so no
 +   code is longer than 8 bits and a single 256-entry table resolves every
@@ -35,12 +36,28 @@
 +   path. 16 keeps len(<=8) + bits(<=16) + bit_offset(<=7) inside 32 bits. */
 +#define CEYX_TRUE_LUT_MAX_DIFF_BITS 16
 +
++/* CEYX X4: one packed 12-byte entry per 8-bit window so the hot path issues a
++   single table load and decodes the diff field branchlessly (the original
++   `first_bit == 0` sign fold is a data-dependent ~50/50 branch; the two
++   separate len[] / diff_bits[] loads are fused into this one entry). */
++typedef struct ceyx_true_lut_entry_s
++{
++  /* Code bits + diff-field bits consumed; 0 means "escape to slow path". */
++  uint8_t total;
++  /* Position of the diff field's sign bit inside the field: bits - 1
++     (0 when bits == 0, where `mask` is 0 and the value below stays 0). */
++  uint8_t sign_shift;
++  uint8_t pad0;
++  uint8_t pad1;
++  /* (1u << bits) - 1: extraction mask for the diff field, 0 when bits == 0.
++     Also the amount subtracted when the sign bit is 0 (matches the original
++     `diff -= (1 << bits) - 1`). */
++  uint32_t mask;
++} ceyx_true_lut_entry_t;
+ 
 +typedef struct ceyx_true_lut_s
 +{
-+  /* Number of bits the Huffman code consumes; 0 means "escape to slow path". */
-+  uint8_t len[CEYX_TRUE_LUT_SIZE];
-+  /* Leaf value = width in bits of the diff field that follows the code. */
-+  uint8_t diff_bits[CEYX_TRUE_LUT_SIZE];
++  ceyx_true_lut_entry_t e[CEYX_TRUE_LUT_SIZE];
 +} ceyx_true_lut_t;
 +
 +static void ceyx_build_true_lut(const x3f_hufftree_t *HTP, ceyx_true_lut_t *lut)
@@ -51,9 +68,13 @@
 +  {
 +    const x3f_huffnode_t *node = &HTP->nodes[0];
 +    int depth = 0;
++    int bits;
 +
-+    lut->len[i] = 0;
-+    lut->diff_bits[i] = 0;
++    lut->e[i].total = 0;
++    lut->e[i].sign_shift = 0;
++    lut->e[i].pad0 = 0;
++    lut->e[i].pad1 = 0;
++    lut->e[i].mask = 0;
 +
 +    while (node != NULL &&
 +           (node->branch[0] != NULL || node->branch[1] != NULL) &&
@@ -72,8 +93,10 @@
 +        node->leaf > (uint32_t)CEYX_TRUE_LUT_MAX_DIFF_BITS)
 +      continue; /* out of the fast path's modelled range: escape */
 +
-+    lut->len[i] = (uint8_t)depth;
-+    lut->diff_bits[i] = (uint8_t)node->leaf;
++    bits = (int)node->leaf;
++    lut->e[i].total = (uint8_t)(depth + bits);
++    lut->e[i].sign_shift = (uint8_t)(bits > 0 ? bits - 1 : 0);
++    lut->e[i].mask = bits > 0 ? ((1u << bits) - 1u) : 0u;
 +  }
 +}
 +
@@ -121,76 +144,106 @@
  /* Decode use the TRUE algorithm */
  
  static int32_t get_true_diff(bit_state_t *BS, x3f_hufftree_t *HTP)
-@@ -948,6 +1055,68 @@
-   }
- 
+@@ -950,6 +1079,98 @@
    return diff;
-+}
+ }
+ 
++/* CEYX X4: register-resident bit window for the LUT fast path. Carrying the
++   bit position through memory (position -> 4-byte reload -> table load ->
++   position) stalls the per-symbol decode chain on L1 latency every symbol.
++   Holding the next <= 64 stream bits
++   MSB-aligned in a register turns the carried chain into
++   idx -> 2 KB L1 entry load -> shift, refilled in 32-bit gulps.
 +
-+/* CEYX X3: LUT fast path over get_true_diff(). `end` is one past the last
-+   readable byte of the compressed block; when the fast path cannot guarantee
-+   its 4-byte lookahead stays inside it, the original walk runs instead.
++   `bits` is the number of valid bits in `win` (from the MSB); `rd` is the
++   next unread stream byte. bits == -1 is the "window dead" sentinel used
++   when a cold escape lands too close to the block end to re-seed the window;
++   from then on the caller's bit_state_t (kept authoritative by the escape
++   path) drives the verbatim get_true_diff() walk, exactly as pre-LUT code. */
++typedef struct ceyx_bitwin_s
++{
++  uint64_t win;
++  int bits;
++  uint8_t *rd;
++} ceyx_bitwin_t;
 +
-+   The bit position is carried in plain (byte, off) locals owned by the caller's
-+   row loop, so the hot path never touches bit_state_t's per-bit cache array;
-+   the position is only materialised into `*BS` when escaping to the slow
-+   walk, and read back from it afterwards. */
-+static inline int32_t ceyx_get_true_diff_lut(bit_state_t *BS,
++static inline int32_t ceyx_get_true_diff_win(bit_state_t *BS,
 +                                             x3f_hufftree_t *HTP,
 +                                             const ceyx_true_lut_t *lut,
 +                                             const uint8_t *end,
-+                                             uint8_t **pbyte, int *poff)
++                                             ceyx_bitwin_t *W)
 +{
-+  uint8_t *byte = *pbyte;
-+  const int off = *poff;
-+
-+  if (byte + 4 <= end)
++  if (W->bits >= 0)
 +  {
-+    const uint32_t w = ((uint32_t)byte[0] << 24) | ((uint32_t)byte[1] << 16) |
-+                       ((uint32_t)byte[2] << 8) | (uint32_t)byte[3];
-+    const uint32_t idx = (w >> (24 - off)) & 0xff;
-+    const int len = lut->len[idx];
-+
-+    if (len != 0)
++    if (W->bits <= 32 && W->rd + 4 <= end)
 +    {
-+      const int bits = lut->diff_bits[idx];
-+      const int total = len + bits;
++      const uint32_t c = ((uint32_t)W->rd[0] << 24) |
++                         ((uint32_t)W->rd[1] << 16) |
++                         ((uint32_t)W->rd[2] << 8) | (uint32_t)W->rd[3];
 +
-+      if (off + total <= 32)
++      W->win |= (uint64_t)c << (32 - W->bits);
++      W->bits += 32;
++      W->rd += 4;
++    }
++
++    {
++      const uint32_t idx = (uint32_t)(W->win >> 56);
++      const ceyx_true_lut_entry_t e = lut->e[idx];
++
++      if (e.total != 0 && (int)e.total <= W->bits)
 +      {
-+        const int abs_off = off + total;
-+        int32_t diff = 0;
++        /* Field layout inside the first `total` window bits: code, then the
++           diff field; `mask` selects the diff field's low `bits` bits. */
++        const uint32_t v = (uint32_t)(W->win >> (64 - e.total)) & e.mask;
++        const uint32_t sign = (v >> e.sign_shift) & 1u;
++        const int32_t diff = (int32_t)v - (int32_t)(e.mask & (sign - 1u));
 +
-+        *pbyte = byte + (abs_off >> 3);
-+        *poff = abs_off & 7;
-+
-+        if (bits != 0)
-+        {
-+          const uint32_t v = (w >> (32 - abs_off)) & ((1u << bits) - 1u);
-+
-+          diff = (int32_t)v;
-+          /* first_bit == 0 in the original loop */
-+          if ((v >> (bits - 1)) == 0)
-+            diff -= (1 << bits) - 1;
-+        }
-+
++        W->win <<= e.total;
++        W->bits -= e.total;
 +        return diff;
 +      }
 +    }
++
++    /* Cold escape: run the verbatim walk from the canonical (byte, offset)
++       position implied by the window, then re-seed the window after it. */
++    {
++      uint8_t *byte = W->rd - ((W->bits + 7) >> 3);
++      int off = (8 - (W->bits & 7)) & 7;
++      int32_t diff;
++
++      ceyx_bs_store(BS, byte, off);
++      diff = get_true_diff(BS, HTP);
++      ceyx_bs_pos(BS, &byte, &off);
++
++      W->rd = byte;
++      W->win = 0;
++      W->bits = 0;
++      while (W->bits <= 56 && W->rd < end)
++      {
++        W->win |= (uint64_t)(*W->rd) << (56 - W->bits);
++        W->bits += 8;
++        W->rd++;
++      }
++      if (W->bits >= off)
++      {
++        W->win <<= off;
++        W->bits -= off;
++      }
++      else
++      {
++        W->bits = -1; /* window dead: BS (already in sync) takes over */
++      }
++      return diff;
++    }
 +  }
 +
-+  {
-+    int32_t diff;
++  return get_true_diff(BS, HTP);
++}
 +
-+    ceyx_bs_store(BS, byte, off);
-+    diff = get_true_diff(BS, HTP);
-+    ceyx_bs_pos(BS, pbyte, poff);
-+    return diff;
-+  }
- }
- 
  /* This code (that decodes one of the X3F color planes, really is a
-@@ -961,7 +1130,8 @@
+    decoding of a compression algorithm suited for Bayer CFA data. In
+    Bayer CFA the data is divided into 2x2 squares that represents
+@@ -961,7 +1182,8 @@
  
  /* TODO: write more about the compression */
  
@@ -200,36 +253,38 @@
  {
    x3f_true_t *TRU = ID->tru;
    x3f_quattro_t *Q = ID->quattro;
-@@ -979,6 +1149,15 @@
+@@ -979,6 +1201,16 @@
  
    set_bit_state(&BS, TRU->plane_address[color]);
  
 +  /* CEYX X3: one past the last readable byte of the compressed block, used to
-+     bound the LUT fast path's 4-byte lookahead, plus the row loop's own copy
-+     of the bit position (see ceyx_get_true_diff_lut). */
++     bound the LUT fast path's lookahead (see ceyx_get_true_diff_win). */
 +  const uint8_t *ceyx_end = (const uint8_t *)ID->data + ID->data_size;
-+  uint8_t *ceyx_byte;
-+  int ceyx_off;
++  /* CEYX X4: register bit window over this plane's stream. */
++  ceyx_bitwin_t ceyx_win;
 +
-+  ceyx_bs_pos(&BS, &ceyx_byte, &ceyx_off);
++  ceyx_win.win = 0;
++  ceyx_win.bits = 0;
++  ceyx_win.rd = TRU->plane_address[color];
 +
    row_start_acc[0][0] = seed;
    row_start_acc[0][1] = seed;
    row_start_acc[1][0] = seed;
-@@ -1014,7 +1193,8 @@
+@@ -1014,7 +1246,8 @@
      for (col = 0; col < (int)cols; col++)
      {
        bool_t odd_col = col & 1;
 -      int32_t diff = get_true_diff(&BS, tree);
-+      int32_t diff = ceyx_get_true_diff_lut(&BS, tree, ceyx_lut, ceyx_end,
-+                                            &ceyx_byte, &ceyx_off);
++      int32_t diff = ceyx_get_true_diff_win(&BS, tree, ceyx_lut, ceyx_end,
++                                            &ceyx_win);
        int32_t prev = col < 2 ? row_start_acc[odd_row][odd_col] : acc[odd_col];
        int32_t value = prev + diff;
  
-@@ -1032,16 +1212,50 @@
+@@ -1031,17 +1264,51 @@
+     }
    }
  }
- 
++
 +/* CEYX X2: the three TRUE colour planes are decoded in parallel.
 +   Each plane owns every piece of mutable state it touches: its own
 +   bit_state_t, its own row_start_acc/acc, its own bitstream
@@ -237,7 +292,7 @@
 +   output slots (interleaved `color` lane of TRU->x3rgb16, or Q->top16 for the
 +   binned Quattro plane 2). The only shared state is read-only: the Huffman
 +   tree, the LUT built from it, and the image dimensions.
-+
+ 
 +   true_decode_one_color() can throw LIBRAW_EXCEPTION_IO_CORRUPT, and an
 +   exception escaping a std::thread would call std::terminate, so each worker
 +   captures its exception and the joiner rethrows the first one - preserving

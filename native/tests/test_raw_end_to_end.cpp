@@ -220,6 +220,44 @@ bool writeHashes(const char* path, const std::map<std::string, std::string>& has
     return out.good();
 }
 
+// Byte-level no-drift gate shared by every file-driven success branch
+// (Bayer, X-Trans, linear-RGB/Foveon). Records the digest into `recorded`
+// (so a --record-hashes run seeds every layout, not just Bayer) and, when not
+// recording, compares against the baseline with the SAME missing-baseline
+// convention the Bayer branch established: a missing entry prints a
+// hash-baseline line and does NOT fail, a present entry is reported and
+// counted. Returns true iff a comparison was performed and matched (used by
+// per-layout aggregate verdicts); a skipped/absent baseline returns false.
+bool recordAndCompareHash(const std::string& id, const uint8_t* rgba,
+                          size_t rgba_size, bool record_hashes,
+                          const std::map<std::string, std::string>& baseline,
+                          std::map<std::string, std::string>& recorded,
+                          int& compared, bool& all_match) {
+    if (!rgba || rgba_size == 0) return false;
+    const std::string digest = sha256Hex(rgba, rgba_size);
+    recorded[id] = digest;
+    const auto it = baseline.find(id);
+    if (record_hashes) {
+        std::printf("[RawE2E] hash-record %s sha256=%s\n", id.c_str(),
+                    digest.c_str());
+        return false;
+    }
+    if (it == baseline.end()) {
+        std::printf("[RawE2E] hash-baseline %s absent (run --record-hashes to "
+                    "seed) sha256=%s\n",
+                    id.c_str(), digest.c_str());
+        return false;
+    }
+    char detail[200];
+    std::snprintf(detail, sizeof(detail), "sha256=%s want=%s", digest.c_str(),
+                  it->second.c_str());
+    const bool ok = digest == it->second;
+    report("hash", id.c_str(), ok, detail);
+    ++compared;
+    if (!ok) all_match = false;
+    return ok;
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic X-Trans frame, shared by the routing case, the FujiGreen
 // kernel-contract case (round-6 should-fix S-R6-01) and the pixel-exact case
@@ -486,6 +524,10 @@ int main(int argc, char** argv) {
     // tracked next to the verdict.
     int bayer_hash_compared = 0;
     bool bayer_hash_all_match = true;
+    int xtrans_hash_compared = 0;
+    bool xtrans_hash_all_match = true;
+    int linear_hash_compared = 0;
+    bool linear_hash_all_match = true;
 
     for (const Sample& s : samples) {
         if (s.id.rfind("malformed_", 0) == 0) continue;   // Task 13 owns these
@@ -552,24 +594,9 @@ int main(int argc, char** argv) {
 
             // Byte-level no-drift record for Task 12's X-Trans wiring.
             if (rc == kRawSuccess && result.rgba_ptr && result.rgba_size > 0) {
-                const std::string digest =
-                    sha256Hex(result.rgba_ptr, result.rgba_size);
-                recorded[s.id] = digest;
-                const auto it = baseline.find(s.id);
-                if (record_hashes) {
-                    std::printf("[RawE2E] hash-record %s sha256=%s\n",
-                                s.id.c_str(), digest.c_str());
-                } else if (it == baseline.end()) {
-                    std::printf("[RawE2E] hash-baseline %s absent (run "
-                                "--record-hashes to seed) sha256=%s\n",
-                                s.id.c_str(), digest.c_str());
-                } else {
-                    std::snprintf(detail, sizeof(detail), "sha256=%s want=%s",
-                                  digest.c_str(), it->second.c_str());
-                    report("hash", s.id.c_str(), digest == it->second, detail);
-                    ++bayer_hash_compared;
-                    if (digest != it->second) bayer_hash_all_match = false;
-                }
+                recordAndCompareHash(s.id, result.rgba_ptr, result.rgba_size,
+                                     record_hashes, baseline, recorded,
+                                     bayer_hash_compared, bayer_hash_all_match);
             }
 
             if (first_bayer.empty()) first_bayer = s.path;
@@ -588,6 +615,17 @@ int main(int argc, char** argv) {
                        result.diag.cfa_repeat_height == 6 &&
                        result.diag.raw_repack_bytes == 0,
                    detail);
+
+            // Byte-level no-drift gate for the X-Trans (RAF) decode path --
+            // the safety net R1/R2 rely on. Same mechanism/convention as the
+            // Bayer branch above.
+            if (rc == kRawSuccess && result.rgba_ptr && result.rgba_size > 0) {
+                recordAndCompareHash(s.id, result.rgba_ptr, result.rgba_size,
+                                     record_hashes, baseline, recorded,
+                                     xtrans_hash_compared,
+                                     xtrans_hash_all_match);
+            }
+
             if (first_xtrans.empty()) first_xtrans = s.path;
         } else if (s.expect_layout == "linear_rgb" && s.expect_error == "kRawSuccess") {
             // P19 T8: real .x3f corpus case. Same predicate shape as the
@@ -607,6 +645,16 @@ int main(int argc, char** argv) {
                    alpha_ok && result.width > 0 && result.height > 0 &&
                        result.diag.raw_repack_bytes == 0,
                    detail);
+
+            // Byte-level no-drift gate for the Foveon (X3F) decode path -- the
+            // safety net R4 relies on. Same mechanism/convention as the Bayer
+            // branch above.
+            if (rc == kRawSuccess && result.rgba_ptr && result.rgba_size > 0) {
+                recordAndCompareHash(s.id, result.rgba_ptr, result.rgba_size,
+                                     record_hashes, baseline, recorded,
+                                     linear_hash_compared,
+                                     linear_hash_all_match);
+            }
         } else if (s.expect_layout == "xtrans6x6") {
             std::snprintf(detail, sizeof(detail), "error=%s want=%s rgba=%s",
                           raw_error_name(rc), s.expect_error.c_str(),
@@ -1102,6 +1150,26 @@ int main(int argc, char** argv) {
                         "with a recorded baseline was present)\n", detail);
         } else {
             report("bayer-unchanged", nullptr, bayer_hash_all_match, detail);
+        }
+
+        std::snprintf(detail, sizeof(detail), "compared=%d all_match=%d",
+                      xtrans_hash_compared, xtrans_hash_all_match ? 1 : 0);
+        if (xtrans_hash_compared == 0) {
+            std::printf("[RawE2E] SKIP xtrans-unchanged (%s: no X-Trans sample "
+                        "with a recorded baseline was present)\n", detail);
+        } else {
+            report("xtrans-unchanged", nullptr, xtrans_hash_all_match, detail);
+        }
+
+        std::snprintf(detail, sizeof(detail), "compared=%d all_match=%d",
+                      linear_hash_compared, linear_hash_all_match ? 1 : 0);
+        if (linear_hash_compared == 0) {
+            std::printf("[RawE2E] SKIP linear-rgb-unchanged (%s: no Foveon "
+                        "sample with a recorded baseline was present)\n",
+                        detail);
+        } else {
+            report("linear-rgb-unchanged", nullptr, linear_hash_all_match,
+                   detail);
         }
     }
 

@@ -1,0 +1,105 @@
+--- a/src/decoders/fuji_compressed.cpp
++++ b/src/decoders/fuji_compressed.cpp
+@@ -176,6 +176,57 @@
+   qt->raw_bits = log2ceil(qt->total_values);
+   qt->q_grad_mult = 9;
+   params->max_bits = 4 * log2ceil(qp[4] + 1);
++}
++
++/* Ceyx project patch 10: per-q_base memoisation of init_main_qtable().
++
++   For lossy RAF, fuji_decode_strip() re-runs init_main_qtable() (which
++   rebuilds the ~2*max_value-entry setup_qlut() table) on every line whose
++   q_base differs from the previous line's, but the table and every derived
++   scalar are a pure function of (q_base, max_value) -- max_value is fixed for
++   the whole file. Measured share: 9.9% of the decode profile
++   (docs/logs/2026-08-28/Task_xtrans_optimization_eval.md par.2). q_base is a
++   uchar, so a per-strip 256-slot cache keyed by q_base computes each table
++   once and afterwards just swaps the qt[0].q_table pointer + scalars back in.
++   init_main_grads() is decoder STATE, not derived data, and still runs on
++   every transition (caller's responsibility, unchanged).
++
++   The cache is strictly per-strip (lives on fuji_decode_strip()'s stack), so
++   there is no interaction with the strip-parallel pool. */
++struct fuji_qtable_cache
++{
++  /* slot.q_table == NULL means "not computed yet". slot stores a complete
++     fuji_q_table (including the owned q_table pointer) plus the matching
++     params->max_bits. */
++  fuji_q_table slot[256];
++  int max_bits[256];
++};
++
++static void init_main_qtable_cached(fuji_compressed_params *params, uchar q_base, fuji_qtable_cache *cache,
++                                    size_t table_size)
++{
++  if (!cache)
++  {
++    /* Cache allocation failed: degrade to upstream's uncached behaviour
++       (qt[0].q_table still points at the strip's inline blob). */
++    init_main_qtable(params, q_base);
++    return;
++  }
++  fuji_q_table *cached = &cache->slot[q_base];
++  if (!cached->q_table)
++  {
++    /* First sighting of this q_base in this strip: compute into a buffer the
++       cache owns, via the verbatim upstream routine. */
++    params->qt[0].q_table = (int8_t *)calloc(table_size, 1);
++    init_main_qtable(params, q_base);
++    *cached = params->qt[0];
++    cache->max_bits[q_base] = params->max_bits;
++  }
++  else
++  {
++    params->qt[0] = *cached;
++    params->max_bits = cache->max_bits[q_base];
++  }
+ }
+ 
+ void LibRaw::init_fuji_compr(fuji_compressed_params *params)
+@@ -1076,6 +1127,10 @@
+   unsigned line_size;
+   fuji_compressed_block info;
+   fuji_compressed_params *info_common = params;
++  /* Ceyx project patch 10: per-strip q_base -> main qtable cache (lossy only;
++     zero-initialised so every slot starts "not computed"). */
++  fuji_qtable_cache *qt_cache = 0;
++  const size_t qt_table_size = size_t(2) << libraw_internal_data.unpacker_data.fuji_bits;
+ 
+   if (!libraw_internal_data.unpacker_data.fuji_lossless)
+   {
+@@ -1085,6 +1140,7 @@
+     memcpy(info_common, params, sizeof(fuji_compressed_params));
+     info_common->qt[0].q_table = (int8_t *)(info_common + 1);
+     info_common->qt[0].q_base = -1;
++    qt_cache = (fuji_qtable_cache *)calloc(sizeof(fuji_qtable_cache), 1);
+   }
+   init_fuji_block(&info, info_common, raw_offset, dsize);
+   line_size = sizeof(ushort) * (info_common->line_width + 2);
+@@ -1113,7 +1169,10 @@
+       int q_base = q_bases ? q_bases[cur_line] : 0;
+       if (!cur_line || q_base != info_common->qt[0].q_base)
+       {
+-        init_main_qtable(info_common, q_bases[cur_line]);
++        /* Ceyx project patch 10: memoised (per q_base) rebuild of the main
++           qtable; init_main_grads() is state and still runs unconditionally
++           on every transition, exactly as upstream. */
++        init_main_qtable_cached(info_common, q_bases[cur_line], qt_cache, qt_table_size);
+         init_main_grads(info_common, &info);
+       }
+     }
+@@ -1141,6 +1200,13 @@
+   }
+ 
+   // release data
++  if (qt_cache)
++  {
++    /* Ceyx project patch 10: the cache owns every table buffer it computed. */
++    for (int i = 0; i < 256; i++)
++      free(qt_cache->slot[i].q_table);
++    free(qt_cache);
++  }
+   if (!libraw_internal_data.unpacker_data.fuji_lossless)
+     free(info_common);
+   free(info.linealloc);
