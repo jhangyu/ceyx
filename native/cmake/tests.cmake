@@ -200,6 +200,15 @@ add_executable(test_cfa_color tests/test_cfa_color.cpp)
 target_include_directories(test_cfa_color PRIVATE ${INC_DIR})
 target_link_libraries(test_cfa_color PRIVATE dng_decoder_native)
 
+# H1 colour gate (spec section 7.5): HEIC decode vs an ImageIO reference.
+# Guarded on DNG_ENABLE_HEIF because the executable calls heif_decode_rgba,
+# which is not linked into dng_decoder_native in an OFF build.
+if(DNG_ENABLE_HEIF)
+    add_executable(test_heif_color tests/test_heif_color.cpp)
+    target_include_directories(test_heif_color PRIVATE ${INC_DIR})
+    target_link_libraries(test_heif_color PRIVATE dng_decoder_native)
+endif()
+
 # P17 T2: plain-C raw pipeline contract ABI test (raw_pipeline_contract.h).
 # Pure header test, no LibRaw/decoder dependency; not gated by
 # DNG_ENABLE_GENERIC_RAW.
