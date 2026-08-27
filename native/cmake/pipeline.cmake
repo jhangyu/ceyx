@@ -119,6 +119,16 @@ if(NOT DNG_ENABLE_GENERIC_RAW)
     # filtered out above, so they must drop out of OFF builds together.
     list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/raw_(gpu_pipeline|ffi_api)\\.cpp$")
 endif()
+# Phase 2 (HEIC): src/pipeline/heif_decode.cpp includes libheif/heif.h, which is
+# only on an include path when DNG_ENABLE_HEIF is ON (cmake/heif.cmake). The
+# GLOB_RECURSE above would otherwise sweep both HEIF TUs into
+# dng_decoder_native in OFF builds too and break them. The C ABI wrapper goes
+# with it: exporting heif_ symbols that resolve to nothing is worse than not
+# exporting them, because the Dart side's guarded lookup would succeed and then
+# the decode would fail at runtime instead of degrading to a permanent miss.
+if(NOT DNG_ENABLE_HEIF)
+    list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/heif_(decode|ffi_api)\\.cpp$")
+endif()
 # W6 H-3: bridge .cpp moved from dng_sdk_custom/source/ into src/;
 # now auto-discovered by file(GLOB_RECURSE) above.
 # Only add target if there are sources, dummy for now to avoid target creation error
