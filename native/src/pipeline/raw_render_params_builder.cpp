@@ -32,21 +32,23 @@ void matrixToRowMajor3x3(const dng_matrix& m, float out9[9]) {
     }
 }
 
-// Scale rows so a neutral camera input maps to a neutral output. On the DNG
-// path this normalisation is already folded into spec->CameraToPCS(); the
-// generic contract hands us an un-normalised camera->XYZ matrix plus a separate
-// as-shot neutral, so it has to happen here.
-void normalizeRowsToNeutral(float m[9], const float neutral[3]) {
-    for (int r = 0; r < 3; ++r) {
-        float sum = 0.0f;
-        for (int c = 0; c < 3; ++c) {
-            sum += m[r * 3 + c] * (neutral[c] > 0.0f ? neutral[c] : 1.0f);
-        }
-        if (std::fabs(sum) > 1e-8f) {
-            for (int c = 0; c < 3; ++c) m[r * 3 + c] /= sum;
-        }
-    }
-}
+// DELETED (design Task_raw_color_architecture.md Rev 2 sections 1.4 / 7 AC-1.4):
+// there used to be a row-to-neutral normalisation helper here that divided row r
+// of camera_to_rgb by sum_c A[r][c]*n[c], forming diag(k)*A -- a diagonal in the
+// OUTPUT (ProPhoto) space. The von Kries correction the DNG path applies is
+// A*diag(g), a diagonal in the camera INPUT space (dng_color_spec.cpp:441-446
+// folds Invert(refCameraWhite.AsDiagonal()) on the right). The two forms agree
+// only when A is diagonal, which a camera->ProPhoto matrix never is: both map
+// neutral to neutral -- which is why greys always looked right -- and they
+// diverge on every saturated colour, which is the washed-out symptom.
+//
+// It is a REPLACEMENT, not an addition. Reinstating it alongside the fold below
+// would double-correct: greys would stay neutral and mask the error while
+// colours over-rotate. AC-1.4 greps this file for the old helper's identifier and
+// requires a count of ZERO, which is why this paragraph describes it rather than
+// naming it. The numeric guard is the V8 saturated-patch case in
+// test_raw_render_params.cpp, which keeps a test-only copy of the old maths as an
+// explicit counterfactual.
 
 // Same shape the DNG path produces (dng_render_halide.cpp:831-833): a
 // dng_1d_table is kTableSize + 2 floats, uniformly sampled over [0,1] with the
@@ -78,10 +80,37 @@ bool raw_build_render_params(const RawGpuInput& input,
         return false;
     }
 
+    // camera_white must be MAX-normalised with a 0.001 floor, because that is
+    // what Stage 4 assumes: its min(s_c, camera_white(c)) is a highlight ceiling
+    // on un-white-balanced data (DngRenderGenerator.cpp:87-89), positioned so a
+    // channel-clipped highlight lands on the neutral vector. The SDK derives it
+    // the same way -- whiteScale = 1/MaxEntry, then Pin_real64(0.001, .., 1.0)
+    // at dng_color_spec.cpp:413-421. An entry above 1.0 would sit outside the
+    // 0..1 signal range and SILENTLY disable the clip on that channel.
+    //
+    // TERMINOLOGY TRAP: on LibRaw's reciprocal quantity, gains m[c], this same
+    // operation is MIN-normalisation. The contract carries a neutral
+    // (n[c] proportional to 1/m[c]) whose absolute scale is arbitrary, so
+    // dividing by max_c(n) here is exactly the design's
+    // camera_white[c] = clamp(min_c(m)/m[c], 0.001, 1.0). Applying "min" to the
+    // neutral instead would produce a global colour cast with no test failure.
+    // This is the ONE place the normalisation happens; the adapter deliberately
+    // emits an unnormalised neutral.
+    float neutral[3];
+    float max_neutral = 0.0f;
     for (int i = 0; i < 3; ++i) {
-        params.camera_white[i] = input.as_shot_neutral[i] > 0.0f
-                                     ? input.as_shot_neutral[i]
-                                     : 1.0f;
+        neutral[i] = (input.as_shot_neutral[i] > 0.0f &&
+                      std::isfinite(input.as_shot_neutral[i]))
+                         ? input.as_shot_neutral[i]
+                         : 1.0f;
+        max_neutral = std::max(max_neutral, neutral[i]);
+    }
+    if (!(max_neutral > 0.0f)) max_neutral = 1.0f;
+    float gain[3];
+    for (int i = 0; i < 3; ++i) {
+        params.camera_white[i] =
+            std::min(1.0f, std::max(0.001f, neutral[i] / max_neutral));
+        gain[i] = 1.0f / params.camera_white[i];   // >= 1 by construction
     }
     params.camera_white_vec = dng_vector_3(params.camera_white[0],
                                            params.camera_white[1],
@@ -94,8 +123,28 @@ bool raw_build_render_params(const RawGpuInput& input,
                                   input.camera_to_pcs.m[4], input.camera_to_pcs.m[5],
                                   input.camera_to_pcs.m[6], input.camera_to_pcs.m[7],
                                   input.camera_to_pcs.m[8]);
+    // THE FOLD. diag(gain) is a RIGHT (column) multiply: it scales the camera
+    // INPUT channels before the matrix mixes them, which is what makes the
+    // matrix's negative off-diagonal terms subtract from a properly scaled
+    // channel and preserves full chroma separation. Composing on the right also
+    // makes this the same transform as multiplying the gains into the pixels
+    // before Stage 4, exactly: since gain[c] > 0, min commutes with positive
+    // per-channel scaling, so A*diag(g)*min(s, w) == A*min(s (*) g, 1). The fold
+    // is preferred over the pixel multiply because it keeps the gains and the
+    // clip vector derived from ONE array in ONE file -- a coupling that is
+    // invisible, and trivially broken, once it spans a file boundary -- and
+    // because the pre-Stage-4 kernels emit uint16, which would quantise and hard
+    // clip the boosted channels (RawBayerDemosaicGenerator.cpp:48-49).
+    //
+    // No row normalisation follows. camera_to_pcs is contractually
+    // white-preserving (camera_to_pcs * (1,1,1) == PCS white, enforced in the
+    // adapter's route table) and ProPhoto's white IS the PCS white, so
+    // ProPhoto::MatrixFromPCS() * camera_to_pcs already maps neutral to neutral.
+    const dng_matrix_3by3 gain_diag(gain[0], 0.0, 0.0,
+                                    0.0, gain[1], 0.0,
+                                    0.0, 0.0, gain[2]);
     const dng_matrix camera_to_rgb =
-        dng_space_ProPhoto::Get().MatrixFromPCS() * camera_to_pcs;
+        dng_space_ProPhoto::Get().MatrixFromPCS() * camera_to_pcs * gain_diag;
     const dng_matrix rgb_to_final =
         dng_space_sRGB::Get().MatrixFromPCS() * dng_space_ProPhoto::Get().MatrixToPCS();
     params.camera_to_rgb_mat = camera_to_rgb;
@@ -103,7 +152,6 @@ bool raw_build_render_params(const RawGpuInput& input,
 
     matrixToRowMajor3x3(camera_to_rgb, params.camera_to_rgb);
     matrixToRowMajor3x3(rgb_to_final, params.rgb_to_final);
-    normalizeRowsToNeutral(params.camera_to_rgb, params.camera_white);
 
     // Exposure / tone / gamma via the same SDK function objects the DNG path
     // feeds into dng_1d_table, so the Stage4 kernel sees identically shaped and
@@ -112,6 +160,7 @@ bool raw_build_render_params(const RawGpuInput& input,
     // from the colour space rather than assumed.
     const real64 exposure = static_cast<real64>(develop.exposure_ev);
     const real64 white = 1.0 / std::pow(2.0, std::max<real64>(0.0, exposure));
+
     const dng_function_exposure_ramp ramp_fn(white, 0.0, 0.0);
     sampleFunction(params.exp_ramp, ramp_fn);
 

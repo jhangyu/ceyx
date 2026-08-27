@@ -261,6 +261,15 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     view.cam_mul = color.cam_mul;
     view.pre_mul = color.pre_mul;
     view.cam_xyz = &color.cam_xyz[0][0];
+    view.rgb_cam = &color.rgb_cam[0][0];
+    view.as_shot_wb_applied =
+        static_cast<uint32_t>(color.as_shot_wb_applied != 0);
+    // ioparams, not idata: raw_color lives in internal_output_params, which
+    // unpack() memmoves into rawdata.ioparams (unpack.cpp:504-510) once the
+    // pixels are decoded. Reading it from there rather than from the private
+    // libraw_internal_data keeps this a public-API read (spec section 6.4.3).
+    view.raw_color = static_cast<uint32_t>(
+        impl_->processor.imgdata.rawdata.ioparams.raw_color);
     view.black_scalar = color.black;
     view.white_level = color.maximum;
     view.black_repeat_height = color.cblack[4];

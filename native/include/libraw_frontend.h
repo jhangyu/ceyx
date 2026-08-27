@@ -39,6 +39,28 @@ struct LibRawRawView {
     const float* cam_mul = nullptr;         // 4 entries
     const float* pre_mul = nullptr;         // 4 entries
     const float* cam_xyz = nullptr;         // 12 entries (LibRaw 4x3)
+    // LibRaw's own colorimetry: `float rgb_cam[3][4]` (libraw_types.h:811),
+    // 3 output sRGB rows x 4 camera-channel columns, i.e. linear-sRGB-FROM-
+    // camera. Built by cam_xyz_coeff (utils_dcraw.cpp:285-312), which
+    // row-normalises the forward sRGB->camera matrix so that it maps (1,1,1)
+    // to (1,1,1,...) and only THEN pseudo-inverts it -- so rgb_cam is
+    // white-preserving by construction, with no bolted-on rescale. That is why
+    // the adapter prefers it over Invert(cam_xyz): normalise-then-invert is not
+    // the same matrix as invert-then-normalise.
+    const float* rgb_cam = nullptr;         // 12 entries (LibRaw 3x4)
+    // color.as_shot_wb_applied (libraw_types.h:829). Non-zero means LibRaw has
+    // ALREADY applied the as-shot white balance to the pixels it handed us
+    // (Nikon sRAW / small-raw). Multiplying by cam_mul again would double-apply
+    // the correction and swing the render hard magenta. Plumbed here in Stage 1;
+    // the guard that consumes it is Stage 2.
+    uint32_t as_shot_wb_applied = 0;
+    // internal_output_params.raw_color (libraw_types.h:139), copied into
+    // rawdata.ioparams at unpack (unpack.cpp:508). 1 means LibRaw found NO
+    // colour data for this camera and left rgb_cam at the identity
+    // (identify.cpp:509 seeds it to 1; a matched camera clears it to 0).
+    // Defaults to 1 -- the conservative value: a view that never populated this
+    // field must not be read as "rgb_cam is trustworthy".
+    uint32_t raw_color = 1;
     const uint32_t* black_pattern = nullptr;
     uint32_t black_repeat_width = 0;
     uint32_t black_repeat_height = 0;

@@ -18,6 +18,22 @@
 #include "libraw_gpu_input_adapter.h"
 #include "raw_contract_validate.h"
 
+// Declared in src/pipeline/libraw_gpu_input_adapter.cpp (this test compiles that
+// TU directly, cmake/tests.cmake:746-752). They are NOT in
+// libraw_gpu_input_adapter.h because that header is outside the Stage 1 file
+// ownership boundary.
+//
+// The route values mirror that TU's RawCameraMatrixRoute enum: 0 none,
+// 1 rgb_cam (primary), 2 cam_xyz (fallback). checkRouteTable() drives all three
+// and asserts the returned value, so a renumbering there fails here rather than
+// silently mislabelling a route.
+extern "C" void raw_srgb_to_pcs_matrix(float out9[9]);
+extern "C" void raw_pcs_white(float out3[3]);
+int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
+                                  uint32_t raw_color, uint32_t colors,
+                                  RawColorTransform* out, char* reason_out,
+                                  size_t reason_cap);
+
 namespace {
 
 int failures = 0;
@@ -453,24 +469,169 @@ void checkMatrixInverse() {
            detail);
 }
 
-// On a real file: the emitted matrix must be the INVERSE of LibRaw's cam_xyz,
-// i.e. cam_xyz * emitted == I. If the adapter ever reverts to transcribing
-// cam_xyz directly this fails immediately.
-void checkMatrixDirection(const char* id, const LibRawRawView& v,
-                          const RawGpuInput& in) {
-    if (!in.camera_to_pcs.valid || !v.cam_xyz) {
-        std::printf("[LibRawAdapter] SKIP matrix-direction %s (no matrix)\n", id);
+// AC-1.2, on every real file: the D50-white invariant. camera_to_pcs must map a
+// neutral (white-balanced) camera triple onto the PCS white.
+//
+// This REPLACES the previous "matrix-direction" case, which asserted
+// cam_xyz * emitted == I. That case encoded the OLD contract, where camera_to_pcs
+// was a bare Invert(cam_xyz) with no white handling; under the section-1.5 route
+// table it is wrong on both routes (the rgb_cam route does not go through cam_xyz
+// at all, and the cam_xyz route is now rescaled onto the PCS white). Observed
+// RED before this rewrite: all 6 corpus samples failed it, e.g. local_sony_bayer
+// "cam_xyz * emitted diag=(0.424245,1.069167,0.589579)"
+// (tmp/verify/stage1_post1_run.txt:85).
+//
+// The tolerance is against raw_pcs_white(), i.e. the row sums of the SDK's own
+// sRGB->PCS matrix, NOT the design document's literal (0.9642, 1.0, 0.8249):
+// that literal is a 4-decimal rounding of D50 and sits 2.0e-4 from this SDK's
+// PCStoXYZ() in Z, twice AC-1.2's own 1e-4 bound, so asserting against it would
+// fail a correct implementation. Flagged to the lead 2026-08-28.
+void checkPcsWhiteInvariant(const char* id, const RawColorTransform& xf,
+                            const char* route_label) {
+    if (!xf.valid) {
+        std::printf("[LibRawAdapter] SKIP pcs-white-invariant %s (no matrix)\n", id);
         return;
     }
-    float cam_from_xyz[9];
-    for (int i = 0; i < 9; ++i) cam_from_xyz[i] = v.cam_xyz[i];
-    float prod[9] = {0};
-    mul3x3(cam_from_xyz, in.camera_to_pcs.m, prod);
+    float want[3];
+    raw_pcs_white(want);
+    float got[3];
+    float worst = 0.0f;
+    for (int r = 0; r < 3; ++r) {
+        got[r] = xf.m[r * 3 + 0] + xf.m[r * 3 + 1] + xf.m[r * 3 + 2];
+        worst = std::fmax(worst, std::fabs(got[r] - want[r]));
+    }
     char detail[256];
     std::snprintf(detail, sizeof(detail),
-                  "cam_xyz * emitted diag=(%.6f,%.6f,%.6f) off=(%.6f,%.6f)",
-                  prod[0], prod[4], prod[8], prod[1], prod[5]);
-    report("matrix-direction", id, nearIdentity3x3(prod, 1e-3f), detail);
+                  "route=%s M*(1,1,1)=(%.6f,%.6f,%.6f) want=(%.6f,%.6f,%.6f) "
+                  "max_abs_diff=%.8f tol=0.0001",
+                  route_label, got[0], got[1], got[2], want[0], want[1], want[2],
+                  worst);
+    report("pcs-white-invariant", id, worst < 1e-4f, detail);
+}
+
+// AC-1.2's "both routes" half. No corpus file reaches the FALLBACK branch --
+// every sample LibRaw recognises yields a usable rgb_cam -- so a corpus-only
+// test would leave half the route table unexercised while reporting green
+// (the 2026-07-10 allowlist lesson). These cases drive the branches directly.
+void checkRouteTable() {
+    char detail[320];
+    char reason[256];
+
+    // A plausible non-identity sRGB-from-camera matrix in LibRaw's [3][4]
+    // layout. Column 3 is deliberately POISONED with huge values: rgb_cam has a
+    // row stride of 4, and a stride-3 misread would pick those up. Rows are
+    // white-preserving (each sums to 1) exactly as cam_xyz_coeff leaves them.
+    const float kRgbCam[12] = {
+         1.7f, -0.6f, -0.1f,  9999.0f,
+        -0.2f,  1.5f, -0.3f, -9999.0f,
+         0.05f, -0.45f, 1.4f,  1234.5f};
+    // A plausible camera-from-XYZ in LibRaw's [4][3] layout (Sony-like).
+    const float kCamXyz[12] = {
+         0.7688f, -0.2199f, -0.0724f,
+        -0.3129f,  1.0781f,  0.2588f,
+        -0.0281f,  0.1287f,  0.6797f,
+         0.0f,     0.0f,     0.0f};
+    const float kIdentityRgbCam[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f};
+
+    // (a) PRIMARY: rgb_cam usable.
+    {
+        RawColorTransform xf{};
+        reason[0] = '\0';
+        const int route = raw_camera_to_pcs_from_libraw(
+            kRgbCam, kCamXyz, /*raw_color=*/0, /*colors=*/3, &xf, reason,
+            sizeof(reason));
+        std::snprintf(detail, sizeof(detail), "route=%d want=1 valid=%u",
+                      route, xf.valid);
+        report("route-primary-rgb_cam", "synthetic",
+               route == 1 && xf.valid == 1, detail);
+        checkPcsWhiteInvariant("synthetic-primary", xf, "rgb_cam");
+
+        // Stride guard: the poisoned 4th column must not appear in the result.
+        // 9999 * any sRGB->PCS coefficient would be >100; every legitimate
+        // entry here is order 1.
+        bool sane = true;
+        for (int i = 0; i < 9; ++i) if (std::fabs(xf.m[i]) > 10.0f) sane = false;
+        std::snprintf(detail, sizeof(detail),
+                      "no |m[i]|>10 despite rgb_cam column 3 = "
+                      "{9999,-9999,1234.5}; m[0]=%.6f", xf.m[0]);
+        report("route-primary-row-stride-is-4", "synthetic", sane, detail);
+    }
+
+    // (b) FALLBACK: rgb_cam absent -> cam_xyz, rescaled onto the PCS white.
+    {
+        RawColorTransform xf{};
+        reason[0] = '\0';
+        const int route = raw_camera_to_pcs_from_libraw(
+            nullptr, kCamXyz, /*raw_color=*/0, /*colors=*/3, &xf, reason,
+            sizeof(reason));
+        std::snprintf(detail, sizeof(detail), "route=%d want=2 valid=%u",
+                      route, xf.valid);
+        report("route-fallback-cam_xyz", "synthetic",
+               route == 2 && xf.valid == 1, detail);
+        checkPcsWhiteInvariant("synthetic-fallback", xf, "cam_xyz");
+    }
+
+    // (c) rgb_cam present but LibRaw matched no camera (raw_color != 0): the
+    //     array is an untrustworthy leftover, so the fallback must be taken.
+    {
+        RawColorTransform xf{};
+        reason[0] = '\0';
+        const int route = raw_camera_to_pcs_from_libraw(
+            kRgbCam, kCamXyz, /*raw_color=*/1, /*colors=*/3, &xf, reason,
+            sizeof(reason));
+        std::snprintf(detail, sizeof(detail), "route=%d want=2 (raw_color=1)",
+                      route);
+        report("route-raw_color-forces-fallback", "synthetic", route == 2, detail);
+    }
+
+    // (d) rgb_cam is the identity: also an untrustworthy leftover, not a
+    //     legitimate "camera is already sRGB" claim (spec 4.1.9).
+    {
+        RawColorTransform xf{};
+        reason[0] = '\0';
+        const int route = raw_camera_to_pcs_from_libraw(
+            kIdentityRgbCam, kCamXyz, /*raw_color=*/0, /*colors=*/3, &xf, reason,
+            sizeof(reason));
+        std::snprintf(detail, sizeof(detail), "route=%d want=2 (rgb_cam==I)",
+                      route);
+        report("route-identity-rgb_cam-forces-fallback", "synthetic", route == 2,
+               detail);
+    }
+
+    // (e) colors == 4: rgb_cam is genuinely 3x4 and truncating it would be a
+    //     wrong-colour render reporting success, so the primary route must NOT
+    //     be taken. (The explicit unsupported branch is Stage 2 / AC-2.3; this
+    //     case pins the Stage 1 behaviour so that change is visible.)
+    {
+        RawColorTransform xf{};
+        reason[0] = '\0';
+        const int route = raw_camera_to_pcs_from_libraw(
+            kRgbCam, kCamXyz, /*raw_color=*/0, /*colors=*/4, &xf, reason,
+            sizeof(reason));
+        std::snprintf(detail, sizeof(detail),
+                      "route=%d want!=1 (colors==4 must not truncate rgb_cam's "
+                      "4th column)", route);
+        report("route-colors4-not-primary", "synthetic", route != 1, detail);
+    }
+
+    // (f) NEITHER: clean failure with a reason. Never an invented identity.
+    {
+        RawColorTransform xf{};
+        for (int i = 0; i < 9; ++i) xf.m[i] = -7.0f;
+        xf.valid = 1;
+        reason[0] = '\0';
+        const int route = raw_camera_to_pcs_from_libraw(
+            nullptr, nullptr, /*raw_color=*/1, /*colors=*/3, &xf, reason,
+            sizeof(reason));
+        std::snprintf(detail, sizeof(detail),
+                      "route=%d want=0 valid=%u want=0 reason=\"%s\"", route,
+                      xf.valid, reason);
+        report("route-none-clean-failure", "synthetic",
+               route == 0 && xf.valid == 0 && reason[0] != '\0', detail);
+    }
 }
 
 }  // namespace
@@ -488,6 +649,7 @@ int main(int argc, char** argv) {
     checkBayerPlaneOrigin();
     checkFiltersPeriodicity();
     checkMatrixInverse();
+    checkRouteTable();
 
     const std::vector<Sample> samples = loadManifest(manifest);
     std::vector<std::string> bayer_paths;
@@ -516,7 +678,33 @@ int main(int argc, char** argv) {
         raw_contract_print("RawInput", &input, rc, reason, stdout);
         ++checked;
 
-        checkMatrixDirection(s.id.c_str(), ctx.raw_view(), input);
+        // AC-1.2 on every real file. The route label is recomputed from the view
+        // with the SAME predicate the adapter uses, so the printed route is a
+        // claim this test can be wrong about -- checkRouteTable() is what pins
+        // the predicate itself.
+        {
+            const LibRawRawView& v = ctx.raw_view();
+            bool rgb_cam_identity = true;
+            if (v.rgb_cam) {
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        const float want = (r == c) ? 1.0f : 0.0f;
+                        if (std::fabs(v.rgb_cam[r * 4 + c] - want) > 1e-6f) {
+                            rgb_cam_identity = false;
+                        }
+                    }
+                }
+            }
+            const bool primary = v.rgb_cam && v.raw_color == 0 &&
+                                 v.colors == 3 && !rgb_cam_identity;
+            checkPcsWhiteInvariant(s.id.c_str(), input.camera_to_pcs,
+                                   primary ? "rgb_cam" : "cam_xyz");
+            std::printf("[LibRawAdapter] %s route-observed raw_color=%u colors=%u "
+                        "rgb_cam_identity=%d -> %s\n",
+                        s.id.c_str(), v.raw_color, v.colors,
+                        rgb_cam_identity ? 1 : 0,
+                        primary ? "rgb_cam(primary)" : "cam_xyz(fallback)");
+        }
 
         const RawLayoutClass cls = raw_classify_layout(&input.layout);
         char detail[320];

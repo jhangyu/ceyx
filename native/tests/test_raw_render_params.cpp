@@ -4,12 +4,29 @@
 // HueSatMap or LookTable, and leaving those vectors uninitialised is explicitly
 // forbidden (spec section 7.1.4). "Uninitialised" would still render - just
 // with garbage colour - so only an elementwise assertion catches it.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <vector>
 
+#include "dng_color_space.h"
 #include "dng_render_params.h"
+#include "libraw_frontend.h"
+#include "libraw_gpu_input_adapter.h"
 #include "raw_render_params_builder.h"
+
+// Declared in src/pipeline/libraw_gpu_input_adapter.cpp, which this test reaches
+// through libdng_decoder_native (cmake/tests.cmake:229-231). Not in
+// libraw_gpu_input_adapter.h because that header is outside the Stage 1 file
+// ownership boundary. Route values: 0 none, 1 rgb_cam, 2 cam_xyz.
+extern "C" void raw_srgb_to_pcs_matrix(float out9[9]);
+extern "C" void raw_pcs_white(float out3[3]);
+int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
+                                  uint32_t raw_color, uint32_t colors,
+                                  RawColorTransform* out, char* reason_out,
+                                  size_t reason_cap);
 
 namespace {
 
@@ -34,12 +51,28 @@ RawGpuInput makeInput(bool matrix_valid) {
     in.camera_to_pcs.valid = matrix_valid ? 1 : 0;
     in.camera_to_pcs.out_rows = 3;
     in.camera_to_pcs.in_cols = 3;
-    // A plausible camera->XYZ matrix; the exact values only need to be
-    // invertible for the composition step.
-    const float m[9] = {0.7688f, -0.2199f, -0.0724f,
-                        -0.3129f, 1.0781f,  0.2588f,
-                        -0.0281f, 0.1287f,  0.6797f};
-    for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = m[i];
+    // A plausible camera->XYZ matrix, ROW-SCALED onto the PCS white.
+    //
+    // The scaling is not cosmetic. Since Stage 1 the contract field
+    // camera_to_pcs is defined as white-preserving -- camera_to_pcs * (1,1,1)
+    // == XYZ(D50) -- and the adapter's route table guarantees it for real files.
+    // The un-scaled literal these numbers came from violates that invariant, so
+    // feeding it in produced a synthetic input no adapter can emit; the V7
+    // neutral round-trip through the real kernel correctly rejected it,
+    // returning (0,226,179) for a neutral probe. Scaling here keeps the
+    // synthetic case inside the contract instead of weakening the test.
+    const double m[9] = {0.7688, -0.2199, -0.0724,
+                         -0.3129, 1.0781,  0.2588,
+                         -0.0281, 0.1287,  0.6797};
+    float white[3];
+    raw_pcs_white(white);
+    for (int r = 0; r < 3; ++r) {
+        const double sum = m[r * 3 + 0] + m[r * 3 + 1] + m[r * 3 + 2];
+        const double s = static_cast<double>(white[r]) / sum;
+        for (int c = 0; c < 3; ++c) {
+            in.camera_to_pcs.m[r * 3 + c] = static_cast<float>(m[r * 3 + c] * s);
+        }
+    }
     return in;
 }
 
@@ -108,6 +141,221 @@ void reportCurveSanity(const char* name, bool precondition,
     report(name, ok, detail);
 }
 
+// --------------------------------------------------------------------------
+// Stage 1 colour-correctness cases (design Task_raw_color_architecture.md Rev 2
+// section 5.3 V5-V8/N2, acceptance AC-1.1/1.3/1.5/1.6/1.7).
+//
+// WHY THESE EXIST AT ALL: every pre-existing case in this file is neutral-only,
+// and BOTH the old (diag(k)*A) and new (A*diag(g)) matrix forms map neutral to
+// neutral by construction. The old suite therefore passed identically before and
+// after the defect was introduced and could never have caught it. V8 below is
+// the case with actual discriminating power.
+// --------------------------------------------------------------------------
+
+// base = ProPhoto_from_PCS * camera_to_pcs -- the matrix BEFORE the white
+// balance fold, recomputed here from the SDK singletons rather than read back
+// out of the builder, so this is an independent reference and not a restatement.
+void proPhotoFromPcsTimes(const float camera_to_pcs[9], float out9[9]) {
+    const dng_matrix_3by3 pcs(camera_to_pcs[0], camera_to_pcs[1], camera_to_pcs[2],
+                              camera_to_pcs[3], camera_to_pcs[4], camera_to_pcs[5],
+                              camera_to_pcs[6], camera_to_pcs[7], camera_to_pcs[8]);
+    const dng_matrix product = dng_space_ProPhoto::Get().MatrixFromPCS() * pcs;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            out9[r * 3 + c] = static_cast<float>(product[r][c]);
+        }
+    }
+}
+
+// The OLD, defective normalisation, reimplemented here byte-for-byte from the
+// deleted raw_render_params_builder.cpp:39-49 so V8 has something to
+// discriminate against. This is a TEST-ONLY counterfactual: AC-1.4 requires the
+// name to be absent from the production file, and it is.
+void oldNormalizeRowsToNeutral(float m[9], const float neutral[3]) {
+    for (int r = 0; r < 3; ++r) {
+        float sum = 0.0f;
+        for (int c = 0; c < 3; ++c) {
+            sum += m[r * 3 + c] * (neutral[c] > 0.0f ? neutral[c] : 1.0f);
+        }
+        if (std::fabs(sum) > 1e-8f) {
+            for (int c = 0; c < 3; ++c) m[r * 3 + c] /= sum;
+        }
+    }
+}
+
+void apply3x3(const float m[9], const float v[3], float out[3]) {
+    for (int r = 0; r < 3; ++r) {
+        out[r] = m[r * 3 + 0] * v[0] + m[r * 3 + 1] * v[1] + m[r * 3 + 2] * v[2];
+    }
+}
+
+// AC-1.1 / V6: camera_white is max-normalised with a 0.001 floor. A max != 1
+// means the normalisation source was wrong, and since Stage 4 uses camera_white
+// as a highlight ceiling on 0..1 data, an entry above 1 SILENTLY disables the
+// clip on that channel -- no test would otherwise fail.
+void checkClipConsistency(const char* id, const RenderParams& p) {
+    float lo = p.camera_white[0], hi = p.camera_white[0];
+    for (int c = 1; c < 3; ++c) {
+        lo = std::min(lo, p.camera_white[c]);
+        hi = std::max(hi, p.camera_white[c]);
+    }
+    char detail[220];
+    std::snprintf(detail, sizeof(detail),
+                  "camera_white=(%.7f,%.7f,%.7f) max=%.7f (want 1 +/-1e-6) "
+                  "min=%.7f (want >=0.001)",
+                  p.camera_white[0], p.camera_white[1], p.camera_white[2], hi, lo);
+    report(id, std::fabs(hi - 1.0f) < 1e-6f && lo >= 0.001f, detail);
+}
+
+// AC-1.3 / N2: the fold identity. camera_to_rgb[r][c] must equal
+// base[r][c] / camera_white[c] -- a COLUMN scale, which is what makes it a von
+// Kries correction on the camera input rather than a rescale of the ProPhoto
+// output. Also pins g[c]*camera_white[c] == 1, the coupling that makes the fold
+// exactly equivalent to a pre-Stage-4 gain multiply (design section 1.2).
+void checkFoldIdentity(const char* id, const RawGpuInput& in,
+                       const RenderParams& p) {
+    float base[9];
+    proPhotoFromPcsTimes(in.camera_to_pcs.m, base);
+    double worst = 0.0;
+    int worst_at = -1;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            const double want = static_cast<double>(base[r * 3 + c]) /
+                                static_cast<double>(p.camera_white[c]);
+            const double d = std::fabs(static_cast<double>(p.camera_to_rgb[r * 3 + c]) - want);
+            if (d > worst) { worst = d; worst_at = r * 3 + c; }
+        }
+    }
+    double gain_worst = 0.0;
+    for (int c = 0; c < 3; ++c) {
+        const double g = 1.0 / static_cast<double>(p.camera_white[c]);
+        gain_worst = std::fmax(gain_worst, std::fabs(g * p.camera_white[c] - 1.0));
+    }
+    char detail[240];
+    std::snprintf(detail, sizeof(detail),
+                  "max|camera_to_rgb[r][c] - base[r][c]/camera_white[c]|=%.9f at "
+                  "%d of 9 (tol 1e-6); max|g[c]*camera_white[c]-1|=%.9f",
+                  worst, worst_at, gain_worst);
+    report(id, worst < 1e-6 && gain_worst < 1e-6, detail);
+}
+
+// AC-1.5 / V8: the ONLY case here that can tell the two matrix forms apart.
+// Saturated probes through old vs new must DIFFER by >5% on at least one
+// channel of at least one probe, and the new matrix must match an independently
+// computed base*diag(g) within 1e-5. Reinstating normalizeRowsToNeutral -- the
+// single most likely implementation mistake, because it leaves greys neutral and
+// so hides behind every other case in this file -- fails the first half.
+void checkSaturatedDiscrimination(const char* id, const RawGpuInput& in,
+                                  const RenderParams& p) {
+    float base[9];
+    proPhotoFromPcsTimes(in.camera_to_pcs.m, base);
+
+    // The counterfactual: what the builder produced before this change.
+    float old_m[9];
+    std::memcpy(old_m, base, sizeof(old_m));
+    oldNormalizeRowsToNeutral(old_m, p.camera_white);
+
+    // The independent reference: base * diag(g), computed from `base` and
+    // camera_white without touching params.camera_to_rgb.
+    float ref[9];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            ref[r * 3 + c] = static_cast<float>(
+                static_cast<double>(base[r * 3 + c]) /
+                static_cast<double>(p.camera_white[c]));
+        }
+    }
+    double ref_worst = 0.0;
+    for (int i = 0; i < 9; ++i) {
+        ref_worst = std::fmax(ref_worst,
+                              std::fabs(static_cast<double>(p.camera_to_rgb[i]) -
+                                        static_cast<double>(ref[i])));
+    }
+
+    // Three camera primaries plus two intermediate hues, all at ~0.8.
+    static const float kProbes[5][3] = {
+        {0.8f, 0.0f, 0.0f}, {0.0f, 0.8f, 0.0f}, {0.0f, 0.0f, 0.8f},
+        {0.8f, 0.6f, 0.1f}, {0.1f, 0.7f, 0.8f}};
+    double biggest_rel = 0.0;
+    int biggest_probe = -1;
+    for (int i = 0; i < 5; ++i) {
+        float a[3], b[3];
+        apply3x3(old_m, kProbes[i], a);
+        apply3x3(p.camera_to_rgb, kProbes[i], b);
+        for (int c = 0; c < 3; ++c) {
+            const double denom = std::fmax(std::fabs(static_cast<double>(a[c])),
+                                           std::fabs(static_cast<double>(b[c])));
+            if (denom < 1e-6) continue;
+            const double rel = std::fabs(static_cast<double>(b[c] - a[c])) / denom;
+            if (rel > biggest_rel) { biggest_rel = rel; biggest_probe = i; }
+        }
+    }
+    // The >5% discrimination half of AC-1.5 is only SATISFIABLE when the gains
+    // are non-trivial: diag(k)*A and A*diag(g) converge to the same matrix as
+    // g -> (1,1,1), so a file shot under a light where cam_mul is already
+    // near-neutral cannot separate them, however correct the implementation is.
+    // The spread is therefore reported as a precondition rather than silently
+    // folded into the verdict -- and it is a precondition of the DATA, checked
+    // before the numbers are read, not a threshold retro-fitted to a result.
+    // Real case: the Foveon X3F corpus samples have camera_white
+    // (0.99969, 1.0, 0.99940), a 1.0006 spread, and separate by only 2.3%.
+    float gain_lo = 1.0f / p.camera_white[0], gain_hi = gain_lo;
+    for (int c = 1; c < 3; ++c) {
+        const float g = 1.0f / p.camera_white[c];
+        gain_lo = std::min(gain_lo, g);
+        gain_hi = std::max(gain_hi, g);
+    }
+    const float gain_spread = gain_hi / gain_lo;
+    const bool discriminable = gain_spread > 1.05f;
+    const bool ok = ref_worst < 1e-5 && (!discriminable || biggest_rel > 0.05);
+    char detail[400];
+    std::snprintf(detail, sizeof(detail),
+                  "gain_spread=%.5f discriminable=%d (needs >1.05); "
+                  "old(diag(k)*A) vs new(A*diag(g)) max_rel_diff=%.6f at probe %d "
+                  "(want >0.05 when discriminable); |new - base*diag(g)|max=%.9f "
+                  "(want <1e-5, always enforced)",
+                  gain_spread, discriminable ? 1 : 0, biggest_rel, biggest_probe,
+                  ref_worst);
+    report(id, ok, detail);
+}
+
+// AC-1.6 / V7: neutral round-trip through the REAL Stage 4 kernel.
+//
+// The probe is v[c] = k * camera_white[c] -- a scene neutral expressed in
+// UNBALANCED camera coordinates, which is what Stage 4 actually receives. A flat
+// (k,k,k) probe would be wrong and would fail a correct implementation. Getting
+// diag and its inverse the wrong way round is the single most likely bug here,
+// and this is what catches it.
+void checkNeutralRoundTrip(const char* id, const RenderParams& p) {
+    const int w = 16, h = 16;
+    std::vector<uint16_t> src(static_cast<size_t>(w) * h * 3);
+    const float k = 0.5f;
+    for (int i = 0; i < w * h; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            const float v = k * p.camera_white[c] * 65535.0f;
+            src[static_cast<size_t>(i) * 3 + c] =
+                static_cast<uint16_t>(std::min(65535.0f, std::max(0.0f, v)));
+        }
+    }
+    std::vector<uint8_t> dst(static_cast<size_t>(w) * h * 4, 0);
+    const bool ok = runRenderStage4HalideAot(
+        src.data(), w, h, /*src_p=*/3, /*src_row_step=*/w * 3,
+        /*src_col_step=*/3, /*src_plane_step=*/1, 1.0f / 65535.0f, w, h, p,
+        dst.data(), /*fuse_rgba=*/true);
+
+    const size_t at = (static_cast<size_t>(h / 2) * w + w / 2) * 4;
+    const int r = dst[at], g = dst[at + 1], b = dst[at + 2];
+    const int hi = std::max(r, std::max(g, b));
+    const int lo = std::min(r, std::min(g, b));
+    const double spread = static_cast<double>(hi - lo) / 255.0;
+    char detail[240];
+    std::snprintf(detail, sizeof(detail),
+                  "kernel_ok=%d probe=k*camera_white (NOT flat grey) out=(%d,%d,%d) "
+                  "spread=%.5f (want <0.005)",
+                  ok ? 1 : 0, r, g, b, spread);
+    report(id, ok && spread < 0.005, detail);
+}
+
 bool isIdentityCurve(const std::vector<float>& t) {
     if (t.size() < 2) return false;
     for (size_t i = 1; i < t.size(); ++i) {
@@ -115,6 +363,90 @@ bool isIdentityCurve(const std::vector<float>& t) {
     }
     return std::fabs(t.front()) < 1e-4f && std::fabs(t.back() - 1.0f) < 1e-4f;
 }
+
+// The adapter duplicates the SDK's sRGB->PCS matrix as a literal because its
+// translation unit must not depend on dng_sdk. That duplication is gated HERE,
+// where both are visible: bit-equality, not a tolerance. Without this, an SDK
+// primaries update would silently skew every LibRaw render while every other
+// case in the suite stayed green.
+void checkSrgbConstantMatchesSdk() {
+    float ours[9];
+    raw_srgb_to_pcs_matrix(ours);
+    const dng_matrix sdk = dng_space_sRGB::Get().MatrixToPCS();
+    double worst = 0.0;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            worst = std::fmax(worst, std::fabs(static_cast<double>(ours[r * 3 + c]) -
+                                               static_cast<double>(sdk[r][c])));
+        }
+    }
+    // Also pin the PCS white the AC-1.2 invariant is stated against, and print
+    // its distance from the design document's rounded literal so the 2.0e-4
+    // discrepancy stays visible rather than becoming folklore.
+    float white[3];
+    raw_pcs_white(white);
+    const double design_literal[3] = {0.9642, 1.0, 0.8249};
+    double literal_gap = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        literal_gap = std::fmax(literal_gap,
+                                std::fabs(static_cast<double>(white[i]) - design_literal[i]));
+    }
+    // Not bit-equality: the SDK carries this matrix in real64 and the adapter
+    // stores float, so 1e-7 is the float round-trip floor, not a slack budget.
+    // The bare published primaries sit 4.0e-6 away -- 40x this bound -- so the
+    // gate still fails if the adapter ever drops the SDK's own white-point
+    // correction (dng_color_space.cpp:210-233).
+    char detail[280];
+    std::snprintf(detail, sizeof(detail),
+                  "max|adapter_constant - dng_space_sRGB::MatrixToPCS()|=%.9f "
+                  "(want <1e-7); pcs_white=(%.7f,%.7f,%.7f), gap to the design's "
+                  "rounded (0.9642,1,0.8249) = %.6f (> AC-1.2's own 1e-4 bound, "
+                  "which is why the invariant is stated against this value)",
+                  worst, white[0], white[1], white[2], literal_gap);
+    report("srgb-constant-matches-sdk", worst < 1e-7, detail);
+}
+
+// One real file through the production LibRaw route: frontend -> adapter ->
+// builder. `ctx` and `adapter` are caller-owned because the adapter owns the
+// plane and CFA arrays that `input` points at and must outlive it.
+bool librawParamsForFile(const char* path, LibRawFrontendContext& ctx,
+                         LibRawGpuInputAdapter& adapter, RawGpuInput& input,
+                         RenderParams& params, char* why, size_t why_cap) {
+    if (ctx.open_and_unpack(path) != kRawSuccess) {
+        std::snprintf(why, why_cap, "open_and_unpack failed");
+        return false;
+    }
+    RawDevelopParams develop{};
+    char reason[256] = {0};
+    if (adapter.build(ctx, &input, &develop, reason, sizeof(reason)) != kRawSuccess) {
+        std::snprintf(why, why_cap, "adapter.build failed: %s", reason);
+        return false;
+    }
+    if (!raw_build_render_params(input, develop, params)) {
+        std::snprintf(why, why_cap, "raw_build_render_params returned false");
+        return false;
+    }
+    return true;
+}
+
+bool fileExists(const char* path) {
+    std::FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    std::fclose(f);
+    return true;
+}
+
+// AC-1.6 requires V7 per FORMAT, and AC-1.1 requires V6 for every corpus file,
+// so the same three files drive both. These are the corpus entries that are
+// actually present in-tree (native/tests/raw_corpus_manifest.json); a missing
+// file is a FAILURE, not a skip -- silent coverage loss is exactly what
+// run_raw_matrix.py exists to prevent.
+struct FormatSample { const char* label; const char* path; };
+const FormatSample kFormatSamples[] = {
+    {"bayer",  "image_samples/raw_sample.arw"},
+    {"xtrans", "image_samples/raw_corpus/fuji_xt3.raf"},
+    {"foveon", "image_samples/raw_corpus/sigma_sd_quattro_h_19.x3f"},
+};
 
 }  // namespace
 
@@ -223,6 +555,260 @@ int main() {
                               dng_params.exp_ramp);
             reportCurveSanity("curve-tone", shapes_ok, raw_params.tone_curve,
                               dng_params.tone_curve);
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Stage 1 colour-correctness gates.
+    // ----------------------------------------------------------------------
+    checkSrgbConstantMatchesSdk();
+
+    // Synthetic, deliberately NON-neutral gains: with as_shot_neutral all-1 the
+    // fold is the identity and V8 could not discriminate anything. These are a
+    // typical daylight cam_mul ~ (2.0, 1.0, 1.5) expressed as a neutral.
+    {
+        RawGpuInput in = makeInput(true);
+        in.as_shot_neutral[0] = 1.0f / 2.0f;
+        in.as_shot_neutral[1] = 1.0f / 1.0f;
+        in.as_shot_neutral[2] = 1.0f / 1.5f;
+        in.as_shot_neutral[3] = 1.0f;
+        RenderParams p;
+        const bool ok = raw_build_render_params(in, makeDevelop(), p);
+        report("synthetic-build", ok, ok ? "returned true" : "returned false");
+        if (ok) {
+            checkClipConsistency("ac-1.1-clip-consistency-synthetic", p);
+            checkFoldIdentity("ac-1.3-fold-identity-synthetic", in, p);
+            checkSaturatedDiscrimination("ac-1.5-saturated-discrimination-synthetic",
+                                         in, p);
+            checkNeutralRoundTrip("ac-1.6-neutral-roundtrip-synthetic", p);
+        }
+    }
+
+    // Scale invariance of the neutral: the contract does not fix the SCALE of
+    // as_shot_neutral (the adapter emits a green-referenced one), so the builder
+    // must normalise. Feeding the same neutral scaled by 10 must produce the
+    // identical camera_white; if the normalisation were ever dropped, camera_white
+    // would leave 0..1 and the Stage 4 highlight clip would silently switch off.
+    {
+        RawGpuInput a = makeInput(true), b = makeInput(true);
+        const float n[3] = {0.5f, 1.0f, 0.6666667f};
+        for (int c = 0; c < 3; ++c) {
+            a.as_shot_neutral[c] = n[c];
+            b.as_shot_neutral[c] = n[c] * 10.0f;
+        }
+        RenderParams pa, pb;
+        const bool ok = raw_build_render_params(a, makeDevelop(), pa) &&
+                        raw_build_render_params(b, makeDevelop(), pb);
+        double worst = 0.0;
+        for (int c = 0; ok && c < 3; ++c) {
+            worst = std::fmax(worst, std::fabs(static_cast<double>(pa.camera_white[c]) -
+                                               pb.camera_white[c]));
+        }
+        char detail[200];
+        std::snprintf(detail, sizeof(detail),
+                      "camera_white(n) vs camera_white(10n) max_abs_diff=%.9f "
+                      "(want 0); camera_white=(%.6f,%.6f,%.6f)",
+                      worst, pa.camera_white[0], pa.camera_white[1],
+                      pa.camera_white[2]);
+        report("neutral-scale-invariance", ok && worst == 0.0, detail);
+    }
+
+    // Per-format, on real files: AC-1.1 (V6), AC-1.3 (N2), AC-1.5 (V8) and
+    // AC-1.6 (V7, through the real Stage 4 kernel).
+    for (const FormatSample& fs : kFormatSamples) {
+        char id[128];
+        if (!fileExists(fs.path)) {
+            std::snprintf(id, sizeof(id), "corpus-%s-present", fs.label);
+            report(id, false, fs.path);
+            continue;
+        }
+        LibRawFrontendContext ctx;
+        LibRawGpuInputAdapter adapter;
+        RawGpuInput input{};
+        RenderParams p;
+        char why[300] = {0};
+        const bool ok = librawParamsForFile(fs.path, ctx, adapter, input, p, why,
+                                            sizeof(why));
+        std::snprintf(id, sizeof(id), "corpus-%s-params", fs.label);
+        report(id, ok, ok ? fs.path : why);
+        if (!ok) continue;
+
+        std::snprintf(id, sizeof(id), "ac-1.1-clip-consistency-%s", fs.label);
+        checkClipConsistency(id, p);
+        std::snprintf(id, sizeof(id), "ac-1.3-fold-identity-%s", fs.label);
+        checkFoldIdentity(id, input, p);
+        std::snprintf(id, sizeof(id), "ac-1.5-saturated-discrimination-%s", fs.label);
+        checkSaturatedDiscrimination(id, input, p);
+        std::snprintf(id, sizeof(id), "ac-1.6-neutral-roundtrip-%s", fs.label);
+        checkNeutralRoundTrip(id, p);
+    }
+
+    // AC-1.7 / V5: overall-transform equivalence on a file BOTH front-ends can
+    // parse. T_dng and T_libraw are both raw-camera -> ProPhoto 3x3, so they are
+    // directly comparable. The residual quantifies the DNG-SDK ForwardMatrix/D50
+    // versus LibRaw inverse-ColorMatrix/D65 divergence. Design AC-1.7: >2% is a
+    // STOP-and-report design input, NOT a tolerance to relax.
+    {
+        const char* kShared = "image_samples/lossless_dng_sample.dng";
+        RenderParams dng_params;
+        LibRawFrontendContext ctx;
+        LibRawGpuInputAdapter adapter;
+        RawGpuInput input{};
+        RenderParams raw_params;
+        char why[300] = {0};
+        const bool have_dng = dng_render_params_for_test(kShared, dng_params);
+        const bool have_raw = librawParamsForFile(kShared, ctx, adapter, input,
+                                                  raw_params, why, sizeof(why));
+        if (!have_dng || !have_raw) {
+            char detail[360];
+            std::snprintf(detail, sizeof(detail),
+                          "dng_params=%d libraw_params=%d (%s) -- the V5 gate is "
+                          "mandatory, not skippable",
+                          have_dng ? 1 : 0, have_raw ? 1 : 0, why);
+            report("ac-1.7-v5-transform-equivalence", false, detail);
+        } else {
+            // Elementwise.
+            double worst_rel = 0.0;
+            int worst_at = -1;
+            for (int i = 0; i < 9; ++i) {
+                const double a = dng_params.camera_to_rgb[i];
+                const double b = raw_params.camera_to_rgb[i];
+                const double denom = std::fmax(std::fabs(a), std::fabs(b));
+                if (denom < 1e-6) continue;
+                const double rel = std::fabs(a - b) / denom;
+                if (rel > worst_rel) { worst_rel = rel; worst_at = i; }
+            }
+            // Basis action: neutral plus the three primaries at 0.5.
+            static const float kBasis[4][3] = {
+                {1.0f, 1.0f, 1.0f}, {0.5f, 0.0f, 0.0f},
+                {0.0f, 0.5f, 0.0f}, {0.0f, 0.0f, 0.5f}};
+            double worst_basis = 0.0;
+            int worst_basis_at = -1;
+            for (int i = 0; i < 4; ++i) {
+                float a[3], b[3];
+                apply3x3(dng_params.camera_to_rgb, kBasis[i], a);
+                apply3x3(raw_params.camera_to_rgb, kBasis[i], b);
+                for (int c = 0; c < 3; ++c) {
+                    const double denom = std::fmax(std::fabs(static_cast<double>(a[c])),
+                                                   std::fabs(static_cast<double>(b[c])));
+                    if (denom < 1e-6) continue;
+                    const double rel = std::fabs(static_cast<double>(a[c] - b[c])) / denom;
+                    if (rel > worst_basis) { worst_basis = rel; worst_basis_at = i; }
+                }
+            }
+            // AC-1.7 is a STOP-and-report gate, so the evidence has to be in the
+            // artifact: a bare "max_rel=1.34" cannot be judged without seeing
+            // whether the offending element is simply near zero. Both matrices,
+            // both white vectors, and a scale-robust companion metric are
+            // printed unconditionally, pass or fail.
+            double dng_absmax = 0.0;
+            for (int i = 0; i < 9; ++i) {
+                dng_absmax = std::fmax(dng_absmax, std::fabs(static_cast<double>(
+                                                       dng_params.camera_to_rgb[i])));
+            }
+            double abs_worst = 0.0;
+            for (int i = 0; i < 9; ++i) {
+                abs_worst = std::fmax(abs_worst,
+                                      std::fabs(static_cast<double>(dng_params.camera_to_rgb[i]) -
+                                                static_cast<double>(raw_params.camera_to_rgb[i])));
+            }
+            std::printf("[RawRenderParams] V5-evidence T_dng      = ");
+            for (int i = 0; i < 9; ++i) std::printf("% .6f ", dng_params.camera_to_rgb[i]);
+            std::printf("\n[RawRenderParams] V5-evidence T_libraw   = ");
+            for (int i = 0; i < 9; ++i) std::printf("% .6f ", raw_params.camera_to_rgb[i]);
+            std::printf("\n[RawRenderParams] V5-evidence camera_white dng=(%.6f,%.6f,%.6f) "
+                        "libraw=(%.6f,%.6f,%.6f)\n",
+                        dng_params.camera_white[0], dng_params.camera_white[1],
+                        dng_params.camera_white[2], raw_params.camera_white[0],
+                        raw_params.camera_white[1], raw_params.camera_white[2]);
+            std::printf("[RawRenderParams] V5-evidence max_abs_diff=%.6f, "
+                        "normalised by max|T_dng|=%.6f -> %.6f\n",
+                        abs_worst, dng_absmax,
+                        dng_absmax > 0.0 ? abs_worst / dng_absmax : -1.0);
+
+            // Instrument check before believing a negative result: if both
+            // matrices are white-preserving under their OWN camera_white, the
+            // divergence is colorimetric, not a bug in either fold.
+            for (int which = 0; which < 2; ++which) {
+                const RenderParams& q = which ? raw_params : dng_params;
+                float n[3];
+                apply3x3(q.camera_to_rgb, q.camera_white, n);
+                std::printf("[RawRenderParams] V5-evidence %s T*camera_white = "
+                            "(%.6f,%.6f,%.6f) (want (1,1,1))\n",
+                            which ? "libraw" : "dng   ", n[0], n[1], n[2]);
+            }
+
+            // Design section 12 names the exact experiment that would overturn
+            // the section-1.5 primary/fallback ORDER: measure the same V5
+            // divergence for the cam_xyz route. Run it unconditionally so an
+            // AC-1.7 breach arrives with the decision-relevant number attached
+            // rather than needing a second round to obtain it.
+            RawColorTransform alt{};
+            char alt_reason[256] = {0};
+            const int alt_route = raw_camera_to_pcs_from_libraw(
+                nullptr, ctx.raw_view().cam_xyz, ctx.raw_view().raw_color,
+                ctx.raw_view().colors, &alt, alt_reason, sizeof(alt_reason));
+            RawGpuInput alt_in = input;
+            alt_in.camera_to_pcs = alt;
+            RenderParams alt_params;
+            RawDevelopParams alt_dev{};
+            alt_dev.exposure_ev = 0.0f;
+            alt_dev.tone_curve_strength = 1.0f;
+            alt_dev.output_space = kRawOutputColorSpaceSrgb;
+            if (alt_route == 2 &&
+                raw_build_render_params(alt_in, alt_dev, alt_params)) {
+                double alt_rel = 0.0;
+                for (int i = 0; i < 9; ++i) {
+                    const double a = dng_params.camera_to_rgb[i];
+                    const double b = alt_params.camera_to_rgb[i];
+                    const double denom = std::fmax(std::fabs(a), std::fabs(b));
+                    if (denom < 1e-6) continue;
+                    alt_rel = std::fmax(alt_rel, std::fabs(a - b) / denom);
+                }
+                std::printf("[RawRenderParams] V5-evidence FALLBACK-ROUTE "
+                            "(cam_xyz) T vs T_dng elementwise max_rel=%.6f "
+                            "(primary rgb_cam route measured above)\n", alt_rel);
+            } else {
+                std::printf("[RawRenderParams] V5-evidence FALLBACK-ROUTE "
+                            "unavailable (route=%d, %s)\n", alt_route, alt_reason);
+            }
+
+            // MEASURE AND RECORD, not a gate.
+            //
+            // AC-1.7 originally required < 2 % here and designated a breach a
+            // STOP-and-report condition. It was breached at 134 %, the stage was
+            // halted, and the USER resolved it 2026-08-28: the matrix stays
+            // Method A (rgb_cam), the measured divergence is recorded as a design
+            // input, and the 2 % gate is DELETED from the contract.
+            //
+            // This is a contract amendment by the only party entitled to make
+            // one, NOT a threshold relaxed to get a green run. The evidence:
+            // both routes were measured (rgb_cam 134 %, cam_xyz 102 %), so no
+            // available matrix source could have satisfied the bound; the two
+            // matrices are each exactly white-preserving under their own white,
+            // so neither fold is broken; and the user's own A/B/C render probe
+            // showed the matrix choice moves the render by ~1-2 8-bit codes while
+            // the visible gap was tone. Full trace:
+            // tmp/verify/stage1_AC-1.7_STOP_report.md and
+            // tmp/verify/ab_renders/README_AB_probe_report.md.
+            //
+            // The number is still computed and printed every run, so a future
+            // change that moves it shows up as a moved number rather than
+            // silence. The only thing asserted is that the comparison could be
+            // performed at all.
+            char detail[420];
+            std::snprintf(detail, sizeof(detail),
+                          "RECORDED (not gated): T_dng vs T_libraw elementwise "
+                          "max_rel=%.6f at %d of 9; basis-action max_rel=%.6f at "
+                          "basis %d. The 2%% bound was deleted by user ruling "
+                          "2026-08-28 after both routes measured ~1e2x over it "
+                          "(rgb_cam 1.34, cam_xyz 1.02) and the render probe "
+                          "showed the matrix is worth ~1-2 codes",
+                          worst_rel, worst_at, worst_basis, worst_basis_at);
+            report("ac-1.7-v5-transform-divergence-recorded",
+                   std::isfinite(worst_rel) && std::isfinite(worst_basis) &&
+                       worst_at >= 0 && worst_basis_at >= 0,
+                   detail);
         }
     }
 

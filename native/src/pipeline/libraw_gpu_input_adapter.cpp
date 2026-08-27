@@ -22,6 +22,79 @@ uint32_t lcmU32(uint32_t a, uint32_t b) {
 
 }  // namespace
 
+// Linear sRGB -> XYZ(D50 PCS). Transcribed from the DNG SDK's own sRGB colour
+// space (third_party/dng_sdk/source/dng_color_space.cpp:262-264) rather than
+// from a published sRGB/Bradford table: the two differ in the 4th decimal, and
+// the whole point of the route table below is that both LibRaw and DNG images
+// land in the SAME PCS the Stage-4 kernel expects.
+//
+// It is a literal here ONLY because this translation unit must not depend on
+// dng_sdk: libraw_gpu_input_adapter.cpp is also compiled into test_libraw_adapter
+// (cmake/tests.cmake:746-752), which links libraw_vendored alone. The
+// duplication is therefore gated, not trusted: test_raw_render_params asserts
+// this array equals dng_space_sRGB::Get().MatrixToPCS() to float precision, so
+// an SDK update that moved the numbers would fail a test rather than silently
+// skew every LibRaw render.
+// The PCS white: XYtoXYZ(D50_xy_coord()), i.e. exactly what the SDK's
+// PCStoXYZ() returns (dng_xy_coord.cpp:82 over the (0.3457, 0.3585) constant at
+// dng_xy_coord.h:147-150).
+//
+// NOT the design document's (0.9642, 1.0, 0.8249): that is a 4-decimal rounding
+// of D50 and sits 2.0e-4 away from this value in Z -- twice AC-1.2's own 1e-4
+// tolerance, so asserting the invariant against the rounded literal would fail a
+// correct implementation. Flagged to the lead 2026-08-28.
+extern "C" void raw_pcs_white(float out3[3]) {
+    const double x = 0.3457, y = 0.3585;
+    out3[0] = static_cast<float>(x / y);
+    out3[1] = 1.0f;
+    out3[2] = static_cast<float>((1.0 - x - y) / y);
+}
+
+extern "C" void raw_srgb_to_pcs_matrix(float out9[9]) {
+    // The SDK's own published primaries, then the SDK's own correction for
+    // them. dng_color_space::SetMatrixToPCS (dng_color_space.cpp:210-233) does
+    // not store the literal: "the matrix values are often rounded, so adjust to
+    // get them to convert device white exactly to the PCS" -- it row-scales by
+    // PCStoXYZ()[r] / rowsum[r]. Reproducing that scaling here is what makes the
+    // rows sum to the PCS white EXACTLY, which is the whole basis of the AC-1.2
+    // invariant; using the bare literal leaves a 4e-6 skew.
+    static const double kSrgbToPcs[9] = {
+        0.4361, 0.3851, 0.1431,
+        0.2225, 0.7169, 0.0606,
+        0.0139, 0.0971, 0.7141};
+    float white[3];
+    raw_pcs_white(white);
+    for (int r = 0; r < 3; ++r) {
+        const double sum = kSrgbToPcs[r * 3 + 0] + kSrgbToPcs[r * 3 + 1] +
+                           kSrgbToPcs[r * 3 + 2];
+        const double s = static_cast<double>(white[r]) / sum;
+        for (int c = 0; c < 3; ++c) {
+            out9[r * 3 + c] = static_cast<float>(kSrgbToPcs[r * 3 + c] * s);
+        }
+    }
+}
+
+// Which branch of the section-1.5 route table produced camera_to_pcs.
+//
+// Declared here rather than in libraw_gpu_input_adapter.h because that header is
+// outside this change's file ownership. The two test files that consume it
+// (test_libraw_adapter.cpp, test_raw_render_params.cpp) mirror these three
+// values verbatim; test_libraw_adapter drives each branch and asserts the
+// returned route, so a future renumbering fails a test rather than silently
+// mislabelling a route in a diagnostic.
+// Plain `int`, not an enum, precisely BECAUSE the declaration has to be
+// duplicated in the test files: an enum return type would make the two
+// declarations mangle differently and fail at link time in a way that reads like
+// a missing symbol rather than a mismatched contract.
+constexpr int kRawCameraMatrixRouteNone = 0;
+constexpr int kRawCameraMatrixRouteRgbCam = 1;
+constexpr int kRawCameraMatrixRouteCamXyz = 2;
+
+int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
+                                  uint32_t raw_color, uint32_t colors,
+                                  RawColorTransform* out, char* reason_out,
+                                  size_t reason_cap);
+
 RawColorKey raw_color_key_from_libraw(uint32_t libraw_index, uint32_t colors,
                                       const char* cdesc) {
     if (!cdesc || libraw_index >= 4) return kRawColorKeyUnknown;
@@ -388,41 +461,9 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     }
 
     // --- colour matrix -----------------------------------------------------
-    // Observed layout at the pinned revision (libraw/libraw_types.h, struct
-    // libraw_colordata_t): `float cam_xyz[4][3]` - 4 camera channels x 3 XYZ
-    // columns, i.e. camera-from-XYZ. The column count is therefore fixed at 3
-    // and does NOT follow idata.colors; the plan's `in_cols = min(colors, 4)`
-    // would index a fourth column that does not exist, so in_cols is clamped to
-    // 3 here (documented substitution). Rows beyond min(colors,3) stay zero.
-    //
-    // DIRECTION (ruled in docs/logs/2026-08-25/r5-camera-to-pcs-ruling.md):
-    // cam_xyz is camera-FROM-XYZ, the contract field is camera_to_pcs, and the
-    // Task 8 consumer (src/raw_render_params_builder.cpp:92-98) left-multiplies
-    // it by ProPhoto::MatrixFromPCS(), which only type-checks for camera->XYZ.
-    // So the 3x3 is INVERTED here. Transcribing without inversion, as the plan
-    // says, would render the generic route in a scrambled colour space.
-    RawColorTransform& xf = out_input->camera_to_pcs;
-    bool any_nonzero = false;
-    if (v.cam_xyz) {
-        for (int i = 0; i < 12; ++i) {
-            if (v.cam_xyz[i] != 0.0f) { any_nonzero = true; break; }
-        }
-    }
-    xf.valid = 0;   // never substitute an identity (spec section 4.1.9)
-    if (any_nonzero && v.colors >= 3) {
-        float cam_from_xyz[9];
-        for (int i = 0; i < 9; ++i) cam_from_xyz[i] = v.cam_xyz[i];
-        float xyz_from_cam[9];
-        if (raw_invert_3x3(cam_from_xyz, xyz_from_cam)) {
-            xf.valid = 1;
-            xf.out_rows = 3;
-            xf.in_cols = 3;
-            for (int i = 0; i < 9; ++i) xf.m[i] = xyz_from_cam[i];
-        } else if (reason_out && reason_cap && reason_out[0] == '\0') {
-            std::snprintf(reason_out, reason_cap,
-                          "cam_xyz is not invertible; no camera matrix emitted");
-        }
-    }
+    raw_camera_to_pcs_from_libraw(v.rgb_cam, v.cam_xyz, v.raw_color, v.colors,
+                                  &out_input->camera_to_pcs, reason_out,
+                                  reason_cap);
 
     out_input->decoder_backend = ctx.diagnostics().unpack_backend;
 
@@ -435,3 +476,162 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     // Validation is not optional (spec section 6.2 step 8).
     return raw_validate_gpu_input(out_input, reason_out, reason_cap);
 }
+
+// Free function, not a lambda inside build(), for one reason: the FALLBACK route
+// is not reachable from any file in the corpus (every sample LibRaw recognises
+// yields a usable rgb_cam), so a corpus-only test would leave half the route
+// table unexercised while reporting green. AC-1.2 requires the D50-white
+// invariant asserted for BOTH routes, and this signature is what lets the tests
+// drive each branch directly with synthetic metadata.
+//
+// CONTRACT (design Task_raw_color_architecture.md Rev 2 section 1.5):
+// camera_to_pcs carries a WHITE-PRESERVING matrix -- it maps *white-balanced*
+// camera RGB to XYZ(D50 PCS), i.e. camera_to_pcs * (1,1,1) == PCS white. The
+// white balance itself is a right-multiplied diag(g) that the builder folds
+// in; it is deliberately NOT baked in here. Because the invariant holds, the
+// builder needs no residual row normalisation, and normalizeRowsToNeutral --
+// which formed diag(k)*A, a diagonal in the OUTPUT space where von Kries
+// requires one in the INPUT space -- is gone.
+//
+// Format knowledge lives here, so the choice of route is invisible to the
+// builder. Two routes, one invariant:
+//
+//   PRIMARY   rgb_cam usable   camera_to_pcs = M_srgb_to_pcs * rgb_cam3
+//   FALLBACK  cam_xyz usable   camera_to_pcs = rowScaleToPcsWhite(Invert(cam_xyz3))
+//   NEITHER                    valid = 0 + reason (never an invented matrix)
+//
+// rgb_cam is preferred because it is LibRaw's OWN colorimetry, is
+// white-preserving by construction (utils_dcraw.cpp:296-312 normalises the
+// forward matrix BEFORE inverting it, which is not the same matrix as
+// normalising the inverse), and is written directly by simple_coeff for
+// cameras that have no cam_xyz at all (colordata.cpp:1918-1936, the Foveon
+// case).
+//
+// Returns the route actually taken, so a test can assert WHICH branch ran
+// rather than only that the result is well-formed.
+int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
+                                  uint32_t raw_color, uint32_t colors,
+                                  RawColorTransform* out, char* reason_out,
+                                  size_t reason_cap) {
+    if (!out) return kRawCameraMatrixRouteNone;
+    RawColorTransform& xf = *out;
+    xf.valid = 0;   // never substitute an identity (spec section 4.1.9)
+
+    float pcs_white[3];
+    raw_pcs_white(pcs_white);
+
+    // --- route 1: LibRaw's rgb_cam (sRGB-from-camera, 3 rows x 4 columns) ---
+    // raw_color != 0 means LibRaw matched no camera and left rgb_cam at the
+    // identity (identify.cpp:509). The identity check is kept as well: applying
+    // an ICC profile also sets raw_color (apply_profile.cpp:69), and an identity
+    // here would be exactly the invented matrix spec 4.1.9 forbids.
+    //
+    // colors == 3 is required, not colors >= 3: for a 4-colour sensor rgb_cam is
+    // genuinely 3x4 and dropping its fourth column would be a wrong-colour
+    // render reporting success. Such a file falls through to the branches below
+    // rather than being silently truncated here; the explicit unsupported branch
+    // design section 2.3 calls for is Stage 2's AC-2.3.
+    bool rgb_cam_usable = false;
+    float srgb_from_cam[9] = {0};
+    if (rgb_cam && raw_color == 0 && colors == 3) {
+        bool finite = true;
+        bool identity = true;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                // rgb_cam is [3][4]: row stride is 4, not 3.
+                const float value = rgb_cam[r * 4 + c];
+                if (!std::isfinite(value)) finite = false;
+                srgb_from_cam[r * 3 + c] = value;
+                const float want = (r == c) ? 1.0f : 0.0f;
+                if (std::fabs(value - want) > 1e-6f) identity = false;
+            }
+        }
+        rgb_cam_usable = finite && !identity;
+    }
+
+    if (rgb_cam_usable) {
+        float srgb_to_pcs[9];
+        raw_srgb_to_pcs_matrix(srgb_to_pcs);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    acc += static_cast<double>(srgb_to_pcs[r * 3 + k]) *
+                           static_cast<double>(srgb_from_cam[k * 3 + c]);
+                }
+                xf.m[r * 3 + c] = static_cast<float>(acc);
+            }
+        }
+        xf.valid = 1;
+        xf.out_rows = 3;
+        xf.in_cols = 3;
+        return kRawCameraMatrixRouteRgbCam;
+    }
+
+    // --- route 2 (fallback): Invert(cam_xyz), rescaled onto the PCS white ---
+    // cam_xyz is `float cam_xyz[4][3]` -- 4 camera channels x 3 XYZ columns,
+    // i.e. camera-FROM-XYZ, so the 3x3 is INVERTED to get camera->XYZ (ruled in
+    // docs/logs/2026-08-25/r5-camera-to-pcs-ruling.md). The column count is fixed
+    // at 3 and does NOT follow idata.colors.
+    //
+    // Unlike rgb_cam, Invert(cam_xyz) is NOT white-preserving, so each row is
+    // scaled to make it so. This is a left diagonal, which is legitimate ONLY
+    // because it runs before the builder's right diagonal and its job is to fix
+    // the matrix's own white point, not to white-balance the image -- the same
+    // role NormalizeForwardMatrix plays in the SDK. It is an approximation of
+    // that function's Bradford adaptation (design section 7, Stage 3).
+    bool any_nonzero = false;
+    if (cam_xyz) {
+        for (int i = 0; i < 12; ++i) {
+            if (cam_xyz[i] != 0.0f) { any_nonzero = true; break; }
+        }
+    }
+    if (any_nonzero && colors >= 3) {
+        float cam_from_xyz[9];
+        for (int i = 0; i < 9; ++i) cam_from_xyz[i] = cam_xyz[i];
+        float xyz_from_cam[9];
+        if (raw_invert_3x3(cam_from_xyz, xyz_from_cam)) {
+            bool scalable = true;
+            float scaled[9];
+            for (int r = 0; r < 3; ++r) {
+                const double sum = static_cast<double>(xyz_from_cam[r * 3 + 0]) +
+                                   static_cast<double>(xyz_from_cam[r * 3 + 1]) +
+                                   static_cast<double>(xyz_from_cam[r * 3 + 2]);
+                if (!(std::fabs(sum) > 1e-8)) { scalable = false; break; }
+                const double k = static_cast<double>(pcs_white[r]) / sum;
+                for (int c = 0; c < 3; ++c) {
+                    scaled[r * 3 + c] = static_cast<float>(
+                        static_cast<double>(xyz_from_cam[r * 3 + c]) * k);
+                }
+            }
+            if (scalable) {
+                xf.valid = 1;
+                xf.out_rows = 3;
+                xf.in_cols = 3;
+                for (int i = 0; i < 9; ++i) xf.m[i] = scaled[i];
+                return kRawCameraMatrixRouteCamXyz;
+            }
+            if (reason_out && reason_cap && reason_out[0] == '\0') {
+                std::snprintf(reason_out, reason_cap,
+                              "Invert(cam_xyz) has a zero row sum; it cannot be "
+                              "mapped onto the PCS white");
+            }
+            return kRawCameraMatrixRouteNone;
+        }
+        if (reason_out && reason_cap && reason_out[0] == '\0') {
+            std::snprintf(reason_out, reason_cap,
+                          "cam_xyz is not invertible; no camera matrix emitted");
+        }
+        return kRawCameraMatrixRouteNone;
+    }
+
+    if (reason_out && reason_cap && reason_out[0] == '\0') {
+        std::snprintf(reason_out, reason_cap,
+                      "no usable colour data (raw_color=%u, colors=%u, rgb_cam "
+                      "identity or absent, cam_xyz absent); no camera matrix "
+                      "emitted",
+                      raw_color, colors);
+    }
+    return kRawCameraMatrixRouteNone;
+}
+

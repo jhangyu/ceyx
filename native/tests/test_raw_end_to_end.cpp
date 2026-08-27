@@ -28,6 +28,12 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 
+// Defined in src/pipeline/libraw_gpu_input_adapter.cpp, reached here through
+// libdng_decoder_native. Not in libraw_gpu_input_adapter.h because that header is
+// outside the Stage 1 file-ownership boundary. Returns the PCS white the
+// camera_to_pcs contract is stated against.
+extern "C" void raw_pcs_white(float out3[3]);
+
 namespace {
 
 int failures = 0;
@@ -252,6 +258,44 @@ void fillSyntheticMosaic(uint16_t* storage) {
     }
 }
 
+// Fills a contract-compliant camera_to_pcs for the synthetic fixtures.
+//
+// This used to be a bare IDENTITY. Since the Stage 1 colour change,
+// camera_to_pcs is contractually WHITE-PRESERVING: it must map a neutral
+// (white-balanced) camera triple onto the PCS white,
+// camera_to_pcs * (1,1,1) == XYZ(D50) == (0.9643, 1.0000, 0.8251). The identity
+// maps it to (1,1,1) instead, so the old fixture was an input the adapter can no
+// longer emit for any real file.
+//
+// It looked fine only by accident: the deleted row-to-neutral normalisation
+// forced every row of ProPhoto_fromPCS * I to sum to 1, which made a grey patch
+// render grey. Once that normalisation was removed -- correctly, it was the bug
+// -- the out-of-contract matrix passed through untouched and the synthetic
+// frame's greys picked up a +21% linear blue cast (+11% in 8-bit code after the
+// sRGB transfer, observed as 129 -> 143 on the exactly-neutral golden pixels).
+//
+// Row-scaling the identity onto the PCS white is therefore diag(pcs_white). The
+// scaling is written out as a loop rather than collapsed to that constant so the
+// operation stays obviously the same one the adapter's fallback route performs,
+// and so it stays correct if the base matrix is ever changed to something other
+// than the identity. Same fix as makeInput() in test_raw_render_params.cpp.
+void setContractCompliantCameraToPcs(float m9[9]) {
+    const float base[9] = {1.0f, 0.0f, 0.0f,
+                           0.0f, 1.0f, 0.0f,
+                           0.0f, 0.0f, 1.0f};
+    float white[3];
+    raw_pcs_white(white);
+    for (int r = 0; r < 3; ++r) {
+        const double sum = static_cast<double>(base[r * 3 + 0]) +
+                           static_cast<double>(base[r * 3 + 1]) +
+                           static_cast<double>(base[r * 3 + 2]);
+        const double s = static_cast<double>(white[r]) / sum;
+        for (int c = 0; c < 3; ++c) {
+            m9[r * 3 + c] = static_cast<float>(base[r * 3 + c] * s);
+        }
+    }
+}
+
 // Runs the synthetic frame with the given 36-entry tile. On success `rgba`
 // holds a COPY of the pool buffer (the pool buffer itself is released before
 // returning, so no checkout survives this helper on any path).
@@ -289,7 +333,7 @@ RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
     }
     in.camera_to_pcs.valid = 1;
     in.camera_to_pcs.out_rows = 3; in.camera_to_pcs.in_cols = 3;
-    for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+    setContractCompliantCameraToPcs(in.camera_to_pcs.m);
 
     RawDevelopParams develop{};
     develop.tone_curve_strength = 1.0f;
@@ -368,7 +412,7 @@ RawErrorCode runSyntheticLinearRgb(std::vector<uint8_t>& rgba,
     }
     in.camera_to_pcs.valid = 1;
     in.camera_to_pcs.out_rows = 3; in.camera_to_pcs.in_cols = 3;
-    for (int i = 0; i < 9; ++i) in.camera_to_pcs.m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+    setContractCompliantCameraToPcs(in.camera_to_pcs.m);
 
     RawDevelopParams develop{};
     develop.tone_curve_strength = 1.0f;
@@ -946,7 +990,16 @@ int main(int argc, char** argv) {
         static const PixelExpectation kExpect[] = {
             {6,  6,   64,  66,  66, 255},
             {7,  6,   69,  67,  66, 255},
-            {8,  6,   68,  68,  69, 255},
+            // RE-RECORDED 2026-08-28 (Stage 1 colour change): 68 -> 69 in R.
+            // This is the ONLY one of the eight goldens that moved, and it moved
+            // by a single code. The two exactly-neutral pixels at (35,23) and
+            // (36,24) are byte-unchanged, which is the direction check the lead
+            // required before any re-record: a correct fix must leave neutrals
+            // alone. See tmp/verify/stage1_golden_pixel_direction_check.md --
+            // the first attempt at this re-record was REJECTED because the
+            // neutrals moved +14 in blue, which turned out to be the fixture's
+            // out-of-contract identity camera_to_pcs, now fixed above.
+            {8,  6,   69,  68,  69, 255},
             {6,  7,   67,  70,  70, 255},
             {7,  7,   72,  70,  70, 255},
             {8,  7,   69,  73,  72, 255},
