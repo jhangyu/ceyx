@@ -66,6 +66,13 @@ void main() {
       }
       // Codes below the current floor stay RAW-classified by design.
       expect(RawErrorCode.isRawError(-300), isTrue);
+      // ...but only down to the bottom of the RAW block. -301 and below is the
+      // HEIF block (HeifErrorCode); an open-ended `code <= -201` claimed those
+      // too, which made the "disjoint blocks" contract untrue in practice.
+      for (final heifCode in <int>[-301, -305, -310, -999]) {
+        expect(RawErrorCode.isRawError(heifCode), isFalse,
+            reason: 'HEIF code $heifCode must not be claimed by the RAW scale');
+      }
     });
 
     test('cancellation is distinguishable from decode failure', () {

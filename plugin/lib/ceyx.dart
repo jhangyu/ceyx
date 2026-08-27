@@ -35,6 +35,13 @@ export 'src/raw_bindings.dart'
         RawGpuBackend,
         RawSampleModel;
 
+export 'src/heif_decoder_service.dart'
+    show HeifImage, HeifProbeResult, HeifDecoderService;
+
+export 'src/heif_error_codes.dart'
+    show HeifErrorCode, HeifDecodeException, HeifUnavailableException;
+
+
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.
 const String dngNativeLibraryTag = 'ceyx-0.1.0';

@@ -91,6 +91,14 @@ option(DNG_DIAGNOSTIC_BUILD
 option(DNG_ENABLE_GENERIC_RAW
        "Build the generic (non-DNG) RAW frontend backed by LibRaw + RawSpeed3" ON)
 
+# HEIC/HEIF decode route (spec section 7, phase 2). ON by default on platforms
+# where the vendored dist exists; OFF drops both HEIF translation units and
+# every libheif/libde265 dependency, which is the documented degradation for a
+# platform whose dist has not been built (the app must still start and simply
+# report HEIC files as unreadable).
+option(DNG_ENABLE_HEIF
+       "Build the HEIC/HEIF decode route (libheif + libde265, dynamically linked)" ON)
+
 # --- Phase 14: Cross-compile and AOT target options ---
 option(DNG_HOST_GENERATORS_ONLY
        "Only build host-side Halide generators and run AOT (Stage 1 of cross-compile)"
@@ -130,5 +138,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generators.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/halide_aot.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ffi.cmake)
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/heif.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests.cmake)

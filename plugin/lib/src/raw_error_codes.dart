@@ -56,10 +56,18 @@ abstract final class RawErrorCode {
     }
   }
 
-  /// True when [code] belongs to the RAW scale (<= -201). Deliberately not
-  /// limited to the twelve named values: a future native code below -211 must
-  /// still be classified RAW rather than misread as a DNG error.
-  static bool isRawError(int code) => code <= -201;
+  /// True when [code] belongs to the RAW block: the closed range -201 .. -300
+  /// (i.e. `code <= -201 && code > -301`).
+  ///
+  /// Deliberately not limited to the twelve named values: a future native code
+  /// below -211 must still be classified RAW rather than misread as a DNG
+  /// error. The range is nonetheless bounded at the bottom, because -301 and
+  /// below is the HEIF block (`HeifErrorCode`,
+  /// native/include/heif_error_codes.h). An open-ended `code <= -201` also
+  /// claimed every HEIF code, which defeats the point of allocating disjoint
+  /// blocks: with two open-ended predicates a value in the shared `int32_t`
+  /// error field cannot be attributed to exactly one subsystem by inspection.
+  static bool isRawError(int code) => code <= -201 && code > -301;
 }
 
 /// A generic-RAW decode returned a non-zero [errorCode].

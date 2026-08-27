@@ -61,6 +61,13 @@ native/third_party/libraw/
 native/third_party/libraw-cmake/
 !native/third_party/libraw/PROVENANCE.md
 
+# Vendored HEIF decode distribution (libheif + libde265, built by
+# native/scripts/fetch_heif_deps.sh). Source is fetched and built, never
+# tracked -- the same policy as Halide and LibRaw. PROVENANCE.md IS tracked so
+# the pinned versions, hashes and configure flags survive without the tree.
+native/third_party/heif-dist/*
+!native/third_party/heif-dist/PROVENANCE.md
+
 # Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
 # native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
 # would otherwise sweep the library, silently leaving a blank checkout without
@@ -82,6 +89,7 @@ native/third_party/libraw-cmake/
 !/docs/legal/
 /docs/legal/*
 !/docs/legal/THIRD_PARTY_LICENSES.md
+!/docs/legal/LGPL-3.0.txt
 !/docs/images/
 /image_samples/*
 !/image_samples/raw_corpus/
