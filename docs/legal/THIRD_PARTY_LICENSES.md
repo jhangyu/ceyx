@@ -154,3 +154,42 @@ mechanically by `native/scripts/verify_raw_provenance.py`.
   in its `Frameworks/` directory alongside `liblcms2`/`libjpeg`. The build
   stages this copy automatically for dev/test builds; app packaging is
   tracked separately.
+
+## libheif
+
+- Used for: HEIF/AVIF container parsing, primary-item selection, `irot`/`imir`
+  transform handling, and YUV to RGBA colour conversion for `.heic`/`.heif`.
+- Version: **1.23.2**
+- Source: <https://github.com/strukturag/libheif/releases/download/v1.23.2/libheif-1.23.2.tar.gz>
+- SHA-256: `8bd5d41d19dc84536d118b04774709f244df6104ef66d623dad5fa4650143405`
+- License: **LGPL-3.0-or-later** (`docs/legal/LGPL-3.0.txt`). The sample
+  applications and the Go/C++ wrappers are MIT, and none of them are built or
+  shipped.
+- Linkage: **dynamic**. Built as a separate shared library `libheif.1.dylib`,
+  vendored by `native/scripts/fetch_heif_deps.sh` into
+  `native/third_party/heif-dist/` and staged next to
+  `libdng_decoder_native.dylib`. `@rpath/libheif.1.dylib` install name.
+
+## libde265
+
+- Used for: HEVC (H.265) intra decoding of the coded image item behind libheif.
+- Version: **1.1.1**
+- Source: <https://github.com/strukturag/libde265/releases/download/v1.1.1/libde265-1.1.1.tar.gz>
+- SHA-256: `fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219`
+- License: **LGPL-3.0-or-later** (`docs/legal/LGPL-3.0.txt`).
+- Linkage: **dynamic**. Built as `libde265.0.dylib`, `@rpath/libde265.0.dylib`
+  install name, `ENABLE_ENCODER=OFF` (decode-only).
+
+### Why dynamic linking (libheif/libde265)
+
+Both libraries are LGPL-3.0-or-later. Shipping them as separate, replaceable
+`.dylib` files satisfies LGPL-3 section 4(d)(1) directly: a user can replace
+`libheif.1.dylib` / `libde265.0.dylib` in `<App>.app/Contents/Frameworks/` with
+their own build. Static linking into `dng_decoder_native` is deliberately NOT
+done, because it would trigger section 4(d)(0)'s duty to ship relinkable object
+files with every release. No encoder is built — `WITH_X265=OFF` (x265 is
+GPL-2.0), `WITH_AOM_ENCODER=OFF`, `ENABLE_ENCODER=OFF` — so nothing GPL-2.0
+enters the binary. Complete corresponding source is the tarball at the URL and
+SHA-256 above, built with the flags in
+`native/scripts/fetch_heif_deps.sh` and
+`native/third_party/heif-dist/PROVENANCE.md`.

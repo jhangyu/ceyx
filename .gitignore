@@ -89,6 +89,7 @@ native/third_party/heif-dist/*
 !/docs/legal/
 /docs/legal/*
 !/docs/legal/THIRD_PARTY_LICENSES.md
+!/docs/legal/LGPL-3.0.txt
 !/docs/images/
 /image_samples/*
 !/image_samples/raw_corpus/
