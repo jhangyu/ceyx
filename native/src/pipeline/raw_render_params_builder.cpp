@@ -158,14 +158,52 @@ bool raw_build_render_params(const RawGpuInput& input,
     // identically valued curves. A linear encode_gamma here would render every
     // generic-route image visibly dark, so the sRGB transfer function is taken
     // from the colour space rather than assumed.
+    // BASELINE EXPOSURE STAYS ZERO, and that is a measurement, not an omission.
+    // The DNG path adds negative.TotalBaselineExposure(profileID) here
+    // (dng_render_halide.cpp:789-793). LibRaw's analogue,
+    // imgdata.color.dng_levels.baseline_exposure, is -999.0 on every corpus
+    // sample: that is LibRaw's ABSENT initialiser (init_close_utils.cpp:97,
+    // :187) and it is only ever overwritten from a DNG BaselineExposure TIFF tag
+    // (tiff.cpp:1522), which vendor raws do not carry.
+    //
+    // CONTRACT LINE, because the obvious predicate is wrong: any future check for
+    // this value MUST treat <= -900 as absent. A `!= 0` test passes -999 straight
+    // through and would fold -999 EV into the exposure. Measured 2026-08-28 on
+    // ARW, RAF and X3F; evidence in tmp/verify/ab_renders/README_AB_probe_report.md.
     const real64 exposure = static_cast<real64>(develop.exposure_ev);
     const real64 white = 1.0 / std::pow(2.0, std::max<real64>(0.0, exposure));
 
-    const dng_function_exposure_ramp ramp_fn(white, 0.0, 0.0);
+    // Shadows black lift, matching dng_render_halide.cpp:794-797:
+    //   black = Shadows * ShadowScale * Stage3Gain * 0.001, capped at 0.99*white.
+    // Shadows is the SDK renderer default of 5.0.
+    //
+    // DOCUMENTED ASSUMPTIONS: ShadowScale and Stage3Gain are dng_negative
+    // properties with no LibRaw analogue, so both are taken as 1.0 -- their DNG
+    // defaults -- giving black = 0.005. Stage3Gain also appears in the DNG
+    // exposure term as -log2(Stage3Gain), which is 0 at gain 1.0 and so drops out
+    // above. If a camera ever has a real Stage3Gain != 1 this substitution is
+    // wrong, and nothing here detects that.
+    const real64 black = std::min<real64>(5.0 * 1.0 * 1.0 * 0.001, 0.99 * white);
+    const dng_function_exposure_ramp ramp_fn(white, black, black);
     sampleFunction(params.exp_ramp, ramp_fn);
 
+    // ACR3 contrast curve, concatenated exactly as the DNG path composes it
+    // (dng_render_halide.cpp:806, and dng_render.cpp:939-942 in the SDK itself).
+    //
+    // ORDER MATTERS AND IS NOT OBVIOUS: dng_1d_concatenate(a, b) evaluates
+    // b(a(x)), so this is acr3(exposureTone(x)) -- the exposure tone first, the
+    // contrast curve on top. Writing the arguments the other way round compiles,
+    // runs, and produces a subtly wrong curve.
+    //
+    // Without this the LibRaw path had NO contrast curve at all, which was the
+    // dominant term in the "washed out" report -- larger in the render than the
+    // white-balance defect Stage 1 fixed. The user's A/B/C probe measured it:
+    // adding this plus the black lift moved p95 luma from 122.3 to 171.4 against
+    // the DNG path's 189.9, while the matrix choice was worth 1-2 codes.
     const dng_function_exposure_tone exposure_tone(exposure);
-    sampleFunction(params.tone_curve, exposure_tone);
+    const dng_tone_curve_acr3_default acr3_tone;
+    const dng_1d_concatenate total_tone(exposure_tone, acr3_tone);
+    sampleFunction(params.tone_curve, total_tone);
     if (develop.tone_curve_strength != 1.0f) {
         const float strength = std::max(develop.tone_curve_strength, 0.0f);
         for (size_t i = 0; i < params.tone_curve.size(); ++i) {

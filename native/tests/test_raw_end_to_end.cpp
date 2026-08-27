@@ -988,23 +988,30 @@ int main(int argc, char** argv) {
         // Kept byte-identical to scripts/tmp/verify/r7_t13_goldens.txt, which is
         // what the discrimination probe reads.
         static const PixelExpectation kExpect[] = {
-            {6,  6,   64,  66,  66, 255},
-            {7,  6,   69,  67,  66, 255},
-            // RE-RECORDED 2026-08-28 (Stage 1 colour change): 68 -> 69 in R.
-            // This is the ONLY one of the eight goldens that moved, and it moved
-            // by a single code. The two exactly-neutral pixels at (35,23) and
-            // (36,24) are byte-unchanged, which is the direction check the lead
-            // required before any re-record: a correct fix must leave neutrals
-            // alone. See tmp/verify/stage1_golden_pixel_direction_check.md --
-            // the first attempt at this re-record was REJECTED because the
-            // neutrals moved +14 in blue, which turned out to be the fixture's
-            // out-of-contract identity camera_to_pcs, now fixed above.
-            {8,  6,   69,  68,  69, 255},
-            {6,  7,   67,  70,  70, 255},
-            {7,  7,   72,  70,  70, 255},
-            {8,  7,   69,  73,  72, 255},
-            {35, 23, 129, 129, 129, 255},
-            {36, 24, 130, 131, 131, 255},
+            // RE-RECORDED 2026-08-28 for Stage 1b (tone parity: ACR3 contrast
+            // curve concatenated onto the exposure tone, plus the Shadows black
+            // lift). ALL EIGHT moved this time, and that is correct: a tone curve
+            // is a single monotonic mapping applied identically to every channel,
+            // so unlike Stage 1's matrix fix it MUST move neutral pixels too.
+            //
+            // The direction check for a tone change is therefore not "neutrals
+            // stay put" but "neutrals stay NEUTRAL", and they do, exactly:
+            //   (35,23) 129,129,129 -> 180,180,180   (perfectly neutral, brighter)
+            //   (36,24) 130,131,131 -> 182,183,183   (channel spread preserved)
+            // Every value increased monotonically, matching the measured p95 luma
+            // move of 122.3 -> 171.4 on the approved probe render.
+            //
+            // Previous values, for reference (Stage 1, matrix only):
+            //   64,66,66 / 69,67,66 / 69,68,69 / 67,70,70 / 72,70,70 / 69,73,72
+            //   129,129,129 / 130,131,131
+            {6,  6,   75,  78,  78, 255},
+            {7,  6,   83,  79,  79, 255},
+            {8,  6,   83,  82,  84, 255},
+            {6,  7,   81,  84,  85, 255},
+            {7,  7,   88,  85,  86, 255},
+            {8,  7,   84,  90,  88, 255},
+            {35, 23, 180, 180, 180, 255},
+            {36, 24, 182, 183, 183, 255},
         };
 
         std::vector<uint8_t> rgba;

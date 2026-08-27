@@ -555,6 +555,24 @@ int main() {
                               dng_params.exp_ramp);
             reportCurveSanity("curve-tone", shapes_ok, raw_params.tone_curve,
                               dng_params.tone_curve);
+
+            // AC-1b.1 (Stage 1b): the tone curve must now MATCH the DNG path
+            // elementwise within 1e-6, not merely be well-shaped. Before Stage 1b
+            // this diverged by 0.3168465 because the LibRaw path had no contrast
+            // curve at all; with acr3(exposureTone(x)) concatenated it agrees at
+            // 0.0000000.
+            //
+            // WHAT THIS DOES AND DOES NOT PROVE. It is gated on ONE file. The two
+            // curves coincide exactly here because this sample's
+            // TotalBaselineExposure and -log2(Stage3Gain) cancel, leaving the DNG
+            // path's effective exposure at 0 -- the same value the LibRaw path
+            // uses. On a file where they did not cancel, the exposure_tone halves
+            // would differ and this case would fail for a legitimate reason: the
+            // LibRaw path cannot see BaselineExposure at all (it is -999/absent in
+            // LibRaw for vendor raws). If a future sample trips this, the answer is
+            // to compare at MATCHED exposure, not to loosen the bound.
+            reportCurve("ac-1b.1-tone-curve-matches-dng", shapes_ok,
+                        raw_params.tone_curve, dng_params.tone_curve);
         }
     }
 
