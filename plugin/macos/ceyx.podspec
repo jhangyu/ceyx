@@ -35,9 +35,18 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   # embedded here. They are DYNAMICALLY linked on purpose: both are
   # LGPL-3.0-or-later, and a replaceable .dylib in Frameworks/ satisfies
   # section 4(d)(1) with no obligation to ship relinkable object files.
+  #
+  # libomp: when native/third_party/libomp/lib/libomp.dylib is present, the
+  # OpenMP resolution in native/cmake/tests.cmake prefers that VENDORED copy
+  # over a Homebrew one, restamps it to @rpath/libomp.dylib and stages it next
+  # to the decoder. The decoder therefore carries an @rpath/libomp.dylib load
+  # command, so libomp must be embedded too -- otherwise dyld fails at launch
+  # on any machine without Homebrew's libomp, which is precisely the
+  # prerequisite-free bundle this directory exists to produce.
   s.vendored_libraries = 'Libraries/libdng_decoder_native.dylib',
                          'Libraries/liblcms2.2.dylib',
                          'Libraries/libjpeg.8.dylib',
                          'Libraries/libheif.1.dylib',
-                         'Libraries/libde265.0.dylib'
+                         'Libraries/libde265.0.dylib',
+                         'Libraries/libomp.dylib'
 end
