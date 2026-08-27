@@ -1,40 +1,41 @@
 --- a/src/decoders/fuji_compressed.cpp
 +++ b/src/decoders/fuji_compressed.cpp
-@@ -27,6 +27,43 @@
+@@ -27,6 +27,44 @@
  #define _min(a, b) ((a) < (b) ? (a) : (b))
  #define _max(a, b) ((a) > (b) ? (a) : (b))
  
 +/* Ceyx project patch 09: block-parallel Fuji strip decode.
 +
-+   Upstream parallelises fuji_decode_loop() only under OpenMP. This project
-+   builds OpenMP ON for desktop and OFF for mobile/iOS/Android
-+   (CEYX_ENABLE_DESKTOP_OPENMP, native/cmake/tests.cmake), so BOTH paths must
-+   work: the OpenMP branch is upstream's, and the std::thread pool in the
-+   #else branch keeps the 11-way strip parallelism of an X-T5 lossy RAF on any
-+   toolchain without OpenMP. The pool is confined to a single unpack() call
-+   and always joins before returning. */
-+#ifndef LIBRAW_USE_OPENMP
++   Upstream parallelises fuji_decode_loop() only under OpenMP. Round 1 of this
++   patch kept upstream's OpenMP branch for the desktop build and added the
++   std::thread pool below only for the non-OpenMP (mobile) build. Round 2
++   (2026-08-28, contract R1 form A) makes the std::thread pool the ONLY fuji
++   path on every platform: the measured desktop cost of the OpenMP branch is
++   an 11.8% profile share of `__kmp_get_global_thread_id` evaluated per
++   consumed input byte (the `omp critical` in fuji_fill_buffer() is inlined
++   into the entropy hot path), worth -11..-15% wall time on an X-T5 lossy RAF
++   (docs/logs/2026-08-28/Task_xtrans_optimization_eval.md par.3, byte-identical
++   output). A single path also removes the never-shipped-untested-branch
++   problem. The rest of LibRaw keeps whatever OpenMP the build enables; only
++   this file drops it. The pool is confined to a single unpack() call and
++   always joins before returning. */
 +#include <atomic>
++#include <cstdlib>
 +#include <exception>
 +#include <thread>
 +#include <vector>
-+#endif
 +
-+/* Deliberately NOT inside the #ifndef above: the datastream sites this guards
-+   are unsynchronised in upstream's OpenMP build too, and this project now
-+   ships that build.
-+
-+   Upstream wraps only the seek+read pair in fuji_fill_buffer() in an
++/* Upstream wraps only the seek+read pair in fuji_fill_buffer() in an
 +   `omp critical`. It leaves init_fuji_block()'s input->size() and both
 +   derror() calls unguarded, even though derror() probes the stream (eof/tell)
 +   and increments unpacker_data.data_error, all shared across strip workers.
++   This mutex guards all of those sites for the std::thread pool.
 +
-+   A std::mutex rather than another `omp critical` on purpose: derror() can
-+   throw LIBRAW_EXCEPTION_IO_EOF, and an exception must not escape an OpenMP
-+   structured block, so `omp critical` is not a legal way to guard it. A
-+   lock_guard unwinds correctly. No deadlock against the omp critical region:
-+   the two never nest (init_fuji_block releases this mutex before calling
-+   fuji_fill_buffer), and they are only ever taken one at a time.
++   A std::mutex rather than an `omp critical` on purpose (beyond this file no
++   longer using OpenMP at all): derror() can throw LIBRAW_EXCEPTION_IO_EOF,
++   and an exception must not escape an OpenMP structured block, so
++   `omp critical` was never a legal way to guard it. A lock_guard unwinds
++   correctly.
 +
 +   Cost is negligible: a 64 KiB refill roughly once per XTRANS_BUF_SIZE bytes
 +   of input, against the entropy decoding it serialises with. */
@@ -44,17 +45,24 @@
  struct int_pair
  {
    int value1;
-@@ -237,13 +274,14 @@
- #endif
+@@ -232,18 +270,16 @@
+     bool needthrow = false;
+     info->cur_pos = 0;
+     info->cur_buf_offset += info->cur_buf_size;
+-#ifdef LIBRAW_USE_OPENMP
+-#pragma omp critical
+-#endif
      {
- #ifndef LIBRAW_USE_OPENMP
+-#ifndef LIBRAW_USE_OPENMP
 -      info->input->lock();
-+      /* Ceyx project patch 09: input->lock()/unlock() are no-ops in a
-+         non-OpenMP build, so hold the decoder's own mutex across the
-+         seek+read pair.  Scoped to this block, mirroring the extent of the
-+         omp critical region used by the OpenMP build. */
+-#endif
++      /* Ceyx project patch 09: hold the decoder's own mutex across the
++         seek+read pair. Round 2: unconditional -- this replaces upstream's
++         `omp critical` (whose per-call thread-id lookup was 11.8% of the
++         decode profile) as well as the no-op input->lock()/unlock() of the
++         non-OpenMP build. Scoped to this block, mirroring the extent of the
++         omp critical region upstream used. */
 +      std::lock_guard<std::mutex> stream_guard(fuji_decode_stream_mutex);
- #endif
        info->input->seek(info->cur_buf_offset, SEEK_SET);
        info->cur_buf_size = info->input->read(info->cur_buf, 1, _min(info->max_read_size, XTRANS_BUF_SIZE));
 -#ifndef LIBRAW_USE_OPENMP
@@ -63,14 +71,13 @@
        if (info->cur_buf_size < 1) // nothing read
        {
          if (info->fillbytes > 0)
-@@ -280,7 +318,14 @@
+@@ -280,7 +316,13 @@
  {
    info->linealloc = (ushort *)calloc(sizeof(ushort), _ltotal * (params->line_width + 2));
  
 -  INT64 fsize = libraw_internal_data.internal_data.input->size();
-+  /* Ceyx project patch 09: init_fuji_block() runs on the strip workers under
-+     BOTH the OpenMP and std::thread paths, so this datastream query is
-+     guarded unconditionally. Upstream leaves it unguarded. */
++  /* Ceyx project patch 09: init_fuji_block() runs on the strip workers, so
++     this datastream query is guarded. Upstream leaves it unguarded. */
 +  INT64 fsize;
 +  {
 +    std::lock_guard<std::mutex> stream_guard(fuji_decode_stream_mutex);
@@ -79,7 +86,7 @@
    info->max_read_size = _min(unsigned(fsize - raw_offset), dsize); // Data size may be incorrect?
    info->fillbytes = 1;
  
-@@ -854,7 +899,15 @@
+@@ -854,7 +896,15 @@
    fuji_extend_blue(info->linebuf, line_width);
  
    if (errcnt)
@@ -95,7 +102,7 @@
  }
  
  void LibRaw::fuji_bayer_decode_block(fuji_compressed_block *info, const fuji_compressed_params *params, int /*cur_line*/)
-@@ -1008,7 +1061,15 @@
+@@ -1008,7 +1058,15 @@
    fuji_extend_blue(info->linebuf, line_width);
  
    if (errcnt)
@@ -111,37 +118,35 @@
  }
  
  void LibRaw::fuji_decode_strip(fuji_compressed_params *params, int cur_block, INT64 raw_offset, unsigned dsize,
-@@ -1151,12 +1212,11 @@
+@@ -1151,33 +1209,114 @@
  void LibRaw::fuji_decode_loop(fuji_compressed_params *common_info, int count, INT64 *raw_block_offsets,
                                unsigned *block_sizes, uchar *q_bases)
  {
 -  int cur_block;
    const int lineStep = (libraw_internal_data.unpacker_data.fuji_total_lines + 0xF) & ~0xF;
- #ifdef LIBRAW_USE_OPENMP
-+  int cur_block;
-   unsigned errcnt = 0;
- #pragma omp parallel for private(cur_block) shared(errcnt)
--#endif
-   for (cur_block = 0; cur_block < count; cur_block++)
-   {
-     try
-@@ -1166,17 +1226,100 @@
-     }
-     catch (...)
-     {
 -#ifdef LIBRAW_USE_OPENMP
- #pragma omp atomic
- 		  errcnt++;
+-  unsigned errcnt = 0;
+-#pragma omp parallel for private(cur_block) shared(errcnt)
+-#endif
+-  for (cur_block = 0; cur_block < count; cur_block++)
+-  {
+-    try
+-    {
+-      fuji_decode_strip(common_info, cur_block, raw_block_offsets[cur_block], block_sizes[cur_block],
+-                        q_bases ? q_bases + cur_block * lineStep : 0);
+-    }
+-    catch (...)
+-    {
+-#ifdef LIBRAW_USE_OPENMP
+-#pragma omp atomic
+-		  errcnt++;
 -#else
 -		  throw;
 -#endif
- 	  }
-   }
--#ifdef LIBRAW_USE_OPENMP
-   if (errcnt)
- 		  throw LIBRAW_EXCEPTION_IO_EOF;
-+#else
-+  /* Ceyx project patch 09: std::thread replacement for the OpenMP loop above.
+-	  }
++  /* Ceyx project patch 09: std::thread replacement for upstream's OpenMP
++     `parallel for` (round 2: on every platform, not just non-OpenMP builds --
++     see the patch header comment for the measured rationale).
 +     Strips are independent by construction -- each one owns its
 +     fuji_compressed_block (and, when lossy, its own copy of
 +     fuji_compressed_params, fuji_decode_strip() above), reads a disjoint byte
@@ -164,6 +169,28 @@
 +
 +  unsigned hw = std::thread::hardware_concurrency();
 +  int nthreads = int(hw ? hw : 1u);
++  /* Ceyx project patch 09 (round 2): thread-count cap. hardware_concurrency()
++     counts efficiency cores too, and more workers than strips (11 for an X-T5
++     lossy RAF) never helps; a hard ceiling keeps the pool bounded on large
++     machines. CEYX_FUJI_DECODE_THREADS (integer >= 1) overrides the default
++     cap at runtime -- this is also the practical stand-in for the ignored
++     OMP_NUM_THREADS noted in the round-2 contract parking-lot. */
++  {
++    int cap = 16; /* CEYX_FUJI_MAX_DECODE_THREADS default */
++    const char *cap_env = getenv("CEYX_FUJI_DECODE_THREADS");
++    if (cap_env)
++    {
++      const int env_cap = atoi(cap_env);
++      if (env_cap >= 1)
++        cap = env_cap;
++    }
++    if (nthreads > cap)
++      nthreads = cap;
+   }
+-#ifdef LIBRAW_USE_OPENMP
+-  if (errcnt)
+-		  throw LIBRAW_EXCEPTION_IO_EOF;
+-#endif
 +  if (nthreads > count)
 +    nthreads = count;
 +  if (nthreads < 1)
@@ -228,6 +255,6 @@
 +
 +  if (first_error)
 +    std::rethrow_exception(first_error);
- #endif
  }
  
+ void LibRaw::parse_fuji_compressed_header()
