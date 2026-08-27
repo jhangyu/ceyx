@@ -193,6 +193,11 @@ class DngNativeBindings {
   /// been freed). Null when the dylib does not export the debug symbol.
   int? poolCheckedOut() => _dngDebugPoolCheckedOut?.call();
 
+  /// The resolved native library, so sibling binding sets (HEIF) can attach to
+  /// the SAME image instead of re-running the candidate search and possibly
+  /// loading a different copy.
+  ffi.DynamicLibrary get library => _lib;
+
   DngNativeBindings._(this._lib) {
     dngDecodeAndProcess = _lib
         .lookupFunction<DngDecodeAndProcessNative, DngDecodeAndProcessDart>(
