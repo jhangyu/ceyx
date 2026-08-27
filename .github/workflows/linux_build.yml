@@ -1,0 +1,169 @@
+name: Linux Build (Vulkan native)
+
+on:
+  workflow_dispatch:
+  push:
+    # ci/** so the lead can verify this workflow from a bootstrap branch
+    # before any of it lands on main (a workflow file only becomes
+    # dispatchable/visible to GitHub once it exists on a ref that runs it).
+    branches:
+      - "ci/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - "native/**"
+      - ".github/workflows/linux_build.yml"
+
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    # BUILD-ONLY gate (user decision 2026-08-28): CI proves compilation of the
+    # Linux Vulkan native library (AC-L1..AC-L4). Runtime gates (capability
+    # probe AC-R1, backend smoke AC-R2, decode/PSNR AC-R3/R4) are NOT run here —
+    # a GitHub-hosted ubuntu-latest runner exposes only the lavapipe software
+    # ICD, whose feature support for the strict vk_int8/vk_int16/vk_int64
+    # contract is not guaranteed; those gates run in the local Linux container
+    # environment instead (see docs/logs/2026-08-28/Task_linux_vulkan_ci_run.md).
+    name: Linux x86-64 Vulkan native (dng_decoder_native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      NATIVE_DIR: ${{ github.workspace }}/native
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build prerequisites (apt)
+        # android_build.yml's set plus the Vulkan trio:
+        #   libvulkan-dev -> Vulkan HEADERS, so find_package(Vulkan QUIET) in
+        #     tests.cmake's capability-probe wiring finds the target rather than
+        #     silently skipping it (a SKIPPED warning is treated as failure).
+        #   libvulkan1 -> the loader the Halide Vulkan runtime dlopen()s at
+        #     runtime (not linked at build time; see ffi.cmake's Linux branch).
+        #   mesa-vulkan-drivers / vulkan-tools -> lavapipe ICD + vulkaninfo, for
+        #     completeness on the runner (build-only job does not exercise them).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - name: Cache vendored Halide v21 distribution (host, Linux)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+
+      - name: Fetch vendored Halide v21 distribution (host)
+        working-directory: ${{ github.workspace }}
+        run: native/scripts/fetch_halide_v21_dist.sh
+
+      # native/third_party/libraw is gitignored; DNG_ENABLE_GENERIC_RAW defaults
+      # ON (native/CMakeLists.txt) and cmake/tests.cmake hard-fails configure
+      # without it, so this has to run before the build. Not disabling the
+      # feature to route around the missing vendor tree: that would drop the
+      # generic RAW frontend from the shipped binary, not just fix CI.
+      - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+
+      - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
+        working-directory: ${{ github.workspace }}
+        run: native/scripts/fetch_libraw_dist.sh
+
+      - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
+        # Native single-stage build: on Linux the host IS the target, so the
+        # default --platform host path is correct (no cross-compile, unlike
+        # Android). halide_aot.cmake's `elseif(UNIX AND NOT APPLE)` branch
+        # selects host-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query
+        # and turns the split Stage 4 kernel ON automatically; ffi.cmake links
+        # no Vulkan library (the Halide runtime dlopen()s libvulkan.so.1).
+        # --idle-timeout-sec raised above the 60s default as a CI margin.
+        # Separate --build-dir build-linux so it never collides with build/.
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/build_native_watchdog.py \
+            --platform host \
+            --target dng_decoder_native \
+            --build-dir build-linux \
+            --idle-timeout-sec 180
+
+      - name: Verify Linux artifact (AC-L2/L3/L4)
+        # AC-L2: file reports an ELF shared object.
+        # AC-L3: nm -D finds halide_vulkan_device_interface (the built binary
+        #        genuinely contains the Vulkan runtime, not just "build ok").
+        # AC-L4: ldd shows no libvulkan entry (dlopen-not-link decision held).
+        # Every check self-captures its own RC on the following line; the
+        # step's own green status is NOT trusted as evidence.
+        working-directory: ${{ github.workspace }}
+        run: |
+          SO="native/build-linux/libdng_decoder_native.so"
+          echo "== AC-L2: file =="
+          file "$SO"
+          echo "RC=$?"
+          echo "== AC-L3: nm -D halide_vulkan_device_interface =="
+          nm -D "$SO" | grep halide_vulkan_device_interface
+          echo "RC=$?"
+          echo "== AC-L4: ldd (expect NO libvulkan) =="
+          ldd "$SO"
+          echo "RC=$?"
+          if ldd "$SO" | grep -q 'libvulkan'; then
+            echo "::error::libvulkan appears in ldd output — link-time Vulkan dependency regressed (D4)." >&2
+            exit 1
+          fi
+
+      - name: Stage native artifacts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}/native"
+          cp "${NATIVE_DIR}/build-linux/libdng_decoder_native.so" \
+            "${ARTIFACT_DIR}/native/" || true
+          ls -la "${ARTIFACT_DIR}/native" || true
+
+      - name: Fail if no shared library was produced
+        run: |
+          shopt -s nullglob
+          libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
+          if [ ${#libs[@]} -eq 0 ]; then
+            echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; the Linux build did not emit the expected artifact." >&2
+            exit 1
+          fi
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-linux-x86-64
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Attach artifact to GitHub Release (tag push only)
+        # This workflow owns its own release-attach step (as android_build.yml
+        # does) to avoid a file jointly owned with another workflow.
+        # softprops/action-gh-release creates the Release if absent, uploads its
+        # own files: glob idempotently, and is safe to run from multiple
+        # independent workflows targeting the same tag.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/artifacts/native/libdng_decoder_native*.so
+          fail_on_unmatched_files: true

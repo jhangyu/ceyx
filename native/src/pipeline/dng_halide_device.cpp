@@ -1,14 +1,14 @@
 #include "dng_halide_device.h"
 #include <cstdlib>
 
-// W5 (2026-08-21, Windows port): Vulkan is the GPU backend on both Android
-// and Windows (see CMakeLists.txt AOT_TARGET), so every __ANDROID__ guard in
-// this file is really a "Vulkan backend" guard. There is no CPU fallback route
+// W5 (2026-08-21, Windows port): Vulkan is the GPU backend on Android, Windows
+// and Linux (see CMakeLists.txt AOT_TARGET), so every "Vulkan backend" guard in
+// this file covers all three. There is no CPU fallback route
 // in the pipeline (dng_pipeline.cpp requireGpuBackend), so a platform that
 // falls through to kUnsupported cannot decode at all.
 #if defined(__APPLE__)
 #include "HalideRuntimeMetal.h"
-#elif defined(__ANDROID__) || defined(_WIN32)
+#elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
 #include "HalideRuntimeVulkan.h"
 #endif
 
@@ -25,7 +25,7 @@ GpuBackend resolve_backend() {
     }
 #if defined(__APPLE__)
     return GpuBackend::kMetal;
-#elif defined(__ANDROID__) || defined(_WIN32)
+#elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
     return GpuBackend::kVulkan;
 #else
     return GpuBackend::kUnsupported;
@@ -45,7 +45,7 @@ const halide_device_interface_t* dng_halide_gpu_device_interface() {
     case GpuBackend::kMetal:
         return halide_metal_device_interface();
 #endif
-#if defined(__ANDROID__) || defined(_WIN32)
+#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
     case GpuBackend::kVulkan:
         return halide_vulkan_device_interface();
 #endif

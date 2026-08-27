@@ -122,7 +122,7 @@ functions:
 // Guards that are about the *kernel variant* (buffer shapes, RGBA scratch, D2H,
 // call sites) key off this macro; guards that are genuinely platform-specific
 // (arm_neon.h, mmap, Android-only prewarm) stay on __ANDROID__.
-#if defined(__ANDROID__) || defined(_WIN32)
+#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
 #define DNG_STAGE4_SPLIT_KERNEL 1
 #endif
 

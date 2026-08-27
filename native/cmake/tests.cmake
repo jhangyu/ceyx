@@ -182,6 +182,51 @@ if(ANDROID AND DNG_CROSS_BUILD)
 endif()
 
 # =============================================================================
+# Linux port (2026-08-28, plan T4). Two additive pieces, no existing block
+# edited (plan T4 criterion 5 / spec A7 contract: an `if(APPLE)` block is never
+# widened in place — that is how macOS regresses).
+#
+# 1. DNG_LINUX_TEST_LIBS: the Linux counterpart of the `${COREFOUNDATION_LIBRARY}
+#    ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY}` frameworks
+#    the `if(APPLE)` blocks below append. Those blocks are purely
+#    platform-runtime linking, so each gets a sibling `if(DNG_LINUX_TEST_LIBS)`
+#    block appending libdl + pthreads: the Halide runtime archive the test
+#    targets link directly dlopen's libvulkan.so.1 and spawns worker threads,
+#    exactly as ffi.cmake's own `elseif(UNIX AND NOT APPLE)` branch does for
+#    dng_decoder_native. Guard is `UNIX AND NOT APPLE AND NOT ANDROID` (in CMake
+#    APPLE implies UNIX, and Android also matches UNIX AND NOT APPLE).
+#    Empty on every other platform, so the sibling blocks are no-ops there.
+#
+# 2. test_linux_vulkan_capability: the standalone ICD gate, mirroring
+#    test_android_vulkan_capability above (lines 15-18). Deliberately links
+#    NOTHING from the pipeline (no dng_decoder_native, no AOT kernels) so a
+#    non-zero exit is attributable to the device rather than to the decoder.
+# =============================================================================
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    find_package(Threads REQUIRED)
+    set(DNG_LINUX_TEST_LIBS ${CMAKE_DL_LIBS} Threads::Threads)
+
+    # Vulkan headers + loader are a *probe-only* build dependency
+    # (libvulkan-dev / vulkan-headers). The production .so must keep resolving
+    # libvulkan.so.1 by dlopen at runtime (spec AC-L4: no libvulkan in its
+    # ldd output), so this find_package must stay confined to this target.
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        add_executable(test_linux_vulkan_capability
+            tests/linux_vulkan_capability_probe.cpp)
+        target_link_libraries(test_linux_vulkan_capability PRIVATE Vulkan::Vulkan)
+    else()
+        # Never skip silently: a dropped target and a passing one are
+        # indistinguishable in a build log otherwise (project lesson
+        # 2026-08-25). WARNING, not STATUS, so it survives a quiet CI log.
+        message(WARNING
+            "SKIPPED test_linux_vulkan_capability because Vulkan headers/loader were "
+            "not found at configure time (install libvulkan-dev). The runtime "
+            "Vulkan ICD gate will NOT run.")
+    endif()
+endif()
+
+# =============================================================================
 # Test targets — only built for native host builds (not cross-compile, not
 # generator-only). Phase 14: guarded to prevent Android/cross-compile breakage.
 # =============================================================================
@@ -232,6 +277,9 @@ target_link_libraries(test_raw_render_params PRIVATE dng_decoder_native dng_sdk)
 if(APPLE)
     target_link_libraries(test_raw_render_params PRIVATE
         ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_raw_render_params PRIVATE ${DNG_LINUX_TEST_LIBS})
 endif()
 
 # -----------------------------------------------------------------------------
@@ -761,6 +809,9 @@ if(DNG_ENABLE_GENERIC_RAW)
         target_link_libraries(test_raw_end_to_end
             ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
     endif()
+    if(DNG_LINUX_TEST_LIBS)
+        target_link_libraries(test_raw_end_to_end ${DNG_LINUX_TEST_LIBS})
+    endif()
 endif()
 
 # P17 T13: malformed input, resource limits, cancellation, GPU-mandatory.
@@ -774,6 +825,9 @@ if(DNG_ENABLE_GENERIC_RAW)
         target_link_libraries(test_raw_hardening
             ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY}
             ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    endif()
+    if(DNG_LINUX_TEST_LIBS)
+        target_link_libraries(test_raw_hardening ${DNG_LINUX_TEST_LIBS})
     endif()
 endif()
 
@@ -820,8 +874,27 @@ add_dependencies(test_device_handoff dng_warp_aot_target)
 add_dependencies(test_device_handoff dng_render_aot_target)
 add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
 add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
+# F-T4-1 (found by T3's Linux run): the mirror image of the
+# `if(NOT DNG_STAGE4_SPLIT_KERNEL)` scaled_preavg block above. This target
+# compiles dng_render_halide.cpp, whose split branch calls
+# dng_render_stage4_split() (dng_render_halide.cpp:1045,1348), so wherever the
+# split kernel is the generated one the archive must be linked here too —
+# ffi.cmake:69-75 already does exactly this for dng_decoder_native, which is why
+# the .so linked cleanly on Linux while these executables did not.
+# `dng_render_android_aot_target` (halide_aot.cmake:208) is the custom target
+# that produces the archive; the TARGET guard mirrors ffi.cmake:20.
+if(DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_device_handoff
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(test_device_handoff dng_render_android_aot_target)
+    endif()
+endif()
 if(APPLE)
     target_link_libraries(test_device_handoff ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_device_handoff ${DNG_LINUX_TEST_LIBS})
 endif()
 
 
@@ -846,6 +919,9 @@ add_dependencies(test_stage4_scaled dng_render_scaled_aot_target)
 add_dependencies(test_stage4_scaled dng_render_scaled_preavg_aot_target)
 if(APPLE)
     target_link_libraries(test_stage4_scaled ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_stage4_scaled ${DNG_LINUX_TEST_LIBS})
 endif()
 
 
@@ -890,8 +966,22 @@ add_dependencies(test_stage4_scaled_photo dng_render_scaled_aot_target)
 add_dependencies(test_stage4_scaled_photo dng_render_scaled_preavg_aot_target)
 add_dependencies(test_stage4_scaled_photo dng_opcode_polynomial_aot_target)
 add_dependencies(test_stage4_scaled_photo dng_opcode_polynomial3_aot_target)
+# F-T4-1: tests/test_stage4_scaled_photo.cpp #includes dng_render_halide.cpp
+# (see the add_executable note above), so it pulls in the same
+# dng_render_stage4_split() call and needs the archive when the split kernel is
+# the generated one.
+if(DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_stage4_scaled_photo
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(test_stage4_scaled_photo dng_render_android_aot_target)
+    endif()
+endif()
 if(APPLE)
     target_link_libraries(test_stage4_scaled_photo ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_stage4_scaled_photo ${DNG_LINUX_TEST_LIBS})
 endif()
 
 
@@ -935,8 +1025,20 @@ add_dependencies(test_sized_decode dng_render_aot_target)
 add_dependencies(test_sized_decode dng_render_scaled_preavg_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
+# F-T4-1: tests/test_sized_decode.cpp #includes dng_render_halide.cpp (see the
+# add_executable note above), so the split archive is required here too.
+if(DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_sized_decode
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(test_sized_decode dng_render_android_aot_target)
+    endif()
+endif()
 if(APPLE)
     target_link_libraries(test_sized_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_sized_decode ${DNG_LINUX_TEST_LIBS})
 endif()
 
 
@@ -947,12 +1049,18 @@ target_link_libraries(test_color_accuracy dng_sdk)
 if(APPLE)
     target_link_libraries(test_color_accuracy ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_color_accuracy ${DNG_LINUX_TEST_LIBS})
+endif()
 
 add_executable(test_dng_layout tests/test_dng_layout.cpp)
 target_include_directories(test_dng_layout PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
 target_link_libraries(test_dng_layout dng_sdk)
 if(APPLE)
     target_link_libraries(test_dng_layout ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_dng_layout ${DNG_LINUX_TEST_LIBS})
 endif()
 
 # Tile testing tool
@@ -962,6 +1070,9 @@ target_link_libraries(test_dng_tiles dng_sdk)
 if(APPLE)
     target_link_libraries(test_dng_tiles ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_dng_tiles ${DNG_LINUX_TEST_LIBS})
+endif()
 
 
 add_executable(test_dng_preview tests/test_dng_preview.cpp)
@@ -969,6 +1080,9 @@ target_include_directories(test_dng_preview PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
 target_link_libraries(test_dng_preview dng_sdk)
 if(APPLE)
     target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_dng_preview ${DNG_LINUX_TEST_LIBS})
 endif()
 
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
@@ -1004,8 +1118,21 @@ add_dependencies(test_decode dng_warp_aot_target)
 add_dependencies(test_decode dng_render_aot_target)
 add_dependencies(test_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_decode dng_opcode_polynomial3_aot_target)
+# F-T4-1: test_decode compiles dng_render_halide.cpp as a source, so it needs
+# the split archive on every split-kernel platform (see the test_device_handoff
+# block above for the full rationale).
+if(DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_decode
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(test_decode dng_render_android_aot_target)
+    endif()
+endif()
 if(APPLE)
     target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_decode ${DNG_LINUX_TEST_LIBS})
 endif()
 
 # Phase 5.3: Halide Demosaic PSNR Test
@@ -1035,6 +1162,9 @@ add_dependencies(test_demosaic_halide dng_opcode_polynomial3_aot_target)
 if(APPLE)
     target_link_libraries(test_demosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_demosaic_halide ${DNG_LINUX_TEST_LIBS})
+endif()
 
 # 2026-08-16 CFA phase: all-four-Bayer-phases unit check on a synthetic
 # mosaic. Covers both the Halide AOT kernel and the CPU reference demosaic
@@ -1052,6 +1182,9 @@ add_dependencies(test_cfa_phase halide_runtime_target)
 add_dependencies(test_cfa_phase dng_demosaic_aot_target)
 if(APPLE)
     target_link_libraries(test_cfa_phase ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_cfa_phase ${DNG_LINUX_TEST_LIBS})
 endif()
 
 # P17 T9: fused normalize + Bayer demosaic AOT kernel vs same-algorithm CPU
@@ -1077,6 +1210,9 @@ if(APPLE)
     target_link_libraries(test_raw_bayer_kernel
         ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_raw_bayer_kernel ${DNG_LINUX_TEST_LIBS})
+endif()
 
 # P17 T11: fused normalize + X-Trans 6x6 demosaic AOT kernel vs same-formula
 # CPU reference (>=99 dB / max_abs<=1), plus the 5x5 coverage property and the
@@ -1099,6 +1235,9 @@ if(APPLE)
     target_link_libraries(test_raw_xtrans_kernel
         ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_raw_xtrans_kernel ${DNG_LINUX_TEST_LIBS})
+endif()
 
 # P19 T7: linear-RGB normalize AOT kernel vs same-formula CPU reference
 # (>=99 dB / max_abs<=1), plus the constant-field oracle and a strided source.
@@ -1118,6 +1257,9 @@ if(APPLE)
     target_link_libraries(test_raw_linear_rgb_kernel
         ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_raw_linear_rgb_kernel ${DNG_LINUX_TEST_LIBS})
+endif()
 
 # Debug demosaic test
 add_executable(test_demosaic_debug tests/test_demosaic_debug.cpp
@@ -1135,6 +1277,9 @@ add_dependencies(test_demosaic_debug dng_demosaic_aot_target)
 if(APPLE)
     target_link_libraries(test_demosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_demosaic_debug ${DNG_LINUX_TEST_LIBS})
+endif()
 
 # Phase 5.1: Halide Render PSNR Test (placeholder - needs DNG SDK data)
 add_executable(test_render_halide tests/test_render_halide.cpp)
@@ -1144,6 +1289,9 @@ target_include_directories(test_render_halide PRIVATE
 target_link_libraries(test_render_halide dng_sdk)
 if(APPLE)
     target_link_libraries(test_render_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_render_halide ${DNG_LINUX_TEST_LIBS})
 endif()
 
 endif() # NOT DNG_CROSS_BUILD (test targets)

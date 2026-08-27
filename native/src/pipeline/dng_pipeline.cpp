@@ -111,7 +111,9 @@ bool requireGpuBackend(const char *path) {
     return true;
   }
   fprintf(stderr, "[Pipeline] GPU capability gate FAILED for %s: "
-          "backend=%s; decode requires Metal (macOS) or Vulkan (Android). "
+          "backend=%s; decode requires Metal (macOS) or Vulkan (Android, "
+          "Windows, Linux). On Linux this usually means a missing Vulkan ICD "
+          "(install libvulkan1 plus a driver such as mesa-vulkan-drivers). "
           "No SDK-CPU fallback route available.\n",
           path, dng_halide_gpu_backend_name());
   return false;
