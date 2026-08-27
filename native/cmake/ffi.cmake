@@ -117,6 +117,17 @@ elseif(WIN32)
     endif()
     message(STATUS "Linking Vulkan loader: ${VULKAN_LIBRARY}")
     target_link_libraries(dng_decoder_native ${VULKAN_LIBRARY})
+elseif(UNIX AND NOT APPLE)
+    # Linux port (2026-08-28, D4): the Halide Vulkan runtime dlopen's
+    # libvulkan.so.1 at runtime (halide_runtime_fork/upstream/vulkan_interface.h),
+    # so this branch deliberately does NOT probe for or hard-require a Vulkan SDK
+    # at build time — a link-time Vulkan dependency would be both unnecessary and a
+    # build-environment regression. The runtime prerequisite is a Vulkan ICD on host
+    # (libvulkan1 + a driver such as mesa-vulkan-drivers). We link only libdl (for
+    # the runtime's dlopen) and pthreads. Branch is UNIX AND NOT APPLE, never bare
+    # UNIX, because in CMake APPLE implies UNIX (R5).
+    find_package(Threads REQUIRED)
+    target_link_libraries(dng_decoder_native ${CMAKE_DL_LIBS} Threads::Threads)
 endif()
 
 # Re-guard (split mechanics): the enclosing `if(NOT DNG_HOST_GENERATORS_ONLY)`

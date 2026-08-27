@@ -32,6 +32,16 @@ else()
         # (dng_pipeline.cpp requireGpuBackend), so a GPU feature is mandatory
         # rather than optional here.
         set(AOT_TARGET "x86-64-windows-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
+    elseif(UNIX AND NOT APPLE)
+        # Linux port (2026-08-28): native host Vulkan build, same strict device
+        # contract as Android/Windows (vk_int8/vk_int16/vk_int64). `host` picks
+        # the runner's own arch; the Halide Vulkan runtime dlopen's libvulkan.so.1
+        # at runtime, so no Vulkan SDK is needed at build time. Must sit AFTER the
+        # ANDROID arm — Android also matches UNIX AND NOT APPLE — so this branch is
+        # Linux-desktop only. Selects the same "vulkan" backend as Android/Windows,
+        # so DNG_STAGE4_SPLIT_KERNEL turns ON automatically (matched in the C++ host
+        # bridge, dng_render_halide.cpp).
+        set(AOT_TARGET "host-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
     else()
         set(AOT_TARGET "host-no_asserts-no_bounds_query")
     endif()

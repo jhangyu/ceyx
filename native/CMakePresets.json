@@ -61,6 +61,18 @@
         "DNG_DIAGNOSTIC_BUILD": "OFF",
         "DNG_VK_PIPELINE_CACHE": "OFF"
       }
+    },
+    {
+      "name": "linux-vulkan",
+      "displayName": "Linux Vulkan (native)",
+      "description": "Single-stage native Linux x86-64 build with the Halide Vulkan GPU backend. The host is the target, so no host/target split is needed (unlike Android). Runtime prerequisite: a Vulkan ICD on the host (libvulkan1 plus a driver such as mesa-vulkan-drivers); the Halide Vulkan runtime dlopen's libvulkan.so.1 rather than linking it, so no Vulkan SDK is required at build time. The strict AOT target (host-vulkan-vk_int8-vk_int16-vk_int64-...) is selected automatically by native/cmake/halide_aot.cmake, not pinned here.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DNG_DIAGNOSTIC_BUILD": "OFF",
+        "DNG_VK_PIPELINE_CACHE": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -81,6 +93,11 @@
     {
       "name": "windows-vulkan",
       "configurePreset": "windows-vulkan",
+      "targets": ["dng_decoder_native"]
+    },
+    {
+      "name": "linux-vulkan",
+      "configurePreset": "linux-vulkan",
       "targets": ["dng_decoder_native"]
     }
   ]
