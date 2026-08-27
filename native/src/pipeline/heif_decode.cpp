@@ -115,6 +115,19 @@ int32_t heifDecodePrimaryRgba(const char *path, int32_t max_dim,
   const int32_t opened = openPrimary(path, ctx, handle);
   if (opened != kHeifSuccess) return opened;
 
+  // Budget check BEFORE any decoder allocation: reject an oversized image on
+  // its declared (post-transform) extent so heif_decode_image never allocates
+  // a full-frame plane for a file that would blow the RGBA budget. The
+  // post-scale check below still guards the output buffer.
+  {
+    const int handle_w = heif_image_handle_get_width(handle.handle);
+    const int handle_h = heif_image_handle_get_height(handle.handle);
+    if (handle_w <= 0 || handle_h <= 0) return kHeifErrMetadataInvalid;
+    const int64_t declared_bytes = static_cast<int64_t>(handle_w) *
+                                   static_cast<int64_t>(handle_h) * 4;
+    if (declared_bytes > kHeifMaxRgbaBytes) return kHeifErrSizeOverflow;
+  }
+
   OptionsGuard options;
   options.options = heif_decoding_options_alloc();
   if (!options.options) return kHeifErrAllocationFailed;
@@ -161,6 +174,13 @@ int32_t heifDecodePrimaryRgba(const char *path, int32_t max_dim,
   const uint8_t *plane =
       heif_image_get_plane_readonly(frame, heif_channel_interleaved, &stride);
   if (!plane || stride <= 0) return kHeifErrColorConversion;
+
+  // Untrusted-input guard: the row copy below reads `width*4` bytes per row
+  // from `plane` at `stride` increments. A stride narrower than the visible
+  // row would read past the plane; reject cleanly instead of over-reading.
+  if (stride < static_cast<int>(static_cast<int64_t>(width) * 4)) {
+    return kHeifErrColorConversion;
+  }
 
   uint8_t *buffer =
       static_cast<uint8_t *>(std::malloc(static_cast<size_t>(needed)));
