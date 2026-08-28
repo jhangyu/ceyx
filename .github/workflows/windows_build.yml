@@ -35,6 +35,37 @@ jobs:
     permissions:
       contents: write
     steps:
+      # MUST run BEFORE actions/checkout. Git for Windows ships
+      # core.autocrlf=true in the system gitconfig, so a checkout done before
+      # this step writes native/patches/**/*.patch into the workspace with CRLF
+      # line endings. fetch_libraw_dist.sh then clones LibRaw/RawSpeed3 into
+      # fresh LF worktrees, and `git apply` compares a CRLF patch against LF
+      # source and fails on every hunk.
+      #
+      # This is exactly how run 33169091228 failed
+      # ("FAILED to apply 01.CameraMeta-extensibility.patch"), and the earlier
+      # version of this workflow made it worse rather than better: it set
+      # autocrlf=false INSIDE the fetch step, i.e. after the patches had already
+      # been checked out as CRLF, which guaranteed the mismatch instead of
+      # preventing it.
+      #
+      # Verified mechanically, not assumed — native/scripts/tmp/windows_eol_probe2.sh
+      # reconstructs the pristine RawSpeed3 file and forward-applies patch 01
+      # three ways: LF patch -> LF tree RC=0, CRLF patch -> LF tree RC=1 (the
+      # runner's state), LF patch -> CRLF tree RC=1. Log:
+      # docs/logs/2026-08-28/ci-verify/windows_eol_probe2.txt
+      #
+      # Setting it here makes the Windows workspace byte-identical to the Linux
+      # and macOS ones, which is why the identical fetch step is green there.
+      - name: Force LF line endings for all git operations
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          echo "core.autocrlf=$(git config --global core.autocrlf)"
+          echo "core.eol=$(git config --global core.eol)"
+          echo "system core.autocrlf=$(git config --system core.autocrlf || echo '<unset>')"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -128,17 +159,43 @@ jobs:
 
       # DNG_ENABLE_GENERIC_RAW defaults ON and cmake/tests.cmake hard-fails
       # configure without this tree, so it must be fetched before configure.
-      # core.autocrlf is forced off for this step: the runner image sets it
-      # globally to true, which would rewrite the freshly cloned LibRaw /
-      # RawSpeed3 worktrees to CRLF and make the LF-authored patch set in
-      # native/patches/** fail `git apply` (a hard error in the script).
+      # Line-ending handling lives in the pre-checkout step at the top of this
+      # job, deliberately not here — by the time this step runs it is already
+      # too late to change how the patch files were written to disk.
       - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
         shell: bash
         working-directory: ${{ github.workspace }}
+        run: native/scripts/fetch_libraw_dist.sh
+
+      # fetch_libraw_dist.sh discards git apply's actual error (`2>/dev/null` on
+      # its --check probe) and prints only "FAILED to apply <name>", which is
+      # what made run 33169091228 cost a whole round to diagnose. This step runs
+      # only on failure and recovers the real error: the script exits before
+      # strip_git(), so the clone and its .git are still on disk.
+      - name: Diagnose LibRaw patch failure (on failure only)
+        if: failure()
+        shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-          native/scripts/fetch_libraw_dist.sh
+          RS="native/third_party/libraw/RawSpeed3/rawspeed"
+          echo "== git config (all scopes) =="
+          git config --show-origin --get-all core.autocrlf || true
+          git config --show-origin --get-all core.eol || true
+          echo "== CR characters in the patch set as checked out =="
+          for p in native/patches/rawspeed3/*.patch; do
+            echo "$p CR_LINES=$(grep -c $'\r' "$p" || true)"
+          done
+          echo "== CR characters in the cloned RawSpeed3 tree =="
+          if [ -d "$RS" ]; then
+            grep -c $'\r' "$RS/src/librawspeed/metadata/CameraMetaData.h" || true
+          else
+            echo "$RS does not exist — failure was BEFORE the RawSpeed3 clone."
+          fi
+          echo "== verbose forward apply, real error text =="
+          for p in native/patches/rawspeed3/*.patch; do
+            echo "--- $p"
+            git -C "$RS" apply --check -v "$p" 2>&1 | head -20 || true
+          done
 
       # cmake is invoked directly rather than through
       # native/scripts/build_native_watchdog.py: that script's watchdog loop
