@@ -2,7 +2,7 @@ name: ceyx
 description: >-
   Bundles the prebuilt dng_decoder_native library into host apps so RAW/DNG
   decoding works without a dev-machine CMake build tree.
-version: 0.1.0
+version: 0.1.2
 publish_to: 'none'
 
 environment:
