@@ -28,3 +28,10 @@ flutter:
         ffiPlugin: true
       windows:
         ffiPlugin: true
+      # ORDERING CONTRACT: this entry and a committed
+      # linux/Libraries/libdng_decoder_native.so must reach the default branch
+      # TOGETHER. Declaring the platform alone makes every consuming
+      # `flutter build linux` fail at the install(FILES ...) step for the
+      # bundled library — see linux/CMakeLists.txt.
+      linux:
+        ffiPlugin: true
