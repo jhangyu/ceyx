@@ -1,0 +1,241 @@
+name: Windows Build (Vulkan native)
+
+on:
+  workflow_dispatch:
+  push:
+    # ci/** so the lead can verify this workflow from a bootstrap branch before
+    # any of it lands on main (a workflow file only becomes dispatchable once it
+    # exists on a ref that runs it). Mirrors linux_build.yml's trigger set.
+    branches:
+      - "ci/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - "native/**"
+      - ".github/workflows/windows_build.yml"
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    # BUILD-ONLY gate, same rationale as linux_build.yml: a GitHub-hosted
+    # windows-latest runner has no Vulkan-capable GPU and no ICD, so decode /
+    # PSNR gates cannot run here. This job proves that the Windows x86-64
+    # Vulkan native library genuinely COMPILES AND LINKS from current source
+    # (the committed dng_processor_ffi/windows/Libraries/dng_decoder_native.dll
+    # was hand-built on a developer machine and has had no CI provenance until
+    # now — see docs/logs/2026-08-26/Task_windows_build_verification.md §3/§4).
+    name: Windows x86-64 Vulkan native (dng_decoder_native)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      NATIVE_DIR: ${{ github.workspace }}/native
+      BUILD_DIR: ${{ github.workspace }}/native/build-windows
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # CMake ships with the runner image; Ninja does not reliably. pip's ninja
+      # wheel is a pinned, deterministic way to get it on PATH without choco.
+      - name: Install Ninja
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          ninja --version
+
+      # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
+      # LIB. On a developer machine that is vcvars64.bat; in CI this action is
+      # the equivalent (it exports the vcvars environment to later steps).
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # clang-cl is MANDATORY, not a preference: native/cmake/pipeline.cmake
+      # hard-fails on cl.exe because dng_sdk needs -ffp-contract=off for the
+      # byte-exact Stage4 colour contract, which cl.exe cannot express. LLVM is
+      # preinstalled on the windows runner image; this step proves it is on PATH
+      # and fails loudly (rather than at cmake configure) if the image changes.
+      - name: Locate clang-cl
+        shell: bash
+        run: |
+          if command -v clang-cl >/dev/null 2>&1; then
+            CLANG_CL="$(command -v clang-cl)"
+          elif [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+            CLANG_CL="/c/Program Files/LLVM/bin/clang-cl.exe"
+            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+          else
+            echo "::error::clang-cl not found on the runner. native/cmake/pipeline.cmake requires it (cl.exe has no -ffp-contract=off equivalent)." >&2
+            exit 1
+          fi
+          echo "clang-cl: $CLANG_CL"
+          "$CLANG_CL" --version
+
+      # Unlike Linux (where the Halide Vulkan runtime dlopen's libvulkan.so.1),
+      # native/cmake/ffi.cmake's WIN32 branch LINKS the loader import library
+      # vulkan-1.lib and hard-fails configure without it, so the SDK is a real
+      # build-time prerequisite here. stripdown is left off: it is exactly the
+      # Lib/ directory we need. install_runtime=false — nothing is executed.
+      - name: Install Vulkan SDK (provides vulkan-1.lib)
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: "1.3.290.0"
+          install_runtime: false
+          cache: true
+          stripdown: false
+
+      - name: Verify vulkan-1.lib is present
+        shell: bash
+        run: |
+          echo "VULKAN_SDK=${VULKAN_SDK:-<unset>}"
+          if [ ! -f "${VULKAN_SDK}/Lib/vulkan-1.lib" ]; then
+            echo "::error::vulkan-1.lib missing under VULKAN_SDK; cmake/ffi.cmake's WIN32 branch would fail configure." >&2
+            ls -la "${VULKAN_SDK}/Lib" || true
+            exit 1
+          fi
+          ls -la "${VULKAN_SDK}/Lib/vulkan-1.lib"
+
+      - name: Cache vendored Halide v21 distribution (Windows x86-64)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+
+      # The fetch script already has a MINGW*/MSYS*/CYGWIN* case selecting the
+      # x86-64-windows zip asset (added 2026-08-21 for the Windows port), so it
+      # runs unmodified under the runner's bundled Git-Bash.
+      - name: Fetch vendored Halide v21 distribution
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: native/scripts/fetch_halide_v21_dist.sh
+
+      - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+
+      # DNG_ENABLE_GENERIC_RAW defaults ON and cmake/tests.cmake hard-fails
+      # configure without this tree, so it must be fetched before configure.
+      # core.autocrlf is forced off for this step: the runner image sets it
+      # globally to true, which would rewrite the freshly cloned LibRaw /
+      # RawSpeed3 worktrees to CRLF and make the LF-authored patch set in
+      # native/patches/** fail `git apply` (a hard error in the script).
+      - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          native/scripts/fetch_libraw_dist.sh
+
+      # cmake is invoked directly rather than through
+      # native/scripts/build_native_watchdog.py: that script's watchdog loop
+      # uses select.select() on a subprocess pipe, which is POSIX-only (on
+      # Windows select accepts sockets only). GitHub Actions already provides
+      # the watchdog's function via timeout-minutes plus streamed logs.
+      #
+      # Cache variables mirror native/CMakePresets.json's `windows-vulkan`
+      # preset (clang-cl, static CRT). The preset itself is not used because CI
+      # needs a different binaryDir-independent set of extra flags and an
+      # explicit, greppable configure line in the log.
+      # -DDNG_ENABLE_HEIF=OFF is the escape hatch cmake/heif.cmake documents:
+      # the HEIC route ships a macOS-only libheif/libde265 dist.
+      - name: Configure (Ninja + clang-cl, Vulkan AOT target)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          # set +e around the command so the literal RC=$? below actually runs:
+          # the default `bash -eo pipefail` shell would otherwise abort the step
+          # before it, leaving a log that only ever records RC=0.
+          set +e
+          cmake -S native -B "native/build-windows" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-cl \
+            -DCMAKE_CXX_COMPILER=clang-cl \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DDNG_DIAGNOSTIC_BUILD=OFF \
+            -DDNG_VK_PIPELINE_CACHE=OFF \
+            -DDNG_ENABLE_HEIF=OFF
+          RC=$?
+          set -e
+          echo "CONFIGURE_RC=$RC"
+          exit $RC
+
+      - name: Build dng_decoder_native
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          cmake --build "native/build-windows" --target dng_decoder_native -- -v
+          RC=$?
+          set -e
+          echo "BUILD_RC=$RC"
+          exit $RC
+
+      # AC-W3 evidence: the DLL exists, is a PE32+ x86-64 DLL, and has a
+      # non-zero size recorded in the log. A build step that silently produced
+      # nothing must not reach the upload step.
+      - name: Verify Windows artifact
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          DLL="native/build-windows/dng_decoder_native.dll"
+          ls -la native/build-windows || true
+          if [ ! -f "$DLL" ]; then
+            echo "::error::$DLL not found — the Windows build did not emit the expected DLL." >&2
+            exit 1
+          fi
+          echo "== file =="
+          file "$DLL" || echo "::notice::file(1) unavailable on this runner; size check below is the binding evidence."
+          echo "== size (bytes) =="
+          SIZE=$(wc -c < "$DLL")
+          echo "DLL_SIZE_BYTES=$SIZE"
+          if [ "$SIZE" -le 0 ]; then
+            echo "::error::DLL is zero bytes." >&2
+            exit 1
+          fi
+
+      - name: Stage native artifacts
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p artifacts/native
+          cp native/build-windows/dng_decoder_native.dll artifacts/native/
+          # The import library is only produced when the linker sees exports;
+          # copy it when present so downstream consumers can link against it.
+          cp native/build-windows/dng_decoder_native.lib artifacts/native/ 2>/dev/null || \
+            echo "::notice::dng_decoder_native.lib not present (import library not emitted); DLL-only artifact."
+          ls -la artifacts/native
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-windows-x86-64
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Attach artifact to GitHub Release (tag push only)
+        # Same pattern as linux_build.yml / android_build.yml: each workflow
+        # owns its own release-attach step so no file is jointly owned.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/artifacts/native/dng_decoder_native.dll
+          fail_on_unmatched_files: true
