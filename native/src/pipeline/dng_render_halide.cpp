@@ -122,7 +122,11 @@ functions:
 // Guards that are about the *kernel variant* (buffer shapes, RGBA scratch, D2H,
 // call sites) key off this macro; guards that are genuinely platform-specific
 // (arm_neon.h, mmap, Android-only prewarm) stay on __ANDROID__.
-#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
+// DNG_FORCE_VULKAN (F-R3-1 MoltenVK arbitration, default OFF): a Vulkan AOT
+// build on Apple ships the split Stage4 kernel (dng_render_stage4_split), so the
+// host bridge must talk to it — same as every other Vulkan target. OFF keeps
+// Apple on the non-split Metal kernel unchanged.
+#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
 #define DNG_STAGE4_SPLIT_KERNEL 1
 #endif
 

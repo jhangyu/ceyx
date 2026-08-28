@@ -75,6 +75,22 @@ option(DNG_DIAGNOSTIC_BUILD
        "Build deprecated research generators (RectilinearWarpStrictFloatGenerator, RectilinearWarpDebugGenerator) for diagnostics"
        OFF)
 
+# F-R3-1 MoltenVK arbitration switch (2026-08-28, default OFF). When ON, the
+# host bridge selects Halide's Vulkan device interface + split Stage4 kernel on
+# Apple too (instead of the hardcoded Metal path), so a Vulkan AOT build
+# (DNG_AOT_TARGET_OVERRIDE=host-vulkan-...) can run over MoltenVK on macOS to
+# tell a lavapipe environment fault apart from a real kernel bug. OFF reproduces
+# the committed Apple/Metal behaviour byte-for-byte (AOT artifacts are emitted by
+# the Halide generators, which this switch does not touch). Pair it with the
+# matching Vulkan AOT target override in a SEPARATE build dir; never the default
+# macOS build.
+option(DNG_FORCE_VULKAN
+       "Force the Vulkan Halide device interface + split Stage4 kernel on Apple (MoltenVK arbitration; OFF = committed Metal path)"
+       OFF)
+if(DNG_FORCE_VULKAN)
+    add_compile_definitions(DNG_FORCE_VULKAN=1)
+endif()
+
 # =============================================================================
 # P17 T1: Generic RAW frontend (LibRaw + bundled RawSpeed3)
 # =============================================================================

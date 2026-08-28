@@ -6,9 +6,12 @@
 // this file covers all three. There is no CPU fallback route
 // in the pipeline (dng_pipeline.cpp requireGpuBackend), so a platform that
 // falls through to kUnsupported cannot decode at all.
-#if defined(__APPLE__)
+// DNG_FORCE_VULKAN (F-R3-1 MoltenVK arbitration, default OFF): route Apple to
+// the Vulkan interface instead of Metal so a Vulkan AOT build can run over
+// MoltenVK. OFF keeps the committed Apple=Metal binding unchanged.
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 #include "HalideRuntimeMetal.h"
-#elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
+#elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
 #include "HalideRuntimeVulkan.h"
 #endif
 
@@ -23,9 +26,9 @@ GpuBackend resolve_backend() {
         if (env[0] == 'v' || env[0] == 'V') return GpuBackend::kVulkan;
         return GpuBackend::kUnsupported;
     }
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
     return GpuBackend::kMetal;
-#elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
+#elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
     return GpuBackend::kVulkan;
 #else
     return GpuBackend::kUnsupported;
@@ -41,11 +44,11 @@ GpuBackend cached_backend() {
 
 const halide_device_interface_t* dng_halide_gpu_device_interface() {
     switch (cached_backend()) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
     case GpuBackend::kMetal:
         return halide_metal_device_interface();
 #endif
-#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__)
+#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
     case GpuBackend::kVulkan:
         return halide_vulkan_device_interface();
 #endif
