@@ -236,8 +236,22 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_BUILD_EXAMPLES=OFF
           cmake --build zlib-build --target install
-          echo "== installed zlib =="
-          find "${GITHUB_WORKSPACE}/zlib-install" -name '*.lib' -o -name 'zlib.h' | sort
+          # List EVERYTHING installed. The previous version of this listing
+          # filtered on '*.lib' and 'zlib.h', which made it look like a complete
+          # inventory while silently omitting zconf.h — the exact file whose
+          # absence was then suspected in round 4. An instrument that answers
+          # only the question you thought to ask is worse than none.
+          echo "== installed zlib (complete) =="
+          find "${GITHUB_WORKSPACE}/zlib-install" -type f | sort
+          # Hard-assert the two artifacts everything downstream depends on, so a
+          # layout change fails here rather than 400 compile steps later.
+          for required in include/zlib.h include/zconf.h lib/zlibstatic.lib; do
+            if [ ! -f "${GITHUB_WORKSPACE}/zlib-install/${required}" ]; then
+              echo "::error::zlib install is missing ${required}." >&2
+              exit 1
+            fi
+          done
+          echo "zlib install verified: zlib.h, zconf.h, zlibstatic.lib all present"
 
       # cmake is invoked directly rather than through
       # native/scripts/build_native_watchdog.py: that script's watchdog loop
@@ -251,6 +265,16 @@ jobs:
       # explicit, greppable configure line in the log.
       # -DDNG_ENABLE_HEIF=OFF is the escape hatch cmake/heif.cmake documents:
       # the HEIC route ships a macOS-only libheif/libde265 dist.
+      #
+      # -DZLIB_USE_STATIC_LIBS=ON: zlib's CMake build emits BOTH zlib.lib (the
+      # import library for zlib.dll) and zlibstatic.lib, and FindZLIB prefers
+      # the former — run 33177220892 logged
+      # "Found ZLIB: .../zlib-install/lib/zlib.lib". Linking that would stamp a
+      # runtime dependency on zlib.dll into libdng_decoder_native, a DLL we do
+      # not ship, and would contradict the static-linking policy
+      # third_party.cmake:29-32 states for exactly this reason ("keeps the
+      # produced DLL free of an external zlib1.dll dependency"). This flag makes
+      # every find_package(ZLIB) in the build resolve to zlibstatic.lib.
       - name: Configure (Ninja + clang-cl, Vulkan AOT target)
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -268,7 +292,8 @@ jobs:
             -DDNG_VK_PIPELINE_CACHE=OFF \
             -DDNG_ENABLE_HEIF=OFF \
             -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
-            -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install"
+            -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
+            -DZLIB_USE_STATIC_LIBS=ON
           RC=$?
           set -e
           echo "CONFIGURE_RC=$RC"
@@ -318,6 +343,27 @@ jobs:
       # AC-W3 evidence: the DLL exists, is a PE32+ x86-64 DLL, and has a
       # non-zero size recorded in the log. A build step that silently produced
       # nothing must not reach the upload step.
+      # The configure diagnostic above sits BEFORE this step, so it cannot fire
+      # for a BUILD failure — which is exactly what happened in round 4, where
+      # the decisive detail (the failing translation unit's include path) was
+      # again one layer below the printed error. This closes that gap: on build
+      # failure, dump how CMake resolved zlib/jpeg and the include directories
+      # actually attached to the RawSpeed3 targets.
+      - name: Diagnose build failure (on failure only)
+        if: failure()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          B="native/build-windows"
+          echo "== how CMake resolved ZLIB / JPEG =="
+          grep -iE '^ZLIB_|^JPEG_|^DNG_ZLIB_' "$B/CMakeCache.txt" || echo "no entries"
+          echo "== zlib headers actually on disk =="
+          ls -la "${GITHUB_WORKSPACE}/zlib-install/include" || echo "prefix missing"
+          echo "== include dirs on the rawspeed decompressors target =="
+          # The compile line is authoritative; recover it from the ninja graph
+          # rather than inferring it from CMake variables.
+          grep -m1 "DeflateDecompressor.cpp.obj" "$B/build.ninja" || echo "rule not found"
+
       - name: Verify Windows artifact
         shell: bash
         working-directory: ${{ github.workspace }}
