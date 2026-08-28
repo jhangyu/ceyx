@@ -1,6 +1,6 @@
 --- a/src/decoders/fuji_compressed.cpp
 +++ b/src/decoders/fuji_compressed.cpp
-@@ -176,6 +176,57 @@
+@@ -176,6 +176,68 @@
    qt->raw_bits = log2ceil(qt->total_values);
    qt->q_grad_mult = 9;
    params->max_bits = 4 * log2ceil(qp[4] + 1);
@@ -45,7 +45,18 @@
 +  {
 +    /* First sighting of this q_base in this strip: compute into a buffer the
 +       cache owns, via the verbatim upstream routine. */
-+    params->qt[0].q_table = (int8_t *)calloc(table_size, 1);
++    int8_t *buf = (int8_t *)calloc(table_size, 1);
++    if (!buf)
++    {
++      /* Allocation failed: fall back to the strip's inline scratch blob
++         (params+1, as set up by fuji_decode_strip) and skip caching, so
++         init_main_qtable() cannot overwrite a buffer a previously cached
++         q_base still owns. */
++      params->qt[0].q_table = (int8_t *)(params + 1);
++      init_main_qtable(params, q_base);
++      return;
++    }
++    params->qt[0].q_table = buf;
 +    init_main_qtable(params, q_base);
 +    *cached = params->qt[0];
 +    cache->max_bits[q_base] = params->max_bits;

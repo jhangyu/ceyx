@@ -243,9 +243,19 @@ bool recordAndCompareHash(const std::string& id, const uint8_t* rgba,
         return false;
     }
     if (it == baseline.end()) {
-        std::printf("[RawE2E] hash-baseline %s absent (run --record-hashes to "
-                    "seed) sha256=%s\n",
-                    id.c_str(), digest.c_str());
+        // A sample that decoded successfully but has NO recorded baseline
+        // means the no-drift gate is silently disarmed for this layout: the
+        // very regression it exists to catch would pass green. Fail loudly so
+        // a newly added corpus file cannot ship an unseeded (vacuous) gate.
+        // Seeding is the explicit, separate `--record-hashes` run.
+        char detail[200];
+        std::snprintf(detail, sizeof(detail),
+                      "no recorded baseline (run --record-hashes to seed) "
+                      "sha256=%s",
+                      digest.c_str());
+        report("hash-baseline-missing", id.c_str(), false, detail);
+        ++compared;
+        all_match = false;
         return false;
     }
     char detail[200];
@@ -635,15 +645,23 @@ int main(int argc, char** argv) {
             const bool alpha_ok = rc == kRawSuccess && result.rgba_ptr &&
                 alphaAll255(result.rgba_ptr,
                             static_cast<size_t>(result.width) * result.height);
+            // P19 A3 (r7 F3): assert the decoded sample_model instead of
+            // printing a hardcoded "class=linear_rgb" literal -- the Bayer
+            // branch checks d.sample_model == kRawSampleModelCfa, so the
+            // Foveon branch must likewise prove the pipeline saw a linear-RGB
+            // frame, not merely that some RGBA of the right size came back.
+            const bool model_ok =
+                result.diag.sample_model == kRawSampleModelLinearRgb;
             std::snprintf(detail, sizeof(detail),
-                          "class=linear_rgb size=%ux%u alpha=%s backend=%s repack=%lld rc=%s",
+                          "sample_model=%d size=%ux%u alpha=%s backend=%s repack=%lld rc=%s",
+                          static_cast<int>(result.diag.sample_model),
                           result.width, result.height, alpha_ok ? "255" : "BAD",
                           raw_backend_name(result.diag.unpack_backend),
                           static_cast<long long>(result.diag.raw_repack_bytes),
                           raw_error_name(rc));
             report("", s.id.c_str(),
-                   alpha_ok && result.width > 0 && result.height > 0 &&
-                       result.diag.raw_repack_bytes == 0,
+                   alpha_ok && model_ok && result.width > 0 &&
+                       result.height > 0 && result.diag.raw_repack_bytes == 0,
                    detail);
 
             // Byte-level no-drift gate for the Foveon (X3F) decode path -- the
@@ -737,9 +755,14 @@ int main(int argc, char** argv) {
     {
         struct Case { const char* name; RawSampleModel model; uint32_t comps;
                       uint32_t repeat_w; uint32_t repeat_h; };
+        // P19 A2 (r7 F2): linear_rgb is a PRODUCTION class since Task 8, so it
+        // no longer belongs in the "must route to kRawErrLayoutUnsupported"
+        // sweep. It only kept passing here because this synthetic frame is
+        // stride-2/planar and rejected by the linear-RGB shape rules, not
+        // because the class is unsupported -- the assertion's meaning had
+        // drifted. Its real coverage is the linear-rgb-synthetic case below.
         const Case cases[] = {
             {"monochrome",   kRawSampleModelMonochrome,   1, 0, 0},
-            {"linear_rgb",   kRawSampleModelLinearRgb,    3, 0, 0},
             {"linear_ycbcr", kRawSampleModelLinearYCbCr,  3, 0, 0},
             {"other_cfa",    kRawSampleModelCfa,          1, 4, 4},
             {"layered",      kRawSampleModelLayered,      3, 0, 0},

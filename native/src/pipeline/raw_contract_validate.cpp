@@ -398,6 +398,25 @@ RawErrorCode raw_validate_gpu_input(const RawGpuInput* input,
                             "linear RGB pixel_stride_bytes must be 6 "
                             "(3 interleaved U16 components)");
         }
+        // P19 A1 (r7 F1): the linear-RGB branch subtracts black exclusively
+        // from component_black and treats the spatial tile as a 1x1 zero by
+        // construction. Enforce that invariant instead of asserting it: a
+        // cpp==3 file carrying a real spatial black tile (e.g. a
+        // BlackLevelRepeatDim 2x2 linear DNG) would otherwise be normalised
+        // with its spatial black silently un-subtracted yet return kRawSuccess.
+        // Symmetric to the CFA rule above (which rejects component_black on a
+        // mosaic, where the spatial tile is the only black term).
+        {
+            const uint32_t bw = input->black.repeat_width
+                                    ? input->black.repeat_width : 1;
+            const uint32_t bh = input->black.repeat_height
+                                    ? input->black.repeat_height : 1;
+            if (bw != 1 || bh != 1 || input->black.values[0] != 0.0f) {
+                return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
+                                "linear RGB carries a non-zero spatial black "
+                                "tile; black must live in component_black only");
+            }
+        }
         return kRawSuccess;
     }
 
