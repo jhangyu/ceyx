@@ -128,6 +128,21 @@ elseif(UNIX AND NOT APPLE)
     # UNIX, because in CMake APPLE implies UNIX (R5).
     find_package(Threads REQUIRED)
     target_link_libraries(dng_decoder_native ${CMAKE_DL_LIBS} Threads::Threads)
+
+    # Size fix (2026-08-29): the Linux .so came out at 22.7MB vs ~6MB elsewhere.
+    # Measured on the CI artifact (run 33186830473): .debug_* = 16.78MB = 74% of
+    # the file, dominated by .debug_gnu_pubnames/pubtypes; .symtab is already
+    # absent and .dynsym+.dynstr is only 1.2%, so neither stripping symbols nor
+    # hidden visibility is the lever. No `-g` exists anywhere in this tree — the
+    # DWARF rides in from prebuilt static inputs (the vendored Halide dist still
+    # carries its build bot's paths). This is a linker-behaviour difference, not
+    # a flag difference: ELF ld copies each input's .debug_* into the .so, while
+    # macOS ld leaves DWARF in the .o files (dsymutil collects it) and MSVC puts
+    # it in a PDB. --strip-debug drops only the debug sections, so the dynamic
+    # symbol table (and thus the FFI export surface) is untouched. Release only,
+    # so a local RelWithDebInfo/Debug build stays debuggable.
+    target_link_options(dng_decoder_native PRIVATE
+        $<$<CONFIG:Release>:-Wl,--strip-debug>)
 endif()
 
 # Re-guard (split mechanics): the enclosing `if(NOT DNG_HOST_GENERATORS_ONLY)`
