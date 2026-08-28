@@ -34,10 +34,6 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write
-    env:
-      NATIVE_DIR: ${{ github.workspace }}/native
-      BUILD_DIR: ${{ github.workspace }}/native/build-windows
-      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
