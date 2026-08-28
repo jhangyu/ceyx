@@ -358,11 +358,13 @@ if(DNG_ENABLE_GENERIC_RAW)
     # project's mobile/cross switch; ANDROID/IOS are belt-and-braces so the
     # intent survives someone cross-compiling without setting DNG_CROSS_BUILD.
     #
-    # This unlocks parallelism that already exists in both vendored trees but
-    # was compiled out: LibRaw's `#pragma omp parallel for` over Fuji strips
-    # (src/decoders/fuji_compressed.cpp) and RawSpeed3's FujiDecompressor
-    # `#pragma omp parallel`. Project patch 09 keeps a std::thread pool in the
-    # `#else` branch, so mobile and any OpenMP-less toolchain stay parallel too.
+    # This unlocks parallelism that already exists in the vendored trees but
+    # was compiled out: RawSpeed3's FujiDecompressor `#pragma omp parallel`
+    # plus LibRaw's remaining `#pragma omp parallel for` loops. NOTE: LibRaw's
+    # Fuji strip decode (src/decoders/fuji_compressed.cpp) no longer depends on
+    # OpenMP at all -- round-2 patch 09 (2026-08-28) replaced its OpenMP branch
+    # with an unconditional std::thread pool on every platform, so the Fuji
+    # path stays parallel even on mobile and any OpenMP-less toolchain.
     if(DNG_CROSS_BUILD OR ANDROID OR IOS)
         set(CEYX_ENABLE_DESKTOP_OPENMP OFF)
     else()
@@ -652,7 +654,9 @@ set(JPEG_VERSION_STRING \"62\")
     set(LIBRAW_PATH ${LIBRAW_DIR} CACHE STRING "" FORCE)
     set(ENABLE_RAWSPEED OFF)
     # Desktop OpenMP (RAW decode accel round, 2026-08-27): unlocks LibRaw's
-    # existing `#pragma omp parallel for` over Fuji strips. Gated by the same
+    # remaining `#pragma omp parallel for` loops. (LibRaw's Fuji strip decode
+    # is no longer among them -- round-2 patch 09 moved it to an unconditional
+    # std::thread pool.) Gated by the same
     # CEYX_ENABLE_DESKTOP_OPENMP computed above (desktop ON / mobile OFF, and
     # forced OFF if no libomp was found) so LibRaw and RawSpeed3 can never
     # disagree about whether OpenMP is in play. The OpenMP hint variables set
@@ -845,6 +849,22 @@ endif()
 if(DNG_ENABLE_GENERIC_RAW)
     add_executable(libraw_smoke tests/libraw_smoke.cpp)
     target_link_libraries(libraw_smoke PRIVATE libraw_vendored)
+endif()
+
+# Scaled decode gate for the LibRaw path (contract AC-2). Links the production
+# dylib so the real exported C ABI + scaled Stage4 dispatch are under test.
+if(DNG_ENABLE_GENERIC_RAW)
+    add_executable(test_raw_sized_decode tests/test_raw_sized_decode.cpp)
+    target_include_directories(test_raw_sized_decode PRIVATE ${INC_DIR})
+    target_link_libraries(test_raw_sized_decode dng_decoder_native libraw_vendored)
+    if(APPLE)
+        target_link_libraries(test_raw_sized_decode
+            ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY}
+            ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    endif()
+    if(DNG_LINUX_TEST_LIBS)
+        target_link_libraries(test_raw_sized_decode ${DNG_LINUX_TEST_LIBS})
+    endif()
 endif()
 
 
