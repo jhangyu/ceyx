@@ -48,11 +48,18 @@ native/third_party/dng_sdk/source/Makefile
 # cmakescripts/BuildPackages.cmake:42-166), so excluding them made a fresh
 # clone impossible to configure — CI on a clean checkout exposed this on
 # 2026-08-26. Together they are ~124KB of text.
+# win/ is NOT excluded either, for the same reason, found on 2026-08-28 when the
+# first Windows CI job ran: BuildPackages.cmake:67-121 configure_file()s
+# win/projectTargets.cmake.in and win/vc/projectTargets-release.cmake.in inside
+# an if(WIN32) block, so no macOS/Linux/Android build could ever reach it. 8
+# files, 36KB. Excluding only the two files that fire today would leave
+# win/turbojpeg.rc.in (CMakeLists.txt:700, if WITH_TURBOJPEG) and
+# win/jpeg*.def + win/jpeg.rc.in (sharedlib/CMakeLists.txt:44-49, if
+# ENABLE_SHARED) armed for the next option flip.
 native/third_party/libjpeg-turbo/java/
 native/third_party/libjpeg-turbo/doc/
 native/third_party/libjpeg-turbo/testimages/
 native/third_party/libjpeg-turbo/fuzz/
-native/third_party/libjpeg-turbo/win/
 native/third_party/libjpeg-turbo/sharedlib/
 native/third_party/libjpeg-turbo/ChangeLog.md
 

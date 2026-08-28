@@ -96,6 +96,21 @@ set(DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE "-1" CACHE STRING
 # =============================================================================
 if(NOT DNG_CROSS_BUILD)
 
+# Completeness accumulator (2026-08-28). Every AOT archive declared below
+# appends itself here, under whatever conditional it is declared in. The
+# stage-1 target (DNG_HOST_GENERATORS_ONLY, used by every two-stage
+# cross-compile) is derived from this list instead of a hand-written copy.
+#
+# Why: the previous literal list had drifted. It named
+# dng_render_stage4_scaled (linked by host TESTS only) while OMITTING
+# dng_render_stage4_scaled_preavg, which cmake/ffi.cmake links into the
+# shipped library on the non-split branch. Every cross-compile that existed
+# at the time resolved to a Vulkan target (Android/Linux/Windows), where the
+# split kernel is linked and preavg deliberately is not -- so the gap could
+# not surface until the first non-split (macOS/Metal x86_64) cross build.
+# Deriving the list removes the class of bug, not just this instance.
+set(DNG_AOT_DECLARED_OUTPUTS "")
+
 # W6 M-4: Standalone Halide runtime replaces legacy dng_pipeline.a runtime anchor.
 # Any generator binary can emit the runtime via `-r`; we use dng_demosaic_generator.
 add_custom_command(
@@ -105,6 +120,7 @@ add_custom_command(
     COMMENT "Generating standalone Halide runtime..."
 )
 add_custom_target(halide_runtime_target DEPENDS ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT})
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp.h
@@ -113,6 +129,7 @@ add_custom_command(
     COMMENT "Generating Halide AOT Rectilinear Warp..."
 )
 add_custom_target(dng_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT})
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear.h
@@ -121,6 +138,7 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage3 Demosaic..."
 )
 add_custom_target(dng_demosaic_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
 
 # P17 T9: generic-RAW fused normalize + Bayer demosaic AOT kernel.
 add_custom_command(
@@ -132,6 +150,7 @@ add_custom_command(
 )
 add_custom_target(raw_bayer_demosaic_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
 
 # P17 T11: generic-RAW fused normalize + X-Trans demosaic AOT kernel.
 add_custom_command(
@@ -143,6 +162,7 @@ add_custom_command(
 )
 add_custom_target(raw_xtrans_demosaic_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT})
 
 # P19 T7: generic-RAW linear-RGB normalize-only AOT kernel (no demosaic).
 add_custom_command(
@@ -154,6 +174,7 @@ add_custom_command(
 )
 add_custom_target(raw_linear_rgb_normalize_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp.h
@@ -162,6 +183,7 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage3 Demosaic+Warp..."
 )
 add_custom_target(dng_demosaic_warp_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT})
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4.h
@@ -170,6 +192,7 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage4 Render..."
 )
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 
 # Sized decode (targetWidth): box-filter-downscaling Stage4 variant. Emitted
 # from the SAME generator binary via -g/-f, exactly like the Android variant
@@ -182,6 +205,7 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled)..."
 )
 add_custom_target(dng_render_scaled_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
 
 # Variant A of the sized kernel: box-averages the Stage3 source BEFORE the
 # colour math (the variant above averages after it). The two co-exist on
@@ -194,6 +218,7 @@ add_custom_command(
     COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled, pre-average)..."
 )
 add_custom_target(dng_render_scaled_preavg_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
 
 # Phase 14: Vulkan three-channel-split Stage4 generator (was Android-only; see
 # the DNG_STAGE4_SPLIT_KERNEL note above).
@@ -206,6 +231,7 @@ if(DNG_STAGE4_SPLIT_KERNEL)
         COMMENT "Generating Halide AOT Stage4 Render (Android 3-channel split)..."
     )
     add_custom_target(dng_render_android_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
 
     # P14-W4-4 GO/NO-GO probe: isolated interleaved flat-1D src-read AOT.
     # Separate kernel/signature; does not touch the production Stage4 kernel.
@@ -216,6 +242,7 @@ if(DNG_STAGE4_SPLIT_KERNEL)
         COMMENT "Generating Halide AOT Stage4 Render PROBE (Android interleaved-src go/no-go)..."
     )
     add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
+    list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
 endif()
 
 # Phase 10 Sprint C1: MapPolynomial AOT (Stage 2 OpcodeList2 GPU).
@@ -229,6 +256,7 @@ add_custom_command(
 )
 add_custom_target(dng_opcode_polynomial_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT})
 
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3.h
@@ -240,28 +268,15 @@ add_custom_command(
 )
 add_custom_target(dng_opcode_polynomial3_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 
 # When building host generators only (Stage 1), pull AOT targets into ALL
 # so `cmake --build` actually runs the generators.
 if(DNG_HOST_GENERATORS_ONLY)
-    set(_DNG_ALL_AOT_DEPS
-        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
-    )
-    if(DNG_STAGE4_SPLIT_KERNEL)
-        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
-        list(APPEND _DNG_ALL_AOT_DEPS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
-    endif()
-    add_custom_target(dng_all_aot ALL DEPENDS ${_DNG_ALL_AOT_DEPS})
+    # Complete by construction: this is exactly the set of AOT archives this
+    # configure declared, so stage 1 cannot omit something stage 2 links.
+    add_custom_target(dng_all_aot ALL DEPENDS ${DNG_AOT_DECLARED_OUTPUTS})
+    message(STATUS "Stage-1 AOT set (${DNG_AOT_DECLARED_OUTPUTS})")
 endif()
 
 endif() # NOT DNG_CROSS_BUILD (AOT custom commands)
