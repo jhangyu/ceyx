@@ -1,11 +1,12 @@
 name: Dart / Flutter Smoke
 
 # Runs on push to ci/** branches and on manual dispatch (2026-08-28).
-# `dart analyze` always runs and fails hard on analyzer errors. The FFI smoke
-# step needs image_samples/lossless_dng_sample.dng (gitignored, absent on CI)
-# plus the native dylib; when either input is missing the step emits a
-# ::notice:: and skips cleanly rather than failing the job (user decision D3).
-# See docs/logs/2026-08-28/Task_ci_repair_contract.md.
+# Compile/analyze + unit tests only (supersedes the earlier FFI-smoke design):
+# `dart analyze` always runs and fails hard on analyzer errors, and the tracked
+# Flutter unit tests run. No step decodes an image — the FFI smoke that read a
+# gitignored sample DNG (never present on CI) was removed; that decode check
+# stays a LOCAL-ONLY developer step. See
+# docs/logs/2026-08-28/Task_ci_repair_contract.md.
 on:
   push:
     branches:
@@ -21,10 +22,6 @@ jobs:
     name: dart analyze + flutter test
     runs-on: macos-14
     timeout-minutes: 30
-    env:
-      REPO_ROOT: ${{ github.workspace }}
-      FLUTTER_DIR: ${{ github.workspace }}/app
-      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,36 +54,3 @@ jobs:
           else
             echo "::notice::No Flutter test files (test/**/*_test.dart) present; skipping 'flutter test'."
           fi
-
-      - name: Download native artifact (optional)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: dng_decoder_native-macos-arm64
-          path: ${{ github.workspace }}/artifacts/native
-
-      - name: Optional FFI smoke (requires sample DNG + native dylib)
-        working-directory: ${{ github.workspace }}/app
-        env:
-          DNG_NATIVE_BUILD_DIR: ${{ github.workspace }}/artifacts/native
-        run: |
-          SAMPLE="${REPO_ROOT}/image_samples/lossless_dng_sample.dng"
-          DYLIB="${DNG_NATIVE_BUILD_DIR}/libdng_decoder_native.dylib"
-          if [ ! -f "$SAMPLE" ]; then
-            echo "::notice::Sample DNG not present at ${SAMPLE} (gitignored, not vendored on CI); skipping FFI smoke (benchmark_zero_copy.dart)."
-            exit 0
-          fi
-          if [ ! -f "$DYLIB" ]; then
-            echo "::notice::Native dylib not present at ${DYLIB} (this workflow does not build it); skipping FFI smoke (benchmark_zero_copy.dart)."
-            exit 0
-          fi
-          dart run bin/benchmark_zero_copy.dart "$SAMPLE"
-
-      - name: Upload smoke artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dart-smoke-artifacts
-          path: ${{ github.workspace }}/artifacts
-          if-no-files-found: ignore
-          retention-days: 7

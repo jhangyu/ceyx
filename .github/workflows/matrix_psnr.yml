@@ -1,13 +1,14 @@
-name: Matrix PSNR Regression
+name: Native Test Targets Build
 
-# Runs on push to ci/** branches and on manual dispatch (2026-08-28).
-# This gate needs image_samples/lossless_dng_sample.dng and lossy_dng_sample.dng
-# (gitignored, absent on CI) plus built native binaries. When the samples are
-# missing the workflow emits explicit ::notice:: skip declarations and the
-# build/run steps skip cleanly rather than failing the job (user decision D3);
-# samples are never vendored or downloaded. When the samples ARE present the
-# full PSNR gate runs and its assertions are unchanged. See
-# docs/logs/2026-08-28/Task_ci_repair_contract.md.
+# Compile-only CI (2026-08-28, supersedes the earlier PSNR-gate design).
+# This workflow ONLY builds the native test targets (test_decode,
+# test_device_handoff) and fails hard on any real compile/link error. It does
+# NOT run any decode/PSNR verification: the PSNR regression (run_decode_matrix.py)
+# reads gitignored DNG samples that never exist on a CI runner, so it stays a
+# LOCAL-ONLY gate for developers and is intentionally not exercised here.
+# HEIF is disabled (-DDNG_ENABLE_HEIF=OFF, same as the Linux/Android legs) so
+# the build needs no native/third_party/heif-dist. Halide/LibRaw fetch + cache
+# mirror macos_build.yml (configure requires both).
 on:
   push:
     branches:
@@ -15,19 +16,14 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: matrix-psnr-${{ github.ref }}
+  group: native-test-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  matrix-psnr:
-    name: Run 4-case decode matrix + PSNR gate
+  build:
+    name: Build native test targets
     runs-on: macos-14
     timeout-minutes: 45
-    needs: []
-    env:
-      REPO_ROOT: ${{ github.workspace }}
-      NATIVE_DIR: ${{ github.workspace }}/native
-      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,32 +35,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check sample DNGs
-        id: samples
-        run: |
-          missing=0
-          for sample in \
-            "${REPO_ROOT}/image_samples/lossless_dng_sample.dng" \
-            "${REPO_ROOT}/image_samples/lossy_dng_sample.dng"; do
-            if [ ! -f "$sample" ]; then
-              echo "::notice::Sample DNG not present at ${sample} (gitignored, not vendored on CI); the PSNR decode matrix will be skipped."
-              missing=1
-            fi
-          done
-
-          if [ "$missing" -eq 0 ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::SKIP: only the PSNR decode gate (run_decode_matrix.py, which reads the DNG samples) is skipped because one or more required samples are absent on this runner. The native builds below (test_decode, test_device_handoff) still ran and still fail hard on real compile/link errors; no assertion was weakened."
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Build steps run UNCONDITIONALLY (user decision D3: skip the tests, still
-      # run the build). They fail hard on any real compile/link error. HEIF is
-      # disabled here the same way the Linux/Android legs do it — the decode
-      # matrix does not exercise HEIF, so -DDNG_ENABLE_HEIF=OFF avoids needing
-      # native/third_party/heif-dist on the runner. The Halide/LibRaw fetch and
-      # caching mirror macos_build.yml (configure requires both).
       - name: Install build prerequisites (Homebrew)
         run: |
           brew update
@@ -112,21 +82,3 @@ jobs:
           python3 native/scripts/build_native_watchdog.py \
             --target test_device_handoff --skip-configure \
             --idle-timeout-sec 180
-
-      - name: Run run_decode_matrix.py (PSNR gate enforced by W5)
-        if: steps.samples.outputs.available == 'true'
-        working-directory: ${{ github.workspace }}
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          python3 native/tests/run_decode_matrix.py \
-            --repeat 1 \
-            --device-handoff-harness native/build/test_device_handoff
-
-      - name: Upload PSNR matrix artifacts
-        if: always() && steps.samples.outputs.available == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: matrix-psnr-artifacts
-          path: ${{ github.workspace }}/artifacts
-          if-no-files-found: warn
-          retention-days: 7
