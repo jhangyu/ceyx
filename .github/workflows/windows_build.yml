@@ -197,6 +197,48 @@ jobs:
             git -C "$RS" apply --check -v "$p" 2>&1 | head -20 || true
           done
 
+      # RawSpeed3's CheckZLIB (cmake/Modules/CheckZLIB.cmake:57-66) LINK-tests
+      # uncompress() and zError() and hard-errors when they do not resolve. A
+      # find-module shim cannot satisfy that: third_party.cmake's Windows branch
+      # brings zlib in via FetchContent, so `zlibstatic` is an in-tree target
+      # that produces no .lib until BUILD time, and a configure-time try_compile
+      # has nothing to link. Run 33176207480 shows the signature exactly — every
+      # header/prototype check passed ("zlib.h - found", "Z_OK - found") and only
+      # the two link checks failed, i.e. the include paths were right and only
+      # the library was unresolvable.
+      #
+      # So build a REAL static zlib first and hand CMake its install prefix.
+      # third_party.cmake:34-39 already documents DNG_ZLIB_ROOT as the supported
+      # "a user-supplied build always wins" entry point, so this uses an existing
+      # seam rather than inventing one. ZLIB_ROOT is passed too so that
+      # RawSpeed3's own find_package(ZLIB) resolves to the same install.
+      #
+      # Same version and same SHA256 as third_party.cmake:44-45, so this does not
+      # fork the project's pin; and the same /MT runtime as the main build, or
+      # the two would not link together.
+      - name: Build zlib 1.3.1 (static, /MT) for the Windows toolchain
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -e
+          ZLIB_URL="https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+          ZLIB_SHA="9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+          mkdir -p zlib-src
+          curl -fsSL -o zlib.tar.gz "$ZLIB_URL"
+          echo "${ZLIB_SHA}  zlib.tar.gz" > zlib.sha256
+          sha256sum -c zlib.sha256
+          echo "SHA_RC=$?"
+          tar -xzf zlib.tar.gz -C zlib-src --strip-components=1
+          cmake -S zlib-src -B zlib-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-cl \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/zlib-install" \
+            -DZLIB_BUILD_EXAMPLES=OFF
+          cmake --build zlib-build --target install
+          echo "== installed zlib =="
+          find "${GITHUB_WORKSPACE}/zlib-install" -name '*.lib' -o -name 'zlib.h' | sort
+
       # cmake is invoked directly rather than through
       # native/scripts/build_native_watchdog.py: that script's watchdog loop
       # uses select.select() on a subprocess pipe, which is POSIX-only (on
@@ -224,11 +266,43 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DDNG_DIAGNOSTIC_BUILD=OFF \
             -DDNG_VK_PIPELINE_CACHE=OFF \
-            -DDNG_ENABLE_HEIF=OFF
+            -DDNG_ENABLE_HEIF=OFF \
+            -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
+            -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install"
           RC=$?
           set -e
           echo "CONFIGURE_RC=$RC"
           exit $RC
+
+      # Rounds 1-3 each burned a full CI cycle because the real error sat one
+      # layer below what the log printed: git apply's message was discarded by
+      # the fetch script, and CMake's check_* failures print only
+      # "<symbol> - not found" while the actual compile/link command and linker
+      # error live in the build tree. CMake >= 3.26 writes them to
+      # CMakeConfigureLog.yaml; older layouts use CMakeError.log. Surface
+      # whichever exists, on failure only.
+      - name: Diagnose configure failure (on failure only)
+        if: failure()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          B="native/build-windows"
+          echo "== CMakeConfigureLog.yaml (last 200 lines) =="
+          if [ -f "$B/CMakeFiles/CMakeConfigureLog.yaml" ]; then
+            tail -200 "$B/CMakeFiles/CMakeConfigureLog.yaml"
+          else
+            echo "not present"
+          fi
+          echo "== CMakeError.log (last 200 lines) =="
+          if [ -f "$B/CMakeFiles/CMakeError.log" ]; then
+            tail -200 "$B/CMakeFiles/CMakeError.log"
+          else
+            echo "not present"
+          fi
+          echo "== zlib as CMake resolved it =="
+          grep -iE '^ZLIB_|^DNG_ZLIB_' "$B/CMakeCache.txt" || echo "no ZLIB entries in cache"
+          echo "== jpeg as CMake resolved it =="
+          grep -iE '^JPEG_' "$B/CMakeCache.txt" || echo "no JPEG entries in cache"
 
       - name: Build dng_decoder_native
         shell: bash
