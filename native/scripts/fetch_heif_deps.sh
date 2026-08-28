@@ -25,20 +25,44 @@ DE265_URL="https://github.com/strukturag/libde265/releases/download/v${DE265_VER
 HEIF_SHA256="8bd5d41d19dc84536d118b04774709f244df6104ef66d623dad5fa4650143405"
 DE265_SHA256="fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
 
+# Target architecture for the produced dylibs. Defaults to the host arch so an
+# ordinary local build is unchanged; the macOS CI Intel leg cross-compiles the
+# decoder for x86_64 on an Apple-silicon runner and must get an x86_64 dist too,
+# otherwise the link fails on an architecture mismatch (the dist used to be
+# hard-pinned to arm64). Override with DNG_HEIF_ARCH=x86_64.
+HEIF_ARCH="${DNG_HEIF_ARCH:-$(uname -m)}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NATIVE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DIST="${NATIVE_DIR}/third_party/heif-dist"
+# The host-architecture dist keeps its historical path, so an ordinary local
+# build is completely unaffected. A cross-architecture dist goes to a SUFFIXED
+# directory instead of overwriting it: this tree is shared (other agents and the
+# developer build arm64 from it concurrently), and silently replacing the arm64
+# dylibs with x86_64 ones would break their next link with an error pointing at
+# the decoder, not at this script.
+HOST_ARCH="$(uname -m)"
+if [ "${HEIF_ARCH}" = "${HOST_ARCH}" ]; then
+  DIST="${NATIVE_DIR}/third_party/heif-dist"
+else
+  DIST="${NATIVE_DIR}/third_party/heif-dist-${HEIF_ARCH}"
+fi
 STAGE="${DIST}/.stage"
 STAMP="${DIST}/.pins"
-WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:${DE265_SHA256}"
+# The arch is part of the stamp: an arm64 dist and an x86_64 dist are not
+# interchangeable, and without this a dist built for the other architecture
+# would be reported as "already at the pinned versions" and then fail at link.
+WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:${DE265_SHA256} arch=${HEIF_ARCH}"
 
 if [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT_PINS}" ] \
    && [ -f "${DIST}/lib/libheif.1.dylib" ] && [ -f "${DIST}/lib/libde265.0.dylib" ]; then
   echo "[heif] dist already at the pinned versions:"
   echo "[heif]   libheif  ${HEIF_VERSION}  ${HEIF_SHA256}"
   echo "[heif]   libde265 ${DE265_VERSION}  ${DE265_SHA256}"
+  echo "[heif]   arch     ${HEIF_ARCH}"
   exit 0
 fi
+
+echo "[heif] building dist for architecture: ${HEIF_ARCH}"
 
 # Downloads ${1} to ${2} and hard-fails unless its SHA-256 equals ${3}.
 # A mismatch is never a warning: an unverified tarball must not reach a build
@@ -74,7 +98,7 @@ COMMON_ARGS=(
   -DCMAKE_INSTALL_PREFIX="${DIST}"
   -DCMAKE_INSTALL_NAME_DIR=@rpath
   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-  -DCMAKE_OSX_ARCHITECTURES=arm64
+  -DCMAKE_OSX_ARCHITECTURES="${HEIF_ARCH}"
   -DBUILD_SHARED_LIBS=ON
 )
 
@@ -168,9 +192,21 @@ if grep -q 'x265_encoder' <<< "${HEIF_SYMBOLS}"; then
   exit 1
 fi
 
+# Arch proof, same "capture then match" discipline as the symbol checks above:
+# a dist silently built for the wrong architecture links nowhere, and the
+# failure surfaces much later as an opaque "building for macOS-x86_64 but
+# attempting to link file built for macOS-arm64".
+for _lib in "${DIST}/lib/libheif.1.dylib" "${DIST}/lib/libde265.0.dylib"; do
+  LIB_ARCHS="$(lipo -archs "${_lib}")"
+  if ! grep -q -w "${HEIF_ARCH}" <<< "${LIB_ARCHS}"; then
+    echo "[heif] FAILED: $(basename "${_lib}") has archs '${LIB_ARCHS}', wanted '${HEIF_ARCH}'" >&2
+    exit 1
+  fi
+done
+
 printf '%s' "${WANT_PINS}" > "${STAMP}"
 rm -rf "${STAGE}/build-de265" "${STAGE}/build-heif" \
        "${STAGE}/libheif-${HEIF_VERSION}" "${STAGE}/libde265-${DE265_VERSION}"
-echo "[heif] dist ready at ${DIST}"
+echo "[heif] dist ready at ${DIST} (arch ${HEIF_ARCH})"
 echo "[heif]   libheif  ${HEIF_VERSION}"
 echo "[heif]   libde265 ${DE265_VERSION}"

@@ -1,9 +1,17 @@
 name: macOS Native Build
 
 # Builds dng_decoder_native for both macOS CPU architectures. CI only verifies
-# "it builds" (produces a .dylib) — decode-correctness / PSNR gating is
-# out of scope here because the sample DNGs are gitignored and not present
-# in the repository (see docs/logs/2026-08-26/Task_cicd_bootstrap.md).
+# "it builds" (produces a .dylib of the expected architecture) — decode-correctness
+# / PSNR gating is out of scope here because the sample DNGs are gitignored and
+# not present in the repository (see docs/logs/2026-08-26/Task_cicd_bootstrap.md).
+#
+# Consequence for user decision D3 (skip a test cleanly when its input file is
+# absent on the runner, rather than failing the job): this workflow contains no
+# step that consumes a test image, sample or test directory, so there is nothing
+# to guard here. The steps below are build steps and artifact checks, and they
+# are all meant to fail hard. Any future step added here that reads
+# image_samples/ (or any other gitignored input) must test for the input first
+# and `echo "::notice::..."` + skip when it is missing.
 #
 # Trigger note (2026-08-26): push.paths is intentionally NOT applied to the
 # push trigger below. GitHub's path-filter matching semantics for tag pushes
@@ -33,18 +41,41 @@ concurrency:
 jobs:
   build:
     name: Build dng_decoder_native (${{ matrix.label }})
-    # AC2 decision (2026-08-26): GitHub still offers a dedicated Intel macOS
-    # runner image (macos-13) as of this writing, so the Intel job below
-    # builds natively on macos-13 rather than cross-compiling x86_64 on an
-    # Apple-silicon host. Cross-compiling would additionally require an
-    # x86_64 build of the vendored libjpeg-turbo (native/cmake/third_party.cmake
-    # probes `brew --prefix jpeg-turbo`, which on an arm64 runner only yields
-    # an arm64 static archive) — out of scope for this task since it touches
-    # native/ dependency acquisition. If GitHub retires macos-13 for this
-    # repository's plan, replace the `intel` matrix entry's `runs-on` with an
-    # Apple-silicon runner plus `-DDNG_AOT_TARGET_OVERRIDE=x86-64-osx-metal-no_asserts-no_bounds_query`
-    # and `-DCMAKE_OSX_ARCHITECTURES=x86_64`, and first resolve the
-    # libjpeg-turbo architecture mismatch above.
+    # Intel leg, 2026-08-28: GitHub retired the dedicated Intel macOS runner
+    # image. A job pinned to it is never scheduled — it simply sits in
+    # `queued` indefinitely (observed 8h+ with zero progress), which is a hang,
+    # not a failure, so nothing times out and nothing reports. Per user decision
+    # D1 the Intel leg is KEPT and is now produced by CROSS-COMPILING x86_64 on
+    # an Apple-silicon runner. Both legs therefore run on macos-14.
+    #
+    # The cross-compile reuses the two-stage machinery this project already has
+    # for Android (DNG_HOST_GENERATORS_ONLY -> DNG_CROSS_BUILD), rather than
+    # setting CMAKE_OSX_ARCHITECTURES=x86_64 over the whole tree in one pass:
+    # the Halide generators are build-time tools that must EXECUTE on the runner,
+    # so they have to stay arm64 (host) while the AOT code they emit targets
+    # x86-64. Stage 1 builds arm64 generators and runs them with
+    # DNG_AOT_TARGET_OVERRIDE=x86-64-osx-metal-...; stage 2 compiles the actual
+    # library for x86_64 against those prebuilt AOT artifacts. A single-pass
+    # x86_64 configure would produce x86_64 generator binaries and then depend on
+    # Rosetta being present to run them.
+    #
+    # Two dependency-architecture blockers had to be resolved for stage 2:
+    #   * libjpeg-turbo — native/cmake/third_party.cmake probes
+    #     `brew --prefix jpeg-turbo`, and Homebrew installs the HOST arch only.
+    #     That file now verifies the probed libjpeg.a with `lipo -archs` and
+    #     falls back to building the vendored libjpeg-turbo from source for the
+    #     target arch when the archive does not contain it.
+    #   * libheif/libde265 — native/scripts/fetch_heif_deps.sh used to hard-pin
+    #     -DCMAKE_OSX_ARCHITECTURES=arm64. It now honours DNG_HEIF_ARCH and
+    #     records the arch in its version stamp, so an arm64 dist is not
+    #     mistaken for an x86_64 one.
+    # The remaining vendored dependencies of the x86_64 link were checked and
+    # need no arch handling: LibRaw, RawSpeed3 and the Adobe DNG SDK are built
+    # from source in-tree and follow CMAKE_OSX_ARCHITECTURES; zlib comes from
+    # the macOS SDK, which is universal; the Halide runtime is an AOT artifact
+    # emitted by stage 1 for the x86-64 target; and libomp is not involved at
+    # all because DNG_CROSS_BUILD turns the desktop OpenMP path off
+    # (native/cmake/tests.cmake).
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -54,13 +85,29 @@ jobs:
           - label: apple-silicon
             runner: macos-14
             arch_tag: arm64
+            cross: "false"
+            # Directory holding the produced dylib, and the directory to cache.
+            dylib_dir: native/build
+            build_cache_path: native/build
+            # fetch_heif_deps.sh writes the HOST-arch dist here and a
+            # cross-arch dist to heif-dist-<arch>; heif.cmake searches both.
+            heif_dist_dir: native/third_party/heif-dist
           - label: intel
-            runner: macos-13
+            runner: macos-14
             arch_tag: x86_64
+            cross: "true"
+            dylib_dir: native/build-macos-x86_64/target
+            build_cache_path: native/build-macos-x86_64
+            heif_dist_dir: native/third_party/heif-dist-x86_64
     env:
       REPO_ROOT: ${{ github.workspace }}
       NATIVE_DIR: ${{ github.workspace }}/native
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      DYLIB: ${{ github.workspace }}/${{ matrix.dylib_dir }}/libdng_decoder_native.dylib
+      # Halide AOT target for the cross leg. Kept here (not inline) so the
+      # string appears exactly once.
+      X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
+      HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,34 +157,100 @@ jobs:
       - name: Fetch vendored LibRaw distribution
         run: native/scripts/fetch_libraw_dist.sh
 
+      # macOS is the one platform that genuinely ships the HEIC decode route, so
+      # unlike the Linux/Android workflows (which configure with
+      # -DDNG_ENABLE_HEIF=OFF) it FETCHES the dist rather than disabling it.
+      # Without this, configure hard-fails at native/cmake/heif.cmake:31 with
+      # "HEIF decode is enabled but the vendored dist is missing".
+      #
+      # Cached in the same shape as Halide/LibRaw above, and for a much stronger
+      # reason: the script does not download a prebuilt dist, it BUILDS libde265
+      # and libheif from source, which is minutes of runner time per job. The key
+      # is derived from hashFiles of the fetch script, so bumping either version
+      # pin (or any configure flag) inside that script invalidates the cache
+      # rather than silently reusing the old dist. arch_tag is part of the key
+      # because the two legs need different-architecture dylibs.
+      - name: Cache vendored HEIF (libheif + libde265) distribution
+        id: cache-heif
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/${{ matrix.heif_dist_dir }}
+          key: heif-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_heif_deps.sh') }}
+
+      - name: Fetch vendored HEIF distribution
+        env:
+          DNG_HEIF_ARCH: ${{ matrix.arch_tag }}
+        run: native/scripts/fetch_heif_deps.sh
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/native/build
+          path: ${{ github.workspace }}/${{ matrix.build_cache_path }}
           key: native-build-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/CMakeLists.txt') }}
           restore-keys: |
             native-build-${{ runner.os }}-${{ matrix.arch_tag }}-
 
-      - name: Build dng_decoder_native via watchdog
+      - name: Build dng_decoder_native via watchdog (native arm64)
+        if: matrix.cross == 'false'
         working-directory: ${{ github.workspace }}
         run: |
           python3 native/scripts/build_native_watchdog.py \
             --target dng_decoder_native \
             --idle-timeout-sec 180
 
-      - name: Verify dylib was produced
+      # Cross leg, stage 1: arm64 host generators, emitting x86-64 AOT code.
+      - name: Build host Halide generators + x86-64 AOT (cross stage 1)
+        if: matrix.cross == 'true'
+        working-directory: ${{ github.workspace }}
         run: |
-          DYLIB="${NATIVE_DIR}/build/libdng_decoder_native.dylib"
+          python3 native/scripts/build_native_watchdog.py \
+            --build-dir "${HOST_GEN_DIR}" \
+            --target dng_all_aot \
+            --idle-timeout-sec 600 \
+            --cmake-arg -DDNG_HOST_GENERATORS_ONLY=ON \
+            --cmake-arg "-DDNG_AOT_TARGET_OVERRIDE=${X86_AOT_TARGET}"
+          echo "--- AOT artifacts:"
+          ls -la "${HOST_GEN_DIR}/halide_generated"
+          echo "--- architecture of an emitted AOT archive (expect x86_64):"
+          lipo -archs "${HOST_GEN_DIR}/halide_generated/dng_render_stage4.a"
+
+      # Cross leg, stage 2: compile the shipped library for x86_64 against the
+      # stage-1 AOT artifacts.
+      - name: Cross-compile dng_decoder_native for x86_64 (cross stage 2)
+        if: matrix.cross == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/build_native_watchdog.py \
+            --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
+            --target dng_decoder_native \
+            --idle-timeout-sec 600 \
+            --cmake-arg -DDNG_CROSS_BUILD=ON \
+            --cmake-arg "-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
+            --cmake-arg -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+      # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
+      # output is both printed and asserted — printing alone would let a wrong
+      # architecture pass unnoticed, and asserting alone would leave no evidence
+      # in the log.
+      - name: Verify dylib was produced and has the expected architecture
+        run: |
           if [ ! -f "$DYLIB" ]; then
             echo "::error::Expected dylib not found at $DYLIB"
             exit 1
           fi
           file "$DYLIB"
+          ARCHS="$(lipo -archs "$DYLIB")"
+          echo "lipo -archs => ${ARCHS}"
+          if [ "${ARCHS}" != "${{ matrix.arch_tag }}" ]; then
+            echo "::error::Expected architecture '${{ matrix.arch_tag }}' but the dylib reports '${ARCHS}'"
+            exit 1
+          fi
+          otool -L "$DYLIB"
 
       - name: Stage native artifact
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
-          cp "${NATIVE_DIR}/build/libdng_decoder_native.dylib" "${ARTIFACT_DIR}/native/"
+          cp "$DYLIB" "${ARTIFACT_DIR}/native/"
           ls -la "${ARTIFACT_DIR}/native"
 
       - name: Upload native artifact
@@ -150,10 +263,9 @@ jobs:
 
       # AC5: attach the built dylib to the GitHub Release for this tag.
       # Uses the `gh` CLI, which is preinstalled on GitHub-hosted runners
-      # (macos-13/macos-14 images ship it) — chosen over a third-party
-      # action (e.g. softprops/action-gh-release) to avoid an extra
-      # dependency for what `gh release create`/`gh release upload` already
-      # do directly with the runner-provided GITHUB_TOKEN.
+      # — chosen over a third-party action (e.g. softprops/action-gh-release)
+      # to avoid an extra dependency for what `gh release create`/`gh release
+      # upload` already do directly with the runner-provided GITHUB_TOKEN.
       - name: Attach artifact to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/')
         env:

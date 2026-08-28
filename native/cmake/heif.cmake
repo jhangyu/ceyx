@@ -9,19 +9,40 @@
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
 if(DNG_ENABLE_HEIF)
+    # Dist selection (2026-08-28). fetch_heif_deps.sh writes a host-architecture
+    # dist to third_party/heif-dist and a cross-architecture one to
+    # third_party/heif-dist-<arch>, so an x86_64 cross-build cannot clobber the
+    # arm64 dist a shared working tree is using. Prefer the arch-suffixed dist
+    # when this build targets a specific architecture, and fall back to the
+    # historical unsuffixed path — which is what every non-cross build uses, so
+    # their behaviour is unchanged.
     set(HEIF_DIST_DIR ${THIRD_PARTY_DIR}/heif-dist)
+    set(HEIF_DIST_HINTS "${HEIF_DIST_DIR}")
+    if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+        set(HEIF_DIST_HINTS "")
+        foreach(_heif_arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+            list(APPEND HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-${_heif_arch}")
+        endforeach()
+        list(APPEND HEIF_DIST_HINTS "${HEIF_DIST_DIR}")
+    endif()
+    set(HEIF_INCLUDE_HINTS "")
+    set(HEIF_LIB_HINTS "")
+    foreach(_heif_hint IN LISTS HEIF_DIST_HINTS)
+        list(APPEND HEIF_INCLUDE_HINTS "${_heif_hint}/include")
+        list(APPEND HEIF_LIB_HINTS "${_heif_hint}/lib")
+    endforeach()
 
     find_path(HEIF_INCLUDE_DIR
         NAMES libheif/heif.h
-        HINTS "${HEIF_DIST_DIR}/include"
+        HINTS ${HEIF_INCLUDE_HINTS}
         NO_DEFAULT_PATH)
     find_library(HEIF_LIBRARY
         NAMES heif
-        HINTS "${HEIF_DIST_DIR}/lib"
+        HINTS ${HEIF_LIB_HINTS}
         NO_DEFAULT_PATH)
     find_library(DE265_LIBRARY
         NAMES de265
-        HINTS "${HEIF_DIST_DIR}/lib"
+        HINTS ${HEIF_LIB_HINTS}
         NO_DEFAULT_PATH)
 
     # NO_DEFAULT_PATH on all three is deliberate: silently linking a Homebrew
@@ -31,12 +52,41 @@ if(DNG_ENABLE_HEIF)
     if(NOT HEIF_INCLUDE_DIR OR NOT HEIF_LIBRARY OR NOT DE265_LIBRARY)
         message(FATAL_ERROR
             "HEIF decode is enabled but the vendored dist is missing.\n"
-            "  expected under ${HEIF_DIST_DIR}\n"
+            "  searched under: ${HEIF_DIST_HINTS}\n"
             "  heif.h    = '${HEIF_INCLUDE_DIR}'\n"
             "  libheif   = '${HEIF_LIBRARY}'\n"
             "  libde265  = '${DE265_LIBRARY}'\n"
             "Run native/scripts/fetch_heif_deps.sh, or configure with "
             "-DDNG_ENABLE_HEIF=OFF to build without the HEIC route.")
+    endif()
+
+    # Re-derive the dist root from what was actually found, so the POST_BUILD
+    # staging below copies out of the SAME dist that was linked (they differ
+    # whenever the arch-suffixed dist won the search above).
+    get_filename_component(HEIF_DIST_DIR "${HEIF_LIBRARY}" DIRECTORY)
+    get_filename_component(HEIF_DIST_DIR "${HEIF_DIST_DIR}" DIRECTORY)
+
+    # Fail at configure time, with a message that names the problem, rather than
+    # letting a stale wrong-architecture dist surface as an opaque linker error.
+    if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+        execute_process(COMMAND lipo -archs "${HEIF_LIBRARY}"
+                        OUTPUT_VARIABLE HEIF_HAVE_ARCHS
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET RESULT_VARIABLE HEIF_LIPO_RC)
+        if(HEIF_LIPO_RC EQUAL 0)
+            foreach(_heif_arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+                if(NOT "${HEIF_HAVE_ARCHS}" MATCHES "(^| )${_heif_arch}( |$)")
+                    message(FATAL_ERROR
+                        "HEIF dist architecture mismatch.\n"
+                        "  ${HEIF_LIBRARY}\n"
+                        "  has archs '${HEIF_HAVE_ARCHS}', this build targets "
+                        "'${CMAKE_OSX_ARCHITECTURES}'.\n"
+                        "Rebuild the dist for the target architecture:\n"
+                        "  DNG_HEIF_ARCH=${_heif_arch} native/scripts/fetch_heif_deps.sh\n"
+                        "or configure with -DDNG_ENABLE_HEIF=OFF.")
+                endif()
+            endforeach()
+        endif()
     endif()
 
     target_include_directories(dng_decoder_native PRIVATE ${HEIF_INCLUDE_DIR})

@@ -1,12 +1,17 @@
-name: Matrix PSNR Regression (manual only)
+name: Matrix PSNR Regression
 
-# Manual-dispatch only (2026-08-26): this gate needs
-# image_samples/lossless_dng_sample.dng and lossy_dng_sample.dng, which are
-# gitignored and not present in the repository. The user has ruled that
-# automatic CI only verifies "it builds"; decode-correctness / PSNR
-# regression stays manual-trigger until sample assets are provisioned in the
-# runner environment. See docs/logs/2026-08-26/Task_cicd_bootstrap.md AC7.
+# Runs on push to ci/** branches and on manual dispatch (2026-08-28).
+# This gate needs image_samples/lossless_dng_sample.dng and lossy_dng_sample.dng
+# (gitignored, absent on CI) plus built native binaries. When the samples are
+# missing the workflow emits explicit ::notice:: skip declarations and the
+# build/run steps skip cleanly rather than failing the job (user decision D3);
+# samples are never vendored or downloaded. When the samples ARE present the
+# full PSNR gate runs and its assertions are unchanged. See
+# docs/logs/2026-08-28/Task_ci_repair_contract.md.
 on:
+  push:
+    branches:
+      - "ci/**"
   workflow_dispatch:
 
 concurrency:
@@ -42,7 +47,7 @@ jobs:
             "${REPO_ROOT}/image_samples/lossless_dng_sample.dng" \
             "${REPO_ROOT}/image_samples/lossy_dng_sample.dng"; do
             if [ ! -f "$sample" ]; then
-              echo "::warning::Missing ${sample}; PSNR matrix will be skipped."
+              echo "::notice::Sample DNG not present at ${sample} (gitignored, not vendored on CI); the PSNR decode matrix will be skipped."
               missing=1
             fi
           done
@@ -50,27 +55,63 @@ jobs:
           if [ "$missing" -eq 0 ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
+            echo "::notice::SKIP: only the PSNR decode gate (run_decode_matrix.py, which reads the DNG samples) is skipped because one or more required samples are absent on this runner. The native builds below (test_decode, test_device_handoff) still ran and still fail hard on real compile/link errors; no assertion was weakened."
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install build prerequisites
-        if: steps.samples.outputs.available == 'true'
+      # Build steps run UNCONDITIONALLY (user decision D3: skip the tests, still
+      # run the build). They fail hard on any real compile/link error. HEIF is
+      # disabled here the same way the Linux/Android legs do it — the decode
+      # matrix does not exercise HEIF, so -DDNG_ENABLE_HEIF=OFF avoids needing
+      # native/third_party/heif-dist on the runner. The Halide/LibRaw fetch and
+      # caching mirror macos_build.yml (configure requires both).
+      - name: Install build prerequisites (Homebrew)
         run: |
           brew update
           brew install cmake ninja jpeg-turbo
 
-      - name: Build test_decode target
-        if: steps.samples.outputs.available == 'true'
-        working-directory: ${{ github.workspace }}
-        run: |
-          python3 native/scripts/build_native_watchdog.py --target test_decode
+      - name: Cache vendored Halide v21 distribution
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
 
-      - name: Build test_device_handoff target
-        if: steps.samples.outputs.available == 'true'
+      - name: Fetch vendored Halide v21 distribution
+        run: native/scripts/fetch_halide_v21_dist.sh
+
+      - name: Cache vendored LibRaw distribution
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
+
+      - name: Fetch vendored LibRaw distribution
+        run: native/scripts/fetch_libraw_dist.sh
+
+      - name: Cache CMake build directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/build
+          key: native-build-matrix-${{ runner.os }}-arm64-${{ hashFiles('native/CMakeLists.txt') }}
+          restore-keys: |
+            native-build-matrix-${{ runner.os }}-arm64-
+
+      - name: Build test_decode target
         working-directory: ${{ github.workspace }}
         run: |
           python3 native/scripts/build_native_watchdog.py \
-            --target test_device_handoff --skip-configure
+            --target test_decode \
+            --cmake-arg -DDNG_ENABLE_HEIF=OFF \
+            --idle-timeout-sec 180
+
+      - name: Build test_device_handoff target
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/build_native_watchdog.py \
+            --target test_device_handoff --skip-configure \
+            --idle-timeout-sec 180
 
       - name: Run run_decode_matrix.py (PSNR gate enforced by W5)
         if: steps.samples.outputs.available == 'true'

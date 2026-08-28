@@ -1,12 +1,15 @@
-name: Dart / Flutter Smoke (manual only)
+name: Dart / Flutter Smoke
 
-# Manual-dispatch only (2026-08-26): the FFI smoke step needs
-# image_samples/lossless_dng_sample.dng, which is gitignored and not present
-# in the repository, so this cannot run unattended on every PR without
-# always short-circuiting. Trigger by hand from the Actions tab once sample
-# assets are available in the runner environment. See
-# docs/logs/2026-08-26/Task_cicd_bootstrap.md AC7.
+# Runs on push to ci/** branches and on manual dispatch (2026-08-28).
+# `dart analyze` always runs and fails hard on analyzer errors. The FFI smoke
+# step needs image_samples/lossless_dng_sample.dng (gitignored, absent on CI)
+# plus the native dylib; when either input is missing the step emits a
+# ::notice:: and skips cleanly rather than failing the job (user decision D3).
+# See docs/logs/2026-08-28/Task_ci_repair_contract.md.
 on:
+  push:
+    branches:
+      - "ci/**"
   workflow_dispatch:
 
 concurrency:
@@ -45,10 +48,14 @@ jobs:
       - name: flutter test (if present)
         working-directory: ${{ github.workspace }}/app
         run: |
-          if [ -d test ] && find test -name "*_test.dart" -print -quit | grep -q .; then
+          test_count=0
+          if [ -d test ]; then
+            test_count=$(find test -name "*_test.dart" -type f | wc -l | tr -d ' ')
+          fi
+          if [ "$test_count" -gt 0 ]; then
             flutter test
           else
-            echo "::notice::No Flutter tests found; skipping flutter test."
+            echo "::notice::No Flutter test files (test/**/*_test.dart) present; skipping 'flutter test'."
           fi
 
       - name: Download native artifact (optional)
@@ -66,11 +73,11 @@ jobs:
           SAMPLE="${REPO_ROOT}/image_samples/lossless_dng_sample.dng"
           DYLIB="${DNG_NATIVE_BUILD_DIR}/libdng_decoder_native.dylib"
           if [ ! -f "$SAMPLE" ]; then
-            echo "::warning::Sample DNG not available; skipping FFI smoke."
+            echo "::notice::Sample DNG not present at ${SAMPLE} (gitignored, not vendored on CI); skipping FFI smoke (benchmark_zero_copy.dart)."
             exit 0
           fi
           if [ ! -f "$DYLIB" ]; then
-            echo "::warning::Native dylib not available at ${DYLIB}; skipping FFI smoke."
+            echo "::notice::Native dylib not present at ${DYLIB} (this workflow does not build it); skipping FFI smoke (benchmark_zero_copy.dart)."
             exit 0
           fi
           dart run bin/benchmark_zero_copy.dart "$SAMPLE"

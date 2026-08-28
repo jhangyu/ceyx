@@ -100,12 +100,17 @@ jobs:
         # no Vulkan library (the Halide runtime dlopen()s libvulkan.so.1).
         # --idle-timeout-sec raised above the 60s default as a CI margin.
         # Separate --build-dir build-linux so it never collides with build/.
+        # -DDNG_ENABLE_HEIF=OFF is the escape hatch cmake/heif.cmake documents:
+        # the HEIC route ships a macOS-only libheif/libde265 dylib dist and no
+        # Linux heif-dist is vendored, so this Vulkan compile gate opts out of
+        # the hard heif gate rather than fetching a dist it does not exercise.
         working-directory: ${{ github.workspace }}
         run: |
           python3 native/scripts/build_native_watchdog.py \
             --platform host \
             --target dng_decoder_native \
             --build-dir build-linux \
+            --cmake-arg -DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
       - name: Verify Linux artifact (AC-L2/L3/L4)
@@ -118,16 +123,46 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           SO="native/build-linux/libdng_decoder_native.so"
+
+          # NOTE on RC handling: `run:` executes under `bash -eo pipefail`, so a
+          # failing command aborts the shell before any trailing `echo "RC=$?"`
+          # could run — such an RC line could only ever print 0 and would read
+          # like false evidence. Each check below is wrapped in `set +e`/`set -e`
+          # so the RC line captures the command's OWN exit code, and nm/ldd are
+          # de-pipelined (output to a file, then grep the file) so pipefail
+          # cannot turn the grep's SIGPIPE-to-nm into a bogus 141 on success.
+
           echo "== AC-L2: file =="
+          set +e
           file "$SO"
-          echo "RC=$?"
+          rc=$?
+          set -e
+          echo "RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::file '$SO' failed (rc=${rc}); the Linux .so is missing." >&2
+            exit 1
+          fi
+
           echo "== AC-L3: nm -D halide_vulkan_device_interface =="
-          nm -D "$SO" | grep halide_vulkan_device_interface
-          echo "RC=$?"
+          nm -D "$SO" > nm_dynsyms.txt
+          set +e
+          grep halide_vulkan_device_interface nm_dynsyms.txt
+          rc=$?
+          set -e
+          echo "RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::halide_vulkan_device_interface not found in $SO — Vulkan runtime absent from the binary (AC-L3)." >&2
+            exit 1
+          fi
+
           echo "== AC-L4: ldd (expect NO libvulkan) =="
-          ldd "$SO"
-          echo "RC=$?"
-          if ldd "$SO" | grep -q 'libvulkan'; then
+          set +e
+          ldd "$SO" > ldd_out.txt
+          rc=$?
+          set -e
+          cat ldd_out.txt
+          echo "RC=${rc}"
+          if grep -q 'libvulkan' ldd_out.txt; then
             echo "::error::libvulkan appears in ldd output — link-time Vulkan dependency regressed (D4)." >&2
             exit 1
           fi

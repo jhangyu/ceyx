@@ -123,6 +123,11 @@ jobs:
         # --idle-timeout-sec is raised above the script's 60s default as a
         # margin for CI hosts, which can be slower/noisier than local dev
         # machines during long Halide codegen steps.
+        # -DDNG_ENABLE_HEIF=OFF (cmake/heif.cmake's documented escape hatch):
+        # the HEIC route vendors only a macOS libheif/libde265 dylib dist; no
+        # Android heif-dist exists, so the Stage 2 cross-compile configure opts
+        # out of the hard heif gate. Passed to both configure stages; Stage 1
+        # (DNG_HOST_GENERATORS_ONLY) guards heif.cmake out anyway.
         working-directory: ${{ github.workspace }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
@@ -131,6 +136,7 @@ jobs:
             --platform android \
             --target dng_decoder_native \
             --android-ndk "${ANDROID_NDK_HOME}" \
+            --cmake-arg -DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
       - name: Stage native artifacts

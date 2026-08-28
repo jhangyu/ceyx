@@ -143,23 +143,87 @@ elseif(APPLE)
               /usr/local/opt/jpeg-turbo/include
         NO_DEFAULT_PATH)
 
-    if(NOT DNG_JPEG_STATIC_LIBRARY OR NOT DNG_JPEG_STATIC_INCLUDE_DIR)
-        message(FATAL_ERROR
-            "Static libjpeg-turbo not found (need lib/libjpeg.a + include/jpeglib.h).\n"
-            "  probed DNG_JPEG_TURBO_ROOT='${DNG_JPEG_TURBO_ROOT}'\n"
-            "  libjpeg.a  = '${DNG_JPEG_STATIC_LIBRARY}'\n"
-            "  jpeglib.h  = '${DNG_JPEG_STATIC_INCLUDE_DIR}'\n"
-            "Install it (`brew install jpeg-turbo`) or pass "
-            "-DDNG_JPEG_TURBO_ROOT=<prefix>.\n"
-            "Do NOT fall back to the shared libjpeg.dylib: the resulting absolute "
-            "dependency makes libdng_decoder_native.dylib unloadable inside "
-            "App-Sandboxed host apps.")
+    # --- Cross-arch guard (2026-08-28, macOS CI Intel leg) -------------------
+    # The probes above resolve a Homebrew prefix, and Homebrew installs exactly
+    # ONE architecture: the host's. On an Apple-silicon runner building
+    # -DCMAKE_OSX_ARCHITECTURES=x86_64 (which is how the Intel matrix leg is
+    # produced now that GitHub retired the macos-13 Intel image), that yields an
+    # arm64-only libjpeg.a and the link fails on an architecture mismatch.
+    #
+    # Verify the archive actually contains every requested architecture, and if
+    # it does not, build the vendored libjpeg-turbo from source for the target
+    # arch instead. Static either way, so the App-Sandbox invariant recorded
+    # above (no absolute LC_LOAD_DYLIB into /opt/homebrew) still holds.
+    set(DNG_JPEG_WANT_ARCHS "${CMAKE_OSX_ARCHITECTURES}")
+    if(NOT DNG_JPEG_WANT_ARCHS)
+        set(DNG_JPEG_WANT_ARCHS "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    set(DNG_JPEG_ARCH_OK TRUE)
+    if(DNG_JPEG_STATIC_LIBRARY)
+        execute_process(COMMAND lipo -archs "${DNG_JPEG_STATIC_LIBRARY}"
+                        OUTPUT_VARIABLE DNG_JPEG_HAVE_ARCHS
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET RESULT_VARIABLE DNG_JPEG_LIPO_RC)
+        if(NOT DNG_JPEG_LIPO_RC EQUAL 0)
+            # Cannot prove compatibility; keep the probed archive (previous
+            # behaviour) rather than discarding a working build over a failed
+            # `lipo` invocation.
+            set(DNG_JPEG_HAVE_ARCHS "<lipo failed>")
+        else()
+            foreach(_want IN LISTS DNG_JPEG_WANT_ARCHS)
+                if(NOT "${DNG_JPEG_HAVE_ARCHS}" MATCHES "(^| )${_want}( |$)")
+                    set(DNG_JPEG_ARCH_OK FALSE)
+                endif()
+            endforeach()
+        endif()
     endif()
 
-    set(JPEG_LIBRARIES ${DNG_JPEG_STATIC_LIBRARY})
-    set(JPEG_INCLUDE_DIRS ${DNG_JPEG_STATIC_INCLUDE_DIR})
-    set(DNG_USE_LIBJPEG ON)
-    message(STATUS "Using STATIC libjpeg-turbo: ${DNG_JPEG_STATIC_LIBRARY}")
+    if(DNG_JPEG_STATIC_LIBRARY AND NOT DNG_JPEG_ARCH_OK)
+        message(STATUS
+            "Probed libjpeg.a has archs '${DNG_JPEG_HAVE_ARCHS}' but this build "
+            "targets '${DNG_JPEG_WANT_ARCHS}'; building the vendored "
+            "libjpeg-turbo from source instead.")
+        set(ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+        set(ENABLE_STATIC ON CACHE BOOL "" FORCE)
+        set(WITH_TURBOJPEG OFF CACHE BOOL "" FORCE)
+        # SIMD off: libjpeg-turbo selects its SIMD sources from
+        # CMAKE_SYSTEM_PROCESSOR (still the arm64 host here) and needs NASM for
+        # the x86 path, so a cross-arch build with SIMD on assembles the wrong
+        # instruction set. JPEG decode is not on the Halide hot path — the same
+        # trade-off the Windows branch above already documents.
+        set(WITH_SIMD OFF CACHE BOOL "" FORCE)
+        set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "libjpeg-turbo")
+        add_subdirectory(${THIRD_PARTY_DIR}/libjpeg-turbo libjpeg-turbo-build EXCLUDE_FROM_ALL)
+        set(JPEG_INCLUDE_DIRS
+            ${THIRD_PARTY_DIR}/libjpeg-turbo/src
+            ${CMAKE_CURRENT_BINARY_DIR}/libjpeg-turbo-build)
+        set(JPEG_LIBRARIES jpeg-static)
+        set(DNG_USE_LIBJPEG ON)
+        message(STATUS
+            "Building vendored libjpeg-turbo 3.1.0 for ${DNG_JPEG_WANT_ARCHS} (SIMD OFF, cross-arch)")
+    else()
+        # `return()` is deliberately NOT used to skip this block: this file is
+        # include()d at the top level of native/CMakeLists.txt, where return()'s
+        # meaning depends on policy CMP0140 / the CMake version, and getting it
+        # wrong silently abandons the rest of the project configure.
+        if(NOT DNG_JPEG_STATIC_LIBRARY OR NOT DNG_JPEG_STATIC_INCLUDE_DIR)
+            message(FATAL_ERROR
+                "Static libjpeg-turbo not found (need lib/libjpeg.a + include/jpeglib.h).\n"
+                "  probed DNG_JPEG_TURBO_ROOT='${DNG_JPEG_TURBO_ROOT}'\n"
+                "  libjpeg.a  = '${DNG_JPEG_STATIC_LIBRARY}'\n"
+                "  jpeglib.h  = '${DNG_JPEG_STATIC_INCLUDE_DIR}'\n"
+                "Install it (`brew install jpeg-turbo`) or pass "
+                "-DDNG_JPEG_TURBO_ROOT=<prefix>.\n"
+                "Do NOT fall back to the shared libjpeg.dylib: the resulting absolute "
+                "dependency makes libdng_decoder_native.dylib unloadable inside "
+                "App-Sandboxed host apps.")
+        endif()
+
+        set(JPEG_LIBRARIES ${DNG_JPEG_STATIC_LIBRARY})
+        set(JPEG_INCLUDE_DIRS ${DNG_JPEG_STATIC_INCLUDE_DIR})
+        set(DNG_USE_LIBJPEG ON)
+        message(STATUS "Using STATIC libjpeg-turbo: ${DNG_JPEG_STATIC_LIBRARY}")
+    endif()
 else()
     find_package(JPEG REQUIRED)
     set(DNG_USE_LIBJPEG ON)
