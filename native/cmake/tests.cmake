@@ -670,6 +670,37 @@ set(JPEG_VERSION_STRING \"62\")
     # dependency of dng_decoder_native (spec section 6.6.1/6.6.3).
     add_subdirectory(${LIBRAW_DIR}/RawSpeed3/rawspeed rawspeed3-build EXCLUDE_FROM_ALL)
 
+    # W-CI3 (2026-08-28, Windows CI round 4): give the decompressors object
+    # library zlib's include directory.
+    #
+    # Upstream RawSpeed3 attaches ZLIB::ZLIB only to the aggregate `rawspeed`
+    # target (cmake/src-dependencies.cmake:215), while the translation unit that
+    # includes <zconf.h> -- DeflateDecompressor.cpp -- is compiled by the
+    # `rawspeed_decompressors` OBJECT library. Object libraries do not inherit
+    # usage requirements from the target that later consumes them, so that TU
+    # gets no zlib include path. Upstream clearly knows the pattern: two files
+    # away it links JPEG::JPEG to this very target
+    # (src/librawspeed/decompressors/CMakeLists.txt:81-82). ZLIB just never got
+    # the same line.
+    #
+    # The defect is universal but LATENT wherever zlib headers sit in a default
+    # system include path -- Linux (zlib1g-dev), macOS (SDK), Android (NDK
+    # sysroot) -- because the compiler finds zconf.h without any -I. On Windows
+    # the headers live in a private prefix, so the omission becomes a hard
+    # 'zconf.h' file not found (CI run 33177220892).
+    #
+    # Scoped to WIN32 deliberately: the other four platforms are green right now
+    # and this is a convergence round, not a refactor. Making it unconditional
+    # would be more correct and is recorded as a parking-lot item rather than
+    # done here.
+    #
+    # PUBLIC, matching upstream's JPEG line, so anything consuming the object
+    # library inherits the include directory too.
+    if(WIN32 AND TARGET rawspeed_decompressors AND TARGET ZLIB::ZLIB)
+        target_link_libraries(rawspeed_decompressors PUBLIC ZLIB::ZLIB)
+        message(STATUS "[ceyx] attached ZLIB::ZLIB to rawspeed_decompressors (W-CI3)")
+    endif()
+
     # LibRaw at the pinned revision ships no CMakeLists.txt of its own
     # (see third_party/libraw/README.cmake: unmaintained by the LibRaw team
     # since 2014). This project vendors the community LibRaw/LibRaw-cmake

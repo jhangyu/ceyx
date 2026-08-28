@@ -293,9 +293,7 @@ jobs:
             -DDNG_ENABLE_HEIF=OFF \
             -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
-            -DZLIB_USE_STATIC_LIBS=ON \
-            -DCMAKE_C_FLAGS="-imsvc ${GITHUB_WORKSPACE}/zlib-install/include" \
-            -DCMAKE_CXX_FLAGS="-imsvc ${GITHUB_WORKSPACE}/zlib-install/include"
+            -DZLIB_USE_STATIC_LIBS=ON
           RC=$?
           set -e
           echo "CONFIGURE_RC=$RC"
