@@ -404,11 +404,29 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Name the release assets (2026-08-29 clobber fix)
+        # The .dll name does not currently collide with any other job, but the
+        # release namespace is flat and shared, so every platform carries its
+        # own suffix (this also restores the v0.1.1 asset names). The import
+        # library is copied only when it exists, so the glob below stays
+        # single-file in the DLL-only case.
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p artifacts/release
+          cp artifacts/native/dng_decoder_native.dll \
+            artifacts/release/dng_decoder_native-windows-x86_64.dll
+          cp artifacts/native/dng_decoder_native.lib \
+            artifacts/release/dng_decoder_native-windows-x86_64.lib 2>/dev/null || \
+            echo "::notice::no import library to attach."
+          ls -la artifacts/release
+
       - name: Attach artifact to GitHub Release (tag push only)
         # Same pattern as linux_build.yml / android_build.yml: each workflow
         # owns its own release-attach step so no file is jointly owned.
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ github.workspace }}/artifacts/native/dng_decoder_native.dll
+          files: ${{ github.workspace }}/artifacts/release/dng_decoder_native-windows-x86_64.*
           fail_on_unmatched_files: true

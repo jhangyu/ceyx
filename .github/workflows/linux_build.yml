@@ -191,6 +191,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Name the release asset (2026-08-29 clobber fix)
+        # Release assets live in ONE flat namespace per tag, so the build-output
+        # name libdng_decoder_native.so collides with the Android job's file of
+        # the same name: on v0.1.2 both jobs uploaded it and only the last
+        # writer survived. The upload-artifact above keeps the plain build name
+        # (it is namespaced by the artifact name); only the release copy is
+        # renamed, matching what macos_build.yml already does per matrix label.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p "${ARTIFACT_DIR}/release"
+          cp "${ARTIFACT_DIR}/native/libdng_decoder_native.so" \
+            "${ARTIFACT_DIR}/release/libdng_decoder_native-linux-x86_64.so"
+
       - name: Attach artifact to GitHub Release (tag push only)
         # This workflow owns its own release-attach step (as android_build.yml
         # does) to avoid a file jointly owned with another workflow.
@@ -200,5 +213,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ github.workspace }}/artifacts/native/libdng_decoder_native*.so
+          files: ${{ github.workspace }}/artifacts/release/libdng_decoder_native-linux-x86_64.so
           fail_on_unmatched_files: true

@@ -164,6 +164,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Name the release asset (2026-08-29 clobber fix)
+        # Release assets share one flat namespace per tag: this job's
+        # libdng_decoder_native.so and the Linux job's file of the same name
+        # overwrote each other on v0.1.2. Rename only the release copy (the
+        # upload-artifact above keeps the plain build name).
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p "${ARTIFACT_DIR}/release"
+          cp "${ARTIFACT_DIR}/native/libdng_decoder_native.so" \
+            "${ARTIFACT_DIR}/release/libdng_decoder_native-android-arm64-v8a.so"
+
       - name: Attach artifact to GitHub Release (tag push only)
         # AC5: this workflow deliberately owns its own release-attach step
         # instead of a separate shared release.yml, to avoid a file jointly
@@ -179,5 +190,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ github.workspace }}/artifacts/native/libdng_decoder_native*.so
+          files: ${{ github.workspace }}/artifacts/release/libdng_decoder_native-android-arm64-v8a.so
           fail_on_unmatched_files: true
