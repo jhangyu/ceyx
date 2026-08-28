@@ -136,7 +136,7 @@ jobs:
             --platform android \
             --target dng_decoder_native \
             --android-ndk "${ANDROID_NDK_HOME}" \
-            --cmake-arg -DDNG_ENABLE_HEIF=OFF \
+            --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
       - name: Stage native artifacts

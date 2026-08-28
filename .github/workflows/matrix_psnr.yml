@@ -103,7 +103,7 @@ jobs:
         run: |
           python3 native/scripts/build_native_watchdog.py \
             --target test_decode \
-            --cmake-arg -DDNG_ENABLE_HEIF=OFF \
+            --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
       - name: Build test_device_handoff target

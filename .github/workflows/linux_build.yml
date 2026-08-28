@@ -110,7 +110,7 @@ jobs:
             --platform host \
             --target dng_decoder_native \
             --build-dir build-linux \
-            --cmake-arg -DDNG_ENABLE_HEIF=OFF \
+            --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
       - name: Verify Linux artifact (AC-L2/L3/L4)

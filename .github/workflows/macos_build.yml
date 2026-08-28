@@ -207,8 +207,8 @@ jobs:
             --build-dir "${HOST_GEN_DIR}" \
             --target dng_all_aot \
             --idle-timeout-sec 600 \
-            --cmake-arg -DDNG_HOST_GENERATORS_ONLY=ON \
-            --cmake-arg "-DDNG_AOT_TARGET_OVERRIDE=${X86_AOT_TARGET}"
+            --cmake-arg=-DDNG_HOST_GENERATORS_ONLY=ON \
+            "--cmake-arg=-DDNG_AOT_TARGET_OVERRIDE=${X86_AOT_TARGET}"
           echo "--- AOT artifacts:"
           ls -la "${HOST_GEN_DIR}/halide_generated"
           echo "--- architecture of an emitted AOT archive (expect x86_64):"
@@ -224,9 +224,9 @@ jobs:
             --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
             --target dng_decoder_native \
             --idle-timeout-sec 600 \
-            --cmake-arg -DDNG_CROSS_BUILD=ON \
-            --cmake-arg "-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
-            --cmake-arg -DCMAKE_OSX_ARCHITECTURES=x86_64
+            --cmake-arg=-DDNG_CROSS_BUILD=ON \
+            "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
+            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64
 
       # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
