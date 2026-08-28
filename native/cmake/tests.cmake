@@ -811,6 +811,15 @@ set(JPEG_VERSION_STRING \"62\")
         ${RAWSPEED3_CAPI_DIR}
         ${_rawspeed3_pugixml_shim}/include_anchor)
     target_compile_definitions(raw PRIVATE USE_RAWSPEED3 USE_RAWSPEED_BITS)
+    if(WIN32)
+        # rawspeed3_capi.h:5-13 picks __declspec(dllexport) vs (dllimport) on
+        # RAWSPEED_BUILDLIB. We COMPILE those functions into `raw`, so without
+        # the macro clang-cl sees dllimport on a definition and hard-errors
+        # ("dllimport cannot be applied to non-inline function definition", 6x,
+        # run 33178093994). Non-Windows builds are unaffected: DllDef expands
+        # to nothing outside _MSC_VER.
+        target_compile_definitions(raw PRIVATE RAWSPEED_BUILDLIB)
+    endif()
     target_link_libraries(raw PRIVATE rawspeed rawspeed_get_number_of_processor_cores)
 
     # P17 R5 (F1): the vendored LibRaw static lib was re-exported wholesale
