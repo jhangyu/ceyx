@@ -108,7 +108,11 @@ typedef enum RawErrorCode {
     kRawErrKernelFailed = -208,
     kRawErrAllocationFailed = -209,
     kRawErrSizeOverflow = -210,
-    kRawErrCancelled = -211
+    kRawErrCancelled = -211,
+    /* Sized/scaled decode requested on a build with no scaled AOT (split
+     * Vulkan/Android/Linux). Matches the DNG path's documented rejection
+     * (AC-D1); macOS/Metal never returns this. */
+    kRawErrSizedUnsupported = -212
 } RawErrorCode;
 
 /* Read-only borrowed view. Never owns the buffer (spec section 5.1.2). */
@@ -236,6 +240,7 @@ static inline const char* raw_error_name(RawErrorCode code) {
         case kRawErrAllocationFailed: return "kRawErrAllocationFailed";
         case kRawErrSizeOverflow: return "kRawErrSizeOverflow";
         case kRawErrCancelled: return "kRawErrCancelled";
+        case kRawErrSizedUnsupported: return "kRawErrSizedUnsupported";
         default: return "kRawErrUnknown";
     }
 }

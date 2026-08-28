@@ -1,6 +1,8 @@
 #include "raw_gpu_pipeline.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -107,6 +109,24 @@ float computeInvRangeLinearRgb(const RawGpuInput& input) {
     return range > 0.0f ? 65535.0f / range : 1.0f;
 }
 
+// Scaled decode output extent, mirroring the DNG path's MaximumSize cap
+// (dng_pipeline.cpp). max_long_edge == 0 or >= the source long edge means
+// full resolution (never upscale) — dst == src, so the shared Stage4 entry
+// stays bit-identical to the pre-scaled crop path. Otherwise scale both edges
+// by the same factor, preserving aspect, rounding to nearest, clamped to >= 1.
+void scaledOutputExtent(uint32_t src_w, uint32_t src_h, uint32_t max_long_edge,
+                        uint32_t* dst_w, uint32_t* dst_h) {
+    const uint32_t long_edge = std::max(src_w, src_h);
+    if (max_long_edge == 0 || max_long_edge >= long_edge || long_edge == 0) {
+        *dst_w = src_w;
+        *dst_h = src_h;
+        return;
+    }
+    const double s = static_cast<double>(max_long_edge) / long_edge;
+    *dst_w = std::max<uint32_t>(1u, static_cast<uint32_t>(std::llround(src_w * s)));
+    *dst_h = std::max<uint32_t>(1u, static_cast<uint32_t>(std::llround(src_h * s)));
+}
+
 RawErrorCode runBayerBranch(const RawGpuInput& input,
                             const RawDevelopParams& develop,
                             RawPipelineResult& out) {
@@ -177,22 +197,32 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         return kRawErrMetadataInvalid;
     }
 
-    const uint32_t out_w = crop.width;
-    const uint32_t out_h = crop.height;
+    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
+    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
+    // pre-average scaled AOT when they differ, and is bit-identical to the
+    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
+    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
+    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
     const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
 
     RgbaCheckoutGuard rgba(rgba_bytes);
     if (!rgba.get()) return kRawErrAllocationFailed;
 
-    // Unscaled crop form: src extent == dst extent, so the shared Stage4 takes
-    // the crop branch at src/dng_render_halide.cpp:1261-1269, which does the
-    // raw->dim[i].min = 0 mutation itself (never set_min/translate, which would
-    // trigger device_deallocate — memory.md Key Gotchas).
+    // src extent (crop) vs dst extent (scaled): equal on the full-res path, so
+    // the shared Stage4 takes the crop branch at
+    // src/dng_render_halide.cpp:1261-1269, which does the raw->dim[i].min = 0
+    // mutation itself (never set_min/translate, which would trigger
+    // device_deallocate — memory.md Key Gotchas); when they differ it dispatches
+    // the pre-average scaled AOT instead (same entry the DNG path uses).
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
                                             1.0f / 65535.0f,
                                             crop.x, crop.y,
-                                            static_cast<int>(out_w),
-                                            static_cast<int>(out_h),
+                                            static_cast<int>(src_w),
+                                            static_cast<int>(src_h),
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba.get(),
@@ -299,8 +329,16 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         return kRawErrMetadataInvalid;
     }
 
-    const uint32_t out_w = crop.width;
-    const uint32_t out_h = crop.height;
+    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
+    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
+    // pre-average scaled AOT when they differ, and is bit-identical to the
+    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
+    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
+    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
     const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
 
     RgbaCheckoutGuard rgba(rgba_bytes);
@@ -310,8 +348,8 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
                                             1.0f / 65535.0f,
                                             crop.x, crop.y,
-                                            static_cast<int>(out_w),
-                                            static_cast<int>(out_h),
+                                            static_cast<int>(src_w),
+                                            static_cast<int>(src_h),
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba.get(),
@@ -417,8 +455,16 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         return kRawErrMetadataInvalid;
     }
 
-    const uint32_t out_w = crop.width;
-    const uint32_t out_h = crop.height;
+    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
+    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
+    // pre-average scaled AOT when they differ, and is bit-identical to the
+    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
+    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
+    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
     const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
 
     RgbaCheckoutGuard rgba(rgba_bytes);
@@ -428,8 +474,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
                                             1.0f / 65535.0f,
                                             crop.x, crop.y,
-                                            static_cast<int>(out_w),
-                                            static_cast<int>(out_h),
+                                            static_cast<int>(src_w),
+                                            static_cast<int>(src_h),
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba.get(),
@@ -472,6 +518,29 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
         out.error = kRawErrSizeOverflow;
         return out.error;
     }
+
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+    // Scaled/sized decode has no AOT on the split (Vulkan/Android/Linux) build,
+    // and the raw path has no host SDK fallback (spec section 2.6). Reject a
+    // sized request that would actually downscale — matching the DNG path's
+    // documented rejection (linux-vulkan-handover.md §3 / AC-D1) rather than
+    // silently returning full resolution, which would violate the caller's
+    // max_output_long_edge contract. A cap >= the crop long edge is satisfiable
+    // at full resolution, so it is allowed through unchanged.
+    if (develop.max_output_long_edge > 0) {
+        const uint32_t long_edge =
+            std::max(input.default_crop.width, input.default_crop.height);
+        if (develop.max_output_long_edge < long_edge) {
+            std::fprintf(stderr,
+                         "[RawPipeline] sized decode unsupported on this build "
+                         "(no scaled AOT); requested max_long_edge=%u vs crop "
+                         "long edge %u\n",
+                         develop.max_output_long_edge, long_edge);
+            out.error = kRawErrSizedUnsupported;
+            return out.error;
+        }
+    }
+#endif
 
     char reason[256] = {0};
     const RawErrorCode validated = raw_validate_gpu_input(&input, reason, sizeof(reason));

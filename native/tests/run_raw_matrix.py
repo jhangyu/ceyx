@@ -96,6 +96,40 @@ def main():
         ok &= run(name, cmd)
         cases.append(name)
 
+    # Scaled decode gate for the LibRaw path (contract AC-2). The binary is
+    # mandatory (a missing binary is silent coverage loss); the SAMPLES are
+    # owner-supplied and untracked, so an absent-sample run is a SKIP, not a
+    # failure — the harness returns 2 for "no usable file", which we tolerate.
+    sized_bin = build_dir / "test_raw_sized_decode"
+    if not sized_bin.is_file():
+        print("[RawMatrix] %-28s -> FAIL (binary missing: %s)"
+              % ("raw-sized-decode", sized_bin))
+        ok = False
+    else:
+        raw_layouts = {"bayer2x2", "xtrans6x6", "linear_rgb"}
+        sized_files = [
+            s["path"] for s in samples
+            if s.get("expect_error") == "kRawSuccess"
+            and s.get("expect_layout") in raw_layouts
+            and s.get("extension") != "dng"
+            and (REPO / s["path"]).is_file()
+        ]
+        if not sized_files:
+            print("[RawMatrix] %-28s -> SKIP (no raw sample present)"
+                  % "raw-sized-decode")
+        else:
+            proc = subprocess.run([str(sized_bin), *sized_files],
+                                  cwd=str(REPO), capture_output=True, text=True)
+            status = "PASS" if proc.returncode == 0 else \
+                ("SKIP" if proc.returncode == 2 else "FAIL")
+            print("[RawMatrix] %-28s rc=%d -> %s"
+                  % ("raw-sized-decode", proc.returncode, status))
+            if proc.returncode not in (0, 2):
+                sys.stdout.write(proc.stdout[-4000:])
+                sys.stderr.write(proc.stderr[-4000:])
+                ok = False
+    cases.append("raw-sized-decode")
+
     if args.skip_dng:
         print("[RawMatrix] WARNING --skip-dng was used; this is NOT a gate run")
         if not ok:
