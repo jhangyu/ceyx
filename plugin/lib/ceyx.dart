@@ -41,6 +41,11 @@ export 'src/heif_decoder_service.dart'
 export 'src/heif_error_codes.dart'
     show HeifErrorCode, HeifDecodeException, HeifUnavailableException;
 
+export 'src/encode_bindings.dart' show CeyxEncodeErrorCode;
+
+export 'src/encode_service.dart'
+    show CeyxEncodeService, CeyxEncodeException, CeyxEncodeUnavailableException;
+
 
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.
