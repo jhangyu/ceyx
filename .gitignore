@@ -75,6 +75,13 @@ native/third_party/libraw-cmake/
 native/third_party/heif-dist/*
 !native/third_party/heif-dist/PROVENANCE.md
 
+# Vendored libwebp encode distribution (static, built by
+# native/scripts/fetch_libwebp_dist.sh). Same policy as the HEIF dist above:
+# fetched and built, never tracked; PROVENANCE.md IS tracked.
+native/third_party/libwebp-dist/*
+!native/third_party/libwebp-dist/PROVENANCE.md
+native/third_party/libwebp-dist-*/
+
 # Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
 # native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
 # would otherwise sweep the library, silently leaving a blank checkout without

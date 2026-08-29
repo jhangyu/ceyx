@@ -254,6 +254,13 @@ if(DNG_ENABLE_HEIF)
     target_link_libraries(test_heif_color PRIVATE dng_decoder_native)
 endif()
 
+# Phase 13 encode route: RGBA8 -> JPEG/WebP C ABI harness. Links the shipped
+# dylib (not the TU) so the gate proves the EXPORTED symbols, which is what the
+# Dart FFI lookup resolves.
+add_executable(ceyx_encode_harness tests/ceyx_encode_harness.cpp)
+target_include_directories(ceyx_encode_harness PRIVATE ${INC_DIR})
+target_link_libraries(ceyx_encode_harness PRIVATE dng_decoder_native)
+
 # P17 T2: plain-C raw pipeline contract ABI test (raw_pipeline_contract.h).
 # Pure header test, no LibRaw/decoder dependency; not gated by
 # DNG_ENABLE_GENERIC_RAW.

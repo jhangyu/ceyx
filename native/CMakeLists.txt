@@ -157,4 +157,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ffi.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/heif.cmake)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/encode.cmake)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests.cmake)
