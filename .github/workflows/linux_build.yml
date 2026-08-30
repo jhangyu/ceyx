@@ -38,6 +38,17 @@ jobs:
       REPO_ROOT: ${{ github.workspace }}
       NATIVE_DIR: ${{ github.workspace }}/native
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
+      # builtin-baseline, vcpkg-configuration.json's default-registry baseline
+      # and port_spike.yml's VCPKG_BASELINE (N30 — one value, four places).
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_TRIPLET: x64-linux-heif
+      # The vcpkg paths deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a workflow
+      # STARTUP failure (the run reports its name as the file path and executes
+      # zero jobs), which is how the first D5 push failed. RUNNER_TEMP is
+      # available as an ordinary environment variable inside `run:` steps, so
+      # the paths are composed there instead.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,6 +108,55 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: native/scripts/fetch_libraw_dist.sh
 
+      # D5 (2026-08-31): libwebp now comes from vcpkg, pinned to exactly 1.6.0 in
+      # native/vcpkg/vcpkg.json, and cmake/encode.cmake HARD-FAILS the configure
+      # when it is absent. Before D5 this leg had no libwebp at all and silently
+      # compiled CEYX_ENABLE_WEBP=0 — a green build shipping no WebP encoder,
+      # which is exactly what the hard failure now prevents.
+      #
+      # --x-no-default-features installs the manifest's CORE set (libwebp alone).
+      # The HEIF stack is behind the manifest's default `heif` feature and is
+      # deliberately skipped here: this leg passes -DDNG_ENABLE_HEIF=OFF, so
+      # building libheif/libde265/kvazaar/aom would cost ~20 minutes to produce
+      # artefacts the configure then disables.
+      #
+      # No assembler package is needed for this step, unlike port_spike.yml's
+      # Linux leg: nasm is required by vcpkg's AOM port, and aom is precisely
+      # what --x-no-default-features excludes here.
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg" version
+
+      - name: vcpkg install libwebp (x64-linux-heif)
+        run: |
+          set +e
+          "$RUNNER_TEMP/vcpkg/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="$VCPKG_TRIPLET" \
+              --x-no-default-features \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
+      # Prove the artefact before the product build consumes it. The linkage
+      # assertion is the one that was missing when the overlay triplets silently
+      # installed libwebp as a shared library.
+      - name: Assert the vcpkg libwebp artefact (static)
+        run: |
+          set -e
+          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          ls -la "$VCPKG_PREFIX/lib"
+          test -f "$VCPKG_PREFIX/lib/libwebp.a" \
+            || { echo "FAIL: libwebp.a absent (expected a static archive)"; exit 1; }
+          shared=$(find "$VCPKG_PREFIX/lib" -name 'libwebp*.so*' | wc -l | tr -d ' ')
+          test "$shared" = "0" \
+            || { echo "FAIL: ${shared} libwebp shared object(s) present; the triplet must keep libwebp static (the LGPL dynamic exception covers libheif/libde265 only)"; exit 1; }
+
       - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
         # Native single-stage build: on Linux the host IS the target, so the
         # default --platform host path is correct (no cross-compile, unlike
@@ -112,6 +172,15 @@ jobs:
         # the hard heif gate rather than fetching a dist it does not exercise.
         working-directory: ${{ github.workspace }}
         run: |
+          # The watchdog locates the vcpkg prefix ITSELF (via CEYX_VCPKG_PREFIX,
+          # else a default path) and injects -DCMAKE_PREFIX_PATH; that resolver
+          # is mandatory and aborts the build when it finds nothing, even if the
+          # caller passed the prefix as an explicit --cmake-arg. So the env var
+          # is the supported channel — passing --cmake-arg alone fails before
+          # configure (run 33325970570). Exporting it also gets the watchdog's
+          # validation of the prefix (it checks share/WebP/WebPConfig.cmake is
+          # really there) instead of a bare string handoff.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --platform host \
             --target dng_decoder_native \

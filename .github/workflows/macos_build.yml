@@ -86,6 +86,11 @@ jobs:
             runner: macos-14
             arch_tag: arm64
             cross: "false"
+            # D5: the overlay triplet whose VCPKG_OSX_ARCHITECTURES matches this
+            # leg's output. Getting this wrong yields a wrong-architecture
+            # libwebp.a and an architecture-mismatch link failure, not a silent
+            # miscompile.
+            vcpkg_triplet: arm64-osx-heif
             # Directory holding the produced dylib, and the directory to cache.
             dylib_dir: native/build
             build_cache_path: native/build
@@ -96,6 +101,7 @@ jobs:
             runner: macos-14
             arch_tag: x86_64
             cross: "true"
+            vcpkg_triplet: x64-osx-heif
             dylib_dir: native/build-macos-x86_64/target
             build_cache_path: native/build-macos-x86_64
             heif_dist_dir: native/third_party/heif-dist-x86_64
@@ -108,6 +114,18 @@ jobs:
       # string appears exactly once.
       X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
       HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
+      # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
+      # builtin-baseline, vcpkg-configuration.json's default-registry baseline
+      # and port_spike.yml's VCPKG_BASELINE (N30 — four places, one value).
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a workflow
+      # STARTUP failure (the run reports its name as the file path and executes
+      # zero jobs), which is how the first D5 push failed. `matrix` IS available
+      # here, which is why VCPKG_TRIPLET above is fine; RUNNER_TEMP is available
+      # as an ordinary environment variable inside `run:` steps, so the paths
+      # are composed there.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -180,6 +198,97 @@ jobs:
       - name: Fetch vendored LibRaw distribution
         run: native/scripts/fetch_libraw_dist.sh
 
+      # D5 (2026-08-31): libwebp is supplied by vcpkg, pinned to exactly 1.6.0 in
+      # native/vcpkg/vcpkg.json. cmake/encode.cmake resolves it with
+      # find_package(WebP CONFIG) and HARD-FAILS the configure when it is
+      # absent, so this step is load-bearing, not best-effort.
+      #
+      # D5 leg 2 (2026-08-31): libde265 now comes from here too, via the
+      # manifest's `de265` feature, and fetch_heif_deps.sh COPIES it out of this
+      # prefix instead of building it. That is why this block runs BEFORE the
+      # HEIF dist step below rather than after it.
+      #
+      # --x-no-default-features --x-feature=de265 installs the core dependency
+      # set (libwebp) plus libde265, and nothing else. The full `heif` feature is
+      # NOT wanted here: this leg still builds libheif itself from source with
+      # the kvazaar HEVC encoder, which no registry libheif offers (Spec §3.2),
+      # so installing it from vcpkg would build a second unused copy and pay for
+      # aom+kvazaar twice.
+      #
+      # Bootstrap mirrors port_spike.yml's (clone, checkout the pinned baseline,
+      # bootstrap-vcpkg.sh) rather than using a marketplace action, so both
+      # workflows acquire vcpkg the same way.
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg" version
+
+      - name: vcpkg install libwebp + libde265 + aom (${{ matrix.vcpkg_triplet }})
+        run: |
+          set +e
+          "$RUNNER_TEMP/vcpkg/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="$VCPKG_TRIPLET" \
+              --x-no-default-features \
+              --x-feature=de265 \
+              --x-feature=aom \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
+      # Prove the artefacts before the product build consumes them. libwebp: a
+      # STATIC archive of the RIGHT architecture — the linkage half is the
+      # assertion that was missing when the triplets silently produced a dylib
+      # here; the architecture half is what the cross leg gets wrong if
+      # vcpkg_triplet and CMAKE_OSX_ARCHITECTURES disagree. libde265: a SHARED
+      # library (A5.2 — LGPL-3 §4(d)(1); the default triplets are static, so this
+      # assertion is the only thing between a triplet typo and a compliance
+      # breach) of the same architecture.
+      - name: Assert the vcpkg artefacts (libwebp static, libde265 shared)
+        run: |
+          set -e
+          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          ls -la "$VCPKG_PREFIX/lib"
+          test -f "$VCPKG_PREFIX/lib/libwebp.a" \
+            || { echo "FAIL: libwebp.a absent (expected a static archive)"; exit 1; }
+          shared=$(find "$VCPKG_PREFIX/lib" -name 'libwebp*.dylib' | wc -l | tr -d ' ')
+          test "$shared" = "0" \
+            || { echo "FAIL: ${shared} libwebp dylib(s) present; the triplet must keep libwebp static (LGPL asymmetry applies to libheif/libde265 only)"; exit 1; }
+          archs=$(lipo -archs "$VCPKG_PREFIX/lib/libwebp.a")
+          echo "libwebp.a archs: ${archs}"
+          echo "${archs}" | grep -qw "${{ matrix.arch_tag }}" \
+            || { echo "FAIL: libwebp.a archs '${archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+          de265=$(find "$VCPKG_PREFIX/lib" -name 'libde265*.dylib' | wc -l | tr -d ' ')
+          test "$de265" != "0" \
+            || { echo "FAIL: no libde265 dylib in the vcpkg prefix; a static libde265 is an LGPL-3 4(d)(1) breach, not a packaging detail [A5.2]"; exit 1; }
+          test ! -f "$VCPKG_PREFIX/lib/libde265.a" \
+            || { echo "FAIL: libde265.a present; the triplet's dynamic exception did not apply [A5.2]"; exit 1; }
+          # Whichever spelling the port produced as the REAL file (the other is a
+          # symlink to it); -L makes lipo follow it either way.
+          de265_lib=$(find "$VCPKG_PREFIX/lib" -name 'libde265*.dylib' | head -n 1)
+          de265_archs=$(lipo -archs "$de265_lib")
+          echo "libde265 archs: ${de265_archs}"
+          echo "${de265_archs}" | grep -qw "${{ matrix.arch_tag }}" \
+            || { echo "FAIL: libde265 archs '${de265_archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+          # aom (D5 leg 3): STATIC — it is linked INTO libheif, so a dylib here
+          # would have to be shipped and resolved at runtime instead. Arch is
+          # checked for the same reason as libwebp's: the cross leg is the one
+          # that gets it wrong, and the old source build forced AOM_TARGET_CPU
+          # by hand precisely because aom otherwise follows the HOST cpu.
+          test -f "$VCPKG_PREFIX/lib/libaom.a" \
+            || { echo "FAIL: libaom.a absent (expected a static archive)"; exit 1; }
+          aom_shared=$(find "$VCPKG_PREFIX/lib" -name 'libaom*.dylib' | wc -l | tr -d ' ')
+          test "$aom_shared" = "0" \
+            || { echo "FAIL: ${aom_shared} libaom dylib(s) present; aom must stay static (it is linked into libheif)"; exit 1; }
+          aom_archs=$(lipo -archs "$VCPKG_PREFIX/lib/libaom.a")
+          echo "libaom.a archs: ${aom_archs}"
+          echo "${aom_archs}" | grep -qw "${{ matrix.arch_tag }}" \
+            || { echo "FAIL: libaom.a archs '${aom_archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+
       # macOS is the one platform that genuinely ships the HEIC decode route, so
       # unlike the Linux/Android workflows (which configure with
       # -DDNG_ENABLE_HEIF=OFF) it FETCHES the dist rather than disabling it.
@@ -187,23 +296,65 @@ jobs:
       # "HEIF decode is enabled but the vendored dist is missing".
       #
       # Cached in the same shape as Halide/LibRaw above, and for a much stronger
-      # reason: the script does not download a prebuilt dist, it BUILDS libde265
-      # and libheif from source, which is minutes of runner time per job. The key
-      # is derived from hashFiles of the fetch script, so bumping either version
-      # pin (or any configure flag) inside that script invalidates the cache
-      # rather than silently reusing the old dist. arch_tag is part of the key
-      # because the two legs need different-architecture dylibs.
+      # reason: the script does not download a prebuilt dist, it BUILDS libheif
+      # (and kvazaar/aom) from source, which is minutes of runner time per job.
+      # The key covers the fetch script AND the vcpkg manifest + libde265 overlay
+      # port, because since D5 leg 2 the dist's libde265 comes from that port —
+      # a version bump there with an unchanged fetch script would otherwise
+      # restore a dist carrying the OLD libde265 and report success. arch_tag is
+      # part of the key because the two legs need different-architecture dylibs.
       - name: Cache vendored HEIF (libheif + libde265) distribution
         id: cache-heif
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/${{ matrix.heif_dist_dir }}
-          key: heif-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_heif_deps.sh') }}
+          key: heif-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_heif_deps.sh', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
 
+      # CEYX_VCPKG_PREFIX is mandatory here since D5 leg 2: build_libde265()
+      # copies the dylib out of it and hard-fails when it is unset, rather than
+      # falling back to a source build (a silent fallback would hide exactly the
+      # wiring this change exists to prove).
       - name: Fetch vendored HEIF distribution
         env:
           DNG_HEIF_ARCH: ${{ matrix.arch_tag }}
-        run: native/scripts/fetch_heif_deps.sh
+        run: |
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          native/scripts/fetch_heif_deps.sh
+
+      # THE load-bearing evidence for D5 leg 2. A green build proves nothing
+      # here: libheif links fine against a dylib whose recorded dependency is an
+      # absolute path into $RUNNER_TEMP, and the failure only appears on a
+      # machine that has no such directory — i.e. never on CI. So assert the
+      # LOAD COMMANDS of the shipped artefacts, positively (@rpath present) and
+      # negatively (no build-machine absolute path).
+      #
+      # Skipped when the dist came from cache: the cache key covers the fetch
+      # script, the manifest and the overlay port, so a hit means these exact
+      # bytes were asserted on the run that produced them — but a hit ALSO means
+      # the copy path did not execute, so saying so out loud beats a PASS that
+      # silently means "not checked" (lesson 2026-08-25).
+      - name: Assert libde265's linkage in the produced dist (A5.2/A5.3)
+        run: |
+          set -e
+          DIST="$GITHUB_WORKSPACE/${{ matrix.heif_dist_dir }}"
+          echo "cache-hit=${{ steps.cache-heif.outputs.cache-hit }}"
+          ls -la "$DIST/lib"
+          test -f "$DIST/lib/libde265.0.dylib" \
+            || { echo "FAIL: $DIST/lib/libde265.0.dylib absent — heif.cmake stages exactly this name next to dng_decoder_native"; exit 1; }
+          test -e "$DIST/lib/libde265.dylib" \
+            || { echo "FAIL: $DIST/lib/libde265.dylib absent — fetch_heif_deps.sh points libheif at the UNVERSIONED name"; exit 1; }
+          id_out=$(otool -D "$DIST/lib/libde265.0.dylib")
+          echo "$id_out"
+          grep -q '^@rpath/libde265.0.dylib$' <<< "$id_out" \
+            || { echo "FAIL: libde265's install name is not @rpath/libde265.0.dylib; libheif would record whatever this says and resolve it on the BUILD machine only"; exit 1; }
+          heif_deps=$(otool -L "$DIST/lib/libheif.1.dylib" | tail -n +2)
+          echo "$heif_deps"
+          grep -q '@rpath/libde265' <<< "$heif_deps" \
+            || { echo "FAIL: libheif does not reference libde265 via @rpath"; exit 1; }
+          if grep -q "$RUNNER_TEMP" <<< "$heif_deps"; then
+            echo "FAIL: libheif carries a load command into the build machine's vcpkg prefix ($RUNNER_TEMP) — this ships a dylib that loads nowhere else"
+            exit 1
+          fi
 
       - name: Cache CMake build directory
         uses: actions/cache@v4
@@ -217,6 +368,12 @@ jobs:
         if: matrix.cross == 'false'
         working-directory: ${{ github.workspace }}
         run: |
+          # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's own resolver runs
+          # before every non-Android configure, is mandatory, and aborts when it
+          # locates no prefix — even if one was passed as an explicit cmake arg
+          # (run 33325970570). The env var is the supported channel and gets the
+          # watchdog's prefix validation for free.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --target dng_decoder_native \
             --idle-timeout-sec 180
@@ -226,6 +383,12 @@ jobs:
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
         run: |
+          # Needed even though this stage sets DNG_HOST_GENERATORS_ONLY (which
+          # makes cmake/encode.cmake a no-op): the watchdog's vcpkg resolver
+          # runs before EVERY non-Android configure regardless of what the
+          # configure will go on to do, so a stage that does not use libwebp
+          # still cannot start without a locatable prefix.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --build-dir "${HOST_GEN_DIR}" \
             --target dng_all_aot \
@@ -243,6 +406,7 @@ jobs:
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
         run: |
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
             --target dng_decoder_native \

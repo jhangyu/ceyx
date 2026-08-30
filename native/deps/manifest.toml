@@ -33,27 +33,39 @@
 # silently resolved -- no such disagreement was found for the four HEIF-stack
 # components (all four version/SHA-256 pairs match exactly, K32).
 #
-# ROUND-1 HONESTY NOTE (read before editing `source.*.kind`): this manifest
-# encodes the CURRENT self-built-everything state of the two scripts above.
-# It does NOT yet encode the target hybrid split from Spec §3.2 (D5, owned by
-# M2, round 2-3: libwebp and macOS/Linux libde265 move to vcpkg; aom bumps to
-# 3.15.0). `manifest.toml` has a single owner (this file's header, and
-# Plan §3's file-ownership table) -- M2 must request changes here rather than
-# editing directly. Two components below carry `migration_pending = true`
-# with a `reason` describing why they are self-built TODAY without yet
-# claiming a permanent R-1a taxonomy reason for libde265/aom specifically:
-#   - libde265: today self-built on every platform; Spec §3.2 resolves
-#     macOS/Linux to `registry` and Windows stays self-built for a genuine
-#     `feature` reason (three blockers, none version-related). Only the
-#     Windows split is a permanent reason; the macOS/Linux self-build today is
-#     a sequencing fact (D5 has not landed), not a durable R-1a reason.
-#   - aom: today self-built at 3.12.1; Spec §3.2 resolves it to `registry`
-#     bumped to 3.15.0 under Ruling 1, landed by M2 in its own commit
-#     (OD-10). The self-build today is likewise sequencing, not durable.
-# kvazaar (`absent` -- no registry port exists at any version) and libheif
-# (`feature` -- no registry libheif offers a kvazaar HEVC-encoder feature at
-# any version, only x265/GPL-2.0) ARE durable R-1a reasons and do not carry
-# `migration_pending`.
+# MIGRATION STATE (read before editing `source.*.kind`). This section replaces
+# the round-1 honesty note, which described a self-built-everything state that
+# stopped being true when D5 landed. A stale honesty note defeats its own
+# purpose, so it is updated in the same commit as every migration step rather
+# than left as archaeology.
+#
+# MIGRATED to the registry (no `migration_pending` anywhere below):
+#   - libwebp        -- D5 leg 1, vcpkg `overrides` pin 1.6.0.
+#   - libde265       -- D5 leg 2, macOS/Linux only, via the CEYX overlay fork
+#                       native/vcpkg/ports/libde265 (its own `version` 1.1.1 is
+#                       the pin; overlay ports bypass the versions database).
+#                       `source.windows` stays `tarball` on a DURABLE `feature`
+#                       reason (three Windows-only blockers, none version-
+#                       related), so that override is not sequencing and must
+#                       not be "finished off" later.
+#   - aom            -- D5 leg 3, vcpkg `overrides` pin 3.15.0. The ONLY
+#                       component whose version changes in this migration
+#                       (3.12.1 -> 3.15.0, Ruling 1), which is why it landed in
+#                       a commit containing nothing else (A5.1b/OD-10): any PSNR
+#                       movement has exactly one candidate cause. No
+#                       `source.windows` override exists because the Windows
+#                       dist builds no aom at all.
+#
+# STILL SELF-BUILT, and each on a durable R-1a reason rather than sequencing:
+#   - kvazaar  -- `absent`: no registry port exists at any version.
+#   - libheif  -- `feature`: no registry libheif offers a kvazaar HEVC-encoder
+#                 feature at any version, only x265/GPL-2.0.
+#   - libjxl / LibRaw / Halide / the committed Windows dists -- see each block.
+#
+# `manifest.toml` has a single owner (this file's header and Plan §3's
+# file-ownership table). D5's implementer edits the libwebp/libde265/aom blocks
+# and this note directly, by the lead's ruling of 2026-08-31; everything else
+# still goes through M1.
 
 # ---------------------------------------------------------------------------
 [component.kvazaar]
@@ -134,11 +146,32 @@ licence_files = ["COPYING*", "LICENSE*"]
 path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.libde265.source.default]
-  kind              = "tarball"
-  migration_pending = true
-  reason            = "self-built on every platform TODAY (transcribed verbatim from fetch_heif_deps.sh / build_heif_dist_windows.sh); Spec_build_rewrite.md §3.2 resolves macOS/Linux to registry (vcpkg 1.1.1, exact match) under D5 (round 2-3, owned by M2) -- this is a sequencing fact, not a durable R-1a reason, and manifest.toml must be updated by M1 on M2's request once D5 lands"
-  url               = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
-  sha256            = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
+  # D5 LEG 2 LANDED for macOS/Linux (2026-08-31). `migration_pending` is gone
+  # because the migration is no longer pending: fetch_heif_deps.sh's
+  # build_libde265() no longer builds anything -- it COPIES the vcpkg-installed
+  # dylib out of $CEYX_VCPKG_PREFIX into the dist and hard-fails when that
+  # prefix is absent. The pin is the overlay port's own `version` field
+  # (native/vcpkg/ports/libde265/vcpkg.json), which selects the exact source
+  # tarball by SHA-512 in its portfile -- a stronger pin than an `overrides`
+  # entry, and the reason no `overrides` entry exists (overlay ports bypass the
+  # versions database entirely).
+  #
+  # `source.windows` below is UNCHANGED and keeps its durable `feature` reason:
+  # build_heif_dist_windows.sh still builds libde265 from source there,
+  # permanently, for the three blockers it records.
+  kind    = "registry"
+  version = "1.1.1"
+  # A5.5: the two patches the overlay port applies, read at
+  # native/vcpkg/ports/libde265/*.patch before being described here.
+  reason  = "supplied by vcpkg at exactly 1.1.1 via the CEYX OVERLAY FORK native/vcpkg/ports/libde265 (its vcpkg.json `version` plus a SHA-512-pinned release tarball IS the pin; overlay ports bypass the versions database, so no `overrides` entry can apply). Spec_build_rewrite.md §3.2 resolves macOS/Linux to registry with no version change. The fork applies two patches, both required: (1) fix-linkage.patch rewrites the pkg-config `Libs.private` derivation -- upstream hard-codes -lc++/-lstdc++ behind a check_cxx_symbol_exists(_LIBCPP_VERSION) probe and appends a literal -lpthread; the patch derives the list from CMAKE_CXX_IMPLICIT_LINK_LIBRARIES minus the C set, uses ${CMAKE_THREAD_LIBS_INIT}, and drops THREADS_PREFER_PTHREAD_FLAG, so a consumer resolving libde265 through pkg-config does not inherit a wrong or duplicated C++ runtime; (2) fix-api-visibility.patch reorders the LIBDE265_API definition so defined(LIBDE265_STATIC_BUILD) yields an EMPTY macro BEFORE the Win32 dllexport/dllimport branch is considered, so a static build stops emitting __declspec"
+  # Retained as HISTORY, not as an instruction: these are the exact bytes the
+  # pre-D5 source build downloaded, and they let a reviewer confirm the overlay
+  # port pins the SAME upstream release (its portfile's SHA-512 covers identical
+  # bytes) rather than take it on trust. One live use survives: assemble() in
+  # fetch_heif_deps.sh still fetches and verifies this tarball to vendor the
+  # LGPL-3 licence file, which the copied dylib does not carry.
+  historical_url    = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
+  historical_sha256 = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
 
   [component.libde265.source.windows]
   # This override IS a durable R-1a reason (`feature`) even after D5 lands:
@@ -203,7 +236,9 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
 # ---------------------------------------------------------------------------
 [component.aom]
 role          = "av1-codec"
-version       = "3.12.1"
+# Bumped 3.12.1 -> 3.15.0 by D5 leg 3 under Ruling 1, in an isolated commit
+# (A5.1b/OD-10) so any PSNR movement is attributable to this and nothing else.
+version       = "3.15.0"
 linkage       = "static"
 licence       = "BSD-2-Clause AND Alliance-for-Open-Media-Patent-License-1.0"
 # PATENTS* is in the glob specifically for aom (K6): it carries the AOM
@@ -212,11 +247,26 @@ licence_files = ["COPYING*", "LICENSE*", "PATENTS*"]
 path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.aom.source.default]
-  kind              = "tarball"
-  migration_pending = true
-  reason            = "self-built at 3.12.1 TODAY (transcribed verbatim); Spec_build_rewrite.md §3.2/§6.5 resolves this to registry at 3.15.0 under Ruling 1, landed by M2 as an ISOLATED single-purpose commit (OD-10) after the rest of the migration proves green at unchanged versions -- this is a sequencing fact, not a durable R-1a reason, and manifest.toml must be updated by M1 on M2's request once D5 lands"
-  url               = "https://storage.googleapis.com/aom-releases/libaom-{version}.tar.gz"
-  sha256            = "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
+  # D5 LEG 3 LANDED (2026-08-31), in its own commit containing nothing else.
+  # fetch_heif_deps.sh's build_aom() no longer builds anything: it copies
+  # lib/libaom.a and include/aom out of $CEYX_VCPKG_PREFIX and hard-fails when
+  # that prefix is absent.
+  #
+  # No `source.windows` override is added: the Windows script on this branch
+  # builds NO aom at all (build_heif_dist_windows.sh:168-169 pass
+  # -DWITH_AOM_DECODER=OFF and -DWITH_AOM_ENCODER=OFF), so there is no Windows
+  # acquisition to describe. Do not infer one from the `cmake.windows` block
+  # below, which is round-1 history transcribed from win_build_round6.sh.
+  kind    = "registry"
+  version = "3.15.0"
+  reason  = "supplied by vcpkg at exactly 3.15.0 (native/vcpkg/vcpkg.json `overrides`, resolved against pinned baseline abb6dda5cc32914d2e64d7d72b974dc301d1fc8a -- never the floating baseline, N30); Spec_build_rewrite.md §3.2/§6.5 resolves this component to registry and Ruling 1 approves the 3.12.1 -> 3.15.0 bump, which is why this is the only component in the migration whose version changes and why it lands alone (A5.1b)"
+  # Retained as HISTORY, not as an instruction: the exact bytes the 3.12.1
+  # source build downloaded. Nothing reads them now that `kind` is "registry" --
+  # and unlike libde265, no licence fetch uses them either: aom's licence is
+  # vendored from the vcpkg prefix's share/aom/copyright, which covers LICENSE,
+  # PATENTS and three third-party licences the old maxdepth-1 glob missed.
+  historical_url    = "https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz"
+  historical_sha256 = "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
 
   [component.aom.cmake.base]
   CMAKE_BUILD_TYPE                       = "Release"
@@ -395,17 +445,27 @@ licence_files = ["COPYING*"]
 path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.libwebp.source.default]
-  # migration_pending, not a durable R-1a reason: Spec §3.2 resolves libwebp
-  # to `registry` on every platform ("-- (no change needed)", our pin already
-  # equals vcpkg's exact version) under D5 (round 2-3, owned by M2). Self-built
-  # TODAY (transcribed verbatim from fetch_libwebp_dist.sh) is a sequencing
-  # fact; M1 updates this block to kind="registry" on M2's request once D5
-  # lands for libwebp.
-  kind              = "tarball"
-  migration_pending = true
-  reason            = "self-built on macOS/Linux TODAY (transcribed verbatim from fetch_libwebp_dist.sh); Spec_build_rewrite.md §3.2 resolves this component to registry (vcpkg 1.6.0, exact match, no bump needed) under D5 -- this is a sequencing fact, not a durable R-1a reason"
-  url               = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-{version}.tar.gz"
-  sha256            = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+  # D5 LANDED for libwebp (2026-08-31). `migration_pending` is gone because the
+  # migration is no longer pending: native/vcpkg/vcpkg.json declares libwebp and
+  # pins it to exactly 1.6.0 via `overrides` (N30 — never the floating
+  # baseline), the overlay triplets install it as a STATIC archive, and
+  # native/cmake/encode.cmake resolves it with find_package(WebP CONFIG),
+  # failing the configure hard if it is absent. fetch_libwebp_dist.sh, which
+  # this block was transcribed from, is deleted in the same commit.
+  #
+  # `version` above (1.6.0) is what the registry resolves to; the schema
+  # (manifest.py:166-175, A1.3) requires that pin to be explicit for
+  # kind="registry" precisely so a future edit cannot let it float.
+  kind    = "registry"
+  version = "1.6.0"
+  reason  = "supplied by vcpkg at exactly 1.6.0 (native/vcpkg/vcpkg.json `overrides`, resolved against pinned baseline abb6dda5cc32914d2e64d7d72b974dc301d1fc8a); Spec_build_rewrite.md §3.2 resolves this component to registry with no version change needed, and D5 landed that wiring on macOS/Linux -- Windows continues to use the committed dist described below, which no script in this repo has ever produced"
+  # The self-built acquisition data is retained as HISTORY, not as an
+  # instruction: these are the exact bytes fetch_libwebp_dist.sh downloaded, and
+  # keeping them is what lets a reviewer confirm the registry build is the same
+  # upstream release rather than take it on trust. Nothing reads them now that
+  # `kind` is "registry".
+  historical_url    = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-{version}.tar.gz"
+  historical_sha256 = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
   # No `source.windows` override: fetch_libwebp_dist.sh has no Windows branch.
   # The committed native/third_party/libwebp-dist-windows/ dist was built
   # once, by hand, by a since-deleted script

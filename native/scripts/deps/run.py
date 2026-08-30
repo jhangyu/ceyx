@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Mapping, Optional, Sequence, Union
 
 PathLike = Union[str, "os.PathLike[str]"]
@@ -60,17 +60,15 @@ def assert_native_windows_interpreter() -> None:
         )
     if os.name != "nt":
         return
-    executable_posix = Path(sys.executable).as_posix()
+    # PureWindowsPath is used explicitly (not the platform-dependent Path)
+    # so this branch is exercisable and unit-testable from macOS/Linux too.
+    executable_posix = PureWindowsPath(sys.executable).as_posix()
     if "/usr/bin" in executable_posix:
         raise RuntimeError(
             "refusing to run under a non-native Windows Python interpreter: "
             f"{sys.executable!r} (looks like MSYS/Cygwin Python -- use native "
             "Windows Python, invoked via `shell: pwsh`)"
         )
-    # PureWindowsPath is used explicitly (not the platform-dependent Path)
-    # so this branch is exercisable and unit-testable from macOS/Linux too.
-    from pathlib import PureWindowsPath
-
     if not PureWindowsPath(sys.executable).drive:
         raise RuntimeError(
             "refusing to run under a Python interpreter with no drive letter: "

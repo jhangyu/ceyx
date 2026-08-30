@@ -56,18 +56,22 @@ esac
 HEIF_VERSION="1.23.2"
 DE265_VERSION="1.1.1"
 KVAZAAR_VERSION="2.3.1"
-AOM_VERSION="3.12.1"
+# D5 leg 3 (2026-08-31): aom is supplied by vcpkg at 3.15.0 (Ruling 1's bump),
+# pinned in native/vcpkg/vcpkg.json `overrides` against the pinned baseline. No
+# AOM_URL/AOM_SHA256 exist any more: this script neither downloads nor builds
+# aom, so keeping a tarball hash it never verifies would state a fact it does
+# not establish. The historical pair is retained in native/deps/manifest.toml as
+# `historical_url`/`historical_sha256`.
+AOM_VERSION="3.15.0"
 HEIF_URL="https://github.com/strukturag/libheif/releases/download/v${HEIF_VERSION}/libheif-${HEIF_VERSION}.tar.gz"
 DE265_URL="https://github.com/strukturag/libde265/releases/download/v${DE265_VERSION}/libde265-${DE265_VERSION}.tar.gz"
 KVAZAAR_URL="https://github.com/ultravideo/kvazaar/releases/download/v${KVAZAAR_VERSION}/kvazaar-${KVAZAAR_VERSION}.tar.gz"
-AOM_URL="https://storage.googleapis.com/aom-releases/libaom-${AOM_VERSION}.tar.gz"
 HEIF_SHA256="8bd5d41d19dc84536d118b04774709f244df6104ef66d623dad5fa4650143405"
 DE265_SHA256="fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
 # Verified against the release API / googlesource tag list on 2026-08-30 (see
 # PROVENANCE.md); these are not assumptions, PROVENANCE.md:11-13 records a
 # prior round that named versions that did not exist upstream.
 KVAZAAR_SHA256="2510b8ecc2bf384bbc7b8fc2756bbfa8a8c173b57634c8dfdd8bea6733e56c46"
-AOM_SHA256="9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
 
 # Host OS detection -- six macOS-only assumptions upstream of this line become
 # conditional per ruling Q3 (Linux gets HEIF/AVIF enabled, no committed dist).
@@ -125,7 +129,16 @@ AOM_LIB="${DIST}/lib/libaom.a"
 # pre-existing decode-only dist would match on libheif/libde265 alone, report
 # "already at the pinned versions", exit 0, and the encoders would silently
 # never appear. This is the highest-probability silent failure in this script.
-WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:${DE265_SHA256} kvazaar=${KVAZAAR_VERSION}:${KVAZAAR_SHA256} aom=${AOM_VERSION}:${AOM_SHA256} arch=${HEIF_ARCH}"
+# libde265's stamp records PROVENANCE as well as the version since D5 leg 2: the
+# dylib is copied from the vcpkg prefix rather than built from DE265_SHA256's
+# tarball, so stamping that hash would claim a fact this script no longer
+# establishes. The version pin stays meaningful because the overlay port pins
+# the SAME release asset (its portfile's SHA-512 covers identical bytes to
+# DE265_SHA256, which assemble() still verifies when vendoring the licence).
+# The literal `vcpkg` token also invalidates every pre-D5 dist, which is what
+# forces the copy path to actually run once rather than being skipped by a
+# stamp that happens to match.
+WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:vcpkg kvazaar=${KVAZAAR_VERSION}:${KVAZAAR_SHA256} aom=${AOM_VERSION}:vcpkg arch=${HEIF_ARCH}"
 
 if [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT_PINS}" ] \
    && [ -f "${LIBHEIF_LIB}" ] && [ -f "${LIBDE265_LIB}" ]; then
@@ -133,7 +146,7 @@ if [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT_PINS}" ] \
   echo "[heif]   libheif  ${HEIF_VERSION}  ${HEIF_SHA256}"
   echo "[heif]   libde265 ${DE265_VERSION}  ${DE265_SHA256}"
   echo "[heif]   kvazaar  ${KVAZAAR_VERSION}  ${KVAZAAR_SHA256}"
-  echo "[heif]   aom      ${AOM_VERSION}  ${AOM_SHA256}"
+  echo "[heif]   aom      ${AOM_VERSION}  (vcpkg)"
   echo "[heif]   arch     ${HEIF_ARCH}"
   exit 0
 fi
@@ -192,28 +205,118 @@ fi
 # with a relocation error that names libheif rather than the archive.
 
 # --- libde265 first: libheif's FindLIBDE265 needs it installed on disk. ---
-# ENABLE_ENCODER=OFF is the LGPL-cleanliness half of the decode-only rule for
-# libde265 itself; ENABLE_SDL/SHERLOCK265 off drops the GUI inspection tools
-# and their deps.
+#
+# D5 leg 2 (2026-08-31): libde265 is no longer built from source here. It is
+# supplied by vcpkg (overlay port native/vcpkg/ports/libde265, pinned to 1.1.1
+# by the port's own `version` field plus a SHA-512-pinned tarball) and this
+# function COPIES the installed artefact into ${DIST}.
+#
+# Why a copy rather than pointing libheif at the vcpkg prefix directly: the
+# shipped product loads libde265 at runtime from BESIDE the decoder dylib
+# (cmake/heif.cmake stages ${DIST}/lib/libde265.0.dylib next to
+# dng_decoder_native, and build_apps.py copies every sibling dylib into the app
+# bundle). Leaving the dylib in the vcpkg prefix and only re-aiming the
+# LIBDE265_* hints would produce a build that links on the build machine and
+# fails to load anywhere else -- a failure invisible on CI. Keeping ${DIST} as
+# the single place everything downstream reads means the pre-seeding, the
+# assemble assertions, the licence vendoring and the staging all stay unchanged.
+#
+# Windows is deliberately NOT part of this: build_heif_dist_windows.sh keeps
+# building libde265 from source for the three durable blockers recorded in
+# native/deps/manifest.toml [component.libde265.source.windows].
 build_libde265() {
   if [ -f "${LIBDE265_LIB}" ]; then
     echo "[heif] libde265 already installed at ${LIBDE265_LIB}, skipping"
     return 0
   fi
-  fetch_verified "${DE265_URL}" "${STAGE}/libde265-${DE265_VERSION}.tar.gz" "${DE265_SHA256}"
-  rm -rf "${STAGE}/libde265-${DE265_VERSION}"
-  tar -xzf "${STAGE}/libde265-${DE265_VERSION}.tar.gz" -C "${STAGE}"
-  echo "[heif] configuring libde265 ${DE265_VERSION}"
-  cmake -S "${STAGE}/libde265-${DE265_VERSION}" -B "${STAGE}/build-de265" \
-    "${COMMON_ARGS[@]}" \
-    -DENABLE_DECODER=ON \
-    -DENABLE_ENCODER=OFF \
-    -DENABLE_SDL=OFF \
-    -DENABLE_SHERLOCK265=OFF \
-    -DENABLE_INTERNAL_DEVELOPMENT_TOOLS=OFF \
-    -DWITH_FUZZERS=OFF
-  cmake --build "${STAGE}/build-de265" --parallel "${NPROC}"
-  cmake --install "${STAGE}/build-de265"
+
+  local prefix="${CEYX_VCPKG_PREFIX:-}"
+  if [ -z "${prefix}" ] || [ ! -d "${prefix}" ]; then
+    echo "[heif] FAILED: libde265 comes from vcpkg since D5, but CEYX_VCPKG_PREFIX" >&2
+    echo "[heif]   is unset or not a directory (value: '${prefix}')." >&2
+    echo "[heif]   Install it first, e.g.:" >&2
+    echo "[heif]     <vcpkg>/vcpkg install --x-manifest-root=native/vcpkg \\" >&2
+    echo "[heif]         --x-install-root=<root> --triplet=<triplet> \\" >&2
+    echo "[heif]         --x-no-default-features --x-feature=de265" >&2
+    echo "[heif]   then export CEYX_VCPKG_PREFIX=<root>/<triplet>." >&2
+    echo "[heif]   There is deliberately no fallback to a source build: a silent" >&2
+    echo "[heif]   fallback would hide exactly the wiring this change exists to" >&2
+    echo "[heif]   prove." >&2
+    exit 1
+  fi
+
+  # Accept either spelling in the prefix: CMake's SOVERSION handling normally
+  # produces the versioned real file plus an unversioned symlink, but which of
+  # the two is the real file is a property of the port's build, not a contract.
+  local src="" cand
+  for cand in "${prefix}/lib/libde265.${DE265_LIB_EXT}" \
+              "${prefix}/lib/libde265.${DE265_UNVERSIONED_EXT}"; do
+    if [ -f "${cand}" ]; then src="${cand}"; break; fi
+  done
+  if [ -z "${src}" ]; then
+    echo "[heif] FAILED: no libde265 shared library under ${prefix}/lib" >&2
+    echo "[heif]   looked for libde265.${DE265_LIB_EXT} and libde265.${DE265_UNVERSIONED_EXT}" >&2
+    echo "[heif]   contents:" >&2
+    ls -la "${prefix}/lib" >&2 || true
+    echo "[heif]   A STATIC libde265 here means the overlay triplet's dynamic" >&2
+    echo "[heif]   exception did not apply -- that is an LGPL-3 4(d)(1) breach," >&2
+    echo "[heif]   not a packaging detail." >&2
+    exit 1
+  fi
+  echo "[heif] using vcpkg-supplied libde265: ${src}"
+
+  mkdir -p "${DIST}/lib" "${DIST}/include"
+  # -L dereferences: whichever spelling was found, ${LIBDE265_LIB} becomes the
+  # REAL file and the unversioned name becomes the symlink pointing at it. That
+  # is the shape everything downstream already assumes: libheif is pointed at
+  # the unversioned name (:319) while heif.cmake stages the versioned one.
+  cp -L "${src}" "${LIBDE265_LIB}"
+  chmod u+w "${LIBDE265_LIB}"
+  ln -sfn "libde265.${DE265_LIB_EXT}" "${DIST}/lib/libde265.${DE265_UNVERSIONED_EXT}"
+
+  rm -rf "${DIST}/include/libde265"
+  cp -R "${prefix}/include/libde265" "${DIST}/include/"
+  if [ ! -f "${DIST}/include/libde265/de265.h" ]; then
+    echo "[heif] FAILED: ${DIST}/include/libde265/de265.h missing after the copy" >&2
+    exit 1
+  fi
+
+  # The soname/install name is the load-bearing part. libheif records the
+  # DEPENDENCY name from this field, not from the file name it linked against,
+  # so a dylib whose install name is an absolute path into the vcpkg prefix
+  # produces a libheif that resolves libde265 out of the BUILD machine's
+  # $RUNNER_TEMP and loads nowhere else. Normalised and then PROVEN, in that
+  # order -- setting a value and the artefact carrying it are different facts.
+  if [ "${HOST_OS}" = "Darwin" ]; then
+    install_name_tool -id "@rpath/libde265.${DE265_LIB_EXT}" "${LIBDE265_LIB}"
+    local id_out
+    id_out="$(otool -D "${LIBDE265_LIB}")"
+    if ! grep -q "^@rpath/libde265.${DE265_LIB_EXT}$" <<< "${id_out}"; then
+      echo "[heif] FAILED: libde265 install name is not @rpath/libde265.${DE265_LIB_EXT}" >&2
+      echo "${id_out}" >&2
+      exit 1
+    fi
+  else
+    # No equivalent rewrite exists without patchelf, so assert instead: the
+    # vcpkg build must already carry SONAME libde265.so.0. A missing readelf is
+    # a FAILURE, not a skip -- a check that passes when its instrument is absent
+    # is worse than no check.
+    if ! command -v readelf > /dev/null 2>&1; then
+      echo "[heif] FAILED: readelf not found; cannot prove libde265's SONAME." >&2
+      echo "[heif]   Install binutils (the SONAME is what libheif records as its" >&2
+      echo "[heif]   runtime dependency; an unverified one is a load failure on" >&2
+      echo "[heif]   the user's machine, not on this one)." >&2
+      exit 1
+    fi
+    local dyn_out
+    dyn_out="$(readelf -d "${LIBDE265_LIB}")"
+    if ! grep -q "SONAME.*libde265\.${DE265_LIB_EXT}" <<< "${dyn_out}"; then
+      echo "[heif] FAILED: libde265 SONAME is not libde265.${DE265_LIB_EXT}" >&2
+      echo "${dyn_out}" >&2
+      exit 1
+    fi
+  fi
+  echo "[heif] libde265 ${DE265_VERSION} installed into ${DIST} from the vcpkg prefix"
 }
 
 # --- kvazaar (HEVC encoder), static, linked into libheif. ---
@@ -234,46 +337,71 @@ build_kvazaar() {
 }
 
 # --- aom (AV1 encoder + decoder), static, linked into libheif. ---
-# CONFIG_AV1_ENCODER and CONFIG_AV1_DECODER are asserted independently later:
-# they are independent flags and one can silently be off while the other is on.
+#
+# D5 leg 3 (2026-08-31): supplied by vcpkg at 3.15.0 and COPIED here, same shape
+# and same reasoning as build_libde265() above -- ${DIST} stays the one place
+# everything downstream reads, so the AOM_INCLUDE_DIR/AOM_LIBRARY pre-seeding at
+# :369-370 and libheif's link line are unchanged.
+#
+# Two things the source build had to arrange by hand are now the carrier's job,
+# which is the point of the migration rather than an oversight:
+#   * AOM_TARGET_CPU. The old build forced it on Darwin because aom derives it
+#     from the HOST CMAKE_SYSTEM_PROCESSOR when unset, so cross-building x86_64
+#     on an arm64 runner compiled NEON sources under an x86_64 clang. The vcpkg
+#     triplets carry VCPKG_TARGET_ARCHITECTURE and the registry port passes its
+#     own aom_target_cpu, so the cross case is expressed by CHOOSING the triplet
+#     (x64-osx-heif) instead. The arch assertion in assemble() still checks the
+#     artefact, so a triplet/arch mismatch is caught, not assumed away.
+#   * -DCMAKE_POSITION_INDEPENDENT_CODE=ON (K15: a static archive linked into a
+#     shared libheif). vcpkg's own linux toolchain appends -fPIC for every port;
+#     on macOS it is the default.
+# CONFIG_AV1_ENCODER/CONFIG_AV1_DECODER are NOT passed here any more (the port
+# leaves both at aom's default ON). That is exactly why assemble()'s two
+# independent symbol assertions for aom_codec_av1_cx and aom_codec_av1_dx are
+# now load-bearing rather than belt-and-braces: they are the only thing proving
+# both halves survived the version bump, and they check libheif's symbol table,
+# not this script's intent.
 build_aom() {
   if [ -f "${AOM_LIB}" ]; then
     echo "[heif] aom already installed at ${AOM_LIB}, skipping"
     return 0
   fi
-  fetch_verified "${AOM_URL}" "${STAGE}/libaom-${AOM_VERSION}.tar.gz" "${AOM_SHA256}"
-  rm -rf "${STAGE}/libaom-${AOM_VERSION}"
-  tar -xzf "${STAGE}/libaom-${AOM_VERSION}.tar.gz" -C "${STAGE}"
-  echo "[heif] configuring libaom ${AOM_VERSION} (static, encoder + decoder)"
-  # AOM_TARGET_CPU must be forced explicitly on Apple silicon runners cross-
-  # building the x86_64 leg (DNG_HEIF_ARCH=x86_64): unlike CMAKE_OSX_ARCHITECTURES
-  # (which only steers the compiler's -arch flag), aom's own
-  # build/cmake/aom_configure.cmake derives AOM_TARGET_CPU from the *host*
-  # CMAKE_SYSTEM_PROCESSOR when the variable isn't already set, so it still
-  # picks arm64 and enables NEON intrinsic sources even though the compiler
-  # is targeting x86_64 -- these NEON sources then fail to compile under the
-  # x86_64 clang invocation ("unknown type name 'uint8x8_t'"). Only forced on
-  # Darwin: HEIF_ARCH there is always exactly "arm64" or "x86_64" (uname -m
-  # vocabulary), which matches AOM_TARGET_CPU's vocabulary 1:1. On Linux
-  # HEIF_ARCH can be "aarch64", which aom's own detection normalizes to
-  # "arm64" (aom_configure.cmake's cpu_lowercase MATCHES "aarch64" branch) --
-  # passing it through unnormalized would break native Linux arm64 builds, so
-  # Linux is left on aom's built-in host detection (no cross leg exists there).
-  AOM_CPU_ARGS=()
-  if [ "${HOST_OS}" = "Darwin" ]; then
-    AOM_CPU_ARGS=(-DAOM_TARGET_CPU="${HEIF_ARCH}")
+
+  local prefix="${CEYX_VCPKG_PREFIX:-}"
+  if [ -z "${prefix}" ] || [ ! -d "${prefix}" ]; then
+    echo "[heif] FAILED: aom comes from vcpkg since D5, but CEYX_VCPKG_PREFIX is" >&2
+    echo "[heif]   unset or not a directory (value: '${prefix}')." >&2
+    echo "[heif]   Install it first, e.g.:" >&2
+    echo "[heif]     <vcpkg>/vcpkg install --x-manifest-root=native/vcpkg \\" >&2
+    echo "[heif]         --x-install-root=<root> --triplet=<triplet> \\" >&2
+    echo "[heif]         --x-no-default-features --x-feature=de265 --x-feature=aom" >&2
+    echo "[heif]   then export CEYX_VCPKG_PREFIX=<root>/<triplet>." >&2
+    exit 1
   fi
-  cmake -S "${STAGE}/libaom-${AOM_VERSION}" -B "${STAGE}/build-aom" \
-    "${STATIC_DEP_ARGS[@]}" \
-    "${AOM_CPU_ARGS[@]}" \
-    -DENABLE_TESTS=OFF \
-    -DENABLE_EXAMPLES=OFF \
-    -DENABLE_DOCS=OFF \
-    -DENABLE_TOOLS=OFF \
-    -DCONFIG_AV1_ENCODER=1 \
-    -DCONFIG_AV1_DECODER=1
-  cmake --build "${STAGE}/build-aom" --parallel "${NPROC}"
-  cmake --install "${STAGE}/build-aom"
+
+  local src="${prefix}/lib/libaom.a"
+  if [ ! -f "${src}" ]; then
+    echo "[heif] FAILED: ${src} missing" >&2
+    echo "[heif]   contents:" >&2
+    ls -la "${prefix}/lib" >&2 || true
+    echo "[heif]   aom must be a STATIC archive: it is linked INTO libheif" >&2
+    echo "[heif]   (ENABLE_PLUGIN_LOADING=OFF), and a dylib here would have to be" >&2
+    echo "[heif]   shipped and resolved at runtime instead." >&2
+    exit 1
+  fi
+
+  mkdir -p "${DIST}/lib" "${DIST}/include"
+  cp "${src}" "${AOM_LIB}"
+  rm -rf "${DIST}/include/aom"
+  cp -R "${prefix}/include/aom" "${DIST}/include/"
+  if [ ! -f "${DIST}/include/aom/aom_encoder.h" ] || [ ! -f "${DIST}/include/aom/aom_decoder.h" ]; then
+    echo "[heif] FAILED: aom headers incomplete under ${DIST}/include/aom" >&2
+    echo "[heif]   (both aom_encoder.h and aom_decoder.h are required -- libheif's" >&2
+    echo "[heif]   encoder and decoder plugins include them separately)" >&2
+    ls -la "${DIST}/include/aom" >&2 || true
+    exit 1
+  fi
+  echo "[heif] aom ${AOM_VERSION} installed into ${DIST} from the vcpkg prefix"
 }
 
 # --- libheif, against the already-installed libde265, kvazaar and aom. ---
@@ -449,17 +577,34 @@ assemble() {
     done
   fi
 
-  # --- Vendor licence files, BEFORE the stage cleanup below deletes the
-  # --- source trees they live in.
-  # PATENTS* is in the glob specifically for aom: it carries the Alliance
-  # for Open Media Patent License 1.0 as a SEPARATE grant on top of BSD-2,
-  # and shipping only LICENSE would drop it.
-  local _srcdirs=("libheif-${HEIF_VERSION}" "libde265-${DE265_VERSION}" "kvazaar-${KVAZAAR_VERSION}" "libaom-${AOM_VERSION}")
-  local _names=("libheif" "libde265" "kvazaar" "aom")
-  local _urls=("${HEIF_URL}" "${DE265_URL}" "${KVAZAAR_URL}" "${AOM_URL}")
-  local _shas=("${HEIF_SHA256}" "${DE265_SHA256}" "${KVAZAAR_SHA256}" "${AOM_SHA256}")
+  # --- aom's licence comes from the vcpkg prefix (D5 leg 3) ---------------
+  # aom is no longer downloaded here, so there is no source tree to glob and no
+  # tarball hash this script could honestly verify. vcpkg's own copyright file
+  # is the correct substitute and is strictly MORE complete than the glob it
+  # replaces: the registry port's vcpkg_install_copyright lists LICENSE,
+  # PATENTS *and* three third-party licences (fastfeat, vector, x86inc) that a
+  # maxdepth-1 glob over the source root never picked up. PATENTS matters
+  # specifically (K6): the Alliance for Open Media Patent License 1.0 is a
+  # SEPARATE grant on top of BSD-2 and shipping only LICENSE would drop it.
+  local _aom_copyright="${CEYX_VCPKG_PREFIX:-}/share/aom/copyright"
+  if [ ! -f "${_aom_copyright}" ]; then
+    echo "[heif] FAILED: aom copyright file not found at ${_aom_copyright}" >&2
+    echo "[heif]   aom is supplied by vcpkg since D5, so its licence is vendored" >&2
+    echo "[heif]   from the install prefix. Set CEYX_VCPKG_PREFIX (see build_aom)." >&2
+    echo "[heif]   Shipping the binary without it is an unmet attribution duty." >&2
+    exit 1
+  fi
+  mkdir -p "${DIST}/share/licenses/aom"
+  cp "${_aom_copyright}" "${DIST}/share/licenses/aom/copyright"
+
+  # --- Vendor the remaining licence files, BEFORE the stage cleanup below
+  # --- deletes the source trees they live in.
+  local _srcdirs=("libheif-${HEIF_VERSION}" "libde265-${DE265_VERSION}" "kvazaar-${KVAZAAR_VERSION}")
+  local _names=("libheif" "libde265" "kvazaar")
+  local _urls=("${HEIF_URL}" "${DE265_URL}" "${KVAZAAR_URL}")
+  local _shas=("${HEIF_SHA256}" "${DE265_SHA256}" "${KVAZAAR_SHA256}")
   local _i _src _name _tarball
-  for _i in 0 1 2 3; do
+  for _i in 0 1 2; do
     _src="${STAGE}/${_srcdirs[$_i]}"
     _name="${_names[$_i]}"
     # A resumed run (e.g. `libde265` stage run separately, already installed,
@@ -482,9 +627,13 @@ assemble() {
   done
 
   printf '%s' "${WANT_PINS}" > "${STAMP}"
-  rm -rf "${STAGE}/build-de265" "${STAGE}/build-kvazaar" "${STAGE}/build-aom" "${STAGE}/build-heif" \
+  # No build-de265/build-aom/libaom-* entries: those stages build nothing since
+  # D5, so nothing of theirs is ever staged. Pre-D5 leftovers are removed by the
+  # stamp change forcing a fresh dist rather than by naming paths that this
+  # script can no longer create.
+  rm -rf "${STAGE}/build-kvazaar" "${STAGE}/build-heif" \
          "${STAGE}/libheif-${HEIF_VERSION}" "${STAGE}/libde265-${DE265_VERSION}" \
-         "${STAGE}/kvazaar-${KVAZAAR_VERSION}" "${STAGE}/libaom-${AOM_VERSION}"
+         "${STAGE}/kvazaar-${KVAZAAR_VERSION}"
   echo "[heif] dist ready at ${DIST} (arch ${HEIF_ARCH})"
   echo "[heif]   libheif  ${HEIF_VERSION}"
   echo "[heif]   libde265 ${DE265_VERSION}"

@@ -12,15 +12,20 @@
 # licence-driven asymmetry, NOT an inconsistency to "clean up".
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE static)
-set(VCPKG_LIBRARY_LINKAGE dynamic)
+set(VCPKG_LIBRARY_LINKAGE static)
 set(VCPKG_CMAKE_SYSTEM_NAME)
 
 # Release-only. The dist ships no debug artefacts and a debug pass roughly
 # doubles wall-clock, which matters under the one-round spike cap.
 set(VCPKG_BUILD_TYPE release)
 
-if(PORT STREQUAL "kvazaar" OR PORT STREQUAL "aom")
-    set(VCPKG_LIBRARY_LINKAGE static)
+# D5 (2026-08-31): stated POSITIVELY — dynamic is the exception, granted only
+# to the two LGPL-3 ports. The previous form (default dynamic, static listed for
+# kvazaar/aom) was an allowlist whose blind spot made D5's newly added libwebp
+# install as a shared library. A new port now defaults to static and must be
+# named here to become dynamic.
+if(PORT STREQUAL "libheif" OR PORT STREQUAL "libde265")
+    set(VCPKG_LIBRARY_LINKAGE dynamic)
 endif()
 
 # clang-cl is reproduced from manifest.toml's cmake.windows blocks

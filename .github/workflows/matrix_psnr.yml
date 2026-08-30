@@ -24,6 +24,17 @@ jobs:
     name: Build native test targets
     runs-on: macos-14
     timeout-minutes: 45
+    env:
+      # D5: same pinned baseline as native/vcpkg/vcpkg.json,
+      # vcpkg-configuration.json and port_spike.yml (N30).
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_TRIPLET: arm64-osx-heif
+      # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a workflow
+      # STARTUP failure (the run reports its name as the file path and executes
+      # zero jobs), which is how the first D5 push failed. RUNNER_TEMP is an
+      # ordinary environment variable inside `run:` steps, so paths are composed
+      # there.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,6 +71,32 @@ jobs:
       - name: Fetch vendored LibRaw distribution
         run: native/scripts/fetch_libraw_dist.sh
 
+      # D5 (2026-08-31): this job builds TEST targets, but the configure it runs
+      # is the whole project's — cmake/encode.cmake included — and that file now
+      # hard-fails when libwebp is absent. So this workflow needs the vcpkg
+      # prefix even though nothing here exercises the WebP encode route.
+      # --x-no-default-features keeps it to libwebp alone (the job already
+      # passes -DDNG_ENABLE_HEIF=OFF).
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg" version
+
+      - name: vcpkg install libwebp (arm64-osx-heif)
+        run: |
+          set +e
+          "$RUNNER_TEMP/vcpkg/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="$VCPKG_TRIPLET" \
+              --x-no-default-features \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
@@ -71,6 +108,11 @@ jobs:
       - name: Build test_decode target
         working-directory: ${{ github.workspace }}
         run: |
+          # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's vcpkg resolver is
+          # mandatory before every non-Android configure and aborts when it
+          # locates no prefix, even if one was supplied as a cmake arg
+          # (run 33325970570).
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --target test_decode \
             --cmake-arg=-DDNG_ENABLE_HEIF=OFF \

@@ -9,12 +9,23 @@
 # Linux, not because a Linux consumer exists. See DEVIATIONS.md D11.
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE dynamic)
-set(VCPKG_LIBRARY_LINKAGE dynamic)
+set(VCPKG_LIBRARY_LINKAGE static)
 set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 set(VCPKG_BUILD_TYPE release)
 
-if(PORT STREQUAL "kvazaar" OR PORT STREQUAL "aom")
-    set(VCPKG_LIBRARY_LINKAGE static)
+# D5 (2026-08-31): the rule is stated POSITIVELY — dynamic is the exception,
+# granted only to the two LGPL-3 ports that require separate replaceability.
+# It used to read the other way round (default dynamic, static listed for
+# kvazaar/aom). That form was an allowlist with a blind spot: libwebp, added to
+# this manifest by D5, was in neither list and silently installed as a DYLIB,
+# contradicting manifest.toml's `linkage = "static"` and third_party.cmake's
+# App-Sandbox rule against absolute dylib load paths. Caught by inspecting the
+# installed artefact (docs/logs/2026-08-31/verify/d5-libwebp-install.txt), not
+# by any assertion — hence the assertion added alongside this fix.
+# In this form a newly added port defaults to the permissive-licence answer and
+# must be named explicitly to become dynamic.
+if(PORT STREQUAL "libheif" OR PORT STREQUAL "libde265")
+    set(VCPKG_LIBRARY_LINKAGE dynamic)
 endif()
 
 # K15 / handoff §B: kvazaar and aom are static archives linked into a SHARED

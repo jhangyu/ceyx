@@ -37,6 +37,33 @@ DE265_BUILTIN = "Compiling 'libde265' as built-in backend"
 X265_BUILTIN = "Compiling 'x265' as built-in backend"
 X265_ABSENT = "Not compiling 'x265' backend"
 
+# --- D5 A5.1: the exact versions this project is pinned to -------------------
+# Source of truth for each pin, so a reviewer can re-derive rather than trust:
+#   libwebp 1.6.0  -- native/vcpkg/vcpkg.json `overrides` (registry port)
+#   aom     3.15.0 -- native/vcpkg/vcpkg.json `overrides` (registry port,
+#                     bumped from the self-built 3.12.1 under Ruling 1)
+#   libde265 1.1.1 -- native/vcpkg/ports/libde265/vcpkg.json `version`; it is an
+#                     OVERLAY port, which bypasses the versions database, so no
+#                     `overrides` entry can apply to it and the port file IS the
+#                     pin (plus a SHA-512-pinned tarball in its portfile).
+# Asserted against the installed status database, never against console output:
+# console text reports what vcpkg SAID it would do, the status DB records what
+# was actually installed into the prefix being tested.
+EXPECTED_VERSIONS = {
+    "libwebp": "1.6.0",
+    "libde265": "1.1.1",
+    "aom": "3.15.0",
+}
+
+# Packages whose presence is REQUIRED for the version assertions to be
+# meaningful rather than vacuous. libwebp is in the manifest's core dependency
+# set, so it is present on every triplet install; libde265 and aom arrive only
+# with the `heif` feature, which a libwebp-only leg installs with
+# --x-no-default-features. Hence: libwebp always required, the other two
+# required only when libheif proves the heif feature was installed.
+ALWAYS_INSTALLED = "libwebp"
+HEIF_FEATURE_MARKER = "libheif"
+
 # Dynamic-CRT import names. A /MT-linked binary imports none of these.
 DYNAMIC_CRT_MARKERS = (
     "vcruntime140",
@@ -161,6 +188,52 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def parse_status_db(install_root: Path, triplet: str) -> dict[str, str]:
+    """Return {package name: version} for packages INSTALLED on `triplet`.
+
+    `<install-root>/vcpkg/status` is vcpkg's Debian-style status database: one
+    blank-line-separated stanza per installed package, e.g.
+
+        Package: libwebp
+        Version: 1.6.0
+        Port-Version: 3
+        Architecture: arm64-osx-heif
+        Status: install ok installed
+
+    Three filters matter and each one is load-bearing:
+      * `Architecture` must equal the triplet under test. Host tool ports
+        (vcpkg-cmake and friends) are installed under the HOST triplet in the
+        same file, so an unfiltered read mixes two architectures.
+      * `Status` must end in "installed". Removed packages keep their stanza
+        with a different status; counting them would assert about software that
+        is not in the prefix.
+      * Feature stanzas (`Feature:` present, no `Version:`) must be skipped —
+        they describe an installed feature of a package, not a package.
+
+    Port-Version is deliberately NOT folded into the returned version. Our pins
+    are upstream version pins; the port revision is vcpkg packaging metadata and
+    changes without the upstream source changing.
+    """
+    status_file = install_root / "vcpkg" / "status"
+    if not status_file.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for stanza in read_text(status_file).split("\n\n"):
+        fields: dict[str, str] = {}
+        for line in stanza.splitlines():
+            if ": " in line:
+                key, _, value = line.partition(": ")
+                fields[key.strip()] = value.strip()
+        if "Feature" in fields or "Version" not in fields:
+            continue
+        if fields.get("Architecture") != triplet:
+            continue
+        if not fields.get("Status", "").endswith("installed"):
+            continue
+        out[fields["Package"]] = fields["Version"]
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--vcpkg-root", required=True, type=Path)
@@ -174,6 +247,66 @@ def main() -> int:
     prefix = args.install_root / triplet
 
     r.check(prefix.is_dir(), f"install prefix exists: {prefix}")
+
+    # --- D5 A5.1: exact versions, read from the installed status database ----
+    installed = parse_status_db(args.install_root, triplet)
+    # ANCHOR FIRST, same reasoning as the configure-log block below: every
+    # version assertion here is of the form "if present, it must equal X", which
+    # passes vacuously against an empty or mis-parsed status DB. Proving the
+    # database was found AND contains the one package that is always installed
+    # is what stops "we asserted nothing" from reporting PASS.
+    anchored = r.check(
+        installed.get(ALWAYS_INSTALLED) is not None,
+        f"status DB parsed and {ALWAYS_INSTALLED} is installed on {triplet} "
+        f"(found {len(installed)} package(s): {sorted(installed)})",
+    )
+    if anchored:
+        heif_installed = HEIF_FEATURE_MARKER in installed
+        for pkg, want in sorted(EXPECTED_VERSIONS.items()):
+            got = installed.get(pkg)
+            if got is None:
+                # libde265 and aom ship with the `heif` feature. Absent on a
+                # libwebp-only leg (--x-no-default-features) is CORRECT; absent
+                # while libheif IS installed means the install plan lost a
+                # package this project consumes directly, which is a failure.
+                if pkg == ALWAYS_INSTALLED or heif_installed:
+                    r.check(False,
+                            f"{pkg} expected at {want} but is NOT installed on "
+                            f"{triplet} (libheif installed={heif_installed})")
+                else:
+                    r.skip(f"{pkg}: not installed on {triplet} — the heif "
+                           f"feature was not requested (libheif absent), which "
+                           f"is a supported install shape, not a failure")
+                continue
+            r.check(got == want,
+                    f"{pkg} installed at exactly {want} (status DB says {got!r}) [A5.1]")
+
+    # --- D5 A5.3: libwebp is STATIC on every platform ------------------------
+    # The LGPL-3 §4(d)(1) dynamic-linkage requirement covers libheif and
+    # libde265 ONLY. libwebp is BSD-3 and must be statically linked, both to
+    # keep third_party.cmake's App-Sandbox invariant (no absolute dylib load
+    # path into a build-machine prefix) and because manifest.toml declares
+    # `linkage = "static"` for it. This assertion exists because its absence was
+    # exploited: the overlay triplets listed which ports get static linkage, so
+    # libwebp — added later — silently installed as a shared library.
+    lib_dir = prefix / "lib"
+    if lib_dir.is_dir():
+        static_names = ("webp.lib", "libwebp.lib") if is_windows else ("libwebp.a",)
+        statics_present = [n for n in static_names if (lib_dir / n).exists()]
+        r.check(bool(statics_present),
+                f"libwebp static artefact present in {lib_dir} "
+                f"(looked for {list(static_names)}, found {statics_present}) [A5.3]")
+        if is_windows:
+            shared_webp = sorted(p.name for p in (prefix / "bin").glob("*webp*.dll")) \
+                if (prefix / "bin").is_dir() else []
+        else:
+            shared_webp = sorted(
+                p.name for p in lib_dir.glob("libwebp*.dylib")
+            ) + sorted(p.name for p in lib_dir.glob("libwebp*.so*"))
+        r.check(not shared_webp,
+                f"libwebp shipped NO shared library (found {shared_webp}) [A5.3]")
+    else:
+        r.check(False, f"install prefix has no lib/ directory: {lib_dir}")
 
     # --- AC3: kvazaar encoder actually enabled in libheif ------------------
     heif_log = find_config_log(args.vcpkg_root, "libheif", triplet)
