@@ -49,6 +49,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install pytest for deps suite
+        run: python -m pip install --disable-pip-version-check pytest
+
       - name: Deps manifest/render/assertions test suite + no-shell lint
         run: python3 -m pytest native/scripts/deps/ -q
 

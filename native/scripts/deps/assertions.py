@@ -20,10 +20,11 @@ This module owns:
 
 Everything else in the §5.3 table (A-CAP-*, A-PUBAPI, A-NO-GPL, A-DEPS,
 A-LINK, A-ARCH, A-CRT, A-LICENCE, A-KVZ-SIMD) is declared in
-assertions.toml but its check function is NOT implemented here yet --
-calling ``run(id, ...)`` for one of those ids raises ``NotImplementedError``
-naming it explicitly, rather than silently no-op'ing (never present a
-not-yet-wired assertion as if it ran).
+assertions.toml but has NO check function implemented here yet -- there is
+no ``run(id, ...)`` dispatcher in this module at all. Do not assume one
+exists; a caller wiring the remaining methods in must add both the check
+function and a dispatcher, never present a not-yet-wired assertion as if
+it ran.
 
 A4.2 (no assertion may branch on ``source.kind``): this module's functions
 take already-resolved bytes/paths, never a manifest ``source`` block, so
