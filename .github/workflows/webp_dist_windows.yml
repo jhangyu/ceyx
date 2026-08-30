@@ -1,0 +1,103 @@
+name: libwebp dist (Windows)
+
+# DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml: the dist is
+# a pinned, reviewed input that is COMMITTED, not rebuilt per push.
+#
+# ci/** is included so the workflow can be verified from a bootstrap branch:
+# a workflow file only becomes dispatchable once it exists on a ref that runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/**"
+    paths:
+      - "native/scripts/build_libwebp_dist_windows.sh"
+      - ".github/workflows/webp_dist_windows.yml"
+
+concurrency:
+  group: webp-dist-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-webp-dist:
+    name: libwebp dist (windows x86-64, clang-cl, static, encode+decode+mux)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      # MUST run BEFORE actions/checkout, same reason as heif_dist_windows.yml:
+      # Git for Windows ships core.autocrlf=true system-wide, and a checkout
+      # done before this writes shell scripts with CRLF, which Git-Bash then
+      # fails to execute with an opaque error.
+      - name: Force LF line endings for all git operations
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          echo "core.autocrlf=$(git config --global core.autocrlf)"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # CMake ships with the runner image; Ninja does not reliably. pip's ninja
+      # wheel is a pinned, deterministic way to get it on PATH without choco.
+      - name: Install Ninja
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          ninja --version
+
+      # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
+      # LIB; this action is CI's equivalent of vcvars64.bat.
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Locate clang-cl
+        shell: bash
+        run: |
+          if command -v clang-cl >/dev/null 2>&1; then
+            CLANG_CL="$(command -v clang-cl)"
+          elif [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+            CLANG_CL="/c/Program Files/LLVM/bin/clang-cl.exe"
+            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+          else
+            echo "::error::clang-cl not found on the runner." >&2
+            exit 1
+          fi
+          echo "clang-cl: $CLANG_CL"
+          "$CLANG_CL" --version
+
+      - name: Build the libwebp dist
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          # set +e so the literal RC=$? below actually runs: the default
+          # `bash -eo pipefail` shell would abort the step first, leaving a log
+          # that could only ever record RC=0.
+          set +e
+          bash native/scripts/build_libwebp_dist_windows.sh
+          RC=$?
+          set -e
+          echo "WEBP_DIST_WINDOWS_RC=$RC"
+          exit $RC
+
+      # Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
+      # inventory while silently omitting the headers.
+      - name: List the produced dist (complete)
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: find native/third_party/libwebp-dist-windows -type f | sort
+
+      - name: Upload the dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: libwebp-dist-windows
+          path: ${{ github.workspace }}/native/third_party/libwebp-dist-windows
+          if-no-files-found: error
+          retention-days: 7
