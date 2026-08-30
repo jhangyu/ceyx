@@ -23,6 +23,12 @@
 #include <webp/encode.h>
 #endif
 
+#if defined(_WIN32)
+#define FFI_EXPORT __declspec(dllexport)
+#else
+#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
+#endif
+
 namespace {
 
 // JPEG's dimension fields are 16-bit; anything larger is rejected up front
@@ -69,7 +75,7 @@ void JpegSilentOutput(j_common_ptr) {}
 
 extern "C" {
 
-const char *ceyx_encode_error_name(int32_t code) {
+FFI_EXPORT const char *ceyx_encode_error_name(int32_t code) {
   switch (code) {
     case kCeyxEncodeSuccess: return "kCeyxEncodeSuccess";
     case kCeyxEncodeErrNullArg: return "kCeyxEncodeErrNullArg";
@@ -83,7 +89,7 @@ const char *ceyx_encode_error_name(int32_t code) {
   }
 }
 
-int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
+FFI_EXPORT int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len) {
   const int32_t bad =
@@ -167,7 +173,7 @@ int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
   return kCeyxEncodeSuccess;
 }
 
-int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
+FFI_EXPORT int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len) {
   const int32_t bad =
@@ -199,7 +205,7 @@ int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
 #endif
 }
 
-void ceyx_encode_free(uint8_t *buffer) {
+FFI_EXPORT void ceyx_encode_free(uint8_t *buffer) {
   if (buffer) free(buffer);
 }
 
