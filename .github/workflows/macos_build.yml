@@ -138,6 +138,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      # D6 layer 1 (round-5 task #1, snippet by impl-d6-opus,
+      # docs/logs/2026-08-31/r5-d6-ci-snippet.md): pure argv-rendering
+      # equivalence between the carrier renderer, the golden fixtures and the
+      # legacy shell scripts. No dist and no build required, so it runs here
+      # before any of the expensive fetch/build steps below and catches a
+      # renderer/manifest regression cheaply. The `echo` on its own line is
+      # deliberate self-captured-RC discipline (ledger 2026-08-23) — do not
+      # rewrite as a pipeline or add `| tee`.
+      - name: D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)
+        run: |
+          set -u
+          python3 native/tests/run_dist_equivalence.py \
+              --layers l1 \
+              --report "${GITHUB_WORKSPACE}/d6-layer1-report-${{ matrix.arch_tag }}.md"
+          echo "D6_LAYER1_RC=$?"
+
       # nasm/yasm are required by fetch_heif_deps.sh's aom build: aom's x86_64
       # codepath is hand-written assembly (unlike the arm64 codepath, which is
       # NEON intrinsics compiled by the C compiler), and its cmake configure
