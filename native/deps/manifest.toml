@@ -134,11 +134,32 @@ licence_files = ["COPYING*", "LICENSE*"]
 path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.libde265.source.default]
-  kind              = "tarball"
-  migration_pending = true
-  reason            = "self-built on every platform TODAY (transcribed verbatim from fetch_heif_deps.sh / build_heif_dist_windows.sh); Spec_build_rewrite.md §3.2 resolves macOS/Linux to registry (vcpkg 1.1.1, exact match) under D5 (round 2-3, owned by M2) -- this is a sequencing fact, not a durable R-1a reason, and manifest.toml must be updated by M1 on M2's request once D5 lands"
-  url               = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
-  sha256            = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
+  # D5 LEG 2 LANDED for macOS/Linux (2026-08-31). `migration_pending` is gone
+  # because the migration is no longer pending: fetch_heif_deps.sh's
+  # build_libde265() no longer builds anything -- it COPIES the vcpkg-installed
+  # dylib out of $CEYX_VCPKG_PREFIX into the dist and hard-fails when that
+  # prefix is absent. The pin is the overlay port's own `version` field
+  # (native/vcpkg/ports/libde265/vcpkg.json), which selects the exact source
+  # tarball by SHA-512 in its portfile -- a stronger pin than an `overrides`
+  # entry, and the reason no `overrides` entry exists (overlay ports bypass the
+  # versions database entirely).
+  #
+  # `source.windows` below is UNCHANGED and keeps its durable `feature` reason:
+  # build_heif_dist_windows.sh still builds libde265 from source there,
+  # permanently, for the three blockers it records.
+  kind    = "registry"
+  version = "1.1.1"
+  # A5.5: the two patches the overlay port applies, read at
+  # native/vcpkg/ports/libde265/*.patch before being described here.
+  reason  = "supplied by vcpkg at exactly 1.1.1 via the CEYX OVERLAY FORK native/vcpkg/ports/libde265 (its vcpkg.json `version` plus a SHA-512-pinned release tarball IS the pin; overlay ports bypass the versions database, so no `overrides` entry can apply). Spec_build_rewrite.md §3.2 resolves macOS/Linux to registry with no version change. The fork applies two patches, both required: (1) fix-linkage.patch rewrites the pkg-config `Libs.private` derivation -- upstream hard-codes -lc++/-lstdc++ behind a check_cxx_symbol_exists(_LIBCPP_VERSION) probe and appends a literal -lpthread; the patch derives the list from CMAKE_CXX_IMPLICIT_LINK_LIBRARIES minus the C set, uses ${CMAKE_THREAD_LIBS_INIT}, and drops THREADS_PREFER_PTHREAD_FLAG, so a consumer resolving libde265 through pkg-config does not inherit a wrong or duplicated C++ runtime; (2) fix-api-visibility.patch reorders the LIBDE265_API definition so defined(LIBDE265_STATIC_BUILD) yields an EMPTY macro BEFORE the Win32 dllexport/dllimport branch is considered, so a static build stops emitting __declspec"
+  # Retained as HISTORY, not as an instruction: these are the exact bytes the
+  # pre-D5 source build downloaded, and they let a reviewer confirm the overlay
+  # port pins the SAME upstream release (its portfile's SHA-512 covers identical
+  # bytes) rather than take it on trust. One live use survives: assemble() in
+  # fetch_heif_deps.sh still fetches and verifies this tarball to vendor the
+  # LGPL-3 licence file, which the copied dylib does not carry.
+  historical_url    = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
+  historical_sha256 = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
 
   [component.libde265.source.windows]
   # This override IS a durable R-1a reason (`feature`) even after D5 lands:

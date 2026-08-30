@@ -24,6 +24,12 @@
         },
         "libde265"
       ]
+    },
+    "de265": {
+      "description": "libde265 ALONE, without libheif/kvazaar/aom. This is what the macOS product legs install (D5 leg 2): they take libde265 from vcpkg but still build libheif itself from source via fetch_heif_deps.sh, because Spec §3.2 disqualifies every registry libheif (none offers a kvazaar HEVC-encoder feature at any version, only x265/GPL-2.0). Installing the full `heif` feature there would build a second, unused libheif and pay for aom+kvazaar twice. Selected with --x-no-default-features --x-feature=de265, so the default `heif` feature (and port_spike.yml's use of it) is untouched.",
+      "dependencies": [
+        "libde265"
+      ]
     }
   },
   "$comment-overrides": "N30: nothing floats with the baseline. libwebp and aom are REGISTRY ports, so an explicit override is what pins them. libde265 is deliberately absent from this list: it is supplied by the overlay port native/vcpkg/ports/libde265 (a fork), and overlay ports bypass the versions database entirely -- a version constraint cannot be applied to them. Its 1.1.1 pin is the literal `version` field in that port's own vcpkg.json, which is a stronger pin than an override (it selects the exact source tarball by SHA-512 in portfile.cmake).",

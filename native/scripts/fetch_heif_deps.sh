@@ -125,7 +125,16 @@ AOM_LIB="${DIST}/lib/libaom.a"
 # pre-existing decode-only dist would match on libheif/libde265 alone, report
 # "already at the pinned versions", exit 0, and the encoders would silently
 # never appear. This is the highest-probability silent failure in this script.
-WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:${DE265_SHA256} kvazaar=${KVAZAAR_VERSION}:${KVAZAAR_SHA256} aom=${AOM_VERSION}:${AOM_SHA256} arch=${HEIF_ARCH}"
+# libde265's stamp records PROVENANCE as well as the version since D5 leg 2: the
+# dylib is copied from the vcpkg prefix rather than built from DE265_SHA256's
+# tarball, so stamping that hash would claim a fact this script no longer
+# establishes. The version pin stays meaningful because the overlay port pins
+# the SAME release asset (its portfile's SHA-512 covers identical bytes to
+# DE265_SHA256, which assemble() still verifies when vendoring the licence).
+# The literal `vcpkg` token also invalidates every pre-D5 dist, which is what
+# forces the copy path to actually run once rather than being skipped by a
+# stamp that happens to match.
+WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:vcpkg kvazaar=${KVAZAAR_VERSION}:${KVAZAAR_SHA256} aom=${AOM_VERSION}:${AOM_SHA256} arch=${HEIF_ARCH}"
 
 if [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT_PINS}" ] \
    && [ -f "${LIBHEIF_LIB}" ] && [ -f "${LIBDE265_LIB}" ]; then
@@ -192,28 +201,118 @@ fi
 # with a relocation error that names libheif rather than the archive.
 
 # --- libde265 first: libheif's FindLIBDE265 needs it installed on disk. ---
-# ENABLE_ENCODER=OFF is the LGPL-cleanliness half of the decode-only rule for
-# libde265 itself; ENABLE_SDL/SHERLOCK265 off drops the GUI inspection tools
-# and their deps.
+#
+# D5 leg 2 (2026-08-31): libde265 is no longer built from source here. It is
+# supplied by vcpkg (overlay port native/vcpkg/ports/libde265, pinned to 1.1.1
+# by the port's own `version` field plus a SHA-512-pinned tarball) and this
+# function COPIES the installed artefact into ${DIST}.
+#
+# Why a copy rather than pointing libheif at the vcpkg prefix directly: the
+# shipped product loads libde265 at runtime from BESIDE the decoder dylib
+# (cmake/heif.cmake stages ${DIST}/lib/libde265.0.dylib next to
+# dng_decoder_native, and build_apps.py copies every sibling dylib into the app
+# bundle). Leaving the dylib in the vcpkg prefix and only re-aiming the
+# LIBDE265_* hints would produce a build that links on the build machine and
+# fails to load anywhere else -- a failure invisible on CI. Keeping ${DIST} as
+# the single place everything downstream reads means the pre-seeding, the
+# assemble assertions, the licence vendoring and the staging all stay unchanged.
+#
+# Windows is deliberately NOT part of this: build_heif_dist_windows.sh keeps
+# building libde265 from source for the three durable blockers recorded in
+# native/deps/manifest.toml [component.libde265.source.windows].
 build_libde265() {
   if [ -f "${LIBDE265_LIB}" ]; then
     echo "[heif] libde265 already installed at ${LIBDE265_LIB}, skipping"
     return 0
   fi
-  fetch_verified "${DE265_URL}" "${STAGE}/libde265-${DE265_VERSION}.tar.gz" "${DE265_SHA256}"
-  rm -rf "${STAGE}/libde265-${DE265_VERSION}"
-  tar -xzf "${STAGE}/libde265-${DE265_VERSION}.tar.gz" -C "${STAGE}"
-  echo "[heif] configuring libde265 ${DE265_VERSION}"
-  cmake -S "${STAGE}/libde265-${DE265_VERSION}" -B "${STAGE}/build-de265" \
-    "${COMMON_ARGS[@]}" \
-    -DENABLE_DECODER=ON \
-    -DENABLE_ENCODER=OFF \
-    -DENABLE_SDL=OFF \
-    -DENABLE_SHERLOCK265=OFF \
-    -DENABLE_INTERNAL_DEVELOPMENT_TOOLS=OFF \
-    -DWITH_FUZZERS=OFF
-  cmake --build "${STAGE}/build-de265" --parallel "${NPROC}"
-  cmake --install "${STAGE}/build-de265"
+
+  local prefix="${CEYX_VCPKG_PREFIX:-}"
+  if [ -z "${prefix}" ] || [ ! -d "${prefix}" ]; then
+    echo "[heif] FAILED: libde265 comes from vcpkg since D5, but CEYX_VCPKG_PREFIX" >&2
+    echo "[heif]   is unset or not a directory (value: '${prefix}')." >&2
+    echo "[heif]   Install it first, e.g.:" >&2
+    echo "[heif]     <vcpkg>/vcpkg install --x-manifest-root=native/vcpkg \\" >&2
+    echo "[heif]         --x-install-root=<root> --triplet=<triplet> \\" >&2
+    echo "[heif]         --x-no-default-features --x-feature=de265" >&2
+    echo "[heif]   then export CEYX_VCPKG_PREFIX=<root>/<triplet>." >&2
+    echo "[heif]   There is deliberately no fallback to a source build: a silent" >&2
+    echo "[heif]   fallback would hide exactly the wiring this change exists to" >&2
+    echo "[heif]   prove." >&2
+    exit 1
+  fi
+
+  # Accept either spelling in the prefix: CMake's SOVERSION handling normally
+  # produces the versioned real file plus an unversioned symlink, but which of
+  # the two is the real file is a property of the port's build, not a contract.
+  local src="" cand
+  for cand in "${prefix}/lib/libde265.${DE265_LIB_EXT}" \
+              "${prefix}/lib/libde265.${DE265_UNVERSIONED_EXT}"; do
+    if [ -f "${cand}" ]; then src="${cand}"; break; fi
+  done
+  if [ -z "${src}" ]; then
+    echo "[heif] FAILED: no libde265 shared library under ${prefix}/lib" >&2
+    echo "[heif]   looked for libde265.${DE265_LIB_EXT} and libde265.${DE265_UNVERSIONED_EXT}" >&2
+    echo "[heif]   contents:" >&2
+    ls -la "${prefix}/lib" >&2 || true
+    echo "[heif]   A STATIC libde265 here means the overlay triplet's dynamic" >&2
+    echo "[heif]   exception did not apply -- that is an LGPL-3 4(d)(1) breach," >&2
+    echo "[heif]   not a packaging detail." >&2
+    exit 1
+  fi
+  echo "[heif] using vcpkg-supplied libde265: ${src}"
+
+  mkdir -p "${DIST}/lib" "${DIST}/include"
+  # -L dereferences: whichever spelling was found, ${LIBDE265_LIB} becomes the
+  # REAL file and the unversioned name becomes the symlink pointing at it. That
+  # is the shape everything downstream already assumes: libheif is pointed at
+  # the unversioned name (:319) while heif.cmake stages the versioned one.
+  cp -L "${src}" "${LIBDE265_LIB}"
+  chmod u+w "${LIBDE265_LIB}"
+  ln -sfn "libde265.${DE265_LIB_EXT}" "${DIST}/lib/libde265.${DE265_UNVERSIONED_EXT}"
+
+  rm -rf "${DIST}/include/libde265"
+  cp -R "${prefix}/include/libde265" "${DIST}/include/"
+  if [ ! -f "${DIST}/include/libde265/de265.h" ]; then
+    echo "[heif] FAILED: ${DIST}/include/libde265/de265.h missing after the copy" >&2
+    exit 1
+  fi
+
+  # The soname/install name is the load-bearing part. libheif records the
+  # DEPENDENCY name from this field, not from the file name it linked against,
+  # so a dylib whose install name is an absolute path into the vcpkg prefix
+  # produces a libheif that resolves libde265 out of the BUILD machine's
+  # $RUNNER_TEMP and loads nowhere else. Normalised and then PROVEN, in that
+  # order -- setting a value and the artefact carrying it are different facts.
+  if [ "${HOST_OS}" = "Darwin" ]; then
+    install_name_tool -id "@rpath/libde265.${DE265_LIB_EXT}" "${LIBDE265_LIB}"
+    local id_out
+    id_out="$(otool -D "${LIBDE265_LIB}")"
+    if ! grep -q "^@rpath/libde265.${DE265_LIB_EXT}$" <<< "${id_out}"; then
+      echo "[heif] FAILED: libde265 install name is not @rpath/libde265.${DE265_LIB_EXT}" >&2
+      echo "${id_out}" >&2
+      exit 1
+    fi
+  else
+    # No equivalent rewrite exists without patchelf, so assert instead: the
+    # vcpkg build must already carry SONAME libde265.so.0. A missing readelf is
+    # a FAILURE, not a skip -- a check that passes when its instrument is absent
+    # is worse than no check.
+    if ! command -v readelf > /dev/null 2>&1; then
+      echo "[heif] FAILED: readelf not found; cannot prove libde265's SONAME." >&2
+      echo "[heif]   Install binutils (the SONAME is what libheif records as its" >&2
+      echo "[heif]   runtime dependency; an unverified one is a load failure on" >&2
+      echo "[heif]   the user's machine, not on this one)." >&2
+      exit 1
+    fi
+    local dyn_out
+    dyn_out="$(readelf -d "${LIBDE265_LIB}")"
+    if ! grep -q "SONAME.*libde265\.${DE265_LIB_EXT}" <<< "${dyn_out}"; then
+      echo "[heif] FAILED: libde265 SONAME is not libde265.${DE265_LIB_EXT}" >&2
+      echo "${dyn_out}" >&2
+      exit 1
+    fi
+  fi
+  echo "[heif] libde265 ${DE265_VERSION} installed into ${DIST} from the vcpkg prefix"
 }
 
 # --- kvazaar (HEVC encoder), static, linked into libheif. ---
