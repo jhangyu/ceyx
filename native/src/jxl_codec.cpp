@@ -251,7 +251,17 @@ extern "C" int32_t ceyx_jxl_decode_impl(const char *path, int32_t max_dim,
     for (;;) {
       const JxlDecoderStatus st = JxlDecoderProcessInput(dec.get());
       if (st == JXL_DEC_ERROR) return kCeyxStillErrDecodeFailed;
-      if (st == JXL_DEC_NEED_MORE_INPUT) return kCeyxStillErrDecodeFailed;
+      if (st == JXL_DEC_NEED_MORE_INPUT) {
+        // The full file is already in `bytes` (JxlDecoderCloseInput was
+        // called above), so this is a genuine failure, not a "feed more"
+        // request. libjxl still requires a matching ReleaseInput before the
+        // decoder (and its parallel runner) are torn down -- omitting it
+        // leaves the decoder believing input is still owned by the caller
+        // mid-operation. dec/runner are RAII-wrapped and destruct on this
+        // return, so the release must happen here, before that happens.
+        JxlDecoderReleaseInput(dec.get());
+        return kCeyxStillErrDecodeFailed;
+      }
       if (st == JXL_DEC_BASIC_INFO) {
         if (JxlDecoderGetBasicInfo(dec.get(), &info) != JXL_DEC_SUCCESS) {
           return kCeyxStillErrDecodeFailed;

@@ -307,6 +307,82 @@ static void DoubleReleaseCase(const char *path) {
   ceyx_still_release(nullptr);  // NULL-safe
 }
 
+// B1 (round-2 review, still_ffi_api.cpp SniffFormat): scan compatible_brands
+// when the major brand isn't directly recognised.
+//
+// IMPORTANT, stated honestly: in THIS codebase the Heic and Avif arms of both
+// ceyx_still_probe and ceyx_still_decode_rgba call the exact same
+// heif_probe()/heif_decode function -- `format` is not read inside that
+// branch at all (only ceyx_heif_encode_impl's ENCODE path branches on it, to
+// pick the HEVC vs AV1 encoder). And the pre-fix SniffFormat's fallback for
+// ANY unrecognised ftyp major brand was `return kCeyxFormatHeic`, never
+// kCeyxFormatUnknown -- so for a real, fully-payloaded ISO-BMFF file, decode
+// already succeeded before this fix regardless of which family it landed in.
+// That means the "hint-less decode fails" symptom described for B1 does not
+// reproduce as a black-box-observable failure against this codebase, and no
+// RED assertion is possible at the ceyx_still_probe/decode return-code level
+// for a fully valid file -- confirmed by hand: git-show of the pre-fix
+// SniffFormat (commit caade3c) has the same `return kCeyxFormatHeic;`
+// catch-all this build already had.
+//
+// What this test DOES verify, and is a genuine regression guard: a file
+// whose major brand is a real, spec-legal brand this build does not match
+// directly ("avio", "mif2" -- both used by real AVIF/HEIC image-sequence
+// files in the wild) but whose compatible_brands correctly lists "avif" or
+// "heic" still decodes successfully end-to-end via hint-less sniffing, byte-
+// identical to a normally-labelled file. This guards against a FUTURE
+// regression where the Heic/Avif catch-all is removed (since it is no longer
+// load-bearing for correctness once the compatible_brands scan is trusted)
+// and only the scan is left to do the routing.
+static void FtypCompatibleBrandSniffCase(const char *avif_path,
+                                         const char *heic_path) {
+  const int w = 24, h = 24;
+  const std::vector<uint8_t> src = MakeSource(w, h);
+  CeyxEncodeOptions opts = Opts(90, false);
+
+  auto encode_and_patch = [&](int32_t format, const char *path,
+                              const char *unrecognised_major) -> bool {
+    uint8_t *buf = nullptr;
+    size_t len = 0;
+    if (ceyx_encode_rgba8(format, src.data(), w, h, &opts, nullptr, &buf, &len) !=
+        kCeyxEncodeSuccess) {
+      return false;
+    }
+    // Real libheif output: [0..4) box_size BE, [4..8) "ftyp",
+    // [8..12) major_brand, [12..16) minor_version, [16..) compatible_brands
+    // (already contains "mif1 avif miaf" / "mif1 heic miaf" per libheif's
+    // own writer -- verified by inspection of a real encoded file's first 32
+    // bytes). Overwriting ONLY the major_brand bytes with a brand this
+    // build's direct-match lists do NOT contain forces routing through the
+    // compatible_brands scan path added by this fix, while leaving the box
+    // size and every other byte (including the actual compressed image data)
+    // untouched.
+    check(len > 16 && !std::memcmp(buf + 4, "ftyp", 4),
+          "encoded output has a real ftyp box to patch");
+    std::memcpy(buf + 8, unrecognised_major, 4);
+    WriteFile(path, buf, len);
+    ceyx_encode_free(buf);
+    return true;
+  };
+
+  if (encode_and_patch(kCeyxFormatAvif, avif_path, "avio")) {
+    CeyxStillResult out;
+    std::memset(&out, 0, sizeof(out));
+    check_eq(ceyx_still_decode_rgba(avif_path, kCeyxFormatUnknown, 0, &out),
+             kCeyxStillSuccess,
+             "ftyp major=avio (unrecognised) compatible=avif still sniffs+decodes");
+    ceyx_still_release(&out);
+  }
+  if (encode_and_patch(kCeyxFormatHeic, heic_path, "mif2")) {
+    CeyxStillResult out;
+    std::memset(&out, 0, sizeof(out));
+    check_eq(ceyx_still_decode_rgba(heic_path, kCeyxFormatUnknown, 0, &out),
+             kCeyxStillSuccess,
+             "ftyp major=mif2 (unrecognised) compatible=heic still sniffs+decodes");
+    ceyx_still_release(&out);
+  }
+}
+
 int main(int argc, char **argv) {
   const std::string d = (argc > 1) ? argv[1] : std::string(".");
   check_eq(ceyx_encode_supports(kCeyxFormatWebp), 1, "supports WebP encode");
@@ -319,6 +395,8 @@ int main(int argc, char **argv) {
   DoubleReleaseCase((d + "/rt_webp_sized.webp").c_str());
   LossyRoundTrip(kCeyxFormatWebp, "webp", (d + "/rt_webp_lossy.webp").c_str());
   SniffCase((d + "/rt_webp_nometa.webp").c_str(), (d + "/rt_sniff.bin").c_str());
+  FtypCompatibleBrandSniffCase((d + "/rt_ftyp_avio.bin").c_str(),
+                               (d + "/rt_ftyp_mif2.bin").c_str());
 
   std::printf(g_failures == 0 ? "CODEC_ROUNDTRIP_OK\n"
                               : "CODEC_ROUNDTRIP_FAILED (%d)\n", g_failures);

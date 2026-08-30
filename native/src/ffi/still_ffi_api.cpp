@@ -4,6 +4,7 @@
 #include "ceyx_still_api.h"
 #include "still_codec_internal.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -62,6 +63,33 @@ int32_t SniffFormat(const char *path) {
     if (!std::memcmp(hdr + 8, "avif", 4) || !std::memcmp(hdr + 8, "avis", 4)) {
       return kCeyxFormatAvif;
     }
+    if (!std::memcmp(hdr + 8, "heic", 4) || !std::memcmp(hdr + 8, "heix", 4) ||
+        !std::memcmp(hdr + 8, "mif1", 4) || !std::memcmp(hdr + 8, "msf1", 4)) {
+      return kCeyxFormatHeic;
+    }
+    // Major brand is neither an AVIF nor a HEIC brand this build recognises
+    // directly (e.g. "avio", "mif2", or a vendor-specific brand). Per the
+    // ISO-BMFF spec a reader MAY treat the file as any brand listed in
+    // compatible_brands, so scan that array -- 4-byte entries starting at
+    // byte 16 of the ftyp box -- for a brand we do know how to route.
+    // Bounds-checked against both the box's declared size (bytes 0..4,
+    // big-endian) and the bytes actually read into hdr, so a truncated or
+    // adversarial header never reads past either buffer.
+    const uint32_t box_size = (uint32_t(hdr[0]) << 24) | (uint32_t(hdr[1]) << 16) |
+                              (uint32_t(hdr[2]) << 8) | uint32_t(hdr[3]);
+    const size_t scan_limit = std::min<size_t>(n, box_size);
+    for (size_t off = 16; off + 4 <= scan_limit; off += 4) {
+      if (!std::memcmp(hdr + off, "avif", 4) || !std::memcmp(hdr + off, "avis", 4)) {
+        return kCeyxFormatAvif;
+      }
+      if (!std::memcmp(hdr + off, "heic", 4) || !std::memcmp(hdr + off, "heix", 4) ||
+          !std::memcmp(hdr + off, "mif1", 4) || !std::memcmp(hdr + off, "msf1", 4)) {
+        return kCeyxFormatHeic;
+      }
+    }
+    // No recognised brand anywhere: keep the pre-existing default of routing
+    // any ftyp file to libheif rather than declaring it Unknown, since HEIC
+    // is by far the more common unrecognised-brand case in practice.
     return kCeyxFormatHeic;
   }
   return kCeyxFormatUnknown;
