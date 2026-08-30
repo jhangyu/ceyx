@@ -24,6 +24,12 @@ jobs:
     name: Build native test targets
     runs-on: macos-14
     timeout-minutes: 45
+    env:
+      # D5: same pinned baseline as native/vcpkg/vcpkg.json,
+      # vcpkg-configuration.json and port_spike.yml (N30).
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_ROOT_DIR: ${{ runner.temp }}/vcpkg
+      VCPKG_PREFIX: ${{ runner.temp }}/vcpkg-installed/arm64-osx-heif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,6 +66,32 @@ jobs:
       - name: Fetch vendored LibRaw distribution
         run: native/scripts/fetch_libraw_dist.sh
 
+      # D5 (2026-08-31): this job builds TEST targets, but the configure it runs
+      # is the whole project's — cmake/encode.cmake included — and that file now
+      # hard-fails when libwebp is absent. So this workflow needs the vcpkg
+      # prefix even though nothing here exercises the WebP encode route.
+      # --x-no-default-features keeps it to libwebp alone (the job already
+      # passes -DDNG_ENABLE_HEIF=OFF).
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT_DIR"
+          git -C "$VCPKG_ROOT_DIR" checkout "$VCPKG_BASELINE"
+          "$VCPKG_ROOT_DIR/bootstrap-vcpkg.sh" -disableMetrics
+          "$VCPKG_ROOT_DIR/vcpkg" version
+
+      - name: vcpkg install libwebp (arm64-osx-heif)
+        run: |
+          set +e
+          "$VCPKG_ROOT_DIR/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="${{ runner.temp }}/vcpkg-installed" \
+              --triplet=arm64-osx-heif \
+              --x-no-default-features \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
@@ -74,6 +106,7 @@ jobs:
           python3 native/scripts/build_native_watchdog.py \
             --target test_decode \
             --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
+            "--cmake-arg=-DCMAKE_PREFIX_PATH=${VCPKG_PREFIX}" \
             --idle-timeout-sec 180
 
       - name: Build test_device_handoff target

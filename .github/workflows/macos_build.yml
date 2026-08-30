@@ -86,6 +86,11 @@ jobs:
             runner: macos-14
             arch_tag: arm64
             cross: "false"
+            # D5: the overlay triplet whose VCPKG_OSX_ARCHITECTURES matches this
+            # leg's output. Getting this wrong yields a wrong-architecture
+            # libwebp.a and an architecture-mismatch link failure, not a silent
+            # miscompile.
+            vcpkg_triplet: arm64-osx-heif
             # Directory holding the produced dylib, and the directory to cache.
             dylib_dir: native/build
             build_cache_path: native/build
@@ -96,6 +101,7 @@ jobs:
             runner: macos-14
             arch_tag: x86_64
             cross: "true"
+            vcpkg_triplet: x64-osx-heif
             dylib_dir: native/build-macos-x86_64/target
             build_cache_path: native/build-macos-x86_64
             heif_dist_dir: native/third_party/heif-dist-x86_64
@@ -108,6 +114,12 @@ jobs:
       # string appears exactly once.
       X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
       HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
+      # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
+      # builtin-baseline, vcpkg-configuration.json's default-registry baseline
+      # and port_spike.yml's VCPKG_BASELINE (N30 — four places, one value).
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_ROOT_DIR: ${{ runner.temp }}/vcpkg
+      VCPKG_PREFIX: ${{ runner.temp }}/vcpkg-installed/${{ matrix.vcpkg_triplet }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -205,6 +217,60 @@ jobs:
           DNG_HEIF_ARCH: ${{ matrix.arch_tag }}
         run: native/scripts/fetch_heif_deps.sh
 
+      # D5 (2026-08-31): libwebp is supplied by vcpkg, pinned to exactly 1.6.0 in
+      # native/vcpkg/vcpkg.json. cmake/encode.cmake resolves it with
+      # find_package(WebP CONFIG) and HARD-FAILS the configure when it is
+      # absent, so this step is load-bearing, not best-effort.
+      #
+      # --x-no-default-features installs the manifest's CORE dependency set,
+      # which is libwebp alone; the HEIF stack sits behind the manifest's
+      # default `heif` feature and is NOT wanted here, because this leg still
+      # gets libheif/libde265 from the vendored dist that fetch_heif_deps.sh
+      # built a few steps above. Building it twice would cost ~20 minutes per
+      # leg and produce an unused second copy.
+      #
+      # Bootstrap mirrors port_spike.yml's (clone, checkout the pinned baseline,
+      # bootstrap-vcpkg.sh) rather than using a marketplace action, so both
+      # workflows acquire vcpkg the same way.
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT_DIR"
+          git -C "$VCPKG_ROOT_DIR" checkout "$VCPKG_BASELINE"
+          "$VCPKG_ROOT_DIR/bootstrap-vcpkg.sh" -disableMetrics
+          "$VCPKG_ROOT_DIR/vcpkg" version
+
+      - name: vcpkg install libwebp (${{ matrix.vcpkg_triplet }})
+        run: |
+          set +e
+          "$VCPKG_ROOT_DIR/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="${{ runner.temp }}/vcpkg-installed" \
+              --triplet="${{ matrix.vcpkg_triplet }}" \
+              --x-no-default-features \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
+      # Prove the artefact before the product build consumes it: a STATIC
+      # archive of the RIGHT architecture. The linkage half is the assertion
+      # that was missing when the triplets silently produced a dylib here; the
+      # architecture half is what the cross leg gets wrong if vcpkg_triplet and
+      # CMAKE_OSX_ARCHITECTURES disagree.
+      - name: Assert the vcpkg libwebp artefact (static, correct arch)
+        run: |
+          set -e
+          ls -la "$VCPKG_PREFIX/lib"
+          test -f "$VCPKG_PREFIX/lib/libwebp.a" \
+            || { echo "FAIL: libwebp.a absent (expected a static archive)"; exit 1; }
+          shared=$(find "$VCPKG_PREFIX/lib" -name 'libwebp*.dylib' | wc -l | tr -d ' ')
+          test "$shared" = "0" \
+            || { echo "FAIL: ${shared} libwebp dylib(s) present; the triplet must keep libwebp static (LGPL asymmetry applies to libheif/libde265 only)"; exit 1; }
+          archs=$(lipo -archs "$VCPKG_PREFIX/lib/libwebp.a")
+          echo "libwebp.a archs: ${archs}"
+          echo "${archs}" | grep -qw "${{ matrix.arch_tag }}" \
+            || { echo "FAIL: libwebp.a archs '${archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
@@ -219,7 +285,8 @@ jobs:
         run: |
           python3 native/scripts/build_native_watchdog.py \
             --target dng_decoder_native \
-            --idle-timeout-sec 180
+            --idle-timeout-sec 180 \
+            "--cmake-arg=-DCMAKE_PREFIX_PATH=${VCPKG_PREFIX}"
 
       # Cross leg, stage 1: arm64 host generators, emitting x86-64 AOT code.
       - name: Build host Halide generators + x86-64 AOT (cross stage 1)
@@ -249,7 +316,8 @@ jobs:
             --idle-timeout-sec 600 \
             --cmake-arg=-DDNG_CROSS_BUILD=ON \
             "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
-            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64
+            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            "--cmake-arg=-DCMAKE_PREFIX_PATH=${VCPKG_PREFIX}"
 
       # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
