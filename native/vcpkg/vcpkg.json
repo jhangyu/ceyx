@@ -30,6 +30,12 @@
       "dependencies": [
         "libde265"
       ]
+    },
+    "aom": {
+      "description": "aom ALONE, for the same reason as `de265` above: the macOS product legs take the AV1 codec from vcpkg (pinned to 3.15.0 in `overrides`) and link the static archive INTO their own libheif, which they still build from source. Selected with --x-feature=aom alongside --x-feature=de265; the default `heif` feature is untouched.",
+      "dependencies": [
+        "aom"
+      ]
     }
   },
   "$comment-overrides": "N30: nothing floats with the baseline. libwebp and aom are REGISTRY ports, so an explicit override is what pins them. libde265 is deliberately absent from this list: it is supplied by the overlay port native/vcpkg/ports/libde265 (a fork), and overlay ports bypass the versions database entirely -- a version constraint cannot be applied to them. Its 1.1.1 pin is the literal `version` field in that port's own vcpkg.json, which is a stronger pin than an override (it selects the exact source tarball by SHA-512 in portfile.cmake).",

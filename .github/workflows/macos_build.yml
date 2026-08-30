@@ -225,7 +225,7 @@ jobs:
           "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
           "$RUNNER_TEMP/vcpkg/vcpkg" version
 
-      - name: vcpkg install libwebp + libde265 (${{ matrix.vcpkg_triplet }})
+      - name: vcpkg install libwebp + libde265 + aom (${{ matrix.vcpkg_triplet }})
         run: |
           set +e
           "$RUNNER_TEMP/vcpkg/vcpkg" install \
@@ -234,6 +234,7 @@ jobs:
               --triplet="$VCPKG_TRIPLET" \
               --x-no-default-features \
               --x-feature=de265 \
+              --x-feature=aom \
               --no-print-usage
           rc=$?
           echo "VCPKG_INSTALL_RC=${rc}"
@@ -273,6 +274,20 @@ jobs:
           echo "libde265 archs: ${de265_archs}"
           echo "${de265_archs}" | grep -qw "${{ matrix.arch_tag }}" \
             || { echo "FAIL: libde265 archs '${de265_archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+          # aom (D5 leg 3): STATIC — it is linked INTO libheif, so a dylib here
+          # would have to be shipped and resolved at runtime instead. Arch is
+          # checked for the same reason as libwebp's: the cross leg is the one
+          # that gets it wrong, and the old source build forced AOM_TARGET_CPU
+          # by hand precisely because aom otherwise follows the HOST cpu.
+          test -f "$VCPKG_PREFIX/lib/libaom.a" \
+            || { echo "FAIL: libaom.a absent (expected a static archive)"; exit 1; }
+          aom_shared=$(find "$VCPKG_PREFIX/lib" -name 'libaom*.dylib' | wc -l | tr -d ' ')
+          test "$aom_shared" = "0" \
+            || { echo "FAIL: ${aom_shared} libaom dylib(s) present; aom must stay static (it is linked into libheif)"; exit 1; }
+          aom_archs=$(lipo -archs "$VCPKG_PREFIX/lib/libaom.a")
+          echo "libaom.a archs: ${aom_archs}"
+          echo "${aom_archs}" | grep -qw "${{ matrix.arch_tag }}" \
+            || { echo "FAIL: libaom.a archs '${aom_archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
 
       # macOS is the one platform that genuinely ships the HEIC decode route, so
       # unlike the Linux/Android workflows (which configure with

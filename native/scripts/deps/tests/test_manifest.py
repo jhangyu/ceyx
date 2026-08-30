@@ -201,7 +201,12 @@ def test_no_pin_disagreement_between_the_two_transcribed_scripts():
     kvazaar = result["manifest"]["component"]["kvazaar"]
     aom = result["manifest"]["component"]["aom"]
     assert kvazaar["version"] == "2.3.1"
-    assert aom["version"] == "3.12.1"
+    # 3.12.1 -> 3.15.0 by the user-approved bump (Ruling 1, 2026-08-30), landed
+    # by D5 leg 3 when aom moved to the vcpkg registry port. The guard moved
+    # DELIBERATELY: it is still a drift guard, now pinned to the new expected
+    # value, not relaxed. aom is the only component in the migration whose
+    # version changes at all.
+    assert aom["version"] == "3.15.0"
     # The Windows override for kvazaar's source uses git, not tarball, but
     # must still target the same tagged version.
     assert kvazaar["source"]["windows"]["tag"] == "v{version}"

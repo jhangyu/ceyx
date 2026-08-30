@@ -33,27 +33,39 @@
 # silently resolved -- no such disagreement was found for the four HEIF-stack
 # components (all four version/SHA-256 pairs match exactly, K32).
 #
-# ROUND-1 HONESTY NOTE (read before editing `source.*.kind`): this manifest
-# encodes the CURRENT self-built-everything state of the two scripts above.
-# It does NOT yet encode the target hybrid split from Spec §3.2 (D5, owned by
-# M2, round 2-3: libwebp and macOS/Linux libde265 move to vcpkg; aom bumps to
-# 3.15.0). `manifest.toml` has a single owner (this file's header, and
-# Plan §3's file-ownership table) -- M2 must request changes here rather than
-# editing directly. Two components below carry `migration_pending = true`
-# with a `reason` describing why they are self-built TODAY without yet
-# claiming a permanent R-1a taxonomy reason for libde265/aom specifically:
-#   - libde265: today self-built on every platform; Spec §3.2 resolves
-#     macOS/Linux to `registry` and Windows stays self-built for a genuine
-#     `feature` reason (three blockers, none version-related). Only the
-#     Windows split is a permanent reason; the macOS/Linux self-build today is
-#     a sequencing fact (D5 has not landed), not a durable R-1a reason.
-#   - aom: today self-built at 3.12.1; Spec §3.2 resolves it to `registry`
-#     bumped to 3.15.0 under Ruling 1, landed by M2 in its own commit
-#     (OD-10). The self-build today is likewise sequencing, not durable.
-# kvazaar (`absent` -- no registry port exists at any version) and libheif
-# (`feature` -- no registry libheif offers a kvazaar HEVC-encoder feature at
-# any version, only x265/GPL-2.0) ARE durable R-1a reasons and do not carry
-# `migration_pending`.
+# MIGRATION STATE (read before editing `source.*.kind`). This section replaces
+# the round-1 honesty note, which described a self-built-everything state that
+# stopped being true when D5 landed. A stale honesty note defeats its own
+# purpose, so it is updated in the same commit as every migration step rather
+# than left as archaeology.
+#
+# MIGRATED to the registry (no `migration_pending` anywhere below):
+#   - libwebp        -- D5 leg 1, vcpkg `overrides` pin 1.6.0.
+#   - libde265       -- D5 leg 2, macOS/Linux only, via the CEYX overlay fork
+#                       native/vcpkg/ports/libde265 (its own `version` 1.1.1 is
+#                       the pin; overlay ports bypass the versions database).
+#                       `source.windows` stays `tarball` on a DURABLE `feature`
+#                       reason (three Windows-only blockers, none version-
+#                       related), so that override is not sequencing and must
+#                       not be "finished off" later.
+#   - aom            -- D5 leg 3, vcpkg `overrides` pin 3.15.0. The ONLY
+#                       component whose version changes in this migration
+#                       (3.12.1 -> 3.15.0, Ruling 1), which is why it landed in
+#                       a commit containing nothing else (A5.1b/OD-10): any PSNR
+#                       movement has exactly one candidate cause. No
+#                       `source.windows` override exists because the Windows
+#                       dist builds no aom at all.
+#
+# STILL SELF-BUILT, and each on a durable R-1a reason rather than sequencing:
+#   - kvazaar  -- `absent`: no registry port exists at any version.
+#   - libheif  -- `feature`: no registry libheif offers a kvazaar HEVC-encoder
+#                 feature at any version, only x265/GPL-2.0.
+#   - libjxl / LibRaw / Halide / the committed Windows dists -- see each block.
+#
+# `manifest.toml` has a single owner (this file's header and Plan §3's
+# file-ownership table). D5's implementer edits the libwebp/libde265/aom blocks
+# and this note directly, by the lead's ruling of 2026-08-31; everything else
+# still goes through M1.
 
 # ---------------------------------------------------------------------------
 [component.kvazaar]
@@ -224,7 +236,9 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
 # ---------------------------------------------------------------------------
 [component.aom]
 role          = "av1-codec"
-version       = "3.12.1"
+# Bumped 3.12.1 -> 3.15.0 by D5 leg 3 under Ruling 1, in an isolated commit
+# (A5.1b/OD-10) so any PSNR movement is attributable to this and nothing else.
+version       = "3.15.0"
 linkage       = "static"
 licence       = "BSD-2-Clause AND Alliance-for-Open-Media-Patent-License-1.0"
 # PATENTS* is in the glob specifically for aom (K6): it carries the AOM
@@ -233,11 +247,26 @@ licence_files = ["COPYING*", "LICENSE*", "PATENTS*"]
 path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.aom.source.default]
-  kind              = "tarball"
-  migration_pending = true
-  reason            = "self-built at 3.12.1 TODAY (transcribed verbatim); Spec_build_rewrite.md §3.2/§6.5 resolves this to registry at 3.15.0 under Ruling 1, landed by M2 as an ISOLATED single-purpose commit (OD-10) after the rest of the migration proves green at unchanged versions -- this is a sequencing fact, not a durable R-1a reason, and manifest.toml must be updated by M1 on M2's request once D5 lands"
-  url               = "https://storage.googleapis.com/aom-releases/libaom-{version}.tar.gz"
-  sha256            = "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
+  # D5 LEG 3 LANDED (2026-08-31), in its own commit containing nothing else.
+  # fetch_heif_deps.sh's build_aom() no longer builds anything: it copies
+  # lib/libaom.a and include/aom out of $CEYX_VCPKG_PREFIX and hard-fails when
+  # that prefix is absent.
+  #
+  # No `source.windows` override is added: the Windows script on this branch
+  # builds NO aom at all (build_heif_dist_windows.sh:168-169 pass
+  # -DWITH_AOM_DECODER=OFF and -DWITH_AOM_ENCODER=OFF), so there is no Windows
+  # acquisition to describe. Do not infer one from the `cmake.windows` block
+  # below, which is round-1 history transcribed from win_build_round6.sh.
+  kind    = "registry"
+  version = "3.15.0"
+  reason  = "supplied by vcpkg at exactly 3.15.0 (native/vcpkg/vcpkg.json `overrides`, resolved against pinned baseline abb6dda5cc32914d2e64d7d72b974dc301d1fc8a -- never the floating baseline, N30); Spec_build_rewrite.md §3.2/§6.5 resolves this component to registry and Ruling 1 approves the 3.12.1 -> 3.15.0 bump, which is why this is the only component in the migration whose version changes and why it lands alone (A5.1b)"
+  # Retained as HISTORY, not as an instruction: the exact bytes the 3.12.1
+  # source build downloaded. Nothing reads them now that `kind` is "registry" --
+  # and unlike libde265, no licence fetch uses them either: aom's licence is
+  # vendored from the vcpkg prefix's share/aom/copyright, which covers LICENSE,
+  # PATENTS and three third-party licences the old maxdepth-1 glob missed.
+  historical_url    = "https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz"
+  historical_sha256 = "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
 
   [component.aom.cmake.base]
   CMAKE_BUILD_TYPE                       = "Release"
