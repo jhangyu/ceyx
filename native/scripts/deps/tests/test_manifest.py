@@ -135,7 +135,7 @@ _HEIF_STACK_KNOWLEDGE_ITEMS = {
     "K9 (MultiThreaded CRT)": ("kvazaar", "cmake.windows.CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded"),
     "K10 (CMP0091 NEW)": ("kvazaar", "cmake.windows.CMAKE_POLICY_DEFAULT_CMP0091", "NEW"),
     "K11 (KVZ_STATIC_LIB on libheif)": ("libheif", "cmake.windows.CMAKE_C_FLAGS", "-DKVZ_STATIC_LIB"),
-    "K15 (PIC on static deps)": ("kvazaar", "cmake.base.CMAKE_POSITION_INDEPENDENT_CODE", "ON"),
+    "K15 (PIC on static deps, Unix-only per F2)": ("kvazaar", "cmake.macos.CMAKE_POSITION_INDEPENDENT_CODE", "ON"),
     "K16 (AOM_TARGET_CPU macOS-only)": ("aom", "cmake.macos.AOM_TARGET_CPU", "{arch.aom_target_cpu}"),
     "K19 (AV1 ENC/DEC independent)": ("aom", "cmake.base.CONFIG_AV1_ENCODER", "1"),
     "K20 (CMAKE_IGNORE_PREFIX_PATH)": ("libheif", "cmake.macos.CMAKE_IGNORE_PREFIX_PATH", None),

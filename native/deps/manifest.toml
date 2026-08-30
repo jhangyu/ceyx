@@ -68,16 +68,23 @@ path_keys = ["CMAKE_INSTALL_PREFIX"]
   [component.kvazaar.cmake.base]
   CMAKE_BUILD_TYPE                = "Release"
   CMAKE_INSTALL_PREFIX            = "{dist}"
-  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
   BUILD_SHARED_LIBS               = "OFF"
   BUILD_TESTS                     = "OFF"
 
   [component.kvazaar.cmake.macos]
+  # F2 fix (round-1 review): CMAKE_POSITION_INDEPENDENT_CODE is Unix-only --
+  # it comes from fetch_heif_deps.sh's STATIC_DEP_ARGS (K15), which
+  # win_build_round6.sh's own STATIC_DEP_ARGS (lines 168-177) does NOT
+  # include. It was wrongly placed in cmake.base, which rendered it into the
+  # Windows argv (a carrier-neutral-migration violation, not merely a stray
+  # key). Lives in macos/linux overlays only, exactly as the two source
+  # scripts do.
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
   CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
   CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
 
   [component.kvazaar.cmake.linux]
-  # No Linux-specific overlay in the source script.
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
 
   [component.kvazaar.cmake.windows]
   _generator                   = "Ninja"
@@ -197,7 +204,6 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   [component.aom.cmake.base]
   CMAKE_BUILD_TYPE                       = "Release"
   CMAKE_INSTALL_PREFIX                   = "{dist}"
-  CMAKE_POSITION_INDEPENDENT_CODE        = "ON"
   BUILD_SHARED_LIBS                      = "OFF"
   ENABLE_TESTS                           = "OFF"
   ENABLE_EXAMPLES                        = "OFF"
@@ -207,6 +213,11 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   CONFIG_AV1_DECODER                     = "1"
 
   [component.aom.cmake.macos]
+  # F2 fix (round-1 review): CMAKE_POSITION_INDEPENDENT_CODE is Unix-only
+  # (fetch_heif_deps.sh's STATIC_DEP_ARGS, K15); win_build_round6.sh's own
+  # STATIC_DEP_ARGS (lines 168-177) does not pass it. Wrongly in cmake.base
+  # previously, which rendered it into the Windows argv.
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
   CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
   CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
   # K16: forced ONLY on Darwin. aom's own aom_configure.cmake derives
@@ -224,7 +235,8 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   AOM_TARGET_CPU = "{arch.aom_target_cpu}"
 
   [component.aom.cmake.linux]
-  # No Linux-specific overlay -- see the AOM_TARGET_CPU note above (K16).
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+  # No AOM_TARGET_CPU overlay on Linux -- see the note above (K16).
 
   [component.aom.cmake.windows]
   _generator                   = "Ninja"
