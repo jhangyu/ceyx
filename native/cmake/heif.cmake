@@ -115,13 +115,23 @@ if(DNG_ENABLE_HEIF)
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_HEIF=1)
 
     # HEIC/AVIF encode + the still-decode delegation (2026-08-30 codec
-    # expansion, Task 7). Added on BOTH branches of this if/else on purpose:
-    # the TU guards all of its libheif usage on DNG_ENABLE_HEIF internally, so
-    # a disabled build still DEFINES ceyx_heif_encode_impl,
-    # ceyx_heif_still_decode_impl and MapHeifToStillError, returning the
-    # "unsupported" codes. A codec excluded from a build must degrade into a
-    # defined error, never into a symbol the caller's lookupFunction cannot
-    # find.
+    # expansion, Task 7).
+    #
+    # REDUNDANT with pipeline.cmake:90's file(GLOB_RECURSE ${SRC_DIR}/*.cpp),
+    # which already sweeps this TU into dng_decoder_native; CMake de-duplicates
+    # identical source paths within a target, so the explicit add changes
+    # nothing today. It is kept as an explicit declaration so that a future
+    # exclusion filter cannot silently drop this TU -- the OFF-branch filter at
+    # pipeline.cmake:130 is `.*/heif_(decode|ffi_api)\.cpp$`, and a maintainer
+    # widening it to cover heif_encode.cpp would otherwise remove the encode
+    # entry points with no diagnostic.
+    #
+    # Listed on BOTH branches of this if/else on purpose: the TU guards all of
+    # its libheif usage on DNG_ENABLE_HEIF internally, so a disabled build still
+    # DEFINES ceyx_heif_encode_impl, ceyx_heif_still_decode_impl and
+    # MapHeifToStillError, returning the "unsupported" codes. A codec excluded
+    # from a build must degrade into a defined error, never into a symbol the
+    # caller's lookupFunction cannot find.
     target_sources(dng_decoder_native PRIVATE ${SRC_DIR}/heif_encode.cpp)
 
     message(STATUS "HEIF: libheif ${HEIF_LIBRARY} + libde265 ${DE265_LIBRARY} (dynamic)")
@@ -179,10 +189,15 @@ if(DNG_ENABLE_HEIF)
     endif()
 else()
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_HEIF=0)
-    # Compiled here too: see the note on the enabled branch above. Without this
-    # line the disabled build fails to LINK (still_ffi_api.cpp and
-    # encode_ffi_api.cpp reference the impls unconditionally), which would turn
-    # "HEIF excluded" from a supported configuration into a broken one.
+    # Listed here too: see the note on the enabled branch above. Also redundant
+    # with pipeline.cmake:90's glob, and kept for the same reason -- guarding
+    # against a future exclusion filter, NOT because the link depends on it.
+    #
+    # What the link DOES depend on is that this TU reaches the target somehow:
+    # still_ffi_api.cpp and encode_ffi_api.cpp reference the impls
+    # unconditionally, so if heif_encode.cpp were ever excluded from an
+    # OFF build, "HEIF excluded" would stop being a supported configuration.
+    # Today the glob guarantees it, and this line is belt-and-braces.
     target_sources(dng_decoder_native PRIVATE ${SRC_DIR}/heif_encode.cpp)
     message(STATUS "HEIF: disabled (DNG_ENABLE_HEIF=OFF) — no heif_ symbols will be exported")
 endif()
