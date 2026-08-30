@@ -1,0 +1,109 @@
+name: HEIF dist (Windows)
+
+# DISPATCH-ONLY BY DESIGN. This job builds the libheif/libde265 distribution
+# that is then COMMITTED to native/third_party/heif-dist-windows/, exactly as
+# the macOS dist is. It is not part of the per-commit Windows build: the dist
+# is a pinned, reviewed input (upstream tarball + SHA-256 + a fixed flag set),
+# and rebuilding it on every push would make the shipped bytes a moving target
+# under an LGPL source-availability obligation.
+#
+# ci/** is included so the workflow can be verified from a bootstrap branch:
+# a workflow file only becomes dispatchable once it exists on a ref that runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/**"
+    paths:
+      - "native/scripts/build_heif_dist_windows.sh"
+      - ".github/workflows/heif_dist_windows.yml"
+
+concurrency:
+  group: heif-dist-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-heif-dist:
+    name: libheif + libde265 dist (windows x86-64, clang-cl, decode-only)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      # MUST run BEFORE actions/checkout, same reason as windows_build.yml:
+      # Git for Windows ships core.autocrlf=true system-wide, and a checkout
+      # done before this writes shell scripts with CRLF, which Git-Bash then
+      # fails to execute with an opaque error.
+      - name: Force LF line endings for all git operations
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          echo "core.autocrlf=$(git config --global core.autocrlf)"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # CMake ships with the runner image; Ninja does not reliably. pip's ninja
+      # wheel is a pinned, deterministic way to get it on PATH without choco.
+      - name: Install Ninja
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          ninja --version
+
+      # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
+      # LIB; this action is CI's equivalent of vcvars64.bat.
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Locate clang-cl
+        shell: bash
+        run: |
+          if command -v clang-cl >/dev/null 2>&1; then
+            CLANG_CL="$(command -v clang-cl)"
+          elif [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+            CLANG_CL="/c/Program Files/LLVM/bin/clang-cl.exe"
+            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+          else
+            echo "::error::clang-cl not found on the runner." >&2
+            exit 1
+          fi
+          echo "clang-cl: $CLANG_CL"
+          "$CLANG_CL" --version
+
+      - name: Build the HEIF dist
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          # set +e so the literal RC=$? below actually runs: the default
+          # `bash -eo pipefail` shell would abort the step first, leaving a log
+          # that only ever records RC=0.
+          set +e
+          bash native/scripts/build_heif_dist_windows.sh
+          RC=$?
+          set -e
+          echo "HEIF_DIST_WINDOWS_RC=$RC"
+          exit $RC
+
+      # Complete listing, deliberately unfiltered. A '*.dll'-filtered listing
+      # looks like a full inventory while silently omitting the import
+      # libraries and headers -- the same instrument failure the zlib step in
+      # windows_build.yml documents.
+      - name: List the produced dist (complete)
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: find native/third_party/heif-dist-windows -type f | sort
+
+      - name: Upload the dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: heif-dist-windows
+          path: ${{ github.workspace }}/native/third_party/heif-dist-windows
+          if-no-files-found: error
+          retention-days: 7
