@@ -1,0 +1,132 @@
+# Capability-assertion declarations (spec §5.2/§5.3, Plan D4).
+#
+# Every record here is a DECLARATION, not an implementation: `assertions.py`
+# loads and schema-validates this file; the actual check for each `method`
+# lives in `assertions.py`'s per-method dispatch (implemented incrementally,
+# see that module's docstring for what is wired in this round vs deferred).
+#
+# Round 2 scope (D4 "written", per Plan_build_rewrite.md D4 row): this file
+# declares the full 13-assertion suite from spec §5.3 so schema validation
+# has real data to validate against. Executing every assertion against a
+# built dist and recording each demonstrated red state (A4.3, A4.6) is
+# D4 "signed" work, tracked separately -- see docs/logs/2026-08-30/
+# round-1-handoff.md's known-limitations convention: this is stated as an
+# explicit outstanding item, not silently skipped.
+
+[[assertion]]
+id        = "A-SRC-HASH"
+tests     = "each downloaded source archive's SHA-256 matches the manifest pin"
+method    = "sha256"
+measures  = "hashlib.sha256(archive_bytes).hexdigest() vs component.<name>.source.<platform>.sha256"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "content hash is a platform-independent fact about the downloaded bytes"
+red_state = "flip one hex digit of a manifest sha256 pin; fetch.py must refuse to accept the download"
+
+[[assertion]]
+id        = "A-CAP-HEVC-ENC"
+tests     = "libheif's plugin registry reports a usable HEVC encoder"
+method    = "functional-probe"
+measures  = "the return value of heif_have_encoder_for_format(heif_compression_HEVC) at runtime"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "libheif's own LIBHEIF_API public capability API; reflects plugin-registry state, not binary layout"
+red_state = "build libheif with WITH_KVAZAAR=OFF; probe must exit non-zero"
+
+[[assertion]]
+id        = "A-CAP-AV1-ENC"
+tests     = "libheif's plugin registry reports a usable AV1 encoder"
+method    = "functional-probe"
+measures  = "heif_have_encoder_for_format(heif_compression_AV1) at runtime"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "same public capability API as A-CAP-HEVC-ENC"
+red_state = "build libheif with aom encoder disabled (CONFIG_AV1_ENCODER=0); probe must exit non-zero"
+
+[[assertion]]
+id        = "A-CAP-HEVC-DEC"
+tests     = "libheif's plugin registry reports a usable HEVC decoder"
+method    = "functional-probe"
+measures  = "heif_have_decoder_for_format(heif_compression_HEVC) at runtime"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "same public capability API as A-CAP-HEVC-ENC"
+red_state = "build libheif with libde265 excluded from the plugin registry; probe must exit non-zero"
+
+[[assertion]]
+id        = "A-CAP-AV1-DEC"
+tests     = "libheif's plugin registry reports a usable AV1 decoder"
+method    = "functional-probe"
+measures  = "heif_have_decoder_for_format(heif_compression_AV1) at runtime"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "independent of A-CAP-AV1-ENC: CONFIG_AV1_ENCODER/CONFIG_AV1_DECODER are separate aom build flags"
+red_state = "build aom with CONFIG_AV1_DECODER=0; probe must exit non-zero while AV1-ENC stays green"
+
+[[assertion]]
+id        = "A-PUBAPI"
+tests     = "libheif's genuinely-public API symbols are present in the shipped binary's symbol table"
+method    = "symbol-table"
+measures  = "presence of heif_decode_image and heif_context_get_encoder_for_format in the export/dynamic symbol table"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "these are LIBHEIF_API-marked in heif_export.h -- libheif's own declared public API, unlike the static-archive symbols layer 7 misused"
+red_state = "strip the shared library's dynamic symbol table; check must fail to find either symbol"
+
+[[assertion]]
+id        = "A-NO-GPL"
+tests     = "no GPL-licensed codec symbol leaked into the artefact"
+method    = "symbol-table"
+measures  = "absence of any x265/x264 symbol in the artefact's symbol table"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "checking a negative by absence is legitimate: a symbol absent from a permissive-visibility table (ELF/Mach-O) is genuinely absent; on PE the check is weaker but never wrong, and is backed by A-DEPS"
+red_state = "link a stub object exporting x265_encoder_open into the artefact; check must fail"
+
+[[assertion]]
+id        = "A-DEPS"
+tests     = "libheif's import/load-command table names the libde265 runtime"
+method    = "dependents"
+measures  = "presence of the libde265 shared-library entry in libheif's import table / load commands"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "a real fact about the binary; also serves as LGPL dynamic-linkage compliance evidence"
+red_state = "statically link libde265 into libheif; check must fail to find a separate libde265 runtime entry"
+
+[[assertion]]
+id        = "A-LINK"
+tests     = "declared linkage matches reality per component"
+method    = "linkage"
+measures  = "libheif and libde265 ship as shared objects; kvazaar and aom ship as static archives with no corresponding shared object"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "directly guards the manifest's compliance asymmetry (spec §4.4): LGPL components must be dynamically linked"
+red_state = "flip libde265's manifest linkage to static; check must fail against the dist inventory"
+
+[[assertion]]
+id        = "A-ARCH"
+tests     = "the artefact's machine architecture equals the requested canonical arch"
+method    = "arch"
+measures  = "lipo -archs (Mach-O) / file + ELF header (ELF) / PE header machine field (PE)"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "each format needs its own instrument, but the capability under test -- runs on the target CPU -- is the same"
+red_state = "request arm64 against an x86_64-only artefact; check must fail"
+
+[[assertion]]
+id        = "A-CRT"
+tests     = "every object in the shipped DLL used the static CRT"
+method    = "crt-imports"
+measures  = "absence of MSVCP*.dll / VCRUNTIME*.dll (dynamic-CRT) imports in the DLL's import table"
+valid_on  = ["windows"]
+why_valid = "layer 6's lesson: CMAKE_MSVC_RUNTIME_LIBRARY can be silently ignored; the artefact is the only reliable witness"
+red_state = "build one object with /MD instead of /MT; check must find a dynamic-CRT import and fail"
+
+[[assertion]]
+id        = "A-LICENCE"
+tests     = "a licence file was vendored for every component, PATENTS* included for aom"
+method    = "file-presence"
+measures  = "presence of a licence file per component directory, plus PATENTS* for aom"
+valid_on  = ["macos", "linux", "windows"]
+why_valid = "file presence is platform-independent"
+red_state = "delete aom's PATENTS file from the dist; check must fail"
+
+[[assertion]]
+id        = "A-KVZ-SIMD"
+tests     = "the x86_64 kvazaar archive contains AVX2/SSE4.1 code paths"
+method    = "symbol-table"
+measures  = "symbol/section scan of the archive for AVX2/SSE4.1 dispatch code (x86_64 targets only)"
+valid_on  = ["macos", "linux", "windows"]
+expected  = "fail"
+why_valid = "known parked defect (spec §5.4): cross-built kvazaar loses SIMD dispatch; recorded red rather than hidden"
+red_state = "this assertion IS the red state today on cross builds -- see spec §5.4 / RK10"

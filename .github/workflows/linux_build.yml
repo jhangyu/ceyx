@@ -49,6 +49,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Deps manifest/render/assertions test suite + no-shell lint
+        run: python3 -m pytest native/scripts/deps/ -q
+
       - name: Install build prerequisites (apt)
         # android_build.yml's set plus the Vulkan trio:
         #   libvulkan-dev -> Vulkan HEADERS, so find_package(Vulkan QUIET) in

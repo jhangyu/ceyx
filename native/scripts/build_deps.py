@@ -7,15 +7,15 @@ Spec: docs/logs/2026-08-30/Spec_build_rewrite.md §4.1.
         --platform <auto|macos|linux|windows> --arch <auto|arm64|x86_64> \
         [--only <name>] [--dry-run]
 
-Round 1 scope (Plan_build_rewrite.md D3, "fetch/run layer and CLI
-skeleton"): this file parses the CLI surface described above, performs the
-Windows-native-interpreter startup assertion (spec §2.3), and resolves
-``platform``/``arch`` from ``auto``. It does not yet drive an acquisition
---  manifest loading (D1/M1), argv rendering (D2/M1) and the assertion
-suite (D4/M3, round 2) are separate deliverables that this CLI will wire
-in once they land. ``--dry-run`` currently prints the resolved
-platform/arch/component selection and exits 0; it does not yet print
-rendered argv (that lands with D2).
+Round 2 (Plan_build_rewrite.md D3 completion / F4 remediation): this file
+parses the CLI surface described above, performs the Windows-native-
+interpreter startup assertion (spec §2.3), resolves ``platform``/``arch``
+from ``auto``, loads the manifest via ``deps.manifest.load()`` and rejects
+any ``--component`` name absent from ``manifest.toml``'s ``[component.*]``
+tables. ``--dry-run`` prints the ``deps.render.render()`` argv for the
+resolved component/platform/arch, one argv element per line, and exits 0.
+The assertion suite (D4/M3) is a separate deliverable this CLI will wire
+in once it lands.
 
 The manifest loader is imported lazily (inside ``main()``, not at module
 scope) so this file has no hard import-time dependency on D1's package,
@@ -71,13 +71,24 @@ def detect_arch() -> str:
 def _load_manifest_module():
     """Import D1's manifest loader lazily. Returns ``None`` (rather than
     raising) if it has not landed yet, so this CLI skeleton stays usable
-    standalone in round 1 -- callers that need the manifest must check for
-    ``None`` and report clearly, never silently proceed without it."""
+    standalone even if the ``deps`` package is somehow absent from the tree
+    -- callers that need the manifest must check for ``None`` and report
+    clearly, never silently proceed without it."""
     try:
         from deps import manifest as manifest_module  # type: ignore[attr-defined]
     except ImportError:
         return None
     return manifest_module
+
+
+def _load_render_module():
+    """Import D2's argv renderer lazily, mirroring ``_load_manifest_module``
+    above (same has-it-landed-yet defensiveness)."""
+    try:
+        from deps import render as render_module  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    return render_module
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -103,20 +114,6 @@ def main(argv: Optional[list] = None) -> int:
     resolved_arch = detect_arch() if args.arch == "auto" else args.arch
 
     manifest_module = _load_manifest_module()
-
-    print(
-        f"[build_deps] component={args.component!r} only={args.only!r} "
-        f"platform={resolved_platform} arch={resolved_arch} "
-        f"manifest_loader={'available' if manifest_module is not None else 'not yet available (D1 pending)'}"
-    )
-
-    if args.dry_run:
-        if manifest_module is None:
-            print("[build_deps] --dry-run: manifest loader not available yet; nothing further to resolve.")
-        else:
-            print("[build_deps] --dry-run: manifest loader available; argv rendering (D2) not yet wired in.")
-        return 0
-
     if manifest_module is None:
         print(
             "[build_deps] error: manifest loader (native/scripts/deps/manifest.py, D1) "
@@ -125,9 +122,50 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 1
 
+    try:
+        loaded = manifest_module.load()
+    except manifest_module.ManifestError as exc:
+        print(f"[build_deps] error: manifest failed validation: {exc}", file=sys.stderr)
+        return 1
+
+    known_components = sorted(loaded["manifest"].get("component", {}))
+    if args.component not in known_components:
+        print(
+            f"[build_deps] error: unknown --component {args.component!r} "
+            f"(not present in native/deps/manifest.toml; known components: {known_components})",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
-        "[build_deps] error: acquisition is not wired in yet -- D2 (argv rendering) "
-        "and D4 (assertion suite) are round-2 deliverables.",
+        f"[build_deps] component={args.component!r} only={args.only!r} "
+        f"platform={resolved_platform} arch={resolved_arch}",
+        file=sys.stderr,
+    )
+
+    render_module = _load_render_module()
+    if render_module is None:
+        print(
+            "[build_deps] error: argv renderer (native/scripts/deps/render.py, D2) "
+            "is not available yet -- cannot resolve the configure command line.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        argv = render_module.render(loaded, args.component, resolved_platform, resolved_arch)
+    except render_module.RenderError as exc:
+        print(f"[build_deps] error: render failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        for token in argv:
+            print(token)
+        return 0
+
+    print(
+        "[build_deps] error: acquisition is not wired in yet -- D4 (assertion suite) "
+        "is a round-2 deliverable still in progress.",
         file=sys.stderr,
     )
     return 1
