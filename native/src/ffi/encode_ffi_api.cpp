@@ -31,9 +31,14 @@ constexpr int32_t kMaxDimension = 65535;
 
 /// Shared argument validation. On failure *out/*out_len are zeroed so a caller
 /// that frees unconditionally is safe.
+//
+// NOTE: this function does NOT and cannot validate that `rgba` actually
+// holds width*height*4 readable bytes -- it only has the pointer and the
+// claimed dimensions, not the buffer's real allocation size. That length
+// contract is entirely the caller's responsibility (see payload_reencoder.dart
+// on the Halcyon side, which guards this before calling in).
 int32_t ValidateArgs(const uint8_t *rgba, int32_t width, int32_t height,
-                     int32_t quality, uint8_t **out, size_t *out_len,
-                     size_t *rgba_len) {
+                     int32_t quality, uint8_t **out, size_t *out_len) {
   if (out) *out = nullptr;
   if (out_len) *out_len = 0;
   if (!rgba || !out || !out_len) return kCeyxEncodeErrNullArg;
@@ -42,15 +47,6 @@ int32_t ValidateArgs(const uint8_t *rgba, int32_t width, int32_t height,
     return kCeyxEncodeErrBadDimensions;
   }
   if (quality < 1 || quality > 100) return kCeyxEncodeErrBadQuality;
-  // 65535 * 65535 * 4 fits comfortably in int64 (~1.7e10), so this product
-  // cannot itself wrap. The ceiling is compared in uint64: casting SIZE_MAX to
-  // int64 yields -1 on a 64-bit target, which would reject every input.
-  const uint64_t bytes = static_cast<uint64_t>(width) *
-                         static_cast<uint64_t>(height) * 4u;
-  if (bytes > static_cast<uint64_t>(SIZE_MAX)) {
-    return kCeyxEncodeErrBadDimensions;
-  }
-  *rgba_len = static_cast<size_t>(bytes);
   return kCeyxEncodeSuccess;
 }
 
@@ -90,16 +86,19 @@ const char *ceyx_encode_error_name(int32_t code) {
 int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len) {
-  size_t rgba_len = 0;
   const int32_t bad =
-      ValidateArgs(rgba, width, height, quality, out, out_len, &rgba_len);
+      ValidateArgs(rgba, width, height, quality, out, out_len);
   if (bad != kCeyxEncodeSuccess) return bad;
 
   struct jpeg_compress_struct cinfo;
   JpegErrorMgr jerr;
   unsigned char *buffer = nullptr;  // allocated by libjpeg via malloc/realloc
   unsigned long buffer_len = 0;
-  uint8_t *row_scratch = nullptr;   // only used on the no-JCS_EXTENSIONS path
+  // volatile: modified after setjmp() and read in the longjmp handler below;
+  // per C11 7.13.2.1 a non-volatile automatic's value is indeterminate there,
+  // which a register-allocating compiler can turn into free() of garbage.
+  // Only reachable on the no-JCS_EXTENSIONS (plain libjpeg) branch.
+  uint8_t *volatile row_scratch = nullptr;
 
   cinfo.err = jpeg_std_error(&jerr.pub);
   jerr.pub.error_exit = JpegErrorExit;
@@ -171,9 +170,8 @@ int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
 int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len) {
-  size_t rgba_len = 0;
   const int32_t bad =
-      ValidateArgs(rgba, width, height, quality, out, out_len, &rgba_len);
+      ValidateArgs(rgba, width, height, quality, out, out_len);
   if (bad != kCeyxEncodeSuccess) return bad;
 #if CEYX_ENABLE_WEBP
   uint8_t *webp_buf = nullptr;
