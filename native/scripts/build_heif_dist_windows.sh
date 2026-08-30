@@ -96,12 +96,26 @@ COMMON_ARGS=(
 # CPU (Intel Penryn 2008+, AMD Bulldozer 2011+; Windows 11 already mandates
 # SSE4.2). Turning ENABLE_SIMD off would have been the "green by building
 # less" answer and is deliberately NOT taken.
+#
+# CMAKE_CXX_FLAGS on the command line REPLACES CMake's MSVC default
+# ("/DWIN32 /D_WINDOWS /W3 /GR /EHsc"), so /EHsc and /GR are restored here by
+# hand. Losing them silently disables C++ exceptions and RTTI for the whole
+# libde265 build -- run 33294201597 surfaced that as "cannot use 'try' with
+# exceptions disabled", but a library compiled without /EHsc that happens not
+# to use `try` would have built green with broken unwinding semantics.
+#
+# ENABLE_DECODER=OFF gates ONLY the dec265 command-line TOOL subdirectory
+# (libde265/CMakeLists.txt:241-243 builds the library unconditionally). The
+# tool is not part of this dist, is never shipped, and its bundled getopt
+# clone does not compile under clang's stricter C rules. The decode library
+# itself is unaffected, which the heif_decode_image / de265-dependency
+# assertions below still prove.
 echo "[heif-win] configuring libde265 ${DE265_VERSION}"
 cmake -S "${STAGE}/libde265-${DE265_VERSION}" -B "${STAGE}/build-de265" \
   "${COMMON_ARGS[@]}" \
-  -DCMAKE_C_FLAGS="/clang:-msse4.1" \
-  -DCMAKE_CXX_FLAGS="/clang:-msse4.1" \
-  -DENABLE_DECODER=ON \
+  -DCMAKE_C_FLAGS="/DWIN32 /D_WINDOWS /clang:-msse4.1" \
+  -DCMAKE_CXX_FLAGS="/DWIN32 /D_WINDOWS /EHsc /GR /clang:-msse4.1" \
+  -DENABLE_DECODER=OFF \
   -DENABLE_ENCODER=OFF \
   -DENABLE_SDL=OFF \
   -DENABLE_SHERLOCK265=OFF \
