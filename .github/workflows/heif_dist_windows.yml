@@ -15,6 +15,14 @@ on:
     branches:
       - "ci/**"
     paths:
+      # The Python carrier now builds this dist, so its files must be able to
+      # TRIGGER the job that proves them. Listing only the retired shell script
+      # would leave every carrier change untested on Windows while the workflow
+      # still looked healthy -- the same trigger-coverage gap S2 fixed for the
+      # vcpkg files in round 3.
+      - "native/scripts/deps/**"
+      - "native/scripts/build_deps.py"
+      - "native/deps/manifest.toml"
       - "native/scripts/build_heif_dist_windows.sh"
       - ".github/workflows/heif_dist_windows.yml"
 
@@ -76,18 +84,30 @@ jobs:
           echo "clang-cl: $CLANG_CL"
           "$CLANG_CL" --version
 
-      - name: Build the HEIF dist
-        shell: bash
-        working-directory: ${{ github.workspace }}
+      # R4: built by the PYTHON CARRIER, not by build_heif_dist_windows.sh.
+      #
+      # `shell: pwsh` rather than bash is the substantive change here, not a
+      # style preference. Under Git-Bash every argument that looks like a path
+      # is eligible for MSYS path rewriting -- which is how an absolute
+      # workspace path became `\d\a\...` on this project before -- and Git-Bash
+      # can also put an MSYS Python on PATH, whose sys.platform is "msys" and
+      # whose entire purpose is POSIX emulation. deps/run.py refuses to run
+      # under that interpreter by design. pwsh + native Windows Python means
+      # argv reaches CreateProcessW unmodified, with no shell in between to
+      # reinterpret the --dist value.
+      #
+      # $LASTEXITCODE is captured on the line IMMEDIATELY after the command and
+      # echoed from the step itself: a harness-reported status has lied in both
+      # directions on this project before (reporting a wrapper's code rather
+      # than the command's, and a trailing filter's code rather than the
+      # build's).
+      - name: Build the HEIF dist (Python carrier)
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/native/scripts
         run: |
-          # set +e so the literal RC=$? below actually runs: the default
-          # `bash -eo pipefail` shell would abort the step first, leaving a log
-          # that only ever records RC=0.
-          set +e
-          bash native/scripts/build_heif_dist_windows.sh
-          RC=$?
-          set -e
-          echo "HEIF_DIST_WINDOWS_RC=$RC"
+          python -m deps.win_heif_dist --dist "${{ github.workspace }}/native/third_party/heif-dist-windows"
+          $RC = $LASTEXITCODE
+          Write-Host "HEIF_DIST_WINDOWS_RC=$RC"
           exit $RC
 
       # Complete listing, deliberately unfiltered. A '*.dll'-filtered listing

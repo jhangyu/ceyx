@@ -76,6 +76,32 @@ jobs:
         with:
           python-version: "3.11"
 
+      # R4: run the carrier's own unit suite on NATIVE WINDOWS PYTHON.
+      #
+      # This is the only leg that executes that code on the interpreter and the
+      # path semantics it actually targets. The value is not hypothetical: the
+      # equivalent Linux step, added in round 3, immediately exposed a genuine
+      # platform-dependent defect (a bare `Path` where `PureWindowsPath` was
+      # required) that was invisible on the developer's machine because it
+      # happened to run a newer Python. Windows is where the drive-letter,
+      # backslash and MSYS-rejection logic can be wrong in ways no macOS or
+      # Linux run can reveal.
+      #
+      # `shell: pwsh` deliberately: running the suite under Git-Bash would put
+      # it on an MSYS interpreter, which deps/run.py refuses by design — the
+      # tests would then be measuring the refusal rather than the code.
+      - name: Install pytest for deps suite
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Run deps unit suite (native Windows Python)
+        shell: pwsh
+        run: |
+          python -m pytest native/scripts/deps/ -q
+          $RC = $LASTEXITCODE
+          Write-Host "DEPS_PYTEST_RC=$RC"
+          exit $RC
+
       # CMake ships with the runner image; Ninja does not reliably. pip's ninja
       # wheel is a pinned, deterministic way to get it on PATH without choco.
       - name: Install Ninja

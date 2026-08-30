@@ -14,11 +14,19 @@ has never been seen to fail is not evidence (project convention, spec §5).
 """
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from win_pe import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Imported through the PACKAGE (`deps.win_pe`), not flat (`win_pe`). A flat
+# import only resolves when something else has already put deps/ on sys.path,
+# which made this file's collection depend on TEST ORDER: it passed in a
+# whole-suite run and failed when run on its own. An order-dependent green is
+# indistinguishable from a real one right up until CI runs the file alone.
+from deps.win_pe import (  # noqa: E402
     PeAssertionFailed,
     PeInspectionError,
     assert_absent,
