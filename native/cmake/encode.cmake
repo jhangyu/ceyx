@@ -49,14 +49,17 @@ if(CEYX_ENABLE_WEBP)
         NAMES webp/encode.h
         HINTS ${WEBP_INCLUDE_HINTS}
         NO_DEFAULT_PATH)
+    # NAMES lists both spellings: the Windows clang-cl dist installs
+    # lib-prefixed archives (libwebp.lib), and CMake's find_library prefix
+    # default on the MSVC-frontend path is not documented to cover it.
     find_library(CEYX_WEBP_LIBRARY
-        NAMES webp
+        NAMES webp libwebp
         HINTS ${WEBP_LIB_HINTS}
         NO_DEFAULT_PATH)
     # libwebp 1.6 factors its YUV conversion into a separate static archive;
     # omitting it surfaces as undefined _SharpYuvConvert at dylib link time.
     find_library(CEYX_SHARPYUV_LIBRARY
-        NAMES sharpyuv
+        NAMES sharpyuv libsharpyuv
         HINTS ${WEBP_LIB_HINTS}
         NO_DEFAULT_PATH)
     # 2026-08-30 (plan Task 8): EXIF/XMP/ICC embedding needs the mux writer and
@@ -64,11 +67,11 @@ if(CEYX_ENABLE_WEBP)
     # -DWEBP_BUILD_WEBPMUX=OFF (fetch_libwebp_dist.sh) disables the command-line
     # TOOL, not the library -- so this is a link line, not a new dependency.
     find_library(CEYX_WEBPMUX_LIBRARY
-        NAMES webpmux
+        NAMES webpmux libwebpmux
         HINTS ${WEBP_LIB_HINTS}
         NO_DEFAULT_PATH)
     find_library(CEYX_WEBPDEMUX_LIBRARY
-        NAMES webpdemux
+        NAMES webpdemux libwebpdemux
         HINTS ${WEBP_LIB_HINTS}
         NO_DEFAULT_PATH)
 
