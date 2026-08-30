@@ -81,6 +81,11 @@ native/third_party/heif-dist/*
 native/third_party/libwebp-dist/*
 !native/third_party/libwebp-dist/PROVENANCE.md
 native/third_party/libwebp-dist-*/
+# EXCEPTION: libwebp-dist-windows IS committed (Task 4, 2026-08-30 codec
+# expansion) -- no machine in this project can produce Windows binaries
+# locally, so unlike the macOS/Linux dist above, the Windows one is a
+# reviewed, pinned INPUT, same policy as heif-dist-windows.
+!native/third_party/libwebp-dist-windows/
 
 # Vendored static libjxl distribution (+ bundled highway, brotli; built by
 # native/scripts/fetch_libjxl_dist.sh). Same policy as the HEIF/libwebp dists
@@ -88,6 +93,9 @@ native/third_party/libwebp-dist-*/
 native/third_party/libjxl-dist/*
 !native/third_party/libjxl-dist/PROVENANCE.md
 native/third_party/libjxl-dist-*/
+# EXCEPTION: libjxl-dist-windows IS committed (Task 6, 2026-08-30 codec
+# expansion) -- same rationale as the libwebp-dist-windows exception above.
+!native/third_party/libjxl-dist-windows/
 
 # Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
 # native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
