@@ -215,6 +215,33 @@ jobs:
       - name: Fetch vendored LibRaw distribution
         run: native/scripts/fetch_libraw_dist.sh
 
+      # G1 fix (round-5 gap closure, task #9): cmake/jxl.cmake defaults
+      # CEYX_ENABLE_JXL=ON but SOFT-degrades to CEYX_JXL_ENABLED=0 with only a
+      # message(WARNING) when native/third_party/libjxl-dist is absent — a
+      # configure that silently ships no JPEG XL codec was indistinguishable
+      # from one that ships it, in every green run before this fix. Fetch the
+      # real dist (native/scripts/fetch_libjxl_dist.sh builds it from source;
+      # same script the plan intends, unlike the HEIF/libwebp dists this one
+      # has no committed/vcpkg alternative) so this leg can prove ENABLED=1
+      # after the product build below, not just attempt it.
+      #
+      # CEYX_JXL_ARCH mirrors DNG_HEIF_ARCH/fetch_heif_deps.sh's arch-suffixed
+      # dist convention (native/cmake/jxl.cmake's WIN32/APPLE hint search):
+      # matrix.arch_tag equals the host arch on the native leg (unsuffixed
+      # dist) and differs on the cross leg (arch-suffixed dist), exactly what
+      # jxl.cmake's CMAKE_OSX_ARCHITECTURES search expects.
+      - name: Cache vendored libjxl distribution
+        id: cache-jxl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist${{ matrix.cross == 'true' && format('-{0}', matrix.arch_tag) || '' }}
+          key: jxl-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_libjxl_dist.sh') }}
+
+      - name: Fetch vendored libjxl distribution
+        env:
+          CEYX_JXL_ARCH: ${{ matrix.arch_tag }}
+        run: native/scripts/fetch_libjxl_dist.sh
+
       # D5 (2026-08-31): libwebp is supplied by vcpkg, pinned to exactly 1.6.0 in
       # native/vcpkg/vcpkg.json. cmake/encode.cmake resolves it with
       # find_package(WebP CONFIG) and HARD-FAILS the configure when it is
@@ -504,6 +531,72 @@ jobs:
             exit 1
           fi
           otool -L "$DYLIB"
+
+      # G1 evidence (task #9): prove the JXL codec is actually LINKED IN, not
+      # just that the fetch step above succeeded — declaration-vs-usage, per
+      # the negative-space lesson (a green configure/build proves nothing by
+      # itself; cmake/jxl.cmake's own soft-degrade path also builds green).
+      # JxlEncoderInitBasicInfo is called directly from src/jxl_codec.cpp only
+      # when CEYX_ENABLE_JXL compiles the real path in; the stub (dist absent)
+      # never references any Jxl* symbol. Output goes to a FILE, then grepped
+      # (never `nm | grep -q`; a SIGPIPE on the pipe's read side under
+      # `bash -eo pipefail` would misreport a real match as a failure).
+      - name: Assert JXL codec is compiled into the dylib (G1)
+        run: |
+          set +e
+          nm -gU "$DYLIB" > dylib_defined_syms.txt 2>&1
+          rc=$?
+          set -e
+          echo "NM_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::nm failed on $DYLIB (rc=${rc}); cannot verify JXL linkage." >&2
+            cat dylib_defined_syms.txt || true
+            exit 1
+          fi
+          set +e
+          grep -q "JxlEncoderInitBasicInfo" dylib_defined_syms.txt
+          rc=$?
+          set -e
+          echo "ASSERT JxlEncoderInitBasicInfo RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::JxlEncoderInitBasicInfo not found in $DYLIB — JPEG XL was NOT linked in (cmake/jxl.cmake's soft-degrade path was taken silently). Check the 'Fetch vendored libjxl distribution' step's log for 'JXL: static' vs the disabled WARNING." >&2
+            exit 1
+          fi
+
+      # G3 fix (task #9): macOS had no FFI export-symbol assertion at all,
+      # unlike Linux (AC-L5) and Windows (AC-W4) — a definition missing
+      # FFI_EXPORT would pass every check above and fail only at a Dart
+      # consumer's lookupFunction. dng_decode_and_process is the POSITIVE
+      # CONTROL (exported since the first build); its absence means this
+      # check itself is broken, not that the build regressed. Output to a
+      # file, then grepped, same pipefail-avoidance reasoning as above.
+      - name: Assert required FFI exports present in dylib (G3)
+        run: |
+          set +e
+          nm -gU "$DYLIB" > dylib_exports.txt 2>&1
+          rc=$?
+          set -e
+          echo "NM_EXPORTS_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::nm failed on $DYLIB (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
+            cat dylib_exports.txt || true
+            exit 1
+          fi
+          missing=""
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 ceyx_encode_webp_rgba8; do
+            set +e
+            grep -q "${sym}" dylib_exports.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} ${sym}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing exported symbol(s) in $DYLIB:${missing} — the dylib does not export the FFI surface Dart looks up." >&2
+            exit 1
+          fi
 
       - name: Stage native artifact
         run: |

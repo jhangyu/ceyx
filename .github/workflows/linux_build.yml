@@ -166,6 +166,25 @@ jobs:
           test "$shared" = "0" \
             || { echo "FAIL: ${shared} libwebp shared object(s) present; the triplet must keep libwebp static (the LGPL dynamic exception covers libheif/libde265 only)"; exit 1; }
 
+      # G1 fix (round-5 gap closure, task #9): cmake/jxl.cmake defaults
+      # CEYX_ENABLE_JXL=ON but SOFT-degrades to a message(WARNING) +
+      # CEYX_JXL_ENABLED=0 when native/third_party/libjxl-dist is absent — a
+      # silent codec-less build was indistinguishable from a real one in every
+      # green run before this fix. native/scripts/fetch_libjxl_dist.sh builds
+      # it from source (no committed/vcpkg alternative exists for this dist,
+      # unlike libheif/libwebp), so fetch it here the same way macos_build.yml
+      # now does, and prove linkage on the built .so below (declaration vs
+      # usage, not just "the fetch step succeeded").
+      - name: Cache vendored libjxl distribution
+        id: cache-jxl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist
+          key: jxl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_libjxl_dist.sh') }}
+
+      - name: Fetch vendored libjxl distribution
+        run: native/scripts/fetch_libjxl_dist.sh
+
       - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
         # Native single-stage build: on Linux the host IS the target, so the
         # default --platform host path is correct (no cross-compile, unlike
@@ -275,9 +294,15 @@ jobs:
           # nm_dynsyms.txt was written de-pipelined by AC-L3 above; grepping the
           # FILE (never `nm | grep -q`) is what keeps pipefail from turning nm's
           # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
+          # G1 evidence (task #9): JxlEncoderInitBasicInfo is called directly
+          # from src/jxl_codec.cpp only when the real JXL path compiled in;
+          # the stub (dist absent) never references any Jxl* symbol, so its
+          # presence in the dynamic symbol table proves libjxl actually
+          # linked, not just that the fetch step above succeeded — the exact
+          # negative-space gap this loop is now also closing.
           echo "== AC-L5: required FFI exports present in .so =="
           missing=""
-          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 JxlEncoderInitBasicInfo; do
             set +e
             grep -E " T ${sym}\$" nm_dynsyms.txt
             rc=$?

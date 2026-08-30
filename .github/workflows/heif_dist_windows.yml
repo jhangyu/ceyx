@@ -29,7 +29,6 @@ on:
       # way manifest.toml already does -- otherwise an arch_map edit could
       # silently desync the Windows dist from what the carrier now renders.
       - "native/deps/arch_map.toml"
-      - "native/scripts/build_heif_dist_windows.sh"
       - ".github/workflows/heif_dist_windows.yml"
 
 concurrency:
