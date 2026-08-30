@@ -10,9 +10,22 @@
 #include "heif_decode.h"
 #include "heif_error_codes.h"
 
+// Windows exports come ONLY from __declspec(dllexport): there is no
+// CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS and no .def file in this tree, so a
+// definition without it compiles, links, produces a correctly-sized DLL and
+// then fails at the consumer's Dart lookupFunction. macOS and Linux export
+// these by default visibility, which is why the omission was invisible until
+// the HEIF route was enabled on Windows. Same macro and same placement as
+// src/ffi/dng_ffi_api.cpp and src/ffi/encode_ffi_api.cpp (f2bf987).
+#if defined(_WIN32)
+#define FFI_EXPORT __declspec(dllexport)
+#else
+#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
+#endif
+
 extern "C" {
 
-const char *heif_error_name(int32_t code) {
+FFI_EXPORT const char *heif_error_name(int32_t code) {
   switch (code) {
     case kHeifSuccess: return "kHeifSuccess";
     case kHeifErrNullPath: return "kHeifErrNullPath";
@@ -29,8 +42,8 @@ const char *heif_error_name(int32_t code) {
   }
 }
 
-int32_t heif_probe(const char *path, uint32_t *width, uint32_t *height,
-                   int32_t *orientation) {
+FFI_EXPORT int32_t heif_probe(const char *path, uint32_t *width, uint32_t *height,
+                              int32_t *orientation) {
   if (!path || !path[0] || !width || !height || !orientation) {
     return kHeifErrNullPath;
   }
@@ -41,7 +54,7 @@ int32_t heif_probe(const char *path, uint32_t *width, uint32_t *height,
   }
 }
 
-int32_t heif_decode_rgba(const char *path, int32_t max_dim, HeifResult *out) {
+FFI_EXPORT int32_t heif_decode_rgba(const char *path, int32_t max_dim, HeifResult *out) {
   if (!out) return kHeifErrNullPath;
   // Fully overwritten, never partially: a caller reading width/height after a
   // failure must see zeroes, not whatever was on its stack.
@@ -84,7 +97,7 @@ int32_t heif_decode_rgba(const char *path, int32_t max_dim, HeifResult *out) {
   }
 }
 
-void heif_release(HeifResult *r) {
+FFI_EXPORT void heif_release(HeifResult *r) {
   if (!r) return;
   if (r->rgba) std::free(r->rgba);
   // Zeroing (not just freeing) is what makes a double release safe: the second
