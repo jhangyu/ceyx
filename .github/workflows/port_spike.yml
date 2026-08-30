@@ -137,8 +137,16 @@ jobs:
         include:
           - runner: macos-14
             triplet: arm64-osx-heif
-          - runner: macos-13
-            triplet: x64-osx-heif
+          # DEFERRED BY USER RULING (2026-08-31): the x64-osx-heif leg is
+          # commented out because macos-13 runners never got scheduled for this
+          # branch — runner starvation, NOT a defect in the port, the triplet or
+          # the gate. Get windows x86-64 and arm64-osx green first.
+          # The triplet native/vcpkg/triplets/x64-osx-heif.cmake is DELIBERATELY
+          # RETAINED: only the CI leg is deferred, not the port work. Restoring
+          # this leg is un-commenting these two lines and nothing else.
+          # See native/vcpkg/DEVIATIONS.md D10.
+          # - runner: macos-13
+          #   triplet: x64-osx-heif
     steps:
       - name: Checkout
         uses: actions/checkout@v4

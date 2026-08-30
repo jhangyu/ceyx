@@ -94,6 +94,20 @@ Reference value: the current shell-script-produced dist
 subdirectory, not the decode library). The fork reproduces exactly that split, and never
 ships the tool on any platform (upstream's port ships it via `vcpkg_copy_tools`).
 
+## D10 [R] The `x64-osx-heif` CI leg is deferred — user ruling, 2026-08-31
+
+**Not a code deviation and not a FALLBACK.** `macos-13` runners were never scheduled for this
+branch across four consecutive runs, so the x86-64 macOS leg produced no evidence either way.
+The user ruled: drop that platform from the spike flow, get `windows x86-64` and
+`arm64-osx-heif` green first, handle x64-osx later.
+
+- The matrix entry in `.github/workflows/port_spike.yml` is **commented out**, not deleted.
+  Restoring it is un-commenting two lines.
+- `triplets/x64-osx-heif.cmake` is **retained in full**. Only the CI leg is deferred, not the
+  port work — nothing about the triplet is known to be wrong.
+- Status of that platform is therefore **DEFERRED-BY-RULING**: unproven, not failed. Do not
+  read the remaining green legs as evidence about x86-64 macOS; no evidence exists.
+
 ## D9 [M] The `hevc` (x265) feature was deleted from the libheif fork
 
 Upstream's port declares it. Removing it rather than leaving it unselected means the GPL-2.0
