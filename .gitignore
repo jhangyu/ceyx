@@ -26,6 +26,11 @@ native/build/
 native/build-android/
 native/build_diag/
 native/.cache/
+
+# Local-dev default vcpkg install root (Task 6, D5): probed by
+# build_native_watchdog.py when CEYX_VCPKG_PREFIX is unset. Populated by an
+# explicit developer `vcpkg install`, never auto-bootstrapped by the watchdog.
+native/vcpkg-installed/
 *.o
 *.a
 *.dylib
