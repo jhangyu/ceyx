@@ -119,10 +119,33 @@ jobs:
         with:
           python-version: "3.11"
 
+      # nasm/yasm are required by fetch_heif_deps.sh's aom build: aom's x86_64
+      # codepath is hand-written assembly (unlike the arm64 codepath, which is
+      # NEON intrinsics compiled by the C compiler), and its cmake configure
+      # hard-fails ("Unable to find assembler") without an assembler on PATH.
+      # Confirmed via the macos-14 runner-images manifest (actions/runner-images
+      # images/macos/macos-14-Readme.md, Utilities section) that neither nasm nor
+      # yasm is preinstalled.
+      #
+      # yasm is installed (not just nasm): aom's build/cmake/aom_configure.cmake
+      # `find_program(CMAKE_ASM_NASM_COMPILER yasm ...)` looks for yasm FIRST and
+      # only falls back to nasm when yasm is absent or ENABLE_NASM is set (which
+      # this project does not set). When a real nasm IS selected, aom additionally
+      # runs test_nasm() (build/cmake/aom_optimization.cmake), which greps `nasm
+      # -hf` output for the literal substring "-Ox" to confirm multipass
+      # optimization support; Homebrew's current nasm (3.02) no longer prints
+      # "-Ox" under `-hf` (verified locally: `nasm -hf` lists only `-f` object
+      # formats, dropping the "-Ox" line older nasm releases used to include),
+      # so aom's version-probe now hard-fails configure even though nasm 3.02 is
+      # fully capable. yasm has no such probe and is unaffected. nasm is kept
+      # installed alongside yasm as a harmless secondary assembler (aom will not
+      # select it while yasm is present) and because other vendored deps in this
+      # tree may still expect it on PATH; removing it is not necessary to fix
+      # this failure.
       - name: Install build prerequisites (Homebrew)
         run: |
           brew update
-          brew install cmake ninja jpeg-turbo
+          brew install cmake ninja jpeg-turbo nasm yasm
 
       - name: Cache vendored Halide v21 distribution
         id: cache-halide

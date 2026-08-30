@@ -245,8 +245,27 @@ build_aom() {
   rm -rf "${STAGE}/libaom-${AOM_VERSION}"
   tar -xzf "${STAGE}/libaom-${AOM_VERSION}.tar.gz" -C "${STAGE}"
   echo "[heif] configuring libaom ${AOM_VERSION} (static, encoder + decoder)"
+  # AOM_TARGET_CPU must be forced explicitly on Apple silicon runners cross-
+  # building the x86_64 leg (DNG_HEIF_ARCH=x86_64): unlike CMAKE_OSX_ARCHITECTURES
+  # (which only steers the compiler's -arch flag), aom's own
+  # build/cmake/aom_configure.cmake derives AOM_TARGET_CPU from the *host*
+  # CMAKE_SYSTEM_PROCESSOR when the variable isn't already set, so it still
+  # picks arm64 and enables NEON intrinsic sources even though the compiler
+  # is targeting x86_64 -- these NEON sources then fail to compile under the
+  # x86_64 clang invocation ("unknown type name 'uint8x8_t'"). Only forced on
+  # Darwin: HEIF_ARCH there is always exactly "arm64" or "x86_64" (uname -m
+  # vocabulary), which matches AOM_TARGET_CPU's vocabulary 1:1. On Linux
+  # HEIF_ARCH can be "aarch64", which aom's own detection normalizes to
+  # "arm64" (aom_configure.cmake's cpu_lowercase MATCHES "aarch64" branch) --
+  # passing it through unnormalized would break native Linux arm64 builds, so
+  # Linux is left on aom's built-in host detection (no cross leg exists there).
+  AOM_CPU_ARGS=()
+  if [ "${HOST_OS}" = "Darwin" ]; then
+    AOM_CPU_ARGS=(-DAOM_TARGET_CPU="${HEIF_ARCH}")
+  fi
   cmake -S "${STAGE}/libaom-${AOM_VERSION}" -B "${STAGE}/build-aom" \
     "${STATIC_DEP_ARGS[@]}" \
+    "${AOM_CPU_ARGS[@]}" \
     -DENABLE_TESTS=OFF \
     -DENABLE_EXAMPLES=OFF \
     -DENABLE_DOCS=OFF \
