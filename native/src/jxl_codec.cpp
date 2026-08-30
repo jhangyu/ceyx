@@ -77,9 +77,16 @@ extern "C" int32_t ceyx_jxl_encode_impl(const uint8_t *rgba,
   return kCeyxEncodeErrUnsupported;
 #else
   try {
+    // Declaration order = REVERSE destruction order: the runner must outlive
+    // the encoder that holds a pointer to it (JxlEncoderSetParallelRunner
+    // below), so it is declared FIRST here -- destructing it before `enc`
+    // would leave `enc` (and any in-flight worker callback into it) holding a
+    // dangling runner pointer during its own teardown. Hardening, no known
+    // defect: nothing in this function's current control flow triggers it,
+    // since every return happens with the runner already idle.
+    auto runner = JxlThreadParallelRunnerMake(nullptr, WorkerCount());
     JxlEncoderPtr enc = JxlEncoderMake(nullptr);
     if (!enc) return kCeyxEncodeErrAllocationFailed;
-    auto runner = JxlThreadParallelRunnerMake(nullptr, WorkerCount());
     if (JxlEncoderSetParallelRunner(enc.get(), JxlThreadParallelRunner,
                                     runner.get()) != JXL_ENC_SUCCESS) {
       return kCeyxEncodeErrEncodeFailed;
@@ -232,9 +239,12 @@ extern "C" int32_t ceyx_jxl_decode_impl(const char *path, int32_t max_dim,
   try {
     const std::vector<uint8_t> bytes = ReadAll(path);
     if (bytes.empty()) return kCeyxStillErrOpenFailed;
+    // Declaration order = reverse destruction order, same reasoning as the
+    // encoder above: the runner must outlive `dec`, which holds a pointer to
+    // it via JxlDecoderSetParallelRunner. Hardening, no known defect.
+    auto runner = JxlThreadParallelRunnerMake(nullptr, WorkerCount());
     JxlDecoderPtr dec = JxlDecoderMake(nullptr);
     if (!dec) return kCeyxStillErrAllocationFailed;
-    auto runner = JxlThreadParallelRunnerMake(nullptr, WorkerCount());
     JxlDecoderSetParallelRunner(dec.get(), JxlThreadParallelRunner, runner.get());
     if (JxlDecoderSubscribeEvents(dec.get(),
             JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
@@ -292,18 +302,33 @@ extern "C" int32_t ceyx_jxl_decode_impl(const char *path, int32_t max_dim,
     uint32_t fw = info.xsize, fh = info.ysize;
     std::vector<uint8_t> scaled;
     if (max_dim > 0 && (fw > uint32_t(max_dim) || fh > uint32_t(max_dim))) {
+      // fw/fh come from the file's basic-info header -- attacker-controlled,
+      // up to the size-overflow ceiling checked above (uint64_t(INT64_MAX)),
+      // not bounded by max_dim. Every index computed FROM them (tw/th sizing,
+      // and the sy0/sy1/sx0/sx1 source-window bounds below) is done in
+      // uint64_t so a large fw/fh cannot silently wrap a uint32 intermediate
+      // before the result is narrowed back to the pixel-index width the loop
+      // actually needs (tw/th themselves are capped by max_dim, an int32_t,
+      // so narrowing THOSE back to uint32_t is safe).
       uint32_t tw, th;
-      if (fw >= fh) { tw = uint32_t(max_dim); th = (fh * tw + fw / 2) / fw; }
-      else          { th = uint32_t(max_dim); tw = (fw * th + fh / 2) / fh; }
+      if (fw >= fh) {
+        tw = uint32_t(max_dim);
+        th = uint32_t((uint64_t(fh) * tw + uint64_t(fw) / 2) / fw);
+      } else {
+        th = uint32_t(max_dim);
+        tw = uint32_t((uint64_t(fw) * th + uint64_t(fh) / 2) / fh);
+      }
       if (tw < 1) tw = 1;
       if (th < 1) th = 1;
       // Box filter. libjxl exposes no arbitrary output scaler, so the sizing
       // contract is honoured here rather than pretended at.
       scaled.resize(size_t(tw) * th * 4);
       for (uint32_t y = 0; y < th; ++y) {
-        const uint32_t sy0 = (y * fh) / th, sy1 = ((y + 1) * fh + th - 1) / th;
+        const uint32_t sy0 = uint32_t((uint64_t(y) * fh) / th);
+        const uint32_t sy1 = uint32_t((uint64_t(y + 1) * fh + th - 1) / th);
         for (uint32_t x = 0; x < tw; ++x) {
-          const uint32_t sx0 = (x * fw) / tw, sx1 = ((x + 1) * fw + tw - 1) / tw;
+          const uint32_t sx0 = uint32_t((uint64_t(x) * fw) / tw);
+          const uint32_t sx1 = uint32_t((uint64_t(x + 1) * fw + tw - 1) / tw);
           uint32_t acc[4] = {0, 0, 0, 0}, cnt = 0;
           for (uint32_t sy = sy0; sy < sy1 && sy < fh; ++sy) {
             for (uint32_t sx = sx0; sx < sx1 && sx < fw; ++sx) {

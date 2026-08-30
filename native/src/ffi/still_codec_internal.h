@@ -56,7 +56,7 @@ int32_t ceyx_heif_still_decode_impl(const char *path, int32_t max_dim,
  * scale. Defined in heif_encode.cpp (Task 7) but called by still_ffi_api.cpp
  * (Task 8) as well, so it is declared here and is NOT a file-local static.
  * Anything unrecognised maps to kCeyxStillErrDecodeFailed. */
-int32_t MapHeifToStillError(int32_t heif_code);
+int32_t ceyx_map_heif_to_still_error(int32_t heif_code);
 
 #ifdef __cplusplus
 }

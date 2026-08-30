@@ -37,6 +37,13 @@ if(CEYX_ENABLE_WEBP)
             list(APPEND WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist-${_webp_arch}")
         endforeach()
         list(APPEND WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist")
+    elseif(WIN32)
+        # Committed dist (Task 6), same shape as jxl.cmake:40-47: no machine in
+        # this project can produce Windows binaries locally, so this is the
+        # ONLY hint on Windows -- without it the committed
+        # native/third_party/libwebp-dist-windows tree is unreachable and
+        # CEYX_ENABLE_WEBP silently compiles to 0 on that platform.
+        set(WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist-windows")
     endif()
     set(WEBP_INCLUDE_HINTS "")
     set(WEBP_LIB_HINTS "")
@@ -49,9 +56,12 @@ if(CEYX_ENABLE_WEBP)
         NAMES webp/encode.h
         HINTS ${WEBP_INCLUDE_HINTS}
         NO_DEFAULT_PATH)
-    # NAMES lists both spellings: the Windows clang-cl dist installs
-    # lib-prefixed archives (libwebp.lib), and CMake's find_library prefix
-    # default on the MSVC-frontend path is not documented to cover it.
+    # NAMES lists both spellings: Platform/Windows-Clang.cmake:33 already sets
+    # CMAKE_FIND_LIBRARY_PREFIXES to "lib" and "", so find_library() alone
+    # would already match the lib-prefixed archives (libwebp.lib) the Windows
+    # clang-cl dist installs -- listing "libwebp" too is belt-and-braces, not
+    # what makes Windows resolution work. What actually enables discovery on
+    # Windows is WEBP_DIST_HINTS above pointing at libwebp-dist-windows.
     find_library(CEYX_WEBP_LIBRARY
         NAMES webp libwebp
         HINTS ${WEBP_LIB_HINTS}

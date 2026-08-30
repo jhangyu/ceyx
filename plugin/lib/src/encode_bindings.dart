@@ -48,6 +48,11 @@ abstract final class CeyxEncodeErrorCode {
   static const int encodeFailed = -405;
   static const int unsupported = -406;
   static const int unknownException = -407;
+  /* --- appended 2026-08-30, codec expansion. Append-only: never renumber. --- */
+  static const int badOptions = -408;
+  static const int metadataRejected = -409;
+  static const int badFormat = -410;
+  static const int losslessUnsupported = -411;
 }
 
 /// Guarded bindings to the encode entry points of `dng_decoder_native`.

@@ -40,9 +40,14 @@ the clang-cl + Ninja toolchain (`CMAKE_STATIC_LIBRARY_PREFIX` follows the
 compiler ID — Clang, not MSVC's `cl.exe` — so it defaults to `lib` here). The
 committed files are `lib/libwebp.lib`, `lib/libwebpmux.lib`,
 `lib/libwebpdemux.lib`, `lib/libsharpyuv.lib` (plus `lib/libwebpdecoder.lib`,
-a decode-only convenience archive CMake also installs). `cmake/encode.cmake`'s
-`find_library(NAMES webp)` already searches both the prefixed and unprefixed
-spellings, so no consumer-side change was needed.
+a decode-only convenience archive CMake also installs). The archive NAME was
+never the gap: `Platform/Windows-Clang.cmake:33` already sets
+`CMAKE_FIND_LIBRARY_PREFIXES` to `"lib"` and `""`, so plain
+`find_library(NAMES webp)` already resolves `libwebp.lib`. What DID need a
+consumer-side change, and is fixed as of this note, is that
+`cmake/encode.cmake`'s `WEBP_DIST_HINTS` had no `WIN32` branch pointing at
+this directory at all -- the committed dist here was unreachable regardless
+of archive naming until that hint was added.
 
 Produced by run
 https://github.com/jhangyu/ceyx/actions/runs/33307183409 (branch

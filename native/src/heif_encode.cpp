@@ -202,7 +202,7 @@ extern "C" int32_t ceyx_heif_encode_impl(int32_t format,
 /* Maps a HeifErrorCode (-301..-310) onto the CeyxStillErrorCode (-501..-511)
  * scale. NOT static: still_ffi_api.cpp calls it from ceyx_still_probe, which is
  * why still_codec_internal.h declares it. */
-extern "C" int32_t MapHeifToStillError(int32_t heif_code) {
+extern "C" int32_t ceyx_map_heif_to_still_error(int32_t heif_code) {
   switch (heif_code) {
     case kHeifSuccess:              return kCeyxStillSuccess;
     case kHeifErrNullPath:          return kCeyxStillErrNullPath;
@@ -244,7 +244,7 @@ extern "C" int32_t ceyx_heif_still_decode_impl(const char *path, int32_t max_dim
   if (rc != kHeifSuccess) {
     // Map the -301 scale onto the -501 scale; the two are disjoint by design
     // and callers of this surface must never see a HeifErrorCode.
-    out->error_code = MapHeifToStillError(rc);
+    out->error_code = ceyx_map_heif_to_still_error(rc);
     return out->error_code;
   }
   out->error_code = kCeyxStillSuccess;

@@ -107,10 +107,14 @@ static void WriteFile(const char *path, const uint8_t *p, size_t n) {
 // find. A same-library check would not see that. So: parse the ISO-BMFF box
 // chain by hand, find the "Exif" box, skip its 4-byte offset field, compare.
 //
-// This logic is pre-verified in isolation (independent of the dispatcher) at
-// native/scripts/tmp/verify/jxl_exif_box_selfcheck.cpp, including a negative
-// control proving it rejects an unprefixed payload rather than trivially
-// passing.
+// This parser is not just trusted to "look right" -- ReadJxlExifBoxRejectsUnprefixedPayload
+// below is a negative control proving it actually rejects an unprefixed
+// payload rather than trivially passing: if the 4-byte prefix is omitted, the
+// first 4 bytes of a real EXIF payload are the TIFF header itself
+// ("II*\0" = 0x49492A00 or "MM\0*" = 0x4D4D002A), which this parser reads AS
+// tiff_off. Either encoding puts `start` (payload + 4 + tiff_off) at or past
+// the end of a small box, so the bounds check at :131 rejects it -- it does
+// not accidentally read 0 and pass.
 static bool ReadJxlExifBox(const uint8_t *data, size_t n,
                            std::vector<uint8_t> *out) {
   size_t p = 0;
@@ -135,6 +139,27 @@ static bool ReadJxlExifBox(const uint8_t *data, size_t n,
     p += box_size;
   }
   return false;
+}
+
+// The negative control the block comment above refers to: an Exif box whose
+// payload is the raw TIFF header with NO 4-byte offset prefix. If
+// ReadJxlExifBox trivially trusted its input it would return true with a
+// garbage 4-byte-truncated "payload" (the first 4 bytes of the real TIFF
+// header consumed as a bogus offset); it must instead reject it.
+static void ReadJxlExifBoxRejectsUnprefixedPayload() {
+  const uint8_t tiff_le[4] = {0x49, 0x49, 0x2A, 0x00};  // "II*\0", little-endian TIFF
+  std::vector<uint8_t> box;
+  const uint32_t box_size = 8 + 4;  // header + unprefixed 4-byte payload
+  box.push_back(uint8_t(box_size >> 24));
+  box.push_back(uint8_t(box_size >> 16));
+  box.push_back(uint8_t(box_size >> 8));
+  box.push_back(uint8_t(box_size));
+  box.insert(box.end(), {'E', 'x', 'i', 'f'});
+  box.insert(box.end(), tiff_le, tiff_le + 4);
+
+  std::vector<uint8_t> out;
+  check(!ReadJxlExifBox(box.data(), box.size(), &out),
+        "ReadJxlExifBox rejects an Exif box with no offset prefix");
 }
 
 static void JxlLossless() {
@@ -286,6 +311,7 @@ static void JxlEncodeLatency() {
 int main() {
   check_eq(ceyx_encode_supports(kCeyxFormatJxl), 1, "supports JXL encode");
   check_eq(ceyx_still_decode_supports(kCeyxFormatJxl), 1, "supports JXL decode");
+  ReadJxlExifBoxRejectsUnprefixedPayload();
   JxlLossless();
   JxlLossy();
   JxlExif();

@@ -88,6 +88,10 @@ FFI_EXPORT const char *ceyx_encode_error_name(int32_t code) {
     case kCeyxEncodeErrEncodeFailed: return "kCeyxEncodeErrEncodeFailed";
     case kCeyxEncodeErrUnsupported: return "kCeyxEncodeErrUnsupported";
     case kCeyxEncodeErrUnknownException: return "kCeyxEncodeErrUnknownException";
+    case kCeyxEncodeErrBadOptions: return "kCeyxEncodeErrBadOptions";
+    case kCeyxEncodeErrMetadataRejected: return "kCeyxEncodeErrMetadataRejected";
+    case kCeyxEncodeErrBadFormat: return "kCeyxEncodeErrBadFormat";
+    case kCeyxEncodeErrLosslessUnsupported: return "kCeyxEncodeErrLosslessUnsupported";
     default: return "kCeyxEncodeErrUnknown";
   }
 }

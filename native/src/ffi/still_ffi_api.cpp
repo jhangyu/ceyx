@@ -157,7 +157,7 @@ FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
       case kCeyxFormatAvif: {
 #if CEYX_HEIF_STILL_ROUTE
         int32_t o = 1;
-        rc = MapHeifToStillError(heif_probe(path, &w, &h, &o));
+        rc = ceyx_map_heif_to_still_error(heif_probe(path, &w, &h, &o));
 #else
         rc = kCeyxStillErrUnsupported;
 #endif
