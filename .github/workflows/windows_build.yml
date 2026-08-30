@@ -473,9 +473,17 @@ jobs:
           #       user's machine that is a total load failure whose error names
           #       only dng_decoder_native.dll.
           #
-          # The de265 runtime file is libde265.dll (its import library is
-          # de265.lib -- upstream's asymmetry); heif.dll's import table names
-          # libde265.dll, so that is the name gated here.
+          # DEPENDENCY DEPTH MATTERS (run 33294722901): libde265 is a TRANSITIVE
+          # dependency. dng_decoder_native.dll imports heif.dll only; it is
+          # heif.dll that imports libde265.dll, because no translation unit in
+          # this project references a de265_* symbol. Asserting libde265.dll in
+          # the DECODER's import table is red on a perfectly correct artifact.
+          # So each name is asserted at the depth where it actually appears:
+          # heif.dll in the decoder's imports, libde265.dll in heif.dll's.
+          #
+          # The de265 runtime file is libde265.dll while its import library is
+          # de265.lib -- upstream's asymmetry, kept because heif.dll's import
+          # table names libde265.dll and renaming would break loading.
           #
           # Output to a file, then grep the file (never `dumpbin | grep -q`:
           # under pipefail a SUCCESSFUL match kills the producer with SIGPIPE
@@ -500,19 +508,13 @@ jobs:
             exit 1
           fi
           cat dll_dependents.txt
-          dep_missing=""
-          for dep in heif.dll libde265.dll; do
-            set +e
-            grep -i "${dep}" dll_dependents.txt
-            rc=$?
-            set -e
-            echo "ASSERT dep ${dep} RC=${rc}"
-            if [ "${rc}" -ne 0 ]; then
-              dep_missing="${dep_missing} ${dep}"
-            fi
-          done
-          if [ -n "${dep_missing}" ]; then
-            echo "::error::$DLL does not import:${dep_missing} — the HEIF route was not compiled in. Do NOT 'fix' this by disabling HEIF; check the configure log for 'HEIF: libheif' and that native/third_party/heif-dist-windows was found." >&2
+          set +e
+          grep -i "heif.dll" dll_dependents.txt
+          rc=$?
+          set -e
+          echo "ASSERT dep heif.dll RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::$DLL does not import heif.dll — the HEIF route was not compiled in. Do NOT 'fix' this by disabling HEIF; check the configure log for 'HEIF: libheif' and that native/third_party/heif-dist-windows was found." >&2
             exit 1
           fi
 
@@ -529,6 +531,40 @@ jobs:
           if [ -n "${stage_missing}" ]; then
             echo "::error::missing dependency DLL(s) beside the decoder:${stage_missing} — cmake/heif.cmake's WIN32 POST_BUILD staging did not run, or the dist lacks them. A package shipped like this fails at DynamicLibrary.open with an error naming only dng_decoder_native.dll." >&2
             ls -la native/build-windows || true
+            exit 1
+          fi
+
+          # Second level: heif.dll must really carry the HEVC decoder with it.
+          # A libheif built without libde265 configures, installs and ships
+          # happily, and then decodes nothing -- the import table is the only
+          # cheap proof that the decode path exists at all.
+          echo "== Step 4: heif.dll's own import table (transitive libde265) =="
+          set +e
+          dumpbin -dependents "native/build-windows/heif.dll" > heif_dependents.txt 2>&1
+          rc=$?
+          set -e
+          echo "HEIF_DEPENDENTS_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::notice::dumpbin -dependents on heif.dll failed (rc=${rc}); falling back to llvm-objdump."
+            set +e
+            llvm-objdump -p "native/build-windows/heif.dll" > heif_dependents.txt 2>&1
+            rc=$?
+            set -e
+            echo "HEIF_LLVM_OBJDUMP_RC=${rc}"
+          fi
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not read the import table of heif.dll; the HEVC decoder linkage is UNVERIFIED, refusing to publish." >&2
+            cat heif_dependents.txt || true
+            exit 1
+          fi
+          cat heif_dependents.txt
+          set +e
+          grep -i "libde265.dll" heif_dependents.txt
+          rc=$?
+          set -e
+          echo "ASSERT dep libde265.dll RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::heif.dll does not import libde265.dll — it was built WITHOUT an HEVC decoder and would report every HEIC file as undecodable. Rebuild the dist via .github/workflows/heif_dist_windows.yml; do NOT disable HEIF." >&2
             exit 1
           fi
 
