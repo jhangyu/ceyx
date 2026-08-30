@@ -28,21 +28,11 @@
 #endif
 #define CEYX_HEIF_STILL_ROUTE (DNG_ENABLE_HEIF && CEYX_HAS_HEIF_STILL_DECODE)
 
-// Likewise for JPEG XL (plan Task 9, src/jxl_codec.cpp): with the dist absent
-// CEYX_ENABLE_JXL is 0 and the arms answer "unsupported" from a symbol that
-// still exists, per the absence-degrades rule.
-#if !CEYX_ENABLE_JXL
-namespace {
-int32_t ceyx_jxl_probe_stub(const char *, uint32_t *, uint32_t *) {
-  return kCeyxStillErrUnsupported;
-}
-int32_t ceyx_jxl_decode_stub(const char *, int32_t, CeyxStillResult *) {
-  return kCeyxStillErrUnsupported;
-}
-}  // namespace
-#define ceyx_jxl_probe_impl  ceyx_jxl_probe_stub
-#define ceyx_jxl_decode_impl ceyx_jxl_decode_stub
-#endif
+// JPEG XL (plan Task 9) needs no local stub here: src/jxl_codec.cpp defines
+// ceyx_jxl_probe_impl/ceyx_jxl_decode_impl unconditionally and answers
+// "unsupported" internally (#if !CEYX_ENABLE_JXL) when the dist is absent,
+// per the absence-degrades rule -- the dispatch arms below call straight
+// through to it in every configuration.
 
 namespace {
 
