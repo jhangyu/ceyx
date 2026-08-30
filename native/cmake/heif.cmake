@@ -24,6 +24,16 @@ if(DNG_ENABLE_HEIF)
             list(APPEND HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-${_heif_arch}")
         endforeach()
         list(APPEND HEIF_DIST_HINTS "${HEIF_DIST_DIR}")
+    elseif(WIN32)
+        # The Windows dist is COMMITTED (native/third_party/heif-dist-windows,
+        # see its PROVENANCE.md) rather than built on demand: no machine in this
+        # project can produce Windows binaries locally, so it is a reviewed,
+        # byte-pinned input. It is the ONLY hint -- the unsuffixed path is not
+        # appended, because a heif-dist/ left behind by a developer running
+        # fetch_heif_deps.sh holds Mach-O dylibs, and letting the search fall
+        # through to it would surface as a link error naming the decoder rather
+        # than naming this mismatch.
+        set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-windows")
     endif()
     set(HEIF_INCLUDE_HINTS "")
     set(HEIF_LIB_HINTS "")
@@ -115,6 +125,36 @@ if(DNG_ENABLE_HEIF)
                     "${HEIF_DIST_DIR}/lib/libde265.0.dylib"
                     "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.0.dylib"
             COMMENT "Staging libheif/libde265 next to dng_decoder_native")
+    elseif(WIN32)
+        # Stage the two DLLs NEXT TO the built decoder DLL. Windows resolves an
+        # imported DLL from the loading module's directory before anything else,
+        # so this is the Windows equivalent of the @rpath/@loader_path wiring the
+        # APPLE branch above relies on -- and it is REQUIRED, not an optimisation:
+        # dng_decoder_native.dll imports heif.dll and libde265.dll, so a directory
+        # missing either one fails at LoadLibrary / DynamicLibrary.open with an
+        # error that names only the decoder.
+        #
+        # Source is <dist>/bin, not <dist>/lib: CMake's Windows install layout
+        # puts runtime DLLs in bin/ and import libraries (what HEIF_LIBRARY
+        # above resolved to) in lib/.
+        #
+        # The de265 runtime file is libde265.dll while its import library is
+        # de265.lib -- that asymmetry is upstream's, and heif.dll's import table
+        # names libde265.dll, so the file must keep that exact name here
+        # (Contract Amendment 1, 2026-08-30).
+        #
+        # This staging is also what plugin/windows/CMakeLists.txt's derived
+        # bundled-library list and windows_build.yml's staging step consume, so
+        # all three ship the same set by construction rather than by three
+        # hand-maintained lists happening to agree.
+        add_custom_command(TARGET dng_decoder_native POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HEIF_DIST_DIR}/bin/heif.dll"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/heif.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HEIF_DIST_DIR}/bin/libde265.dll"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.dll"
+            COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
     endif()
 else()
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_HEIF=0)
