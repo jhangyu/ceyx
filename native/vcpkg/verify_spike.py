@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -127,6 +128,27 @@ def find_config_log(vcpkg_root: Path, port: str, triplet: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def macho_install_name(path: Path) -> str:
+    """Return a dylib's LC_ID_DYLIB install name via `otool -D`.
+
+    Raises on any failure. A check that passes silently when its instrument is
+    missing is worthless, so the caller turns an exception into a FAIL rather
+    than a SKIP.
+    """
+    proc = subprocess.run(
+        ["otool", "-D", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    # Output is "<path>:" then the install name. A fat binary repeats per arch.
+    names = [ln for ln in lines if not ln.endswith(":")]
+    if not names:
+        raise ValueError(f"otool -D printed no install name for {path}")
+    if len(set(names)) != 1:
+        raise ValueError(f"{path}: inconsistent install names across slices: {names}")
+    return names[0]
+
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
@@ -179,6 +201,23 @@ def main() -> int:
         statics = {p.name for p in lib.glob("*.a")}
         r.check("libkvazaar.a" in statics, f"kvazaar static archive present (found: {sorted(statics)})")
         r.check("libaom.a" in statics, f"aom static archive present (found: {sorted(statics)})")
+
+    # --- DEVIATIONS.md D7: settle the macOS install-name question ---------
+    # manifest.toml passes CMAKE_INSTALL_NAME_DIR=@rpath on macOS; the overlay
+    # ports do not, relying on vcpkg's own handling. An absolute install name
+    # would break downstream packaging (the consumer resolves the dylib at the
+    # BUILD machine's path). Asserted on the ARTEFACT, not on the configure log.
+    if "osx" in triplet:
+        dylibs = sorted(p for p in lib.glob("*.dylib") if not p.is_symlink()) if lib.is_dir() else []
+        r.check(bool(dylibs), "at least one dylib produced for the install-name assertion")
+        for dylib in dylibs:
+            try:
+                name = macho_install_name(dylib)
+            except Exception as exc:  # noqa: BLE001
+                r.check(False, f"{dylib.name}: install name unreadable ({exc})")
+                continue
+            r.check(name.startswith("@rpath/"),
+                    f"{dylib.name}: install name is @rpath-relative (got {name!r}) [D7]")
 
     # --- Windows blocker (1): the dec265 tool must not be shipped ---------
     if is_windows:

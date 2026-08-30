@@ -80,9 +80,13 @@ debug pass roughly doubles wall-clock, which matters under the one-round spike c
 ## D7 [S] macOS install names are the carrier's default, not `CMAKE_INSTALL_NAME_DIR=@rpath`
 
 `manifest.toml` passes `CMAKE_INSTALL_NAME_DIR=@rpath` on macOS/Linux. The overlay ports do
-not; vcpkg does its own macOS install-name handling. **Not yet verified on an artefact** —
-if the produced `libheif.dylib` has an absolute install name, downstream packaging breaks.
-Listed as an open uncertainty rather than a claim.
+not; vcpkg does its own macOS install-name handling. **Now gated mechanically**:
+`verify_spike.py` runs `otool -D` on every produced `.dylib` and asserts the install name
+starts with `@rpath/`. An unreadable install name is a FAIL, not a SKIP.
+
+Reference value: the current shell-script-produced dist
+(`native/third_party/heif-dist/lib/libde265.0.2.1.dylib`) reports
+`@rpath/libde265.0.dylib`, so `@rpath/` is the correct expectation, not a guess.
 
 ## D8 [M] libde265's `dec265` tool
 
