@@ -114,6 +114,16 @@ if(DNG_ENABLE_HEIF)
     target_link_libraries(dng_decoder_native ${HEIF_LIBRARY} ${DE265_LIBRARY})
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_HEIF=1)
 
+    # HEIC/AVIF encode + the still-decode delegation (2026-08-30 codec
+    # expansion, Task 7). Added on BOTH branches of this if/else on purpose:
+    # the TU guards all of its libheif usage on DNG_ENABLE_HEIF internally, so
+    # a disabled build still DEFINES ceyx_heif_encode_impl,
+    # ceyx_heif_still_decode_impl and MapHeifToStillError, returning the
+    # "unsupported" codes. A codec excluded from a build must degrade into a
+    # defined error, never into a symbol the caller's lookupFunction cannot
+    # find.
+    target_sources(dng_decoder_native PRIVATE ${SRC_DIR}/heif_encode.cpp)
+
     message(STATUS "HEIF: libheif ${HEIF_LIBRARY} + libde265 ${DE265_LIBRARY} (dynamic)")
 
     if(APPLE)
@@ -169,6 +179,11 @@ if(DNG_ENABLE_HEIF)
     endif()
 else()
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_HEIF=0)
+    # Compiled here too: see the note on the enabled branch above. Without this
+    # line the disabled build fails to LINK (still_ffi_api.cpp and
+    # encode_ffi_api.cpp reference the impls unconditionally), which would turn
+    # "HEIF excluded" from a supported configuration into a broken one.
+    target_sources(dng_decoder_native PRIVATE ${SRC_DIR}/heif_encode.cpp)
     message(STATUS "HEIF: disabled (DNG_ENABLE_HEIF=OFF) — no heif_ symbols will be exported")
 endif()
 

@@ -11,7 +11,10 @@
 
 #include "ceyx_encode_api.h"
 
+#include "still_codec_internal.h"
+
 #include <csetjmp>
+#include <cstddef>  // offsetof
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -207,6 +210,113 @@ FFI_EXPORT int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
 
 FFI_EXPORT void ceyx_encode_free(uint8_t *buffer) {
   if (buffer) free(buffer);
+}
+
+}  // extern "C"
+
+// --- Generic multi-format encode surface (2026-08-30, codec expansion) -------
+//
+// Appended below the two original entries, which are left byte-for-byte
+// unchanged: Halcyon already ships against them, and their output is pinned by
+// a SHA-256 captured before this change.
+
+namespace {
+
+// Shared validation for the generic entry. Deliberately stricter than
+// ValidateArgs (:46-57): it also enforces the struct_size handshake and the
+// metadata pointer/length agreement.
+int32_t ValidateGeneric(int32_t format, const uint8_t *rgba,
+                        int32_t width, int32_t height,
+                        const CeyxEncodeOptions *opts,
+                        const CeyxEncodeMetadata *meta,
+                        uint8_t **out, size_t *out_len) {
+  if (out) *out = nullptr;
+  if (out_len) *out_len = 0;
+  if (!rgba || !out || !out_len) return kCeyxEncodeErrNullArg;
+
+  // kCeyxFormatUnknown (0) is a DECODE-side "sniff by content" sentinel; as an
+  // encode target it is not a format, hence the lower bound is Jpeg, not
+  // Unknown (ceyx_encode_api.h:83-90).
+  if (format < kCeyxFormatJpeg || format > kCeyxFormatJxl) {
+    return kCeyxEncodeErrBadFormat;
+  }
+  if (width <= 0 || height <= 0 || width > kMaxDimension ||
+      height > kMaxDimension) {
+    return kCeyxEncodeErrBadDimensions;
+  }
+  if (!opts) return kCeyxEncodeErrBadOptions;
+  // struct_size handshake: larger than this build knows is a caller from the
+  // future and is rejected; smaller is accepted and the missing tail defaults.
+  if (opts->struct_size > sizeof(CeyxEncodeOptions)) return kCeyxEncodeErrBadOptions;
+  if (opts->struct_size < offsetof(CeyxEncodeOptions, lossless)) {
+    return kCeyxEncodeErrBadOptions;
+  }
+  if (opts->reserved0 != 0) return kCeyxEncodeErrBadOptions;
+  if (opts->effort < 0 || opts->effort > 10) return kCeyxEncodeErrBadOptions;
+  if (!opts->lossless && (opts->quality < 1 || opts->quality > 100)) {
+    return kCeyxEncodeErrBadQuality;
+  }
+  if (opts->lossless && format == kCeyxFormatJpeg) {
+    return kCeyxEncodeErrLosslessUnsupported;
+  }
+  if (meta) {
+    if (meta->struct_size > sizeof(CeyxEncodeMetadata)) return kCeyxEncodeErrBadOptions;
+    if ((meta->exif == nullptr) != (meta->exif_len == 0)) return kCeyxEncodeErrNullArg;
+    if ((meta->xmp == nullptr) != (meta->xmp_len == 0)) return kCeyxEncodeErrNullArg;
+    if ((meta->icc == nullptr) != (meta->icc_len == 0)) return kCeyxEncodeErrNullArg;
+  }
+  return kCeyxEncodeSuccess;
+}
+
+}  // namespace
+
+extern "C" {
+
+FFI_EXPORT int32_t ceyx_encode_supports(int32_t format) {
+  switch (format) {
+    case kCeyxFormatJpeg: return 1;                 // libjpeg-turbo always linked
+    case kCeyxFormatWebp: return CEYX_ENABLE_WEBP ? 1 : 0;
+    case kCeyxFormatHeic:
+    case kCeyxFormatAvif: return DNG_ENABLE_HEIF ? 1 : 0;
+    case kCeyxFormatJxl:  return CEYX_ENABLE_JXL ? 1 : 0;
+    default: return kCeyxEncodeErrBadFormat;
+  }
+}
+
+FFI_EXPORT int32_t ceyx_encode_rgba8(int32_t format,
+                                     const uint8_t *rgba,
+                                     int32_t width, int32_t height,
+                                     const CeyxEncodeOptions *opts,
+                                     const CeyxEncodeMetadata *meta,
+                                     uint8_t **out, size_t *out_len) {
+  const int32_t bad =
+      ValidateGeneric(format, rgba, width, height, opts, meta, out, out_len);
+  if (bad != kCeyxEncodeSuccess) return bad;
+
+  switch (format) {
+    case kCeyxFormatJpeg:
+      // EXIF for JPEG is attached by the caller (Halcyon re-encodes with
+      // package:image); this entry ignores meta for JPEG rather than silently
+      // pretending to embed it.
+      return ceyx_encode_jpeg_rgba8(rgba, width, height, opts->quality, out, out_len);
+    case kCeyxFormatWebp:
+#if CEYX_ENABLE_WEBP
+      return ceyx_webp_encode_impl(rgba, width, height, opts, meta, out, out_len);
+#else
+      return kCeyxEncodeErrUnsupported;
+#endif
+    case kCeyxFormatHeic:
+    case kCeyxFormatAvif:
+      return ceyx_heif_encode_impl(format, rgba, width, height, opts, meta, out, out_len);
+    case kCeyxFormatJxl:
+#if CEYX_ENABLE_JXL
+      return ceyx_jxl_encode_impl(rgba, width, height, opts, meta, out, out_len);
+#else
+      return kCeyxEncodeErrUnsupported;
+#endif
+    default:
+      return kCeyxEncodeErrBadFormat;  // unreachable; validated above
+  }
 }
 
 }  // extern "C"
