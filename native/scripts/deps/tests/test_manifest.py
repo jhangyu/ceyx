@@ -49,7 +49,11 @@ def _minimal_valid_manifest() -> dict:
 def test_a1_1_real_manifest_loads_without_raising():
     result = manifest.load()
     assert "component" in result["manifest"]
-    assert set(result["manifest"]["component"]) == {"kvazaar", "libde265", "aom", "libheif"}
+    assert set(result["manifest"]["component"]) == {
+        "kvazaar", "libde265", "aom", "libheif",
+        # Round 2 (D1 remaining components): libwebp, libjxl, LibRaw, Halide.
+        "libwebp", "libjxl", "libraw", "halide",
+    }
 
 
 # --- A1.2 -------------------------------------------------------------------

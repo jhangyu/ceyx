@@ -18,10 +18,24 @@ from deps import manifest, render  # noqa: E402
 
 _GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 _COMPONENTS = ("kvazaar", "libde265", "aom", "libheif")
+# Round 2: libwebp and libjxl have a `cmake` block (render()-able) but no live
+# Windows acquisition script exists for either -- see their manifest.toml
+# comments. Their golden combos are therefore macOS/Linux only; adding a
+# "windows" combo would assert a build that does not exist today (red line:
+# do not invent a build step). libraw and halide have NO `cmake` block at all
+# (libraw is add_subdirectory'd; halide is download-only) and are excluded
+# from render() entirely -- there is nothing for the renderer to produce.
+_RENDERABLE_COMPONENTS = ("kvazaar", "libde265", "aom", "libheif", "libwebp", "libjxl")
+_ALL_PLATFORM_ARCH = (("macos", "arm64"), ("macos", "x86_64"), ("linux", "x86_64"), ("windows", "x86_64"))
+_MACOS_LINUX_ONLY = (("macos", "arm64"), ("macos", "x86_64"), ("linux", "x86_64"))
+_PLATFORM_ARCH_BY_COMPONENT = {
+    "libwebp": _MACOS_LINUX_ONLY,
+    "libjxl": _MACOS_LINUX_ONLY,
+}
 _COMBOS = [
     (comp, platform, arch)
-    for comp in _COMPONENTS
-    for platform, arch in (("macos", "arm64"), ("macos", "x86_64"), ("linux", "x86_64"), ("windows", "x86_64"))
+    for comp in _RENDERABLE_COMPONENTS
+    for platform, arch in _PLATFORM_ARCH_BY_COMPONENT.get(comp, _ALL_PLATFORM_ARCH)
 ]
 
 

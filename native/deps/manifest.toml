@@ -2,8 +2,25 @@
 #
 # Round 1 scope (see docs/logs/2026-08-30/Plan_build_rewrite.md, deliverable
 # D1): the HEIF-chain components only -- kvazaar, libde265, aom, libheif.
-# LibRaw, libjxl and Halide are D11/D10 (round 2-3, owned by M1/M3) and are
-# NOT yet present in this file.
+#
+# ROUND 2 (D1 remaining components, D11, D10's manifest half): libwebp,
+# libjxl, LibRaw/RawSpeed3 (patched) and Halide are added below by M1.
+# Values are TRANSCRIBED VERBATIM from:
+#   - native/scripts/fetch_libwebp_dist.sh    (macOS/Linux only -- see note
+#     on [component.libwebp] below; no live Windows acquisition script exists
+#     today, only a historically-built committed dist, PROVENANCE.md at
+#     native/third_party/libwebp-dist-windows/PROVENANCE.md)
+#   - native/scripts/fetch_libjxl_dist.sh     (macOS/Linux only; Windows uses
+#     a committed dist per native/cmake/jxl.cmake, no live fetch script)
+#   - native/scripts/fetch_libraw_dist.sh     (all platforms; D10, the patch
+#     APPLIER, is M3's file; this manifest only declares the patches DATA per
+#     spec §4.5, which is D1's job)
+#   - native/scripts/fetch_halide_v21_dist.sh (all platforms; download-only,
+#     no cmake configure step, so no `[component.halide.cmake]` block exists)
+# No version, hash, URL, revision or CMake option value has been changed from
+# these scripts. Where a script does not cover a platform (libwebp/libjxl on
+# Windows), no `source.windows` override is fabricated -- see each
+# component's own comment.
 #
 # Schema: docs/logs/2026-08-30/Spec_build_rewrite.md §4.2-4.4. Values below
 # are TRANSCRIBED VERBATIM from:
@@ -365,3 +382,263 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
   shared_lib.required   = true
   import_lib.candidates = ["lib/heif.lib"]
   import_lib.required   = false
+
+# ---------------------------------------------------------------------------
+# ROUND 2 (M1): libwebp, libjxl, LibRaw/RawSpeed3, Halide.
+# ---------------------------------------------------------------------------
+[component.libwebp]
+role          = "webp-codec"
+version       = "1.6.0"
+linkage       = "static"
+licence       = "BSD-3-Clause"
+licence_files = ["COPYING*"]
+path_keys     = ["CMAKE_INSTALL_PREFIX"]
+
+  [component.libwebp.source.default]
+  # migration_pending, not a durable R-1a reason: Spec §3.2 resolves libwebp
+  # to `registry` on every platform ("-- (no change needed)", our pin already
+  # equals vcpkg's exact version) under D5 (round 2-3, owned by M2). Self-built
+  # TODAY (transcribed verbatim from fetch_libwebp_dist.sh) is a sequencing
+  # fact; M1 updates this block to kind="registry" on M2's request once D5
+  # lands for libwebp.
+  kind              = "tarball"
+  migration_pending = true
+  reason            = "self-built on macOS/Linux TODAY (transcribed verbatim from fetch_libwebp_dist.sh); Spec_build_rewrite.md §3.2 resolves this component to registry (vcpkg 1.6.0, exact match, no bump needed) under D5 -- this is a sequencing fact, not a durable R-1a reason"
+  url               = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-{version}.tar.gz"
+  sha256            = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+  # No `source.windows` override: fetch_libwebp_dist.sh has no Windows branch.
+  # The committed native/third_party/libwebp-dist-windows/ dist was built
+  # once, by hand, by a since-deleted script
+  # (build_libwebp_dist_windows.sh, per its own PROVENANCE.md:3-8) run on a
+  # windows-latest GitHub Actions runner and is not reproduced by any script
+  # in this repo today -- there is nothing live to transcribe for Windows, so
+  # no `source.windows` block is fabricated here (red line: do not invent a
+  # build step that does not exist).
+
+  [component.libwebp.cmake.base]
+  # Transcribed from fetch_libwebp_dist.sh:90-104. CMAKE_POSITION_INDEPENDENT_CODE
+  # is unconditional here (unlike kvazaar/aom's F2 Unix-only placement) because
+  # the source script passes it unconditionally, outside its Darwin-only
+  # CMAKE_OSX_ARGS block (fetch_libwebp_dist.sh:82-94).
+  CMAKE_BUILD_TYPE                = "Release"
+  CMAKE_INSTALL_PREFIX            = "{dist}"
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+  BUILD_SHARED_LIBS               = "OFF"
+  WEBP_BUILD_ANIM_UTILS            = "OFF"
+  WEBP_BUILD_CWEBP                 = "OFF"
+  WEBP_BUILD_DWEBP                 = "OFF"
+  WEBP_BUILD_GIF2WEBP              = "OFF"
+  WEBP_BUILD_IMG2WEBP              = "OFF"
+  WEBP_BUILD_VWEBP                 = "OFF"
+  WEBP_BUILD_WEBPINFO              = "OFF"
+  WEBP_BUILD_WEBPMUX               = "OFF"
+  WEBP_BUILD_EXTRAS                = "OFF"
+
+  [component.libwebp.cmake.macos]
+  CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+  CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+
+  [component.libwebp.outputs]
+  # WEBP_BUILD_WEBPMUX=OFF disables only the cwebp/dwebp/etc CLI tools; the
+  # mux and demux LIBRARIES are built regardless (fetch_libwebp_dist.sh:118-120,
+  # verbatim comment preserved -- "not a contract", asserted below).
+  static_lib.candidates  = ["lib/libwebp.a", "lib/libwebp.lib"]
+  static_lib.required    = true
+  mux_lib.candidates     = ["lib/libwebpmux.a", "lib/libwebpmux.lib"]
+  mux_lib.required       = true
+  demux_lib.candidates   = ["lib/libwebpdemux.a", "lib/libwebpdemux.lib"]
+  demux_lib.required     = true
+  sharpyuv_lib.candidates = ["lib/libsharpyuv.a", "lib/libsharpyuv.lib"]
+  sharpyuv_lib.required   = true
+
+# ---------------------------------------------------------------------------
+[component.libjxl]
+role          = "jxl-codec"
+# Note: NOT the plan's stated target v0.11.1 -- fetch_libjxl_dist.sh:27-29
+# itself documents pinning v0.12.0 instead ("latest stable per GitHub API as
+# of 2026-08-30 ... deviates from the plan's target v0.11.1, which the plan
+# stated no reason to prefer over latest"). Transcribed verbatim, not
+# reconciled -- a real finding, not a transcription choice (D1 red line).
+version       = "0.12.0"
+linkage       = "static"
+licence       = "BSD-3-Clause"
+licence_files = ["LICENSE*", "COPYING*"]
+path_keys     = ["CMAKE_INSTALL_PREFIX"]
+
+  [component.libjxl.source.default]
+  kind       = "git"
+  reason     = "downgrade: OD-9 ruled self-built -- vcpkg's libjxl versions database tops out at 0.11.2, below our pinned tag v0.12.0 (verified 2026-08-30); adopting the registry copy would ship an older JPEG-XL implementation, not merely a different one"
+  repo       = "https://github.com/libjxl/libjxl.git"
+  tag        = "v{version}"
+  # Pin mechanism is commit-SHA based, not a tarball SHA-256: upstream has
+  # never published a release asset that is a source tarball including the
+  # third_party/highway and third_party/brotli submodules the static build
+  # requires (fetch_libjxl_dist.sh:6-24, checked across every tag v0.6-v0.12.0
+  # via the GitHub Releases API). The tag itself is the pin -- `git submodule
+  # update --init` at a given tag deterministically resolves the submodule
+  # SHAs the superproject recorded for that tag.
+  submodules = ["third_party/brotli", "third_party/highway", "third_party/skcms"]
+  # No `source.windows` override: fetch_libjxl_dist.sh has no Windows branch;
+  # native/cmake/jxl.cmake:40-47 points WIN32 at a committed dist instead
+  # (soft-degrades with message(WARNING) if absent, per jxl.cmake:13-18) --
+  # nothing live to transcribe for Windows.
+
+  [component.libjxl.cmake.base]
+  CMAKE_BUILD_TYPE                = "Release"
+  CMAKE_INSTALL_PREFIX            = "{dist}"
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+  BUILD_SHARED_LIBS               = "OFF"
+  BUILD_TESTING                   = "OFF"
+  JPEGXL_ENABLE_TOOLS             = "OFF"
+  JPEGXL_ENABLE_BENCHMARK         = "OFF"
+  JPEGXL_ENABLE_EXAMPLES          = "OFF"
+  JPEGXL_ENABLE_FUZZERS           = "OFF"
+  JPEGXL_ENABLE_DOXYGEN           = "OFF"
+  JPEGXL_ENABLE_MANPAGES          = "OFF"
+  JPEGXL_ENABLE_SJPEG             = "OFF"
+  JPEGXL_ENABLE_OPENEXR           = "OFF"
+  # JPEGXL_ENABLE_SKCMS=ON is REQUIRED, not a style choice: libjxl.a leaves
+  # JxlGetDefaultCms undefined and only libjxl_cms.a (built because of this
+  # flag) defines it -- an encode/decode consumer linking libjxl.a without
+  # libjxl_cms.a fails at final link time, not at compile time
+  # (fetch_libjxl_dist.sh:46-49; native/cmake/jxl.cmake:61-65 verbatim).
+  JPEGXL_ENABLE_SKCMS              = "ON"
+  JPEGXL_ENABLE_JNI                = "OFF"
+  # FORCE_SYSTEM_*=OFF pins highway and brotli to the bundled submodule
+  # copies recorded by `submodules` above -- a system copy would make that
+  # pin a half-truth (fetch_libjxl_dist.sh:127-129 verbatim).
+  JPEGXL_FORCE_SYSTEM_BROTLI       = "OFF"
+  JPEGXL_FORCE_SYSTEM_HWY          = "OFF"
+
+  [component.libjxl.cmake.macos]
+  CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+  CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+
+  [component.libjxl.outputs]
+  # libjxl_cms.a is REQUIRED (see JPEGXL_ENABLE_SKCMS comment above), not
+  # merely "the archive that happens to exist" (fetch_libjxl_dist.sh:46-50).
+  static_lib.candidates       = ["lib/libjxl.a"]
+  static_lib.required         = true
+  cms_lib.candidates          = ["lib/libjxl_cms.a"]
+  cms_lib.required            = true
+  threads_lib.candidates      = ["lib/libjxl_threads.a"]
+  threads_lib.required        = true
+  hwy_lib.candidates          = ["lib/libhwy.a"]
+  hwy_lib.required            = true
+  brotlicommon_lib.candidates = ["lib/libbrotlicommon.a"]
+  brotlicommon_lib.required   = true
+  brotlidec_lib.candidates    = ["lib/libbrotlidec.a"]
+  brotlidec_lib.required      = true
+  brotlienc_lib.candidates    = ["lib/libbrotlienc.a"]
+  brotlienc_lib.required      = true
+
+# ---------------------------------------------------------------------------
+[component.libraw]
+role    = "raw-decoder"
+# LibRaw ships no version tag at these pinned revisions (README.cmake); the
+# manifest pin is the three git revisions below, not a semver (spec §4.5).
+version = "df226ea4178ccd74245f4f13c23adddfa01411c9"
+linkage = "static"
+# Per native/third_party/libraw/PROVENANCE.md's table: "LGPL-2.1 (elected;
+# CDDL-1.0 also offered upstream)" -- LibRaw dual-licenses and this project
+# elects LGPL-2.1. RawSpeed3 is LGPL-2.1; LibRaw-cmake is MIT.
+licence = "LGPL-2.1-only"
+licence_files = ["LICENSE.LGPL", "LICENSE.CDDL"]
+# No `cmake` block: LibRaw is add_subdirectory'd via the vendored
+# LibRaw-cmake overlay directly into the main native build
+# (fetch_libraw_dist.sh:16-19), not built as a standalone `cmake --install`
+# dist the way the HEIF stack and libwebp/libjxl are -- there is no separate
+# configure argv for render.py to produce here.
+
+  [component.libraw.source.default]
+  kind   = "git-multi"
+  reason = "patched: ten project-authored patches (5 native/patches/libraw/*.patch, 5 native/patches/rawspeed3/*.patch) with a load-bearing apply order; no registry copy carries them (vcpkg libraw 0.22.1 and conan libraw 0.22.2 are both unpatched and a different version besides, verified 2026-08-30)"
+
+    [[component.libraw.source.default.repos]]
+    name = "libraw"
+    url  = "https://github.com/LibRaw/LibRaw.git"
+    rev  = "df226ea4178ccd74245f4f13c23adddfa01411c9"
+    dest = "third_party/libraw"
+
+    [[component.libraw.source.default.repos]]
+    name = "rawspeed3"
+    url  = "https://github.com/darktable-org/rawspeed.git"
+    rev  = "c835b05aecfacb7343f7c424abd620aa12116c3f"
+    dest = "third_party/libraw/RawSpeed3/rawspeed"
+
+    [[component.libraw.source.default.repos]]
+    name = "libraw-cmake"
+    url  = "https://github.com/LibRaw/LibRaw-cmake.git"
+    rev  = "eb98e4325aef2ce85d2eb031c2ff18640ca616d3"
+    dest = "third_party/libraw-cmake"
+
+  # Overlay REPLACES LibRaw's own in-tree RawSpeed3 patch directory wholesale
+  # (not a merge): a patch dropped as upstream-fixed must stay dropped, never
+  # resurrected by LibRaw's next re-clone (fetch_libraw_dist.sh:72-91, spec
+  # §4.5 R-P5). Applied FIRST (list order is apply order, spec §4.5 R-P1).
+  [[component.libraw.patches]]
+  set  = "rawspeed3"
+  from = "native/patches/rawspeed3"
+  into = "third_party/libraw/RawSpeed3/patches"
+  mode = "replace-directory"
+  why  = "a patch dropped as upstream-fixed must stay dropped; merging would resurrect it (fetch_libraw_dist.sh:82-84)"
+
+  # Applied AFTER the RawSpeed3 overlay above, rooted at the LibRaw tree
+  # (fetch_libraw_dist.sh:129-145). Each patch's forward/reverse
+  # apply-detection is D10/M3's applier (patches.py), not this manifest's
+  # concern -- this block only declares WHAT to apply and in WHAT ORDER
+  # (spec §4.5).
+  [[component.libraw.patches]]
+  set  = "libraw"
+  from = "native/patches/libraw"
+  root = "third_party/libraw"
+  mode = "apply-in-order"
+  why  = "project-authored; must apply AFTER LibRaw's own (overlaid) RawSpeed3 set (fetch_libraw_dist.sh:129-131)"
+
+# ---------------------------------------------------------------------------
+[component.halide]
+role    = "aot-codegen"
+version = "21.0.0"
+# Halide is a prebuilt binary distribution consumed for ahead-of-time code
+# generation, not a library ceyx links a source build of -- there is no
+# `linkage` in the licence-compliance sense §4.4 defines for the HEIF stack.
+linkage = "n/a (prebuilt binary distribution, download-only)"
+licence = "MIT"
+licence_files = ["LICENSE.txt"]
+# No `cmake` block and no `path_keys`: fetch_halide_v21_dist.sh has no
+# configure/build step at all -- it downloads a prebuilt archive and extracts
+# it (fetch_halide_v21_dist.sh:71-96). Nothing for render.py to produce.
+
+  [component.halide.source.default]
+  kind   = "tarball"
+  reason = "downgrade: OD-9 ruled self-built -- the vcpkg Halide port is 18.0.0, three major versions below our pinned v21.0.0 (verified 2026-08-30), and native/third_party/halide/VERSION's own abi_notes warn 'schedule changes break AOT artifacts; bump requires full regen' -- a downgrade here would invalidate every AOT artefact in the decode pipeline, not merely ship an older tool"
+  # Same build commit backs every platform/arch asset (fetch_halide_v21_dist.sh:23-26,
+  # "all share the same b629c80... build commit, so the ABI matches the pinned
+  # version"), so this is the one hash-like pin recorded per component, not
+  # per asset.
+  commit = "b629c80de18f1534ec71fddd8b567aa7027a0876"
+  # No published SHA-256 for these release assets -- fetch_halide_v21_dist.sh
+  # itself performs no hash verification (verbatim gap, not introduced here;
+  # flagged for D4/D6, not silently "fixed" by inventing a hash this manifest
+  # cannot independently verify).
+  url_template = "https://github.com/halide/Halide/releases/download/v{version}/Halide-{version}-{halide_platform}-{commit}.{ext}"
+
+    # platform.arch -> {halide_platform, ext} asset-name components, verbatim
+    # from fetch_halide_v21_dist.sh's case statement (:30-60). Windows is
+    # included because, unlike libwebp/libjxl, Halide DOES run through this
+    # fetch script on the Windows runner today (windows_build.yml:150) --
+    # MSYS/Git-Bash's `uname` there reports "MINGW*"/x86_64, which the script's
+    # case statement maps to the same canonical arch_map x86_64 spelling used
+    # everywhere else in this manifest.
+    [component.halide.source.default.assets]
+    macos.arm64    = { halide_platform = "arm-64-osx",     ext = "tar.gz" }
+    macos.x86_64   = { halide_platform = "x86-64-osx",     ext = "tar.gz" }
+    linux.arm64    = { halide_platform = "arm-64-linux",   ext = "tar.gz" }
+    linux.x86_64   = { halide_platform = "x86-64-linux",   ext = "tar.gz" }
+    windows.x86_64 = { halide_platform = "x86-64-windows", ext = "zip" }
+
+  [component.halide.outputs]
+  # Windows ships an import library (Halide.lib); POSIX hosts a static
+  # archive (fetch_halide_v21_dist.sh:65-69 verbatim).
+  static_lib.candidates = ["lib/libHalide.a", "lib/Halide.lib"]
+  static_lib.required   = true
