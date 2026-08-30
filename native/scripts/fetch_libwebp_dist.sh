@@ -36,10 +36,12 @@ else
 fi
 STAGE="${DIST}/.stage"
 STAMP="${DIST}/.pins"
-WANT_PINS="libwebp=${WEBP_VERSION}:${WEBP_SHA256} arch=${WEBP_ARCH}"
+WANT_PINS="libwebp=${WEBP_VERSION}:${WEBP_SHA256} arch=${WEBP_ARCH} archives=webp+mux+demux+sharpyuv"
 
 if [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT_PINS}" ] \
    && [ -f "${DIST}/lib/libwebp.a" ] && [ -f "${DIST}/lib/libsharpyuv.a" ] \
+   && [ -f "${DIST}/lib/libwebpmux.a" ] && [ -f "${DIST}/lib/libwebpdemux.a" ] \
+   && [ -f "${DIST}/include/webp/mux.h" ] \
    && [ -f "${DIST}/include/webp/encode.h" ]; then
   echo "[webp] dist already at the pinned version: ${WEBP_VERSION} (${WEBP_ARCH})"
   exit 0
@@ -54,7 +56,14 @@ if [ ! -f "${TARBALL}" ]; then
   curl -fsSL -o "${TARBALL}.part" "${WEBP_URL}"
   mv "${TARBALL}.part" "${TARBALL}"
 fi
-GOT="$(shasum -a 256 "${TARBALL}" | awk '{print $1}')"
+HOST_OS="$(uname -s)"
+if [ "${HOST_OS}" = "Darwin" ]; then
+  SHA_CMD="shasum -a 256"
+else
+  SHA_CMD="sha256sum"
+fi
+
+GOT="$(${SHA_CMD} "${TARBALL}" | awk '{print $1}')"
 if [ "${GOT}" != "${WEBP_SHA256}" ]; then
   echo "[webp] SHA-256 MISMATCH for ${TARBALL}" >&2
   echo "[webp]   expected ${WEBP_SHA256}" >&2
@@ -70,11 +79,18 @@ tar -xzf "${TARBALL}" -C "${STAGE}"
 # Encode + decode core only: no command-line tools, no mux/demux, no extras.
 # The decoder half is kept because it costs nothing here and the harness uses
 # WebPGetInfo to prove the produced bitstream is actually parseable.
+CMAKE_OSX_ARGS=()
+if [ "${HOST_OS}" = "Darwin" ]; then
+  CMAKE_OSX_ARGS=(
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+    -DCMAKE_OSX_ARCHITECTURES="${WEBP_ARCH}"
+  )
+fi
+
 cmake -S "${STAGE}/libwebp-${WEBP_VERSION}" -B "${STAGE}/build" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="${DIST}" \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-  -DCMAKE_OSX_ARCHITECTURES="${WEBP_ARCH}" \
+  "${CMAKE_OSX_ARGS[@]}" \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
   -DBUILD_SHARED_LIBS=OFF \
   -DWEBP_BUILD_ANIM_UTILS=OFF \
@@ -90,24 +106,71 @@ cmake -S "${STAGE}/libwebp-${WEBP_VERSION}" -B "${STAGE}/build" \
 cmake --build "${STAGE}/build" -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
 cmake --install "${STAGE}/build"
 
+# Vendor the licence before the stage directory (which holds the extracted
+# source tree, including COPYING) is removed.
+mkdir -p "${DIST}/share/licenses/libwebp"
+cp "${STAGE}/libwebp-${WEBP_VERSION}/COPYING" "${DIST}/share/licenses/libwebp/"
+
 # Mechanical post-conditions: the encoder entry the FFI layer calls must exist
 # in the archive, and the archive must be for the requested architecture.
 # `nm | grep` is deliberately avoided: under `set -o pipefail` grep's early
 # exit sends SIGPIPE to nm and inverts the gate.
+# The mux and demux archives are what WebP EXIF support links against. They
+# are built by default, but "built by default" is not a contract: assert them,
+# so a future upstream default flip fails HERE rather than as an undefined
+# _WebPMuxAssemble at the decoder's link step.
+MISSING_LIBS=""
+for _l in libwebp.a libwebpmux.a libwebpdemux.a libsharpyuv.a; do
+  [ -f "${DIST}/lib/${_l}" ] || MISSING_LIBS="${MISSING_LIBS} ${_l}"
+done
+if [ -n "${MISSING_LIBS}" ]; then
+  echo "[webp] FATAL: dist is missing:${MISSING_LIBS}" >&2
+  find "${DIST}/lib" -name '*.a' | sort >&2
+  exit 1
+fi
+
 NM_OUT="${STAGE}/nm-libwebp.txt"
 nm -g "${DIST}/lib/libwebp.a" > "${NM_OUT}" 2>/dev/null || true
 if ! grep -q "_WebPEncodeRGBA" "${NM_OUT}"; then
   echo "[webp] FATAL: WebPEncodeRGBA not found in ${DIST}/lib/libwebp.a" >&2
   exit 1
 fi
-HAVE_ARCHS="$(lipo -archs "${DIST}/lib/libwebp.a" 2>/dev/null || echo unknown)"
-case " ${HAVE_ARCHS} " in
-  *" ${WEBP_ARCH} "*) ;;
-  *)
-    echo "[webp] FATAL: libwebp.a has archs '${HAVE_ARCHS}', wanted '${WEBP_ARCH}'" >&2
+if ! grep -q "WebPEncodeLosslessRGBA" "${NM_OUT}"; then
+  echo "[webp] FATAL: WebPEncodeLosslessRGBA not found in libwebp.a" >&2
+  exit 1
+fi
+
+NM_MUX="${STAGE}/nm-libwebpmux.txt"
+nm -g "${DIST}/lib/libwebpmux.a" > "${NM_MUX}" 2>/dev/null || true
+for _sym in WebPMuxAssemble WebPMuxSetChunk; do
+  if ! grep -q "${_sym}" "${NM_MUX}"; then
+    echo "[webp] FATAL: ${_sym} not found in libwebpmux.a" >&2
     exit 1
-    ;;
-esac
+  fi
+done
+
+if [ "${HOST_OS}" = "Darwin" ]; then
+  HAVE_ARCHS="$(lipo -archs "${DIST}/lib/libwebp.a" 2>/dev/null || echo unknown)"
+  case " ${HAVE_ARCHS} " in
+    *" ${WEBP_ARCH} "*) ;;
+    *)
+      echo "[webp] FATAL: libwebp.a has archs '${HAVE_ARCHS}', wanted '${WEBP_ARCH}'" >&2
+      exit 1
+      ;;
+  esac
+else
+  # ar-wrapped ELF objects: `file` on the archive reports "current ar archive",
+  # so inspect an extracted member instead of the archive itself.
+  ARDIR="${STAGE}/archprobe"; rm -rf "${ARDIR}"; mkdir -p "${ARDIR}"
+  (cd "${ARDIR}" && ar x "${DIST}/lib/libwebp.a" && \
+     file "$(ls *.o | head -1)" > arch.txt)
+  if ! grep -q 'ELF 64-bit' "${ARDIR}/arch.txt"; then
+    echo "[webp] FATAL: libwebp.a members are not 64-bit ELF:" >&2
+    cat "${ARDIR}/arch.txt" >&2
+    exit 1
+  fi
+  HAVE_ARCHS="$(cat "${ARDIR}/arch.txt")"
+fi
 
 echo "${WANT_PINS}" > "${STAMP}"
 echo "[webp] dist ready: ${DIST} (archs: ${HAVE_ARCHS})"
