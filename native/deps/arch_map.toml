@@ -1,0 +1,38 @@
+# arch_map.toml -- canonical architecture id -> each consumer's own vocabulary.
+#
+# Spec: docs/logs/2026-08-30/Spec_build_rewrite.md §4.3.
+#
+# Why this file exists: the current shell scripts derive several of these
+# fields from `uname -m` and rely on lucky string overlap (macOS `uname -m`
+# happens to equal aom's own `AOM_TARGET_CPU` vocabulary). That overlap does
+# NOT hold on Linux (`uname -m` there prints "aarch64", which aom normalises
+# internally through a different code path -- see K16 / handoff §D). This
+# table replaces the overlap with an explicit, reviewable mapping so a future
+# reader extending arch support does not rediscover the aarch64 trap.
+#
+# render.py substitutes "{arch.<field>}" tokens against the arch entry
+# selected by the --arch argument. A manifest referencing a field that does
+# not exist under the selected arch raises at LOAD time (manifest.py), never
+# at build time (A1.4).
+
+[arm64]
+# Accepted spellings when the arch is *detected* from a host (e.g. `uname -m`
+# returning "arm64" on Darwin or "aarch64" on Linux). Not consumed by
+# render.py directly in round 1 -- reserved for D3's host-detection step.
+uname = ["arm64", "aarch64"]
+# CMAKE_OSX_ARCHITECTURES value (K17).
+apple = "arm64"
+# aom's own build/cmake/aom_configure.cmake AOM_TARGET_CPU vocabulary (K16).
+# Only ever substituted on Darwin in the manifest -- see the aom component's
+# macOS-only cmake overlay and K16's rationale for why Linux is deliberately
+# left on aom's own host detection instead of being forced through this table.
+aom_target_cpu = "arm64"
+# CMAKE_SYSTEM_PROCESSOR vocabulary, for completeness / future cross-compile
+# toolchain-file work (out of round-1 scope).
+cmake_system = "aarch64"
+
+[x86_64]
+uname = ["x86_64", "amd64"]
+apple = "x86_64"
+aom_target_cpu = "x86_64"
+cmake_system = "x86_64"

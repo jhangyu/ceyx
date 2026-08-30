@@ -1,0 +1,355 @@
+# native/deps/manifest.toml -- third-party dependency manifest.
+#
+# Round 1 scope (see docs/logs/2026-08-30/Plan_build_rewrite.md, deliverable
+# D1): the HEIF-chain components only -- kvazaar, libde265, aom, libheif.
+# LibRaw, libjxl and Halide are D11/D10 (round 2-3, owned by M1/M3) and are
+# NOT yet present in this file.
+#
+# Schema: docs/logs/2026-08-30/Spec_build_rewrite.md §4.2-4.4. Values below
+# are TRANSCRIBED VERBATIM from:
+#   - native/scripts/fetch_heif_deps.sh                          (macOS/Linux)
+#   - native/scripts/tmp/win_build_round6.sh                     (Windows;
+#     `git show ci/ci-green-round6:native/scripts/build_heif_dist_windows.sh`,
+#     read-only scratch dump, not a build artefact)
+# No version, hash, URL or CMake option value has been changed. Where the two
+# source scripts disagree, that would be reported as a finding rather than
+# silently resolved -- no such disagreement was found for the four HEIF-stack
+# components (all four version/SHA-256 pairs match exactly, K32).
+#
+# ROUND-1 HONESTY NOTE (read before editing `source.*.kind`): this manifest
+# encodes the CURRENT self-built-everything state of the two scripts above.
+# It does NOT yet encode the target hybrid split from Spec §3.2 (D5, owned by
+# M2, round 2-3: libwebp and macOS/Linux libde265 move to vcpkg; aom bumps to
+# 3.15.0). `manifest.toml` has a single owner (this file's header, and
+# Plan §3's file-ownership table) -- M2 must request changes here rather than
+# editing directly. Two components below carry `migration_pending = true`
+# with a `reason` describing why they are self-built TODAY without yet
+# claiming a permanent R-1a taxonomy reason for libde265/aom specifically:
+#   - libde265: today self-built on every platform; Spec §3.2 resolves
+#     macOS/Linux to `registry` and Windows stays self-built for a genuine
+#     `feature` reason (three blockers, none version-related). Only the
+#     Windows split is a permanent reason; the macOS/Linux self-build today is
+#     a sequencing fact (D5 has not landed), not a durable R-1a reason.
+#   - aom: today self-built at 3.12.1; Spec §3.2 resolves it to `registry`
+#     bumped to 3.15.0 under Ruling 1, landed by M2 in its own commit
+#     (OD-10). The self-build today is likewise sequencing, not durable.
+# kvazaar (`absent` -- no registry port exists at any version) and libheif
+# (`feature` -- no registry libheif offers a kvazaar HEVC-encoder feature at
+# any version, only x265/GPL-2.0) ARE durable R-1a reasons and do not carry
+# `migration_pending`.
+
+# ---------------------------------------------------------------------------
+[component.kvazaar]
+role          = "hevc-encoder"
+version       = "2.3.1"
+linkage       = "static"
+licence       = "BSD-3-Clause"
+licence_files = ["COPYING*", "LICENSE*"]
+# K25: the installed archive name differs by generator/platform; the real
+# build (D3, fetch.py) resolves whichever of these actually exists on disk.
+path_keys = ["CMAKE_INSTALL_PREFIX"]
+
+  [component.kvazaar.source.default]
+  kind   = "tarball"
+  reason = "no vcpkg port and no conan-center recipe exists for kvazaar at any version (verified 2026-08-30: raw.githubusercontent.com/microsoft/vcpkg/master/ports/kvazaar/vcpkg.json -> 404; conan-center recipes/kvazaar/config.yml -> empty)"
+  url    = "https://github.com/ultravideo/kvazaar/releases/download/v{version}/kvazaar-{version}.tar.gz"
+  sha256 = "2510b8ecc2bf384bbc7b8fc2756bbfa8a8c173b57634c8dfdd8bea6733e56c46"
+
+  [component.kvazaar.source.windows]
+  # Not a registry-vs-self-built decision -- kvazaar stays self-built on every
+  # platform. This overlay changes only the ACQUISITION MECHANISM: the release
+  # tarball above is missing a file that the Windows configure needs.
+  override_only = true
+  kind   = "git"
+  reason = "the v2.3.1 release tarball omits src/threadwrapper/src/pthread.cpp, which kvazaar's CMakeLists.txt unconditionally adds to the kvazaar target when WIN32 is true; the file exists in the tagged git tree but was excluded from the packaged tarball asset (observed in CI run 33307277766). macOS/Linux never hit this because WIN32 is false there; do not unify the fetch mechanism (handoff §B, K24)."
+  repo   = "https://github.com/ultravideo/kvazaar.git"
+  tag    = "v{version}"
+
+  [component.kvazaar.cmake.base]
+  CMAKE_BUILD_TYPE                = "Release"
+  CMAKE_INSTALL_PREFIX            = "{dist}"
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+  BUILD_SHARED_LIBS               = "OFF"
+  BUILD_TESTS                     = "OFF"
+
+  [component.kvazaar.cmake.macos]
+  CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+  CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+
+  [component.kvazaar.cmake.linux]
+  # No Linux-specific overlay in the source script.
+
+  [component.kvazaar.cmake.windows]
+  _generator                   = "Ninja"
+  CMAKE_C_COMPILER             = "clang-cl"
+  CMAKE_CXX_COMPILER           = "clang-cl"
+  CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
+  CMAKE_MSVC_RUNTIME_LIBRARY   = "MultiThreaded"
+  # /clang:-mNNN target-feature flags: kvazaar's CMakeLists reads if(MSVC) as
+  # "this is cl.exe, which accepts every intrinsic unconditionally"; clang-cl
+  # sets MSVC=1 but is clang underneath and hard-errors without these (K12,
+  # layer 2). CMAKE_C_FLAGS/CXX_FLAGS on the Windows configure line REPLACE
+  # CMake's own MSVC defaults rather than appending -- kvazaar's Windows
+  # configure passes no other flags, so there is nothing to restore here
+  # (contrast with libde265 and libheif below, which DO need K13/K14/N16's
+  # restored defaults).
+  CMAKE_C_FLAGS   = ["/clang:-msse4.1", "/clang:-mavx2"]
+  CMAKE_CXX_FLAGS = ["/clang:-msse4.1", "/clang:-mavx2"]
+
+  [component.kvazaar.outputs]
+  static_lib.candidates = ["lib/libkvazaar.a", "lib/kvazaar.lib", "lib/libkvazaar.lib"]
+  static_lib.required   = true
+
+# ---------------------------------------------------------------------------
+[component.libde265]
+role          = "hevc-decoder"
+version       = "1.1.1"
+linkage       = "shared"
+licence       = "LGPL-3.0-or-later"
+licence_files = ["COPYING*", "LICENSE*"]
+path_keys     = ["CMAKE_INSTALL_PREFIX"]
+
+  [component.libde265.source.default]
+  kind              = "tarball"
+  migration_pending = true
+  reason            = "self-built on every platform TODAY (transcribed verbatim from fetch_heif_deps.sh / build_heif_dist_windows.sh); Spec_build_rewrite.md §3.2 resolves macOS/Linux to registry (vcpkg 1.1.1, exact match) under D5 (round 2-3, owned by M2) -- this is a sequencing fact, not a durable R-1a reason, and manifest.toml must be updated by M1 on M2's request once D5 lands"
+  url               = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
+  sha256            = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
+
+  [component.libde265.source.windows]
+  # This override IS a durable R-1a reason (`feature`) even after D5 lands:
+  # Spec §3.2 "Why libde265 still splits by platform" lists three Windows-only
+  # blockers, none of them version-related, so Windows never joins the
+  # registry regardless of a future version bump.
+  kind   = "tarball"
+  reason = "feature: three Windows-only blockers make the vcpkg libde265 port unusable here -- (1) its portfile builds the dec265 tool via vcpkg_copy_tools, whose bundled getopt clone does not compile under clang-cl; (2) the port passes no /clang:-msse4.1, so libde265's if(MSVC) SIMD gap (layer 2) recurs inside the port where this manifest cannot reach it; (3) we need dynamic-library + static-CRT, a combination no built-in vcpkg triplet expresses (verified 2026-08-30 against ports/libde265/portfile.cmake)"
+  url    = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
+  sha256 = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
+
+  [component.libde265.cmake.base]
+  CMAKE_BUILD_TYPE                       = "Release"
+  CMAKE_INSTALL_PREFIX                   = "{dist}"
+  BUILD_SHARED_LIBS                      = "ON"
+  ENABLE_DECODER                         = "ON"
+  ENABLE_ENCODER                         = "OFF"
+  ENABLE_SDL                             = "OFF"
+  ENABLE_SHERLOCK265                     = "OFF"
+  ENABLE_INTERNAL_DEVELOPMENT_TOOLS      = "OFF"
+  WITH_FUZZERS                           = "OFF"
+
+  [component.libde265.cmake.macos]
+  # CMAKE_INSTALL_NAME_DIR is Unix-only (dylib @rpath install name); the
+  # Windows script never passes it (Windows has no equivalent concept), so it
+  # lives in the macos/linux overlays rather than base to keep the Windows
+  # argv verbatim-clean (no invented flag).
+  CMAKE_INSTALL_NAME_DIR      = "@rpath"
+  CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+  CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+
+  [component.libde265.cmake.linux]
+  CMAKE_INSTALL_NAME_DIR = "@rpath"
+
+  [component.libde265.cmake.windows]
+  _generator                   = "Ninja"
+  CMAKE_C_COMPILER             = "clang-cl"
+  CMAKE_CXX_COMPILER           = "clang-cl"
+  CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
+  CMAKE_MSVC_RUNTIME_LIBRARY   = "MultiThreaded"
+  # K13/N16: CMAKE_C_FLAGS/CXX_FLAGS REPLACE (never append to) CMake's own
+  # MSVC defaults, so -DWIN32/-D_WINDOWS/-EHsc/-GR are restored by hand here,
+  # exactly as build_heif_dist_windows.sh does. Losing them silently disables
+  # C++ exceptions/RTTI with no build error -- only a much later runtime
+  # failure (N16). ENABLE_DECODER=OFF here gates ONLY the dec265 CLI tool
+  # subdirectory, not the decode library itself (see the source script's own
+  # comment); the library-level ENABLE_DECODER stays ON via cmake.base above
+  # -- wait: base sets ENABLE_DECODER=ON, and the Windows override below sets
+  # it OFF, which is an intentional additive OVERRIDE (permitted; §4.2 rule 1
+  # forbids deletion, not override) transcribed verbatim from
+  # build_heif_dist_windows.sh:293 (ENABLE_DECODER=OFF on Windows only).
+  ENABLE_DECODER  = "OFF"
+  CMAKE_C_FLAGS   = ["-DWIN32", "-D_WINDOWS", "/clang:-msse4.1"]
+  CMAKE_CXX_FLAGS = ["-DWIN32", "-D_WINDOWS", "-EHsc", "-GR", "/clang:-msse4.1"]
+
+  [component.libde265.outputs]
+  shared_lib.candidates = ["lib/libde265.dylib", "lib/libde265.so", "bin/libde265.dll", "bin/de265.dll"]
+  shared_lib.required   = true
+  import_lib.candidates = ["lib/de265.lib", "lib/libde265.lib"]
+  import_lib.required   = false
+
+# ---------------------------------------------------------------------------
+[component.aom]
+role          = "av1-codec"
+version       = "3.12.1"
+linkage       = "static"
+licence       = "BSD-2-Clause AND Alliance-for-Open-Media-Patent-License-1.0"
+# PATENTS* is in the glob specifically for aom (K6): it carries the AOM
+# Patent License 1.0 as a SEPARATE grant on top of BSD-2; LICENSE alone drops it.
+licence_files = ["COPYING*", "LICENSE*", "PATENTS*"]
+path_keys     = ["CMAKE_INSTALL_PREFIX"]
+
+  [component.aom.source.default]
+  kind              = "tarball"
+  migration_pending = true
+  reason            = "self-built at 3.12.1 TODAY (transcribed verbatim); Spec_build_rewrite.md §3.2/§6.5 resolves this to registry at 3.15.0 under Ruling 1, landed by M2 as an ISOLATED single-purpose commit (OD-10) after the rest of the migration proves green at unchanged versions -- this is a sequencing fact, not a durable R-1a reason, and manifest.toml must be updated by M1 on M2's request once D5 lands"
+  url               = "https://storage.googleapis.com/aom-releases/libaom-{version}.tar.gz"
+  sha256            = "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
+
+  [component.aom.cmake.base]
+  CMAKE_BUILD_TYPE                       = "Release"
+  CMAKE_INSTALL_PREFIX                   = "{dist}"
+  CMAKE_POSITION_INDEPENDENT_CODE        = "ON"
+  BUILD_SHARED_LIBS                      = "OFF"
+  ENABLE_TESTS                           = "OFF"
+  ENABLE_EXAMPLES                        = "OFF"
+  ENABLE_DOCS                            = "OFF"
+  ENABLE_TOOLS                           = "OFF"
+  CONFIG_AV1_ENCODER                     = "1"
+  CONFIG_AV1_DECODER                     = "1"
+
+  [component.aom.cmake.macos]
+  CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+  CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+  # K16: forced ONLY on Darwin. aom's own aom_configure.cmake derives
+  # AOM_TARGET_CPU from the HOST CMAKE_SYSTEM_PROCESSOR when unset, which
+  # mismatches on a cross-arch build (e.g. cross-building x86_64 on an
+  # Apple-silicon arm64 host). macOS uname -m vocabulary ("arm64"/"x86_64")
+  # matches aom's own vocabulary 1:1 -- this is lucky string overlap, not
+  # design (handoff §D) -- which is why arch_map.toml's aom_target_cpu field
+  # exists as an explicit table instead of passing uname -m through directly.
+  # Linux is deliberately NOT given this override: uname -m there returns
+  # "aarch64", which aom normalises internally via a different branch: an
+  # explicit override would not match aom's later string comparisons and
+  # would silently break native Linux arm64 builds (K16, no Linux-arm64 CI
+  # leg exists to prove otherwise -- do not generalise this by accident).
+  AOM_TARGET_CPU = "{arch.aom_target_cpu}"
+
+  [component.aom.cmake.linux]
+  # No Linux-specific overlay -- see the AOM_TARGET_CPU note above (K16).
+
+  [component.aom.cmake.windows]
+  _generator                   = "Ninja"
+  CMAKE_C_COMPILER             = "clang-cl"
+  CMAKE_CXX_COMPILER           = "clang-cl"
+  CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
+  CMAKE_MSVC_RUNTIME_LIBRARY   = "MultiThreaded"
+  # No AOM_TARGET_CPU override on Windows: the Windows dist is never
+  # cross-built (x86_64-only runner), so the host-vs-target mismatch K16
+  # documents does not arise there (transcribed verbatim -- the Windows
+  # script does not pass this flag).
+
+  [component.aom.outputs]
+  static_lib.candidates = ["lib/libaom.a", "lib/aom.lib", "lib/libaom.lib"]
+  static_lib.required   = true
+
+# ---------------------------------------------------------------------------
+[component.libheif]
+role          = "heif-container"
+version       = "1.23.2"
+linkage       = "shared"
+licence       = "LGPL-3.0-or-later"
+licence_files = ["COPYING*", "LICENSE*"]
+path_keys     = [
+  "CMAKE_INSTALL_PREFIX", "CMAKE_PREFIX_PATH",
+  "LIBDE265_INCLUDE_DIR", "LIBDE265_LIBRARY",
+  "KVAZAAR_INCLUDE_DIR", "KVAZAAR_LIBRARY",
+  "AOM_INCLUDE_DIR", "AOM_LIBRARY",
+]
+path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
+
+  [component.libheif.source.default]
+  kind   = "tarball"
+  reason = "feature: no vcpkg or conan-center libheif port offers a kvazaar HEVC-encoder feature at ANY version -- both registries' only HEVC encoder option is x265 (vcpkg ports/libheif/vcpkg.json feature 'hevc' -> WITH_X265, licence GPL-2.0-or-later), which this project excludes by name (K3, WITH_X265=OFF). Not a version reason: bumping libheif to any future release does not add a kvazaar option (verified 2026-08-30)."
+  url    = "https://github.com/strukturag/libheif/releases/download/v{version}/libheif-{version}.tar.gz"
+  sha256 = "8bd5d41d19dc84536d118b04774709f244df6104ef66d623dad5fa4650143405"
+
+  [component.libheif.cmake.base]
+  CMAKE_BUILD_TYPE            = "Release"
+  CMAKE_INSTALL_PREFIX        = "{dist}"
+  BUILD_SHARED_LIBS           = "ON"
+  CMAKE_PREFIX_PATH           = "{dist}"
+  LIBDE265_INCLUDE_DIR        = "{dist}/include"
+  WITH_LIBDE265               = "ON"
+  WITH_LIBDE265_PLUGIN        = "OFF"
+  ENABLE_PLUGIN_LOADING       = "OFF"
+  WITH_X265                   = "OFF"
+  WITH_X264                   = "OFF"
+  WITH_KVAZAAR                = "ON"
+  WITH_KVAZAAR_PLUGIN         = "OFF"
+  KVAZAAR_INCLUDE_DIR         = "{dist}/include"
+  WITH_UVG266                 = "OFF"
+  WITH_VVDEC                  = "OFF"
+  WITH_VVENC                  = "OFF"
+  WITH_AOM_DECODER            = "ON"
+  WITH_AOM_ENCODER            = "ON"
+  WITH_AOM_DECODER_PLUGIN     = "OFF"
+  WITH_AOM_ENCODER_PLUGIN     = "OFF"
+  AOM_INCLUDE_DIR             = "{dist}/include"
+  WITH_DAV1D                  = "OFF"
+  WITH_SvtEnc                 = "OFF"
+  WITH_RAV1E                  = "OFF"
+  WITH_OpenH264_DECODER       = "OFF"
+  WITH_FFMPEG_DECODER         = "OFF"
+  WITH_JPEG_DECODER           = "OFF"
+  WITH_JPEG_ENCODER           = "OFF"
+  WITH_OpenJPEG_DECODER       = "OFF"
+  WITH_OpenJPEG_ENCODER       = "OFF"
+  WITH_OPENJPH_ENCODER        = "OFF"
+  WITH_UNCOMPRESSED_CODEC     = "OFF"
+  WITH_HEADER_COMPRESSION     = "OFF"
+  WITH_LIBSHARPYUV            = "OFF"
+  WITH_EXAMPLES               = "OFF"
+  WITH_GDK_PIXBUF             = "OFF"
+  WITH_REDUCED_VISIBILITY     = "ON"
+  BUILD_TESTING               = "OFF"
+  WITH_FUZZERS                = "OFF"
+
+  [component.libheif.cmake.macos]
+  CMAKE_INSTALL_NAME_DIR      = "@rpath"
+  CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+  CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+  # K20: libheif's FindAOM.cmake tries find_package(AOM CONFIG) FIRST, which
+  # on a dev machine with `brew install aom` resolves Homebrew's shared
+  # AOMConfig.cmake and never even consults the *_INCLUDE_DIR/*_LIBRARY hints
+  # below -- a green build with zero aom_codec_* symbols merged in. macOS-only
+  # because the trap is specific to Homebrew's default prefix search.
+  CMAKE_IGNORE_PREFIX_PATH = ["/opt/homebrew", "/usr/local"]
+  # Nominal/primary artefact names (K25 -- real resolution is D3/fetch.py's
+  # actual-file-presence probe).
+  LIBDE265_LIBRARY = "{dist}/lib/libde265.dylib"
+  KVAZAAR_LIBRARY  = "{dist}/lib/libkvazaar.a"
+  AOM_LIBRARY      = "{dist}/lib/libaom.a"
+
+  [component.libheif.cmake.linux]
+  CMAKE_INSTALL_NAME_DIR = "@rpath"
+  LIBDE265_LIBRARY = "{dist}/lib/libde265.so"
+  KVAZAAR_LIBRARY  = "{dist}/lib/libkvazaar.a"
+  AOM_LIBRARY      = "{dist}/lib/libaom.a"
+
+  [component.libheif.cmake.windows]
+  _generator                   = "Ninja"
+  CMAKE_C_COMPILER             = "clang-cl"
+  CMAKE_CXX_COMPILER           = "clang-cl"
+  CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
+  CMAKE_MSVC_RUNTIME_LIBRARY   = "MultiThreaded"
+  # K11/N9, layer 3: -DKVZ_STATIC_LIB belongs on LIBHEIF's compile, not
+  # kvazaar's -- kvazaar.h assumes __declspec(dllimport) unless the CONSUMER
+  # defines this, and kvazaar installs no CMake package config to propagate
+  # the usage requirement automatically.
+  # K13/K14/N16: CMAKE_C_FLAGS/CXX_FLAGS REPLACE CMake's own MSVC defaults, so
+  # -DWIN32/-D_WINDOWS/-W3/-GR/-EHsc are restored by hand, exactly as
+  # build_heif_dist_windows.sh does.
+  # This dist is DECODE-ONLY on Windows: WITH_AOM_ENCODER/WITH_AOM_DECODER
+  # stay ON per the source script (encoder+decoder both requested there);
+  # only the tool-level ENABLE_DECODER override lives on libde265, not here.
+  CMAKE_C_FLAGS         = ["-DWIN32", "-D_WINDOWS", "-W3", "-DKVZ_STATIC_LIB"]
+  CMAKE_CXX_FLAGS       = ["-DWIN32", "-D_WINDOWS", "-W3", "-GR", "-EHsc", "-DKVZ_STATIC_LIB"]
+  LIBDE265_LIBRARY      = "{dist}/lib/de265.lib"
+  KVAZAAR_LIBRARY       = "{dist}/lib/kvazaar.lib"
+  AOM_LIBRARY           = "{dist}/lib/aom.lib"
+  BUILD_DOCUMENTATION   = "OFF"
+
+  [component.libheif.outputs]
+  shared_lib.candidates = ["lib/libheif.1.dylib", "lib/libheif.so.1", "bin/heif.dll"]
+  shared_lib.required   = true
+  import_lib.candidates = ["lib/heif.lib"]
+  import_lib.required   = false
