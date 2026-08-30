@@ -133,11 +133,14 @@ jobs:
         with:
           submodules: recursive
           # D6 layer-1 (below) resolves the deleted legacy script from the
-          # r5-pre-d9-legacy-scripts tag via `git show <tag>:<path>`. A
-          # keyless checkout defaults to a depth-1, no-tags fetch, which
-          # leaves that tag unresolvable on the runner -> gate FAILs. Do not
-          # remove this key.
-          fetch-tags: true
+          # r5-pre-d9-legacy-scripts tag via `git show <tag>:<path>`.
+          # fetch-tags: true alone (with the default depth-1) fetches the
+          # tag REF but not the tagged commit's tree when that commit is
+          # outside the shallow history window (confirmed by CI failure:
+          # `git show <tag>:<path>` -> rc=128 not found). fetch-depth: 0
+          # (full history) is required so the tagged commit's tree is
+          # actually present. Do not remove this key or shrink the depth.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
