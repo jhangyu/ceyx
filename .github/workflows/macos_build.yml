@@ -132,6 +132,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          # D6 layer-1 (below) resolves the deleted legacy script from the
+          # r5-pre-d9-legacy-scripts tag via `git show <tag>:<path>`. A
+          # keyless checkout defaults to a depth-1, no-tags fetch, which
+          # leaves that tag unresolvable on the runner -> gate FAILs. Do not
+          # remove this key.
+          fetch-tags: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
