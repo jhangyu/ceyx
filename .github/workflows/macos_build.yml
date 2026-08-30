@@ -118,8 +118,14 @@ jobs:
       # builtin-baseline, vcpkg-configuration.json's default-registry baseline
       # and port_spike.yml's VCPKG_BASELINE (N30 — four places, one value).
       VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
-      VCPKG_ROOT_DIR: ${{ runner.temp }}/vcpkg
-      VCPKG_PREFIX: ${{ runner.temp }}/vcpkg-installed/${{ matrix.vcpkg_triplet }}
+      VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a workflow
+      # STARTUP failure (the run reports its name as the file path and executes
+      # zero jobs), which is how the first D5 push failed. `matrix` IS available
+      # here, which is why VCPKG_TRIPLET above is fine; RUNNER_TEMP is available
+      # as an ordinary environment variable inside `run:` steps, so the paths
+      # are composed there.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -234,18 +240,18 @@ jobs:
       # workflows acquire vcpkg the same way.
       - name: Bootstrap vcpkg at the pinned baseline (D5)
         run: |
-          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT_DIR"
-          git -C "$VCPKG_ROOT_DIR" checkout "$VCPKG_BASELINE"
-          "$VCPKG_ROOT_DIR/bootstrap-vcpkg.sh" -disableMetrics
-          "$VCPKG_ROOT_DIR/vcpkg" version
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg" version
 
       - name: vcpkg install libwebp (${{ matrix.vcpkg_triplet }})
         run: |
           set +e
-          "$VCPKG_ROOT_DIR/vcpkg" install \
+          "$RUNNER_TEMP/vcpkg/vcpkg" install \
               --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
-              --x-install-root="${{ runner.temp }}/vcpkg-installed" \
-              --triplet="${{ matrix.vcpkg_triplet }}" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="$VCPKG_TRIPLET" \
               --x-no-default-features \
               --no-print-usage
           rc=$?
@@ -260,6 +266,7 @@ jobs:
       - name: Assert the vcpkg libwebp artefact (static, correct arch)
         run: |
           set -e
+          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           ls -la "$VCPKG_PREFIX/lib"
           test -f "$VCPKG_PREFIX/lib/libwebp.a" \
             || { echo "FAIL: libwebp.a absent (expected a static archive)"; exit 1; }
@@ -283,6 +290,7 @@ jobs:
         if: matrix.cross == 'false'
         working-directory: ${{ github.workspace }}
         run: |
+          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --target dng_decoder_native \
             --idle-timeout-sec 180 \
@@ -317,7 +325,7 @@ jobs:
             --cmake-arg=-DDNG_CROSS_BUILD=ON \
             "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
             --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            "--cmake-arg=-DCMAKE_PREFIX_PATH=${VCPKG_PREFIX}"
+            "--cmake-arg=-DCMAKE_PREFIX_PATH=${RUNNER_TEMP}/vcpkg-installed/${VCPKG_TRIPLET}"
 
       # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
