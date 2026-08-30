@@ -34,7 +34,8 @@ STAMP="${DIST}/.pins"
 WANT_PINS="libheif=${HEIF_VERSION}:${HEIF_SHA256} libde265=${DE265_VERSION}:${DE265_SHA256} platform=windows-x86_64"
 
 if [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT_PINS}" ] \
-   && [ -f "${DIST}/bin/heif.dll" ] && [ -f "${DIST}/bin/de265.dll" ]; then
+   && [ -f "${DIST}/bin/heif.dll" ] \
+   && { [ -f "${DIST}/bin/libde265.dll" ] || [ -f "${DIST}/bin/de265.dll" ]; }; then
   echo "[heif-win] dist already at the pinned versions:"
   echo "[heif-win]   libheif  ${HEIF_VERSION}  ${HEIF_SHA256}"
   echo "[heif-win]   libde265 ${DE265_VERSION}  ${DE265_SHA256}"
@@ -191,8 +192,28 @@ cmake --install "${STAGE}/build-heif"
 # libraries under lib/. Asserting each file by name here means a layout change
 # fails in this script -- where the message names the missing file -- rather
 # than as an opaque find_library() failure inside the decoder's configure.
+#
+# NAME NOTE (observed in run 33294287061, not a guess): upstream installs the
+# runtime as bin/libde265.dll while its import library is lib/de265.lib. The
+# DLL is NOT renamed to de265.dll here: heif.dll's import table names
+# "libde265.dll", so a renamed copy would simply never be loaded. Consumers
+# (heif.cmake, the CI staging step) must stage the name resolved below.
+DE265_DLL=""
+for _cand in bin/libde265.dll bin/de265.dll; do
+  if [ -f "${DIST}/${_cand}" ]; then
+    DE265_DLL="${_cand}"
+    break
+  fi
+done
+if [ -z "${DE265_DLL}" ]; then
+  echo "[heif-win] FAILED: no libde265 runtime DLL was installed under bin/." >&2
+  find "${DIST}" -type f -name '*.dll' | sort >&2
+  exit 1
+fi
+echo "[heif-win] DE265_DLL=${DE265_DLL}"
+
 MISSING=""
-for required in bin/heif.dll bin/de265.dll lib/heif.lib lib/de265.lib \
+for required in bin/heif.dll "${DE265_DLL}" lib/heif.lib lib/de265.lib \
                 include/libheif/heif.h include/libde265/de265.h; do
   if [ ! -f "${DIST}/${required}" ]; then
     MISSING="${MISSING} ${required}"
@@ -295,7 +316,7 @@ RC=$?
 set -e
 if [ "${RC}" -eq 0 ]; then
   ARCH_TXT="${DIST}/.heif_arch.txt"
-  file "${DIST}/bin/heif.dll" "${DIST}/bin/de265.dll" > "${ARCH_TXT}" 2>&1
+  file "${DIST}/bin/heif.dll" "${DIST}/${DE265_DLL}" > "${ARCH_TXT}" 2>&1
   set +e
   grep -c "x86-64" "${ARCH_TXT}" > /dev/null
   RC=$?
