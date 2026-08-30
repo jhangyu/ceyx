@@ -160,16 +160,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Handoff §B: aom searches yasm FIRST and hard-rejects Homebrew's nasm
-      # 3.02 on its `-Ox` string probe. vcpkg's aom port acquires its own
-      # assembler, but installing yasm keeps the preferred one available.
-      - name: Install yasm (macOS)
+      # THE PRECONDITION IS PER-OS. It was originally written as one rule for
+      # macOS and then carried onto Linux unchanged, which is what broke the
+      # first Linux run — the comment was macOS reasoning wearing a
+      # platform-neutral coat.
+      #
+      # macOS: aom searches yasm FIRST and hard-rejects Homebrew's nasm 3.02 on
+      #   its crude `nasm -hf | grep -Ox` probe (handoff §B), so yasm is what
+      #   must be present. Homebrew nasm is actively harmful here.
+      # Linux: vcpkg's own aom port calls vcpkg_find_acquire_program(NASM) and
+      #   will NOT auto-acquire it on Linux — it errors out telling you to
+      #   install nasm. So NASM IS MANDATORY on this leg regardless of aom's
+      #   yasm preference. Ubuntu's nasm is 2.16, which does not have the 3.02
+      #   probe problem. yasm is installed alongside because aom still prefers
+      #   it once both are available.
+      - name: Install assembler (macOS — yasm)
         if: runner.os == 'macOS'
         run: brew install yasm || true
 
-      - name: Install yasm (Linux)
+      - name: Install assemblers (Linux — nasm required by vcpkg, yasm preferred by aom)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y yasm
+        run: sudo apt-get update && sudo apt-get install -y nasm yasm
 
       - name: Bootstrap vcpkg at the pinned baseline
         run: |
