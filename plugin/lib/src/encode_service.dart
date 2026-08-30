@@ -5,8 +5,11 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
+import 'codec_format.dart';
 import 'dng_bindings.dart';
 import 'encode_bindings.dart';
+import 'encode_bindings_v2.dart';
+import 'encode_options.dart';
 
 /*
 ---
@@ -220,6 +223,193 @@ class CeyxEncodeService {
       }
     } finally {
       malloc.free(rgbaPtr);
+      calloc.free(outPtr);
+      calloc.free(outLenPtr);
+    }
+  }
+
+  /// Encodes `rgba` as [format]. Runs on a worker isolate, like the two
+  /// legacy entry points.
+  ///
+  /// Throws [CeyxEncodeUnavailableException] when the dylib lacks the generic
+  /// symbols (an older drop), and [CeyxEncodeException] with
+  /// [CeyxEncodeErrorCode.unsupported] when the symbol exists but the codec
+  /// was excluded from this platform's build. Those are DIFFERENT states and
+  /// Halcyon needs the distinction to decide whether to offer a format at all.
+  Future<Uint8List> encodeNative(
+    Uint8List rgba, {
+    required CeyxImageFormat format,
+    required int width,
+    required int height,
+    int quality = 90,
+    bool lossless = false,
+    int effort = 0,
+    Uint8List? exif,
+    Uint8List? xmp,
+    Uint8List? icc,
+  }) async {
+    final libraryPath = _libraryPath;
+    final memoized = _unavailableCache[libraryPath];
+    if (memoized != null) throw memoized;
+
+    debugIsolateSpawnCount++;
+    try {
+      return await Isolate.run(
+        () => _encodeGenericOnWorker(
+          rgba,
+          format: format.value,
+          width: width,
+          height: height,
+          quality: quality,
+          lossless: lossless,
+          effort: effort,
+          exif: exif,
+          xmp: xmp,
+          icc: icc,
+          libraryPath: libraryPath,
+        ),
+      );
+    } on CeyxEncodeUnavailableException catch (e) {
+      _unavailableCache[libraryPath] = e;
+      rethrow;
+    }
+  }
+
+  /// True when this build can encode [format]. Cheap: one native call, no
+  /// encode. Returns false rather than throwing when the symbol is absent.
+  Future<bool> supports(CeyxImageFormat format) async {
+    final libraryPath = _libraryPath;
+    if (_unavailableCache[libraryPath] != null) return false;
+    try {
+      return await Isolate.run(() {
+        final lib = libraryPath == null
+            ? DngNativeBindings.load().library
+            : DngNativeBindings.fromPath(libraryPath).library;
+        final b = CeyxEncodeV2Bindings.fromLibrary(lib);
+        if (!b.available) return false;
+        return b.supports(format.value) == 1;
+      });
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Worker-isolate entry point for [encodeNative]. Static so [Isolate.run]
+  /// does not capture parent-isolate state (matches [_encodeOnWorker]).
+  ///
+  /// Allocates [CeyxEncodeOptions]/[CeyxEncodeMetadata] with `calloc`, sets
+  /// `structSize` to `sizeOf<...>()`, copies the metadata buffers into native
+  /// memory, calls through, copies the result into a Dart-owned [Uint8List],
+  /// and frees everything in a `finally` -- including the native output
+  /// buffer via [CeyxEncodeBindings.free], which is reused rather than
+  /// re-looked-up.
+  static Uint8List _encodeGenericOnWorker(
+    Uint8List rgba, {
+    required int format,
+    required int width,
+    required int height,
+    required int quality,
+    required bool lossless,
+    required int effort,
+    required Uint8List? exif,
+    required Uint8List? xmp,
+    required Uint8List? icc,
+    required String? libraryPath,
+  }) {
+    final lib = libraryPath == null
+        ? DngNativeBindings.load().library
+        : DngNativeBindings.fromPath(libraryPath).library;
+    final legacy = CeyxEncodeBindings.fromLibrary(lib);
+    final v2 = CeyxEncodeV2Bindings.fromLibrary(lib);
+    if (!v2.available) {
+      throw CeyxEncodeUnavailableException();
+    }
+
+    final rgbaPtr = malloc<ffi.Uint8>(rgba.length);
+    rgbaPtr.asTypedList(rgba.length).setAll(0, rgba);
+
+    final optsPtr = calloc<CeyxEncodeOptions>();
+    optsPtr.ref
+      ..structSize = ffi.sizeOf<CeyxEncodeOptions>()
+      ..quality = quality
+      ..lossless = lossless ? 1 : 0
+      ..effort = effort
+      ..reserved0 = 0;
+
+    final metaPtr = calloc<CeyxEncodeMetadata>();
+    ffi.Pointer<ffi.Uint8> exifPtr = ffi.nullptr;
+    ffi.Pointer<ffi.Uint8> xmpPtr = ffi.nullptr;
+    ffi.Pointer<ffi.Uint8> iccPtr = ffi.nullptr;
+    if (exif != null && exif.isNotEmpty) {
+      exifPtr = malloc<ffi.Uint8>(exif.length);
+      exifPtr.asTypedList(exif.length).setAll(0, exif);
+    }
+    if (xmp != null && xmp.isNotEmpty) {
+      xmpPtr = malloc<ffi.Uint8>(xmp.length);
+      xmpPtr.asTypedList(xmp.length).setAll(0, xmp);
+    }
+    if (icc != null && icc.isNotEmpty) {
+      iccPtr = malloc<ffi.Uint8>(icc.length);
+      iccPtr.asTypedList(icc.length).setAll(0, icc);
+    }
+    metaPtr.ref
+      ..structSize = ffi.sizeOf<CeyxEncodeMetadata>()
+      ..exif = exifPtr
+      ..exifLen = exif?.length ?? 0
+      ..xmp = xmpPtr
+      ..xmpLen = xmp?.length ?? 0
+      ..icc = iccPtr
+      ..iccLen = icc?.length ?? 0;
+
+    final outPtr = calloc<ffi.Pointer<ffi.Uint8>>();
+    final outLenPtr = calloc<ffi.Size>();
+
+    try {
+      final result = v2.encode(
+        format,
+        rgbaPtr,
+        width,
+        height,
+        optsPtr,
+        metaPtr,
+        outPtr,
+        outLenPtr,
+      );
+
+      if (result != CeyxEncodeErrorCode.success) {
+        // Contract: *out is NULL and *out_len is 0 on failure, so nothing to
+        // free here.
+        final name = legacy.available
+            ? legacy.errorName(result)
+            : 'code:$result';
+        throw CeyxEncodeException(result, name);
+      }
+
+      final buffer = outPtr.value;
+      final len = outLenPtr.value;
+      if (buffer == ffi.nullptr || len == 0) {
+        throw CeyxEncodeException(
+          CeyxEncodeErrorCode.encodeFailed,
+          legacy.available
+              ? legacy.errorName(CeyxEncodeErrorCode.encodeFailed)
+              : 'code:${CeyxEncodeErrorCode.encodeFailed}',
+        );
+      }
+
+      try {
+        return Uint8List.fromList(buffer.asTypedList(len));
+      } finally {
+        if (legacy.available) {
+          legacy.free(buffer);
+        }
+      }
+    } finally {
+      malloc.free(rgbaPtr);
+      if (exifPtr != ffi.nullptr) malloc.free(exifPtr);
+      if (xmpPtr != ffi.nullptr) malloc.free(xmpPtr);
+      if (iccPtr != ffi.nullptr) malloc.free(iccPtr);
+      calloc.free(optsPtr);
+      calloc.free(metaPtr);
       calloc.free(outPtr);
       calloc.free(outLenPtr);
     }

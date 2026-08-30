@@ -46,6 +46,14 @@ export 'src/encode_bindings.dart' show CeyxEncodeErrorCode;
 export 'src/encode_service.dart'
     show CeyxEncodeService, CeyxEncodeException, CeyxEncodeUnavailableException;
 
+export 'src/codec_format.dart' show CeyxImageFormat;
+
+export 'src/still_error_codes.dart'
+    show CeyxStillErrorCode, CeyxStillDecodeException, CeyxStillUnavailableException;
+
+export 'src/still_decoder_service.dart'
+    show CeyxStillImage, CeyxStillProbe, CeyxStillDecoderService;
+
 
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.
