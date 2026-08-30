@@ -1,0 +1,196 @@
+name: Port spike (OD-2)
+
+# Round-2 OD-2 spike, ONE-ROUND CAP. Validates the self-written vcpkg overlay
+# ports in native/vcpkg/ for the three registry-blocked components:
+# kvazaar (absent from every registry), libheif (no WITH_KVAZAAR feature
+# upstream) and libde265 on Windows (three blockers, Spec §3.2).
+#
+# This workflow is ADDITIVE and lives only on ci/round2-port-spike. It does not
+# replace, disable or touch any existing workflow. In particular it does not go
+# near `HEIF dist (Windows)` on ci/ci-green-round6, whose red state is
+# deliberate and out of scope.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/round2-port-spike"
+    paths:
+      - "native/vcpkg/**"
+      - ".github/workflows/port_spike.yml"
+
+concurrency:
+  group: port-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # N30: pinned, never floating. Same SHA as native/vcpkg/vcpkg.json's
+  # builtin-baseline and vcpkg-configuration.json's default-registry baseline.
+  VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+
+jobs:
+  windows:
+    name: overlay ports (windows x86-64, clang-cl, static CRT + dynamic libs)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Force LF line endings for all git operations
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # clang-cl needs the MSVC headers/libs/linker on PATH, INCLUDE and LIB.
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # EVERY step below is `shell: pwsh`, never bash. That is the structural
+      # fix for layers 4/5/8/9 (handoff §A): those four defects all came from
+      # MSYS rewriting argv on its way to a native Windows tool. vcpkg's own
+      # toolchain passes slash-prefixed flags (/nologo /DWIN32 /MT ...), which
+      # Git-Bash would mangle. No Unix-like shell touches this job.
+      - name: Verify clang-cl
+        shell: pwsh
+        run: |
+          $cl = Get-Command clang-cl -ErrorAction SilentlyContinue
+          if (-not $cl) {
+            $fallback = "C:\Program Files\LLVM\bin"
+            if (Test-Path "$fallback\clang-cl.exe") {
+              Add-Content -Path $env:GITHUB_PATH -Value $fallback
+              $env:PATH = "$fallback;$env:PATH"
+            } else {
+              Write-Error "clang-cl not found on the runner."
+              exit 1
+            }
+          }
+          clang-cl --version
+
+      - name: Bootstrap vcpkg at the pinned baseline
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          git -C "$env:RUNNER_TEMP\vcpkg" checkout $env:VCPKG_BASELINE
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" version
+
+      - name: vcpkg install (overlay ports + overlay triplet)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
+              --x-manifest-root="$env:GITHUB_WORKSPACE\native\vcpkg" `
+              --x-install-root="$env:RUNNER_TEMP\vcpkg-installed" `
+              --triplet=x64-windows-heif `
+              --host-triplet=x64-windows `
+              --no-print-usage
+          $rc = $LASTEXITCODE
+          Write-Host "VCPKG_INSTALL_RC=$rc"
+          if ($rc -ne 0) { exit $rc }
+
+      - name: Mechanical acceptance gate
+        if: always()
+        shell: pwsh
+        run: |
+          python "$env:GITHUB_WORKSPACE\native\vcpkg\verify_spike.py" `
+              --vcpkg-root "$env:RUNNER_TEMP\vcpkg" `
+              --install-root "$env:RUNNER_TEMP\vcpkg-installed" `
+              --triplet x64-windows-heif
+          $rc = $LASTEXITCODE
+          Write-Host "VERIFY_RC=$rc"
+          if ($rc -ne 0) { exit $rc }
+
+      - name: Collect logs
+        if: always()
+        shell: pwsh
+        run: |
+          $dest = "$env:RUNNER_TEMP\spike-logs"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Get-ChildItem "$env:RUNNER_TEMP\vcpkg\buildtrees" -Recurse -Filter "*.log" `
+              -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $rel = $_.FullName.Replace("$env:RUNNER_TEMP\vcpkg\buildtrees\", "").Replace("\", "__")
+              Copy-Item $_.FullName (Join-Path $dest $rel) -ErrorAction SilentlyContinue
+            }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-logs-windows
+          path: ${{ runner.temp }}/spike-logs
+          if-no-files-found: warn
+
+  macos:
+    name: overlay ports (${{ matrix.triplet }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            triplet: arm64-osx-heif
+          - runner: macos-13
+            triplet: x64-osx-heif
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Handoff §B: aom searches yasm FIRST and hard-rejects Homebrew's nasm
+      # 3.02 on its `-Ox` string probe. vcpkg's aom port acquires its own
+      # assembler, but installing yasm keeps the preferred one available.
+      - name: Install yasm
+        run: brew install yasm || true
+
+      - name: Bootstrap vcpkg at the pinned baseline
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg" version
+
+      - name: vcpkg install (overlay ports + overlay triplet)
+        run: |
+          set +e
+          "$RUNNER_TEMP/vcpkg/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="${{ matrix.triplet }}" \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
+      - name: Mechanical acceptance gate
+        if: always()
+        run: |
+          set +e
+          python3 "$GITHUB_WORKSPACE/native/vcpkg/verify_spike.py" \
+              --vcpkg-root "$RUNNER_TEMP/vcpkg" \
+              --install-root "$RUNNER_TEMP/vcpkg-installed" \
+              --triplet "${{ matrix.triplet }}"
+          rc=$?
+          echo "VERIFY_RC=${rc}"
+          exit $rc
+
+      - name: Collect logs
+        if: always()
+        run: |
+          dest="$RUNNER_TEMP/spike-logs"
+          mkdir -p "$dest"
+          find "$RUNNER_TEMP/vcpkg/buildtrees" -name "*.log" -type f -print0 2>/dev/null |
+            while IFS= read -r -d '' f; do
+              rel="${f#$RUNNER_TEMP/vcpkg/buildtrees/}"
+              cp "$f" "$dest/${rel//\//__}" 2>/dev/null || true
+            done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-logs-${{ matrix.triplet }}
+          path: ${{ runner.temp }}/spike-logs
+          if-no-files-found: warn
