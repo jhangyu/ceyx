@@ -1,0 +1,14 @@
+{
+  "name": "kvazaar",
+  "version": "2.3.1",
+  "description": "Kvazaar — an open-source HEVC/H.265 encoder (BSD-3-Clause).",
+  "homepage": "https://github.com/ultravideo/kvazaar",
+  "license": "BSD-3-Clause",
+  "supports": "!uwp & !xbox & !android",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    }
+  ]
+}

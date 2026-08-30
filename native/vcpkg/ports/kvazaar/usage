@@ -1,0 +1,7 @@
+kvazaar provides no CMake package config (upstream does not install one).
+Consume it with find_library/pkg-config, and on Windows the CONSUMER must
+define KVZ_STATIC_LIB — kvazaar.h otherwise declares its API
+__declspec(dllimport) and the link fails with
+"undefined symbol: __declspec(dllimport) kvz_api_get".
+
+    target_compile_definitions(your_target PRIVATE KVZ_STATIC_LIB)

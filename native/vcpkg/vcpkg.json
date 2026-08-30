@@ -1,0 +1,22 @@
+{
+  "name": "ceyx-heif-stack",
+  "version-string": "round2-od2-spike",
+  "description": "Consuming manifest for the OD-2 overlay-port spike: the HEIF stack (libheif + libde265 + kvazaar + aom) as vcpkg would deliver it.",
+  "builtin-baseline": "abb6dda5cc32914d2e64d7d72b974dc301d1fc8a",
+  "dependencies": [
+    {
+      "name": "libheif",
+      "default-features": false,
+      "features": [
+        "kvazaar",
+        "aom"
+      ]
+    }
+  ],
+  "overrides": [
+    {
+      "name": "aom",
+      "version": "3.15.0"
+    }
+  ]
+}

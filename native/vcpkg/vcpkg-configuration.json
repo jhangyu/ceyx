@@ -1,0 +1,13 @@
+{
+  "$comment": "Overlay ports/triplets for the OD-2 spike. Paths are relative to this file. N30: the consuming vcpkg.json pins builtin-baseline explicitly and overrides aom's version, so no registry component floats with vcpkg's moving baseline. Overlay ports bypass the versions database entirely, so kvazaar/libheif/libde265 need no versions-DB entry and cannot drift.",
+  "overlay-ports": [
+    "./ports"
+  ],
+  "overlay-triplets": [
+    "./triplets"
+  ],
+  "default-registry": {
+    "kind": "builtin",
+    "baseline": "abb6dda5cc32914d2e64d7d72b974dc301d1fc8a"
+  }
+}
