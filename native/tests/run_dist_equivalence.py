@@ -94,13 +94,20 @@ LAYER 3 -- consumer equivalence (needs a decoder linked to the carrier dist)
 LAYER SELECTION (--layers, default l1,l2,l3)
   A layer left out is reported `N/REQ` and the requested set is printed in
   the report header, so a narrowed run is never mistakable for a full one.
-  This exists for one honest reason, not for convenience: **layer 2 is
-  genuinely impossible in a cloud checkout on macOS**. macos_build.yml
-  builds the carrier dist into native/third_party/heif-dist, and the macOS
-  baseline binaries are NOT tracked in git (only PROVENANCE.md is), so no
-  independent baseline exists there to compare against. The distinctness
-  guard below turns the resulting self-comparison into a FAIL rather than
-  a perfect verdict vector.
+
+  WHERE EACH LAYER RUNS (user ruling 2026-08-31: cloud CI is COMPILE-ONLY,
+  no sample-file test flows in any workflow):
+    L1  CI and local. Pure rendering; needs no dist and no samples.
+    L2  LOCAL ONLY, structurally. A cloud checkout has no independent
+        baseline: macos_build.yml builds the carrier dist into
+        native/third_party/heif-dist, and the macOS baseline binaries are
+        NOT tracked in git (only PROVENANCE.md is). The distinctness guard
+        below turns the resulting self-comparison into a FAIL rather than a
+        perfect verdict vector.
+    L3  LOCAL ONLY. Needs sample images and test binaries that a
+        compile-only CI job does not produce.
+  L2 and L3 being local is a property of the inputs, not a convenience
+  choice, and is not pending a future CI enablement.
 
 EXIT CODES (self-captured by the caller; this script also writes its own
 exit code as the last line of the report):
