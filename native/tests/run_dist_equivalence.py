@@ -28,8 +28,8 @@ LAYER 1 -- argv equivalence (pure, runs on any host, covers Windows)
        must equal the committed golden argv file EXACTLY (list equality,
        element for element, order included).
        Expected: 22 combos, 22 PASS.
-  L1B  Transcription check against the LEGACY SHELL SCRIPT that is still in
-       the tree (native/scripts/fetch_heif_deps.sh). L1A alone is
+  L1B  Transcription check against the LEGACY SHELL SCRIPT
+       (native/scripts/fetch_heif_deps.sh). L1A alone is
        self-consistency -- golden files and renderer are both ours -- so it
        cannot detect a mis-transcription made when the goldens were first
        written. L1B compares the rendered argv against the flags literally
@@ -52,28 +52,28 @@ LAYER 1 -- argv equivalence (pure, runs on any host, covers Windows)
              meaningless assertion. Nothing else is normalised.
        Expected: kvazaar PASS, libheif PASS.
 
-  L1B RETIREMENT (registered 2026-08-31, after D9 deleted the referent)
-       L1B compares against a file that D9 deletes BY DESIGN. Once gone, no
-       future run can re-derive the comparison -- the referent does not
-       exist anywhere, and the dist it built cannot be rebuilt either.
-       Three candidate semantics, and why the third is right:
-         (a) keep printing SKIP and keep exiting 0 -- REJECTED, it hides
-             that transcription is no longer verified;
-         (b) count L1B as a skipped layer, so the gate exits 2 forever --
-             REJECTED, it destroys the gate's value as an ongoing
-             regression check to restate a fact that never changes;
-         (c) RETIRED: exit 0 is legitimate, but every run PRINTS that the
-             check is closed and names the artefact holding its permanent
-             evidence. Chosen.
-       So a RETIRED layer does NOT force INCOMPLETE. That is a deliberate
-       amendment to the exit-code rule below, made when the referent's
-       permanent disappearance became a fact rather than a hypothetical --
-       not a relaxation to reach green: L1B was PASSING when it was
-       retired, and its evidence was captured before deletion.
-       Absence of the archived artefact downgrades the wording to
-       RETIRED-UNVERIFIED but not the exit code, because docs/ is
-       deliberately never version-controlled here and a fresh clone
-       legitimately lacks it.
+  L1B BASELINE RESOLUTION (registered 2026-08-31, fix cycle 2)
+       L1B is a LIVE layer permanently. D9 deleted the WORKTREE copy of the
+       legacy script, but AC2 required tagging the commit that still
+       contains it, so the referent never ceased to exist -- it moved to
+       `<tag>:<path>` and is re-derivable on any clone, forever.
+       Resolution order, highest priority first:
+         1. --legacy-script <path>, when given. A named path that does not
+            exist is a FAIL, never a pass: otherwise a typo'd path would be
+            blessed as "nothing to compare".
+         2. the worktree file, if present (pre-D9 clones, reverts).
+         3. `git show <--legacy-tag>:native/scripts/fetch_heif_deps.sh`.
+            A MISSING TAG IS A FAIL. The rollback tag is an AC2
+            deliverable; losing it is a real regression and deserves red,
+            not a shrug.
+       HISTORICAL NOTE, kept deliberately: an earlier revision declared
+       L1B "RETIRED" with a bespoke verdict and an exit-code exception, on
+       the premise that the referent was permanently gone. That premise was
+       FALSE -- the round-5 reviewer refuted it by re-deriving the whole
+       comparison from the tag. The lesson is not "RETIRED was dishonest"
+       (it printed loudly and its facts were true) but that a mechanism
+       invented to cope with a loss should first check whether the loss is
+       real. There is now no exit-code exception of any kind.
   L1 SCOPE LIMITS (spec section 6.1) -- declared, not silently absent:
        - libde265 and aom on macOS/Linux: acquired from the vcpkg registry;
          we author no argv for them, so there is nothing to diff against
@@ -139,12 +139,9 @@ exit code as the last line of the report):
   2  INCOMPLETE -- a requested layer was SKIPPED for missing inputs. A
      skipped layer can never produce exit 0, so a partial run is
      mechanically distinguishable from a full one.
-     One registered exception, and only one: a RETIRED check (currently
-     only L1B post-D9) does not force INCOMPLETE, because its input is
-     permanently gone by design rather than merely absent today. See
-     "L1B RETIREMENT" above for why the alternatives were rejected. Every
-     RETIRED row prints, on every run, that the check is closed and where
-     its evidence lives -- so exit 0 never means "this was verified".
+     There are NO exceptions to this rule. An earlier revision carved one
+     out for a "RETIRED" layer; fix cycle 2 removed both the exception and
+     the mechanism, because the loss that motivated them was not real.
 """
 from __future__ import annotations
 
@@ -186,10 +183,11 @@ _L1B_COMPONENTS = {
     "kvazaar": "build-kvazaar",
     "libheif": "build-heif",
 }
-# Where L1B's permanent evidence lives once D9 deletes its referent. docs/ is
-# deliberately never version-controlled in this project, so this file is
-# expected to be absent on a fresh clone -- see the retirement branch.
-_L1B_ARCHIVED_EVIDENCE = _REPO_ROOT / "docs" / "logs" / "2026-08-31" / "r5-d6-full-run.txt"
+# D9 deleted the worktree copy of the legacy script, but AC2 tagged the commit
+# that still carries it, so L1B's baseline stays re-derivable forever via
+# `git show <tag>:<path>`. These two constants are that fallback.
+_LEGACY_TAG = "r5-pre-d9-legacy-scripts"
+_LEGACY_REPO_PATH = "native/scripts/fetch_heif_deps.sh"
 
 _L1B_SKIPPED = (
     ("libde265", "macos/linux", "vcpkg registry component -- we author no argv (spec 6.1 scope limit)"),
@@ -231,11 +229,6 @@ class Verdict:
     PASS = "PASS"
     FAIL = "FAIL"
     SKIP = "SKIP"
-    # A check whose referent no longer exists BY DESIGN and can never be
-    # re-derived. Distinct from SKIP (missing input that could be supplied)
-    # and from PASS (something was verified this run). Does not force
-    # INCOMPLETE; always prints where its permanent evidence lives.
-    RETIRED = "RETIRED"
 
 
 class Report:
@@ -396,50 +389,82 @@ def _flag_array_flags(script_text: str, array_name: str) -> dict[str, str]:
     return flags
 
 
-def layer1b(report: Report, loaded: dict[str, Any], legacy_script: Optional[Path] = None) -> None:
-    _LEGACY = Path(legacy_script) if legacy_script else _LEGACY_UNIX_SCRIPT
+def _legacy_text_from_tag(tag: str) -> tuple[Optional[str], str]:
+    """Read the legacy script out of the AC2 rollback tag.
+
+    Returns (text, provenance). `text` is None when the tag or the path
+    inside it cannot be resolved -- which is a FAIL for the caller, never a
+    skip: the tag is an AC2 deliverable and its disappearance is a real
+    regression that deserves red.
+    """
+    proc = subprocess.run(
+        ["git", "show", f"{tag}:{_LEGACY_REPO_PATH}"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None, f"git show {tag}:{_LEGACY_REPO_PATH} failed (rc={proc.returncode})"
+    return proc.stdout, f"{tag}:{_LEGACY_REPO_PATH}"
+
+
+def layer1b(
+    report: Report,
+    loaded: dict[str, Any],
+    legacy_script: Optional[Path] = None,
+    legacy_tag: str = _LEGACY_TAG,
+) -> None:
     for comp, scope, why in _L1B_SKIPPED:
         report.record("L1B", f"{comp}/{scope}", Verdict.SKIP, why)
 
-    if not _LEGACY.is_file():
-        # RETIRED, not skipped. See the docstring's "L1B RETIREMENT" section:
-        # D9 deletes the legacy script by design, so L1B's referent is gone
-        # PERMANENTLY and no future run can ever recreate it. Treating that as
-        # a skip would pin the gate at exit 2 forever and destroy its value as
-        # an ongoing regression check; treating it as a silent pass would hide
-        # that transcription is no longer being verified. RETIRED is neither:
-        # it exits 0 but prints, every run, that the check is closed and where
-        # its permanent evidence lives.
-        archive = _L1B_ARCHIVED_EVIDENCE
-        if archive.is_file():
-            hits = sum(
-                1 for ln in archive.read_text(encoding="utf-8").splitlines()
-                if ln.startswith("[L1B] PASS")
-            )
+    # L1B is a LIVE layer, permanently. D9 deleted the worktree copy of the
+    # legacy script, but AC2 required tagging the commit that still contains
+    # it, so the referent did NOT cease to exist -- it moved into
+    # `<tag>:<path>`, from which it is re-derivable on any clone forever.
+    # An earlier revision of this file declared L1B "RETIRED" on the premise
+    # that the referent was permanently gone. That premise was simply FALSE,
+    # and the round-5 reviewer refuted it by re-deriving the comparison from
+    # the tag. Resolution order below; note that a missing tag is a FAIL,
+    # because losing the rollback tag is an AC2 regression, not a reason to
+    # stop checking.
+    if legacy_script is not None:
+        source = Path(legacy_script)
+        if not source.is_file():
             report.record(
                 "L1B",
-                "retired",
-                "RETIRED",
-                f"legacy script {_LEGACY.name} deleted by D9 as designed; "
-                f"transcription was verified BEFORE deletion and the permanent "
-                f"record is {archive} ({hits} L1B PASS lines). No future run can "
-                f"re-derive this -- the referent no longer exists.",
+                "legacy-source",
+                Verdict.FAIL,
+                f"--legacy-script {source} does not exist. An explicitly named "
+                f"baseline that is absent is an error, never a pass: it would "
+                f"otherwise bless any typo'd path as 'nothing to compare'.",
             )
-        else:
+            return
+        text = source.read_text(encoding="utf-8")
+        provenance = str(source)
+    elif _LEGACY_UNIX_SCRIPT.is_file():
+        text = _LEGACY_UNIX_SCRIPT.read_text(encoding="utf-8")
+        provenance = f"worktree {_LEGACY_UNIX_SCRIPT}"
+    else:
+        text, provenance = _legacy_text_from_tag(legacy_tag)
+        if text is None:
             report.record(
                 "L1B",
-                "retired-unverified",
-                "RETIRED",
-                f"legacy script {_LEGACY.name} absent (D9). The historical "
-                f"artefact {archive} was NOT found on this host -- expected on a "
-                f"fresh clone, since docs/ is deliberately never version-"
-                f"controlled in this project. The evidence exists in the "
-                f"round-5 log directory of the machine that ran the gate; its "
-                f"absence here does not re-open the check.",
+                "legacy-source",
+                Verdict.FAIL,
+                f"legacy script absent from the worktree (D9) AND unresolvable "
+                f"from the rollback tag: {provenance}. The AC2 tag "
+                f"{legacy_tag!r} is what keeps this layer live after deletion; "
+                f"losing it is an AC2 regression, so this is red rather than a "
+                f"skip.",
             )
-        return
+            return
 
-    text = _LEGACY.read_text(encoding="utf-8")
+    report.record(
+        "L1B",
+        "legacy-source",
+        Verdict.PASS,
+        f"baseline resolved from {provenance} ({len(text.splitlines())} lines)",
+    )
 
     for comp, marker in _L1B_COMPONENTS.items():
         extracted = _shell_configure_flags(text, marker)
@@ -715,6 +740,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         "against a deliberately mutated copy; never used for the real verdict)",
     )
     parser.add_argument(
+        "--legacy-tag",
+        default=_LEGACY_TAG,
+        help="git tag carrying the pre-D9 legacy script, used when the worktree "
+        "copy is gone. Overridable so the missing-tag FAIL can be demonstrated.",
+    )
+    parser.add_argument(
         "--consumer-profile",
         default="decode-matrix",
         choices=sorted(_L3_PROFILES),
@@ -741,7 +772,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if "l1" in requested:
         layer1a(report, loaded)
-        layer1b(report, loaded, Path(args.legacy_script) if args.legacy_script else None)
+        layer1b(
+            report,
+            loaded,
+            Path(args.legacy_script) if args.legacy_script else None,
+            args.legacy_tag,
+        )
     else:
         report.record("L1A", "not-requested", "N/REQ", "--layers excluded L1")
 
