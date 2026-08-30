@@ -108,10 +108,14 @@ jobs:
       - name: Build test_decode target
         working-directory: ${{ github.workspace }}
         run: |
+          # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's vcpkg resolver is
+          # mandatory before every non-Android configure and aborts when it
+          # locates no prefix, even if one was supplied as a cmake arg
+          # (run 33325970570).
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --target test_decode \
             --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
-            "--cmake-arg=-DCMAKE_PREFIX_PATH=${RUNNER_TEMP}/vcpkg-installed/${VCPKG_TRIPLET}" \
             --idle-timeout-sec 180
 
       - name: Build test_device_handoff target

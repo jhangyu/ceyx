@@ -172,13 +172,20 @@ jobs:
         # the hard heif gate rather than fetching a dist it does not exercise.
         working-directory: ${{ github.workspace }}
         run: |
-          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          # The watchdog locates the vcpkg prefix ITSELF (via CEYX_VCPKG_PREFIX,
+          # else a default path) and injects -DCMAKE_PREFIX_PATH; that resolver
+          # is mandatory and aborts the build when it finds nothing, even if the
+          # caller passed the prefix as an explicit --cmake-arg. So the env var
+          # is the supported channel — passing --cmake-arg alone fails before
+          # configure (run 33325970570). Exporting it also gets the watchdog's
+          # validation of the prefix (it checks share/WebP/WebPConfig.cmake is
+          # really there) instead of a bare string handoff.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --platform host \
             --target dng_decoder_native \
             --build-dir build-linux \
             --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
-            "--cmake-arg=-DCMAKE_PREFIX_PATH=${VCPKG_PREFIX}" \
             --idle-timeout-sec 180
 
       - name: Verify Linux artifact (AC-L2/L3/L4/L5)

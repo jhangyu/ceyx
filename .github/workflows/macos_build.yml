@@ -290,17 +290,27 @@ jobs:
         if: matrix.cross == 'false'
         working-directory: ${{ github.workspace }}
         run: |
-          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's own resolver runs
+          # before every non-Android configure, is mandatory, and aborts when it
+          # locates no prefix — even if one was passed as an explicit cmake arg
+          # (run 33325970570). The env var is the supported channel and gets the
+          # watchdog's prefix validation for free.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --target dng_decoder_native \
-            --idle-timeout-sec 180 \
-            "--cmake-arg=-DCMAKE_PREFIX_PATH=${VCPKG_PREFIX}"
+            --idle-timeout-sec 180
 
       # Cross leg, stage 1: arm64 host generators, emitting x86-64 AOT code.
       - name: Build host Halide generators + x86-64 AOT (cross stage 1)
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
         run: |
+          # Needed even though this stage sets DNG_HOST_GENERATORS_ONLY (which
+          # makes cmake/encode.cmake a no-op): the watchdog's vcpkg resolver
+          # runs before EVERY non-Android configure regardless of what the
+          # configure will go on to do, so a stage that does not use libwebp
+          # still cannot start without a locatable prefix.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --build-dir "${HOST_GEN_DIR}" \
             --target dng_all_aot \
@@ -318,14 +328,14 @@ jobs:
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
         run: |
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
             --target dng_decoder_native \
             --idle-timeout-sec 600 \
             --cmake-arg=-DDNG_CROSS_BUILD=ON \
             "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
-            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            "--cmake-arg=-DCMAKE_PREFIX_PATH=${RUNNER_TEMP}/vcpkg-installed/${VCPKG_TRIPLET}"
+            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64
 
       # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
