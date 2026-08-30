@@ -116,6 +116,42 @@ class TestNativeWindowsInterpreterAssertion(unittest.TestCase):
         ):
             run_module.assert_native_windows_interpreter()  # must not raise
 
+    def test_rejects_msys_platform_even_when_os_name_reports_posix(self) -> None:
+        # Round-1 review finding F1: MSYS2/Cygwin CPython reports
+        # os.name == "posix" (it's a POSIX-emulation layer), so the check
+        # must not be gated on os.name == "nt" -- it must fire on
+        # sys.platform == "msys"/"cygwin" regardless of os.name.
+        with mock.patch.object(run_module.os, "name", "posix"), mock.patch.object(
+            run_module.sys, "platform", "msys"
+        ):
+            with self.assertRaises(RuntimeError):
+                run_module.assert_native_windows_interpreter()
+
+    def test_rejects_cygwin_platform_even_when_os_name_reports_posix(self) -> None:
+        with mock.patch.object(run_module.os, "name", "posix"), mock.patch.object(
+            run_module.sys, "platform", "cygwin"
+        ):
+            with self.assertRaises(RuntimeError):
+                run_module.assert_native_windows_interpreter()
+
+    def test_accepts_real_posix_platform(self) -> None:
+        # A genuine macOS/Linux interpreter (os.name == "posix",
+        # sys.platform == "darwin"/"linux") must not be rejected.
+        with mock.patch.object(run_module.os, "name", "posix"), mock.patch.object(
+            run_module.sys, "platform", "darwin"
+        ):
+            run_module.assert_native_windows_interpreter()  # must not raise
+
+
+class TestRunCallsInterpreterAssertion(unittest.TestCase):
+    """Related F1 note: run() must call the assertion itself so a direct
+    importer cannot bypass the startup check that build_deps.py performs."""
+
+    def test_run_rejects_msys_platform_without_explicit_startup_call(self) -> None:
+        with mock.patch.object(run_module.sys, "platform", "msys"):
+            with self.assertRaises(RuntimeError):
+                run_module.run(["true"])
+
 
 if __name__ == "__main__":
     unittest.main()

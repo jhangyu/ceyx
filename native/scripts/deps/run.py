@@ -35,13 +35,29 @@ class SubprocessError(RuntimeError):
 
 
 def assert_native_windows_interpreter() -> None:
-    """On Windows, refuse to run under an MSYS/Cygwin Python interpreter.
+    """Refuse to run under an MSYS/Cygwin Python interpreter.
 
-    No-op on non-Windows platforms. Spec §2.3: "On the Windows the
-    interpreter must be native Windows Python, not MSYS/Cygwin Python" --
-    checked via ``sys.executable`` containing ``/usr/bin`` (MSYS/Cygwin
-    layout) or lacking a drive letter (``pathlib.PureWindowsPath.drive``).
+    Fix (round-1 review finding F1): MSYS2/Cygwin CPython reports
+    ``os.name == "posix"`` (it is a POSIX-emulation layer on top of
+    Windows), NOT ``"nt"`` -- so a guard that early-returns on
+    ``os.name != "nt"`` is a no-op on exactly the interpreter it must
+    reject. The reliable signal is ``sys.platform``, which MSYS2/Cygwin
+    Python reports as ``"msys"``/``"cygwin"`` regardless of ``os.name``.
+    This check therefore runs unconditionally (not gated on ``os.name``),
+    so it also rejects an MSYS/Cygwin interpreter accidentally invoked
+    from a non-Windows CI runner image.
+
+    On native Windows Python (``os.name == "nt"``, ``sys.platform ==
+    "win32"``) this additionally checks ``sys.executable`` for the
+    MSYS/Cygwin path layout and a missing drive letter, as a second,
+    independent signal (spec §2.3).
     """
+    if sys.platform in ("cygwin", "msys"):
+        raise RuntimeError(
+            f"refusing to run under sys.platform={sys.platform!r}: this is "
+            "MSYS/Cygwin Python, not native Windows Python -- use native "
+            "Windows Python, invoked via `shell: pwsh`"
+        )
     if os.name != "nt":
         return
     executable_posix = Path(sys.executable).as_posix()
@@ -89,6 +105,12 @@ def run(
       ``CompletedProcess.returncode``, never inferred from output text or
       a pipeline's last stage.
     """
+    # Enforced on every call, not just at CLI startup, so a direct importer
+    # of this module (bypassing build_deps.py's startup check) cannot
+    # accidentally shell out from an MSYS/Cygwin interpreter either
+    # (round-1 review finding F1, related note).
+    assert_native_windows_interpreter()
+
     if isinstance(argv, (str, bytes)):
         raise TypeError("run() requires a list of argv elements, not a string")
     argv_list = list(argv)
