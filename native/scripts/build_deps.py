@@ -41,9 +41,10 @@ try/except in ``_load_manifest_module`` below.
 from __future__ import annotations
 
 import argparse
+import os
 import platform as platform_module
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -139,17 +140,68 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stage",
         default="all",
-        help="for heif-stack: which stage to run (all|libde265|kvazaar|aom|libheif|assemble). "
-             "The per-component split exists so each build is its own foreground "
-             "invocation short enough to fit inside a normal command timeout.",
+        help="for heif-stack on macOS/Linux: which stage to run "
+             "(all|libde265|kvazaar|aom|libheif|assemble). The per-component split "
+             "exists so each build is its own foreground invocation short enough to "
+             "fit inside a normal command timeout. The Windows dist has no stage "
+             "split, so any value but 'all' is rejected there rather than ignored.",
     )
     parser.add_argument("--jobs", type=int, default=None, help="cmake --build --parallel value")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="heif-stack on Windows only: rebuild even when the .pins stamp is current.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the resolved configure argv and exit 0 without building",
     )
     return parser
+
+
+def resolve_dist(raw: str, target_platform: str) -> Path:
+    """Turn ``--dist`` into the path to hand the renderer, WITHOUT resolving a
+    foreign platform's path against the host's filesystem.
+
+    Round-4 defect this exists to fix: an unconditional ``Path(raw).resolve()``
+    is correct when the host and the target agree, but on a macOS host
+    rendering Windows argv (spec §8.1's explicit use case -- inspecting and
+    unit-testing the exact Windows command line from a dev machine) it
+    prepends the Unix cwd to a drive-lettered path, and ``PureWindowsPath``
+    then renders the result as ``\\Users\\...\\C:\\ceyx\\dist``. That is the
+    drive-letter-mangling family recorded on 2026-08-30 (``D:/a/...`` ->
+    ``\\d\\a\\...``), reintroduced by our own convenience call rather than by a
+    shell.
+
+    Rules:
+      - host and target agree  -> ``resolve()``, so a relative ``--dist`` and
+        symlinks behave exactly as a developer expects.
+      - host and target differ -> the value is passed through as the TARGET's
+        own path type and must already be absolute for that target. A relative
+        path is unresolvable in that direction (there is no meaningful cwd on
+        the other platform), so it is rejected loudly instead of being turned
+        into a plausible-looking wrong path.
+
+    Note the real builds are never cross: Windows dists are built on Windows
+    runners. The cross direction is inspection/dry-run, which is precisely
+    where a silently wrong path is most likely to be believed.
+    """
+    host_is_windows = os.name == "nt"
+    target_is_windows = target_platform == "windows"
+    if host_is_windows == target_is_windows:
+        return Path(raw).resolve()
+
+    pure = PureWindowsPath(raw) if target_is_windows else PurePosixPath(raw)
+    is_absolute = bool(getattr(pure, "drive", "")) or bool(pure.root)
+    if not is_absolute:
+        raise ValueError(
+            f"--dist {raw!r} is relative, but the target platform "
+            f"({target_platform}) is not the host. A relative path cannot be "
+            f"resolved against another platform's working directory -- pass an "
+            f"absolute path (e.g. C:/ceyx-dist for windows)."
+        )
+    return Path(str(pure))
 
 
 def _run_build(argv: list) -> int:
@@ -180,7 +232,11 @@ def _run_build(argv: list) -> int:
     from deps import execute as execute_module  # noqa: PLC0415 - see docstring
     from deps import heif as heif_module  # noqa: PLC0415
 
-    dist = Path(args.dist).resolve()
+    try:
+        dist = resolve_dist(args.dist, resolved_platform)
+    except ValueError as exc:
+        print(f"[build_deps] error: {exc}", file=sys.stderr)
+        return 1
     print(
         f"[build_deps] build component={args.component!r} platform={resolved_platform} "
         f"arch={resolved_arch} dist={dist}",
@@ -189,6 +245,52 @@ def _run_build(argv: list) -> int:
 
     try:
         if args.component == heif_module.COMPONENT:
+            # The HEIF stack is one pseudo-component with TWO implementations,
+            # dispatched on platform. They are deliberately not merged: the
+            # dists differ in capability, not merely in toolchain. Unix is
+            # full-capability (libde265 + kvazaar HEVC encode + aom AV1);
+            # Windows is decode-only (libde265 + libheif) per the 2026-08-31
+            # OPTION 1 ruling. Their assertion sets therefore differ in kind --
+            # demanding kvz_api_get/aom_codec_av1_cx of the Windows dist would
+            # require encoders it intentionally does not contain.
+            if resolved_platform == "windows":
+                from deps import win_heif_dist  # noqa: PLC0415 - lazy, see docstring
+
+                if args.stage != "all":
+                    print(
+                        f"[build_deps] error: --stage {args.stage!r} is a macOS/Linux "
+                        f"concept; the Windows HEIF dist is built in one pass and has "
+                        f"no stage split. Rejected rather than silently ignored.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                if args.dry_run:
+                    for name in ("libde265", "libheif"):
+                        print(f"# {name}")
+                        for token in render_module.render(
+                            loaded, name, resolved_platform, resolved_arch, dist=str(dist)
+                        ):
+                            print(token)
+                    return 0
+                try:
+                    win_heif_dist.build(loaded, dist, arch=resolved_arch, force=args.force)
+                except (
+                    win_heif_dist.WindowsHeifError,
+                    win_heif_dist.win_pe.PeInspectionError,
+                    win_heif_dist.win_pe.PeAssertionFailed,
+                ) as exc:
+                    print(f"[heif-win] {exc}", file=sys.stderr)
+                    return 1
+                return 0
+
+            if args.force:
+                print(
+                    "[build_deps] error: --force is Windows-only; the macOS/Linux "
+                    "stack is made idempotent by its per-stage artefact checks and "
+                    "the .pins stamp. Rejected rather than silently ignored.",
+                    file=sys.stderr,
+                )
+                return 1
             if args.dry_run:
                 for name in ("kvazaar", "libheif"):
                     print(f"# {name}")
