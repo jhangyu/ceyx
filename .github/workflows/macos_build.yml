@@ -115,8 +115,9 @@ jobs:
       X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
       HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
       # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
-      # builtin-baseline, vcpkg-configuration.json's default-registry baseline
-      # and port_spike.yml's VCPKG_BASELINE (N30 — four places, one value).
+      # builtin-baseline and vcpkg-configuration.json's default-registry
+      # baseline (N30). port_spike.yml, the round-2 spike that used to be the
+      # fourth place this SHA was pinned, was deleted in round 5 (task #6).
       VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
       VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
       # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
@@ -215,9 +216,9 @@ jobs:
       # so installing it from vcpkg would build a second unused copy and pay for
       # aom+kvazaar twice.
       #
-      # Bootstrap mirrors port_spike.yml's (clone, checkout the pinned baseline,
-      # bootstrap-vcpkg.sh) rather than using a marketplace action, so both
-      # workflows acquire vcpkg the same way.
+      # Bootstrap (clone, checkout the pinned baseline, bootstrap-vcpkg.sh)
+      # rather than using a marketplace action, matching this repo's other
+      # vcpkg-consuming workflows (e.g. linux_build.yml).
       - name: Bootstrap vcpkg at the pinned baseline (D5)
         run: |
           git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"

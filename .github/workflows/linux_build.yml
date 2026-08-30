@@ -39,8 +39,9 @@ jobs:
       NATIVE_DIR: ${{ github.workspace }}/native
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
       # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
-      # builtin-baseline, vcpkg-configuration.json's default-registry baseline
-      # and port_spike.yml's VCPKG_BASELINE (N30 — one value, four places).
+      # builtin-baseline and vcpkg-configuration.json's default-registry
+      # baseline (N30). port_spike.yml, the round-2 spike that used to be the
+      # fourth place this SHA was pinned, was deleted in round 5 (task #6).
       VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
       VCPKG_TRIPLET: x64-linux-heif
       # The vcpkg paths deliberately do NOT live here. The `runner` context is
@@ -128,8 +129,8 @@ jobs:
       # building libheif/libde265/kvazaar/aom would cost ~20 minutes to produce
       # artefacts the configure then disables.
       #
-      # No assembler package is needed for this step, unlike port_spike.yml's
-      # Linux leg: nasm is required by vcpkg's AOM port, and aom is precisely
+      # No assembler package is needed for this step (unlike a full HEIF/AOM
+      # leg): nasm is required by vcpkg's AOM port, and aom is precisely
       # what --x-no-default-features excludes here.
       - name: Bootstrap vcpkg at the pinned baseline (D5)
         run: |
