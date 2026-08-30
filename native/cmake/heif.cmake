@@ -60,14 +60,25 @@ if(DNG_ENABLE_HEIF)
     # shipped dylib, which App-Sandboxed hosts cannot open — the exact failure
     # third_party.cmake's static-libjpeg note records for libjpeg in 2026-08-17.
     if(NOT HEIF_INCLUDE_DIR OR NOT HEIF_LIBRARY OR NOT DE265_LIBRARY)
-        message(FATAL_ERROR
-            "HEIF decode is enabled but the vendored dist is missing.\n"
-            "  searched under: ${HEIF_DIST_HINTS}\n"
-            "  heif.h    = '${HEIF_INCLUDE_DIR}'\n"
-            "  libheif   = '${HEIF_LIBRARY}'\n"
-            "  libde265  = '${DE265_LIBRARY}'\n"
-            "Run native/scripts/fetch_heif_deps.sh, or configure with "
-            "-DDNG_ENABLE_HEIF=OFF to build without the HEIC route.")
+        if(WIN32)
+            message(FATAL_ERROR
+                "HEIF decode is enabled but the vendored dist is missing.\n"
+                "  searched under: ${HEIF_DIST_HINTS}\n"
+                "  heif.h    = '${HEIF_INCLUDE_DIR}'\n"
+                "  libheif   = '${HEIF_LIBRARY}'\n"
+                "  libde265  = '${DE265_LIBRARY}'\n"
+                "Restore native/third_party/heif-dist-windows by dispatching "
+                ".github/workflows/heif_dist_windows.yml.")
+        else()
+            message(FATAL_ERROR
+                "HEIF decode is enabled but the vendored dist is missing.\n"
+                "  searched under: ${HEIF_DIST_HINTS}\n"
+                "  heif.h    = '${HEIF_INCLUDE_DIR}'\n"
+                "  libheif   = '${HEIF_LIBRARY}'\n"
+                "  libde265  = '${DE265_LIBRARY}'\n"
+                "Run native/scripts/fetch_heif_deps.sh, or configure with "
+                "-DDNG_ENABLE_HEIF=OFF to build without the HEIC route.")
+        endif()
     endif()
 
     # Re-derive the dist root from what was actually found, so the POST_BUILD

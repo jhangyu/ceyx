@@ -15,7 +15,7 @@ whole transitive package graph, so host apps get the bundling automatically.
 |---|---|---|
 | macOS | CocoaPods `vendored_libraries` | `macos/Libraries/libdng_decoder_native.dylib` → `<App>.app/Contents/Frameworks/` |
 | Android | Gradle `jniLibs` | `android/src/main/jniLibs/arm64-v8a/libdng_decoder_native.so` → APK `lib/arm64-v8a/` |
-| Windows | CMake `<pkg>_bundled_libraries` (`windows/CMakeLists.txt`) | `windows/Libraries/dng_decoder_native.dll` → next to `<App>.exe` |
+| Windows | CMake `<pkg>_bundled_libraries` (`windows/CMakeLists.txt`) | `windows/Libraries/{dng_decoder_native,heif,libde265}.dll` → next to `<App>.exe` |
 
 ## Known limitations
 
@@ -29,25 +29,34 @@ whole transitive package graph, so host apps get the bundling automatically.
 - The binaries are **committed prebuilts**, not built during the host app's
   build. Building `native/CMakeLists.txt` (Halide AOT generators, Adobe DNG SDK,
   vendored libjpeg-turbo) inside every host build is not viable.
-- As of this writing, `windows/Libraries/dng_decoder_native.dll` does not
-  exist yet -- it can only be produced by building `native/` on a Windows
-  machine (see the Halcyon repo's
-  `docs/logs/2026-08-21/windows-ffi-build-runbook.md`). Until it is committed,
-  `flutter build windows` for any host app will succeed but the resulting exe
-  will fail to `dlopen` the library at runtime.
+- `windows/Libraries/*.dll` are **not committed**. They are fetched on demand
+  from a pinned ceyx GitHub Release by the Halcyon repo's
+  `scripts/build_apps.py` (run `python3 scripts/build_apps.py --fetch-native`
+  from Halcyon, or just build `linux`/`windows` there — the fetch happens
+  automatically when a destination library is absent). The pin (tag +
+  per-asset SHA-256) lives in Halcyon's `scripts/ceyx_release_pin.json`.
+  Without a fetch, `flutter build windows` for any host app will succeed but
+  the resulting exe will fail to `dlopen` the libraries at runtime.
 
 ## Refreshing the binaries
 
-After rebuilding the native library in `native`:
+After rebuilding the native library in `native` (macOS/Android — these are
+committed prebuilts):
 
 ```bash
 cp native/build/libdng_decoder_native.dylib \
    plugin/macos/Libraries/
 cp native/build-android/android-arm64/libdng_decoder_native.so \
    plugin/android/src/main/jniLibs/arm64-v8a/
-copy native\build-windows\dng_decoder_native.dll ^
-   plugin\windows\Libraries\
 ```
+
+Windows and Linux libraries (`dng_decoder_native`, `heif`, `libde265`) are
+never committed here or copied by hand — they are fetched from the pinned
+ceyx release via Halcyon's `scripts/build_apps.py --fetch-native`. To move
+the pin itself to a newer ceyx release, run
+`python3 scripts/build_apps.py --ceyx-release latest` from Halcyon; it
+records the new per-asset SHA-256s and stops without building so the diff
+can be reviewed and committed.
 
 The macOS dylib must keep the install name `@rpath/libdng_decoder_native.dylib`
 (check with `otool -D`) and must not link anything under `/opt/homebrew`

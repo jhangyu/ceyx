@@ -79,3 +79,15 @@ happily and then decodes nothing), and no `x265` symbol exists.
   AMD Bulldozer 2011+; Windows 11 already mandates SSE4.2). Setting
   `ENABLE_SIMD=OFF` would have made the build green by building less and was
   deliberately not done.
+- **Explicit `/EHsc /GR` is passed on the command line.** clang-cl in
+  `MultiThreaded` static-CRT configurations does not always carry over MSVC's
+  default exception-handling and RTTI flags, so both are restored explicitly
+  to match what a normal MSVC build would produce. Without them, libheif's C++
+  exception-based error path and RTTI-dependent code would silently compile
+  with different semantics than upstream expects.
+- **`ENABLE_DECODER=OFF` is passed to the libde265 configure.** This gates
+  only the standalone `dec265` command-line decoding tool that upstream
+  builds alongside the library; the `de265` library itself (the thing
+  `heif.dll` links against for HEVC decode) is built unconditionally by this
+  flag. No decode capability is lost — nothing in this project uses the
+  `dec265` CLI tool.

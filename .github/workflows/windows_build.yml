@@ -26,7 +26,7 @@ jobs:
     # windows-latest runner has no Vulkan-capable GPU and no ICD, so decode /
     # PSNR gates cannot run here. This job proves that the Windows x86-64
     # Vulkan native library genuinely COMPILES AND LINKS from current source
-    # (the committed dng_processor_ffi/windows/Libraries/dng_decoder_native.dll
+    # (the committed plugin/windows/Libraries/dng_decoder_native.dll
     # was hand-built on a developer machine and has had no CI provenance until
     # now — see docs/logs/2026-08-26/Task_windows_build_verification.md §3/§4).
     name: Windows x86-64 Vulkan native (dng_decoder_native)
@@ -508,8 +508,13 @@ jobs:
             exit 1
           fi
           cat dll_dependents.txt
+          # Strip the "Dump of file <path>" header before grepping: if the
+          # dumped path itself contained "heif.dll" this would self-match and
+          # the assertion would pass without the DLL actually importing it
+          # (2026-08-28 otool self-match shape).
+          grep -v "Dump of file" dll_dependents.txt > dll_dependents_body.txt || true
           set +e
-          grep -i "heif.dll" dll_dependents.txt
+          grep -i "heif.dll" dll_dependents_body.txt
           rc=$?
           set -e
           echo "ASSERT dep heif.dll RC=${rc}"

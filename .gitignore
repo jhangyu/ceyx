@@ -134,3 +134,11 @@ image_samples/raw_corpus/*
 # TSan side-build (Foveon accel round) and root scratch probes — untracked residue, never committed
 /native/build-tsan-x3f/
 /scripts/
+
+# Fetched Windows native libraries (dng_decoder_native, heif, libde265). These
+# are pulled at build time from a pinned ceyx GitHub Release by Halcyon's
+# scripts/build_apps.py; a fetched copy must never be re-committed as a new
+# trust-on-first-use binary. .gitkeep IS tracked so the directory survives a
+# clean checkout.
+plugin/windows/Libraries/*.dll
+!plugin/windows/Libraries/.gitkeep
