@@ -235,7 +235,7 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_BUILD_EXAMPLES=OFF
-          cmake --build zlib-build --target install
+          cmake --build zlib-build --target install -- -k 0
           # List EVERYTHING installed. The previous version of this listing
           # filtered on '*.lib' and 'zlib.h', which made it look like a complete
           # inventory while silently omitting zconf.h — the exact file whose
@@ -342,7 +342,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set +e
-          cmake --build "native/build-windows" --target dng_decoder_native -- -v
+          cmake --build "native/build-windows" --target dng_decoder_native -- -v -k 0
           RC=$?
           set -e
           echo "BUILD_RC=$RC"
