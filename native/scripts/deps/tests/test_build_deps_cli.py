@@ -50,15 +50,52 @@ def test_windows_dist_with_backslashes_survives_too() -> None:
     assert str(PureWindowsPath(resolved)) == r"D:\a\ceyx\dist"
 
 
+def _foreign_platform() -> str:
+    """A target platform that is NOT the host's.
+
+    Hardcoding "windows" here was a latent Windows-only failure: on a Windows
+    host that target is the SAME platform, so resolve_dist() correctly
+    resolves instead of raising and the test would have failed on the Windows
+    CI leg alone. Same green-on-macOS/red-on-Windows shape as the `/src`
+    literal in test_execute.py, found by sweeping for siblings after CI caught
+    that one rather than by CI catching this one too.
+    """
+    return "linux" if sys.platform == "win32" else "windows"
+
+
 def test_relative_dist_for_a_foreign_target_is_rejected_not_guessed() -> None:
     """There is no meaningful cwd on the other platform, so a plausible
     looking wrong path is the worst possible outcome."""
     with pytest.raises(ValueError) as exc:
-        build_deps.resolve_dist("relative/dir", "windows")
+        build_deps.resolve_dist("relative/dir", _foreign_platform())
     assert "relative" in str(exc.value)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="host must be non-Windows")
+def test_windows_host_branch_is_exercised_from_any_host() -> None:
+    """Cover the Windows-HOST half of resolve_dist's branch from a Unix box.
+
+    Without this the branch only ever executes on the Windows CI leg — which
+    is exactly how both defects in this file's history got there. The host is
+    INJECTED rather than simulated by patching `os.name`: that was tried
+    first and mutates a shared global, changing pathlib's behaviour
+    process-wide (`Path.resolve()` starts raising UnsupportedOperation). Same
+    reason the suite never patches os.environ/subprocess globally.
+    """
+    # Windows host + posix target = foreign: an absolute path passes through...
+    foreign = build_deps.resolve_dist("/opt/ceyx-dist", "linux", host_is_windows=True)
+    assert str(foreign).replace("\\", "/") == "/opt/ceyx-dist"
+
+    # ...and a relative one is rejected, not resolved against a Windows cwd.
+    with pytest.raises(ValueError):
+        build_deps.resolve_dist("relative/dir", "linux", host_is_windows=True)
+
+    # The Windows-host + Windows-target (same-platform) case is NOT asserted
+    # here: it takes the resolve() path, whose output on this Unix box would
+    # be a Unix absolute path and would prove nothing about Windows. The
+    # equivalent same-platform behaviour is covered by
+    # test_same_platform_dist_is_still_resolved_absolutely.
+
+
 def test_same_platform_dist_is_still_resolved_absolutely(tmp_path: Path) -> None:
     """The convenience behaviour must survive the fix: a relative --dist for
     the HOST platform still resolves against the cwd."""

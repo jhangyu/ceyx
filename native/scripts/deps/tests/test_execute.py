@@ -197,10 +197,30 @@ def test_three_cmake_phases_are_three_argv_lists_no_pipelines() -> None:
 
     assert len(calls) == 3
     configure, build, install = calls
-    assert configure[:5] == ["cmake", "-S", "/src", "-B", "/build"]
+
+    # Paths are compared AS PATHS, never against a hardcoded posix literal.
+    # execute.py renders them with `str(Path)`, which is correct and is the
+    # convention render.py already establishes: separators are NATIVE TO THE
+    # TARGET (the Windows golden files hold `C:\ceyx-dist`, the posix ones
+    # `/Users/build/ceyx-dist`). `-S`/`-B` are host paths handed to a cmake
+    # running on that same host, so backslashes on Windows are right.
+    # A literal "/src" expectation was the original form of this assertion and
+    # it failed on the Windows CI leg only -- the same green-on-macOS,
+    # red-on-real-Windows shape as round 3's run.py:63 defect.
+    src, build_dir = Path("/src"), Path("/build")
+    assert configure[:2] == ["cmake", "-S"]
+    assert Path(configure[2]) == src
+    assert configure[3] == "-B"
+    assert Path(configure[4]) == build_dir
     assert "-DCMAKE_BUILD_TYPE=Release" in configure
-    assert build == ["cmake", "--build", "/build", "--parallel", "4"]
-    assert install == ["cmake", "--install", "/build"]
+
+    assert build[:2] == ["cmake", "--build"]
+    assert Path(build[2]) == build_dir
+    assert build[3:] == ["--parallel", "4"]
+
+    assert install[:2] == ["cmake", "--install"]
+    assert Path(install[2]) == build_dir
+
     for argv in calls:
         assert isinstance(argv, list)
         assert not any("|" in element for element in argv)

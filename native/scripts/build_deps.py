@@ -160,7 +160,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_dist(raw: str, target_platform: str) -> Path:
+def resolve_dist(raw: str, target_platform: str, *, host_is_windows: Optional[bool] = None) -> Path:
     """Turn ``--dist`` into the path to hand the renderer, WITHOUT resolving a
     foreign platform's path against the host's filesystem.
 
@@ -186,8 +186,17 @@ def resolve_dist(raw: str, target_platform: str) -> Path:
     Note the real builds are never cross: Windows dists are built on Windows
     runners. The cross direction is inspection/dry-run, which is precisely
     where a silently wrong path is most likely to be believed.
+
+    ``host_is_windows`` is injectable purely so a test can exercise the
+    Windows-HOST branch from a Unix dev box. It is a parameter rather than a
+    patched ``os.name`` deliberately: ``os`` is a shared global, and
+    reassigning ``os.name`` changes ``pathlib``'s own behaviour process-wide
+    (observed: ``Path.resolve()`` then raises ``UnsupportedOperation``). That
+    is the same "no global monkeypatching" rule the rest of this suite follows
+    for ``os.environ``/``subprocess``.
     """
-    host_is_windows = os.name == "nt"
+    if host_is_windows is None:
+        host_is_windows = os.name == "nt"
     target_is_windows = target_platform == "windows"
     if host_is_windows == target_is_windows:
         return Path(raw).resolve()
