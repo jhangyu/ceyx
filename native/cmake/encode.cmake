@@ -5,24 +5,39 @@
 # (pipeline.cmake attaches them to dng_sdk PUBLIC, which propagates, but stating
 # it here keeps the encode TU independent of that detail).
 #
-# WebP links the STATIC dist produced by native/scripts/fetch_libwebp_dist.sh.
+# WebP comes from vcpkg (D5, 2026-08-31): native/vcpkg/vcpkg.json pins libwebp
+# to exactly 1.6.0 and the overlay triplets keep it STATIC (only libheif and
+# libde265 are dynamic, for the LGPL-3 §4(d)(1) relink duty). It replaces the
+# dist that native/scripts/fetch_libwebp_dist.sh used to build, on exactly the
+# platforms that script covered — macOS and Linux. Resolution is
+# find_package(WebP CONFIG), i.e. the WebPConfig.cmake the vcpkg port installs
+# (portfile.cmake: vcpkg_cmake_config_fixup(PACKAGE_NAME WebP ...)), reached
+# through the vcpkg toolchain file or CMAKE_PREFIX_PATH.
+#
 # Static, not dynamic like the heif dist: libwebp is BSD-3 (no LGPL relink
 # duty) and third_party.cmake's App-Sandbox rule forbids an absolute
-# LC_LOAD_DYLIB into a Homebrew prefix. NO_DEFAULT_PATH on both probes is what
-# enforces that — a system libwebp must never be picked up silently.
+# LC_LOAD_DYLIB into a Homebrew prefix. CONFIG mode is what enforces that now —
+# it matches only a package that ships WebPConfig.cmake, so a bare system
+# /usr/lib/libwebp.so cannot be picked up silently the way an unqualified
+# find_library() would allow.
 #
-# Absent dist is a soft degradation, not a configure failure: the JPEG path is
-# the one Phase 13 depends on, and src/ffi/encode_ffi_api.cpp compiles with
-# CEYX_ENABLE_WEBP=0 into ceyx_encode_webp_rgba8 returning
-# kCeyxEncodeErrUnsupported (the symbol stays exported, so a Dart-side lookup
-# still succeeds and the caller gets a defined error instead of a crash).
+# A MISSING libwebp IS A HARD CONFIGURE ERROR on macOS/Linux/Windows.
+# It used to be a soft degradation (warning + CEYX_ENABLE_WEBP=0, so
+# ceyx_encode_webp_rgba8 returned kCeyxEncodeErrUnsupported). That behaviour is
+# deliberately removed: with acquisition moved to a package manager, "not
+# found" no longer means "the optional dist was not fetched", it means the
+# dependency wiring is broken — and the old soft path would have turned that
+# into a GREEN build silently shipping a binary with no WebP encoder. Opting
+# out is still possible, but only EXPLICITLY, via -DCEYX_ENABLE_WEBP=OFF.
+# Android keeps the soft path: it never consumed the dist and vcpkg does not
+# supply that platform (see the ANDROID branch below).
 #
 # Included (not add_subdirectory'd) from native/CMakeLists.txt after
 # cmake/heif.cmake, so dng_decoder_native already exists as a target.
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
 option(CEYX_ENABLE_WEBP
-       "Build the WebP encode route (vendored static libwebp dist)" ON)
+       "Build the WebP encode route (vcpkg-supplied static libwebp 1.6.0)" ON)
 
 if(DNG_USE_LIBJPEG)
     target_include_directories(dng_decoder_native PRIVATE ${JPEG_INCLUDE_DIRS})
@@ -30,82 +45,116 @@ endif()
 
 set(CEYX_WEBP_ENABLED 0)
 if(CEYX_ENABLE_WEBP)
-    set(WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist")
-    if(APPLE AND CMAKE_OSX_ARCHITECTURES)
-        set(WEBP_DIST_HINTS "")
-        foreach(_webp_arch IN LISTS CMAKE_OSX_ARCHITECTURES)
-            list(APPEND WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist-${_webp_arch}")
-        endforeach()
-        list(APPEND WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist")
-    elseif(WIN32)
-        # Committed dist (Task 6), same shape as jxl.cmake:40-47: no machine in
-        # this project can produce Windows binaries locally, so this is the
-        # ONLY hint on Windows -- without it the committed
-        # native/third_party/libwebp-dist-windows tree is unreachable and
-        # CEYX_ENABLE_WEBP silently compiles to 0 on that platform.
-        set(WEBP_DIST_HINTS "${THIRD_PARTY_DIR}/libwebp-dist-windows")
-    endif()
-    set(WEBP_INCLUDE_HINTS "")
-    set(WEBP_LIB_HINTS "")
-    foreach(_webp_hint IN LISTS WEBP_DIST_HINTS)
-        list(APPEND WEBP_INCLUDE_HINTS "${_webp_hint}/include")
-        list(APPEND WEBP_LIB_HINTS "${_webp_hint}/lib")
-    endforeach()
-
-    find_path(CEYX_WEBP_INCLUDE_DIR
-        NAMES webp/encode.h
-        HINTS ${WEBP_INCLUDE_HINTS}
-        NO_DEFAULT_PATH)
-    # NAMES lists both spellings: Platform/Windows-Clang.cmake:33 already sets
-    # CMAKE_FIND_LIBRARY_PREFIXES to "lib" and "", so find_library() alone
-    # would already match the lib-prefixed archives (libwebp.lib) the Windows
-    # clang-cl dist installs -- listing "libwebp" too is belt-and-braces, not
-    # what makes Windows resolution work. What actually enables discovery on
-    # Windows is WEBP_DIST_HINTS above pointing at libwebp-dist-windows.
-    find_library(CEYX_WEBP_LIBRARY
-        NAMES webp libwebp
-        HINTS ${WEBP_LIB_HINTS}
-        NO_DEFAULT_PATH)
-    # libwebp 1.6 factors its YUV conversion into a separate static archive;
+    # The four archives this route needs, as the vcpkg port's WebPConfig.cmake
+    # names them. sharpyuv: libwebp 1.6 factors its YUV conversion out, and
     # omitting it surfaces as undefined _SharpYuvConvert at dylib link time.
-    find_library(CEYX_SHARPYUV_LIBRARY
-        NAMES sharpyuv libsharpyuv
-        HINTS ${WEBP_LIB_HINTS}
-        NO_DEFAULT_PATH)
-    # 2026-08-30 (plan Task 8): EXIF/XMP/ICC embedding needs the mux writer and
-    # the demux reader. Both archives are ALREADY in the vendored dist --
-    # -DWEBP_BUILD_WEBPMUX=OFF (fetch_libwebp_dist.sh) disables the command-line
-    # TOOL, not the library -- so this is a link line, not a new dependency.
-    find_library(CEYX_WEBPMUX_LIBRARY
-        NAMES webpmux libwebpmux
-        HINTS ${WEBP_LIB_HINTS}
-        NO_DEFAULT_PATH)
-    find_library(CEYX_WEBPDEMUX_LIBRARY
-        NAMES webpdemux libwebpdemux
-        HINTS ${WEBP_LIB_HINTS}
-        NO_DEFAULT_PATH)
+    # libwebpmux + webpdemux: EXIF/XMP/ICC embedding needs the mux writer and
+    # the demux reader (2026-08-30, plan Task 8). libwebpmux is in the port's
+    # default feature set, so no `features` entry in vcpkg.json is required to
+    # get it — but it IS required to keep it, which is why the target is
+    # asserted below rather than assumed.
+    set(CEYX_WEBP_REQUIRED_TARGETS
+        WebP::libwebpmux WebP::webpdemux WebP::webp WebP::sharpyuv)
 
-    if(CEYX_WEBP_INCLUDE_DIR AND CEYX_WEBP_LIBRARY AND CEYX_SHARPYUV_LIBRARY
-       AND CEYX_WEBPMUX_LIBRARY AND CEYX_WEBPDEMUX_LIBRARY)
-        target_include_directories(dng_decoder_native PRIVATE ${CEYX_WEBP_INCLUDE_DIR})
-        # Link order matters for static archives: mux/demux reference libwebp's
-        # symbols, so they precede it.
-        target_link_libraries(dng_decoder_native
-            ${CEYX_WEBPMUX_LIBRARY} ${CEYX_WEBPDEMUX_LIBRARY}
-            ${CEYX_WEBP_LIBRARY} ${CEYX_SHARPYUV_LIBRARY})
+    find_package(WebP CONFIG QUIET)
+
+    set(CEYX_WEBP_MISSING_TARGETS "")
+    if(WebP_FOUND)
+        foreach(_webp_target IN LISTS CEYX_WEBP_REQUIRED_TARGETS)
+            if(NOT TARGET ${_webp_target})
+                list(APPEND CEYX_WEBP_MISSING_TARGETS ${_webp_target})
+            endif()
+        endforeach()
+    endif()
+
+    if(WebP_FOUND AND NOT CEYX_WEBP_MISSING_TARGETS)
+        # Imported targets carry their own include dirs and their inter-archive
+        # dependencies, so neither target_include_directories() nor the manual
+        # mux-before-webp link ordering the raw-archive probe needed is
+        # required here — CMake derives the static link order from the
+        # exported target graph.
+        target_link_libraries(dng_decoder_native ${CEYX_WEBP_REQUIRED_TARGETS})
         set(CEYX_WEBP_ENABLED 1)
-        message(STATUS "WebP encode+mux: static ${CEYX_WEBP_LIBRARY}")
-    else()
+        message(STATUS "WebP encode+mux: vcpkg WebP ${WebP_VERSION} (${CEYX_WEBP_REQUIRED_TARGETS})")
+    elseif(WIN32)
+        # Windows keeps the COMMITTED dist (native/third_party/libwebp-dist-windows,
+        # Task 6) as its source, and it is NOT a degraded fallback — it is the
+        # only acquisition path this platform has ever had.
+        # fetch_libwebp_dist.sh (deleted by D5/A5.4) had no Windows branch at
+        # all: manifest.toml [component.libwebp].source.default states in so
+        # many words that the Windows dist was built once, by hand, by a
+        # since-deleted script on a GitHub runner, and that no `source.windows`
+        # block exists because there is nothing live to transcribe. So D5's
+        # "libwebp moves to vcpkg" applies to exactly the platforms the script
+        # covered — macOS and Linux. Moving Windows onto vcpkg means building
+        # the whole overlay stack on that runner and is a separate change.
+        #
+        # Still a HARD error if the committed dist is unusable: absent or
+        # partial, the outcome would again be a green build with no WebP
+        # encoder.
+        set(WEBP_WIN_DIST "${THIRD_PARTY_DIR}/libwebp-dist-windows")
+        find_path(CEYX_WEBP_INCLUDE_DIR NAMES webp/encode.h
+                  HINTS "${WEBP_WIN_DIST}/include" NO_DEFAULT_PATH)
+        # NAMES lists both spellings: Platform/Windows-Clang.cmake:33 sets
+        # CMAKE_FIND_LIBRARY_PREFIXES to "lib" and "", so the bare name would
+        # already match the lib-prefixed archives the clang-cl dist installs;
+        # listing both is belt-and-braces.
+        find_library(CEYX_WEBP_LIBRARY      NAMES webp libwebp
+                     HINTS "${WEBP_WIN_DIST}/lib" NO_DEFAULT_PATH)
+        find_library(CEYX_SHARPYUV_LIBRARY  NAMES sharpyuv libsharpyuv
+                     HINTS "${WEBP_WIN_DIST}/lib" NO_DEFAULT_PATH)
+        find_library(CEYX_WEBPMUX_LIBRARY   NAMES webpmux libwebpmux
+                     HINTS "${WEBP_WIN_DIST}/lib" NO_DEFAULT_PATH)
+        find_library(CEYX_WEBPDEMUX_LIBRARY NAMES webpdemux libwebpdemux
+                     HINTS "${WEBP_WIN_DIST}/lib" NO_DEFAULT_PATH)
+        if(CEYX_WEBP_INCLUDE_DIR AND CEYX_WEBP_LIBRARY AND CEYX_SHARPYUV_LIBRARY
+           AND CEYX_WEBPMUX_LIBRARY AND CEYX_WEBPDEMUX_LIBRARY)
+            target_include_directories(dng_decoder_native PRIVATE ${CEYX_WEBP_INCLUDE_DIR})
+            # Link order matters for raw static archives: mux/demux reference
+            # libwebp's symbols, so they precede it.
+            target_link_libraries(dng_decoder_native
+                ${CEYX_WEBPMUX_LIBRARY} ${CEYX_WEBPDEMUX_LIBRARY}
+                ${CEYX_WEBP_LIBRARY} ${CEYX_SHARPYUV_LIBRARY})
+            set(CEYX_WEBP_ENABLED 1)
+            message(STATUS "WebP encode+mux: committed Windows dist ${CEYX_WEBP_LIBRARY}")
+        else()
+            message(FATAL_ERROR
+                "WebP encode: the committed Windows dist is missing or not mux-capable.\n"
+                "  searched under: ${WEBP_WIN_DIST}\n"
+                "  webp/encode.h = '${CEYX_WEBP_INCLUDE_DIR}'\n"
+                "  libwebp       = '${CEYX_WEBP_LIBRARY}'\n"
+                "  libsharpyuv   = '${CEYX_SHARPYUV_LIBRARY}'\n"
+                "  libwebpmux    = '${CEYX_WEBPMUX_LIBRARY}'\n"
+                "  libwebpdemux  = '${CEYX_WEBPDEMUX_LIBRARY}'\n"
+                "Pass -DCEYX_ENABLE_WEBP=OFF to build without the WebP encode route.")
+        endif()
+    elseif(ANDROID)
+        # Android never consumed the libwebp dist and vcpkg does not supply this
+        # platform, so this arm preserves the pre-D5 soft degradation for it
+        # ALONE: ceyx_encode_webp_rgba8 compiles to kCeyxEncodeErrUnsupported,
+        # the symbol stays exported, and a Dart-side lookup still gets a
+        # defined error rather than a crash.
         message(WARNING
-            "WebP encode disabled — vendored dist not found or not mux-capable.\n"
-            "  searched under: ${WEBP_DIST_HINTS}\n"
-            "  webp/encode.h = '${CEYX_WEBP_INCLUDE_DIR}'\n"
-            "  libwebp       = '${CEYX_WEBP_LIBRARY}'\n"
-            "  libsharpyuv   = '${CEYX_SHARPYUV_LIBRARY}'\n"
-            "  libwebpmux    = '${CEYX_WEBPMUX_LIBRARY}'\n"
-            "  libwebpdemux  = '${CEYX_WEBPDEMUX_LIBRARY}'\n"
-            "Run native/scripts/fetch_libwebp_dist.sh. JPEG encode is unaffected; "
-            "ceyx_encode_webp_rgba8 will return kCeyxEncodeErrUnsupported.")
+            "WebP encode disabled on Android (no vcpkg-supplied libwebp). "
+            "JPEG encode is unaffected; ceyx_encode_webp_rgba8 will return "
+            "kCeyxEncodeErrUnsupported.")
+    else()
+        # Desktop: HARD failure. See this file's header — after D5 moved
+        # acquisition to vcpkg, "not found" means broken wiring, and degrading
+        # to a green build that silently ships no WebP encoder is precisely the
+        # failure mode this error exists to prevent.
+        message(FATAL_ERROR
+            "libwebp not found via find_package(WebP CONFIG).\n"
+            "  WebP_FOUND        = '${WebP_FOUND}'\n"
+            "  WebP_DIR          = '${WebP_DIR}'\n"
+            "  missing targets   = '${CEYX_WEBP_MISSING_TARGETS}'\n"
+            "  CMAKE_PREFIX_PATH = '${CMAKE_PREFIX_PATH}'\n"
+            "libwebp is supplied by vcpkg (native/vcpkg/vcpkg.json pins 1.6.0). "
+            "Configure with the vcpkg toolchain file, or add the vcpkg installed "
+            "prefix for this triplet to CMAKE_PREFIX_PATH.\n"
+            "To build deliberately WITHOUT the WebP encode route, pass "
+            "-DCEYX_ENABLE_WEBP=OFF — that is the only supported way to opt out, "
+            "and unlike this error it is visible in the configure line.")
     endif()
 else()
     message(STATUS "WebP encode: disabled (CEYX_ENABLE_WEBP=OFF)")

@@ -395,17 +395,27 @@ licence_files = ["COPYING*"]
 path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.libwebp.source.default]
-  # migration_pending, not a durable R-1a reason: Spec §3.2 resolves libwebp
-  # to `registry` on every platform ("-- (no change needed)", our pin already
-  # equals vcpkg's exact version) under D5 (round 2-3, owned by M2). Self-built
-  # TODAY (transcribed verbatim from fetch_libwebp_dist.sh) is a sequencing
-  # fact; M1 updates this block to kind="registry" on M2's request once D5
-  # lands for libwebp.
-  kind              = "tarball"
-  migration_pending = true
-  reason            = "self-built on macOS/Linux TODAY (transcribed verbatim from fetch_libwebp_dist.sh); Spec_build_rewrite.md §3.2 resolves this component to registry (vcpkg 1.6.0, exact match, no bump needed) under D5 -- this is a sequencing fact, not a durable R-1a reason"
-  url               = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-{version}.tar.gz"
-  sha256            = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+  # D5 LANDED for libwebp (2026-08-31). `migration_pending` is gone because the
+  # migration is no longer pending: native/vcpkg/vcpkg.json declares libwebp and
+  # pins it to exactly 1.6.0 via `overrides` (N30 — never the floating
+  # baseline), the overlay triplets install it as a STATIC archive, and
+  # native/cmake/encode.cmake resolves it with find_package(WebP CONFIG),
+  # failing the configure hard if it is absent. fetch_libwebp_dist.sh, which
+  # this block was transcribed from, is deleted in the same commit.
+  #
+  # `version` above (1.6.0) is what the registry resolves to; the schema
+  # (manifest.py:166-175, A1.3) requires that pin to be explicit for
+  # kind="registry" precisely so a future edit cannot let it float.
+  kind    = "registry"
+  version = "1.6.0"
+  reason  = "supplied by vcpkg at exactly 1.6.0 (native/vcpkg/vcpkg.json `overrides`, resolved against pinned baseline abb6dda5cc32914d2e64d7d72b974dc301d1fc8a); Spec_build_rewrite.md §3.2 resolves this component to registry with no version change needed, and D5 landed that wiring on macOS/Linux -- Windows continues to use the committed dist described below, which no script in this repo has ever produced"
+  # The self-built acquisition data is retained as HISTORY, not as an
+  # instruction: these are the exact bytes fetch_libwebp_dist.sh downloaded, and
+  # keeping them is what lets a reviewer confirm the registry build is the same
+  # upstream release rather than take it on trust. Nothing reads them now that
+  # `kind` is "registry".
+  historical_url    = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-{version}.tar.gz"
+  historical_sha256 = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
   # No `source.windows` override: fetch_libwebp_dist.sh has no Windows branch.
   # The committed native/third_party/libwebp-dist-windows/ dist was built
   # once, by hand, by a since-deleted script

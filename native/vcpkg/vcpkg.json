@@ -1,8 +1,9 @@
 {
   "name": "ceyx-heif-stack",
   "version-string": "round2-od2-spike",
-  "description": "Consuming manifest for the OD-2 overlay-port spike: the HEIF stack (libheif + libde265 + kvazaar + aom) as vcpkg would deliver it.",
+  "description": "Consuming manifest for the product build's vcpkg-supplied third-party stack: the HEIF stack (libheif + libde265 + kvazaar + aom) plus libwebp. Round-2 began this as the OD-2 overlay-port spike; D5 makes it load-bearing for the product build.",
   "builtin-baseline": "abb6dda5cc32914d2e64d7d72b974dc301d1fc8a",
+  "$comment-dependencies": "libde265 and aom already arrive as transitive dependencies of libheif; they are ALSO listed explicitly because D5 consumes them directly (libde265 via the LIBDE265_* pre-seeding, aom via AOM_*), and a direct consumer must be a direct dependency -- otherwise a future libheif feature change could silently drop them from the install plan. libwebp has no path to this graph other than being declared here.",
   "dependencies": [
     {
       "name": "libheif",
@@ -11,12 +12,19 @@
         "kvazaar",
         "aom"
       ]
-    }
+    },
+    "libde265",
+    "libwebp"
   ],
+  "$comment-overrides": "N30: nothing floats with the baseline. libwebp and aom are REGISTRY ports, so an explicit override is what pins them. libde265 is deliberately absent from this list: it is supplied by the overlay port native/vcpkg/ports/libde265 (a fork), and overlay ports bypass the versions database entirely -- a version constraint cannot be applied to them. Its 1.1.1 pin is the literal `version` field in that port's own vcpkg.json, which is a stronger pin than an override (it selects the exact source tarball by SHA-512 in portfile.cmake).",
   "overrides": [
     {
       "name": "aom",
       "version": "3.15.0"
+    },
+    {
+      "name": "libwebp",
+      "version": "1.6.0"
     }
   ]
 }
