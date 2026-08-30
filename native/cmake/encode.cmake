@@ -59,20 +59,38 @@ if(CEYX_ENABLE_WEBP)
         NAMES sharpyuv
         HINTS ${WEBP_LIB_HINTS}
         NO_DEFAULT_PATH)
+    # 2026-08-30 (plan Task 8): EXIF/XMP/ICC embedding needs the mux writer and
+    # the demux reader. Both archives are ALREADY in the vendored dist --
+    # -DWEBP_BUILD_WEBPMUX=OFF (fetch_libwebp_dist.sh) disables the command-line
+    # TOOL, not the library -- so this is a link line, not a new dependency.
+    find_library(CEYX_WEBPMUX_LIBRARY
+        NAMES webpmux
+        HINTS ${WEBP_LIB_HINTS}
+        NO_DEFAULT_PATH)
+    find_library(CEYX_WEBPDEMUX_LIBRARY
+        NAMES webpdemux
+        HINTS ${WEBP_LIB_HINTS}
+        NO_DEFAULT_PATH)
 
-    if(CEYX_WEBP_INCLUDE_DIR AND CEYX_WEBP_LIBRARY AND CEYX_SHARPYUV_LIBRARY)
+    if(CEYX_WEBP_INCLUDE_DIR AND CEYX_WEBP_LIBRARY AND CEYX_SHARPYUV_LIBRARY
+       AND CEYX_WEBPMUX_LIBRARY AND CEYX_WEBPDEMUX_LIBRARY)
         target_include_directories(dng_decoder_native PRIVATE ${CEYX_WEBP_INCLUDE_DIR})
+        # Link order matters for static archives: mux/demux reference libwebp's
+        # symbols, so they precede it.
         target_link_libraries(dng_decoder_native
+            ${CEYX_WEBPMUX_LIBRARY} ${CEYX_WEBPDEMUX_LIBRARY}
             ${CEYX_WEBP_LIBRARY} ${CEYX_SHARPYUV_LIBRARY})
         set(CEYX_WEBP_ENABLED 1)
-        message(STATUS "WebP encode: static ${CEYX_WEBP_LIBRARY}")
+        message(STATUS "WebP encode+mux: static ${CEYX_WEBP_LIBRARY}")
     else()
         message(WARNING
-            "WebP encode disabled — vendored dist not found.\n"
+            "WebP encode disabled — vendored dist not found or not mux-capable.\n"
             "  searched under: ${WEBP_DIST_HINTS}\n"
             "  webp/encode.h = '${CEYX_WEBP_INCLUDE_DIR}'\n"
             "  libwebp       = '${CEYX_WEBP_LIBRARY}'\n"
             "  libsharpyuv   = '${CEYX_SHARPYUV_LIBRARY}'\n"
+            "  libwebpmux    = '${CEYX_WEBPMUX_LIBRARY}'\n"
+            "  libwebpdemux  = '${CEYX_WEBPDEMUX_LIBRARY}'\n"
             "Run native/scripts/fetch_libwebp_dist.sh. JPEG encode is unaffected; "
             "ceyx_encode_webp_rgba8 will return kCeyxEncodeErrUnsupported.")
     endif()
@@ -82,5 +100,27 @@ endif()
 
 target_compile_definitions(dng_decoder_native PRIVATE
     CEYX_ENABLE_WEBP=${CEYX_WEBP_ENABLED})
+
+# src/ffi/still_ffi_api.cpp routes HEIC/AVIF into src/heif_encode.cpp (plan
+# Task 7). Until that TU exists the arms must answer kCeyxStillErrUnsupported
+# instead of leaving MapHeifToStillError / ceyx_heif_still_decode_impl
+# undefined at dylib link time. Keyed on the file's existence — the same
+# advance-registration pattern cmake/tests.cmake:1433 uses for the codec tests —
+# so it flips automatically once Task 7 lands and the build is reconfigured.
+if(EXISTS "${SRC_DIR}/heif_encode.cpp")
+    set(CEYX_HEIF_ENCODE_TU 1)
+else()
+    set(CEYX_HEIF_ENCODE_TU 0)
+    message(STATUS
+        "still-decode: HEIC/AVIF arms stubbed (src/heif_encode.cpp absent)")
+endif()
+target_compile_definitions(dng_decoder_native PRIVATE
+    CEYX_HAS_HEIF_STILL_DECODE=${CEYX_HEIF_ENCODE_TU})
+
+# NOTE (deviation from plan Step 6): the plan adds src/webp_codec.cpp and
+# src/ffi/still_ffi_api.cpp via target_sources() here. cmake/pipeline.cmake:90
+# already collects them with file(GLOB_RECURSE "${SRC_DIR}/*.cpp"), so an
+# explicit target_sources() would compile both TUs twice and fail the dylib
+# link with duplicate symbols. Nothing to add.
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
