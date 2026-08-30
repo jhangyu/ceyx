@@ -296,30 +296,43 @@ jobs:
       # "HEIF decode is enabled but the vendored dist is missing".
       #
       # Cached in the same shape as Halide/LibRaw above, and for a much stronger
-      # reason: the script does not download a prebuilt dist, it BUILDS libheif
-      # (and kvazaar/aom) from source, which is minutes of runner time per job.
-      # The key covers the fetch script AND the vcpkg manifest + libde265 overlay
-      # port, because since D5 leg 2 the dist's libde265 comes from that port —
-      # a version bump there with an unchanged fetch script would otherwise
-      # restore a dist carrying the OLD libde265 and report success. arch_tag is
-      # part of the key because the two legs need different-architecture dylibs.
+      # reason: the carrier does not download a prebuilt dist, it BUILDS libheif
+      # (and kvazaar) from source, which is minutes of runner time per job.
+      #
+      # R4 (2026-08-31): the dist is now produced by the Python carrier
+      # (native/scripts/build_deps.py, the port of fetch_heif_deps.sh), so the
+      # cache key hashes the carrier and the MANIFEST it reads its versions,
+      # hashes and cmake options from — not the retired shell script. Missing
+      # native/deps/manifest.toml from this key would be the exact defect the
+      # libde265 clause below already guards against: a version bump that
+      # restores a stale dist from cache and reports success. The vcpkg manifest
+      # + libde265 overlay port stay in the key because since D5 leg 2 the
+      # dist's libde265 comes from that port. arch_tag is part of the key
+      # because the two legs need different-architecture dylibs.
       - name: Cache vendored HEIF (libheif + libde265) distribution
         id: cache-heif
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/${{ matrix.heif_dist_dir }}
-          key: heif-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_heif_deps.sh', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
+          key: heif-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/build_deps.py', 'native/scripts/deps/*.py', 'native/deps/manifest.toml', 'native/deps/arch_map.toml', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
 
-      # CEYX_VCPKG_PREFIX is mandatory here since D5 leg 2: build_libde265()
+      # CEYX_VCPKG_PREFIX is mandatory here since D5 leg 2: the libde265 stage
       # copies the dylib out of it and hard-fails when it is unset, rather than
       # falling back to a source build (a silent fallback would hide exactly the
       # wiring this change exists to prove).
-      - name: Fetch vendored HEIF distribution
-        env:
-          DNG_HEIF_ARCH: ${{ matrix.arch_tag }}
+      #
+      # --arch is passed EXPLICITLY rather than through the old DNG_HEIF_ARCH
+      # environment variable, and --dist names the same directory the cache
+      # step above and the assertions below use. The cross leg's dist path is a
+      # matrix value, so the carrier is never left to infer "host arch or not"
+      # from a runner it is cross-compiling on.
+      - name: Fetch vendored HEIF distribution (Python carrier)
         run: |
           export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
-          native/scripts/fetch_heif_deps.sh
+          python3 native/scripts/build_deps.py build heif-stack \
+              --platform macos \
+              --arch "${{ matrix.arch_tag }}" \
+              --dist "$GITHUB_WORKSPACE/${{ matrix.heif_dist_dir }}"
 
       # THE load-bearing evidence for D5 leg 2. A green build proves nothing
       # here: libheif links fine against a dylib whose recorded dependency is an

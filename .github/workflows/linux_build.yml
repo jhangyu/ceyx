@@ -63,7 +63,15 @@ jobs:
       - name: Install pytest for deps suite
         run: python -m pip install --disable-pip-version-check pytest
 
-      - name: Deps manifest/render/assertions test suite + no-shell lint
+      # R4: the suite now also covers the EXECUTION layer (deps/execute.py) and
+      # the Unix HEIF assembly (deps/heif.py, the port of fetch_heif_deps.sh),
+      # including a demonstrated-red case for every capability, licence and
+      # architecture assertion the shell script made. This leg does not build
+      # the HEIF dist itself (it configures with -DDNG_ENABLE_HEIF=OFF, see
+      # below), so this step is where the carrier's Linux-specific code paths —
+      # `nm -D`, `ldd`, and the readelf SONAME check whose missing instrument is
+      # a FAILURE rather than a skip — are exercised on a Linux runner at all.
+      - name: Deps manifest/render/execute/heif test suite + no-shell lint
         run: python3 -m pytest native/scripts/deps/ -q
 
       - name: Install build prerequisites (apt)

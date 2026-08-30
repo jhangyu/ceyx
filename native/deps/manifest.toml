@@ -410,16 +410,46 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
   CMAKE_CXX_COMPILER           = "clang-cl"
   CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
   CMAKE_MSVC_RUNTIME_LIBRARY   = "MultiThreaded"
+  # TRANSCRIPTION SOURCE CORRECTED 2026-08-31 (R4 Task #8, lead's ruling
+  # "BLOCKER A -- OPTION 1"). This overlay was originally transcribed from
+  # win_build_round6.sh (the 663-line full-capability script on branch
+  # ci/ci-green-round6). That is the WRONG source for this branch: the Windows
+  # script actually shipped here, build_heif_dist_windows.sh @ ci/round3,
+  # builds a DECODE-ONLY dist -- libde265 + libheif and nothing else.
+  #
+  # The defect was caught mechanically, not by reading: rendering this
+  # component for windows/x86_64 emitted WITH_KVAZAAR=ON / WITH_AOM_*=ON while
+  # build_heif_dist_windows.sh:164,168,169 pass all three OFF. As rendered
+  # before the fix, the Windows configure was also UNSATISFIABLE: it demanded
+  # {dist}/lib/aom.lib, yet [component.aom] deliberately has no
+  # `source.windows` block and its comment forbids inventing one -- so no
+  # Windows aom could ever be acquired to satisfy it.
+  #
+  # The round6 full-capability shape (kvazaar HEVC encoder + aom) stays PARKED
+  # by that ruling: Round 4's carrier reproduces today's green through Python,
+  # it does not expand Windows capability. Restoring it is a product scope
+  # change for the user to make, not a transcription choice -- so do not
+  # "restore" these three flags to ON on the strength of this comment alone.
+  WITH_KVAZAAR          = "OFF"
+  WITH_AOM_DECODER      = "OFF"
+  WITH_AOM_ENCODER      = "OFF"
   # K11/N9, layer 3: -DKVZ_STATIC_LIB belongs on LIBHEIF's compile, not
   # kvazaar's -- kvazaar.h assumes __declspec(dllimport) unless the CONSUMER
   # defines this, and kvazaar installs no CMake package config to propagate
-  # the usage requirement automatically.
+  # the usage requirement automatically. With WITH_KVAZAAR=OFF above it is now
+  # INERT (libheif never includes kvazaar.h), and it is kept rather than
+  # removed so that un-parking the round6 shape is a pure flag flip. Same for
+  # the KVAZAAR_LIBRARY/AOM_LIBRARY/*_INCLUDE_DIR values below and the
+  # WITH_*_PLUGIN keys inherited from cmake.base: libheif only consults them
+  # inside `if(WITH_KVAZAAR)` / `if(WITH_AOM_*)`, so they render into the argv
+  # but are never read. They cannot be dropped from the rendered argv in any
+  # case -- §4.2 rule 1 lets a platform overlay OVERRIDE a base key, never
+  # DELETE one.
   # K13/K14/N16: CMAKE_C_FLAGS/CXX_FLAGS REPLACE CMake's own MSVC defaults, so
-  # -DWIN32/-D_WINDOWS/-W3/-GR/-EHsc are restored by hand, exactly as
-  # build_heif_dist_windows.sh does.
-  # This dist is DECODE-ONLY on Windows: WITH_AOM_ENCODER/WITH_AOM_DECODER
-  # stay ON per the source script (encoder+decoder both requested there);
-  # only the tool-level ENABLE_DECODER override lives on libde265, not here.
+  # -DWIN32/-D_WINDOWS/-W3/-GR/-EHsc are restored by hand. (The source script
+  # passes no flags at all on libheif's configure and thus inherits exactly
+  # that default set; restoring it by hand here is equivalent, plus the inert
+  # define above.)
   CMAKE_C_FLAGS         = ["-DWIN32", "-D_WINDOWS", "-W3", "-DKVZ_STATIC_LIB"]
   CMAKE_CXX_FLAGS       = ["-DWIN32", "-D_WINDOWS", "-W3", "-GR", "-EHsc", "-DKVZ_STATIC_LIB"]
   LIBDE265_LIBRARY      = "{dist}/lib/de265.lib"
