@@ -127,7 +127,10 @@ jobs:
           path: ${{ runner.temp }}/spike-logs
           if-no-files-found: warn
 
-  macos:
+  # One job for every Unix-like leg. The steps are identical apart from how the
+  # assembler is installed, so they share a matrix rather than being duplicated
+  # — a second copy of these steps is a second place for them to drift.
+  unix:
     name: overlay ports (${{ matrix.triplet }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
@@ -137,6 +140,12 @@ jobs:
         include:
           - runner: macos-14
             triplet: arm64-osx-heif
+          # Added by user ruling (2026-08-31). NOTE: nothing on Linux links the
+          # HEIF stack today (linux_build.yml:113 passes -DDNG_ENABLE_HEIF=OFF),
+          # so this leg proves the ports BUILD on Linux — it proves nothing
+          # about the product. See DEVIATIONS.md D11.
+          - runner: ubuntu-latest
+            triplet: x64-linux-heif
           # DEFERRED BY USER RULING (2026-08-31): the x64-osx-heif leg is
           # commented out because macos-13 runners never got scheduled for this
           # branch — runner starvation, NOT a defect in the port, the triplet or
@@ -154,8 +163,13 @@ jobs:
       # Handoff §B: aom searches yasm FIRST and hard-rejects Homebrew's nasm
       # 3.02 on its `-Ox` string probe. vcpkg's aom port acquires its own
       # assembler, but installing yasm keeps the preferred one available.
-      - name: Install yasm
+      - name: Install yasm (macOS)
+        if: runner.os == 'macOS'
         run: brew install yasm || true
+
+      - name: Install yasm (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y yasm
 
       - name: Bootstrap vcpkg at the pinned baseline
         run: |

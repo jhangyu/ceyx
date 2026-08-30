@@ -94,6 +94,26 @@ Reference value: the current shell-script-produced dist
 subdirectory, not the decode library). The fork reproduces exactly that split, and never
 ships the tool on any platform (upstream's port ships it via `vcpkg_copy_tools`).
 
+## D11 [R] The `x64-linux-heif` leg proves the PORTS build, not the PRODUCT
+
+Added by user ruling, 2026-08-31. Read this before quoting the Linux leg as evidence of
+anything: **nothing on Linux links the HEIF stack today.**
+`.github/workflows/linux_build.yml:113` passes `-DDNG_ENABLE_HEIF=OFF` (its own comment at
+:103-106 says "no Linux heif-dist is vendored"); same for `android_build.yml:139` and
+`matrix_psnr.yml:76`. Only macOS and Windows consume the dist.
+
+So a green Linux leg means "these four libraries compile and install correctly under the
+overlay ports on Linux" and nothing more. It is not evidence that a Linux consumer works,
+because there is no Linux consumer. Shipping HEIF on Linux would be a product scope change
+with its own contract, not a consequence of this leg.
+
+One thing the leg does buy structurally: vcpkg's `scripts/toolchains/linux.cmake:84-85`
+appends `-fPIC` to `CMAKE_C_FLAGS_INIT`/`CMAKE_CXX_FLAGS_INIT` unconditionally, so K15
+(static archives without PIC failing at link time with an error naming libheif rather than
+the archive at fault) is absorbed by the carrier — the same family of win as N7 and N16 on
+Windows. The kvazaar portfile still passes `-DCMAKE_POSITION_INDEPENDENT_CODE=ON` explicitly
+(N8 reasoning: do not silently depend on someone else's default).
+
 ## D10 [R] The `x64-osx-heif` CI leg is deferred — user ruling, 2026-08-31
 
 **Not a code deviation and not a FALLBACK.** `macos-13` runners were never scheduled for this
