@@ -1419,6 +1419,30 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_render_halide ${DNG_LINUX_TEST_LIBS})
 endif()
 
+# --- Codec expansion (2026-08-30) ------------------------------------------
+# test_abi_layout has no external codec dependency: it only pins struct layouts
+# and error-code values, so it builds even on a platform with no dist at all.
+add_executable(test_abi_layout tests/test_abi_layout.cpp)
+target_include_directories(test_abi_layout PRIVATE ${INC_DIR})
+target_link_libraries(test_abi_layout PRIVATE dng_decoder_native)
+
+# The three codec round-trip targets are registered HERE, in advance, each
+# guarded on its source file existing. That is deliberate: Tasks 7/8/9 are
+# meant to run in parallel and must not contend over this file. A guard that
+# is false today simply means that task has not landed yet.
+foreach(_codec_test test_codec_roundtrip test_codec_heif test_codec_jxl)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_codec_test}.cpp")
+        add_executable(${_codec_test} tests/${_codec_test}.cpp)
+        target_include_directories(${_codec_test} PRIVATE ${INC_DIR} ${SRC_DIR})
+        target_link_libraries(${_codec_test} PRIVATE dng_decoder_native)
+        message(STATUS "codec test enabled: ${_codec_test}")
+    else()
+        # Printed, never silent: a skipped target and a passing one must not
+        # look the same in a build log.
+        message(STATUS "codec test SKIPPED (source absent): ${_codec_test}")
+    endif()
+endforeach()
+
 endif() # NOT DNG_CROSS_BUILD (test targets)
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)
