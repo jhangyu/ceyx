@@ -51,6 +51,29 @@ LAYER 1 -- argv equivalence (pure, runs on any host, covers Windows)
              cannot be equal by construction and equality would be a
              meaningless assertion. Nothing else is normalised.
        Expected: kvazaar PASS, libheif PASS.
+
+  L1B RETIREMENT (registered 2026-08-31, after D9 deleted the referent)
+       L1B compares against a file that D9 deletes BY DESIGN. Once gone, no
+       future run can re-derive the comparison -- the referent does not
+       exist anywhere, and the dist it built cannot be rebuilt either.
+       Three candidate semantics, and why the third is right:
+         (a) keep printing SKIP and keep exiting 0 -- REJECTED, it hides
+             that transcription is no longer verified;
+         (b) count L1B as a skipped layer, so the gate exits 2 forever --
+             REJECTED, it destroys the gate's value as an ongoing
+             regression check to restate a fact that never changes;
+         (c) RETIRED: exit 0 is legitimate, but every run PRINTS that the
+             check is closed and names the artefact holding its permanent
+             evidence. Chosen.
+       So a RETIRED layer does NOT force INCOMPLETE. That is a deliberate
+       amendment to the exit-code rule below, made when the referent's
+       permanent disappearance became a fact rather than a hypothetical --
+       not a relaxation to reach green: L1B was PASSING when it was
+       retired, and its evidence was captured before deletion.
+       Absence of the archived artefact downgrades the wording to
+       RETIRED-UNVERIFIED but not the exit code, because docs/ is
+       deliberately never version-controlled here and a fresh clone
+       legitimately lacks it.
   L1 SCOPE LIMITS (spec section 6.1) -- declared, not silently absent:
        - libde265 and aom on macOS/Linux: acquired from the vcpkg registry;
          we author no argv for them, so there is nothing to diff against
@@ -113,9 +136,15 @@ EXIT CODES (self-captured by the caller; this script also writes its own
 exit code as the last line of the report):
   0  every REQUESTED layer PASSED
   1  at least one check FAILED (including the distinctness guard)
-  2  INCOMPLETE -- a requested layer was skipped for missing inputs. A
+  2  INCOMPLETE -- a requested layer was SKIPPED for missing inputs. A
      skipped layer can never produce exit 0, so a partial run is
      mechanically distinguishable from a full one.
+     One registered exception, and only one: a RETIRED check (currently
+     only L1B post-D9) does not force INCOMPLETE, because its input is
+     permanently gone by design rather than merely absent today. See
+     "L1B RETIREMENT" above for why the alternatives were rejected. Every
+     RETIRED row prints, on every run, that the check is closed and where
+     its evidence lives -- so exit 0 never means "this was verified".
 """
 from __future__ import annotations
 
@@ -157,6 +186,11 @@ _L1B_COMPONENTS = {
     "kvazaar": "build-kvazaar",
     "libheif": "build-heif",
 }
+# Where L1B's permanent evidence lives once D9 deletes its referent. docs/ is
+# deliberately never version-controlled in this project, so this file is
+# expected to be absent on a fresh clone -- see the retirement branch.
+_L1B_ARCHIVED_EVIDENCE = _REPO_ROOT / "docs" / "logs" / "2026-08-31" / "r5-d6-full-run.txt"
+
 _L1B_SKIPPED = (
     ("libde265", "macos/linux", "vcpkg registry component -- we author no argv (spec 6.1 scope limit)"),
     ("aom", "macos/linux", "vcpkg registry component -- we author no argv (spec 6.1 scope limit)"),
@@ -197,6 +231,11 @@ class Verdict:
     PASS = "PASS"
     FAIL = "FAIL"
     SKIP = "SKIP"
+    # A check whose referent no longer exists BY DESIGN and can never be
+    # re-derived. Distinct from SKIP (missing input that could be supplied)
+    # and from PASS (something was verified this run). Does not force
+    # INCOMPLETE; always prints where its permanent evidence lives.
+    RETIRED = "RETIRED"
 
 
 class Report:
@@ -363,14 +402,43 @@ def layer1b(report: Report, loaded: dict[str, Any], legacy_script: Optional[Path
         report.record("L1B", f"{comp}/{scope}", Verdict.SKIP, why)
 
     if not _LEGACY.is_file():
-        report.record(
-            "L1B",
-            "legacy-script",
-            Verdict.SKIP,
-            f"{_LEGACY} absent (deleted by D9?) -- transcription check "
-            f"is only available while the legacy script is still in the tree",
-        )
+        # RETIRED, not skipped. See the docstring's "L1B RETIREMENT" section:
+        # D9 deletes the legacy script by design, so L1B's referent is gone
+        # PERMANENTLY and no future run can ever recreate it. Treating that as
+        # a skip would pin the gate at exit 2 forever and destroy its value as
+        # an ongoing regression check; treating it as a silent pass would hide
+        # that transcription is no longer being verified. RETIRED is neither:
+        # it exits 0 but prints, every run, that the check is closed and where
+        # its permanent evidence lives.
+        archive = _L1B_ARCHIVED_EVIDENCE
+        if archive.is_file():
+            hits = sum(
+                1 for ln in archive.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("[L1B] PASS")
+            )
+            report.record(
+                "L1B",
+                "retired",
+                "RETIRED",
+                f"legacy script {_LEGACY.name} deleted by D9 as designed; "
+                f"transcription was verified BEFORE deletion and the permanent "
+                f"record is {archive} ({hits} L1B PASS lines). No future run can "
+                f"re-derive this -- the referent no longer exists.",
+            )
+        else:
+            report.record(
+                "L1B",
+                "retired-unverified",
+                "RETIRED",
+                f"legacy script {_LEGACY.name} absent (D9). The historical "
+                f"artefact {archive} was NOT found on this host -- expected on a "
+                f"fresh clone, since docs/ is deliberately never version-"
+                f"controlled in this project. The evidence exists in the "
+                f"round-5 log directory of the machine that ran the gate; its "
+                f"absence here does not re-open the check.",
+            )
         return
+
     text = _LEGACY.read_text(encoding="utf-8")
 
     for comp, marker in _L1B_COMPONENTS.items():
@@ -544,6 +612,37 @@ def layer2(report: Report, platform: str, arch: str, baseline: Path, carrier: Op
 
     base_vec = _capability_vector(platform, arch, Path(baseline))
     carr_vec = _capability_vector(platform, arch, Path(carrier))
+
+    # CARDINALITY GUARD, pre-registered like L1A's combo count. Without it a
+    # verdict vector that silently lost assertions -- an upstream edit to
+    # deps.heif's symbol tuples, or an artefact path that stopped resolving --
+    # would still report "every assertion agreed" and pass, because agreeing
+    # about fewer things is trivially easier. The expected value is DERIVED
+    # from the source tuples rather than hard-coded, so legitimately adding an
+    # assertion updates it, while losing one at runtime fails here.
+    expected = (
+        len(heif_mod._REQUIRED_HEIF_SYMBOLS)
+        + len(heif_mod._FORBIDDEN_HEIF_SYMBOLS)
+        + 1  # A-DEPS-DE265
+        + 2  # A-ARCH-libheif, A-ARCH-libde265
+    )
+    if len(base_vec) != expected or len(carr_vec) != expected:
+        report.record(
+            "L2",
+            "assertion-cardinality",
+            Verdict.FAIL,
+            f"expected {expected} assertions per dist, got baseline={len(base_vec)} "
+            f"carrier={len(carr_vec)} -- a shrunken vector agrees more easily and "
+            f"must never pass silently",
+        )
+        return
+    report.record(
+        "L2",
+        "assertion-cardinality",
+        Verdict.PASS,
+        f"{expected} assertions evaluated against each dist",
+    )
+
     for assertion in sorted(set(base_vec) | set(carr_vec)):
         b = base_vec.get(assertion, "<absent>")
         c = carr_vec.get(assertion, "<absent>")
