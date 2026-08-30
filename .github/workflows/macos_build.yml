@@ -369,6 +369,47 @@ jobs:
             exit 1
           fi
 
+      # D4/R-7 (round-5 contract AC4): native/scripts/deps/probe/probe_codecs.c
+      # has never been compiled or run anywhere (Spec §5.6). It is run here,
+      # on the native (non-cross) arm64 leg only, against the dist this same
+      # job just fetched two steps above -- the dist is NOT committed to git
+      # (native/third_party/heif-dist/* is gitignored except PROVENANCE.md),
+      # so the probe must consume the freshly-built dist in this job rather
+      # than assuming a checked-in one. The dist carries kvazaar (HEVC
+      # encoder) + aom (AV1 encoder/decoder) + libde265 (HEVC decoder) per
+      # Spec §3.2, so all four capability bits are expected clear (RC=0).
+      #
+      # Restricted to matrix.cross == 'false': the cross leg's dist
+      # (heif-dist-x86_64) is built for x86_64 and cannot be exec'd on this
+      # arm64 runner without Rosetta, which this workflow does not provision.
+      - name: Compile + run functional capability probe (D4/R-7)
+        if: matrix.cross == 'false'
+        run: |
+          set -e
+          DIST="$GITHUB_WORKSPACE/${{ matrix.heif_dist_dir }}"
+          PROBE_DIR="$GITHUB_WORKSPACE/native/scripts/deps/probe"
+          clang \
+            -I"$DIST/include" \
+            -L"$DIST/lib" \
+            -Wl,-rpath,"$DIST/lib" \
+            -o "$PROBE_DIR/probe_codecs" \
+            "$PROBE_DIR/probe_codecs.c" \
+            -lheif
+          file "$PROBE_DIR/probe_codecs"
+          set +e
+          "$PROBE_DIR/probe_codecs"
+          RC=$?
+          set -e
+          echo "RC=${RC}"
+          # Bit convention (probe_codecs.c): bit0=HEVC-ENC,bit1=AV1-ENC,
+          # bit2=HEVC-DEC,bit3=AV1-DEC; a SET bit means that capability is
+          # ABSENT. This dist ships all four, so any set bit is a real defect.
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::probe_codecs exited ${RC} (nonzero bits = missing capabilities)"
+            exit "${RC}"
+          fi
+          echo "A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0"
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
