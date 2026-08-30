@@ -81,15 +81,34 @@ if [ "${IS_MACHO}" -gt 0 ]; then
     exit 2
   fi
   # Output to a file then grep it -- never `otool | grep -q` / `nm | grep -q`,
-  # which under pipefail reports 141 when grep exits early on a match.
+  # which under pipefail reports 141 when grep exits early on a match. Also
+  # capture the tool's OWN exit code immediately: a tool that failed to parse
+  # the file (wrong format, corrupt input) prints an error to stdout/stderr
+  # and a naive `grep -c PATTERN` on that error text finds 0 matches, which
+  # reads exactly like a clean verdict. A non-zero tool exit is CANNOT_CHECK,
+  # never CLEAN.
+  set +e
   otool -l "${TARGET}" > "${TMP}/loadcmds.txt" 2>&1
+  OTOOL_RC=$?
+  set -e
+  if [ "${OTOOL_RC}" -ne 0 ]; then
+    echo "CANNOT_CHECK: otool exited ${OTOOL_RC} inspecting ${TARGET}: $(cat "${TMP}/loadcmds.txt")" >&2
+    exit 2
+  fi
   set +e
   grep -c '__DWARF' "${TMP}/loadcmds.txt" > "${TMP}/dwarf_count.txt"
   set -e
   DWARF_COUNT="$(cat "${TMP}/dwarf_count.txt")"
   echo "DWARF_SEGMENT_COUNT=${DWARF_COUNT}"
 
+  set +e
   nm -a "${TARGET}" > "${TMP}/nmall.txt" 2>&1
+  NM_RC=$?
+  set -e
+  if [ "${NM_RC}" -ne 0 ]; then
+    echo "CANNOT_CHECK: nm exited ${NM_RC} inspecting ${TARGET}: $(cat "${TMP}/nmall.txt")" >&2
+    exit 2
+  fi
   set +e
   grep -c ' OSO ' "${TMP}/nmall.txt" > "${TMP}/oso_count.txt"
   set -e
@@ -113,19 +132,75 @@ if [ "${IS_MACHO}" -gt 0 ]; then
 fi
 
 if [ "${IS_ELF}" -gt 0 ]; then
-  if ! command -v readelf > /dev/null 2>&1; then
-    echo "CANNOT_CHECK: readelf unavailable" >&2
+  # Prefer native readelf (default on Linux runners, most reliable). Where
+  # it's absent -- e.g. auditing a downloaded Linux .so from a macOS host --
+  # fall back to llvm-objdump, which macOS's CommandLineTools ship as a
+  # cross-format binutils and can read ELF section headers fine. Either way,
+  # capture the tool's OWN exit code before trusting its grep count: an error
+  # message misread as "zero matches" is a false CLEAN, not evidence.
+  SECTIONS_TOOL=""
+  SECTIONS_RC=1
+  if command -v readelf > /dev/null 2>&1; then
+    set +e
+    readelf -S "${TARGET}" > "${TMP}/sections.txt" 2>&1
+    SECTIONS_RC=$?
+    set -e
+    SECTIONS_TOOL="readelf -S"
+  else
+    OBJDUMP=""
+    if command -v llvm-objdump > /dev/null 2>&1; then
+      OBJDUMP="llvm-objdump"
+    elif command -v xcrun > /dev/null 2>&1 && xcrun --find llvm-objdump > /dev/null 2>&1; then
+      OBJDUMP="$(xcrun --find llvm-objdump)"
+    fi
+    if [ -z "${OBJDUMP}" ]; then
+      echo "CANNOT_CHECK: neither readelf nor llvm-objdump available" >&2
+      exit 2
+    fi
+    set +e
+    "${OBJDUMP}" --section-headers "${TARGET}" > "${TMP}/sections.txt" 2>&1
+    SECTIONS_RC=$?
+    set -e
+    SECTIONS_TOOL="${OBJDUMP} --section-headers"
+  fi
+  if [ "${SECTIONS_RC}" -ne 0 ]; then
+    echo "CANNOT_CHECK: '${SECTIONS_TOOL}' exited ${SECTIONS_RC} inspecting ${TARGET}: $(cat "${TMP}/sections.txt")" >&2
     exit 2
   fi
-  readelf -S "${TARGET}" > "${TMP}/sections.txt" 2>&1
+  # Success-shape guard: a section listing that parsed at all must contain a
+  # section named .text (every linked ELF shared object has one). Its
+  # absence means the tool ran but didn't actually produce a section table
+  # (e.g. printed a warning to stdout instead) -- treat that as CANNOT_CHECK
+  # rather than trusting a `.debug_` count of 0 from unparsed output.
+  set +e
+  grep -c '\.text' "${TMP}/sections.txt" > "${TMP}/text_count.txt"
+  set -e
+  if [ "$(cat "${TMP}/text_count.txt")" -eq 0 ]; then
+    echo "CANNOT_CHECK: '${SECTIONS_TOOL}' output for ${TARGET} does not look like a section table (no .text section found)" >&2
+    exit 2
+  fi
   set +e
   grep -c '\.debug_' "${TMP}/sections.txt" > "${TMP}/count.txt"
   set -e
   COUNT="$(cat "${TMP}/count.txt")"
   echo "DEBUG_SECTION_COUNT=${COUNT}"
+  set +e
+  grep -c '\.symtab' "${TMP}/sections.txt" > "${TMP}/symtab_count.txt"
+  set -e
+  SYMTAB_COUNT="$(cat "${TMP}/symtab_count.txt")"
+  echo "SYMTAB_SECTION_COUNT=${SYMTAB_COUNT}"
   if [ "${COUNT}" -gt 0 ]; then
     echo "DEBUG_INFO_PRESENT: ${TARGET} has .debug_* sections"
     exit 1
+  fi
+  if [ "${SYMTAB_COUNT}" -gt 0 ]; then
+    # Weaker signal than .debug_*: an intact symbol table (file(1) calls
+    # this "not stripped") leaks less than DWARF but is still worth noting.
+    # Not gated on -- `strip --strip-debug` (what this repo's dist scripts
+    # run) deliberately keeps .symtab while removing .debug_* sections, so
+    # failing the gate on symtab alone would make every correctly-stripped
+    # new dist fail.
+    echo "SYMTAB_PRESENT_NOTE: ${TARGET} retains a .symtab section (no .debug_* sections; not gated, informational only)"
   fi
   echo "CLEAN: ${TARGET}"
   exit 0
