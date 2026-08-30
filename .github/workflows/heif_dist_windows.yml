@@ -101,11 +101,19 @@ jobs:
       # directions on this project before (reporting a wrapper's code rather
       # than the command's, and a trailing filter's code rather than the
       # build's).
+      # Invoked through the SINGLE CARRIER ENTRY POINT (build_deps.py), which is
+      # the agreed team contract. The earlier interim form,
+      # `python -m deps.win_heif_dist --dist ...`, was a stopgap while the
+      # heif-stack/windows dispatch did not exist; it still works and is still
+      # the way to drive this module directly, but CI goes through the contract
+      # so that one command shape covers every platform.
       - name: Build the HEIF dist (Python carrier)
         shell: pwsh
-        working-directory: ${{ github.workspace }}/native/scripts
+        working-directory: ${{ github.workspace }}
         run: |
-          python -m deps.win_heif_dist --dist "${{ github.workspace }}/native/third_party/heif-dist-windows"
+          python native/scripts/build_deps.py build heif-stack `
+            --platform windows --arch x86_64 `
+            --dist "${{ github.workspace }}/native/third_party/heif-dist-windows"
           $RC = $LASTEXITCODE
           Write-Host "HEIF_DIST_WINDOWS_RC=$RC"
           exit $RC
