@@ -86,11 +86,22 @@ LAYER 3 -- consumer equivalence (needs a decoder linked to the carrier dist)
   A missing binary is a SKIP with a printed one-line declaration, never a
   PASS.
 
+LAYER SELECTION (--layers, default l1,l2,l3)
+  A layer left out is reported `N/REQ` and the requested set is printed in
+  the report header, so a narrowed run is never mistakable for a full one.
+  This exists for one honest reason, not for convenience: **layer 2 is
+  genuinely impossible in a cloud checkout on macOS**. macos_build.yml
+  builds the carrier dist into native/third_party/heif-dist, and the macOS
+  baseline binaries are NOT tracked in git (only PROVENANCE.md is), so no
+  independent baseline exists there to compare against. The distinctness
+  guard below turns the resulting self-comparison into a FAIL rather than
+  a perfect verdict vector.
+
 EXIT CODES (self-captured by the caller; this script also writes its own
 exit code as the last line of the report):
-  0  every requested layer PASSED
-  1  at least one layer FAILED
-  2  INCOMPLETE -- at least one layer was skipped (missing inputs). A
+  0  every REQUESTED layer PASSED
+  1  at least one check FAILED (including the distinctness guard)
+  2  INCOMPLETE -- a requested layer was skipped for missing inputs. A
      skipped layer can never produce exit 0, so a partial run is
      mechanically distinguishable from a full one.
 """
@@ -165,10 +176,10 @@ class Report:
         print(f"[{layer}] {verdict:<4} {check}" + (f" -- {detail}" if detail else ""))
 
     def counts(self, layer: str) -> dict[str, int]:
-        out = {Verdict.PASS: 0, Verdict.FAIL: 0, Verdict.SKIP: 0}
+        out = {Verdict.PASS: 0, Verdict.FAIL: 0, Verdict.SKIP: 0, "N/REQ": 0}
         for row_layer, _, verdict, _ in self.rows:
             if row_layer == layer:
-                out[verdict] += 1
+                out[verdict] = out.get(verdict, 0) + 1
         return out
 
     def layer_verdict(self, layer: str) -> str:
@@ -463,6 +474,40 @@ def layer2(report: Report, platform: str, arch: str, baseline: Path, carrier: Op
         report.record("L2", "carrier-dist", Verdict.SKIP, f"{carrier} is not a directory")
         return
 
+    # DISTINCTNESS GUARD -- FAIL, never SKIP and never PASS.
+    #
+    # This is the single most dangerous false green available to this gate.
+    # macos_build.yml builds the carrier dist INTO
+    # native/third_party/heif-dist -- the very path this script defaults to
+    # for the baseline -- and the macOS baseline binaries are NOT tracked in
+    # git (only PROVENANCE.md is). So in a cloud checkout there is no
+    # baseline at all: the carrier build creates the directory, and pointing
+    # both arguments at it would compare a dist against ITSELF and report a
+    # perfect identical-verdict vector. That green would be structurally
+    # meaningless and indistinguishable from a real one in the report.
+    #
+    # Same hazard on Windows for the opposite reason: heif-dist-windows IS
+    # tracked, and heif_dist_windows.yml builds over it, destroying the
+    # baseline in the workspace. A Windows CI comparison must copy the
+    # committed dist aside BEFORE the carrier build step runs.
+    if Path(baseline).resolve() == Path(carrier).resolve():
+        report.record(
+            "L2",
+            "dists-are-distinct",
+            Verdict.FAIL,
+            f"baseline and carrier resolve to the SAME directory "
+            f"({Path(baseline).resolve()}) -- this would compare a dist against "
+            f"itself and manufacture a perfect verdict vector. Supply a baseline "
+            f"that was not produced by the carrier.",
+        )
+        return
+    report.record(
+        "L2",
+        "dists-are-distinct",
+        Verdict.PASS,
+        "baseline and carrier are different directories",
+    )
+
     base_vec = _capability_vector(platform, arch, Path(baseline))
     carr_vec = _capability_vector(platform, arch, Path(carrier))
     for assertion in sorted(set(base_vec) | set(carr_vec)):
@@ -535,22 +580,53 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="override the L1B shell baseline (used to demonstrate the check red "
         "against a deliberately mutated copy; never used for the real verdict)",
     )
+    parser.add_argument(
+        "--layers",
+        default="l1,l2,l3",
+        help="comma-separated subset of l1,l2,l3 to run. A layer left out is "
+        "reported as N/REQ (not requested) and named in the report header, so a "
+        "narrowed run can never be mistaken for a full one.",
+    )
     parser.add_argument("--report", default=None, help="write the artefact here")
     args = parser.parse_args(argv)
 
     loaded = manifest_mod.load()
     report = Report()
 
-    layer1a(report, loaded)
-    layer1b(report, loaded, Path(args.legacy_script) if args.legacy_script else None)
-    layer2(
-        report,
-        args.platform,
-        args.arch,
-        Path(args.baseline_dist),
-        Path(args.carrier_dist) if args.carrier_dist else None,
-    )
-    layer3(report, args.consumer_command.split() if args.consumer_command else None)
+    requested = {x.strip().lower() for x in args.layers.split(",") if x.strip()}
+    unknown = requested - {"l1", "l2", "l3"}
+    if unknown:
+        parser.error(f"unknown layer(s) {sorted(unknown)}; expected any of l1,l2,l3")
+
+    if "l1" in requested:
+        layer1a(report, loaded)
+        layer1b(report, loaded, Path(args.legacy_script) if args.legacy_script else None)
+    else:
+        report.record("L1A", "not-requested", "N/REQ", "--layers excluded L1")
+
+    if "l2" in requested:
+        layer2(
+            report,
+            args.platform,
+            args.arch,
+            Path(args.baseline_dist),
+            Path(args.carrier_dist) if args.carrier_dist else None,
+        )
+    else:
+        report.record(
+            "L2",
+            "not-requested",
+            "N/REQ",
+            "--layers excluded L2. NOTE: capability equivalence needs a baseline "
+            "dist NOT produced by the carrier. In a cloud checkout the macOS "
+            "baseline does not exist (untracked), so L2 is genuinely unavailable "
+            "there -- it is not being skipped for convenience.",
+        )
+
+    if "l3" in requested:
+        layer3(report, args.consumer_command.split() if args.consumer_command else None)
+    else:
+        report.record("L3", "not-requested", "N/REQ", "--layers excluded L3")
 
     failed = any(v == Verdict.FAIL for _, _, v, _ in report.rows)
     # A skipped LAYER (not merely a declared in-layer scope skip) forces
@@ -558,7 +634,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     skipped_layers = [
         layer
         for layer in ("L1A", "L2", "L3")
-        if report.counts(layer)[Verdict.SKIP] > 0 or report.counts(layer)[Verdict.PASS] == 0
+        if layer.lower().startswith(tuple(requested))
+        and (report.counts(layer)[Verdict.SKIP] > 0 or report.counts(layer)[Verdict.PASS] == 0)
     ]
     exit_code = 1 if failed else (2 if skipped_layers else 0)
 
@@ -569,6 +646,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"- baseline dist: {args.baseline_dist}",
         f"- carrier dist: {args.carrier_dist or '<not supplied>'}",
         f"- consumer command: {args.consumer_command or '<not supplied>'}",
+        f"- LAYERS REQUESTED: {sorted(requested)} "
+        f"(a layer not requested is reported N/REQ, never PASS)",
         f"- skipped layers: {skipped_layers or 'none'}",
         "- criteria: pre-registered in this script's module docstring "
         "(native/tests/run_dist_equivalence.py); no byte-identity comparison of "
