@@ -29,7 +29,7 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   # without requiring Homebrew on the host machine.
   #
   # Phase 2 (HEIC): libheif/libde265 are built by
-  # native/scripts/fetch_heif_deps.sh with CMAKE_INSTALL_NAME_DIR=@rpath, so
+  # native/scripts/build_deps.py build heif-stack with CMAKE_INSTALL_NAME_DIR=@rpath, so
   # they already carry @rpath install names and need no rewriting -- they are
   # simply staged next to the decoder dylib by native/cmake/heif.cmake and
   # embedded here. They are DYNAMICALLY linked on purpose: both are

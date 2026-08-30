@@ -1,6 +1,6 @@
 # heif.cmake - HEIC/HEIF decode route (libheif + libde265, DYNAMICALLY linked).
 #
-# The dist is produced by native/scripts/fetch_heif_deps.sh; see
+# The dist is produced by `native/scripts/build_deps.py build heif-stack`; see
 # native/third_party/heif-dist/PROVENANCE.md for versions, hashes, the exact
 # decode-only configure flags and the LGPL-3 relinking rationale.
 #
@@ -9,7 +9,7 @@
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
 if(DNG_ENABLE_HEIF)
-    # Dist selection (2026-08-28). fetch_heif_deps.sh writes a host-architecture
+    # Dist selection (2026-08-28). build_deps.py's heif-stack build writes a host-architecture
     # dist to third_party/heif-dist and a cross-architecture one to
     # third_party/heif-dist-<arch>, so an x86_64 cross-build cannot clobber the
     # arm64 dist a shared working tree is using. Prefer the arch-suffixed dist
@@ -32,7 +32,9 @@ if(DNG_ENABLE_HEIF)
         # appended, because a heif-dist/ left behind by a developer running
         # fetch_heif_deps.sh holds Mach-O dylibs, and letting the search fall
         # through to it would surface as a link error naming the decoder rather
-        # than naming this mismatch.
+        # than naming this mismatch. (Historically produced by the now-deleted
+        # native/scripts/fetch_heif_deps.sh; same hazard applies to a dist left
+        # behind by build_deps.py's heif-stack build.)
         set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-windows")
     endif()
     set(HEIF_INCLUDE_HINTS "")
@@ -76,7 +78,8 @@ if(DNG_ENABLE_HEIF)
                 "  heif.h    = '${HEIF_INCLUDE_DIR}'\n"
                 "  libheif   = '${HEIF_LIBRARY}'\n"
                 "  libde265  = '${DE265_LIBRARY}'\n"
-                "Run native/scripts/fetch_heif_deps.sh, or configure with "
+                "Run `python3 native/scripts/build_deps.py build heif-stack "
+                "--dist ${HEIF_DIST_DIR}`, or configure with "
                 "-DDNG_ENABLE_HEIF=OFF to build without the HEIC route.")
         endif()
     endif()
@@ -103,7 +106,8 @@ if(DNG_ENABLE_HEIF)
                         "  has archs '${HEIF_HAVE_ARCHS}', this build targets "
                         "'${CMAKE_OSX_ARCHITECTURES}'.\n"
                         "Rebuild the dist for the target architecture:\n"
-                        "  DNG_HEIF_ARCH=${_heif_arch} native/scripts/fetch_heif_deps.sh\n"
+                        "  python3 native/scripts/build_deps.py build heif-stack "
+                        "--arch ${_heif_arch}\n"
                         "or configure with -DDNG_ENABLE_HEIF=OFF.")
                 endif()
             endforeach()
@@ -140,8 +144,8 @@ if(DNG_ENABLE_HEIF)
         # Stage the two dylibs NEXT TO the built decoder library. Two reasons,
         # both load-bearing:
         #  1. dng_decoder_native records them as @rpath/libheif.1.dylib and
-        #     @rpath/libde265.0.dylib (their install names, set by the fetch
-        #     script), and the dylib carries an @loader_path rpath, so a bare
+        #     @rpath/libde265.0.dylib (their install names, set by the
+        #     heif-stack build), and the dylib carries an @loader_path rpath, so a bare
         #     dlopen out of the build directory resolves them.
         #  2. scripts/build_apps.py Phase 1 copies every sibling *.dylib from
         #     the build dir into plugin/macos/Libraries/, which is how they

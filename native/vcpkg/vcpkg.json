@@ -3,7 +3,7 @@
   "version-string": "round2-od2-spike",
   "description": "Consuming manifest for the product build's vcpkg-supplied third-party stack: the HEIF stack (libheif + libde265 + kvazaar + aom) plus libwebp. Round-2 began this as the OD-2 overlay-port spike; D5 makes it load-bearing for the product build.",
   "builtin-baseline": "abb6dda5cc32914d2e64d7d72b974dc301d1fc8a",
-  "$comment-dependencies": "CORE = what every consuming platform needs. libwebp is core because native/cmake/encode.cmake links it on all desktop platforms. The HEIF stack sits behind the `heif` feature below, which is a DEFAULT feature -- so an unqualified `vcpkg install` against this manifest resolves exactly what it resolved before D5, and .github/workflows/port_spike.yml keeps working unchanged. A leg that needs libwebp alone (the Linux product build passes -DDNG_ENABLE_HEIF=OFF) adds --x-no-default-features and skips building aom/libheif/kvazaar entirely, rather than paying for a stack it then disables.",
+  "$comment-dependencies": "CORE = what every consuming platform needs. libwebp is core because native/cmake/encode.cmake links it on all desktop platforms. The HEIF stack sits behind the `heif` feature below, which is a DEFAULT feature -- so an unqualified `vcpkg install` against this manifest resolves exactly what it resolved before D5. A leg that needs libwebp alone (the Linux product build passes -DDNG_ENABLE_HEIF=OFF) adds --x-no-default-features and skips building aom/libheif/kvazaar entirely, rather than paying for a stack it then disables.",
   "dependencies": [
     "libwebp"
   ],
@@ -26,7 +26,7 @@
       ]
     },
     "de265": {
-      "description": "libde265 ALONE, without libheif/kvazaar/aom. This is what the macOS product legs install (D5 leg 2): they take libde265 from vcpkg but still build libheif itself from source via fetch_heif_deps.sh, because Spec §3.2 disqualifies every registry libheif (none offers a kvazaar HEVC-encoder feature at any version, only x265/GPL-2.0). Installing the full `heif` feature there would build a second, unused libheif and pay for aom+kvazaar twice. Selected with --x-no-default-features --x-feature=de265, so the default `heif` feature (and port_spike.yml's use of it) is untouched.",
+      "description": "libde265 ALONE, without libheif/kvazaar/aom. This is what the macOS product legs install (D5 leg 2): they take libde265 from vcpkg but still build libheif itself from source via `native/scripts/build_deps.py build heif-stack` (the Python carrier; the legacy fetch_heif_deps.sh shell script was deleted in D9), because Spec §3.2 disqualifies every registry libheif (none offers a kvazaar HEVC-encoder feature at any version, only x265/GPL-2.0). Installing the full `heif` feature there would build a second, unused libheif and pay for aom+kvazaar twice. Selected with --x-no-default-features --x-feature=de265, so the default `heif` feature is untouched.",
       "dependencies": [
         "libde265"
       ]

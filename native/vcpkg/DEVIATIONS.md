@@ -121,8 +121,9 @@ branch across four consecutive runs, so the x86-64 macOS leg produced no evidenc
 The user ruled: drop that platform from the spike flow, get `windows x86-64` and
 `arm64-osx-heif` green first, handle x64-osx later.
 
-- The matrix entry in `.github/workflows/port_spike.yml` is **commented out**, not deleted.
-  Restoring it is un-commenting two lines.
+- The matrix entry that deferred this leg lived in `.github/workflows/port_spike.yml`,
+  which no longer exists (workflow consolidation, task #6); the vcpkg ports and triplet
+  it referenced are unaffected by that removal.
 - `triplets/x64-osx-heif.cmake` is **retained in full**. Only the CI leg is deferred, not the
   port work — nothing about the triplet is known to be wrong.
 - Status of that platform is therefore **DEFERRED-BY-RULING**: unproven, not failed. Do not
