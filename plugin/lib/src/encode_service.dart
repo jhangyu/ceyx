@@ -3,6 +3,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
 import 'encode_bindings.dart';
@@ -56,7 +57,42 @@ class CeyxEncodeService {
   /// in [DngNativeBindings.load]. Primarily for tests.
   final String? _libraryPath;
 
+  /// Memoized [CeyxEncodeUnavailableException] outcomes, keyed by the
+  /// resolved library path (or `null` for the platform default search).
+  ///
+  /// Without this, every encode call on a dylib lacking the encode symbols
+  /// paid a fresh [Isolate.run] spawn + dylib-load attempt before degrading
+  /// into the caller's fallback (reviewer nit #5, 2026-08-30 P13 review). A
+  /// dylib's symbol set cannot change mid-process, so once a given
+  /// [libraryPath] has been observed unavailable, every subsequent call for
+  /// that same path can fail fast without paying the probe again. Only the
+  /// unavailable outcome is cached: successful encodes still run on a fresh
+  /// worker isolate every time, matching the existing off-UI-isolate
+  /// contract.
+  static final Map<String?, CeyxEncodeUnavailableException>
+  _unavailableCache = {};
+
   CeyxEncodeService({String? libraryPath}) : _libraryPath = libraryPath;
+
+  /// Test-only: clears the memoized unavailability cache so test cases don't
+  /// leak state into one another.
+  @visibleForTesting
+  static void resetAvailabilityCacheForTesting() => _unavailableCache.clear();
+
+  /// Test-only: seeds the memoized-unavailable cache for [libraryPath]
+  /// without needing a dylib actually built without the encode symbols, so
+  /// the memoization short-circuit can be exercised directly.
+  @visibleForTesting
+  static void debugMarkUnavailableForTesting(String? libraryPath) {
+    _unavailableCache[libraryPath] = CeyxEncodeUnavailableException();
+  }
+
+  /// Test-only: counts how many times an encode call actually spawned the
+  /// worker isolate (as opposed to short-circuiting from
+  /// [_unavailableCache]). Not reset automatically — callers should read the
+  /// delta across a test case.
+  @visibleForTesting
+  static int debugIsolateSpawnCount = 0;
 
   /// Encodes `rgba` ([width] x [height], 4 bytes/pixel, tightly packed) as a
   /// baseline JPEG at [quality] (1..100; alpha is discarded).
@@ -69,16 +105,12 @@ class CeyxEncodeService {
     required int height,
     required int quality,
   }) {
-    final libraryPath = _libraryPath;
-    return Isolate.run(
-      () => _encodeOnWorker(
-        rgba,
-        width: width,
-        height: height,
-        quality: quality,
-        libraryPath: libraryPath,
-        isWebp: false,
-      ),
+    return _encode(
+      rgba,
+      width: width,
+      height: height,
+      quality: quality,
+      isWebp: false,
     );
   }
 
@@ -92,17 +124,44 @@ class CeyxEncodeService {
     required int height,
     required int quality,
   }) {
-    final libraryPath = _libraryPath;
-    return Isolate.run(
-      () => _encodeOnWorker(
-        rgba,
-        width: width,
-        height: height,
-        quality: quality,
-        libraryPath: libraryPath,
-        isWebp: true,
-      ),
+    return _encode(
+      rgba,
+      width: width,
+      height: height,
+      quality: quality,
+      isWebp: true,
     );
+  }
+
+  Future<Uint8List> _encode(
+    Uint8List rgba, {
+    required int width,
+    required int height,
+    required int quality,
+    required bool isWebp,
+  }) async {
+    final libraryPath = _libraryPath;
+    final memoized = _unavailableCache[libraryPath];
+    if (memoized != null) {
+      throw memoized;
+    }
+
+    debugIsolateSpawnCount++;
+    try {
+      return await Isolate.run(
+        () => _encodeOnWorker(
+          rgba,
+          width: width,
+          height: height,
+          quality: quality,
+          libraryPath: libraryPath,
+          isWebp: isWebp,
+        ),
+      );
+    } on CeyxEncodeUnavailableException catch (e) {
+      _unavailableCache[libraryPath] = e;
+      rethrow;
+    }
   }
 
   /// Worker-isolate entry point. Static so [Isolate.run] does not capture

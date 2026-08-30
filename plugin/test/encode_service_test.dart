@@ -78,6 +78,72 @@ void main() {
     );
   });
 
+  test(
+    'memoized unavailability short-circuits without spawning a worker isolate',
+    () async {
+      CeyxEncodeService.resetAvailabilityCacheForTesting();
+      addTearDown(CeyxEncodeService.resetAvailabilityCacheForTesting);
+
+      const probePath = '/nonexistent/only-for-this-test.dylib';
+      CeyxEncodeService.debugMarkUnavailableForTesting(probePath);
+      final before = CeyxEncodeService.debugIsolateSpawnCount;
+
+      final service = CeyxEncodeService(libraryPath: probePath);
+      await expectLater(
+        service.encodeJpegNative(
+          redFrame(),
+          width: 2,
+          height: 2,
+          quality: 80,
+        ),
+        throwsA(isA<CeyxEncodeUnavailableException>()),
+      );
+      await expectLater(
+        service.encodeWebpNative(
+          redFrame(),
+          width: 2,
+          height: 2,
+          quality: 80,
+        ),
+        throwsA(isA<CeyxEncodeUnavailableException>()),
+      );
+
+      expect(
+        CeyxEncodeService.debugIsolateSpawnCount,
+        equals(before),
+        reason:
+            'a memoized-unavailable libraryPath must not spawn a worker '
+            'isolate to re-probe',
+      );
+    },
+  );
+
+  test(
+    'repeated calls against the real dylib each spawn a worker isolate and '
+    'return equivalent, independently valid results',
+    () async {
+      CeyxEncodeService.resetAvailabilityCacheForTesting();
+      final service = CeyxEncodeService(libraryPath: dylibPath);
+      final before = CeyxEncodeService.debugIsolateSpawnCount;
+
+      final first = await service.encodeJpegNative(
+        redFrame(),
+        width: 2,
+        height: 2,
+        quality: 80,
+      );
+      final second = await service.encodeJpegNative(
+        redFrame(),
+        width: 2,
+        height: 2,
+        quality: 80,
+      );
+
+      expect(first, equals(second));
+      expect(CeyxEncodeService.debugIsolateSpawnCount, equals(before + 2));
+    },
+  );
+
   test('encodeJpegNative throws CeyxEncodeException on bad quality', () async {
     final service = CeyxEncodeService(libraryPath: dylibPath);
     await expectLater(
