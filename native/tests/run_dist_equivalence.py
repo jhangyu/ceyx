@@ -82,7 +82,12 @@ LAYER 3 -- consumer equivalence (needs a decoder linked to the carrier dist)
   EXECUTION LINES, not merely the word "harness" (ledger 2026-08-25: a
   silently skipped gate produces a PASS count identical to a full run).
   Criterion: the command exits 0 AND its output contains at least one
-  line matching each required marker regex declared in _L3_REQUIRED_MARKERS.
+  line matching every required marker regex of the selected profile in
+  _L3_PROFILES (--consumer-profile). Each profile declares what THAT
+  consumer prints and must contain at least one PER-CASE marker, never a
+  summary verdict alone. Profiles are additive: adding one for a new
+  consumer does not relax an existing one, and none may be narrowed to
+  reach green.
   A missing binary is a SKIP with a printed one-line declaration, never a
   PASS.
 
@@ -151,12 +156,34 @@ _L1B_SKIPPED = (
     ("heif-stack", "windows", "build_heif_dist_windows.sh is a round-4 delegating shim -- no argv to transcribe"),
 )
 
-# --- Layer 3 required per-case execution markers.
-_L3_REQUIRED_MARKERS = (
-    ("decode-matrix-case", re.compile(r"^\s*\[(?:Contract|PSNR GATE)\]")),
-    ("ffi-harness-case", re.compile(r"^\[FFI (?:run \d+|RGB MATCH)\]")),
-    ("device-handoff-case", re.compile(r"device handoff|\[Handoff", re.IGNORECASE)),
-)
+# --- Layer 3 required per-case execution markers, one profile per consumer.
+#
+# A profile declares what THAT consumer prints when its cases actually
+# execute. Profiles are additive: adding one for a second consumer is not a
+# relaxation of the first, and no profile may be narrowed to reach green.
+# Every profile must include at least one PER-CASE line (not just a summary
+# verdict), because a silently skipped gate emits a summary identical to a
+# full run (ledger 2026-08-25).
+_L3_PROFILES = {
+    # The spec's named gate (spec section 6.3): the DNG decode matrix plus the
+    # FFI and device-handoff harnesses.
+    "decode-matrix": (
+        ("decode-matrix-case", re.compile(r"^\s*\[(?:Contract|PSNR GATE)\]")),
+        ("ffi-harness-case", re.compile(r"^\[FFI (?:run \d+|RGB MATCH)\]")),
+        ("device-handoff-case", re.compile(r"device handoff|\[Handoff", re.IGNORECASE)),
+    ),
+    # The HEIF-specific consumer. This is the one whose link actually resolves
+    # to the dist under test, which is what makes it the direct layer-3
+    # instrument for a HEIF dist; the decode matrix exercises the DNG pipeline
+    # and touches libheif only indirectly.
+    # `ok   <check>` are the per-case lines (test_codec_heif.cpp:37,46);
+    # CODEC_HEIF_OK is the terminal verdict (test_codec_heif.cpp:309) and is
+    # required IN ADDITION to the per-case lines, never instead of them.
+    "heif-codec": (
+        ("heif-codec-case", re.compile(r"^ok\s")),
+        ("heif-codec-verdict", re.compile(r"^CODEC_HEIF_OK$")),
+    ),
+}
 
 
 class Verdict:
@@ -524,7 +551,7 @@ def layer2(report: Report, platform: str, arch: str, baseline: Path, carrier: Op
 # =========================================================================
 # Layer 3
 # =========================================================================
-def layer3(report: Report, command: Optional[list[str]]) -> None:
+def layer3(report: Report, command: Optional[list[str]], profile: str = "decode-matrix") -> None:
     if not command:
         report.record(
             "L3",
@@ -547,7 +574,8 @@ def layer3(report: Report, command: Optional[list[str]]) -> None:
         f"rc={rc}, log={log_path}",
     )
     lines = output.splitlines()
-    for name, pattern in _L3_REQUIRED_MARKERS:
+    report.record("L3", "consumer-profile", Verdict.PASS, f"marker profile: {profile}")
+    for name, pattern in _L3_PROFILES[profile]:
         hits = [ln for ln in lines if pattern.search(ln)]
         if hits:
             report.record("L3", name, Verdict.PASS, f"{len(hits)} per-case execution lines")
@@ -579,6 +607,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="override the L1B shell baseline (used to demonstrate the check red "
         "against a deliberately mutated copy; never used for the real verdict)",
+    )
+    parser.add_argument(
+        "--consumer-profile",
+        default="decode-matrix",
+        choices=sorted(_L3_PROFILES),
+        help="which per-case marker set layer 3 requires; must match the "
+        "consumer command supplied. Profiles are declared in _L3_PROFILES.",
     )
     parser.add_argument(
         "--layers",
@@ -624,7 +659,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     if "l3" in requested:
-        layer3(report, args.consumer_command.split() if args.consumer_command else None)
+        layer3(
+            report,
+            args.consumer_command.split() if args.consumer_command else None,
+            args.consumer_profile,
+        )
     else:
         report.record("L3", "not-requested", "N/REQ", "--layers excluded L3")
 
