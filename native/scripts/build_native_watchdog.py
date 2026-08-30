@@ -137,6 +137,44 @@ def run_with_watchdog(cmd: list[str], cwd: Path, idle_timeout_sec: int, native_d
             return 124
 
 
+def resolve_vcpkg_prefix_cmake_arg() -> Optional[list[str]]:
+    """Return the -DCMAKE_PREFIX_PATH=<prefix> cmake arg sourced from the
+    CEYX_VCPKG_PREFIX env var, or None (after printing an actionable error)
+    when it is unset or does not look like a valid vcpkg triplet install
+    prefix.
+
+    Contract (relayed from impl-d5-opus, D5): consumption is via the CMake
+    cache variable CMAKE_PREFIX_PATH set to the per-triplet installed prefix
+    (<install-root>/<triplet>, the directory containing include/ and lib/) --
+    never the vcpkg toolchain file.
+    """
+    prefix = os.environ.get("CEYX_VCPKG_PREFIX")
+    if not prefix:
+        print(
+            "[ERROR] CEYX_VCPKG_PREFIX is not set.\n"
+            "        The desktop build now requires vcpkg-provided dependencies "
+            "(e.g. libwebp) via CMAKE_PREFIX_PATH.\n"
+            "        Bootstrap vcpkg (see native/vcpkg/) then set:\n"
+            "          export CEYX_VCPKG_PREFIX=<vcpkg-install-root>/<triplet>\n"
+            "        (the per-triplet directory containing include/ and lib/, "
+            "NOT the vcpkg root and NOT the toolchain file).",
+            file=sys.stderr,
+        )
+        return None
+    prefix_path = Path(prefix)
+    marker = prefix_path / "share" / "WebP" / "WebPConfig.cmake"
+    if not marker.exists():
+        print(
+            f"[ERROR] CEYX_VCPKG_PREFIX={prefix} does not look like a vcpkg "
+            f"triplet install prefix (missing {marker}).\n"
+            "        Point it at the per-triplet install directory containing "
+            "include/ and lib/, e.g. <install-root>/<triplet>.",
+            file=sys.stderr,
+        )
+        return None
+    return [f"-DCMAKE_PREFIX_PATH={prefix}"]
+
+
 def repo_root_from_native_dir(native_dir: Path) -> Path:
     # Post-restructure layout: <repo>/native/ and <repo>/app/ are siblings.
     return native_dir.parent
@@ -592,12 +630,16 @@ def main() -> int:
     native_needed = args.target != "none" and not args.build_web_app
     flutter_idle_timeout_sec = max(args.idle_timeout_sec, 300)
     if native_needed and not args.skip_configure:
+        vcpkg_prefix_arg = resolve_vcpkg_prefix_cmake_arg()
+        if vcpkg_prefix_arg is None:
+            return 1
         # Perf fix (2026-07-04): explicit Release even though CMakeLists.txt now
         # defaults to it, so this stays correct if the cache already pinned a
         # different CMAKE_BUILD_TYPE from a prior configure.
         configure_cmd = [
             "cmake", "-S", str(native_dir), "-B", str(build_dir),
             "-DCMAKE_BUILD_TYPE=Release",
+            *vcpkg_prefix_arg,
             *args.cmake_arg,
         ]
         code = run_with_watchdog(
