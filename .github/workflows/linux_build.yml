@@ -113,7 +113,7 @@ jobs:
             --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
-      - name: Verify Linux artifact (AC-L2/L3/L4)
+      - name: Verify Linux artifact (AC-L2/L3/L4/L5)
         # AC-L2: file reports an ELF shared object.
         # AC-L3: nm -D finds halide_vulkan_device_interface (the built binary
         #        genuinely contains the Vulkan runtime, not just "build ok").
@@ -164,6 +164,47 @@ jobs:
           echo "RC=${rc}"
           if grep -q 'libvulkan' ldd_out.txt; then
             echo "::error::libvulkan appears in ldd output — link-time Vulkan dependency regressed (D4)." >&2
+            exit 1
+          fi
+
+          # AC-L5 (2026-08-30): the FFI export surface is actually present.
+          #
+          # Why this gate exists: src/ffi/encode_ffi_api.cpp originally defined
+          # its ceyx_encode_* entries with no export attribute, unlike
+          # dng_ffi_api.cpp's FFI_EXPORT. On this platform default visibility
+          # hides that mistake completely — the symbols export anyway — so
+          # neither Linux nor macOS could have caught it; only the Windows DLL
+          # would have shipped without them, failing at a user's Dart lookup
+          # rather than in CI. "The .so exists and is non-zero" was the entire
+          # prior contract, and it cannot see a missing export.
+          #
+          # dng_decode_and_process is the POSITIVE CONTROL: it has always been
+          # exported, so if it is ever absent the check itself is broken (wrong
+          # file, wrong nm flags) rather than the build being at fault. A gate
+          # that can only ever pass is not evidence.
+          #
+          # ceyx_encode_webp_rgba8 is deliberately NOT gated: cmake/encode.cmake
+          # compiles it to return kCeyxEncodeErrUnsupported when no vendored
+          # libwebp dist is present (the case on this runner) and the symbol
+          # still exists. Presence is the contract; capability is not.
+          #
+          # nm_dynsyms.txt was written de-pipelined by AC-L3 above; grepping the
+          # FILE (never `nm | grep -q`) is what keeps pipefail from turning nm's
+          # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
+          echo "== AC-L5: required FFI exports present in .so =="
+          missing=""
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
+            set +e
+            grep -E " T ${sym}\$" nm_dynsyms.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} ${sym}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing exported symbol(s) in $SO:${missing} — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
             exit 1
           fi
 

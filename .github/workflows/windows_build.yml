@@ -384,6 +384,71 @@ jobs:
             exit 1
           fi
 
+          # AC-W4 (2026-08-30): the DLL actually EXPORTS the FFI surface.
+          #
+          # Everything above this line passes for a DLL that exports nothing at
+          # all, and on Windows that is a real and silent failure mode: exports
+          # here come only from __declspec(dllexport) (there is no
+          # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS and no .def file in this tree), so
+          # a definition missing its FFI_EXPORT compiles, links, produces a
+          # correctly-sized DLL, and then fails at the consumer's Dart
+          # lookupFunction. src/ffi/encode_ffi_api.cpp shipped exactly that
+          # omission; Linux and macOS export by default visibility and so could
+          # never have caught it. This step is the only place that can.
+          #
+          # dng_decode_and_process is the POSITIVE CONTROL: it has been exported
+          # since the first Windows build, so its absence means this check is
+          # broken (wrong tool, wrong file), not that the build regressed.
+          #
+          # ceyx_encode_webp_rgba8 is deliberately NOT gated: it is compiled to
+          # return kCeyxEncodeErrUnsupported where no vendored libwebp dist
+          # exists (the case on this runner) but the symbol is still exported.
+          # Presence is the contract; capability is not.
+          #
+          # Tooling: dumpbin comes from the MSVC environment set up by
+          # ilammy/msvc-dev-cmd above; llvm-nm ships beside the mandatory
+          # clang-cl. `-exports` is spelled with a leading dash, NOT /exports,
+          # because MSYS bash rewrites a leading-slash argument into a Windows
+          # path. Output goes to a FILE which is then grepped — never
+          # `dumpbin | grep -q`, which under `bash -eo pipefail` makes the
+          # producer die of SIGPIPE on a SUCCESSFUL match and reports 141.
+          echo "== AC-W4: exported FFI symbols =="
+          set +e
+          dumpbin -exports "$DLL" > dll_exports.txt 2>&1
+          rc=$?
+          set -e
+          echo "DUMPBIN_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::notice::dumpbin unavailable or failed (rc=${rc}); falling back to llvm-nm."
+            set +e
+            llvm-nm --extern-only --defined-only "$DLL" > dll_exports.txt 2>&1
+            rc=$?
+            set -e
+            echo "LLVM_NM_RC=${rc}"
+          fi
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not read the export table of $DLL with either dumpbin or llvm-nm (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
+            cat dll_exports.txt || true
+            exit 1
+          fi
+          echo "-- first 60 lines of the export listing --"
+          head -60 dll_exports.txt
+          missing=""
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
+            set +e
+            grep -w "${sym}" dll_exports.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} ${sym}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing exported symbol(s) in $DLL:${missing} — the DLL does not export the FFI surface Dart looks up. On Windows this needs __declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ (see dng_ffi_api.cpp)." >&2
+            exit 1
+          fi
+
       - name: Stage native artifacts
         shell: bash
         working-directory: ${{ github.workspace }}
