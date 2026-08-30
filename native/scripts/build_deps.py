@@ -213,6 +213,69 @@ def resolve_dist(raw: str, target_platform: str, *, host_is_windows: Optional[bo
     return Path(str(pure))
 
 
+def publish_subcommand_parser() -> argparse.ArgumentParser:
+    """The round-5 D12 publish CLI (``build_deps.py publish ...``).
+
+    Packages an already-built ``--dist`` directory, hash-pins it into
+    ``artifacts.lock``, uploads it to a GitHub Release (``--tag``), and
+    downloads it back to assert the published bytes match the lock. This
+    subcommand never builds anything itself -- run ``build_deps.py build``
+    first.
+    """
+    parser = argparse.ArgumentParser(
+        prog="build_deps.py publish",
+        description="Package, hash-pin, and publish a built dist to a GitHub Release, "
+                     "then verify the upload via a download-back hash check.",
+    )
+    parser.add_argument("component", help="component/group name used to name the asset (e.g. heif-stack)")
+    parser.add_argument("--platform", choices=_PLATFORM_CHOICES, default="auto")
+    parser.add_argument("--arch", choices=_ARCH_CHOICES, default="auto")
+    parser.add_argument("--dist", required=True, help="the already-built dist directory to publish")
+    parser.add_argument("--tag", required=True, help="GitHub Release tag to publish/verify against")
+    parser.add_argument("--repo", required=True, help="GitHub repo in OWNER/NAME form")
+    parser.add_argument("--work-dir", required=True, help="scratch dir for the tarball, lock, and download-back")
+    return parser
+
+
+def _run_publish(argv: list) -> int:
+    """Handler for ``build_deps.py publish ...`` (D12)."""
+    args = publish_subcommand_parser().parse_args(argv)
+    resolved_platform = detect_platform() if args.platform == "auto" else args.platform
+    resolved_arch = detect_arch() if args.arch == "auto" else args.arch
+
+    from deps import publish as publish_module  # noqa: PLC0415
+    from deps.run import SubprocessError as _SubprocessError  # noqa: PLC0415
+
+    dist_dir = Path(args.dist).resolve()
+    work_dir = Path(args.work_dir).resolve()
+    print(
+        f"[build_deps] publish component={args.component!r} platform={resolved_platform} "
+        f"arch={resolved_arch} dist={dist_dir} tag={args.tag!r} repo={args.repo!r}",
+        file=sys.stderr,
+    )
+    try:
+        lock = publish_module.publish_dist(
+            dist_dir,
+            component=args.component,
+            platform=resolved_platform,
+            arch=resolved_arch,
+            tag=args.tag,
+            repo=args.repo,
+            work_dir=work_dir,
+        )
+    except (publish_module.PublishError, _SubprocessError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"[build_deps] publish ok: {json_dumps_compact(lock)}", file=sys.stderr)
+    return 0
+
+
+def json_dumps_compact(obj) -> str:
+    import json as _json
+
+    return _json.dumps(obj, sort_keys=True)
+
+
 def _run_build(argv: list) -> int:
     """Handler for ``build_deps.py build ...``. Imports the execution layer
     lazily so the legacy dry-run path keeps working even if a future edit
@@ -364,6 +427,8 @@ def main(argv: Optional[list] = None) -> int:
     tokens = list(sys.argv[1:] if argv is None else argv)
     if tokens and tokens[0] == "build":
         return _run_build(tokens[1:])
+    if tokens and tokens[0] == "publish":
+        return _run_publish(tokens[1:])
 
     parser = build_arg_parser()
     args = parser.parse_args(tokens)
