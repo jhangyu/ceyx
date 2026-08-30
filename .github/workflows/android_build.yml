@@ -140,14 +140,21 @@ jobs:
         # accidental one) and the log is captured + grepped below to prove the
         # OFF branch was actually taken, not just requested.
         working-directory: ${{ github.workspace }}
+        shell: bash
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
-          # bash -eo pipefail is this step's shell (GH Actions default on
-          # Linux): `set +e` below disables errexit but pipefail stays active,
-          # so `$?` after the pipe already reflects the PYTHON process's exit
-          # code, not tee's — ${PIPESTATUS[0]} is deliberately NOT used here
-          # (08-23 lesson: it does not reliably expand in every shell).
+          # round-5-review BLOCKER fix: the explicit `shell: bash` key above is
+          # what supplies pipefail — GitHub's default for a keyless `run:` is
+          # `bash -e {0}` (NO pipefail), which silently makes `rc=$?` below
+          # capture tee's exit code (always 0), not the build's. Removing this
+          # key re-inverts the gate; do not remove it.
+          #
+          # With `shell: bash` in effect: `set +e` below disables errexit but
+          # pipefail stays active, so `$?` after the pipe reflects the PYTHON
+          # process's exit code, not tee's — ${PIPESTATUS[0]} is deliberately
+          # NOT used here (08-23 lesson: it does not reliably expand in every
+          # shell).
           set +e
           python3 native/scripts/build_native_watchdog.py \
             --platform android \

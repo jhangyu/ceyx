@@ -503,11 +503,19 @@ jobs:
       - name: Cross-compile dng_decoder_native for x86_64 (cross stage 2)
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
+        shell: bash
         run: |
+          # round-5-review BLOCKER fix: the explicit `shell: bash` key above is
+          # what supplies pipefail — GitHub's default for a keyless `run:` on
+          # macOS runners is `bash -e {0}` (NO pipefail), which silently makes
+          # `rc=$?` below capture tee's exit code (always 0), not the build's.
+          # Removing this key re-inverts the gate; do not remove it.
+          #
           # Output is captured to a file (in addition to the live log) so the
           # G1 cross-leg assertion below can grep the configure line without
-          # depending on the watchdog itself persisting one — pipefail keeps
-          # $? as the watchdog's own exit code (last non-zero wins).
+          # depending on the watchdog itself persisting one — with `shell: bash`
+          # in effect, pipefail keeps $? as the watchdog's own exit code (last
+          # non-zero wins).
           set +e
           export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
