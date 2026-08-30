@@ -21,13 +21,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-# --- libheif's own configure-time verdict on the kvazaar backend -------------
-# libheif/plugins/CMakeLists.txt:28 prints this when a codec is compiled INTO
-# libheif; :44 prints the negative form. Both are checked, because asserting
-# only the positive cannot distinguish "enabled" from "log truncated".
-KVZ_BUILTIN = "Compiling 'Kvazaar HEVC encoder' as built-in backend"
-KVZ_ABSENT = "Not compiling 'Kvazaar HEVC encoder' backend"
-DE265_BUILTIN = "Compiling 'libde265 HEVC decoder' as built-in backend"
+# --- libheif's own configure-time verdict on each codec backend --------------
+# libheif/plugins/CMakeLists.txt:28 prints the positive form when a codec is
+# compiled INTO libheif, :44 the negative form. The message interpolates the
+# plugin's IDENTIFIER (`kvazaar`, `libde265`, `x265`), NOT the human description
+# passed to plugin_compilation_info() — an earlier version of this file asserted
+# the descriptions, which never appear in the log. That defect also made both
+# `not in` checks vacuous: a licence assertion that cannot fail is worse than no
+# assertion, because it reports PASS. Strings below are transcribed from an
+# actual configure log (docs/logs/2026-08-30/verify/diag-ci-2.md:66-70).
+ANCHOR = "as built-in backend"
+KVZ_BUILTIN = "Compiling 'kvazaar' as built-in backend"
+KVZ_ABSENT = "Not compiling 'kvazaar' backend"
+DE265_BUILTIN = "Compiling 'libde265' as built-in backend"
+X265_BUILTIN = "Compiling 'x265' as built-in backend"
+X265_ABSENT = "Not compiling 'x265' backend"
 
 # Dynamic-CRT import names. A /MT-linked binary imports none of these.
 DYNAMIC_CRT_MARKERS = (
@@ -173,15 +181,32 @@ def main() -> int:
         r.check(False, "libheif configure log found")
     else:
         text = read_text(heif_log)
-        r.check(KVZ_BUILTIN in text,
-                f"libheif configure log contains {KVZ_BUILTIN!r} ({heif_log})")
-        r.check(KVZ_ABSENT not in text,
-                f"libheif configure log does NOT contain {KVZ_ABSENT!r}")
-        r.check(DE265_BUILTIN in text,
-                f"libheif configure log contains {DE265_BUILTIN!r} (N27: decoder really linked)")
-        # K3: the GPL encoder must not have been found or enabled.
-        r.check("Compiling 'x265 HEVC encoder' as built-in backend" not in text,
-                "libheif configure log shows NO x265 backend (K3, GPL-2.0 excluded)")
+        # ANCHOR FIRST. Every assertion below is a substring test, and a
+        # substring test against a truncated, empty or wrongly-selected log
+        # fails in the *negative* direction silently — `not in` passes on an
+        # empty string. Proving the log contains the backend-report section at
+        # all is what makes the rest of this block meaningful.
+        anchored = r.check(ANCHOR in text,
+                           f"libheif configure log carries the backend report ({ANCHOR!r}) "
+                           f"[{heif_log}]")
+        if anchored:
+            r.check(KVZ_BUILTIN in text,
+                    f"libheif configure log contains {KVZ_BUILTIN!r} — kvazaar HEVC encoder "
+                    "is built IN (AC3)")
+            r.check(KVZ_ABSENT not in text,
+                    f"libheif configure log does NOT contain {KVZ_ABSENT!r}")
+            r.check(DE265_BUILTIN in text,
+                    f"libheif configure log contains {DE265_BUILTIN!r} (N27: decoder really linked)")
+            # K3: the GPL-2.0 encoder must be excluded. Asserted POSITIVELY —
+            # libheif must have printed that it is NOT compiling x265. The
+            # negative form ("Compiling 'x265' ..." not in text) would also pass
+            # if libheif never considered x265 at all, or if the log were
+            # unreadable; this form cannot.
+            r.check(X265_ABSENT in text,
+                    f"libheif configure log contains {X265_ABSENT!r} — GPL-2.0 x265 "
+                    "positively excluded (K3)")
+            r.check(X265_BUILTIN not in text,
+                    f"libheif configure log does NOT contain {X265_BUILTIN!r}")
 
     # --- linkage asymmetry (LGPL vs permissive) ---------------------------
     lib = prefix / "lib"
