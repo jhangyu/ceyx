@@ -83,9 +83,24 @@ COMMON_ARGS=(
 # --- libde265 first: libheif's FindLIBDE265 needs it installed on disk. ---
 # ENABLE_ENCODER=OFF is the LGPL-cleanliness half of the decode-only rule;
 # ENABLE_SDL/SHERLOCK265 off drops the GUI inspection tools and their deps.
+#
+# DEVIATION (build mechanism, not a feature reduction): libde265's
+# CMakeLists.txt takes `if(MSVC)` to mean cl.exe, which enables the SSE4.1
+# kernels while adding NO -m flag, because cl.exe accepts every intrinsic
+# unconditionally. clang-cl sets MSVC=1 but is clang underneath and rejects
+# `always_inline function '_mm_mullo_epi32' requires target feature 'sse4.1'`
+# -- observed as 3 hard errors in run 33294113014. `/clang:-msse4.1` is the
+# clang-cl spelling of the flag upstream would have passed on any non-MSVC
+# compiler; it restores exactly the code paths upstream intended to build.
+# Consequence, recorded in PROVENANCE.md: de265.dll requires an SSE4.1-capable
+# CPU (Intel Penryn 2008+, AMD Bulldozer 2011+; Windows 11 already mandates
+# SSE4.2). Turning ENABLE_SIMD off would have been the "green by building
+# less" answer and is deliberately NOT taken.
 echo "[heif-win] configuring libde265 ${DE265_VERSION}"
 cmake -S "${STAGE}/libde265-${DE265_VERSION}" -B "${STAGE}/build-de265" \
   "${COMMON_ARGS[@]}" \
+  -DCMAKE_C_FLAGS="/clang:-msse4.1" \
+  -DCMAKE_CXX_FLAGS="/clang:-msse4.1" \
   -DENABLE_DECODER=ON \
   -DENABLE_ENCODER=OFF \
   -DENABLE_SDL=OFF \
