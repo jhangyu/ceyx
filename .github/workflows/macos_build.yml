@@ -504,6 +504,11 @@ jobs:
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
         run: |
+          # Output is captured to a file (in addition to the live log) so the
+          # G1 cross-leg assertion below can grep the configure line without
+          # depending on the watchdog itself persisting one — pipefail keeps
+          # $? as the watchdog's own exit code (last non-zero wins).
+          set +e
           export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
@@ -511,7 +516,11 @@ jobs:
             --idle-timeout-sec 600 \
             --cmake-arg=-DDNG_CROSS_BUILD=ON \
             "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
-            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64
+            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64 2>&1 | tee cross_stage2_build.log
+          rc=$?
+          set -e
+          echo "CROSS_STAGE2_RC=${rc}"
+          exit "${rc}"
 
       # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
@@ -532,34 +541,53 @@ jobs:
           fi
           otool -L "$DYLIB"
 
-      # G1 evidence (task #9): prove the JXL codec is actually LINKED IN, not
-      # just that the fetch step above succeeded — declaration-vs-usage, per
-      # the negative-space lesson (a green configure/build proves nothing by
-      # itself; cmake/jxl.cmake's own soft-degrade path also builds green).
-      # JxlEncoderInitBasicInfo is called directly from src/jxl_codec.cpp only
-      # when CEYX_ENABLE_JXL compiles the real path in; the stub (dist absent)
-      # never references any Jxl* symbol. Output goes to a FILE, then grepped
-      # (never `nm | grep -q`; a SIGPIPE on the pipe's read side under
-      # `bash -eo pipefail` would misreport a real match as a failure).
-      - name: Assert JXL codec is compiled into the dylib (G1)
+      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
+      # the original nm-grep assertion tested an UNSATISFIABLE claim.
+      # JxlEncoderInitBasicInfo is compiled into the vendored static libjxl.a
+      # with hidden visibility (JXL_STATIC_DEFINE -> JXL_EXPORT expands to
+      # nothing in jxl_export.h), so it can never appear in ANY export table
+      # regardless of whether the codec is correctly linked — confirmed via
+      # nm -m on the archive (`private external`) vs. the linked dylib
+      # (`non-external`), a disabled-build control (identical 0-hit result),
+      # and the +5.2MB size delta / 548-symbol full-symtab count proving the
+      # code IS present. The correct instrument is OUR OWN exported FFI
+      # capability surface, called end-to-end: a green link with
+      # CEYX_ENABLE_JXL=1 entails libjxl.a was linked (a mismatch would fail
+      # to link at all, not silently answer wrong), so calling
+      # ceyx_still_decode_supports/ceyx_encode_supports and checking the
+      # returned value is strictly stronger than a symbol-presence check.
+      #
+      # Native (non-cross) leg only: dlopen requires a same-architecture,
+      # same-OS process, exactly the same constraint the D4/R-7 probe above
+      # already applies (matrix.cross == 'false') — an arm64 host process
+      # cannot dlopen the Intel leg's x86_64 dylib.
+      - name: Assert JXL capability via FFI (G1, native leg)
+        if: matrix.cross == 'false'
         run: |
           set +e
-          nm -gU "$DYLIB" > dylib_defined_syms.txt 2>&1
+          python3 native/scripts/jxl_capability_probe.py "$DYLIB" --expect 1
           rc=$?
           set -e
-          echo "NM_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::nm failed on $DYLIB (rc=${rc}); cannot verify JXL linkage." >&2
-            cat dylib_defined_syms.txt || true
-            exit 1
-          fi
+          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
+      # Cross leg: cannot dlopen a foreign-arch (x86_64) dylib from this
+      # arm64 host process, so the achievable proof is the compile-time one —
+      # the SAME configure that produced this dylib printed cmake/jxl.cmake's
+      # success line, which is only reachable from the branch that also sets
+      # CEYX_JXL_ENABLED=1 (see the diagnosis doc's falsification of "cmake
+      # took the soft-degrade path"). Weaker than the native leg's runtime
+      # call, but honest about what this leg can actually prove.
+      - name: Assert JXL enabled in cross-compile configure log (G1, cross leg)
+        if: matrix.cross == 'true'
+        run: |
           set +e
-          grep -q "JxlEncoderInitBasicInfo" dylib_defined_syms.txt
+          grep -q -- "-- JXL: static" cross_stage2_build.log
           rc=$?
           set -e
-          echo "ASSERT JxlEncoderInitBasicInfo RC=${rc}"
+          echo "ASSERT cross-leg JXL enabled RC=${rc}"
           if [ "${rc}" -ne 0 ]; then
-            echo "::error::JxlEncoderInitBasicInfo not found in $DYLIB — JPEG XL was NOT linked in (cmake/jxl.cmake's soft-degrade path was taken silently). Check the 'Fetch vendored libjxl distribution' step's log for 'JXL: static' vs the disabled WARNING." >&2
+            echo "::error::cross_stage2_build.log does not show '-- JXL: static ...' from cmake/jxl.cmake's success branch; the x86_64 cross-compile configure may not have enabled JXL." >&2
             exit 1
           fi
 

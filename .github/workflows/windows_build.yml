@@ -626,6 +626,27 @@ jobs:
             exit 1
           fi
 
+      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
+      # this leg took the explicit-OFF branch (no acquisition path exists for
+      # this platform; see the "Assert JXL was explicitly disabled" step
+      # above). That step only proves the CONFIGURE line was printed; this
+      # step proves the runtime CONSEQUENCE — the built DLL's own exported
+      # capability surface genuinely answers "unsupported" for JXL, not just
+      # that a log line appeared. windows-latest is the DLL's own target
+      # architecture (no cross-compile here), so dlopen from this same
+      # process is valid. Shares the same probe script as the macOS/Linux
+      # expect=1 legs, called with --expect 0.
+      - name: Assert JXL capability via FFI (G1, expect disabled)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          python3 native/scripts/jxl_capability_probe.py "native/build-windows/dng_decoder_native.dll" --expect 0
+          rc=$?
+          set -e
+          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
       - name: Stage native artifacts
         shell: bash
         working-directory: ${{ github.workspace }}

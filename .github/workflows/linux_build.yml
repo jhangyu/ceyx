@@ -294,15 +294,9 @@ jobs:
           # nm_dynsyms.txt was written de-pipelined by AC-L3 above; grepping the
           # FILE (never `nm | grep -q`) is what keeps pipefail from turning nm's
           # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
-          # G1 evidence (task #9): JxlEncoderInitBasicInfo is called directly
-          # from src/jxl_codec.cpp only when the real JXL path compiled in;
-          # the stub (dist absent) never references any Jxl* symbol, so its
-          # presence in the dynamic symbol table proves libjxl actually
-          # linked, not just that the fetch step above succeeded — the exact
-          # negative-space gap this loop is now also closing.
           echo "== AC-L5: required FFI exports present in .so =="
           missing=""
-          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 JxlEncoderInitBasicInfo; do
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
             set +e
             grep -E " T ${sym}\$" nm_dynsyms.txt
             rc=$?
@@ -316,6 +310,30 @@ jobs:
             echo "::error::missing exported symbol(s) in $SO:${missing} — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
             exit 1
           fi
+
+      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
+      # an earlier nm-grep for JxlEncoderInitBasicInfo tested an unsatisfiable
+      # claim on every platform (the vendored static libjxl.a compiles that
+      # symbol with hidden visibility; it can never appear in any export
+      # table regardless of whether the codec is correctly linked in — see
+      # the diagnosis doc's macOS nm -m evidence, which extrapolates by
+      # mechanism to ELF's STV_HIDDEN/LOCAL binding here). The correct
+      # instrument is our OWN exported FFI capability surface: a green link
+      # with CEYX_ENABLE_JXL=1 entails libjxl.a was actually linked (a
+      # mismatch fails to link, not silently answers wrong), so calling
+      # ceyx_still_decode_supports/ceyx_encode_supports and checking the
+      # returned value is strictly stronger than a symbol-presence check.
+      # Linux is a single-arch host build (no cross-compile), so dlopen from
+      # this same process is always valid here.
+      - name: Assert JXL capability via FFI (G1)
+        run: |
+          SO="native/build-linux/libdng_decoder_native.so"
+          set +e
+          python3 native/scripts/jxl_capability_probe.py "$SO" --expect 1
+          rc=$?
+          set -e
+          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
 
       - name: Stage native artifacts
         run: |
