@@ -263,8 +263,17 @@ jobs:
       # preset (clang-cl, static CRT). The preset itself is not used because CI
       # needs a different binaryDir-independent set of extra flags and an
       # explicit, greppable configure line in the log.
-      # -DDNG_ENABLE_HEIF=OFF is the escape hatch cmake/heif.cmake documents:
-      # the HEIC route ships a macOS-only libheif/libde265 dist.
+      # HEIF is ENABLED here. The option defaults ON in native/CMakeLists.txt,
+      # so there is deliberately no -DDNG_ENABLE_HEIF=ON flag to flip. It used
+      # to be forced OFF because the libheif/libde265 dist was macOS-only; a
+      # committed Windows dist now exists at
+      # native/third_party/heif-dist-windows (see its PROVENANCE.md), and
+      # cmake/heif.cmake's WIN32 branch finds it and stages heif.dll and
+      # libde265.dll next to the built decoder. If this configure fails with
+      # "HEIF decode is enabled but the vendored dist is missing", the fix is to
+      # restore that dist -- NOT to turn the HEIF option back off, which would
+      # ship a binary reporting every HEIC file as unreadable while this job
+      # reports green.
       #
       # -DZLIB_USE_STATIC_LIBS=ON: zlib's CMake build emits BOTH zlib.lib (the
       # import library for zlib.dll) and zlibstatic.lib, and FindZLIB prefers
@@ -290,7 +299,6 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DDNG_DIAGNOSTIC_BUILD=OFF \
             -DDNG_VK_PIPELINE_CACHE=OFF \
-            -DDNG_ENABLE_HEIF=OFF \
             -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_USE_STATIC_LIBS=ON
@@ -434,7 +442,13 @@ jobs:
           echo "-- first 60 lines of the export listing --"
           head -60 dll_exports.txt
           missing=""
-          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
+          # The four heif_* entries were added when the HEIF route was enabled
+          # on Windows -- they are exported only because
+          # src/ffi/heif_ffi_api.cpp applies FFI_EXPORT (__declspec(dllexport))
+          # to each definition. Without that, every check above still passes and
+          # Dart's lookupFunction fails on the user's machine instead.
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 \
+                     heif_probe heif_decode_rgba heif_release heif_error_name; do
             set +e
             grep -w "${sym}" dll_exports.txt
             rc=$?
@@ -445,7 +459,76 @@ jobs:
             fi
           done
           if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in $DLL:${missing} — the DLL does not export the FFI surface Dart looks up. On Windows this needs __declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ (see dng_ffi_api.cpp)." >&2
+            echo "::error::missing exported symbol(s) in $DLL:${missing} — the DLL does not export the FFI surface Dart looks up. On Windows this needs __declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ (see dng_ffi_api.cpp and heif_ffi_api.cpp)." >&2
+            exit 1
+          fi
+
+          # --- Step-4 load gate: the DLLs this decoder needs at load time ---
+          #
+          # Two distinct failure modes, both invisible to every check above:
+          #   (a) HEIF silently NOT compiled in -- caught by the import table
+          #       not naming heif.dll;
+          #   (b) HEIF compiled in but the dependency DLLs are not beside the
+          #       decoder -- caught by the file-existence assertions. On a
+          #       user's machine that is a total load failure whose error names
+          #       only dng_decoder_native.dll.
+          #
+          # The de265 runtime file is libde265.dll (its import library is
+          # de265.lib -- upstream's asymmetry); heif.dll's import table names
+          # libde265.dll, so that is the name gated here.
+          #
+          # Output to a file, then grep the file (never `dumpbin | grep -q`:
+          # under pipefail a SUCCESSFUL match kills the producer with SIGPIPE
+          # and the pipeline reports 141).
+          echo "== Step 4: import table =="
+          set +e
+          dumpbin -dependents "$DLL" > dll_dependents.txt 2>&1
+          rc=$?
+          set -e
+          echo "DEPENDENTS_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::notice::dumpbin -dependents failed (rc=${rc}); falling back to llvm-objdump."
+            set +e
+            llvm-objdump -p "$DLL" > dll_dependents.txt 2>&1
+            rc=$?
+            set -e
+            echo "LLVM_OBJDUMP_RC=${rc}"
+          fi
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not read the import table of $DLL; dependency presence is UNVERIFIED, refusing to publish." >&2
+            cat dll_dependents.txt || true
+            exit 1
+          fi
+          cat dll_dependents.txt
+          dep_missing=""
+          for dep in heif.dll libde265.dll; do
+            set +e
+            grep -i "${dep}" dll_dependents.txt
+            rc=$?
+            set -e
+            echo "ASSERT dep ${dep} RC=${rc}"
+            if [ "${rc}" -ne 0 ]; then
+              dep_missing="${dep_missing} ${dep}"
+            fi
+          done
+          if [ -n "${dep_missing}" ]; then
+            echo "::error::$DLL does not import:${dep_missing} — the HEIF route was not compiled in. Do NOT 'fix' this by disabling HEIF; check the configure log for 'HEIF: libheif' and that native/third_party/heif-dist-windows was found." >&2
+            exit 1
+          fi
+
+          echo "== Step 4: dependency DLLs staged beside the decoder =="
+          stage_missing=""
+          for dep in heif.dll libde265.dll; do
+            if [ -f "native/build-windows/${dep}" ]; then
+              echo "STAGED ${dep} OK ($(wc -c < "native/build-windows/${dep}") bytes)"
+            else
+              echo "STAGED ${dep} MISSING"
+              stage_missing="${stage_missing} ${dep}"
+            fi
+          done
+          if [ -n "${stage_missing}" ]; then
+            echo "::error::missing dependency DLL(s) beside the decoder:${stage_missing} — cmake/heif.cmake's WIN32 POST_BUILD staging did not run, or the dist lacks them. A package shipped like this fails at DynamicLibrary.open with an error naming only dng_decoder_native.dll." >&2
+            ls -la native/build-windows || true
             exit 1
           fi
 
@@ -455,6 +538,12 @@ jobs:
         run: |
           mkdir -p artifacts/native
           cp native/build-windows/dng_decoder_native.dll artifacts/native/
+          # The two HEIF dependencies are NOT optional: dng_decoder_native.dll
+          # imports them (asserted in the verify step above), so a release that
+          # omits either cannot be loaded. Copied WITHOUT `|| true` on purpose --
+          # a failure here must stop the job.
+          cp native/build-windows/heif.dll      artifacts/native/
+          cp native/build-windows/libde265.dll  artifacts/native/
           # The import library is only produced when the linker sees exports;
           # copy it when present so downstream consumers can link against it.
           cp native/build-windows/dng_decoder_native.lib artifacts/native/ 2>/dev/null || \
@@ -482,10 +571,26 @@ jobs:
           mkdir -p artifacts/release
           cp artifacts/native/dng_decoder_native.dll \
             artifacts/release/dng_decoder_native-windows-x86_64.dll
+          # The release namespace is flat and shared across platforms, so every
+          # asset carries its own platform suffix. heif/libde265 ship as separate
+          # assets rather than inside a zip because Halcyon's build_apps.py
+          # verifies a per-asset sha256 and places each file individually.
+          cp artifacts/native/heif.dll     artifacts/release/heif-windows-x86_64.dll
+          cp artifacts/native/libde265.dll artifacts/release/libde265-windows-x86_64.dll
           cp artifacts/native/dng_decoder_native.lib \
             artifacts/release/dng_decoder_native-windows-x86_64.lib 2>/dev/null || \
             echo "::notice::no import library to attach."
           ls -la artifacts/release
+          # Exactly three DLLs must be present; a fourth or a missing one is a
+          # packaging bug that would otherwise be found by a user.
+          set +e
+          DLL_COUNT=$(ls artifacts/release/*.dll | wc -l | tr -d ' ')
+          set -e
+          echo "RELEASE_DLL_COUNT=${DLL_COUNT}"
+          if [ "${DLL_COUNT}" -ne 3 ]; then
+            echo "::error::expected exactly 3 release DLLs, found ${DLL_COUNT}." >&2
+            exit 1
+          fi
 
       - name: Attach artifact to GitHub Release (tag push only)
         # Same pattern as linux_build.yml / android_build.yml: each workflow
@@ -493,5 +598,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ github.workspace }}/artifacts/release/dng_decoder_native-windows-x86_64.*
+          files: |
+            ${{ github.workspace }}/artifacts/release/dng_decoder_native-windows-x86_64.*
+            ${{ github.workspace }}/artifacts/release/heif-windows-x86_64.dll
+            ${{ github.workspace }}/artifacts/release/libde265-windows-x86_64.dll
           fail_on_unmatched_files: true
