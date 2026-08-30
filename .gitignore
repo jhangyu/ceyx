@@ -82,6 +82,13 @@ native/third_party/libwebp-dist/*
 !native/third_party/libwebp-dist/PROVENANCE.md
 native/third_party/libwebp-dist-*/
 
+# Vendored static libjxl distribution (+ bundled highway, brotli; built by
+# native/scripts/fetch_libjxl_dist.sh). Same policy as the HEIF/libwebp dists
+# above: fetched and built, never tracked; PROVENANCE.md IS tracked.
+native/third_party/libjxl-dist/*
+!native/third_party/libjxl-dist/PROVENANCE.md
+native/third_party/libjxl-dist-*/
+
 # Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
 # native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
 # would otherwise sweep the library, silently leaving a blank checkout without
