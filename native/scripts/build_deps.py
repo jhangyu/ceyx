@@ -14,8 +14,24 @@ from ``auto``, loads the manifest via ``deps.manifest.load()`` and rejects
 any ``--component`` name absent from ``manifest.toml``'s ``[component.*]``
 tables. ``--dry-run`` prints the ``deps.render.render()`` argv for the
 resolved component/platform/arch, one argv element per line, and exits 0.
-The assertion suite (D4/M3) is a separate deliverable this CLI will wire
-in once it lands.
+
+Round 4 (D3 execution layer) adds the form that actually BUILDS:
+
+    python3 native/scripts/build_deps.py build <component> \
+        --platform <auto|macos|linux|windows> \
+        --arch <auto|arm64|x86_64> \
+        --dist <dir> [--stage <name>] [--jobs N] [--dry-run]
+
+``<component>`` is either a manifest component (built generically through
+``deps.execute``) or the pseudo-component ``heif-stack``, which runs the
+Unix libde265/kvazaar/aom/libheif assembly in ``deps.heif`` -- the port of
+``native/scripts/fetch_heif_deps.sh``. This subcommand shape is an agreed
+interface contract shared with the Windows carrier work; do not change it
+unilaterally.
+
+The legacy ``--component X --dry-run`` form above is retained verbatim so
+nothing that already invokes it has to change at the same time as the
+execution layer lands.
 
 The manifest loader is imported lazily (inside ``main()``, not at module
 scope) so this file has no hard import-time dependency on D1's package,
@@ -34,7 +50,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from deps.run import assert_native_windows_interpreter  # noqa: E402
+from deps.fetch import FetchError  # noqa: E402
+from deps.run import SubprocessError, assert_native_windows_interpreter  # noqa: E402
 
 
 _PLATFORM_CHOICES = ("auto", "macos", "linux", "windows")
@@ -104,11 +121,141 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_subcommand_parser() -> argparse.ArgumentParser:
+    """The round-4 execution CLI (``build_deps.py build <component> ...``).
+
+    Kept as its own parser rather than an argparse subparser of the legacy
+    one so the legacy ``--component`` form stays REQUIRED-argument-exact and
+    its existing behaviour is provably untouched by this addition.
+    """
+    parser = argparse.ArgumentParser(
+        prog="build_deps.py build",
+        description="Acquire, configure, build and install a manifest component.",
+    )
+    parser.add_argument("component", help="manifest component name, or the 'heif-stack' group")
+    parser.add_argument("--platform", choices=_PLATFORM_CHOICES, default="auto")
+    parser.add_argument("--arch", choices=_ARCH_CHOICES, default="auto")
+    parser.add_argument("--dist", required=True, help="install prefix the built artefacts land in")
+    parser.add_argument(
+        "--stage",
+        default="all",
+        help="for heif-stack: which stage to run (all|libde265|kvazaar|aom|libheif|assemble). "
+             "The per-component split exists so each build is its own foreground "
+             "invocation short enough to fit inside a normal command timeout.",
+    )
+    parser.add_argument("--jobs", type=int, default=None, help="cmake --build --parallel value")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the resolved configure argv and exit 0 without building",
+    )
+    return parser
+
+
+def _run_build(argv: list) -> int:
+    """Handler for ``build_deps.py build ...``. Imports the execution layer
+    lazily so the legacy dry-run path keeps working even if a future edit
+    breaks an import in deps/execute.py or deps/heif.py."""
+    args = build_subcommand_parser().parse_args(argv)
+
+    resolved_platform = detect_platform() if args.platform == "auto" else args.platform
+    resolved_arch = detect_arch() if args.arch == "auto" else args.arch
+
+    manifest_module = _load_manifest_module()
+    render_module = _load_render_module()
+    if manifest_module is None or render_module is None:
+        print(
+            "[build_deps] error: the deps package (native/scripts/deps/) is not "
+            "importable -- cannot acquire dependencies without it.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        loaded = manifest_module.load()
+    except manifest_module.ManifestError as exc:
+        print(f"[build_deps] error: manifest failed validation: {exc}", file=sys.stderr)
+        return 1
+
+    from deps import execute as execute_module  # noqa: PLC0415 - see docstring
+    from deps import heif as heif_module  # noqa: PLC0415
+
+    dist = Path(args.dist).resolve()
+    print(
+        f"[build_deps] build component={args.component!r} platform={resolved_platform} "
+        f"arch={resolved_arch} dist={dist}",
+        file=sys.stderr,
+    )
+
+    try:
+        if args.component == heif_module.COMPONENT:
+            if args.dry_run:
+                for name in ("kvazaar", "libheif"):
+                    print(f"# {name}")
+                    for token in render_module.render(
+                        loaded, name, resolved_platform, resolved_arch, dist=str(dist)
+                    ):
+                        print(token)
+                return 0
+            return heif_module.build(
+                loaded,
+                resolved_platform,
+                resolved_arch,
+                dist,
+                stage_arg=args.stage,
+            )
+
+        known_components = sorted(loaded["manifest"].get("component", {}))
+        if args.component not in known_components:
+            print(
+                f"[build_deps] error: unknown component {args.component!r} (not present "
+                f"in native/deps/manifest.toml; known components: {known_components}, "
+                f"plus the group {heif_module.COMPONENT!r})",
+                file=sys.stderr,
+            )
+            return 1
+
+        if args.dry_run:
+            for token in render_module.render(
+                loaded, args.component, resolved_platform, resolved_arch, dist=str(dist)
+            ):
+                print(token)
+            return 0
+
+        execute_module.build_component(
+            loaded,
+            args.component,
+            resolved_platform,
+            resolved_arch,
+            dist,
+            dist / ".stage",
+            jobs=args.jobs,
+        )
+        return 0
+    except (
+        execute_module.ExecuteError,
+        heif_module.HeifError,
+        render_module.RenderError,
+        SubprocessError,
+        FetchError,
+    ) as exc:
+        # Reported, not re-raised: these are the expected failure modes
+        # (a tool exited non-zero, a hash did not match, an assertion found
+        # the capability genuinely absent) and their messages already name
+        # the concrete artefact. A traceback would bury that under frames.
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def main(argv: Optional[list] = None) -> int:
     assert_native_windows_interpreter()
 
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if tokens and tokens[0] == "build":
+        return _run_build(tokens[1:])
+
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(tokens)
 
     resolved_platform = detect_platform() if args.platform == "auto" else args.platform
     resolved_arch = detect_arch() if args.arch == "auto" else args.arch
