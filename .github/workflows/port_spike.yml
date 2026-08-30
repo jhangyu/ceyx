@@ -21,7 +21,10 @@ on:
 
 concurrency:
   group: port-spike-${{ github.ref }}
-  cancel-in-progress: true
+  # NOT cancel-in-progress. Under a one-round spike cap, an in-flight Windows
+  # leg is evidence being generated; a follow-up push that fixes an unrelated
+  # macOS failure must not destroy it.
+  cancel-in-progress: false
 
 env:
   # N30: pinned, never floating. Same SHA as native/vcpkg/vcpkg.json's

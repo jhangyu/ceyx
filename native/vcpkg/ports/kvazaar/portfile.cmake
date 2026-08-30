@@ -65,4 +65,12 @@ endforeach()
 file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage"
      DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
 
-vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/COPYING")
+# kvazaar's licence file is LICENSE, not COPYING (unlike libheif/libde265).
+# LICENSE.EXT.greatest covers the vendored `greatest` test framework and is
+# included because manifest.toml's licence_files glob ["COPYING*", "LICENSE*"]
+# would collect it too — the LGPL/BSD source-availability obligation is
+# discharged by shipping what the glob names, not a subset of it.
+vcpkg_install_copyright(FILE_LIST
+    "${SOURCE_PATH}/LICENSE"
+    "${SOURCE_PATH}/LICENSE.EXT.greatest"
+)
