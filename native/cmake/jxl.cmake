@@ -58,20 +58,30 @@ if(CEYX_ENABLE_JXL)
     find_path(CEYX_JXL_INCLUDE_DIR NAMES jxl/encode.h
               HINTS ${JXL_INCLUDE_HINTS} NO_DEFAULT_PATH)
     find_library(CEYX_JXL_LIBRARY         NAMES jxl         HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
+    # REQUIRED, not optional: libjxl.a leaves JxlGetDefaultCms undefined and
+    # only libjxl_cms.a (built because this dist enables -DJPEGXL_ENABLE_SKCMS=ON)
+    # defines it -- confirmed via `nm`: `U _JxlGetDefaultCms` in libjxl.a,
+    # `T _JxlGetDefaultCms` only in libjxl_cms.a. Omitting this library link
+    # would compile cleanly and fail only at final link time.
+    find_library(CEYX_JXL_CMS_LIBRARY     NAMES jxl_cms     HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
     find_library(CEYX_JXL_THREADS_LIBRARY NAMES jxl_threads HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
     find_library(CEYX_HWY_LIBRARY         NAMES hwy         HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
     find_library(CEYX_BROTLIDEC_LIBRARY   NAMES brotlidec   HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
     find_library(CEYX_BROTLIENC_LIBRARY   NAMES brotlienc   HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
     find_library(CEYX_BROTLICOMMON_LIBRARY NAMES brotlicommon HINTS ${JXL_LIB_HINTS} NO_DEFAULT_PATH)
 
-    if(CEYX_JXL_INCLUDE_DIR AND CEYX_JXL_LIBRARY AND CEYX_JXL_THREADS_LIBRARY
+    if(CEYX_JXL_INCLUDE_DIR AND CEYX_JXL_LIBRARY AND CEYX_JXL_CMS_LIBRARY
+       AND CEYX_JXL_THREADS_LIBRARY
        AND CEYX_HWY_LIBRARY AND CEYX_BROTLIDEC_LIBRARY AND CEYX_BROTLIENC_LIBRARY
        AND CEYX_BROTLICOMMON_LIBRARY)
         target_include_directories(dng_decoder_native PRIVATE ${CEYX_JXL_INCLUDE_DIR})
         # Order matters for static archives on ld: jxl before its dependencies,
-        # brotlicommon last because both brotli halves reference it.
+        # jxl_cms right after jxl (it satisfies jxl's own undefined
+        # JxlGetDefaultCms), brotlicommon last because both brotli halves
+        # reference it.
         target_link_libraries(dng_decoder_native
             ${CEYX_JXL_LIBRARY}
+            ${CEYX_JXL_CMS_LIBRARY}
             ${CEYX_JXL_THREADS_LIBRARY}
             ${CEYX_HWY_LIBRARY}
             ${CEYX_BROTLIENC_LIBRARY}
@@ -85,6 +95,7 @@ if(CEYX_ENABLE_JXL)
             "  searched under: ${JXL_DIST_HINTS}\n"
             "  jxl/encode.h  = '${CEYX_JXL_INCLUDE_DIR}'\n"
             "  libjxl        = '${CEYX_JXL_LIBRARY}'\n"
+            "  libjxl_cms    = '${CEYX_JXL_CMS_LIBRARY}'\n"
             "  libjxl_threads= '${CEYX_JXL_THREADS_LIBRARY}'\n"
             "  libhwy        = '${CEYX_HWY_LIBRARY}'\n"
             "  brotli        = '${CEYX_BROTLIDEC_LIBRARY}' '${CEYX_BROTLIENC_LIBRARY}' '${CEYX_BROTLICOMMON_LIBRARY}'\n"

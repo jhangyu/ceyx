@@ -33,16 +33,21 @@ the static core library: brotli, highway, skcms)
 
 ## Licence and linkage
 
-libjxl and brotli are BSD-3-Clause; highway (Google) is Apache-2.0. All three
-are linked **statically** into `libdng_decoder_native` — BSD-3/Apache-2.0
+libjxl, brotli and skcms are BSD-3-Clause; highway (Google) is Apache-2.0. All
+four are linked **statically** into `libdng_decoder_native` — BSD-3/Apache-2.0
 carry no relink duty, unlike the LGPL-3 heif-dist, which is why this dist is
-static where heif-dist is dynamic (see cmake/jxl.cmake). Licence files for all
-three are vendored under `share/licenses/{libjxl,highway,brotli}/` and must
-ship alongside any distributed build that includes JXL support.
+static where heif-dist is dynamic (see cmake/jxl.cmake). skcms is pulled in
+because this dist builds with `-DJPEGXL_ENABLE_SKCMS=ON`; its object code
+ships inside `libjxl_cms.a`, which libjxl.a's `JxlGetDefaultCms` requires at
+link time (confirmed via `nm`: undefined `U _JxlGetDefaultCms` in libjxl.a,
+defined `T _JxlGetDefaultCms` only in libjxl_cms.a — an encode/decode consumer
+linking libjxl.a without libjxl_cms.a fails at link time). Licence files for
+all four are vendored under `share/licenses/{libjxl,highway,brotli,skcms}/`
+and must ship alongside any distributed build that includes JXL support.
 
 ## Static libraries
 
-`libjxl.a`, `libjxl_threads.a`, `libhwy.a`, `libbrotlicommon.a`,
-`libbrotlidec.a`, `libbrotlienc.a` — all release-built with
-`CMAKE_BUILD_TYPE=Release` and stripped of debug symbols (ruling Q5) before
-being written here.
+`libjxl.a`, `libjxl_cms.a`, `libjxl_threads.a`, `libhwy.a`,
+`libbrotlicommon.a`, `libbrotlidec.a`, `libbrotlienc.a` — all release-built
+with `CMAKE_BUILD_TYPE=Release` and stripped of debug symbols (ruling Q5)
+before being written here.
