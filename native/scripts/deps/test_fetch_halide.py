@@ -17,24 +17,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deps import fetch_halide  # noqa: E402
 
-_SH_SCRIPT = Path(__file__).resolve().parents[1] / "fetch_halide_v21_dist.sh"
 
+class TestFrozenTranscriptionMatchesTheDeletedShellScript(unittest.TestCase):
+    """fetch_halide_v21_dist.sh was DELETED in the same commit set as this
+    freeze (round 3, task #8 / 2026-09-01 contract item 11 / ENTRY-POINT
+    RULE): windows_build.yml's last remaining call site was rewired to
+    ``build_deps.py fetch halide`` (linux_build.yml, macos_build.yml and
+    android_build.yml already called the Python replacement), so the .sh
+    had zero remaining consumers. Same pattern as
+    win_jxl_dist_test.py's ``TestFrozenTranscriptionMatchesTheDeletedShellScript``
+    and test_fetch_libjxl.py's ``TestFrozenPinsMatchTheDeletedShellScript``.
 
-class TestTranscriptionMatchesTheShellScript(unittest.TestCase):
-    def setUp(self) -> None:
-        self.sh_text = _SH_SCRIPT.read_text(encoding="utf-8")
+    These values are FROZEN LITERALS, copied (not retyped) from the last
+    revision of fetch_halide_v21_dist.sh at commit
+    7d786775a9797fee98e441b7ab1721a0a04c0ad7 (``git show
+    7d786775a9797fee98e441b7ab1721a0a04c0ad7:native/scripts/fetch_halide_v21_dist.sh``
+    recovers the full original text). A value changing here without a
+    corresponding intentional edit to fetch_halide.py is exactly as much a
+    red flag as a live-diff mismatch against the .sh would have been.
+    """
 
     def test_commit_matches(self) -> None:
-        self.assertIn(f'HALIDE_COMMIT="{fetch_halide.HALIDE_COMMIT}"', self.sh_text)
+        self.assertEqual(fetch_halide.HALIDE_COMMIT, "b629c80de18f1534ec71fddd8b567aa7027a0876")
 
     def test_version_matches(self) -> None:
-        self.assertIn(f"v{fetch_halide.HALIDE_VERSION}", self.sh_text)
+        self.assertEqual(fetch_halide.HALIDE_VERSION, "21.0.0")
 
     def test_platform_tags_match(self) -> None:
-        for (_, ext) in fetch_halide._PLATFORM_TABLE.values():
-            self.assertIn(ext.split(".")[0], self.sh_text)
-        for platform_tag, _ in fetch_halide._PLATFORM_TABLE.values():
-            self.assertIn(f'PLATFORM="{platform_tag}"', self.sh_text)
+        self.assertEqual(
+            fetch_halide._PLATFORM_TABLE,
+            {
+                ("Darwin", "arm64"): ("arm-64-osx", "tar.gz"),
+                ("Darwin", "x86_64"): ("x86-64-osx", "tar.gz"),
+                ("Linux", "arm64"): ("arm-64-linux", "tar.gz"),
+                ("Linux", "x86_64"): ("x86-64-linux", "tar.gz"),
+                ("Windows", "x86_64"): ("x86-64-windows", "zip"),
+                ("Windows", "x86_32"): ("x86-32-windows", "zip"),
+            },
+        )
 
 
 class TestNormaliseArch(unittest.TestCase):

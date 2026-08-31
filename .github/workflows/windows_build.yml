@@ -159,17 +159,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/halide
-          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
 
-      # The fetch script already has a MINGW*/MSYS*/CYGWIN* case selecting the
-      # 64-bit-Intel Windows zip asset that upstream Halide publishes (added
-      # 2026-08-21 for the Windows port; the exact upstream asset name lives in
-      # native/scripts/fetch_halide_v21_dist.sh, not here), so it
-      # runs unmodified under the runner's bundled Git-Bash.
+      # Round 3 (2026-09-01 contract item 11 / ENTRY-POINT RULE): this was
+      # the last remaining call site of fetch_halide_v21_dist.sh (linux/macos/
+      # android already called the Python replacement); the .sh is now
+      # DELETED (frozen-transcription tests in
+      # native/scripts/deps/test_fetch_halide.py guard the pins that used to
+      # be diffed live against it). build_deps.py fetch halide's Windows
+      # branch resolves the same 64-bit-Intel zip asset upstream Halide
+      # publishes under native/scripts/deps/fetch_halide.py's own platform
+      # table, runs under the runner's native Python (not Git-Bash), and is
+      # exercised on every other desktop/android leg already.
       - name: Fetch vendored Halide v21 distribution
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: native/scripts/fetch_halide_v21_dist.sh
+        run: python3 native/scripts/build_deps.py fetch halide
 
       - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
         uses: actions/cache@v4
@@ -177,17 +182,21 @@ jobs:
           path: |
             ${{ github.workspace }}/native/third_party/libraw
             ${{ github.workspace }}/native/third_party/libraw-cmake
-          key: libraw-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+          key: libraw-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
 
       # DNG_ENABLE_GENERIC_RAW defaults ON and cmake/tests.cmake hard-fails
       # configure without this tree, so it must be fetched before configure.
       # Line-ending handling lives in the pre-checkout step at the top of this
       # job, deliberately not here — by the time this step runs it is already
       # too late to change how the patch files were written to disk.
+      #
+      # Round 3: last remaining call site of fetch_libraw_dist.sh, now
+      # DELETED (see the Halide fetch step above for the same migration and
+      # native/scripts/deps/test_fetch_libraw.py for the frozen-pin guard).
       - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: native/scripts/fetch_libraw_dist.sh
+        run: python3 native/scripts/build_deps.py fetch libraw
 
       # fetch_libraw_dist.sh discards git apply's actual error (`2>/dev/null` on
       # its --check probe) and prints only "FAILED to apply <name>", which is
@@ -630,16 +639,30 @@ jobs:
       # that a configure-log line appeared. windows-latest is the DLL's own
       # target architecture (no cross-compile here), so dlopen from this
       # same process is valid. Shares the same probe script as the
-      # macOS/Linux expect=1 legs, now called with --expect 1 here too.
-      - name: Assert JXL capability via FFI (G1, expect enabled)
+      # macOS/Linux legs.
+      #
+      # Round 3 (CI-T1 call-site replacement, contract item CI-T1): the full
+      # end-state vector is now achievable -- W-T3 (encode-capable HEIF
+      # dist) and the JXL-CARRIER dist both landed this round, so this leg's
+      # ledger entry (native/deps/codec_expectations.toml
+      # [windows-x86_64]) is the same all-format vector as macOS/Linux, not
+      # JXL-only. The --expect tokens below are this leg's literal
+      # transcription of the ledger; render_expectations.py --check
+      # mechanically proves they have not drifted from it.
+      - name: Assert full codec capability vector via probe (G1)
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set +e
-          python3 native/scripts/jxl_capability_probe.py "native/build-windows/dng_decoder_native.dll" --expect 1
+          python3 native/scripts/codec_capability_probe.py "native/build-windows/dng_decoder_native.dll" \
+            --expect jpeg:encode=1 --expect jpeg:decode=0 \
+            --expect webp:encode=1 --expect webp:decode=1 \
+            --expect heic:encode=1 --expect heic:decode=1 \
+            --expect avif:encode=1 --expect avif:decode=1 \
+            --expect jxl:encode=1 --expect jxl:decode=1
           rc=$?
           set -e
-          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
       - name: Stage native artifacts

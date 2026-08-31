@@ -590,14 +590,29 @@ jobs:
       # same-OS process, exactly the same constraint the D4/R-7 probe above
       # already applies (matrix.cross == 'false') — an arm64 host process
       # cannot dlopen the Intel leg's x86_64 dylib.
-      - name: Assert JXL capability via FFI (G1, native leg)
+      #
+      # Round 3 (CI-T1 call-site replacement): generalised from the
+      # JXL-only single-format probe (now deleted) to the full 5-format
+      # x 2-direction vector via codec_capability_probe.py. The --expect
+      # tokens below are the macos-arm64 leg's literal transcription of
+      # native/deps/codec_expectations.toml (see that file's header for the
+      # schema); render_expectations.py --check mechanically proves they
+      # have not drifted from the ledger. This step is the ledger's
+      # `step_anchor = "native leg"` anchor for macos-arm64 — do not rename
+      # without updating codec_expectations.toml.
+      - name: Assert full codec capability vector via probe (G1, native leg)
         if: matrix.cross == 'false'
         run: |
           set +e
-          python3 native/scripts/jxl_capability_probe.py "$DYLIB" --expect 1
+          python3 native/scripts/codec_capability_probe.py "$DYLIB" \
+            --expect jpeg:encode=1 --expect jpeg:decode=0 \
+            --expect webp:encode=1 --expect webp:decode=1 \
+            --expect heic:encode=1 --expect heic:decode=1 \
+            --expect avif:encode=1 --expect avif:decode=1 \
+            --expect jxl:encode=1 --expect jxl:decode=1
           rc=$?
           set -e
-          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
       # Cross leg: cannot dlopen a foreign-arch (x86_64) dylib from this
@@ -607,10 +622,30 @@ jobs:
       # CEYX_JXL_ENABLED=1 (see the diagnosis doc's falsification of "cmake
       # took the soft-degrade path"). Weaker than the native leg's runtime
       # call, but honest about what this leg can actually prove.
-      - name: Assert JXL enabled in cross-compile configure log (G1, cross leg)
+      #
+      # Round 3 (CI-T1 call-site replacement): this leg's `instrument =
+      # "configure-log"` (codec_expectations.toml) cannot dlopen, so it has
+      # no --expect flags to call; the ledger's full vector for this leg is
+      # instead transcribed here as a literal comment so
+      # render_expectations.py --check can still prove it has not drifted.
+      # avif:*=0 is the DP-8 honest zero (owner CI-T11); jpeg:decode=0 is
+      # deliberate on every leg (libjpeg-only decode route). This step is the
+      # ledger's `step_anchor = "cross leg"` anchor for macos-x86_64 — do not
+      # rename without updating codec_expectations.toml.
+      - name: Assert codec capability vector via configure log (G1, cross leg)
         if: matrix.cross == 'true'
         run: |
           set +e
+          # LEDGER VECTOR (macos-x86_64), transcribed from
+          # native/deps/codec_expectations.toml -- kept INSIDE this step
+          # (not in the comment block above the `- name:` header) so
+          # render_expectations.py's per-leg step_anchor scan attributes
+          # these tokens to THIS step and not the preceding "native leg"
+          # step (SF2 fix; a token in the trailing comments before a step
+          # header is inside the PREVIOUS step's slice, not this one's).
+          # jpeg:encode=1 jpeg:decode=0
+          # webp:encode=1 webp:decode=1 heic:encode=1 heic:decode=1
+          # avif:encode=0 avif:decode=0 jxl:encode=1 jxl:decode=1
           grep -q -- "-- JXL: static" cross_stage2_build.log
           rc=$?
           set -e

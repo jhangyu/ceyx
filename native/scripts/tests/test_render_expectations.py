@@ -234,6 +234,59 @@ def test_check_catches_cross_leg_drift_union_missed(tmp_path):
     assert any("leg-windows" in d and "avif:encode=1" in d for d in disagreements), disagreements
 
 
+def test_check_step_anchor_discriminates_two_legs_in_one_file(tmp_path):
+    """SF2 regression (round-3 review): two legs sharing ONE workflow file
+    (macos_build.yml's arm64/x86_64 matrix legs), each asserting a different
+    value for the same token in a different step. A whole-file scan would
+    see both legs' tokens as one set and falsely flag both as wrong; the
+    `step_anchor` discriminator must isolate each leg to its own step."""
+    ledger = {
+        "leg-native": {"instrument": "capability-probe", "workflow": "shared.yml",
+                       "step_anchor": "native leg", "expect": {"avif:encode": 1}},
+        "leg-cross": {"instrument": "configure-log", "workflow": "shared.yml",
+                      "step_anchor": "cross leg", "expect": {"avif:encode": 0}},
+    }
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "shared.yml").write_text(
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - name: Assert full vector (native leg)\n"
+        "        if: matrix.cross == 'false'\n"
+        "        run: probe.py --expect avif:encode=1\n"
+        "      - name: Assert full vector (cross leg)\n"
+        "        if: matrix.cross == 'true'\n"
+        "        run: echo 'avif:encode=0 (configure-log honest zero)'\n"
+    )
+    assert re_mod.check(ledger=ledger, workflows_dir=workflows_dir) == []
+
+
+def test_check_step_anchor_catches_drift_within_shared_file(tmp_path):
+    """Positive control for the fix above: a leg wired to the WRONG value
+    inside its own anchored step must still be caught."""
+    ledger = {
+        "leg-native": {"instrument": "capability-probe", "workflow": "shared.yml",
+                       "step_anchor": "native leg", "expect": {"avif:encode": 1}},
+    }
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "shared.yml").write_text(
+        "      - name: Assert full vector (native leg)\n"
+        "        run: probe.py --expect avif:encode=0\n"
+        "      - name: Assert full vector (cross leg)\n"
+        "        run: echo 'avif:encode=1'\n"
+    )
+    disagreements = re_mod.check(ledger=ledger, workflows_dir=workflows_dir)
+    assert any("leg-native" in d for d in disagreements), disagreements
+
+
+def test_tokens_in_file_unknown_anchor_returns_empty(tmp_path):
+    path = tmp_path / "f.yml"
+    path.write_text("      - name: Something else\n        run: probe.py --expect avif:encode=1\n")
+    assert re_mod._tokens_in_file(path, step_anchor="not present") == set()
+
+
 def test_cli_leg_help_exits_zero():
     import subprocess
     result = subprocess.run(

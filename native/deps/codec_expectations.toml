@@ -43,6 +43,14 @@
 [macos-arm64]
 instrument = "capability-probe"
 workflow = "macos_build.yml"
+# SF2 fix (round-3 review): macos-arm64 and macos-x86_64 share ONE workflow
+# file (a matrix job), each asserting a different vector for the same
+# tokens (avif:*) in a different step. step_anchor pins render_expectations
+# --check to scan only the ONE step whose `- name:` line contains this
+# substring (see render_expectations._tokens_in_file), so the two legs'
+# conflicting avif tokens in the same file cannot collide. Must match the
+# step name in .github/workflows/macos_build.yml verbatim.
+step_anchor = "native leg"
 
 [macos-arm64.expect]
 "jpeg:encode" = 1
@@ -62,6 +70,10 @@ workflow = "macos_build.yml"
 [macos-x86_64]
 instrument = "configure-log"
 workflow = "macos_build.yml"
+# SF2 fix (round-3 review): see macos-arm64's step_anchor comment above for
+# the full rationale. Must match the step name in
+# .github/workflows/macos_build.yml verbatim.
+step_anchor = "cross leg"
 
 [macos-x86_64.expect]
 "jpeg:encode" = 1

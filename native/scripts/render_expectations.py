@@ -94,7 +94,12 @@ def load_ledger(path=None):
                 expect[pair] = 0
             else:
                 raise LedgerError(f"leg {leg!r} pair {pair!r}: unrecognised entry type {type(entry)}")
-        legs[leg] = {"instrument": table["instrument"], "workflow": table["workflow"], "expect": expect}
+        legs[leg] = {
+            "instrument": table["instrument"],
+            "workflow": table["workflow"],
+            "step_anchor": table.get("step_anchor"),
+            "expect": expect,
+        }
     return legs
 
 
@@ -111,10 +116,50 @@ def render(leg, ledger=None):
     return fragment
 
 
-def _tokens_in_file(path):
-    """Return the FMT:DIR=VAL token set found in a single workflow file."""
-    tokens = set()
+# Matches a GitHub Actions step header line, e.g. "      - name: Foo bar".
+# Used to slice a workflow file into per-step blocks when a leg needs a
+# `step_anchor` discriminator (see _tokens_in_file below).
+_STEP_HEADER_RE = re.compile(r"(?m)^([ \t]*)-\s*name:.*$")
+
+
+def _tokens_in_file(path, step_anchor=None):
+    """Return the FMT:DIR=VAL token set found in a single workflow file.
+
+    If `step_anchor` is given, scanning is restricted to the text of the ONE
+    GitHub Actions step whose `- name:` line contains that substring (from
+    that step header up to, but not including, the next step header at the
+    same or shallower indentation, or EOF). This is the SF2 fix (round-3
+    review): macos_build.yml runs TWO legs (macos-arm64, macos-x86_64) out of
+    the SAME workflow file via a matrix, each asserting a different vector
+    for the same token (e.g. avif:encode=1 vs avif:encode=0) in different
+    steps gated by `if: matrix.cross`. Without a discriminator, a whole-file
+    scan sees BOTH legs' tokens as one set, and a leg's correct assertion
+    collides with the other leg's honest, differently-valued assertion --
+    `check()` would report a false disagreement for both legs. A leg with no
+    `step_anchor` keeps the original whole-file scan (every other leg has an
+    exclusive workflow file, so there is nothing to disambiguate).
+    """
     text = pathlib.Path(path).read_text()
+    if step_anchor is not None:
+        headers = list(_STEP_HEADER_RE.finditer(text))
+        start = None
+        indent = ""
+        start_idx = -1
+        for i, h in enumerate(headers):
+            if step_anchor in h.group(0):
+                start = h.start()
+                indent = h.group(1)
+                start_idx = i
+                break
+        if start is None:
+            return set()
+        end = len(text)
+        for h in headers[start_idx + 1:]:
+            if len(h.group(1)) <= len(indent):
+                end = h.start()
+                break
+        text = text[start:end]
+    tokens = set()
     for match in _EXPECT_TOKEN_RE.finditer(text):
         tokens.add(match.group(1))
     return tokens
@@ -161,7 +206,7 @@ def check(ledger=None, workflows_dir=None):
                 f"does not exist under {workflows_dir}"
             )
             continue
-        wf_tokens = _tokens_in_file(wf_path)
+        wf_tokens = _tokens_in_file(wf_path, step_anchor=table.get("step_anchor"))
         for token in sorted(wf_tokens - leg_tokens):
             disagreements.append(
                 f"leg {leg!r} workflow {workflow_name!r} asserts {token!r} but the ledger leg does not claim it"

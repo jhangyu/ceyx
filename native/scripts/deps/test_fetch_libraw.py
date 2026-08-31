@@ -14,26 +14,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deps import fetch_libraw  # noqa: E402
 
-_SH_SCRIPT = Path(__file__).resolve().parents[1] / "fetch_libraw_dist.sh"
 
+class TestFrozenTranscriptionMatchesTheDeletedShellScript(unittest.TestCase):
+    """fetch_libraw_dist.sh was DELETED in the same commit set as this
+    freeze (round 3, task #8 / 2026-09-01 contract item 11 / ENTRY-POINT
+    RULE): windows_build.yml's last remaining call site was rewired to
+    ``build_deps.py fetch libraw`` (linux_build.yml, macos_build.yml and
+    android_build.yml already called the Python replacement), so the .sh
+    had zero remaining consumers. Same pattern as
+    win_jxl_dist_test.py's ``TestFrozenTranscriptionMatchesTheDeletedShellScript``
+    and test_fetch_halide.py's sibling freeze.
 
-class TestTranscriptionMatchesTheShellScript(unittest.TestCase):
-    def setUp(self) -> None:
-        self.sh_text = _SH_SCRIPT.read_text(encoding="utf-8")
+    These values are FROZEN LITERALS, copied (not retyped) from the last
+    revision of fetch_libraw_dist.sh at commit
+    07596ef604badbc2037342d078d60242c511f2e4 (``git show
+    07596ef604badbc2037342d078d60242c511f2e4:native/scripts/fetch_libraw_dist.sh``
+    recovers the full original text). A value changing here without a
+    corresponding intentional edit to fetch_libraw.py is exactly as much a
+    red flag as a live-diff mismatch against the .sh would have been.
+    """
 
     def test_libraw_rev_matches(self) -> None:
-        self.assertIn(f'LIBRAW_REV="{fetch_libraw.LIBRAW_REV}"', self.sh_text)
+        self.assertEqual(fetch_libraw.LIBRAW_REV, "df226ea4178ccd74245f4f13c23adddfa01411c9")
 
     def test_rawspeed_rev_matches(self) -> None:
-        self.assertIn(f'RAWSPEED_REV="{fetch_libraw.RAWSPEED_REV}"', self.sh_text)
+        self.assertEqual(fetch_libraw.RAWSPEED_REV, "c835b05aecfacb7343f7c424abd620aa12116c3f")
 
     def test_libraw_cmake_rev_matches(self) -> None:
-        self.assertIn(f'LIBRAW_CMAKE_REV="{fetch_libraw.LIBRAW_CMAKE_REV}"', self.sh_text)
+        self.assertEqual(fetch_libraw.LIBRAW_CMAKE_REV, "eb98e4325aef2ce85d2eb031c2ff18640ca616d3")
 
     def test_urls_match(self) -> None:
-        self.assertIn(f'LIBRAW_URL="{fetch_libraw.LIBRAW_URL}"', self.sh_text)
-        self.assertIn(f'RAWSPEED_URL="{fetch_libraw.RAWSPEED_URL}"', self.sh_text)
-        self.assertIn(f'LIBRAW_CMAKE_URL="{fetch_libraw.LIBRAW_CMAKE_URL}"', self.sh_text)
+        self.assertEqual(fetch_libraw.LIBRAW_URL, "https://github.com/LibRaw/LibRaw.git")
+        self.assertEqual(fetch_libraw.RAWSPEED_URL, "https://github.com/darktable-org/rawspeed.git")
+        self.assertEqual(fetch_libraw.LIBRAW_CMAKE_URL, "https://github.com/LibRaw/LibRaw-cmake.git")
 
 
 class TestReadVendorRev(unittest.TestCase):

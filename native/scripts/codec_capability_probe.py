@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Codec capability gate: dlopen the built library and ask it what it supports.
 
-Generalises native/scripts/jxl_capability_probe.py (task #9, per
-docs/logs/2026-08-31/r5-jxl-diagnosis.md) from one format to all five, because
-spec-windows-codec-full-green.md AC1 names five formats in two directions.
+Generalises the original single-format JXL-only capability probe (task #9,
+per docs/logs/2026-08-31/r5-jxl-diagnosis.md; that script was retired in
+round 3 once every call site was rewired to this one -- see
+native/deps/codec_expectations.toml and render_expectations.py) from one
+format to all five, because spec-windows-codec-full-green.md AC1 names five
+formats in two directions.
 
 WHY NOT A SYMBOL GREP -- the reasoning is unchanged and load-bearing on every
 platform, so it is repeated here rather than referenced:

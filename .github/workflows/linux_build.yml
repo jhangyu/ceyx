@@ -326,14 +326,26 @@ jobs:
       # returned value is strictly stronger than a symbol-presence check.
       # Linux is a single-arch host build (no cross-compile), so dlopen from
       # this same process is always valid here.
-      - name: Assert JXL capability via FFI (G1)
+      #
+      # Round 3 (CI-T1 call-site replacement): generalised from the
+      # JXL-only single-format probe (now deleted) to the full 5-format
+      # x 2-direction vector via codec_capability_probe.py. The --expect
+      # tokens below are the linux-x86_64 leg's literal transcription of
+      # native/deps/codec_expectations.toml; render_expectations.py --check
+      # mechanically proves they have not drifted from the ledger.
+      - name: Assert full codec capability vector via probe (G1)
         run: |
           SO="native/build-linux/libdng_decoder_native.so"
           set +e
-          python3 native/scripts/jxl_capability_probe.py "$SO" --expect 1
+          python3 native/scripts/codec_capability_probe.py "$SO" \
+            --expect jpeg:encode=1 --expect jpeg:decode=0 \
+            --expect webp:encode=1 --expect webp:decode=1 \
+            --expect heic:encode=1 --expect heic:decode=1 \
+            --expect avif:encode=1 --expect avif:decode=1 \
+            --expect jxl:encode=1 --expect jxl:decode=1
           rc=$?
           set -e
-          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
       - name: Stage native artifacts
