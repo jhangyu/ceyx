@@ -33,7 +33,14 @@ permissions:
 
 jobs:
   build:
-    name: Build dng_decoder_native (${{ matrix.label }})
+    # Display name only. Rendered by GitHub as "<caller job> / <this job>",
+    # i.e. "macOS / arm64" — the caller (build.yml) already supplies the
+    # platform word, so repeating it here produced "macOS / macOS ...".
+    # The legacy `apple-silicon` / `intel` matrix labels were retired in
+    # round 6: they were a third vocabulary for bytes the release already
+    # named arm64 / x86_64, and a reader had to know that "intel" and
+    # "x86_64" meant the same leg.
+    name: ${{ matrix.arch_tag }}
     # Intel leg, 2026-08-28: GitHub retired the dedicated Intel macOS runner
     # image. A job pinned to it is never scheduled — it simply sits in
     # `queued` indefinitely (observed 8h+ with zero progress), which is a hang,
@@ -76,8 +83,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: apple-silicon
-            runner: macos-14
+          # `arch_tag` is now the ONLY identifier for a leg: it drives both the
+          # job display name and the artifact name, so the two can no longer
+          # disagree. The former `label:` key (apple-silicon / intel) was
+          # deleted rather than left unused — a dead matrix key is an invitation
+          # to reintroduce the second vocabulary.
+          - runner: macos-14
             arch_tag: arm64
             cross: "false"
             # D5: the overlay triplet whose VCPKG_OSX_ARCHITECTURES matches this
@@ -91,8 +102,7 @@ jobs:
             # fetch_heif_deps.sh writes the HOST-arch dist here and a
             # cross-arch dist to heif-dist-<arch>; heif.cmake searches both.
             heif_dist_dir: native/third_party/heif-dist
-          - label: intel
-            runner: macos-14
+          - runner: macos-14
             arch_tag: x86_64
             cross: "true"
             vcpkg_triplet: x64-osx-heif
@@ -541,7 +551,7 @@ jobs:
           echo "CROSS_STAGE2_RC=${rc}"
           exit "${rc}"
 
-      # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
+      # AC: the run log must show the cross-built dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
       # architecture pass unnoticed, and asserting alone would leave no evidence
       # in the log.
@@ -652,12 +662,13 @@ jobs:
           ls -la "${ARTIFACT_DIR}/native"
 
       # Round 6, Plan B naming normalization: the artifact name is built from
-      # `matrix.arch_tag` (arm64 / x86_64), NOT from `matrix.label`
-      # (apple-silicon / intel). The label is a human display string for the
-      # job title only and must never reach a filename
-      # (.github/CI-CONVENTIONS.md rule 2) — the v0.1.6 release already used
-      # arm64/x86_64 in its asset names while CI used the marketing words, so
-      # the two vocabularies disagreed for the same bytes.
+      # `matrix.arch_tag` (arm64 / x86_64). Before round 6 it was built from a
+      # separate `matrix.label` key (apple-silicon / intel), which no longer
+      # exists — the v0.1.6 release already used arm64/x86_64 in its asset
+      # names while CI used the marketing words, so two vocabularies described
+      # the same bytes. `arch_tag` now drives the job display name AND this
+      # filename, so they cannot drift apart again
+      # (.github/CI-CONVENTIONS.md rule 2).
       #
       # This name is also the release asset stem: the publish job in build.yml
       # packages `<artifact name>.tar.gz` verbatim, so there is no rename step

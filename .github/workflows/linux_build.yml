@@ -22,7 +22,12 @@ jobs:
     # ICD, whose feature support for the strict vk_int8/vk_int16/vk_int64
     # contract is not guaranteed; those gates run in the local Linux container
     # environment instead (see docs/logs/2026-08-28/Task_linux_vulkan_ci_run.md).
-    name: Linux x86_64 Vulkan native (dng_decoder_native)
+    # Display name only. GitHub renders this as "<caller job> / <this job>",
+    # and build.yml's caller job is already named "Linux", so naming this job
+    # "Linux x86_64 Vulkan native (dng_decoder_native)" rendered as
+    # "Linux / Linux x86_64 Vulkan native (dng_decoder_native)". Only the part
+    # the caller does not already say belongs here.
+    name: x86_64 Vulkan
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # `contents: write` was dropped in round 6 together with the release-attach

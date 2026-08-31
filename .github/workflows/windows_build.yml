@@ -18,7 +18,9 @@ jobs:
     # (the committed plugin/windows/Libraries/dng_decoder_native.dll
     # was hand-built on a developer machine and has had no CI provenance until
     # now — see docs/logs/2026-08-26/Task_windows_build_verification.md §3/§4).
-    name: Windows x86_64 Vulkan native (dng_decoder_native)
+    # Display name only; renders as "Windows / x86_64 Vulkan". See
+    # linux_build.yml for why the platform word is not repeated here.
+    name: x86_64 Vulkan
     runs-on: windows-latest
     timeout-minutes: 90
     # `contents: write` was dropped in round 6 together with the release-attach

@@ -28,7 +28,9 @@ jobs:
     #     preinstalled on the runner image) so the arm64-v8a / android-24
     #     target this build produces does not silently drift when GitHub
     #     bumps the default runner image's bundled NDK.
-    name: Android arm64-v8a Vulkan cross-compile (dng_decoder_native)
+    # Display name only; renders as "Android / arm64-v8a Vulkan". See
+    # linux_build.yml for why the platform word is not repeated here.
+    name: arm64-v8a Vulkan
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # `contents: write` was dropped in round 6 together with the release-attach
