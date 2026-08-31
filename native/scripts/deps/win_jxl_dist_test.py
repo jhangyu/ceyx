@@ -6,8 +6,10 @@ jxl.lib really contains the encode/decode entry points) are CI's job and
 are asserted there by the module itself. What is proven here is the logic
 that would otherwise only be debugged one 90-minute CI round at a time:
 pin-string derivation, the stamp fast path, the static-lib layout
-assertion, the transcription fidelity against
-``build_libjxl_dist_windows.sh``, and the cmake argv shape.
+assertion, the frozen transcription fidelity against the now-deleted
+``build_libjxl_dist_windows.sh`` (see
+``TestFrozenTranscriptionMatchesTheDeletedShellScript``), and the cmake
+argv shape.
 """
 from __future__ import annotations
 
@@ -24,8 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # down a fallback branch, and exception identity must stay single.
 from deps import win_jxl_dist, win_pe  # noqa: E402
 
-_SH_SCRIPT = Path(__file__).resolve().parents[1] / "build_libjxl_dist_windows.sh"
-
 
 def _dist_with(files: dict, root: Path) -> Path:
     for relative, content in files.items():
@@ -35,40 +35,82 @@ def _dist_with(files: dict, root: Path) -> Path:
     return root
 
 
-class TestTranscriptionMatchesTheShellScript(unittest.TestCase):
-    """Mechanical proof, not eyeballing: every pin/flag/required-lib value
-    must equal the shell script's, because the module docstring commits to
-    VERBATIM transcription and a reviewer is told to diff them.
+class TestFrozenTranscriptionMatchesTheDeletedShellScript(unittest.TestCase):
+    """build_libjxl_dist_windows.sh was DELETED in the same commit set as
+    this freeze (round 2 task #6 closeout, 2026-09-01 contract item 10 /
+    ENTRY-POINT RULE): the carrier-built dist was proven green on a real
+    Windows CI leg (run https://github.com/jhangyu/ceyx/actions/runs/33421023420,
+    head c1d771d) and the .sh had zero remaining consumers once
+    jxl_dist_windows.yml was rewired to call ``build_deps.py build
+    jxl-stack``. Same pattern as ``test_fetch_libjxl.py``'s
+    ``TestFrozenPinsMatchTheDeletedShellScript`` for the macOS/Linux
+    sibling.
+
+    These values are FROZEN LITERALS, copied (not retyped) from the last
+    revision of ``build_libjxl_dist_windows.sh`` at commit
+    d125df8e830b9c7e98541b34fff42ab694abde2b (``git show
+    d125df8e830b9c7e98541b34fff42ab694abde2b:native/scripts/build_libjxl_dist_windows.sh``
+    recovers the full original text). A value changing here without a
+    corresponding intentional edit to ``win_jxl_dist.py`` is exactly as much
+    a red flag as a live-diff mismatch against the .sh would have been.
     """
 
-    def setUp(self) -> None:
-        self.sh_text = _SH_SCRIPT.read_text(encoding="utf-8")
-
     def test_jxl_tag_matches(self) -> None:
-        self.assertIn(f'JXL_TAG="{win_jxl_dist.JXL_TAG}"', self.sh_text)
+        self.assertEqual(win_jxl_dist.JXL_TAG, "v0.12.0")
 
     def test_repo_url_matches(self) -> None:
-        self.assertIn(f'JXL_REPO_URL="{win_jxl_dist.JXL_REPO_URL}"', self.sh_text)
+        self.assertEqual(win_jxl_dist.JXL_REPO_URL, "https://github.com/libjxl/libjxl.git")
 
     def test_required_libs_match(self) -> None:
-        sh_line = next(line for line in self.sh_text.splitlines() if line.startswith("REQUIRED_LIBS="))
-        sh_libs = tuple(sh_line.split("=", 1)[1].strip('"').split())
-        self.assertEqual(sh_libs, win_jxl_dist.REQUIRED_LIBS)
+        self.assertEqual(
+            win_jxl_dist.REQUIRED_LIBS,
+            (
+                "jxl.lib",
+                "jxl_threads.lib",
+                "jxl_cms.lib",
+                "hwy.lib",
+                "brotlicommon.lib",
+                "brotlidec.lib",
+                "brotlienc.lib",
+            ),
+        )
 
     def test_required_symbols_match(self) -> None:
-        for symbol in win_jxl_dist.REQUIRED_SYMBOLS:
-            self.assertIn(symbol, self.sh_text)
+        self.assertEqual(
+            win_jxl_dist.REQUIRED_SYMBOLS,
+            ("JxlEncoderProcessOutput", "JxlDecoderProcessInput", "JxlEncoderAddBox"),
+        )
 
     def test_needed_submodules_match(self) -> None:
-        sh_line = next(
-            line for line in self.sh_text.splitlines() if line.startswith("JXL_NEEDED_SUBMODULES=")
+        self.assertEqual(
+            win_jxl_dist.JXL_NEEDED_SUBMODULES,
+            ("third_party/brotli", "third_party/highway", "third_party/skcms"),
         )
-        sh_submodules = tuple(sh_line.split("=", 1)[1].strip('"').split())
-        self.assertEqual(sh_submodules, win_jxl_dist.JXL_NEEDED_SUBMODULES)
 
     def test_cmake_flags_match(self) -> None:
-        for flag in win_jxl_dist._CMAKE_ARGS_BASE:
-            self.assertIn(flag, self.sh_text)
+        self.assertEqual(
+            win_jxl_dist._CMAKE_ARGS_BASE,
+            (
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_C_COMPILER=clang-cl",
+                "-DCMAKE_CXX_COMPILER=clang-cl",
+                "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                "-DBUILD_SHARED_LIBS=OFF",
+                "-DBUILD_TESTING=OFF",
+                "-DJPEGXL_ENABLE_TOOLS=OFF",
+                "-DJPEGXL_ENABLE_BENCHMARK=OFF",
+                "-DJPEGXL_ENABLE_EXAMPLES=OFF",
+                "-DJPEGXL_ENABLE_FUZZERS=OFF",
+                "-DJPEGXL_ENABLE_DOXYGEN=OFF",
+                "-DJPEGXL_ENABLE_MANPAGES=OFF",
+                "-DJPEGXL_ENABLE_SJPEG=OFF",
+                "-DJPEGXL_ENABLE_OPENEXR=OFF",
+                "-DJPEGXL_ENABLE_SKCMS=ON",
+                "-DJPEGXL_ENABLE_JNI=OFF",
+                "-DJPEGXL_FORCE_SYSTEM_BROTLI=OFF",
+                "-DJPEGXL_FORCE_SYSTEM_HWY=OFF",
+            ),
+        )
 
     def test_skcms_is_on_not_off(self) -> None:
         """R7 / the module's own KNOWN RISK paragraph: this flag must never

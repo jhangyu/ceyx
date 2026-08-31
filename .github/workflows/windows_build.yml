@@ -310,8 +310,9 @@ jobs:
       # is now a real committed dist (see its PROVENANCE.md) produced by the
       # Python carrier (win_jxl_dist.py via `build_deps.py build jxl-stack`)
       # -- the same status the HEIF dist reached in the G1 fix above. JXL is
-      # therefore no longer force-disabled: -DCEYX_ENABLE_JXL=OFF is REMOVED
-      # so cmake/jxl.cmake's WIN32 branch finds the dist and links it
+      # therefore no longer force-disabled: the explicit JXL opt-out flag
+      # round 5 added to this configure invocation was REMOVED here, so
+      # cmake/jxl.cmake's WIN32 branch finds the dist and links it
       # statically. The assertion below flips from "prove the explicit-OFF
       # branch ran" to "prove the static-link success branch ran" -- same
       # G1 discipline (a captured configure.log line, not a silent default),
