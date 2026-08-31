@@ -1,0 +1,123 @@
+# codec_expectations.toml -- the single reviewable table of per-leg codec
+# capability expectations, replacing scattered hard-coded `--expect` flags in
+# the CI workflows.
+#
+# Spec: docs/logs/2026-08-31/plan-ci-codec-integration.md, Task 2 (CI-T2).
+# Vocabulary (format names, directions) is owned by
+# native/scripts/codec_capability_probe.py's FORMATS / DIRECTIONS -- this file
+# must never invent a format or direction name codec_capability_probe.py does
+# not know.
+#
+# Schema, per leg table [<leg-id>]:
+#   instrument = "capability-probe" | "configure-log" | "on-device" | "none (accepted gap)"
+#   [<leg-id>.expect]
+#     "<format>:<direction>" = 1            -- a plain 1 needs no annotation.
+#     "<format>:<direction>" = { value = 0, reason = "...", owner = "..." }
+#                                            -- EVERY 0 must be a table with a
+#                                               `reason` and an `owner` (the
+#                                               task responsible for closing
+#                                               the gap). A bare `0` integer is
+#                                               rejected at load time -- see
+#                                               render_expectations.load_ledger.
+#
+# This is what makes a flip a one-line edit in the same PR as the capability,
+# and what stops an honest zero from being mistaken for an accepted
+# permanent state (the round-4 ruling: "every honest-zero ledger entry
+# carries reason + owning task").
+#
+# The ledger records what a leg SHOULD assert. It is never edited to match a
+# red run: a red run means the capability or the expectation is wrong, and
+# the fix (supplying the capability, or correcting the expectation with
+# evidence) goes in the same PR either way.
+
+[macos-arm64]
+instrument = "capability-probe"
+
+[macos-arm64.expect]
+"jpeg:encode" = 1
+"jpeg:decode" = { value = 0, reason = "JPEG decode capability is deliberately 0 on every platform: the decode route uses libjpeg unconditionally, not the generic ceyx_still_decode_supports gate", owner = "N/A (deliberate, not a gap)" }
+"webp:encode" = 1
+"webp:decode" = 1
+"heic:encode" = 1
+"heic:decode" = 1
+"avif:encode" = 1
+"avif:decode" = 1
+"jxl:encode" = 1
+"jxl:decode" = 1
+
+# The macOS cross x86_64 leg cannot dlopen a cross-compiled artifact from the
+# arm64 host process (F9): it keeps its configure-log-line assertion instead
+# of calling codec_capability_probe.py.
+[macos-x86_64]
+instrument = "configure-log"
+
+[macos-x86_64.expect]
+"jpeg:encode" = 1
+"jpeg:decode" = { value = 0, reason = "JPEG decode capability is deliberately 0 on every platform: the decode route uses libjpeg unconditionally, not the generic ceyx_still_decode_supports gate", owner = "N/A (deliberate, not a gap)" }
+"webp:encode" = 1
+"webp:decode" = 1
+"heic:encode" = 1
+"heic:decode" = 1
+# AVIF is a known gap on the macOS cross x86_64 leg (DP-8, honest zero);
+# remedy is the committed-dylib -> release-fetch migration chain, owned by
+# CI-T11 (out of round scope per the convergence contract's parking-lot).
+"avif:encode" = { value = 0, reason = "macOS x86_64 cross leg AVIF gap (DP-8 honest zero); remedy is the committed-dylib to release-fetch migration", owner = "CI-T11" }
+"avif:decode" = { value = 0, reason = "macOS x86_64 cross leg AVIF gap (DP-8 honest zero); remedy is the committed-dylib to release-fetch migration", owner = "CI-T11" }
+"jxl:encode" = 1
+"jxl:decode" = 1
+
+[linux-x86_64]
+instrument = "capability-probe"
+
+[linux-x86_64.expect]
+"jpeg:encode" = 1
+"jpeg:decode" = { value = 0, reason = "JPEG decode capability is deliberately 0 on every platform: the decode route uses libjpeg unconditionally, not the generic ceyx_still_decode_supports gate", owner = "N/A (deliberate, not a gap)" }
+"webp:encode" = 1
+"webp:decode" = 1
+"heic:encode" = 1
+"heic:decode" = 1
+"avif:encode" = 1
+"avif:decode" = 1
+"jxl:encode" = 1
+"jxl:decode" = 1
+
+# End-state vector per the convergence contract (docs/logs/2026-09-01/contract-
+# windows-codec-round.md, CI-T1 acceptance criteria): full green across every
+# format once W-T3 (encode-capable HEIF dist) and the JXL-CARRIER dist land.
+# This is the target the round is building toward, not yet the state of
+# windows_build.yml today -- call-site replacement (wiring the workflow to
+# render this vector) is round-2/round-3 work (task CI-T1 call sites, blocked
+# on this ledger existing).
+[windows-x86_64]
+instrument = "capability-probe"
+
+[windows-x86_64.expect]
+"jpeg:encode" = 1
+"jpeg:decode" = { value = 0, reason = "JPEG decode capability is deliberately 0 on every platform: the decode route uses libjpeg unconditionally, not the generic ceyx_still_decode_supports gate", owner = "N/A (deliberate, not a gap)" }
+"webp:encode" = 1
+"webp:decode" = 1
+"heic:encode" = 1
+"heic:decode" = 1
+"avif:encode" = 1
+"avif:decode" = 1
+"jxl:encode" = 1
+"jxl:decode" = 1
+
+# Android has NO runnable capability instrument in CI at all (compile-only
+# ruling 2026-08-31): the cross-compiled AArch64 .so cannot be dlopen'd from
+# the x86_64 runner, and the emulator gate that would have run an on-device
+# probe was removed. Every cell is an honest, permanently-accepted zero.
+[android-arm64-v8a]
+instrument = "none (accepted gap)"
+
+[android-arm64-v8a.expect]
+"jpeg:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"jpeg:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"webp:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"webp:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"heic:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"heic:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"avif:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"avif:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"jxl:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"jxl:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
