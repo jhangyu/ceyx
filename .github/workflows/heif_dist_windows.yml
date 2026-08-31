@@ -9,7 +9,17 @@ name: HEIF dist (Windows)
 #
 # ci/** is included so the workflow can be verified from a bootstrap branch:
 # a workflow file only becomes dispatchable once it exists on a ref that runs it.
+#
+# Round 6 (Plan B): `workflow_call` was ADDED alongside the existing triggers so
+# build.yml can invoke this leg on demand. workflow_dispatch is KEPT and remains
+# the primary entry point — this workflow is the sole producer of the committed
+# native/third_party/heif-dist-windows tree and must stay independently runnable
+# by a human regenerating that tree under the LGPL source-availability
+# obligation. It is deliberately NOT wired into build.yml's per-push platform
+# matrix: rebuilding a pinned, reviewed, committed input on every push is
+# exactly the "moving target" the paragraph above forbids.
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches:
@@ -37,7 +47,7 @@ concurrency:
 
 jobs:
   build-heif-dist:
-    name: libheif + libde265 dist (windows x86-64, clang-cl, decode-only)
+    name: libheif + libde265 dist (windows x86_64, clang-cl, decode-only)
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -133,10 +143,15 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: find native/third_party/heif-dist-windows -type f | sort
 
+      # Canonical artifact name <component>-<platform>-<arch> (round 6); the
+      # arch suffix was previously implicit. The PACKAGED DIRECTORY keeps its
+      # committed path (native/third_party/heif-dist-windows) — that is a
+      # tracked source path consumed by cmake/heif.cmake, not an artifact name,
+      # and renaming it is out of scope here.
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
-          name: heif-dist-windows
+          name: heif-dist-windows-x86_64
           path: ${{ github.workspace }}/native/third_party/heif-dist-windows
           if-no-files-found: error
           retention-days: 7

@@ -1,0 +1,369 @@
+name: Build
+
+# ORCHESTRATOR (round 6, Plan B). This is the ONLY workflow in this repository
+# with build/release triggers. Every platform leg lives in its own
+# `on: workflow_call` reusable workflow and is invoked from here, so:
+#
+#   * a tag push produces ONE run containing every platform's artifacts, which
+#     is what lets the publish job below use `needs:` + same-run
+#     download-artifact instead of resolving artifacts across sibling runs
+#     (the fragility that produced the one-off scratch publish script for
+#     v0.1.6);
+#   * "did every platform succeed?" is answerable inside the run, by the
+#     `all-platforms-green` guard, before a single asset is uploaded;
+#   * a leg cannot be silently skipped into a partial release.
+#
+# Trigger note (inherited from macos_build.yml, 2026-08-26): push.paths is
+# deliberately NOT applied to the push trigger. GitHub's path-filter semantics
+# for TAG pushes were never verified against a real run, and a tag push that
+# silently failed to trigger would mean a tag with no release. So pushes to
+# main / ci/** and every `v*` tag run unfiltered. pull_request keeps a paths
+# filter, since no tag is ever involved there.
+on:
+  push:
+    branches: [main, "ci/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - "native/**"
+      - "app/**"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+# Concurrency is declared HERE and only here. Reusable workflows inherit the
+# caller's group; a second group inside a called workflow would let this
+# workflow's cancel-in-progress race its own legs.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only at the top level. The publish job raises its own scope to
+# `contents: write`; no platform leg needs it any more.
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Platform legs.
+  #
+  # WHY FOUR EXPLICIT JOBS AND NOT A MATRIX: `uses:` for a reusable workflow
+  # must be a static path. GitHub does not evaluate expressions in it, so
+  # `uses: ./.github/workflows/${{ matrix.workflow }}.yml` is a workflow
+  # STARTUP error, not a runtime failure — the run executes zero jobs. The
+  # four legs are therefore spelled out. The matrix that does exist lives
+  # INSIDE macos_build.yml (its arm64 / x86_64 legs).
+  # --------------------------------------------------------------------------
+  macos:
+    name: macOS
+    uses: ./.github/workflows/macos_build.yml
+    # `secrets: inherit` on every leg: a reusable workflow receives NO secrets
+    # by default. Omitting this is silent — the leg runs and only the steps
+    # that actually need a secret fail, or worse, degrade. Declared explicitly
+    # on all four legs so the property is uniform and greppable.
+    secrets: inherit
+
+  linux:
+    name: Linux
+    uses: ./.github/workflows/linux_build.yml
+    secrets: inherit
+
+  windows:
+    name: Windows
+    uses: ./.github/workflows/windows_build.yml
+    secrets: inherit
+
+  android:
+    name: Android
+    uses: ./.github/workflows/android_build.yml
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
+  # Merged gates.
+  #
+  # These two jobs are the former dart_smoke.yml and native_test_targets.yml,
+  # moved here verbatim in content and DELETED as standalone files (round 6).
+  # They were not dead code: both fired only on `push: ci/**`, so they never
+  # ran on main or on a pull request — real gates with the wrong trigger. As
+  # jobs of this workflow they now inherit the orchestrator's trigger set and
+  # actually protect main and PRs, which was the defect.
+  #
+  # They are NOT in the publish job's `needs:` list on purpose: they produce no
+  # release artifact. They gate the run (a red run is a red run) without being
+  # able to block publication of bytes they did not build.
+  # --------------------------------------------------------------------------
+  verify-dart:
+    name: dart analyze + flutter test
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: ${{ github.workspace }}/app
+        run: flutter pub get
+
+      - name: dart analyze
+        working-directory: ${{ github.workspace }}/app
+        run: dart analyze
+
+      # Compile/analyze + unit tests only (supersedes the earlier FFI-smoke
+      # design): no step decodes an image. The FFI smoke that read a gitignored
+      # sample DNG (never present on CI) was removed; that decode check stays a
+      # LOCAL-ONLY developer step. See
+      # docs/logs/2026-08-28/Task_ci_repair_contract.md.
+      - name: flutter test (if present)
+        working-directory: ${{ github.workspace }}/app
+        run: |
+          test_count=0
+          if [ -d test ]; then
+            test_count=$(find test -name "*_test.dart" -type f | wc -l | tr -d ' ')
+          fi
+          if [ "$test_count" -gt 0 ]; then
+            flutter test
+          else
+            echo "::notice::No Flutter test files (test/**/*_test.dart) present; skipping 'flutter test'."
+          fi
+
+  verify-native-tests:
+    # Compile-only gate (2026-08-28, supersedes the earlier PSNR-gate design).
+    # This job ONLY builds the native test targets (test_decode,
+    # test_device_handoff) and fails hard on any real compile/link error. It
+    # does NOT run any decode/PSNR verification: the PSNR regression
+    # (run_decode_matrix.py) reads gitignored DNG samples that never exist on a
+    # CI runner, so it stays a LOCAL-ONLY gate for developers and is
+    # intentionally not exercised here. HEIF is disabled
+    # (-DDNG_ENABLE_HEIF=OFF, same as the Linux/Android legs) so the build
+    # needs no native/third_party/heif-dist. Halide/LibRaw fetch + cache mirror
+    # macos_build.yml (configure requires both).
+    name: Build native test targets
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      # D5: same pinned baseline as native/vcpkg/vcpkg.json and
+      # vcpkg-configuration.json (N30).
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_TRIPLET: arm64-osx-heif
+      # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a
+      # workflow STARTUP failure (the run reports its name as the file path and
+      # executes zero jobs), which is how the first D5 push failed. RUNNER_TEMP
+      # is an ordinary environment variable inside `run:` steps, so paths are
+      # composed there.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build prerequisites (Homebrew)
+        run: |
+          brew update
+          brew install cmake ninja jpeg-turbo
+
+      - name: Cache vendored Halide v21 distribution
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+
+      - name: Fetch vendored Halide v21 distribution
+        run: native/scripts/fetch_halide_v21_dist.sh
+
+      - name: Cache vendored LibRaw distribution
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
+
+      - name: Fetch vendored LibRaw distribution
+        run: native/scripts/fetch_libraw_dist.sh
+
+      # D5 (2026-08-31): this job builds TEST targets, but the configure it runs
+      # is the whole project's — cmake/encode.cmake included — and that file now
+      # hard-fails when libwebp is absent. So this job needs the vcpkg prefix
+      # even though nothing here exercises the WebP encode route.
+      # --x-no-default-features keeps it to libwebp alone (the job already
+      # passes -DDNG_ENABLE_HEIF=OFF).
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg" version
+
+      - name: vcpkg install libwebp (arm64-osx-heif)
+        run: |
+          set +e
+          "$RUNNER_TEMP/vcpkg/vcpkg" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="$VCPKG_TRIPLET" \
+              --x-no-default-features \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
+      - name: Cache CMake build directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/build
+          key: native-build-matrix-${{ runner.os }}-arm64-${{ hashFiles('native/CMakeLists.txt') }}
+          restore-keys: |
+            native-build-matrix-${{ runner.os }}-arm64-
+
+      - name: Build test_decode target
+        working-directory: ${{ github.workspace }}
+        run: |
+          # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's vcpkg resolver is
+          # mandatory before every non-Android configure and aborts when it
+          # locates no prefix, even if one was supplied as a cmake arg
+          # (run 33325970570).
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_native_watchdog.py \
+            --target test_decode \
+            --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
+            --idle-timeout-sec 180
+
+      - name: Build test_device_handoff target
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/build_native_watchdog.py \
+            --target test_device_handoff --skip-configure \
+            --idle-timeout-sec 180
+
+  # --------------------------------------------------------------------------
+  # Guard.
+  #
+  # Plan B's named risk: "matrix-level `if:` for platform-specific steps is a
+  # common source of 'job skipped, release incomplete' bugs — needs an explicit
+  # all-four-legs-succeeded guard before publish."
+  #
+  # `needs:` alone does NOT provide this. A `needs:` dependency is satisfied by
+  # a SKIPPED upstream job as well as a successful one, so publish could run
+  # with a leg that never produced an artifact. This job runs with
+  # `if: always()` so it is reached even when a leg fails, and then asserts
+  # every leg's result is literally "success" — treating skipped, cancelled and
+  # failed identically, because all three mean "these bytes do not exist".
+  # --------------------------------------------------------------------------
+  all-platforms-green:
+    name: All platform legs succeeded
+    runs-on: ubuntu-latest
+    needs: [macos, linux, windows, android]
+    if: always()
+    steps:
+      - name: Assert every platform leg reported success
+        env:
+          MACOS_RESULT: ${{ needs.macos.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+        run: |
+          echo "macos=${MACOS_RESULT} linux=${LINUX_RESULT} windows=${WINDOWS_RESULT} android=${ANDROID_RESULT}"
+          failed=""
+          for leg in macos linux windows android; do
+            case "${leg}" in
+              macos)   result="${MACOS_RESULT}" ;;
+              linux)   result="${LINUX_RESULT}" ;;
+              windows) result="${WINDOWS_RESULT}" ;;
+              android) result="${ANDROID_RESULT}" ;;
+            esac
+            # Explicit string comparison. An empty result (a leg that never
+            # started) must be caught too, which is why this tests for equality
+            # with "success" rather than testing for known-bad values.
+            if [ "${result}" != "success" ]; then
+              failed="${failed} ${leg}=${result:-<empty>}"
+            fi
+          done
+          if [ -n "${failed}" ]; then
+            echo "::error::platform leg(s) not successful:${failed} — refusing to treat this run as publishable." >&2
+            exit 1
+          fi
+          echo "ALL_LEGS_SUCCESS=1"
+
+  # --------------------------------------------------------------------------
+  # Publish. The single place in this repository allowed to create or upload a
+  # release asset (.github/CI-CONVENTIONS.md rule 3). Every per-workflow
+  # "name the release asset" + `gh release upload` / softprops/action-gh-release
+  # pair was deleted in round 6 in favour of this job.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Publish release assets
+    runs-on: ubuntu-latest
+    # The guard is in `needs:` as well as the legs: depending on the legs alone
+    # would let a SKIPPED leg satisfy the dependency (see all-platforms-green).
+    needs: [macos, linux, windows, android, all-platforms-green]
+    # Tag-gated. `v*` only — a push to main or a PR must never reach a release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No `name:` filter: every artifact of THIS run is downloaded, each into
+      # a subdirectory named exactly after its artifact. Because the artifact
+      # name is also the release asset stem, publish_release.py can derive the
+      # whole asset list from the directory listing — there is no second place
+      # where asset names are spelled out, and therefore no way for the two to
+      # drift. Same-run download also means no `gh run download` cross-run
+      # resolution, which is the race Plan A would have kept.
+      - name: Download all artifacts from this run
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ github.workspace }}/downloaded-artifacts
+
+      - name: List downloaded artifacts
+        run: find "${{ github.workspace }}/downloaded-artifacts" -maxdepth 2 | sort
+
+      - name: Publish release assets + artifacts.lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The tag is derived from the ref, never hardcoded.
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "PUBLISH_TAG=${TAG}"
+          set +e
+          python3 native/scripts/publish_release.py \
+            --tag "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --artifacts-dir "${GITHUB_WORKSPACE}/downloaded-artifacts" \
+            --staging-dir "${GITHUB_WORKSPACE}/release-staging"
+          rc=$?
+          set -e
+          echo "PUBLISH_RELEASE_RC=${rc}"
+          exit "${rc}"
+
+      # The lock is the release's provenance record (rule 4); keeping a copy as
+      # a run artifact means a failed download-back verification can still be
+      # diagnosed after the fact.
+      - name: Upload artifacts.lock as a run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-lock
+          path: ${{ github.workspace }}/release-staging/artifacts.lock
+          if-no-files-found: warn
+          retention-days: 30

@@ -5,7 +5,14 @@ name: libwebp dist (Windows)
 #
 # ci/** is included so the workflow can be verified from a bootstrap branch:
 # a workflow file only becomes dispatchable once it exists on a ref that runs it.
+#
+# Round 6 (Plan B): `workflow_call` was ADDED alongside the existing triggers so
+# build.yml can invoke this leg on demand; workflow_dispatch is KEPT and remains
+# the primary entry point. Sole producer of the committed
+# native/third_party/libwebp-dist-windows tree — see heif_dist_windows.yml for
+# the full rationale and for why this leg is not in build.yml's per-push matrix.
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches:
@@ -20,7 +27,7 @@ concurrency:
 
 jobs:
   build-webp-dist:
-    name: libwebp dist (windows x86-64, clang-cl, static, encode+decode+mux)
+    name: libwebp dist (windows x86_64, clang-cl, static, encode+decode+mux)
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -94,10 +101,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: find native/third_party/libwebp-dist-windows -type f | sort
 
+      # Canonical artifact name <component>-<platform>-<arch> (round 6); the
+      # packaged directory keeps its committed tracked path.
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
-          name: libwebp-dist-windows
+          name: libwebp-dist-windows-x86_64
           path: ${{ github.workspace }}/native/third_party/libwebp-dist-windows
           if-no-files-found: error
           retention-days: 7

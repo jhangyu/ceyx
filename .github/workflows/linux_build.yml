@@ -1,24 +1,17 @@
 name: Linux Build (Vulkan native)
 
+# REUSABLE WORKFLOW (round 6, Plan B). This file has NO triggers of its own:
+# it is invoked exclusively by .github/workflows/build.yml, which owns the
+# push/PR/tag/dispatch trigger set for every platform leg. Adding a push or
+# pull_request trigger back here would make the leg run twice per event (once
+# standalone, once through the orchestrator) and would resurrect the
+# cross-run artifact-resolution problem the orchestrator exists to remove.
 on:
-  workflow_dispatch:
-  push:
-    # ci/** so the lead can verify this workflow from a bootstrap branch
-    # before any of it lands on main (a workflow file only becomes
-    # dispatchable/visible to GitHub once it exists on a ref that runs it).
-    branches:
-      - "ci/**"
-    tags:
-      - "v*"
-  pull_request:
-    branches: [main]
-    paths:
-      - "native/**"
-      - ".github/workflows/linux_build.yml"
+  workflow_call:
 
-concurrency:
-  group: linux-build-${{ github.ref }}
-  cancel-in-progress: true
+# Concurrency is deliberately NOT declared here. A reusable workflow inherits
+# the caller's concurrency group; declaring a second group at this level would
+# let the orchestrator's own cancel-in-progress race this leg's.
 
 jobs:
   build-linux:
@@ -29,11 +22,14 @@ jobs:
     # ICD, whose feature support for the strict vk_int8/vk_int16/vk_int64
     # contract is not guaranteed; those gates run in the local Linux container
     # environment instead (see docs/logs/2026-08-28/Task_linux_vulkan_ci_run.md).
-    name: Linux x86-64 Vulkan native (dng_decoder_native)
+    name: Linux x86_64 Vulkan native (dng_decoder_native)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # `contents: write` was dropped in round 6 together with the release-attach
+    # step it existed for. This leg now only reads the repo and uploads
+    # artifacts; the publish job in build.yml holds the write scope.
     permissions:
-      contents: write
+      contents: read
     env:
       REPO_ROOT: ${{ github.workspace }}
       NATIVE_DIR: ${{ github.workspace }}/native
@@ -351,35 +347,34 @@ jobs:
             exit 1
           fi
 
+      # Round 6, Plan B: the artifact name is now the SINGLE naming decision
+      # this workflow makes. It is also the release asset stem — the publish
+      # job in build.yml packages `<artifact name>.tar.gz` verbatim, so there
+      # is no rename step anywhere between here and the release. Canonical form
+      # is <component>-<platform>-<arch> with an underscore in x86_64
+      # (.github/CI-CONVENTIONS.md rule 2). The former "Name the release asset"
+      # + softprops/action-gh-release pair that used to follow this step is
+      # deleted: no workflow may attach release assets directly any more, that
+      # is the publish job's exclusive job (rule 3).
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dng_decoder_native-linux-x86-64
+          name: dng_decoder_native-linux-x86_64
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 7
 
-      - name: Name the release asset (2026-08-29 clobber fix)
-        # Release assets live in ONE flat namespace per tag, so the build-output
-        # name libdng_decoder_native.so collides with the Android job's file of
-        # the same name: on v0.1.2 both jobs uploaded it and only the last
-        # writer survived. The upload-artifact above keeps the plain build name
-        # (it is namespaced by the artifact name); only the release copy is
-        # renamed, matching what macos_build.yml already does per matrix label.
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          mkdir -p "${ARTIFACT_DIR}/release"
-          cp "${ARTIFACT_DIR}/native/libdng_decoder_native.so" \
-            "${ARTIFACT_DIR}/release/libdng_decoder_native-linux-x86_64.so"
-
-      - name: Attach artifact to GitHub Release (tag push only)
-        # This workflow owns its own release-attach step (as android_build.yml
-        # does) to avoid a file jointly owned with another workflow.
-        # softprops/action-gh-release creates the Release if absent, uploads its
-        # own files: glob idempotently, and is safe to run from multiple
-        # independent workflows targeting the same tag.
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      # Round 6 gap closure (r5-release-v016.md:174-182): this leg BUILDS a
+      # libjxl distribution from source (the "Fetch vendored libjxl
+      # distribution" step above) and then threw it away — the bytes that the
+      # shipped Linux .so links against had no artifact and no release
+      # presence, unlike the three Windows dists which each have their own
+      # dist workflow. Uploading it here makes the Linux JXL dist a first-class
+      # publishable artifact with a canonical name.
+      - name: Upload libjxl dist (Linux)
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ github.workspace }}/artifacts/release/libdng_decoder_native-linux-x86_64.so
-          fail_on_unmatched_files: true
+          name: libjxl-dist-linux-x86_64
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist
+          if-no-files-found: error
+          retention-days: 7

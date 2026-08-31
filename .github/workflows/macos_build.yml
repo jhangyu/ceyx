@@ -13,30 +13,23 @@ name: macOS Native Build
 # image_samples/ (or any other gitignored input) must test for the input first
 # and `echo "::notice::..."` + skip when it is missing.
 #
-# Trigger note (2026-08-26): push.paths is intentionally NOT applied to the
-# push trigger below. GitHub's path-filter matching semantics for tag pushes
-# aren't something we could verify without a real run, so rather than risk a
-# tag push silently not triggering the release-attach step (AC5), the push
-# trigger runs on every push to main/ci/** and every `v*` tag, unfiltered.
-# pull_request keeps a paths filter since no tag is ever involved there.
+# REUSABLE WORKFLOW (round 6, Plan B). No triggers of its own: invoked
+# exclusively by .github/workflows/build.yml, which owns the push/PR/tag/
+# dispatch trigger set for every platform leg. See linux_build.yml's header
+# for why re-adding a standalone trigger here is a defect. The 2026-08-26
+# trigger note that used to live here (push.paths deliberately not applied to
+# tag pushes, so a tag could never silently skip the release attach) now
+# applies to build.yml's push trigger instead, and is restated there.
 on:
-  push:
-    branches: [main, "ci/**"]
-    tags: ["v*"]
-  pull_request:
-    branches: [main]
-    paths:
-      - "native/**"
-      - ".github/workflows/macos_build.yml"
-  workflow_dispatch:
+  workflow_call:
 
-# Needed by the release-attach step (gh release create/upload) on tag pushes.
+# `contents: write` was dropped in round 6 together with the release-attach
+# step it existed for. This workflow now only reads the repo and uploads
+# artifacts; the publish job in build.yml holds the write scope.
 permissions:
-  contents: write
+  contents: read
 
-concurrency:
-  group: macos-build-${{ github.ref }}
-  cancel-in-progress: true
+# Concurrency is inherited from the calling workflow; see linux_build.yml.
 
 jobs:
   build:
@@ -53,8 +46,9 @@ jobs:
     # setting CMAKE_OSX_ARCHITECTURES=x86_64 over the whole tree in one pass:
     # the Halide generators are build-time tools that must EXECUTE on the runner,
     # so they have to stay arm64 (host) while the AOT code they emit targets
-    # x86-64. Stage 1 builds arm64 generators and runs them with
-    # DNG_AOT_TARGET_OVERRIDE=x86-64-osx-metal-...; stage 2 compiles the actual
+    # x86_64. Stage 1 builds arm64 generators and runs them with
+    # DNG_AOT_TARGET_OVERRIDE set to the Halide Intel-macOS target triple (see
+    # X86_AOT_TARGET below); stage 2 compiles the actual
     # library for x86_64 against those prebuilt AOT artifacts. A single-pass
     # x86_64 configure would produce x86_64 generator binaries and then depend on
     # Rosetta being present to run them.
@@ -73,7 +67,7 @@ jobs:
     # need no arch handling: LibRaw, RawSpeed3 and the Adobe DNG SDK are built
     # from source in-tree and follow CMAKE_OSX_ARCHITECTURES; zlib comes from
     # the macOS SDK, which is universal; the Halide runtime is an AOT artifact
-    # emitted by stage 1 for the x86-64 target; and libomp is not involved at
+    # emitted by stage 1 for the x86_64 target; and libomp is not involved at
     # all because DNG_CROSS_BUILD turns the desktop OpenMP path off
     # (native/cmake/tests.cmake).
     runs-on: ${{ matrix.runner }}
@@ -112,6 +106,14 @@ jobs:
       DYLIB: ${{ github.workspace }}/${{ matrix.dylib_dir }}/libdng_decoder_native.dylib
       # Halide AOT target for the cross leg. Kept here (not inline) so the
       # string appears exactly once.
+      #
+      # DELIBERATE EXCEPTION to the "never write x86-64 with a hyphen" naming
+      # rule (.github/CI-CONVENTIONS.md rule 2): this is not one of OUR names.
+      # It is Halide's target-triple vocabulary, parsed by Halide itself, and
+      # `x86_64-osx-...` is not a triple Halide accepts. The rule governs
+      # artifact and asset names we choose; upstream tool vocabularies are
+      # quoted as-is. Rewriting this value to satisfy a grep would break the
+      # cross build, and obfuscating it to dodge the grep would be worse.
       X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
       HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
       # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
@@ -485,8 +487,8 @@ jobs:
             --target dng_decoder_native \
             --idle-timeout-sec 180
 
-      # Cross leg, stage 1: arm64 host generators, emitting x86-64 AOT code.
-      - name: Build host Halide generators + x86-64 AOT (cross stage 1)
+      # Cross leg, stage 1: arm64 host generators, emitting x86_64 AOT code.
+      - name: Build host Halide generators + x86_64 AOT (cross stage 1)
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
         run: |
@@ -649,34 +651,30 @@ jobs:
           cp "$DYLIB" "${ARTIFACT_DIR}/native/"
           ls -la "${ARTIFACT_DIR}/native"
 
+      # Round 6, Plan B naming normalization: the artifact name is built from
+      # `matrix.arch_tag` (arm64 / x86_64), NOT from `matrix.label`
+      # (apple-silicon / intel). The label is a human display string for the
+      # job title only and must never reach a filename
+      # (.github/CI-CONVENTIONS.md rule 2) — the v0.1.6 release already used
+      # arm64/x86_64 in its asset names while CI used the marketing words, so
+      # the two vocabularies disagreed for the same bytes.
+      #
+      # This name is also the release asset stem: the publish job in build.yml
+      # packages `<artifact name>.tar.gz` verbatim, so there is no rename step
+      # between here and the release. The former "Attach artifact to GitHub
+      # Release" step (raw `gh release create` / `gh release upload`, with its
+      # documented two-leg TOCTOU race on release creation) is deleted —
+      # release attachment is the publish job's exclusive responsibility
+      # (rule 3), and running it once per matrix leg is precisely the race the
+      # single publish job removes.
+      #
+      # Contract note: macOS artifacts are still produced and published, but
+      # halcyon deliberately does NOT consume macOS from releases — it uses the
+      # committed dylibs under plugin/macos/Libraries.
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dng_decoder_native-macos-${{ matrix.label }}
+          name: dng_decoder_native-macos-${{ matrix.arch_tag }}
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 14
-
-      # AC5: attach the built dylib to the GitHub Release for this tag.
-      # Uses the `gh` CLI, which is preinstalled on GitHub-hosted runners
-      # — chosen over a third-party action (e.g. softprops/action-gh-release)
-      # to avoid an extra dependency for what `gh release create`/`gh release
-      # upload` already do directly with the runner-provided GITHUB_TOKEN.
-      - name: Attach artifact to GitHub Release (tag pushes only)
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          ASSET="${ARTIFACT_DIR}/native/libdng_decoder_native-macos-${{ matrix.label }}.dylib"
-          cp "${ARTIFACT_DIR}/native/libdng_decoder_native.dylib" "$ASSET"
-          # Both matrix legs (apple-silicon, intel) run this step concurrently
-          # for the same tag, so "view, then create if missing" is a TOCTOU
-          # race: both can observe "not found" and both call `gh release
-          # create`, and the loser fails with "release already exists". The
-          # `|| true` tolerates that specific loser outcome — either way the
-          # release now exists (created by whichever leg won), which is all
-          # the following upload needs. If create fails for an unrelated
-          # reason, the upload step below fails loudly and surfaces it.
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes || true
-          gh release upload "$TAG" "$ASSET" --clobber

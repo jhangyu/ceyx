@@ -1,39 +1,31 @@
 name: Windows Build (Vulkan native)
 
+# REUSABLE WORKFLOW (round 6, Plan B). No triggers of its own: invoked
+# exclusively by .github/workflows/build.yml, which owns the push/PR/tag/
+# dispatch trigger set for every platform leg. See linux_build.yml's header
+# for why re-adding a standalone trigger here is a defect.
 on:
-  workflow_dispatch:
-  push:
-    # ci/** so the lead can verify this workflow from a bootstrap branch before
-    # any of it lands on main (a workflow file only becomes dispatchable once it
-    # exists on a ref that runs it). Mirrors linux_build.yml's trigger set.
-    branches:
-      - "ci/**"
-    tags:
-      - "v*"
-  pull_request:
-    branches: [main]
-    paths:
-      - "native/**"
-      - ".github/workflows/windows_build.yml"
+  workflow_call:
 
-concurrency:
-  group: windows-build-${{ github.ref }}
-  cancel-in-progress: true
+# Concurrency is inherited from the calling workflow; see linux_build.yml.
 
 jobs:
   build-windows:
     # BUILD-ONLY gate, same rationale as linux_build.yml: a GitHub-hosted
     # windows-latest runner has no Vulkan-capable GPU and no ICD, so decode /
-    # PSNR gates cannot run here. This job proves that the Windows x86-64
+    # PSNR gates cannot run here. This job proves that the Windows x86_64
     # Vulkan native library genuinely COMPILES AND LINKS from current source
     # (the committed plugin/windows/Libraries/dng_decoder_native.dll
     # was hand-built on a developer machine and has had no CI provenance until
     # now — see docs/logs/2026-08-26/Task_windows_build_verification.md §3/§4).
-    name: Windows x86-64 Vulkan native (dng_decoder_native)
+    name: Windows x86_64 Vulkan native (dng_decoder_native)
     runs-on: windows-latest
     timeout-minutes: 90
+    # `contents: write` was dropped in round 6 together with the release-attach
+    # step it existed for. This leg now only reads the repo and uploads
+    # artifacts; the publish job in build.yml holds the write scope.
     permissions:
-      contents: write
+      contents: read
     steps:
       # MUST run BEFORE actions/checkout. Git for Windows ships
       # core.autocrlf=true in the system gitconfig, so a checkout done before
@@ -161,14 +153,16 @@ jobs:
           fi
           ls -la "${VULKAN_SDK}/Lib/vulkan-1.lib"
 
-      - name: Cache vendored Halide v21 distribution (Windows x86-64)
+      - name: Cache vendored Halide v21 distribution (Windows x86_64)
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/halide
           key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
 
       # The fetch script already has a MINGW*/MSYS*/CYGWIN* case selecting the
-      # x86-64-windows zip asset (added 2026-08-21 for the Windows port), so it
+      # 64-bit-Intel Windows zip asset that upstream Halide publishes (added
+      # 2026-08-21 for the Windows port; the exact upstream asset name lives in
+      # native/scripts/fetch_halide_v21_dist.sh, not here), so it
       # runs unmodified under the runner's bundled Git-Bash.
       - name: Fetch vendored Halide v21 distribution
         shell: bash
@@ -401,7 +395,7 @@ jobs:
           echo "BUILD_RC=$RC"
           exit $RC
 
-      # AC-W3 evidence: the DLL exists, is a PE32+ x86-64 DLL, and has a
+      # AC-W3 evidence: the DLL exists, is a PE32+ x86_64 DLL, and has a
       # non-zero size recorded in the log. A build step that silently produced
       # nothing must not reach the upload step.
       # The configure diagnostic above sits BEFORE this step, so it cannot fire
@@ -665,56 +659,65 @@ jobs:
             echo "::notice::dng_decoder_native.lib not present (import library not emitted); DLL-only artifact."
           ls -la artifacts/native
 
-      - name: Upload native artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dng_decoder_native-windows-x86-64
-          path: ${{ github.workspace }}/artifacts/native
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Name the release assets (2026-08-29 clobber fix)
-        # The .dll name does not currently collide with any other job, but the
-        # release namespace is flat and shared, so every platform carries its
-        # own suffix (this also restores the v0.1.1 asset names). The import
-        # library is copied only when it exists, so the glob below stays
-        # single-file in the DLL-only case.
-        if: startsWith(github.ref, 'refs/tags/v')
+      # ATOMIC-GROUP GATE. Preserved verbatim in intent from the deleted
+      # "Name the release assets" step, but with two round-6 changes:
+      #
+      #   1. It is no longer tag-gated. The trio assertion is a property of the
+      #      BUILD (dng_decoder_native.dll imports heif.dll and libde265.dll,
+      #      asserted by the verify step above, so shipping any subset is
+      #      unloadable). Running it only on tag pushes meant every ordinary
+      #      push had the packaging bug invisible until release day. It now
+      #      runs on every invocation of this leg.
+      #   2. It counts the DLLs in artifacts/native — the directory that is
+      #      actually uploaded — instead of a separate artifacts/release copy
+      #      that no longer exists. Counting the staged copy while uploading a
+      #      different directory would be an instrument that cannot see the
+      #      failure it exists to catch.
+      #
+      # Red line (contract): the Windows DLL trio travels as one atomic group
+      # everywhere, so all three ship inside the SINGLE
+      # dng_decoder_native-windows-x86_64 artifact/asset rather than as three
+      # independently-fetchable assets.
+      - name: Assert the Windows DLL trio is complete (atomic group)
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
-          mkdir -p artifacts/release
-          cp artifacts/native/dng_decoder_native.dll \
-            artifacts/release/dng_decoder_native-windows-x86_64.dll
-          # The release namespace is flat and shared across platforms, so every
-          # asset carries its own platform suffix. heif/libde265 ship as separate
-          # assets rather than inside a zip because Halcyon's build_apps.py
-          # verifies a per-asset sha256 and places each file individually.
-          cp artifacts/native/heif.dll     artifacts/release/heif-windows-x86_64.dll
-          cp artifacts/native/libde265.dll artifacts/release/libde265-windows-x86_64.dll
-          cp artifacts/native/dng_decoder_native.lib \
-            artifacts/release/dng_decoder_native-windows-x86_64.lib 2>/dev/null || \
-            echo "::notice::no import library to attach."
-          ls -la artifacts/release
-          # Exactly three DLLs must be present; a fourth or a missing one is a
-          # packaging bug that would otherwise be found by a user.
+          ls -la artifacts/native
+          # De-pipelined: `ls | wc -l` is fine here (no early-exiting consumer),
+          # but the count is captured with set +e so its own RC is visible.
           set +e
-          DLL_COUNT=$(ls artifacts/release/*.dll | wc -l | tr -d ' ')
+          DLL_COUNT=$(ls artifacts/native/*.dll | wc -l | tr -d ' ')
+          rc=$?
           set -e
-          echo "RELEASE_DLL_COUNT=${DLL_COUNT}"
+          echo "STAGED_DLL_COUNT=${DLL_COUNT} RC=${rc}"
           if [ "${DLL_COUNT}" -ne 3 ]; then
-            echo "::error::expected exactly 3 release DLLs, found ${DLL_COUNT}." >&2
+            echo "::error::expected exactly 3 staged DLLs (dng_decoder_native, heif, libde265), found ${DLL_COUNT}." >&2
             exit 1
           fi
+          for dll in dng_decoder_native.dll heif.dll libde265.dll; do
+            if [ ! -f "artifacts/native/${dll}" ]; then
+              echo "::error::atomic group member missing: ${dll}" >&2
+              exit 1
+            fi
+          done
 
-      - name: Attach artifact to GitHub Release (tag push only)
-        # Same pattern as linux_build.yml / android_build.yml: each workflow
-        # owns its own release-attach step so no file is jointly owned.
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      # Round 6, Plan B: this artifact name is also the release asset stem —
+      # the publish job in build.yml packages `<artifact name>.tar.gz`
+      # verbatim, so no rename step exists between here and the release. The
+      # former "Name the release assets" + softprops/action-gh-release pair is
+      # deleted; release attachment is the publish job's exclusive
+      # responsibility (.github/CI-CONVENTIONS.md rule 3).
+      #
+      # Consumer note: pre-round-6 releases shipped heif.dll and libde265.dll
+      # as SEPARATE flat assets (heif-windows-x86_64.dll,
+      # libde265-windows-x86_64.dll) because halcyon's build_apps.py verified a
+      # per-asset sha256 and placed each file individually. From v0.1.7 the
+      # trio ships inside this one tar.gz; halcyon's fetch table is updated in
+      # the same round to extract the group as a unit.
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: |
-            ${{ github.workspace }}/artifacts/release/dng_decoder_native-windows-x86_64.*
-            ${{ github.workspace }}/artifacts/release/heif-windows-x86_64.dll
-            ${{ github.workspace }}/artifacts/release/libde265-windows-x86_64.dll
-          fail_on_unmatched_files: true
+          name: dng_decoder_native-windows-x86_64
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
