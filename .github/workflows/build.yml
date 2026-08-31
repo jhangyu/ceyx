@@ -30,6 +30,17 @@ on:
       - "app/**"
       - ".github/workflows/**"
   workflow_dispatch:
+    inputs:
+      run_dists:
+        description: >-
+          Also build the three Windows third-party dists (heif / libjxl /
+          libwebp). Off by default because each is a 45-90 minute clang-cl
+          build and their output is a pinned, reviewed input that does not
+          change per commit. Tag pushes set this implicitly — a release must
+          carry the dist assets halcyon pins. Use this to rehearse the full
+          tag pipeline from a branch without creating a tag.
+        type: boolean
+        default: false
 
 # Concurrency is declared HERE and only here. Reusable workflows inherit the
 # caller's group; a second group inside a called workflow would let this
@@ -76,6 +87,53 @@ jobs:
   android:
     name: Android
     uses: ./.github/workflows/android_build.yml
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
+  # Windows third-party dist legs (round-6 review BLOCKER fix).
+  #
+  # These were made `workflow_call`-capable but nothing called them, so from
+  # v0.1.7 a release would have carried at most six assets while halcyon's pin
+  # requires `heif-dist-windows-x86_64.tar.gz` and
+  # `libwebp-dist-windows-x86_64.tar.gz` (halcyon build_apps.py:409-426, which
+  # hard-fails at :1717/:1724 when an archive is missing or absent from
+  # artifacts.lock). The release would not have been "smaller"; it would have
+  # been unusable downstream.
+  #
+  # WHY CONDITIONAL, not unconditional: each of these is a 45-90 minute
+  # clang-cl build of a pinned, reviewed, committed input that does not change
+  # per commit. Running them on every push would dominate the pipeline's cost
+  # to rebuild bytes nobody consumed. They run when a release actually needs
+  # them (`v*` tag) or when a human asks (`run_dists` dispatch input).
+  #
+  # This is not a coverage hole: each dist workflow KEEPS its own
+  # `push: ci/** + paths` trigger on its own source files, so a change to the
+  # carrier or manifest still proves that dist independently. The orchestrator
+  # input exists so the full tag pipeline — including the publish job's
+  # required-asset assertion — can be rehearsed from a branch without cutting
+  # a tag.
+  #
+  # A SKIPPED leg satisfies `needs:`, so skipping must never be able to shrink
+  # a release silently. That is what the "Assert the required asset set"
+  # step in the publish job below is for: on a tag it fails loudly if any
+  # expected artifact is absent.
+  # --------------------------------------------------------------------------
+  heif-dist-windows:
+    name: HEIF dist (Windows)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.run_dists }}
+    uses: ./.github/workflows/heif_dist_windows.yml
+    secrets: inherit
+
+  jxl-dist-windows:
+    name: libjxl dist (Windows)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.run_dists }}
+    uses: ./.github/workflows/jxl_dist_windows.yml
+    secrets: inherit
+
+  webp-dist-windows:
+    name: libwebp dist (Windows)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.run_dists }}
+    uses: ./.github/workflows/webp_dist_windows.yml
     secrets: inherit
 
   # --------------------------------------------------------------------------
@@ -309,8 +367,27 @@ jobs:
     runs-on: ubuntu-latest
     # The guard is in `needs:` as well as the legs: depending on the legs alone
     # would let a SKIPPED leg satisfy the dependency (see all-platforms-green).
-    needs: [macos, linux, windows, android, all-platforms-green]
-    # Deliberately NOT `if: startsWith(github.ref, 'refs/tags/v')`.
+    # The dist legs are in `needs:` so that a FAILED dist blocks the release.
+    # They are conditional, and a SKIPPED job also satisfies `needs:` — that
+    # gap is closed by the required-asset assertion below, not by `needs:`.
+    needs:
+      - macos
+      - linux
+      - windows
+      - android
+      - all-platforms-green
+      - heif-dist-windows
+      - jxl-dist-windows
+      - webp-dist-windows
+    # `always()` is required now that some `needs:` entries are conditional:
+    # without it, a skipped dist leg would skip this job too, and the non-tag
+    # dry-run (the thing that proves packaging before release day) would never
+    # run. The guard result is therefore re-checked explicitly below rather
+    # than relied on implicitly.
+    if: >-
+      always()
+      && needs.all-platforms-green.result == 'success'
+    # Deliberately NOT gated on `startsWith(github.ref, 'refs/tags/v')`.
     #
     # The tag gate is applied to the UPLOAD, not to the job: on a non-tag run
     # this job still downloads every artifact and runs publish_release.py with
@@ -334,20 +411,100 @@ jobs:
         with:
           python-version: "3.11"
 
-      # No `name:` filter: every artifact of THIS run is downloaded, each into
-      # a subdirectory named exactly after its artifact. Because the artifact
-      # name is also the release asset stem, publish_release.py can derive the
-      # whole asset list from the directory listing — there is no second place
-      # where asset names are spelled out, and therefore no way for the two to
-      # drift. Same-run download also means no `gh run download` cross-run
-      # resolution, which is the race Plan A would have kept.
-      - name: Download all artifacts from this run
+      # `always()` above means a FAILED dist leg no longer blocks this job via
+      # `needs:`, so its result is re-asserted here. Skipped is fine (non-tag
+      # runs); failed or cancelled is not — publishing a release while a dist
+      # that belongs in it errored would produce exactly the incomplete asset
+      # set the round-6 review flagged.
+      - name: Assert no dist leg failed
+        env:
+          HEIF_RESULT: ${{ needs.heif-dist-windows.result }}
+          JXL_RESULT: ${{ needs.jxl-dist-windows.result }}
+          WEBP_RESULT: ${{ needs.webp-dist-windows.result }}
+        run: |
+          echo "heif=${HEIF_RESULT} jxl=${JXL_RESULT} webp=${WEBP_RESULT}"
+          bad=""
+          for leg in heif jxl webp; do
+            case "${leg}" in
+              heif) result="${HEIF_RESULT}" ;;
+              jxl)  result="${JXL_RESULT}" ;;
+              webp) result="${WEBP_RESULT}" ;;
+            esac
+            if [ "${result}" != "success" ] && [ "${result}" != "skipped" ]; then
+              bad="${bad} ${leg}=${result:-<empty>}"
+            fi
+          done
+          if [ -n "${bad}" ]; then
+            echo "::error::dist leg(s) did not succeed:${bad}" >&2
+            exit 1
+          fi
+
+      # `pattern` matters for re-runnability, not tidiness. This job also
+      # UPLOADS an artifact (`artifacts-lock`, below), so on "Re-run failed
+      # jobs" attempt 2 an unfiltered download would place an `artifacts-lock/`
+      # subdirectory next to the real assets — and publish_release.py derives
+      # its asset list from subdirectory names, so it exits 1 on a name with no
+      # platform token. The standard recovery from a transient publish failure
+      # was therefore permanently red at exactly the moment it is expensive.
+      #
+      # `*-*-*` matches the canonical <component>-<platform>-<arch> shape (two
+      # or more hyphens) and excludes `artifacts-lock` (one hyphen). Filtering
+      # on the DOWNLOAD side rather than teaching the CLI to skip unknown names
+      # is deliberate: silently skipping an unrecognised directory is how a
+      # real asset goes missing from a release.
+      #
+      # The artifact name is still the release asset stem, so there remains no
+      # second place where asset names are spelled out.
+      - name: Download asset artifacts from this run
         uses: actions/download-artifact@v4
         with:
           path: ${{ github.workspace }}/downloaded-artifacts
+          pattern: "*-*-*"
 
       - name: List downloaded artifacts
         run: find "${{ github.workspace }}/downloaded-artifacts" -maxdepth 2 | sort
+
+      # Round-6 review parking-lot item, adopted here because the blocker above
+      # is exactly its failure mode: the publish job promotes WHATEVER was
+      # uploaded, so a leg that skipped or an artifact that was renamed yields
+      # a quietly smaller release rather than an error. This step declares what
+      # a release must contain and fails loudly when it does not.
+      #
+      # The first five entries are the archives halcyon pins and verifies
+      # (build_apps.py CEYX_FETCH_SPECS); if any is missing, a downstream
+      # `--ceyx-release` run hard-fails. The rest are produced by this pipeline
+      # and belong in the lock for provenance.
+      #
+      # Tag-only: on branch runs the dist legs are intentionally skipped, so
+      # asserting the full set there would fail by design.
+      - name: Assert the required asset set (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cd "${GITHUB_WORKSPACE}/downloaded-artifacts"
+          required="
+          dng_decoder_native-linux-x86_64
+          dng_decoder_native-windows-x86_64
+          dng_decoder_native-android-arm64-v8a
+          heif-dist-windows-x86_64
+          libwebp-dist-windows-x86_64
+          dng_decoder_native-macos-arm64
+          dng_decoder_native-macos-x86_64
+          libjxl-dist-linux-x86_64
+          libjxl-dist-windows-x86_64
+          "
+          missing=""
+          for name in ${required}; do
+            if [ -d "${name}" ]; then
+              echo "present: ${name}"
+            else
+              missing="${missing} ${name}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::release is missing required artifact(s):${missing} — refusing to publish an incomplete asset set." >&2
+            exit 1
+          fi
+          echo "REQUIRED_ASSET_SET_COMPLETE=1"
 
       # Dry run on every non-tag event. Packaging, canonical naming, the
       # atomic-group assertion and artifacts.lock generation all execute; no
@@ -387,6 +544,15 @@ jobs:
       # The lock is the release's provenance record (rule 4); keeping a copy as
       # a run artifact means a failed download-back verification can still be
       # diagnosed after the fact.
+      # `overwrite: true` is what makes "Re-run failed jobs" work:
+      # upload-artifact@v4 rejects a duplicate artifact name within a run, so
+      # on attempt 2 this step would otherwise fail even when the publish it
+      # was diagnosing had succeeded.
+      #
+      # The name deliberately contains ONE hyphen so it cannot match the
+      # `*-*-*` download pattern above — the two rules are a matched pair, and
+      # renaming this artifact to a two-hyphen name would silently turn the
+      # provenance file into a release asset candidate.
       - name: Upload artifacts.lock as a run artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -394,4 +560,5 @@ jobs:
           name: artifacts-lock
           path: ${{ github.workspace }}/release-staging/artifacts.lock
           if-no-files-found: warn
+          overwrite: true
           retention-days: 30
