@@ -306,16 +306,16 @@ jobs:
       # third_party.cmake:29-32 states for exactly this reason ("keeps the
       # produced DLL free of an external zlib1.dll dependency"). This flag makes
       # every find_package(ZLIB) in the build resolve to zlibstatic.lib.
-      # G1 fix (round-5 gap closure, task #9): despite cmake/jxl.cmake's
-      # comment claiming native/third_party/libjxl-dist-windows is a
-      # "Committed dist (Task 6)", no such dist is actually tracked in git
-      # (`git ls-files native/third_party/libjxl-dist-windows` returns
-      # nothing) and native/scripts/fetch_libjxl_dist.sh has no Windows/MSVC
-      # acquisition path (unlike fetch_halide_v21_dist.sh's MINGW* case).
-      # Building one is a new feature, not a CI-assertion fix, so per task #9's
-      # ruling this leg takes the explicit-OFF branch: -DCEYX_ENABLE_JXL=OFF,
-      # asserted below via the captured configure log (was already the
-      # de-facto silent outcome; this makes it explicit and loud instead).
+      # G1 fix v3 (round 2, task #6): native/third_party/libjxl-dist-windows
+      # is now a real committed dist (see its PROVENANCE.md) produced by the
+      # Python carrier (win_jxl_dist.py via `build_deps.py build jxl-stack`)
+      # -- the same status the HEIF dist reached in the G1 fix above. JXL is
+      # therefore no longer force-disabled: -DCEYX_ENABLE_JXL=OFF is REMOVED
+      # so cmake/jxl.cmake's WIN32 branch finds the dist and links it
+      # statically. The assertion below flips from "prove the explicit-OFF
+      # branch ran" to "prove the static-link success branch ran" -- same
+      # G1 discipline (a captured configure.log line, not a silent default),
+      # inverted for the new capability instead of weakened.
       - name: Configure (Ninja + clang-cl, Vulkan AOT target)
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -333,7 +333,6 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DDNG_DIAGNOSTIC_BUILD=OFF \
             -DDNG_VK_PIPELINE_CACHE=OFF \
-            -DCEYX_ENABLE_JXL=OFF \
             -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_USE_STATIC_LIBS=ON 2>&1 | tee configure.log
@@ -342,17 +341,17 @@ jobs:
           echo "CONFIGURE_RC=$RC"
           exit $RC
 
-      - name: Assert JXL was explicitly disabled, not silently degraded (G1)
+      - name: Assert JXL was statically linked, not silently degraded (G1)
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set +e
-          grep -q "JXL: disabled (CEYX_ENABLE_JXL=OFF)" configure.log
+          grep -q "JXL: static" configure.log
           rc=$?
           set -e
-          echo "ASSERT JXL explicit-OFF RC=${rc}"
+          echo "ASSERT JXL static-link RC=${rc}"
           if [ "${rc}" -ne 0 ]; then
-            echo "::error::configure.log does not show the expected 'JXL: disabled (CEYX_ENABLE_JXL=OFF)' line from cmake/jxl.cmake; the -DCEYX_ENABLE_JXL=OFF flag above may not have taken effect." >&2
+            echo "::error::configure.log does not show the expected 'JXL: static' line from cmake/jxl.cmake; native/third_party/libjxl-dist-windows may be missing or cmake/jxl.cmake fell back to the soft-degrade WARNING branch instead of finding it." >&2
             exit 1
           fi
 
@@ -622,22 +621,21 @@ jobs:
             exit 1
           fi
 
-      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
-      # this leg took the explicit-OFF branch (no acquisition path exists for
-      # this platform; see the "Assert JXL was explicitly disabled" step
-      # above). That step only proves the CONFIGURE line was printed; this
-      # step proves the runtime CONSEQUENCE — the built DLL's own exported
-      # capability surface genuinely answers "unsupported" for JXL, not just
-      # that a log line appeared. windows-latest is the DLL's own target
-      # architecture (no cross-compile here), so dlopen from this same
-      # process is valid. Shares the same probe script as the macOS/Linux
-      # expect=1 legs, called with --expect 0.
-      - name: Assert JXL capability via FFI (G1, expect disabled)
+      # G1 fix v3 (round 2, task #6): this leg now statically links a real
+      # committed libjxl dist (see the "Assert JXL was statically linked"
+      # step above), so the runtime CONSEQUENCE this step proves flips from
+      # "unsupported" to "supported" -- the built DLL's own exported
+      # capability surface must genuinely answer JXL as available, not just
+      # that a configure-log line appeared. windows-latest is the DLL's own
+      # target architecture (no cross-compile here), so dlopen from this
+      # same process is valid. Shares the same probe script as the
+      # macOS/Linux expect=1 legs, now called with --expect 1 here too.
+      - name: Assert JXL capability via FFI (G1, expect enabled)
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set +e
-          python3 native/scripts/jxl_capability_probe.py "native/build-windows/dng_decoder_native.dll" --expect 0
+          python3 native/scripts/jxl_capability_probe.py "native/build-windows/dng_decoder_native.dll" --expect 1
           rc=$?
           set -e
           echo "JXL_CAPABILITY_PROBE_RC=${rc}"
