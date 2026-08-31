@@ -59,16 +59,20 @@ def _rendered(loaded, component: str = "libheif") -> dict[str, str]:
 def _has_windows_acquisition(component_block: dict) -> bool:
     """True when the component can actually be OBTAINED on Windows.
 
-    A ``source.windows`` block qualifies. A ``source.default`` qualifies ONLY
-    if it is not registry-supplied, because the registry (vcpkg) legs of this
-    project are macOS/Linux -- an `aom` resolved to `kind = "registry"` has no
-    Windows acquisition path in this tree, which is precisely the trap.
+    A ``source.windows`` block qualifies. A ``source.default`` of
+    ``kind = "registry"`` ALSO qualifies as of D1-a (2026-08-31,
+    spec-windows-codec-full-green.md): `native/vcpkg/triplets/x64-windows-heif.cmake`
+    exists and names aom as a static vcpkg port, so vcpkg's registry leg now
+    covers Windows too -- it is no longer macOS/Linux-only, which is what made
+    a registry-resolved component unacquirable on Windows before this ruling.
+    Any OTHER `source.default` kind (tarball/git) still needs a concrete URL
+    or ref and is treated as acquirable outright, same as before.
     """
     source = component_block.get("source", {})
     if "windows" in source:
         return True
     default = source.get("default", {})
-    return bool(default) and default.get("kind") != "registry"
+    return bool(default) and default.get("kind") in ("registry", "tarball", "git")
 
 
 class TestWindowsCodecAcquirability(unittest.TestCase):
@@ -98,39 +102,50 @@ class TestWindowsCodecAcquirability(unittest.TestCase):
         self.assertIn("windows", self.components["libde265"]["source"])
 
     def test_the_invariant_actually_fires_when_violated(self) -> None:
-        """Demonstrated red: flipping aom back ON without giving it a Windows
-        acquisition must be caught. This is the exact pre-fix state."""
-        self.flags["WITH_AOM_DECODER"] = "ON"
+        """Demonstrated red: switching on a codec whose component has no
+        Windows acquisition at all (no ``source.windows`` and no
+        ``source.default``) must be caught. Synthesised rather than reusing
+        `aom` because D1-a (2026-08-31) gave `aom` a real Windows acquisition
+        path (its registry `source.default`, now vcpkg-resolvable on Windows
+        via `x64-windows-heif.cmake`) -- reusing it here would no longer
+        demonstrate a violation, it would demonstrate the fix."""
+        switches = dict(_CODEC_SWITCH_TO_COMPONENT)
+        switches["WITH_UNACQUIRABLE_TEST_CODEC"] = "_unacquirable_test_component"
+        flags = dict(self.flags)
+        flags["WITH_UNACQUIRABLE_TEST_CODEC"] = "ON"
+        components = dict(self.components)
+        components["_unacquirable_test_component"] = {"source": {}}
         unsatisfiable = [
             f"{switch}=ON but {component} has no Windows acquisition"
-            for switch, component in _CODEC_SWITCH_TO_COMPONENT.items()
-            if self.flags.get(switch) == "ON" and not _has_windows_acquisition(self.components[component])
+            for switch, component in switches.items()
+            if flags.get(switch) == "ON" and not _has_windows_acquisition(components[component])
         ]
         self.assertEqual(len(unsatisfiable), 1, unsatisfiable)
-        self.assertIn("aom", unsatisfiable[0])
+        self.assertIn("_unacquirable_test_component", unsatisfiable[0])
 
 
-class TestWindowsDistIsDecodeOnly(unittest.TestCase):
-    """Pins the lead's OPTION 1 ruling (2026-08-31): the Windows dist
-    reproduces build_heif_dist_windows.sh @ ci/round3 -- libde265 + libheif,
-    decode-only. The round6 full-capability shape stays parked; un-parking it
-    is a product scope change for the user, not a transcription choice."""
+class TestWindowsDistIsFullCapability(unittest.TestCase):
+    """Un-parked 2026-08-31 by docs/logs/2026-08-31/spec-windows-codec-full-green.md
+    (in-scope item 1), which is the product-scope ruling this class (formerly
+    ``TestWindowsDistIsDecodeOnly``, pinning the lead's OPTION 1 ruling) is
+    superseded by rather than kept alongside -- WITH_KVAZAAR=OFF and
+    WITH_KVAZAAR=ON cannot both pass."""
 
     def setUp(self) -> None:
         self.flags = _rendered(manifest.load())
 
-    def test_kvazaar_and_aom_are_off(self) -> None:
-        self.assertEqual(self.flags.get("WITH_KVAZAAR"), "OFF")
-        self.assertEqual(self.flags.get("WITH_AOM_DECODER"), "OFF")
-        self.assertEqual(self.flags.get("WITH_AOM_ENCODER"), "OFF")
+    def test_kvazaar_and_aom_are_on(self) -> None:
+        self.assertEqual(self.flags.get("WITH_KVAZAAR"), "ON")
+        self.assertEqual(self.flags.get("WITH_AOM_DECODER"), "ON")
+        self.assertEqual(self.flags.get("WITH_AOM_ENCODER"), "ON")
 
     def test_hevc_decode_stays_on(self) -> None:
-        """Decode-only must not decay into decode-nothing."""
+        """Decode must not decay into decode-nothing."""
         self.assertEqual(self.flags.get("WITH_LIBDE265"), "ON")
 
     def test_gpl_encoder_stays_off(self) -> None:
         """x265 is GPL-2.0 and is excluded by name, independently of the
-        decode-only ruling."""
+        encode-capability ruling."""
         self.assertEqual(self.flags.get("WITH_X265"), "OFF")
 
     def test_msvc_defaults_are_restored_by_hand(self) -> None:
@@ -143,6 +158,46 @@ class TestWindowsDistIsDecodeOnly(unittest.TestCase):
 
     def test_static_crt_is_requested(self) -> None:
         self.assertEqual(self.flags.get("CMAKE_MSVC_RUNTIME_LIBRARY"), "MultiThreaded")
+
+
+class TestWindowsLibheifFullCapabilityFlags(unittest.TestCase):
+    """Windows must render the same encoder flag set as macOS/Linux.
+
+    Un-parked by docs/logs/2026-08-31/spec-windows-codec-full-green.md
+    (in-scope item 1). Before that ruling this rendered WITH_KVAZAAR=OFF and
+    WITH_AOM_*=OFF.
+
+    Uses the module's actual API (``render.render`` / manual source-block
+    inspection) rather than the plan's illustrative ``manifest.render_cmake_args``
+    / ``manifest.resolve_source`` names, which this tree does not export
+    (grep -n '^def ' native/scripts/deps/manifest.py); the assertions
+    themselves are identical to the plan's.
+    """
+
+    def test_windows_libheif_renders_full_capability_flags(self) -> None:
+        loaded = manifest.load()
+        argv = render.render(loaded, "libheif", "windows", "x86_64", dist="/D")
+        joined = " ".join(argv)
+        self.assertIn("-DWITH_KVAZAAR=ON", joined)
+        self.assertIn("-DWITH_AOM_DECODER=ON", joined)
+        self.assertIn("-DWITH_AOM_ENCODER=ON", joined)
+        # Licence red line, asserted in the SAME test so it cannot be relaxed
+        # by accident while flipping the three above.
+        self.assertIn("-DWITH_X265=OFF", joined)
+
+    def test_windows_aom_has_a_resolvable_source(self) -> None:
+        """[component.aom] must be acquirable on Windows.
+
+        Before this change its source.default was registry-only with a
+        comment stating no Windows acquisition existed, which made the
+        libheif Windows configure unsatisfiable the moment WITH_AOM_*
+        flipped ON.
+        """
+        loaded = manifest.load()
+        aom = loaded["manifest"]["component"]["aom"]
+        self.assertTrue(_has_windows_acquisition(aom))
+        src = aom["source"].get("windows") or aom["source"]["default"]
+        self.assertIn(src["kind"], ("registry", "tarball", "git"))
 
 
 if __name__ == "__main__":

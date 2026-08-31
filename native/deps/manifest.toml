@@ -252,11 +252,11 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   # lib/libaom.a and include/aom out of $CEYX_VCPKG_PREFIX and hard-fails when
   # that prefix is absent.
   #
-  # No `source.windows` override is added: the Windows script on this branch
-  # builds NO aom at all (build_heif_dist_windows.sh:168-169 pass
-  # -DWITH_AOM_DECODER=OFF and -DWITH_AOM_ENCODER=OFF), so there is no Windows
-  # acquisition to describe. Do not infer one from the `cmake.windows` block
-  # below, which is round-1 history transcribed from win_build_round6.sh.
+  # 2026-08-31: a Windows consumer now EXISTS (spec-windows-codec-full-green.md
+  # in-scope item 1 flips libheif's WITH_AOM_* ON for windows). No
+  # `source.windows` override is added even so: `kind = "registry"` above is
+  # platform-neutral, and native/vcpkg/triplets/x64-windows-heif.cmake already
+  # names aom as a static port. One pin, three platforms.
   kind    = "registry"
   version = "3.15.0"
   reason  = "supplied by vcpkg at exactly 3.15.0 (native/vcpkg/vcpkg.json `overrides`, resolved against pinned baseline abb6dda5cc32914d2e64d7d72b974dc301d1fc8a -- never the floating baseline, N30); Spec_build_rewrite.md §3.2/§6.5 resolves this component to registry and Ruling 1 approves the 3.12.1 -> 3.15.0 bump, which is why this is the only component in the migration whose version changes and why it lands alone (A5.1b)"
@@ -425,14 +425,16 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
   # `source.windows` block and its comment forbids inventing one -- so no
   # Windows aom could ever be acquired to satisfy it.
   #
-  # The round6 full-capability shape (kvazaar HEVC encoder + aom) stays PARKED
-  # by that ruling: Round 4's carrier reproduces today's green through Python,
-  # it does not expand Windows capability. Restoring it is a product scope
-  # change for the user to make, not a transcription choice -- so do not
-  # "restore" these three flags to ON on the strength of this comment alone.
-  WITH_KVAZAAR          = "OFF"
-  WITH_AOM_DECODER      = "OFF"
-  WITH_AOM_ENCODER      = "OFF"
+  # UN-PARKED 2026-08-31 by docs/logs/2026-08-31/spec-windows-codec-full-green.md
+  # (in-scope item 1), which is the product-scope ruling the previous
+  # comment said was required. The history is kept, not deleted: these three
+  # flags were transcribed OFF from build_heif_dist_windows.sh @ci/round3 (a
+  # decode-only script) under the lead's 2026-08-31 "OPTION 1" ruling, and the
+  # surrounding KVAZAAR_LIBRARY / AOM_LIBRARY / -DKVZ_STATIC_LIB keys were
+  # deliberately kept inert so that un-parking would be a pure flag flip. It is.
+  WITH_KVAZAAR          = "ON"
+  WITH_AOM_DECODER      = "ON"
+  WITH_AOM_ENCODER      = "ON"
   # K11/N9, layer 3: -DKVZ_STATIC_LIB belongs on LIBHEIF's compile, not
   # kvazaar's -- kvazaar.h assumes __declspec(dllimport) unless the CONSUMER
   # defines this, and kvazaar installs no CMake package config to propagate
