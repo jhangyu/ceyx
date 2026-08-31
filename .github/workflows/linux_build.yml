@@ -208,7 +208,7 @@ jobs:
         id: cache-heif
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/native/third_party/heif-dist
+          path: ${{ github.workspace }}/native/third_party/heif-dist-linux
           key: heif-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/build_deps.py', 'native/scripts/deps/*.py', 'native/deps/manifest.toml', 'native/deps/arch_map.toml', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
 
       # CEYX_VCPKG_PREFIX is mandatory (heif.py's _vcpkg_prefix hard-fails
@@ -224,7 +224,7 @@ jobs:
           python3 native/scripts/build_deps.py build heif-stack \
               --platform linux \
               --arch x86_64 \
-              --dist "$GITHUB_WORKSPACE/native/third_party/heif-dist"
+              --dist "$GITHUB_WORKSPACE/native/third_party/heif-dist-linux"
 
       - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
         # Native single-stage build: on Linux the host IS the target, so the
@@ -236,11 +236,12 @@ jobs:
         # --idle-timeout-sec raised above the 60s default as a CI margin.
         # Separate --build-dir build-linux so it never collides with build/.
         # LINUX-HEIF (round 3): -DDNG_ENABLE_HEIF=OFF is REMOVED here. The
-        # "Build HEIF stack" step above now produces a real
-        # native/third_party/heif-dist for this platform, so
-        # cmake/heif.cmake's generic (non-APPLE, non-WIN32) find_path/
-        # find_library search resolves it the same way it always resolved the
-        # macOS dist — no cmake changes were needed, only the dist's presence.
+        # "Build HEIF stack" step above now produces a real dist under
+        # native/third_party/heif-dist-linux; cmake/heif.cmake's new
+        # `elseif(UNIX AND NOT APPLE)` branch (added this round) points
+        # HEIF_DIST_HINTS there instead of the unsuffixed default, which is
+        # reserved for macOS's own dylib dist (see that branch's comment for
+        # why the two must not share a path).
         working-directory: ${{ github.workspace }}
         run: |
           # The watchdog locates the vcpkg prefix ITSELF (via CEYX_VCPKG_PREFIX,
@@ -402,7 +403,7 @@ jobs:
       - name: Compile + run functional capability probe (CI-T3)
         run: |
           set -e
-          DIST="$GITHUB_WORKSPACE/native/third_party/heif-dist"
+          DIST="$GITHUB_WORKSPACE/native/third_party/heif-dist-linux"
           PROBE_DIR="$GITHUB_WORKSPACE/native/scripts/deps/probe"
           clang \
             -I"$DIST/include" \

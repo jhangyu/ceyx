@@ -36,6 +36,22 @@ if(DNG_ENABLE_HEIF)
         # native/scripts/fetch_heif_deps.sh; same hazard applies to a dist left
         # behind by build_deps.py's heif-stack build.)
         set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-windows")
+    elseif(UNIX AND NOT APPLE)
+        # LINUX-HEIF (round 3, user ruling 2026-09-01): the Linux dist is
+        # built in-CI (native/scripts/build_deps.py build heif-stack
+        # --platform linux --dist .../heif-dist-linux, see linux_build.yml),
+        # never committed, under a Linux-specific suffixed directory rather
+        # than the unsuffixed ${HEIF_DIST_DIR} default. This mirrors the
+        # WIN32 branch's isolation intent immediately above: unsuffixed
+        # heif-dist/ is the path macOS's build produces (its dylibs), and a
+        # Linux configure searching that same unsuffixed path in a working
+        # tree that has ever run a macOS build would find Mach-O bytes that
+        # `file`/`nm -D`/`readelf` cannot parse as ELF -- surfacing as an
+        # opaque "not a 64-bit ELF" assertion failure inside the carrier
+        # rather than naming the real mismatch. The unsuffixed path is not
+        # appended as a fallback for the same reason the Windows branch does
+        # not append it.
+        set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-linux")
     endif()
     set(HEIF_INCLUDE_HINTS "")
     set(HEIF_LIB_HINTS "")

@@ -79,6 +79,11 @@ native/third_party/libraw-cmake/
 # the pinned versions, hashes and configure flags survive without the tree.
 native/third_party/heif-dist/*
 !native/third_party/heif-dist/PROVENANCE.md
+# Arch/platform-suffixed dist directories (macOS cross leg's heif-dist-x86_64,
+# LINUX-HEIF round 3's heif-dist-linux): same fetched-and-built-never-tracked
+# policy, no PROVENANCE.md carve-out because none of these is a reviewed,
+# committed INPUT (unlike heif-dist-windows below).
+native/third_party/heif-dist-*/
 
 # Vendored libwebp encode distribution (static, built by
 # native/scripts/fetch_libwebp_dist.sh). Same policy as the HEIF dist above:
