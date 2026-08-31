@@ -79,7 +79,7 @@ def main():
     cases.append("corpus")
 
     ok &= run("architecture-gates",
-              ["bash", "native/scripts/check_raw_architecture_gates.sh"])
+              [sys.executable, "native/scripts/check_raw_architecture_gates.py"])
     cases.append("architecture-gates")
 
     build_dir = REPO / args.build_dir
