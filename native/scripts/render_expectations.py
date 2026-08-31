@@ -194,6 +194,22 @@ def check(ledger=None, workflows_dir=None):
     disagreements = []
     for leg in sorted(legs):
         table = legs[leg]
+        # Legs whose `instrument` starts with "none" (e.g. android-arm64-v8a's
+        # "none (accepted gap)") have NO runnable capability instrument in CI
+        # at all -- there is nothing for their workflow to assert, by design,
+        # so a whole-leg comparison against workflow tokens would always be
+        # red. This is a deliberate, printed SKIP (never silent, per the
+        # 2026-08-25 lesson: a silently-skipped gate looks identical to a
+        # fully-checked green one), not an exemption from the ledger's
+        # reason/owner discipline -- load_ledger() still requires every 0
+        # cell to carry both.
+        instrument = table.get("instrument", "")
+        if instrument.startswith("none"):
+            print(
+                f"::notice::SKIP leg {leg!r}: instrument={instrument!r} has no runnable "
+                f"CI capability probe, so its workflow is not checked against the ledger."
+            )
+            continue
         workflow_name = table.get("workflow")
         if not workflow_name:
             disagreements.append(f"leg {leg!r} has no 'workflow' mapping to check against")

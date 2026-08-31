@@ -287,6 +287,40 @@ def test_tokens_in_file_unknown_anchor_returns_empty(tmp_path):
     assert re_mod._tokens_in_file(path, step_anchor="not present") == set()
 
 
+def test_check_skips_none_instrument_leg_with_notice(tmp_path, capsys):
+    """android-arm64-v8a shape: instrument="none (accepted gap)" has no
+    runnable CI capability instrument at all, so its workflow asserts
+    nothing and a whole-leg comparison would always be red. check() must
+    SKIP it (no disagreement) but print a visible notice -- never a silent
+    skip (2026-08-25 lesson)."""
+    ledger = {
+        "leg-none": {"instrument": "none (accepted gap)", "workflow": "empty.yml",
+                     "expect": {"avif:encode": 0}},
+    }
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "empty.yml").write_text("jobs: {}\n")
+    disagreements = re_mod.check(ledger=ledger, workflows_dir=workflows_dir)
+    assert disagreements == []
+    captured = capsys.readouterr()
+    assert "SKIP" in captured.out
+    assert "leg-none" in captured.out
+
+
+def test_check_still_fails_same_leg_without_none_instrument(tmp_path):
+    """Positive control for the skip above: without instrument="none...",
+    the identical leg/workflow pair must still be caught as a disagreement."""
+    ledger = {
+        "leg-none": {"instrument": "capability-probe", "workflow": "empty.yml",
+                     "expect": {"avif:encode": 0}},
+    }
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "empty.yml").write_text("jobs: {}\n")
+    disagreements = re_mod.check(ledger=ledger, workflows_dir=workflows_dir)
+    assert any("leg-none" in d and "avif:encode=0" in d for d in disagreements), disagreements
+
+
 def test_cli_leg_help_exits_zero():
     import subprocess
     result = subprocess.run(
