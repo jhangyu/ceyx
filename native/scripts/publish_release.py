@@ -35,11 +35,13 @@ Manifest format (JSON, used with ``--manifest``)::
     }
 
 With ``--artifacts-dir DIR``, one manifest entry is derived per immediate
-subdirectory of ``DIR``: the subdirectory name is split from the right into
-``<component>-<platform>-<arch>`` (arch and platform are the last two
-hyphen-separated segments; component is everything before them, so
-component names containing hyphens, e.g. ``libjxl-dist``, work correctly).
-Exactly one of ``--manifest`` / ``--artifacts-dir`` must be given.
+subdirectory of ``DIR``: the subdirectory name is split into
+``<component>-<platform>-<arch>`` by locating a known ``-<platform>-``
+token (from ``native/deps/arch_map.toml``'s ``[platforms]`` table, e.g.
+``-android-``), not by a fixed-position hyphen split -- so both a
+multi-hyphen component (``libjxl-dist``) and a multi-hyphen arch
+(``arm64-v8a``) parse correctly. Exactly one of ``--manifest`` /
+``--artifacts-dir`` must be given.
 
 Canonical asset name is always ``<component>-<platform>-<arch>.tar.gz``;
 ``arch`` is normalized against ``native/deps/arch_map.toml`` (accepts any
@@ -147,24 +149,52 @@ def _assert_atomic_required_files(dist_dir: Path, component: str, platform: str)
     )
 
 
-def derive_manifest_from_artifacts_dir(artifacts_dir: Path) -> List[Dict[str, str]]:
+def _split_artifact_name(name: str, platforms: Sequence[str]) -> tuple:
+    """Split ``name`` into ``(component, platform, arch)`` by locating a
+    known ``-<platform>-`` token (sourced from ``arch_map.toml``'s
+    ``[platforms]`` table), NOT by a fixed-position hyphen split.
+
+    Both component (e.g. ``libjxl-dist``) and arch (e.g. ``arm64-v8a``) may
+    themselves contain hyphens, so no ``split``/``rsplit`` with a fixed
+    field count can parse every real artifact name (round-6: the Android
+    ``dng_decoder_native-android-arm64-v8a`` case). The platform token is
+    the only field guaranteed hyphen-free, so it anchors the split.
+    """
+    for platform in platforms:
+        marker = f"-{platform}-"
+        idx = name.find(marker)
+        if idx == -1:
+            continue
+        component = name[:idx]
+        arch = name[idx + len(marker):]
+        if component and arch:
+            return component, platform, arch
+    raise ManifestError(
+        f"artifact directory name {name!r} does not contain any known "
+        f"-<platform>- token from {ARCH_MAP_PATH} [platforms] "
+        f"({list(platforms)}) -- expected <component>-<platform>-<arch>"
+    )
+
+
+def derive_manifest_from_artifacts_dir(
+    artifacts_dir: Path, arch_map: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, str]]:
     """Build manifest entries from a directory of one-subdir-per-artifact
     layout (``actions/download-artifact`` with no ``name:`` filter), where
     each subdirectory's name is the canonical ``<component>-<platform>-
     <arch>`` artifact name."""
     if not artifacts_dir.is_dir():
         raise ManifestError(f"--artifacts-dir does not exist: {artifacts_dir}")
+    if arch_map is None:
+        arch_map = load_arch_map()
+    platforms = arch_map.get("platforms", {}).get("names", [])
+    if not platforms:
+        raise ManifestError(f"{ARCH_MAP_PATH} has no [platforms] names table")
     entries: List[Dict[str, str]] = []
     for sub in sorted(artifacts_dir.iterdir()):
         if not sub.is_dir():
             continue
-        parts = sub.name.rsplit("-", 2)
-        if len(parts) != 3:
-            raise ManifestError(
-                f"artifact directory name {sub.name!r} does not match "
-                f"<component>-<platform>-<arch> (in {artifacts_dir})"
-            )
-        component, platform, arch = parts
+        component, platform, arch = _split_artifact_name(sub.name, platforms)
         entries.append(
             {
                 "dist_dir": str(sub),
@@ -210,7 +240,9 @@ def build_plan(
 def run_publish(args: argparse.Namespace) -> int:
     arch_map = load_arch_map()
     if args.artifacts_dir:
-        manifest_assets = derive_manifest_from_artifacts_dir(Path(args.artifacts_dir))
+        manifest_assets = derive_manifest_from_artifacts_dir(
+            Path(args.artifacts_dir), arch_map
+        )
     else:
         manifest_assets = load_manifest(Path(args.manifest))
     plan = build_plan(manifest_assets, arch_map)

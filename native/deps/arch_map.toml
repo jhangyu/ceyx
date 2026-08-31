@@ -36,3 +36,23 @@ uname = ["x86_64", "amd64"]
 apple = "x86_64"
 aom_target_cpu = "x86_64"
 cmake_system = "x86_64"
+
+[arm64-v8a]
+# Android ABI directory name (round-6 CI convention: canonical release
+# asset naming, e.g. dng_decoder_native-android-arm64-v8a.tar.gz). Distinct
+# canonical key from [arm64] because Android's own ABI vocabulary is
+# "arm64-v8a", not "arm64" -- do not collapse the two, callers must use the
+# exact ABI name for Android assets.
+uname = ["arm64-v8a"]
+cmake_system = "aarch64"
+
+# Release-asset naming vocabulary: <component>-<platform>-<arch>.tar.gz.
+# native/scripts/publish_release.py's --artifacts-dir mode splits an
+# artifact directory name into these three fields by locating one of these
+# platform tokens, rather than a fixed-position hyphen split -- required
+# because both component (e.g. "libjxl-dist") and arch (e.g. "arm64-v8a")
+# may themselves contain hyphens, so no single split-from-left/right rule
+# can parse all three fields; the platform token is the only reliably
+# hyphen-free anchor.
+[platforms]
+names = ["macos", "linux", "windows", "android"]
