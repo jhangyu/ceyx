@@ -536,7 +536,7 @@ GitHub's 100 MB single-file limit. Fetch it once after cloning; the native build
 configure without it:
 
 ```bash
-native/scripts/fetch_halide_v21_dist.sh
+python3 native/scripts/build_deps.py fetch halide
 ```
 
 ### Native library
@@ -692,7 +692,7 @@ in `docs/legal/THIRD_PARTY_LICENSES.md`.
 | Component | License | Notes |
 |---|---|---|
 | Adobe DNG SDK | Adobe DNG SDK License Agreement | Compiled from source into the native library |
-| Halide | MIT | Statically linked runtime; distribution fetched by `fetch_halide_v21_dist.sh` |
+| Halide | MIT | Statically linked runtime; distribution fetched by `build_deps.py fetch halide` |
 | LibRaw | LGPL-2.1 (elected; CDDL-1.0 also offered upstream) | Statically linked when `DNG_ENABLE_GENERIC_RAW=ON` |
 | RawSpeed3 | LGPL-2.1 | Statically linked into the LibRaw target only |
 | pugixml | MIT | Hash-pinned tarball fetched by RawSpeed3's build |

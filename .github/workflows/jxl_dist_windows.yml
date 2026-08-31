@@ -24,9 +24,10 @@ name: libjxl dist (Windows)
 # path trigger below follows suit: it names the carrier module paths, the
 # same S2/S3 trigger-coverage rationale heif_dist_windows.yml documents (a
 # carrier change must be able to trigger the leg that proves it).
-# build_libjxl_dist_windows.sh stays in the tree (round 2 deletes it once
-# the carrier-built dist is committed and green) but is no longer a trigger
-# path, because it is no longer consumed by this job.
+# build_libjxl_dist_windows.sh was retired in round 2 once the carrier-built
+# dist was committed and green (its transcription test is frozen in
+# win_jxl_dist_test.py); it was never a trigger path here since it was no
+# longer consumed by this job.
 on:
   workflow_call:
   workflow_dispatch:

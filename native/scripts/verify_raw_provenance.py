@@ -30,7 +30,8 @@ def fail(msg):
 
 def git_head(repo):
     # Vendored components have their .git stripped after fetch (see
-    # fetch_libraw_dist.sh strip_git()) so that PROVENANCE.md can be tracked
+    # native/scripts/deps/fetch_libraw.py strip_git(), invoked via
+    # `build_deps.py fetch libraw`) so that PROVENANCE.md can be tracked
     # inside the otherwise-untracked vendor tree; the resolved revision is
     # recorded in a .vendor-rev sidecar file instead of read via git.
     vendor_rev = repo / ".vendor-rev"

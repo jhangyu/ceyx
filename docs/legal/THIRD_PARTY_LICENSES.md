@@ -24,7 +24,7 @@ mechanically by `native/scripts/verify_raw_provenance.py`.
   the native library.
 - Linkage: statically linked runtime. The Halide binary distribution itself is not
   tracked in git — it is fetched by
-  `native/scripts/fetch_halide_v21_dist.sh` into
+  `python3 native/scripts/build_deps.py fetch halide` into
   `native/third_party/halide/`.
 - License: MIT. Text ships inside the fetched distribution; upstream copy at
   <https://github.com/halide/Halide/blob/main/LICENSE.txt>.
@@ -40,9 +40,9 @@ mechanically by `native/scripts/verify_raw_provenance.py`.
   making relinkable object files, or the complete corresponding source,
   available to recipients of the built library. The full LibRaw source at
   the pinned revision is retained (untracked, fetched by
-  `native/scripts/fetch_libraw_dist.sh`) and its provenance is
+  `python3 native/scripts/build_deps.py fetch libraw`) and its provenance is
   recorded in `native/third_party/libraw/PROVENANCE.md`; the
-  source offer is this repository plus that script.
+  source offer is this repository plus that command.
 - Full license text: `native/third_party/libraw/LICENSE.LGPL`
   (fetched into the vendored tree).
 

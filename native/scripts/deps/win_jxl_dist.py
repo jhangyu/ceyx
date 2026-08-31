@@ -4,9 +4,9 @@
 Migration ruling (2026-09-01, contract item 10 / ENTRY-POINT RULE,
 ``docs/logs/2026-09-01/contract-windows-codec-round.md``): the Windows
 libjxl dist build MIGRATES into this carrier module, exposed as
-``build_deps.py build jxl-stack``. ``build_libjxl_dist_windows.sh`` stays in
-the tree until the carrier-built dist is committed and green (round 2,
-task #6 in this round's plan) -- it is NOT deleted by this change.
+``build_deps.py build jxl-stack``. ``build_libjxl_dist_windows.sh`` was
+retired (round 2, task #6) once the carrier-built dist was committed and
+green; its transcription test is frozen in ``win_jxl_dist_test.py``.
 
 UNLIKE ``win_heif_dist.py``, this module does NOT go through
 ``manifest.toml`` / ``deps/execute.py``. ``[component.libjxl]`` in the
@@ -271,6 +271,7 @@ def vendor_licenses(src: Path, dist: Path) -> None:
         ("libjxl", src),
         ("highway", src / "third_party" / "highway"),
         ("brotli", src / "third_party" / "brotli"),
+        ("skcms", src / "third_party" / "skcms"),
     )
     for name, source_dir in pairs:
         dest = dist / "share" / "licenses" / name

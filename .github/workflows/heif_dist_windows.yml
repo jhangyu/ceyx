@@ -39,6 +39,12 @@ on:
       # way manifest.toml already does -- otherwise an arch_map edit could
       # silently desync the Windows dist from what the carrier now renders.
       - "native/deps/arch_map.toml"
+      # SF3 (round-3 parking-lot): this leg installs de265 + aom via vcpkg
+      # (see the "vcpkg install de265 + aom" step below), so a change to the
+      # vcpkg manifest/portfiles must trigger it -- otherwise a vcpkg.json or
+      # port edit could silently desync the Windows HEIF dist the same way an
+      # untriggered manifest.toml change would.
+      - "native/vcpkg/**"
       - ".github/workflows/heif_dist_windows.yml"
 
 concurrency:
