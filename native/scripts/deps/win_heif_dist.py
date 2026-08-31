@@ -1,22 +1,31 @@
 """Windows HEIF dist assembly -- the Python port of
 ``native/scripts/build_heif_dist_windows.sh``.
 
-Sibling of ``deps/heif.py`` (macOS/Linux), which explicitly refuses Windows
-and points here. The two are deliberately NOT merged: the dists differ in
-capability, not merely in toolchain. The Unix dist is full-capability
-(libde265 + kvazaar HEVC encode + aom AV1), the Windows dist is
-**decode-only** (libde265 + libheif, nothing else) per the lead's OPTION 1
-ruling of 2026-08-31. Their assertion sets therefore differ in kind: asserting
-``kvz_api_get``/``aom_codec_av1_cx`` here -- as ``heif.py`` correctly does for
-Unix -- would demand encoders this dist intentionally does not contain.
+Sibling of ``deps/heif.py`` (macOS/Linux), which explicitly refuses Windows and
+points here. BOTH dists are now full-capability (libde265 HEVC decode + kvazaar
+HEVC encode + aom AV1 encode/decode); the Windows dist WAS decode-only until
+2026-08-31, when docs/logs/2026-08-31/spec-windows-codec-full-green.md
+un-parked the three flags manifest.toml had kept OFF. The two modules stay
+SEPARATE regardless: the split is toolchain (clang-cl, static CRT, *.lib
+archive names, llvm-nm, the two-step libde265 import-library resolution), not
+capability, and merging them is a refactor no spec has authorised.
+
+There is NO end-to-end proof that the kvazaar/aom encoders actually WORK: the
+round-trip gate was removed by the 2026-08-31 compile-only ruling. The
+strongest surviving claim is libheif's own ``heif_have_encoder_for_format``
+runtime answer, queried by ``probe_codecs`` in the product leg. This module's
+assertions (below) stay narrow on purpose -- static-archive presence and
+absence from the import table -- rather than being "strengthened" into an
+export-table grep, which would have zero discriminating power under
+``WITH_REDUCED_VISIBILITY=ON`` (see ``_REQUIRED_STATIC_ARCHIVES`` docstring).
 
 The heavy lifting is NOT re-implemented: acquisition, the three cmake phases
 and the manifest ``[outputs]`` check all come from ``deps/execute.py``, and PE
 inspection from ``deps/win_pe.py``. What is genuinely Windows-specific and
-lives here is only: the two-step ordering (libde265 must be installed on disk
-before libheif's find module runs), the by-presence resolution of libde265's
-import-library spelling, the decode-only assertion set, and the ``.pins``
-stamp.
+lives here is only: the four-stage ordering (libde265, kvazaar and aom must
+all be installed on disk before libheif's find modules run), the by-presence
+resolution of libde265's import-library spelling, the capability assertion
+set, and the ``.pins`` stamp.
 
 LICENCE (do not "optimise" this away): libheif and libde265 are
 LGPL-3.0-or-later. They are built as SEPARATE SHARED LIBRARIES and linked
@@ -57,11 +66,29 @@ PLATFORM = "windows"
 _DE265_IMPLIB_CANDIDATES = ("lib/de265.lib", "lib/libde265.lib")
 _DE265_DLL_CANDIDATES = ("bin/libde265.dll", "bin/de265.dll")
 
-# Decode-only dist: the capability that must be present, and the licence
-# contamination that must not be.
+# Encode-capable dist (un-parked 2026-08-31, spec-windows-codec-full-green.md).
 _REQUIRED_HEIF_SYMBOL = "heif_decode_image"
 _REQUIRED_HEIF_DEPENDENCY = "de265"
 _FORBIDDEN_HEIF_SYMBOL = "x265"
+
+# kvazaar (HEVC encode) and aom (AV1 encode+decode) are STATIC archives merged
+# INTO heif.dll (ENABLE_PLUGIN_LOADING=OFF), so they are asserted as INPUTS on
+# disk, never as exports of heif.dll: WITH_REDUCED_VISIBILITY=ON means
+# kvz_api_get / aom_codec_av1_cx are absent from the export table of a fully
+# correct build. Export tables are not capability evidence on Windows --
+# docs/logs/2026-08-31/r5-jxl-diagnosis.md proves the identical confusion for
+# JXL. There is NO end-to-end proof that these encoders WORK: the round-trip
+# gate was removed by the 2026-08-31 compile-only ruling. The strongest
+# surviving claim is libheif's own heif_have_encoder_for_format answer, queried
+# by probe_codecs in the product leg. Do not add an export grep here to
+# compensate -- it would have zero discriminating power.
+_REQUIRED_STATIC_ARCHIVES = ("lib/kvazaar.lib", "lib/aom.lib")
+
+# If heif.dll imports either of these, find_package resolved an IMPORT
+# library instead of the static archive: the dist would run on the build
+# machine and fail on a user's (the zlib.lib vs zlibstatic.lib shape, run
+# 33177220892).
+_FORBIDDEN_HEIF_DEPENDENCIES = ("aom.dll", "kvazaar.dll")
 
 _REQUIRED_FILES = (
     "bin/heif.dll",
@@ -93,24 +120,34 @@ def _component(loaded: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def want_pins(loaded: dict[str, Any], arch: str = "x86_64") -> str:
-    """Reproduce the shell script's ``WANT_PINS`` string EXACTLY, derived from
-    the manifest rather than from restated constants, so a version bump cannot
-    leave the stamp and the build disagreeing.
+    """Stamp string covering EVERY component whose bytes land in the dist.
 
-    Byte-compatible with a ``.pins`` file written by
-    build_heif_dist_windows.sh, so a dist built by either carrier is
-    recognised as current by the other -- which is what makes the shell->Python
-    switchover a no-op for an already-built tree rather than a forced rebuild.
+    Format changed 2026-08-31 when kvazaar and aom joined the dist. The change
+    is deliberately stamp-invalidating: an existing decode-only tree must not
+    be recognised as current, or the encode-capable rebuild would be skipped
+    and the workflow would upload the OLD bytes under a NEW claim.
     """
     heif = _component(loaded, "libheif")
     de265 = _component(loaded, "libde265")
-    heif_sha = str(heif["source"]["default"]["sha256"])
-    de265_sha = str(de265["source"]["windows"]["sha256"])
+    kvazaar = _component(loaded, "kvazaar")
+    aom = _component(loaded, "aom")
     return (
-        f"libheif={heif['version']}:{heif_sha} "
-        f"libde265={de265['version']}:{de265_sha} "
+        f"libheif={heif['version']}:{str(heif['source']['default']['sha256'])} "
+        f"libde265={de265['version']}:{str(de265['source']['windows']['sha256'])} "
+        f"kvazaar={kvazaar['version']}:{_source_pin(kvazaar, 'windows')} "
+        f"aom={aom['version']}:{_source_pin(aom, 'windows')} "
         f"platform=windows-{arch}"
     )
+
+
+def _source_pin(comp: dict[str, Any], platform: str) -> str:
+    """The strongest identifier the component's resolved source offers:
+    sha256 for a tarball, tag for a git overlay, version for a registry port."""
+    src = comp["source"].get(platform) or comp["source"]["default"]
+    for key in ("sha256", "tag", "version"):
+        if key in src:
+            return str(src[key])
+    raise _fail(f"source block for {comp.get('role', '?')} has no pinnable key")
 
 
 def stamp_is_current(dist: Path, loaded: dict[str, Any], arch: str = "x86_64") -> bool:
@@ -152,6 +189,33 @@ def resolve_de265_import_library(dist: Path) -> str:
     resolved = win_pe.resolve_existing(dist, _DE265_IMPLIB_CANDIDATES, what="libde265 import library")
     _log(f"libde265 import library: {resolved}")
     return resolved
+
+
+def build_kvazaar(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> None:
+    """HEVC encoder, STATIC, merged into libheif.
+
+    SELF-BUILT FROM GIT ON WINDOWS: [component.kvazaar.source.windows] records
+    the durable reason -- the v2.3.1 release tarball omits
+    src/threadwrapper/src/pthread.cpp, which kvazaar's CMakeLists adds
+    unconditionally when WIN32 is true (observed in CI run 33307277766).
+    macOS/Linux never hit this because WIN32 is false there. Do not unify the
+    fetch mechanism.
+    """
+    _log(f"building kvazaar {execute_mod.component_version(loaded, 'kvazaar')}")
+    execute_mod.build_component(loaded, "kvazaar", PLATFORM, arch, dist, stage)
+
+
+def build_aom(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> None:
+    """AV1 encoder + decoder, STATIC, merged into libheif.
+
+    D1-a: acquired from vcpkg at the version [component.aom] pins (3.15.0 via
+    native/vcpkg/vcpkg.json `overrides`, resolved against the PINNED baseline,
+    never the floating one) using the x64-windows-heif triplet, then copied
+    into {dist} -- the same install-and-copy shape D5 leg 3 left on
+    macOS/Linux. Nothing is compiled here.
+    """
+    _log(f"acquiring aom {execute_mod.component_version(loaded, 'aom')}")
+    execute_mod.build_component(loaded, "aom", PLATFORM, arch, dist, stage)
 
 
 def build_libheif(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> None:
@@ -230,6 +294,36 @@ def assert_capabilities(dist: Path, de265_dll: str) -> None:
     )
     _log("ASSERT no-x265 OK")
 
+    _log("== static encoder archives (inputs, not exports -- see module docstring) ==")
+    for rel in _REQUIRED_STATIC_ARCHIVES:
+        path = Path(dist) / rel
+        if not path.is_file() or path.stat().st_size == 0:
+            raise _fail(
+                f"{rel} missing or empty under {dist}. libheif configured with "
+                "WITH_KVAZAAR=ON / WITH_AOM_*=ON does NOT fail when these are "
+                "absent -- its find modules' probes are non-fatal -- so this "
+                "check is the only thing between a green build and a dist that "
+                "reports HEIC/AVIF encode support and then encodes nothing. Do "
+                "NOT satisfy it by flipping the flags back OFF."
+            )
+        _log(f"ASSERT static archive {rel} OK ({path.stat().st_size} bytes)")
+
+    # Deliberately raised as WindowsHeifError (via _fail), not
+    # win_pe.PeAssertionFailed: the interface contract for this function is
+    # "raises WindowsHeifError on any missing capability", and the static
+    # archive checks above already use _fail for the same reason -- one
+    # exception type for every capability defect this function can find.
+    for forbidden in _FORBIDDEN_HEIF_DEPENDENCIES:
+        if win_pe.token_present_ci(deps_text, forbidden):
+            raise _fail(
+                f"heif.dll imports {forbidden}: find_package resolved an IMPORT "
+                "library instead of the static archive. This dist would load on "
+                "the build machine and fail on a user's. Force the static "
+                "archive (BUILD_SHARED_LIBS=OFF is already in "
+                "[component.*.cmake.base]); do not ship the extra DLL."
+            )
+    _log(f"ASSERT no dynamic aom/kvazaar OK (import table as read: {deps_text!r})")
+
     assert_architecture(dist, de265_dll)
 
 
@@ -284,6 +378,14 @@ def build(
 
     stage.mkdir(parents=True, exist_ok=True)
     build_libde265(loaded, arch, dist, stage)
+    # Ordering is load-bearing: libheif's Findkvazaar.cmake / FindAOM.cmake
+    # resolve against the INSTALLED tree via the *_INCLUDE_DIR / *_LIBRARY
+    # hints manifest.toml supplies, so both must be on disk before libheif is
+    # configured. A libheif configured with WITH_KVAZAAR=ON but no kvazaar on
+    # disk does NOT fail -- Findkvazaar's check_symbol_exists probe is
+    # non-fatal -- and the result is a green build with no HEVC encoder.
+    build_kvazaar(loaded, arch, dist, stage)
+    build_aom(loaded, arch, dist, stage)
     build_libheif(loaded, arch, dist, stage)
 
     de265_dll = assert_layout(dist)

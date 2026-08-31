@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Imported through the PACKAGE (`deps.`), never flat: a flat `import
@@ -54,16 +56,22 @@ class TestWantPins(unittest.TestCase):
         self.assertIn(windows_sha, pins)
         self.assertNotIn("vcpkg", pins)
 
-    def test_format_matches_the_shell_script_byte_for_byte(self) -> None:
-        """Compatibility with a .pins written by build_heif_dist_windows.sh is
-        what makes the shell->Python switchover a no-op for an already-built
-        tree instead of a forced rebuild."""
+    def test_format_matches_the_four_component_shape(self) -> None:
+        """Format changed 2026-08-31 when kvazaar and aom joined the dist
+        (spec-windows-codec-full-green.md). The change is deliberately
+        stamp-invalidating -- superseding rather than pinning the OLD
+        two-component byte-for-byte shape, so an existing decode-only tree's
+        stamp cannot be mistaken for current."""
         components = self.loaded["manifest"]["component"]
         expected = (
             f"libheif={components['libheif']['version']}:"
             f"{components['libheif']['source']['default']['sha256']} "
             f"libde265={components['libde265']['version']}:"
             f"{components['libde265']['source']['windows']['sha256']} "
+            f"kvazaar={components['kvazaar']['version']}:"
+            f"{win_heif_dist._source_pin(components['kvazaar'], 'windows')} "
+            f"aom={components['aom']['version']}:"
+            f"{win_heif_dist._source_pin(components['aom'], 'windows')} "
             f"platform=windows-x86_64"
         )
         self.assertEqual(win_heif_dist.want_pins(self.loaded, "x86_64"), expected)
@@ -165,9 +173,15 @@ class TestLayoutAssertion(unittest.TestCase):
 
 
 class TestDecodeOnlyAssertionSet(unittest.TestCase):
-    """The Windows dist is decode-only, so its assertion set must differ from
-    heif.py's Unix one -- which requires kvazaar and aom ENCODER symbols this
-    dist intentionally does not contain."""
+    """The Windows dist is now encode+decode capable (un-parked 2026-08-31,
+    spec-windows-codec-full-green.md), but its capability assertions must
+    still never be shaped as an export-table grep for the ENCODER symbols
+    (R1): with WITH_REDUCED_VISIBILITY=ON a perfectly correct build exports
+    neither ``kvz_api_get`` nor ``aom_codec_av1_*``. The kvazaar/aom checks
+    that DO exist (below, TestEncoderCapabilityAssertions) are against the
+    static archives on disk and the import table, never the export table --
+    this class's name is kept ("DecodeOnly...") because it still documents
+    what the *export*-table assertion set may never grow to cover."""
 
     def test_does_not_require_encoder_symbols(self) -> None:
         source = Path(win_heif_dist.__file__).read_text(encoding="utf-8")
@@ -181,6 +195,115 @@ class TestDecodeOnlyAssertionSet(unittest.TestCase):
 
     def test_hevc_dependency_is_asserted(self) -> None:
         self.assertEqual(win_heif_dist._REQUIRED_HEIF_DEPENDENCY, "de265")
+
+
+def _make_minimal_dist(tmp_path: Path) -> Path:
+    """The existing decode-only layout (heif.dll + libde265.dll + headers),
+    with NEITHER encoder static archive present."""
+    return _dist_with(dict(TestLayoutAssertion.COMPLETE), tmp_path)
+
+
+def _make_full_dist(tmp_path: Path) -> Path:
+    """The minimal dist plus both encoder static archives -- a fully
+    capability-complete Windows HEIF dist as far as inputs-on-disk go."""
+    dist = _make_minimal_dist(tmp_path)
+    (dist / "lib" / "kvazaar.lib").write_bytes(b"!<arch>\n")
+    (dist / "lib" / "aom.lib").write_bytes(b"!<arch>\n")
+    return dist
+
+
+def test_want_pins_includes_kvazaar_and_aom() -> None:
+    """The stamp must cover every component whose bytes land in the dist.
+
+    A stamp omitting kvazaar/aom would report an OLD decode-only dist as
+    'already at the pinned versions' and skip the rebuild entirely.
+    """
+    loaded = manifest.load()
+    pins = win_heif_dist.want_pins(loaded)
+    assert "kvazaar=" in pins
+    assert "aom=" in pins
+    assert "libheif=" in pins and "libde265=" in pins
+
+
+def test_build_installs_dependencies_before_libheif(monkeypatch, tmp_path) -> None:
+    """libheif's find modules resolve against the INSTALLED tree, so all three
+    dependencies must be on disk first. Order is asserted, not assumed."""
+    calls = []
+    for name in ("build_libde265", "build_kvazaar", "build_aom", "build_libheif"):
+        monkeypatch.setattr(win_heif_dist, name,
+                             lambda *a, _n=name, **k: calls.append(_n))
+    monkeypatch.setattr(win_heif_dist, "assert_layout", lambda d: "bin/libde265.dll")
+    monkeypatch.setattr(win_heif_dist, "assert_capabilities", lambda d, x: None)
+    monkeypatch.setattr(win_heif_dist, "stamp_is_current", lambda *a, **k: False)
+    monkeypatch.setattr(win_heif_dist, "want_pins", lambda *a, **k: "pins")
+    win_heif_dist.build(manifest.load(), tmp_path)
+    assert calls == ["build_libde265", "build_kvazaar", "build_aom", "build_libheif"]
+
+
+def _patch_pe_reads(monkeypatch, *, deps_text: str) -> None:
+    """R1: neither patched reader is asked about the encoder symbols -- the
+    encoder checks in assert_capabilities look at static archives on disk and
+    at ``deps_text`` (the import table), never at the export table.
+
+    Also stubs `assert_architecture`: these tests write placeholder byte
+    content for the DLLs (not real PE binaries), and this suite already
+    documents (module docstring) that it never invokes real Windows tooling
+    -- the architecture check is orthogonal to what is under test here.
+    """
+    monkeypatch.setattr(win_heif_dist.win_pe, "read_exports",
+                         lambda dll, out: "    3    2 0002B230 heif_decode_image")
+    monkeypatch.setattr(win_heif_dist.win_pe, "read_dependents",
+                         lambda dll, out: deps_text)
+    monkeypatch.setattr(win_heif_dist, "assert_architecture", lambda dist, de265_dll: None)
+
+
+def test_assert_capabilities_rejects_missing_kvazaar_archive(monkeypatch, tmp_path) -> None:
+    """A dist whose libheif configured with WITH_KVAZAAR=ON but whose kvazaar
+    archive is absent installs happily and then encodes nothing."""
+    dist = _make_minimal_dist(tmp_path)
+    (dist / "lib" / "aom.lib").write_bytes(b"!<arch>\n")
+    _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
+    with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+    assert "kvazaar" in str(exc.value)
+
+
+def test_assert_capabilities_rejects_missing_aom_archive(monkeypatch, tmp_path) -> None:
+    """Symmetric case for aom: present kvazaar, absent aom."""
+    dist = _make_minimal_dist(tmp_path)
+    (dist / "lib" / "kvazaar.lib").write_bytes(b"!<arch>\n")
+    _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
+    with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+    assert "aom" in str(exc.value)
+
+
+def test_assert_capabilities_rejects_dynamic_aom(monkeypatch, tmp_path) -> None:
+    """aom must be MERGED statically. An aom.dll import means find_package
+    picked an import library: runs on the build machine, breaks on a user's."""
+    dist = _make_full_dist(tmp_path)
+    _patch_pe_reads(monkeypatch, deps_text="libde265.dll\naom.dll\nKERNEL32.dll")
+    with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+    assert "aom.dll" in str(exc.value)
+
+
+def test_assert_capabilities_rejects_dynamic_kvazaar(monkeypatch, tmp_path) -> None:
+    """Symmetric case for kvazaar."""
+    dist = _make_full_dist(tmp_path)
+    _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nkvazaar.dll\nKERNEL32.dll")
+    with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+    assert "kvazaar.dll" in str(exc.value)
+
+
+def test_assert_capabilities_accepts_full_static_dist(monkeypatch, tmp_path) -> None:
+    """Positive control: both archives present, no dynamic aom/kvazaar import
+    -- assert_capabilities must return cleanly (it must not vacuously reject
+    everything)."""
+    dist = _make_full_dist(tmp_path)
+    _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
+    win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
 
 
 if __name__ == "__main__":
