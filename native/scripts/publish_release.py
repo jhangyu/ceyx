@@ -340,9 +340,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notes-file", default="", help="Path to a file with release notes body.")
     parser.add_argument(
         "--prerelease",
-        action="store_true",
-        default=True,
-        help="Mark the release as a prerelease (default: True, matching deps.publish default).",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Mark the release as a prerelease. Default: False -- the contract's "
+            "end state is a real (non-prerelease) automated release; pass "
+            "--prerelease explicitly to opt in (e.g. --no-prerelease is also "
+            "available for symmetry)."
+        ),
     )
     return parser
 
