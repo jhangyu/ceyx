@@ -68,11 +68,12 @@ jobs:
       # R4: the suite now also covers the EXECUTION layer (deps/execute.py) and
       # the Unix HEIF assembly (deps/heif.py, the port of fetch_heif_deps.sh),
       # including a demonstrated-red case for every capability, licence and
-      # architecture assertion the shell script made. This leg does not build
-      # the HEIF dist itself (it configures with -DDNG_ENABLE_HEIF=OFF, see
-      # below), so this step is where the carrier's Linux-specific code paths —
+      # architecture assertion the shell script made. LINUX-HEIF (round 3):
+      # this leg now ALSO builds the HEIF dist for real (see the "Build HEIF
+      # stack" step below), so the carrier's Linux-specific code paths —
       # `nm -D`, `ldd`, and the readelf SONAME check whose missing instrument is
-      # a FAILURE rather than a skip — are exercised on a Linux runner at all.
+      # a FAILURE rather than a skip — are exercised HERE (unit-level, against
+      # captured text) as well as against the real artefact further down.
       - name: Deps manifest/render/execute/heif test suite + no-shell lint
         run: python3 -m pytest native/scripts/deps/ -q
 
@@ -85,11 +86,17 @@ jobs:
         #     runtime (not linked at build time; see ffi.cmake's Linux branch).
         #   mesa-vulkan-drivers / vulkan-tools -> lavapipe ICD + vulkaninfo, for
         #     completeness on the runner (build-only job does not exercise them).
+        #   nasm / yasm -> LINUX-HEIF (round 3): vcpkg's aom port needs an x86_64
+        #     assembler for its optimized kernels (same requirement macos_build.yml
+        #     documents at its `brew install ... nasm yasm` step); this leg now
+        #     installs the `aom` vcpkg feature below, so the assembler must be
+        #     present before that install step runs.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
-            libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools \
+            nasm yasm
 
       - name: Cache vendored Halide v21 distribution (host, Linux)
         uses: actions/cache@v4
@@ -124,15 +131,14 @@ jobs:
       # compiled CEYX_ENABLE_WEBP=0 — a green build shipping no WebP encoder,
       # which is exactly what the hard failure now prevents.
       #
-      # --x-no-default-features installs the manifest's CORE set (libwebp alone).
-      # The HEIF stack is behind the manifest's default `heif` feature and is
-      # deliberately skipped here: this leg passes -DDNG_ENABLE_HEIF=OFF, so
-      # building libheif/libde265/kvazaar/aom would cost ~20 minutes to produce
-      # artefacts the configure then disables.
-      #
-      # No assembler package is needed for this step (unlike a full HEIF/AOM
-      # leg): nasm is required by vcpkg's AOM port, and aom is precisely
-      # what --x-no-default-features excludes here.
+      # LINUX-HEIF (round 3, user ruling 2026-09-01): --x-feature=de265
+      # --x-feature=aom now install the manifest's `heif` feature's vcpkg-side
+      # halves (libde265 dynamic + aom static), mirroring macos_build.yml's
+      # "vcpkg install libwebp + libde265 + aom" step. This leg no longer
+      # opts out of the HEIF stack — the heif-stack build step below consumes
+      # this exact vcpkg prefix (via CEYX_VCPKG_PREFIX) to build kvazaar +
+      # libheif from source against these two vcpkg-supplied halves, same
+      # division of labour as the macOS legs.
       - name: Bootstrap vcpkg at the pinned baseline (D5)
         run: |
           git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
@@ -140,7 +146,7 @@ jobs:
           "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
           "$RUNNER_TEMP/vcpkg/vcpkg" version
 
-      - name: vcpkg install libwebp (x64-linux-heif)
+      - name: vcpkg install libwebp + libde265 + aom (x64-linux-heif)
         run: |
           set +e
           "$RUNNER_TEMP/vcpkg/vcpkg" install \
@@ -148,6 +154,8 @@ jobs:
               --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
               --triplet="$VCPKG_TRIPLET" \
               --x-no-default-features \
+              --x-feature=de265 \
+              --x-feature=aom \
               --no-print-usage
           rc=$?
           echo "VCPKG_INSTALL_RC=${rc}"
@@ -186,6 +194,38 @@ jobs:
       - name: Fetch vendored libjxl distribution
         run: python3 native/scripts/build_deps.py fetch libjxl
 
+      # LINUX-HEIF (round 3, user ruling 2026-09-01, contract item 12): this
+      # leg now builds a real HEIF stack in-leg instead of opting out with
+      # -DDNG_ENABLE_HEIF=OFF (see the removed comment on the configure step
+      # below). Same carrier entry point as macos_build.yml's "Fetch vendored
+      # HEIF distribution (Python carrier)" step — native/scripts/deps/heif.py
+      # already has a full Linux traits row (readelf SONAME check, .so
+      # extensions, nm -D), it was simply never invoked here. Cache key
+      # mirrors macOS's: the carrier scripts + the manifest it reads
+      # versions/hashes/cmake options from, plus the vcpkg manifest + libde265
+      # overlay port (the dist's libde265 comes from that port).
+      - name: Cache vendored HEIF (libheif + libde265) distribution
+        id: cache-heif
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/heif-dist
+          key: heif-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/build_deps.py', 'native/scripts/deps/*.py', 'native/deps/manifest.toml', 'native/deps/arch_map.toml', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
+
+      # CEYX_VCPKG_PREFIX is mandatory (heif.py's _vcpkg_prefix hard-fails
+      # otherwise): libde265 and aom are copied out of the vcpkg prefix
+      # installed above, not built from source here, same division of labour
+      # as the macOS legs. --platform linux selects heif.py's Linux traits
+      # row (readelf SONAME assertion instead of install_name_tool, .so
+      # instead of .dylib). ~20 minutes uncached (kvazaar + libheif built from
+      # source); accepted per the contract.
+      - name: Build HEIF stack (libheif + libde265 + kvazaar + aom, Python carrier)
+        run: |
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_deps.py build heif-stack \
+              --platform linux \
+              --arch x86_64 \
+              --dist "$GITHUB_WORKSPACE/native/third_party/heif-dist"
+
       - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
         # Native single-stage build: on Linux the host IS the target, so the
         # default --platform host path is correct (no cross-compile, unlike
@@ -195,10 +235,12 @@ jobs:
         # no Vulkan library (the Halide runtime dlopen()s libvulkan.so.1).
         # --idle-timeout-sec raised above the 60s default as a CI margin.
         # Separate --build-dir build-linux so it never collides with build/.
-        # -DDNG_ENABLE_HEIF=OFF is the escape hatch cmake/heif.cmake documents:
-        # the HEIC route ships a macOS-only libheif/libde265 dylib dist and no
-        # Linux heif-dist is vendored, so this Vulkan compile gate opts out of
-        # the hard heif gate rather than fetching a dist it does not exercise.
+        # LINUX-HEIF (round 3): -DDNG_ENABLE_HEIF=OFF is REMOVED here. The
+        # "Build HEIF stack" step above now produces a real
+        # native/third_party/heif-dist for this platform, so
+        # cmake/heif.cmake's generic (non-APPLE, non-WIN32) find_path/
+        # find_library search resolves it the same way it always resolved the
+        # macOS dist — no cmake changes were needed, only the dist's presence.
         working-directory: ${{ github.workspace }}
         run: |
           # The watchdog locates the vcpkg prefix ITSELF (via CEYX_VCPKG_PREFIX,
@@ -214,7 +256,6 @@ jobs:
             --platform host \
             --target dng_decoder_native \
             --build-dir build-linux \
-            --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
             --idle-timeout-sec 180
 
       - name: Verify Linux artifact (AC-L2/L3/L4/L5)
@@ -348,6 +389,41 @@ jobs:
           echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
+      # CI-T3 (task #11 spec; LINUX-HEIF round 3 adds the previously-held
+      # Linux leg): functional capability-bitmask probe against the dist the
+      # "Build HEIF stack" step produced two steps above, same
+      # native/scripts/deps/probe/probe_codecs.c binary the macOS/Windows legs
+      # compile (bit0=HEVC-ENC, bit1=AV1-ENC, bit2=HEVC-DEC, bit3=AV1-DEC; a
+      # SET bit means that capability is ABSENT). Plain clang + -Wl,-rpath
+      # (the macOS shape), not clang-cl: this is a native Linux compile, not
+      # a cross build. Stdout is captured to a file BEFORE the exit code is
+      # interpreted so a nonzero RC still leaves all four bits legible in the
+      # uploaded artifact.
+      - name: Compile + run functional capability probe (CI-T3)
+        run: |
+          set -e
+          DIST="$GITHUB_WORKSPACE/native/third_party/heif-dist"
+          PROBE_DIR="$GITHUB_WORKSPACE/native/scripts/deps/probe"
+          clang \
+            -I"$DIST/include" \
+            -L"$DIST/lib" \
+            -Wl,-rpath,"$DIST/lib" \
+            -o "$PROBE_DIR/probe_codecs" \
+            "$PROBE_DIR/probe_codecs.c" \
+            -lheif
+          file "$PROBE_DIR/probe_codecs"
+          set +e
+          "$PROBE_DIR/probe_codecs" > "$PROBE_DIR/probe_codecs.txt" 2>&1
+          RC=$?
+          set -e
+          echo "PROBE_CODECS_RC=${RC}" | tee -a "$PROBE_DIR/probe_codecs.txt"
+          cat "$PROBE_DIR/probe_codecs.txt"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::probe_codecs exited ${RC} (nonzero bits = missing capabilities)"
+            exit "${RC}"
+          fi
+          echo "A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0"
+
       - name: Stage native artifacts
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
@@ -393,5 +469,19 @@ jobs:
         with:
           name: libjxl-dist-linux-x86_64
           path: ${{ github.workspace }}/native/third_party/libjxl-dist
+          if-no-files-found: error
+          retention-days: 7
+
+      # CI-T3 (task #11 spec; LINUX-HEIF round 3): probe_codecs.txt from the
+      # step above, alongside the other two desktop legs'
+      # probe_results_<platform>_<arch> artifacts (.github/CI-CONVENTIONS.md
+      # rule 2, underscore separators). `if: always()` so a failed probe still
+      # uploads its own diagnosis rather than leaving CI to guess.
+      - name: Upload probe_results_linux_x86_64
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe_results_linux_x86_64
+          path: native/scripts/deps/probe/probe_codecs.txt
           if-no-files-found: error
           retention-days: 7
