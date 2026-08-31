@@ -78,8 +78,11 @@ class TestTranscriptionMatchesTheShellScript(unittest.TestCase):
 
 class TestCmakeConfigureArgs(unittest.TestCase):
     def test_install_prefix_is_the_dist_dir(self) -> None:
-        argv = win_jxl_dist.cmake_configure_args(Path("/tmp/jxl-dist"))
-        self.assertIn("-DCMAKE_INSTALL_PREFIX=/tmp/jxl-dist", argv)
+        dist = Path("/tmp/jxl-dist")
+        argv = win_jxl_dist.cmake_configure_args(dist)
+        # str(dist), not a POSIX literal: the CI Windows leg runs this suite
+        # on native Windows Python, where Path("/tmp/...") renders as \tmp\...
+        self.assertIn(f"-DCMAKE_INSTALL_PREFIX={dist}", argv)
 
     def test_no_shared_libs(self) -> None:
         argv = win_jxl_dist.cmake_configure_args(Path("/tmp/jxl-dist"))
