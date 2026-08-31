@@ -204,3 +204,64 @@ def test_legacy_component_form_still_works(capsys) -> None:
                           "--arch", "x86_64", "--dry-run"])
     assert rc == 0
     assert "-DBUILD_SHARED_LIBS=OFF" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# fetch <name> arg strictness (round 3, review nit 5): --arch/--force are
+# documented per-module-only in fetch_subcommand_parser()'s help text; a
+# caller passing either for a module that ignores it silently gets a build
+# that doesn't do what the flag implied. Same "rejected rather than silently
+# ignored" doctrine as --stage/--force above for `build heif-stack`.
+# ---------------------------------------------------------------------------
+def test_fetch_halide_rejects_arch(capsys) -> None:
+    rc = build_deps.main(["fetch", "halide", "--arch", "x86_64"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--arch is not accepted for fetch 'halide'" in err
+
+
+def test_fetch_libraw_rejects_arch(capsys) -> None:
+    rc = build_deps.main(["fetch", "libraw", "--arch", "arm64"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--arch is not accepted for fetch 'libraw'" in err
+
+
+def test_fetch_libraw_rejects_force(capsys) -> None:
+    rc = build_deps.main(["fetch", "libraw", "--force"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--force is not accepted for fetch 'libraw'" in err
+
+
+def test_fetch_libjxl_still_accepts_arch_and_force(monkeypatch, tmp_path: Path) -> None:
+    """Sanity check that the new rejections are scoped to halide/libraw only
+    -- libjxl's documented use of both flags must keep working."""
+    from deps import fetch_libjxl  # noqa: PLC0415
+
+    calls = {}
+
+    def _fake_build(dest, *, arch=None, force=False):
+        calls["dest"] = dest
+        calls["arch"] = arch
+        calls["force"] = force
+        return dest
+
+    monkeypatch.setattr(fetch_libjxl, "build", _fake_build)
+    rc = build_deps.main(
+        ["fetch", "libjxl", "--dest", str(tmp_path / "libjxl"), "--arch", "x86_64", "--force"]
+    )
+    assert rc == 0
+    assert calls == {"dest": tmp_path.resolve() / "libjxl", "arch": "x86_64", "force": True}
+
+
+def test_fetch_rejects_nonexistent_dest_parent(tmp_path: Path, capsys) -> None:
+    """A --dest whose parent directory does not exist must fail fast with a
+    FetchError-style message, not a raw traceback surfaced from deep inside
+    the acquisition module (e.g. a bare mkdir/shutil.move failure)."""
+    bad_dest = tmp_path / "does-not-exist-yet" / "halide"
+    rc = build_deps.main(["fetch", "halide", "--dest", str(bad_dest)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "non-existent parent directory" in err
+    assert str(bad_dest.parent) in err

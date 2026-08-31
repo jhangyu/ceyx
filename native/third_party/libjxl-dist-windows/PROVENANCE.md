@@ -78,8 +78,14 @@ static where heif-dist is dynamic (see `cmake/jxl.cmake`). skcms is pulled in
 because this dist builds with `-DJPEGXL_ENABLE_SKCMS=ON`; its object code
 ships inside `jxl_cms.lib`, which `jxl.lib`'s `JxlGetDefaultCms` requires at
 link time (same load-bearing relationship as the macOS dist). Licence files
-for all three vendored dependencies are under `share/licenses/{libjxl,highway,brotli}/`
+for all four vendored dependencies are under `share/licenses/{libjxl,highway,brotli,skcms}/`
 and must ship alongside any distributed build that includes JXL support.
+`share/licenses/skcms/LICENSE` is byte-identical to the macOS `libjxl-dist`'s
+copy (`native/third_party/libjxl-dist/share/licenses/skcms/LICENSE`) — both
+dists pin the same `third_party/skcms` submodule commit `96d9171c94b937a1b5f0293de7309ac16311b722`
+(see the submodule pins table above), so vendoring the already-verified file
+carries the exact BSD-3 text at that pinned commit, not a re-fetch of a
+possibly-different revision.
 
 ## Symbol proof (build-time, `win_jxl_dist.py::assert_symbols`)
 
@@ -108,6 +114,18 @@ ASSERT JxlEncoderAddBox OK
 [^len]: computed via `shasum -a 256` on the artifact downloaded from the CI
 run above (`native/scripts/tmp/jxl-dist-download/`), each digest verified 64
 hex characters.
+
+## Licence files (`share/licenses/`) — SHA-256
+
+| File | SHA-256 |
+|---|---|
+| `share/licenses/skcms/LICENSE` | `e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36` |
+
+Computed via `shasum -a 256 native/third_party/libjxl-dist-windows/share/licenses/skcms/LICENSE`
+(64 hex characters). This file is a copy of the macOS `libjxl-dist`'s
+`share/licenses/skcms/LICENSE`, sourced from the pinned `third_party/skcms`
+submodule commit `96d9171c94b937a1b5f0293de7309ac16311b722` (tag `v0.12.0`
+checkout) — see "Licence and linkage" above.
 
 All release-built with `CMAKE_BUILD_TYPE=Release`. Windows archives are
 MSVC-style `.lib` (not `lib*.a`), matching the Windows toolchain's naming

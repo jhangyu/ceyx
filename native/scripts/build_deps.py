@@ -261,6 +261,37 @@ def _run_fetch(argv: list) -> int:
     dest = Path(args.dest).resolve() if args.dest else None
     print(f"[build_deps] fetch name={args.name!r} dest={dest}", file=sys.stderr)
 
+    # --arch and --force are documented above as "libjxl only" / "halide/libjxl
+    # only" respectively -- a caller passing either for a module that ignores
+    # it silently gets a build that doesn't do what the flag implied. Reject
+    # (same doctrine as `build webp-stack --stage` rejecting an out-of-scope
+    # flag) rather than accept-and-ignore.
+    if args.name in ("halide", "libraw") and args.arch is not None:
+        exc = FetchError(
+            f"--arch is not accepted for fetch {args.name!r} -- {args.name} has no "
+            "arch-specific acquisition (only 'libjxl' honours --arch, via "
+            "CEYX_JXL_ARCH); drop the flag."
+        )
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.name == "libraw" and args.force:
+        exc = FetchError(
+            "--force is not accepted for fetch 'libraw' -- fetch_libraw.fetch() "
+            "takes no force parameter and always re-verifies against its pinned "
+            "SHA-256 (only 'halide' and 'libjxl' honour --force); drop the flag."
+        )
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if dest is not None and not dest.parent.exists():
+        exc = FetchError(
+            f"--dest {dest} has a non-existent parent directory {dest.parent} -- "
+            "create it first (or pass a --dest whose parent already exists); "
+            "acquisition does not create arbitrary ancestor directories."
+        )
+        print(str(exc), file=sys.stderr)
+        return 1
+
     if args.name == "halide":
         from deps import fetch_halide  # noqa: PLC0415
 

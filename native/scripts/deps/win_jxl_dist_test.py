@@ -249,15 +249,38 @@ class TestVendorLicenses(unittest.TestCase):
             dist = root / "dist"
             (src / "third_party" / "highway").mkdir(parents=True)
             (src / "third_party" / "brotli").mkdir(parents=True)
+            (src / "third_party" / "skcms").mkdir(parents=True)
             (src / "LICENSE").write_text("jxl licence", encoding="utf-8")
             (src / "third_party" / "highway" / "LICENSE").write_text("hwy licence", encoding="utf-8")
             (src / "third_party" / "brotli" / "COPYING").write_text("brotli licence", encoding="utf-8")
+            (src / "third_party" / "skcms" / "LICENSE").write_text("skcms licence", encoding="utf-8")
 
             win_jxl_dist.vendor_licenses(src, dist)
 
             self.assertTrue((dist / "share" / "licenses" / "libjxl" / "LICENSE").is_file())
             self.assertTrue((dist / "share" / "licenses" / "highway" / "LICENSE").is_file())
             self.assertTrue((dist / "share" / "licenses" / "brotli" / "COPYING").is_file())
+            self.assertTrue((dist / "share" / "licenses" / "skcms" / "LICENSE").is_file())
+
+    def test_licence_pairs_include_skcms(self) -> None:
+        """SF1: skcms's object code ships inside jxl_cms.lib (see
+        PROVENANCE.md's licence section), so its BSD-3 attribution must be
+        vendored alongside libjxl/highway/brotli -- mirrors
+        fetch_libjxl.py's _LICENSE_DIRS tuple for the macOS/Linux sibling.
+        """
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            dist = root / "dist"
+            for sub in ("highway", "brotli", "skcms"):
+                (src / "third_party" / sub).mkdir(parents=True)
+                (src / "third_party" / sub / "LICENSE").write_text(f"{sub} licence", encoding="utf-8")
+            (src / "LICENSE").write_text("jxl licence", encoding="utf-8")
+
+            win_jxl_dist.vendor_licenses(src, dist)
+
+            names = {p.name for p in (dist / "share" / "licenses").iterdir()}
+            self.assertEqual(names, {"libjxl", "highway", "brotli", "skcms"})
 
     def test_red_when_a_licence_is_missing(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -266,8 +289,10 @@ class TestVendorLicenses(unittest.TestCase):
             dist = root / "dist"
             (src / "third_party" / "highway").mkdir(parents=True)
             (src / "third_party" / "brotli").mkdir(parents=True)
+            (src / "third_party" / "skcms").mkdir(parents=True)
             (src / "LICENSE").write_text("jxl licence", encoding="utf-8")
             (src / "third_party" / "brotli" / "COPYING").write_text("brotli licence", encoding="utf-8")
+            (src / "third_party" / "skcms" / "LICENSE").write_text("skcms licence", encoding="utf-8")
             # highway licence deliberately absent
 
             with self.assertRaises(win_jxl_dist.WindowsJxlError) as ctx:
