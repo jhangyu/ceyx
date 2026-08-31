@@ -1,9 +1,16 @@
 """Tests for win_webp_dist.py -- all runnable on macOS/Linux (spec §8.1).
 
-Mirrors win_jxl_dist_test.py's TestTranscriptionMatchesTheShellScript
-pattern. This round's proof for the Windows carrier is these tests plus
-webp_dist_windows.yml's rewire; a real Windows build run is round 3's job
-(this host cannot build a Windows PE) -- see the module docstring.
+Round 3: the carrier was proven green on a real Windows CI leg (run
+https://github.com/jhangyu/ceyx/actions/runs/33422633434, head
+522e913b4b6178f1c128bf3b48058e88603ad36c, self-captured
+``WEBP_DIST_WINDOWS_RC=0``) and the produced dist was byte-compared against
+the committed native/third_party/libwebp-dist-windows tree (headers,
+pkgconfig, cmake, licence and PROVENANCE.md are digest-identical; the five
+``.lib`` binaries differ -- non-reproducible compiler output across build
+runs, not a logic regression -- see docs/logs for the full finding).
+``build_libwebp_dist_windows.sh`` was then deleted; its transcription test
+is frozen below to literals, same pattern as win_jxl_dist_test.py's
+``TestFrozenTranscriptionMatchesTheDeletedShellScript``.
 """
 from __future__ import annotations
 
@@ -17,8 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deps import win_pe, win_webp_dist  # noqa: E402
 
-_SH_SCRIPT = Path(__file__).resolve().parents[1] / "build_libwebp_dist_windows.sh"
-
 
 def _dist_with(files: dict, root: Path) -> Path:
     for relative, content in files.items():
@@ -28,38 +33,77 @@ def _dist_with(files: dict, root: Path) -> Path:
     return root
 
 
-class TestTranscriptionMatchesTheShellScript(unittest.TestCase):
-    def setUp(self) -> None:
-        self.sh_text = _SH_SCRIPT.read_text(encoding="utf-8")
+class TestFrozenTranscriptionMatchesTheDeletedShellScript(unittest.TestCase):
+    """build_libwebp_dist_windows.sh was DELETED in this commit set (round 3
+    task #12 closeout) once the carrier-built dist was proven green on a
+    real Windows CI leg (run 33422633434, head
+    522e913b4b6178f1c128bf3b48058e88603ad36c).
+
+    These values are FROZEN LITERALS, copied (not retyped) from the last
+    revision of ``build_libwebp_dist_windows.sh`` at commit
+    d125df8e830b9c7e98541b34fff42ab694abde2b (``git show
+    d125df8e830b9c7e98541b34fff42ab694abde2b:native/scripts/build_libwebp_dist_windows.sh``
+    recovers the full original text). A value changing here without a
+    corresponding intentional edit to ``win_webp_dist.py`` is exactly as
+    much a red flag as a live-diff mismatch against the .sh would have been.
+    """
 
     def test_version_matches(self) -> None:
-        self.assertIn(f'WEBP_VERSION="{win_webp_dist.WEBP_VERSION}"', self.sh_text)
+        self.assertEqual(win_webp_dist.WEBP_VERSION, "1.6.0")
 
     def test_sha256_matches(self) -> None:
-        self.assertIn(win_webp_dist.WEBP_SHA256, self.sh_text)
+        self.assertEqual(
+            win_webp_dist.WEBP_SHA256,
+            "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564",
+        )
 
     def test_url_pattern_matches(self) -> None:
-        self.assertIn("storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-", self.sh_text)
+        self.assertEqual(
+            win_webp_dist.WEBP_URL,
+            "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz",
+        )
 
     def test_required_libs_match(self) -> None:
-        for lib in win_webp_dist.REQUIRED_LIBS:
-            self.assertIn(f"lib/{lib}", self.sh_text)
+        self.assertEqual(
+            win_webp_dist.REQUIRED_LIBS,
+            ("libwebp.lib", "libwebpmux.lib", "libwebpdemux.lib", "libsharpyuv.lib"),
+        )
 
     def test_required_headers_match(self) -> None:
-        for header in win_webp_dist.REQUIRED_HEADERS:
-            self.assertIn(header, self.sh_text)
+        self.assertEqual(
+            win_webp_dist.REQUIRED_HEADERS,
+            ("include/webp/encode.h", "include/webp/decode.h", "include/webp/mux.h"),
+        )
 
     def test_encoder_symbols_match(self) -> None:
-        for symbol in win_webp_dist.REQUIRED_ENCODER_SYMBOLS:
-            self.assertIn(symbol, self.sh_text)
+        self.assertEqual(
+            win_webp_dist.REQUIRED_ENCODER_SYMBOLS,
+            ("WebPEncodeRGBA", "WebPEncodeLosslessRGBA"),
+        )
 
     def test_mux_symbols_match(self) -> None:
-        for symbol in win_webp_dist.REQUIRED_MUX_SYMBOLS:
-            self.assertIn(symbol, self.sh_text)
+        self.assertEqual(win_webp_dist.REQUIRED_MUX_SYMBOLS, ("WebPMuxSetChunk", "WebPMuxAssemble"))
 
     def test_cmake_flags_match(self) -> None:
-        for flag in win_webp_dist._CMAKE_ARGS_BASE:
-            self.assertIn(flag, self.sh_text)
+        self.assertEqual(
+            win_webp_dist._CMAKE_ARGS_BASE,
+            (
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_C_COMPILER=clang-cl",
+                "-DCMAKE_CXX_COMPILER=clang-cl",
+                "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                "-DBUILD_SHARED_LIBS=OFF",
+                "-DWEBP_BUILD_ANIM_UTILS=OFF",
+                "-DWEBP_BUILD_CWEBP=OFF",
+                "-DWEBP_BUILD_DWEBP=OFF",
+                "-DWEBP_BUILD_GIF2WEBP=OFF",
+                "-DWEBP_BUILD_IMG2WEBP=OFF",
+                "-DWEBP_BUILD_VWEBP=OFF",
+                "-DWEBP_BUILD_WEBPINFO=OFF",
+                "-DWEBP_BUILD_WEBPMUX=OFF",
+                "-DWEBP_BUILD_EXTRAS=OFF",
+            ),
+        )
 
     def test_multithreaded_runtime_not_dynamic(self) -> None:
         self.assertIn("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", win_webp_dist._CMAKE_ARGS_BASE)
