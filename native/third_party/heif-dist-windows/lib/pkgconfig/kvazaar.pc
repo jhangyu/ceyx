@@ -1,0 +1,12 @@
+prefix=D:/a/ceyx/ceyx/native/third_party/heif-dist-windows
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+incdir=${prefix}/include
+
+Name: libkvazaar
+Description: An open-source HEVC encoder licensed under 3-clause BSD
+URL: https://github.com/ultravideo/kvazaar
+Version: 2.3.1
+Libs: -L${libdir} -lkvazaar
+Libs.private: 
+Cflags: -I${incdir}
