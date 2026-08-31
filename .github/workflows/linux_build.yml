@@ -39,11 +39,10 @@ jobs:
       REPO_ROOT: ${{ github.workspace }}
       NATIVE_DIR: ${{ github.workspace }}/native
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
-      # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
-      # builtin-baseline and vcpkg-configuration.json's default-registry
-      # baseline (N30). port_spike.yml, the round-2 spike that used to be the
-      # fourth place this SHA was pinned, was deleted in round 5 (task #6).
-      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      # VCPKG_BASELINE is NOT set here (ruling 5, 2026-09-01) -- derived at
+      # runtime by the "Derive vcpkg baseline from vcpkg.json" step below,
+      # from native/vcpkg/vcpkg.json's builtin-baseline (the single source),
+      # rather than a hardcoded literal that could drift from it silently.
       VCPKG_TRIPLET: x64-linux-heif
       # The vcpkg paths deliberately do NOT live here. The `runner` context is
       # not available in a job-level `env:` block — using it there is a workflow
@@ -56,6 +55,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # Ruling 5 (2026-09-01): single-source the vcpkg baseline from
+      # native/vcpkg/vcpkg.json's builtin-baseline instead of a hardcoded
+      # 40-hex literal in this env: block (native/scripts/ci_conventions_check.py
+      # rule C9 fails red on the latter). Populates $GITHUB_ENV so every later
+      # step's $VCPKG_BASELINE reference keeps working unchanged.
+      - name: Derive vcpkg baseline from vcpkg.json
+        run: |
+          BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
+          echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
