@@ -112,6 +112,38 @@ _REQUIRED_FILES = (
     "include/libde265/de265.h",
 )
 
+# CLI tools/manpages that a component's own `install()` target drops into the
+# dist as a side effect of building its LIBRARY, but that this project never
+# consumes (2026-09-01 ruling 3): the build links only lib/libkvazaar.lib, not
+# a kvazaar.exe subprocess, and grepping plugin/ + native/ + .github/ for the
+# filename found zero consumers. Kept as a project-wide constant (not just
+# "kvazaar") so any future component that installs an unused CLI binary/manual
+# page is excluded the same way, without re-deriving this decision.
+_EXCLUDED_UNCONSUMED_PATHS = (
+    "bin/kvazaar.exe",
+    "share/man/man1/kvazaar.1",
+)
+
+
+def prune_unconsumed_cli_tools(dist: Path) -> list:
+    """Delete `_EXCLUDED_UNCONSUMED_PATHS` from `dist` if present.
+
+    Called after `build_kvazaar` installs its tree and before the dist is
+    committed/uploaded, so a future rebuild does not resurrect the unconsumed
+    CLI tool the 2026-09-01 ruling removed from git. Returns the list of
+    relative paths actually removed (empty when the dist has none of them --
+    e.g. an upstream release that stops installing the CLI tool at all).
+    """
+    dist = Path(dist)
+    removed: list = []
+    for rel in _EXCLUDED_UNCONSUMED_PATHS:
+        target = dist / rel
+        if target.is_file():
+            target.unlink()
+            removed.append(rel)
+            _log(f"pruned unconsumed CLI artefact: {rel}")
+    return removed
+
 
 class WindowsHeifError(RuntimeError):
     """Raised when any stage of the Windows HEIF assembly fails. The message
@@ -591,6 +623,7 @@ def build(
     # disk does NOT fail -- Findkvazaar's check_symbol_exists probe is
     # non-fatal -- and the result is a green build with no HEVC encoder.
     build_kvazaar(loaded, arch, dist, stage)
+    prune_unconsumed_cli_tools(dist)
     build_aom(loaded, arch, dist, stage)
     build_libheif(loaded, arch, dist, stage)
 

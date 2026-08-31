@@ -53,7 +53,6 @@ assumption the carrier was written to avoid.
 |---|---|
 | `bin/heif.dll` | `58b723c407035ea490221494e150d0f10431d176528d200df3165a04723223e1` |
 | `bin/libde265.dll` | `7974e31e2eec2dcce16d88122f3a44e239aa0fbb4e787965c7735ad25c09e765` |
-| `bin/kvazaar.exe` | `932fe1fa32498f8df0e66247d74b79f3da32d9c952596701466d1fa535c2fc5e` |
 | `lib/heif.lib` | `46ed10b6b906758440873f11b28148b6137da0e7a8530d6d824c1b52f6876ce2` |
 | `lib/de265.lib` | `d606afc41621282d8f8f2b8754029b36a316fe46a0dd5ca7b06139f5915d3e9a` |
 | `lib/libkvazaar.lib` | `92ef74d5b294600244d6d521fc91638437fdbd525d38286f4062ebdf5082ded5` |
@@ -93,6 +92,15 @@ licences carry no source-availability duty for static linking. `WITH_X265`
 stays OFF — x265 is GPL-2.0 and is excluded by name.
 
 ## Excluded from this commit
+
+**Removed 2026-09-01 (ruling 3):** `bin/kvazaar.exe` (the kvazaar CLI tool)
+and `share/man/man1/kvazaar.1` (its manpage) were dropped from this tree.
+Neither has any consumer — the build links only `lib/libkvazaar.lib` as a
+static archive merged into `heif.dll`; nothing in `plugin/`, `native/`, or
+`.github/` invokes `kvazaar.exe` as a subprocess or references the manpage
+(verified by grep before removal). `win_heif_dist.py`'s
+`prune_unconsumed_cli_tools()` now deletes both from any future dist
+assembly before it lands on disk, so a rebuild does not resurrect them.
 
 Per Nit-5 ruling (round-2 review): dot-prefixed instrument outputs the
 carrier writes during assertion (`.heif_exports.txt`, `.heif_deps.txt`) are

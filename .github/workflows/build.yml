@@ -207,9 +207,12 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 45
     env:
-      # D5: same pinned baseline as native/vcpkg/vcpkg.json and
-      # vcpkg-configuration.json (N30).
-      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      # VCPKG_BASELINE is NOT set here (ruling 5, 2026-09-01): a hardcoded
+      # literal here would be a second authority alongside
+      # native/vcpkg/vcpkg.json's "builtin-baseline", free to drift out of
+      # sync with it. It is derived at runtime instead by the "Derive vcpkg
+      # baseline from vcpkg.json" step below, which exports it via
+      # $GITHUB_ENV before any step that reads $VCPKG_BASELINE runs.
       VCPKG_TRIPLET: arm64-osx-heif
       # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
       # not available in a job-level `env:` block — using it there is a
@@ -222,6 +225,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
+      # is the ONLY authority for this SHA; every workflow reads it here
+      # instead of hardcoding its own copy that can drift.
+      - name: Derive vcpkg baseline from vcpkg.json
+        run: |
+          BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
+          echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5

@@ -57,10 +57,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      # D1-a: aom reaches the Windows HEIF build via vcpkg, same mechanism and
-      # same PINNED baseline as macos_build.yml/linux_build.yml (D5). One pin,
-      # three platforms -- see native/deps/manifest.toml [component.aom].
-      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      # D1-a: aom reaches the Windows HEIF build via vcpkg, same mechanism as
+      # macos_build.yml/linux_build.yml (D5). VCPKG_BASELINE is NOT set here
+      # (ruling 5, 2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
+      # is the ONLY authority, derived at runtime by the "Derive vcpkg
+      # baseline from vcpkg.json" step below -- see
+      # native/deps/manifest.toml [component.aom].
       VCPKG_TRIPLET: x64-windows-heif
     steps:
       # MUST run BEFORE actions/checkout, same reason as windows_build.yml:
@@ -76,6 +78,16 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline" is
+      # the ONLY authority for this SHA; every workflow reads it here instead
+      # of hardcoding its own copy that can drift. shell: bash is explicit --
+      # the runner's default shell is pwsh.
+      - name: Derive vcpkg baseline from vcpkg.json
+        shell: bash
+        run: |
+          BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
+          echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5

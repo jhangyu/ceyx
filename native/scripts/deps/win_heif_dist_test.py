@@ -254,6 +254,7 @@ def test_build_installs_dependencies_before_libheif(monkeypatch, tmp_path) -> No
     for name in ("build_libde265", "build_kvazaar", "build_aom", "build_libheif"):
         monkeypatch.setattr(win_heif_dist, name,
                              lambda *a, _n=name, **k: calls.append(_n))
+    monkeypatch.setattr(win_heif_dist, "prune_unconsumed_cli_tools", lambda d: [])
     monkeypatch.setattr(win_heif_dist, "assert_layout", lambda d: "bin/libde265.dll")
     monkeypatch.setattr(win_heif_dist, "assert_capabilities", lambda d, x: None)
     monkeypatch.setattr(win_heif_dist, "vendor_licences", lambda *a, **k: None)
@@ -261,6 +262,67 @@ def test_build_installs_dependencies_before_libheif(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(win_heif_dist, "want_pins", lambda *a, **k: "pins")
     win_heif_dist.build(manifest.load(), tmp_path)
     assert calls == ["build_libde265", "build_kvazaar", "build_aom", "build_libheif"]
+
+
+class TestPruneUnconsumedCliTools(unittest.TestCase):
+    """2026-09-01 ruling 3: kvazaar's own `install()` target drops a CLI
+    tool + manpage into the dist as a side effect of building the library
+    this project actually links (lib/libkvazaar.lib). Neither is consumed
+    anywhere (grepped plugin/, native/, .github/); future dist assemblies
+    must not resurrect them."""
+
+    def test_removes_kvazaar_exe_and_manpage_when_present(self) -> None:
+        with TemporaryDirectory() as tmp:
+            dist = _dist_with(
+                {
+                    "bin/heif.dll": "x",
+                    "bin/kvazaar.exe": "cli tool bytes",
+                    "share/man/man1/kvazaar.1": "manpage",
+                },
+                Path(tmp),
+            )
+            removed = win_heif_dist.prune_unconsumed_cli_tools(dist)
+            self.assertEqual(sorted(removed), ["bin/kvazaar.exe", "share/man/man1/kvazaar.1"])
+            self.assertFalse((dist / "bin" / "kvazaar.exe").exists())
+            self.assertFalse((dist / "share" / "man" / "man1" / "kvazaar.1").exists())
+            # A file NOT in the exclusion list must survive untouched.
+            self.assertTrue((dist / "bin" / "heif.dll").is_file())
+
+    def test_no_op_and_reports_nothing_removed_when_absent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            dist = _dist_with({"bin/heif.dll": "x"}, Path(tmp))
+            removed = win_heif_dist.prune_unconsumed_cli_tools(dist)
+            self.assertEqual(removed, [])
+
+    def test_build_prunes_cli_tools_after_kvazaar_before_libheif(self, ) -> None:
+        """Ordering matters: pruning must happen after kvazaar's install step
+        writes the CLI tool and before libheif is configured (though libheif
+        itself does not depend on it, this keeps the dist's final shape
+        settled before the remaining build stages run)."""
+        import unittest.mock as mock
+
+        calls: list = []
+        with TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            with mock.patch.object(win_heif_dist, "build_libde265", lambda *a, **k: calls.append("build_libde265")), \
+                 mock.patch.object(win_heif_dist, "build_kvazaar", lambda *a, **k: calls.append("build_kvazaar")), \
+                 mock.patch.object(win_heif_dist, "build_aom", lambda *a, **k: calls.append("build_aom")), \
+                 mock.patch.object(win_heif_dist, "build_libheif", lambda *a, **k: calls.append("build_libheif")), \
+                 mock.patch.object(win_heif_dist, "prune_unconsumed_cli_tools",
+                                    lambda d: calls.append("prune_unconsumed_cli_tools")), \
+                 mock.patch.object(win_heif_dist, "assert_layout", lambda d: "bin/libde265.dll"), \
+                 mock.patch.object(win_heif_dist, "assert_capabilities", lambda d, x: None), \
+                 mock.patch.object(win_heif_dist, "vendor_licences", lambda *a, **k: None), \
+                 mock.patch.object(win_heif_dist, "stamp_is_current", lambda *a, **k: False), \
+                 mock.patch.object(win_heif_dist, "want_pins", lambda *a, **k: "pins"):
+                win_heif_dist.build(manifest.load(), dist)
+        assert calls == [
+            "build_libde265",
+            "build_kvazaar",
+            "prune_unconsumed_cli_tools",
+            "build_aom",
+            "build_libheif",
+        ]
 
 
 def _patch_pe_reads(monkeypatch, *, deps_text: str) -> None:

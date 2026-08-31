@@ -218,6 +218,42 @@ def check_c6_required_asset_set(workflows_dir):
     return violations
 
 
+_HEX40_RE = re.compile(r"\b[0-9a-f]{40}\b")
+_BASELINE_CONTEXT_RE = re.compile(r"baseline|vcpkg", re.IGNORECASE)
+
+
+def check_c9_no_hardcoded_vcpkg_baseline(workflows_dir):
+    """No workflow file hardcodes the vcpkg builtin-baseline SHA.
+
+    Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline" is the
+    ONLY authority for this value; every workflow must derive it at runtime
+    (see the "Derive vcpkg baseline from vcpkg.json" step in
+    macos_build.yml/heif_dist_windows.yml) rather than hardcode its own copy.
+    A hardcoded copy is a violation whether or not it currently matches
+    vcpkg.json's value -- a second authority that happens to agree today is
+    exactly the drift risk this rule exists to catch before it disagrees.
+
+    Any 40-hex token on a line that also mentions "baseline" or "vcpkg"
+    (case-insensitive) is flagged, except a line that is itself the runtime
+    derivation (contains "GITHUB_ENV" or "builtin-baseline" -- the latter is
+    the JSON key name read out of vcpkg.json, not a SHA literal).
+    """
+    violations = []
+    for wf in _workflow_files(workflows_dir):
+        for lineno, line in enumerate(wf.read_text().splitlines(), start=1):
+            if "GITHUB_ENV" in line or "builtin-baseline" in line:
+                continue
+            if not _BASELINE_CONTEXT_RE.search(line):
+                continue
+            for token in _HEX40_RE.findall(line):
+                violations.append(
+                    f"C9: {wf.name}:{lineno}: hardcoded 40-hex vcpkg baseline literal "
+                    f"{token!r} -- derive it at runtime from native/vcpkg/vcpkg.json's "
+                    f"builtin-baseline instead (ruling 5, 2026-09-01): {line.strip()}"
+                )
+    return violations
+
+
 def check_c8_ledger_sync(workflows_dir):
     """render_expectations.py --check passes against the given workflows directory."""
     sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
@@ -237,6 +273,7 @@ RULES = [
     check_c5_real_trigger,
     check_c6_required_asset_set,
     check_c8_ledger_sync,
+    check_c9_no_hardcoded_vcpkg_baseline,
 ]
 
 

@@ -214,3 +214,63 @@ def test_c8_catches_cross_leg_drift_union_missed(tmp_path, monkeypatch):
     _write(tmp_path, "windows.yml", "  - run: probe.py --expect avif:encode=0\n")
     violations = cc.check_c8_ledger_sync(tmp_path)
     assert any("leg-windows" in v for v in violations), violations
+
+
+# ---------------------------------------------------------------------------
+# C9 (ruling 5, 2026-09-01): no workflow hardcodes the vcpkg builtin-baseline
+# SHA; every workflow must derive it at runtime from native/vcpkg/vcpkg.json.
+# ---------------------------------------------------------------------------
+
+def test_c9_compliant_fixture_passes(tmp_path):
+    _write(
+        tmp_path,
+        "macos_build.yml",
+        "    env:\n"
+        "      VCPKG_TRIPLET: arm64-osx-heif\n"
+        "    steps:\n"
+        "      - name: Derive vcpkg baseline from vcpkg.json\n"
+        "        run: |\n"
+        "          BASELINE=\"$(python3 -c \\\"import json; "
+        "print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])\\\")\"\n"
+        "          echo \"VCPKG_BASELINE=$BASELINE\" >> \"$GITHUB_ENV\"\n",
+    )
+    assert cc.check_c9_no_hardcoded_vcpkg_baseline(tmp_path) == []
+
+
+def test_c9_violation_fixture_fails(tmp_path):
+    """Injected drift: a workflow hardcoding the baseline literal, exactly
+    the shape ruling 5 forbids -- must be caught red before it is fixed."""
+    _write(
+        tmp_path,
+        "linux_build.yml",
+        "    env:\n"
+        "      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a\n",
+    )
+    violations = cc.check_c9_no_hardcoded_vcpkg_baseline(tmp_path)
+    assert any("linux_build.yml" in v and "abb6dda5cc32914d2e64d7d72b974dc301d1fc8a" in v
+               for v in violations), violations
+
+
+def test_c9_flags_hardcoded_literal_even_when_it_matches_vcpkg_json(tmp_path):
+    """A hardcoded copy is a violation even if it currently agrees with
+    vcpkg.json -- single authority, not eventual consistency."""
+    _write(
+        tmp_path,
+        "heif_dist_windows.yml",
+        "    env:\n"
+        "      # same PINNED baseline as macos_build.yml\n"
+        "      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a\n",
+    )
+    violations = cc.check_c9_no_hardcoded_vcpkg_baseline(tmp_path)
+    assert violations
+
+
+def test_c9_ignores_unrelated_40_hex_tokens(tmp_path):
+    """A 40-hex SHA with no baseline/vcpkg context (e.g. a ZLIB_SHA literal)
+    must not be flagged -- C9 is scoped to the vcpkg baseline specifically."""
+    _write(
+        tmp_path,
+        "windows_build.yml",
+        "          ZLIB_SHA=\"9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23\"\n",
+    )
+    assert cc.check_c9_no_hardcoded_vcpkg_baseline(tmp_path) == []

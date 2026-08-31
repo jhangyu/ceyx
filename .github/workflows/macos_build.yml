@@ -126,11 +126,12 @@ jobs:
       # cross build, and obfuscating it to dodge the grep would be worse.
       X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
       HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
-      # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
-      # builtin-baseline and vcpkg-configuration.json's default-registry
-      # baseline (N30). port_spike.yml, the round-2 spike that used to be the
-      # fourth place this SHA was pinned, was deleted in round 5 (task #6).
-      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      # VCPKG_BASELINE is NOT set here (ruling 5, 2026-09-01): a hardcoded
+      # literal here would be a second authority alongside
+      # native/vcpkg/vcpkg.json's "builtin-baseline", free to drift out of
+      # sync with it. It is derived at runtime instead by the "Derive vcpkg
+      # baseline from vcpkg.json" step below, which exports it via
+      # $GITHUB_ENV before any step that reads $VCPKG_BASELINE runs.
       VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
       # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
       # not available in a job-level `env:` block — using it there is a workflow
@@ -153,6 +154,14 @@ jobs:
           # (full history) is required so the tagged commit's tree is
           # actually present. Do not remove this key or shrink the depth.
           fetch-depth: 0
+
+      # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
+      # is the ONLY authority for this SHA; every workflow reads it here
+      # instead of hardcoding its own copy that can drift.
+      - name: Derive vcpkg baseline from vcpkg.json
+        run: |
+          BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
+          echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
