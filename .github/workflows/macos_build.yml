@@ -447,6 +447,10 @@ jobs:
       # Restricted to matrix.cross == 'false': the cross leg's dist
       # (heif-dist-x86_64) is built for x86_64 and cannot be exec'd on this
       # arm64 runner without Rosetta, which this workflow does not provision.
+      # CI-T3 (task #11 spec, native/scripts/tmp/ci-t3-probe-codecs-step-spec.md
+      # section 2): stdout now goes to a file (previously printed straight to
+      # the step log only) so it can travel as an artifact alongside the
+      # Windows leg's equivalent.
       - name: Compile + run functional capability probe (D4/R-7)
         if: matrix.cross == 'false'
         run: |
@@ -462,13 +466,14 @@ jobs:
             -lheif
           file "$PROBE_DIR/probe_codecs"
           set +e
-          "$PROBE_DIR/probe_codecs"
+          "$PROBE_DIR/probe_codecs" > "$PROBE_DIR/probe_codecs.txt" 2>&1
           RC=$?
           set -e
-          echo "RC=${RC}"
           # Bit convention (probe_codecs.c): bit0=HEVC-ENC,bit1=AV1-ENC,
           # bit2=HEVC-DEC,bit3=AV1-DEC; a SET bit means that capability is
           # ABSENT. This dist ships all four, so any set bit is a real defect.
+          echo "PROBE_CODECS_RC=${RC}" | tee -a "$PROBE_DIR/probe_codecs.txt"
+          cat "$PROBE_DIR/probe_codecs.txt"
           if [ "${RC}" -ne 0 ]; then
             echo "::error::probe_codecs exited ${RC} (nonzero bits = missing capabilities)"
             exit "${RC}"
@@ -604,12 +609,14 @@ jobs:
         if: matrix.cross == 'false'
         run: |
           set +e
+          mkdir -p native/scripts/deps/probe
           python3 native/scripts/codec_capability_probe.py "$DYLIB" \
             --expect jpeg:encode=1 --expect jpeg:decode=0 \
             --expect webp:encode=1 --expect webp:decode=1 \
             --expect heic:encode=1 --expect heic:decode=1 \
             --expect avif:encode=1 --expect avif:decode=1 \
-            --expect jxl:encode=1 --expect jxl:decode=1
+            --expect jxl:encode=1 --expect jxl:decode=1 \
+            --json-out native/scripts/deps/probe/capability.json
           rc=$?
           set -e
           echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
@@ -724,3 +731,22 @@ jobs:
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 14
+
+      # CI-T3 (task #11 spec, section 2): probe_codecs.txt/capability.json
+      # are only produced on the native (arm64) leg (matrix.cross == 'false'
+      # gates both the probe_codecs compile+run step above and the codec
+      # capability vector step); the cross leg never creates them, so this
+      # upload is scoped the same way rather than uploading an empty/missing
+      # artifact for x86_64. `if: always()` so a failed probe still uploads
+      # its own diagnosis (R3/R7).
+      - name: Upload probe_results_macos_arm64
+        if: always() && matrix.cross == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe_results_macos_arm64
+          path: |
+            native/scripts/deps/probe/probe_codecs.txt
+            native/scripts/deps/probe/capability.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
