@@ -23,19 +23,30 @@
 extern "C" {
 #endif
 
+/* All ceyx_*_impl entry points below are cross-TU-only (still_ffi_api.cpp /
+ * encode_ffi_api.cpp dispatch into them, nothing outside this binary does).
+ * They carry hidden visibility (2026-09-01 Ruling 6) so they do not appear in
+ * the dylib's exported-symbol table, matching CeyxHeifHasDecoderFor below. */
+
 /* --- WebP (Task 8, webp_codec.cpp) --------------------------------------- */
+__attribute__((visibility("hidden")))
 int32_t ceyx_webp_probe_impl(const char *path, uint32_t *w, uint32_t *h);
+__attribute__((visibility("hidden")))
 int32_t ceyx_webp_decode_impl(const char *path, int32_t max_dim,
                               CeyxStillResult *out);
+__attribute__((visibility("hidden")))
 int32_t ceyx_webp_encode_impl(const uint8_t *rgba, int32_t width, int32_t height,
                               const CeyxEncodeOptions *opts,
                               const CeyxEncodeMetadata *meta,
                               uint8_t **out, size_t *out_len);
 
 /* --- JPEG XL (Task 9, jxl_codec.cpp) ------------------------------------- */
+__attribute__((visibility("hidden")))
 int32_t ceyx_jxl_probe_impl(const char *path, uint32_t *w, uint32_t *h);
+__attribute__((visibility("hidden")))
 int32_t ceyx_jxl_decode_impl(const char *path, int32_t max_dim,
                              CeyxStillResult *out);
+__attribute__((visibility("hidden")))
 int32_t ceyx_jxl_encode_impl(const uint8_t *rgba, int32_t width, int32_t height,
                              const CeyxEncodeOptions *opts,
                              const CeyxEncodeMetadata *meta,
@@ -44,11 +55,13 @@ int32_t ceyx_jxl_encode_impl(const uint8_t *rgba, int32_t width, int32_t height,
 /* --- HEIC / AVIF (Task 7, heif_encode.cpp) ------------------------------- */
 /* `format` is kCeyxFormatHeic or kCeyxFormatAvif; it selects
  * heif_compression_HEVC vs heif_compression_AV1. */
+__attribute__((visibility("hidden")))
 int32_t ceyx_heif_encode_impl(int32_t format,
                               const uint8_t *rgba, int32_t width, int32_t height,
                               const CeyxEncodeOptions *opts,
                               const CeyxEncodeMetadata *meta,
                               uint8_t **out, size_t *out_len);
+__attribute__((visibility("hidden")))
 int32_t ceyx_heif_still_decode_impl(const char *path, int32_t max_dim,
                                     CeyxStillResult *out);
 
