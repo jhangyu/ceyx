@@ -327,7 +327,7 @@ if(DNG_ENABLE_GENERIC_RAW)
     if(NOT EXISTS ${LIBRAW_DIR}/libraw/libraw.h)
         message(FATAL_ERROR
             "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_DIR} is missing. Run "
-            "native/scripts/fetch_libraw_dist.sh first, or "
+            "python3 native/scripts/build_deps.py fetch libraw first, or "
             "configure with -DDNG_ENABLE_GENERIC_RAW=OFF.")
     endif()
     if(NOT EXISTS ${LIBRAW_CMAKE_OVERLAY_DIR}/CMakeLists.txt)
@@ -335,7 +335,7 @@ if(DNG_ENABLE_GENERIC_RAW)
             "DNG_ENABLE_GENERIC_RAW=ON but ${LIBRAW_CMAKE_OVERLAY_DIR} is missing "
             "(LibRaw ships no CMakeLists.txt of its own; this project vendors the "
             "community LibRaw-cmake overlay, see PROVENANCE.md). Run "
-            "native/scripts/fetch_libraw_dist.sh first.")
+            "python3 native/scripts/build_deps.py fetch libraw first.")
     endif()
 
     # RawSpeed3 build policy (spec section 6.6): no OpenMP, no tools/tests/

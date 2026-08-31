@@ -19,6 +19,8 @@ on:
       - "ci/**"
     paths:
       - "native/scripts/build_libwebp_dist_windows.sh"
+      - "native/scripts/deps/win_webp_dist.py"
+      - "native/scripts/build_deps.py"
       - ".github/workflows/webp_dist_windows.yml"
 
 concurrency:
@@ -79,6 +81,12 @@ jobs:
           echo "clang-cl: $CLANG_CL"
           "$CLANG_CL" --version
 
+      # Migrated off build_libwebp_dist_windows.sh (2026-09-01 contract item
+      # 11 / ENTRY-POINT RULE): the carrier is native/scripts/deps/win_webp_dist.py,
+      # exposed as `build_deps.py build webp-stack`. build_libwebp_dist_windows.sh
+      # stays in the tree, UNUSED by this workflow, until this carrier is proven
+      # green on a real Windows run (this is that first real run) -- see the
+      # module docstring for why deletion is deferred rather than immediate.
       - name: Build the libwebp dist
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -87,7 +95,9 @@ jobs:
           # `bash -eo pipefail` shell would abort the step first, leaving a log
           # that could only ever record RC=0.
           set +e
-          bash native/scripts/build_libwebp_dist_windows.sh
+          python3 native/scripts/build_deps.py build webp-stack \
+            --platform windows --arch x86_64 \
+            --dist native/third_party/libwebp-dist-windows
           RC=$?
           set -e
           echo "WEBP_DIST_WINDOWS_RC=$RC"

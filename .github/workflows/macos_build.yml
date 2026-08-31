@@ -208,10 +208,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/halide
-          key: halide-v21-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+          key: halide-v21-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
 
       - name: Fetch vendored Halide v21 distribution
-        run: native/scripts/fetch_halide_v21_dist.sh
+        run: python3 native/scripts/build_deps.py fetch halide
 
       # Configure fails without this (cmake/tests.cmake requires LibRaw
       # unless DNG_ENABLE_GENERIC_RAW=OFF, which we will not disable just to
@@ -231,17 +231,17 @@ jobs:
           path: |
             ${{ github.workspace }}/native/third_party/libraw
             ${{ github.workspace }}/native/third_party/libraw-cmake
-          key: libraw-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
+          key: libraw-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
 
       - name: Fetch vendored LibRaw distribution
-        run: native/scripts/fetch_libraw_dist.sh
+        run: python3 native/scripts/build_deps.py fetch libraw
 
       # G1 fix (round-5 gap closure, task #9): cmake/jxl.cmake defaults
       # CEYX_ENABLE_JXL=ON but SOFT-degrades to CEYX_JXL_ENABLED=0 with only a
       # message(WARNING) when native/third_party/libjxl-dist is absent — a
       # configure that silently ships no JPEG XL codec was indistinguishable
       # from one that ships it, in every green run before this fix. Fetch the
-      # real dist (native/scripts/fetch_libjxl_dist.sh builds it from source;
+      # real dist (native/scripts/build_deps.py fetch libjxl builds it from source;
       # same script the plan intends, unlike the HEIF/libwebp dists this one
       # has no committed/vcpkg alternative) so this leg can prove ENABLED=1
       # after the product build below, not just attempt it.
@@ -256,12 +256,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/libjxl-dist${{ matrix.cross == 'true' && format('-{0}', matrix.arch_tag) || '' }}
-          key: jxl-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_libjxl_dist.sh') }}
+          key: jxl-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/deps/fetch_libjxl.py') }}
 
       - name: Fetch vendored libjxl distribution
         env:
           CEYX_JXL_ARCH: ${{ matrix.arch_tag }}
-        run: native/scripts/fetch_libjxl_dist.sh
+        run: python3 native/scripts/build_deps.py fetch libjxl
 
       # D5 (2026-08-31): libwebp is supplied by vcpkg, pinned to exactly 1.6.0 in
       # native/vcpkg/vcpkg.json. cmake/encode.cmake resolves it with

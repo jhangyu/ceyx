@@ -95,11 +95,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/halide
-          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
 
       - name: Fetch vendored Halide v21 distribution (host)
         working-directory: ${{ github.workspace }}
-        run: native/scripts/fetch_halide_v21_dist.sh
+        run: python3 native/scripts/build_deps.py fetch halide
 
       # native/third_party/libraw is gitignored; DNG_ENABLE_GENERIC_RAW defaults
       # ON (native/CMakeLists.txt) and cmake/tests.cmake hard-fails configure
@@ -112,11 +112,11 @@ jobs:
           path: |
             ${{ github.workspace }}/native/third_party/libraw
             ${{ github.workspace }}/native/third_party/libraw-cmake
-          key: libraw-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+          key: libraw-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
 
       - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
         working-directory: ${{ github.workspace }}
-        run: native/scripts/fetch_libraw_dist.sh
+        run: python3 native/scripts/build_deps.py fetch libraw
 
       # D5 (2026-08-31): libwebp now comes from vcpkg, pinned to exactly 1.6.0 in
       # native/vcpkg/vcpkg.json, and cmake/encode.cmake HARD-FAILS the configure
@@ -171,7 +171,7 @@ jobs:
       # CEYX_ENABLE_JXL=ON but SOFT-degrades to a message(WARNING) +
       # CEYX_JXL_ENABLED=0 when native/third_party/libjxl-dist is absent — a
       # silent codec-less build was indistinguishable from a real one in every
-      # green run before this fix. native/scripts/fetch_libjxl_dist.sh builds
+      # green run before this fix. native/scripts/build_deps.py fetch libjxl builds
       # it from source (no committed/vcpkg alternative exists for this dist,
       # unlike libheif/libwebp), so fetch it here the same way macos_build.yml
       # now does, and prove linkage on the built .so below (declaration vs
@@ -181,10 +181,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/libjxl-dist
-          key: jxl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/fetch_libjxl_dist.sh') }}
+          key: jxl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/deps/fetch_libjxl.py') }}
 
       - name: Fetch vendored libjxl distribution
-        run: native/scripts/fetch_libjxl_dist.sh
+        run: python3 native/scripts/build_deps.py fetch libjxl
 
       - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
         # Native single-stage build: on Linux the host IS the target, so the

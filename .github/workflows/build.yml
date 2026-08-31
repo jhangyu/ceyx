@@ -237,10 +237,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/native/third_party/halide
-          key: halide-v21-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/fetch_halide_v21_dist.sh') }}
+          key: halide-v21-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
 
       - name: Fetch vendored Halide v21 distribution
-        run: native/scripts/fetch_halide_v21_dist.sh
+        run: python3 native/scripts/build_deps.py fetch halide
 
       - name: Cache vendored LibRaw distribution
         uses: actions/cache@v4
@@ -248,10 +248,10 @@ jobs:
           path: |
             ${{ github.workspace }}/native/third_party/libraw
             ${{ github.workspace }}/native/third_party/libraw-cmake
-          key: libraw-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/fetch_libraw_dist.sh', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
+          key: libraw-${{ runner.os }}-arm64-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
 
       - name: Fetch vendored LibRaw distribution
-        run: native/scripts/fetch_libraw_dist.sh
+        run: python3 native/scripts/build_deps.py fetch libraw
 
       # D5 (2026-08-31): this job builds TEST targets, but the configure it runs
       # is the whole project's — cmake/encode.cmake included — and that file now

@@ -99,7 +99,7 @@ if(CEYX_ENABLE_JXL)
             "  libjxl_threads= '${CEYX_JXL_THREADS_LIBRARY}'\n"
             "  libhwy        = '${CEYX_HWY_LIBRARY}'\n"
             "  brotli        = '${CEYX_BROTLIDEC_LIBRARY}' '${CEYX_BROTLIENC_LIBRARY}' '${CEYX_BROTLICOMMON_LIBRARY}'\n"
-            "Run native/scripts/fetch_libjxl_dist.sh. Every other codec is "
+            "Run python3 native/scripts/build_deps.py fetch libjxl. Every other codec is "
             "unaffected; the JXL entries will return the unsupported code.")
     endif()
 else()

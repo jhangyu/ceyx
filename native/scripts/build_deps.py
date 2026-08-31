@@ -70,6 +70,15 @@ _ARCH_CHOICES = ("auto", "arm64", "x86_64")
 # migrated capability lands as a build_deps.py subcommand.
 _JXL_STACK_COMPONENT = "jxl-stack"
 
+# Windows-only pseudo-component migrating build_libwebp_dist_windows.sh off
+# the shell script (2026-09-01 contract item 11 / ENTRY-POINT RULE). Same
+# rationale as _JXL_STACK_COMPONENT: no manifest component entry, no
+# macOS/Linux implementation -- those platforms resolve libwebp from
+# native/vcpkg/vcpkg.json, not this script.
+_WEBP_STACK_COMPONENT = "webp-stack"
+
+_FETCH_CHOICES = ("halide", "libjxl", "libraw")
+
 
 def detect_platform() -> str:
     """Resolve ``auto`` to one of macos/linux/windows using the running
@@ -223,6 +232,70 @@ def resolve_dist(raw: str, target_platform: str, *, host_is_windows: Optional[bo
             f"absolute path (e.g. C:/ceyx-dist for windows)."
         )
     return Path(str(pure))
+
+
+def fetch_subcommand_parser() -> argparse.ArgumentParser:
+    """The ``build_deps.py fetch <name> ...`` CLI (2026-09-01 contract item
+    11 / ENTRY-POINT RULE). Ports the CI fetch scripts that vendor a source
+    tree rather than produce a standalone ``cmake --install`` dist (those
+    stay pseudo-components under ``build``, e.g. ``jxl-stack``,
+    ``webp-stack``) -- ``halide``/``libjxl``/``libraw`` are cross-platform
+    and take no ``--platform``/``--arch`` beyond what each module resolves
+    itself (``libjxl`` honours ``CEYX_JXL_ARCH``, same as the shell script
+    it replaces).
+    """
+    parser = argparse.ArgumentParser(
+        prog="build_deps.py fetch",
+        description="Fetch/vendor a third-party dependency tree (halide, libjxl, libraw).",
+    )
+    parser.add_argument("name", choices=_FETCH_CHOICES)
+    parser.add_argument("--dest", default=None, help="override the default native/third_party/<name> destination")
+    parser.add_argument("--arch", default=None, help="libjxl only: overrides CEYX_JXL_ARCH")
+    parser.add_argument("--force", action="store_true", help="halide/libjxl only: rebuild even if already present")
+    return parser
+
+
+def _run_fetch(argv: list) -> int:
+    """Handler for ``build_deps.py fetch <name> ...``."""
+    args = fetch_subcommand_parser().parse_args(argv)
+    dest = Path(args.dest).resolve() if args.dest else None
+    print(f"[build_deps] fetch name={args.name!r} dest={dest}", file=sys.stderr)
+
+    if args.name == "halide":
+        from deps import fetch_halide  # noqa: PLC0415
+
+        try:
+            fetch_halide.fetch(dest, force=args.force)
+        except fetch_halide.HalideFetchError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+
+    if args.name == "libjxl":
+        from deps import fetch_libjxl  # noqa: PLC0415
+        from deps.run import SubprocessError as _SubprocessError  # noqa: PLC0415
+
+        try:
+            fetch_libjxl.build(dest, arch=args.arch, force=args.force)
+        except (fetch_libjxl.JxlFetchError, _SubprocessError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+
+    if args.name == "libraw":
+        from deps import fetch_libraw  # noqa: PLC0415
+        from deps.run import SubprocessError as _SubprocessError  # noqa: PLC0415
+
+        native_dir = dest.parents[1] if dest else None  # dest would be .../third_party/libraw
+        try:
+            fetch_libraw.fetch(native_dir)
+        except (fetch_libraw.LibrawFetchError, _SubprocessError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+
+    print(f"[build_deps] error: unknown fetch name {args.name!r}", file=sys.stderr)
+    return 1
 
 
 def publish_subcommand_parser() -> argparse.ArgumentParser:
@@ -441,12 +514,54 @@ def _run_build(argv: list) -> int:
                 return 1
             return 0
 
+        if args.component == _WEBP_STACK_COMPONENT:
+            # Windows-only (see the constant's docstring above), same
+            # rejection shape as jxl-stack: macOS/Linux resolve libwebp from
+            # native/vcpkg/vcpkg.json directly, not from this pseudo-component.
+            if resolved_platform != "windows":
+                print(
+                    f"[build_deps] error: {_WEBP_STACK_COMPONENT!r} currently only "
+                    "supports --platform windows. macOS/Linux resolve libwebp through "
+                    "native/vcpkg/vcpkg.json directly.",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.stage != "all":
+                print(
+                    f"[build_deps] error: --stage {args.stage!r} is a macOS/Linux "
+                    f"heif-stack concept; the Windows libwebp dist is built in one "
+                    f"pass and has no stage split. Rejected rather than silently "
+                    f"ignored.",
+                    file=sys.stderr,
+                )
+                return 1
+            from deps import win_webp_dist  # noqa: PLC0415 - lazy, see docstring
+
+            if args.dry_run:
+                print(
+                    f"# {_WEBP_STACK_COMPONENT} (windows): self-contained tarball-fetch "
+                    f"recipe transcribed from build_libwebp_dist_windows.sh, version="
+                    f"{win_webp_dist.WEBP_VERSION} -- not manifest-rendered, no argv preview"
+                )
+                return 0
+            try:
+                win_webp_dist.build(dist, force=args.force)
+            except (
+                win_webp_dist.WindowsWebpError,
+                win_webp_dist.win_pe.PeInspectionError,
+                win_webp_dist.win_pe.PeAssertionFailed,
+            ) as exc:
+                print(f"[webp-win] {exc}", file=sys.stderr)
+                return 1
+            return 0
+
         known_components = sorted(loaded["manifest"].get("component", {}))
         if args.component not in known_components:
             print(
                 f"[build_deps] error: unknown component {args.component!r} (not present "
                 f"in native/deps/manifest.toml; known components: {known_components}, "
-                f"plus the groups {heif_module.COMPONENT!r} and {_JXL_STACK_COMPONENT!r})",
+                f"plus the groups {heif_module.COMPONENT!r}, {_JXL_STACK_COMPONENT!r} and "
+                f"{_WEBP_STACK_COMPONENT!r})",
                 file=sys.stderr,
             )
             return 1
@@ -491,6 +606,8 @@ def main(argv: Optional[list] = None) -> int:
         return _run_build(tokens[1:])
     if tokens and tokens[0] == "publish":
         return _run_publish(tokens[1:])
+    if tokens and tokens[0] == "fetch":
+        return _run_fetch(tokens[1:])
 
     parser = build_arg_parser()
     args = parser.parse_args(tokens)
