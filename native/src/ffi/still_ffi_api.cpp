@@ -121,7 +121,16 @@ FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
   switch (format) {
     case kCeyxFormatWebp: return CEYX_ENABLE_WEBP ? 1 : 0;
     case kCeyxFormatHeic:
-    case kCeyxFormatAvif: return CEYX_HEIF_STILL_ROUTE ? 1 : 0;
+    case kCeyxFormatAvif:
+      // NOT the route flag. CEYX_HEIF_STILL_ROUTE only says "the HEIF route
+      // was compiled"; it cannot say whether the libheif we linked carries
+      // the HEVC or AV1 codec this format needs. Asking libheif at runtime is
+      // the only honest answer, and it is what makes a per-codec dist
+      // regression visible as a 0 here instead of as a decode failure later.
+      // CEYX_HEIF_STILL_ROUTE is (DNG_ENABLE_HEIF && CEYX_HAS_HEIF_STILL_DECODE),
+      // defined at still_ffi_api.cpp:30. Keep BOTH halves: dropping the
+      // DNG_ENABLE_HEIF half would call into libheif from a HEIF-less build.
+      return CEYX_HEIF_STILL_ROUTE ? CeyxHeifHasDecoderFor(format) : 0;
     case kCeyxFormatJxl:  return CEYX_ENABLE_JXL ? 1 : 0;
     // JPEG: 0 ON PURPOSE, deviating from the plan's literal `return 1`. This
     // surface has no libjpeg decode arm -- a JPEG path handed to

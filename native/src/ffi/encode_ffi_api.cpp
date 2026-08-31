@@ -347,7 +347,9 @@ FFI_EXPORT int32_t ceyx_encode_supports(int32_t format) {
     case kCeyxFormatJpeg: return 1;                 // libjpeg-turbo always linked
     case kCeyxFormatWebp: return CEYX_ENABLE_WEBP ? 1 : 0;
     case kCeyxFormatHeic:
-    case kCeyxFormatAvif: return DNG_ENABLE_HEIF ? 1 : 0;
+    case kCeyxFormatAvif:
+      // See the matching arm in still_ffi_api.cpp: route != codec.
+      return CeyxHeifHasEncoderFor(format);
     case kCeyxFormatJxl:  return CEYX_ENABLE_JXL ? 1 : 0;
     default: return kCeyxEncodeErrBadFormat;
   }

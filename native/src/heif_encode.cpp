@@ -199,6 +199,60 @@ extern "C" int32_t ceyx_heif_encode_impl(int32_t format,
 #endif
 }
 
+// Runtime codec queries -- the fix for the parity-matrix §2 defect.
+//
+// ceyx_still_decode_supports / ceyx_encode_supports used to answer HEIC and
+// AVIF through the SAME route-level flag, so they could not distinguish
+// "libheif is linked" from "libheif was built WITH the AV1 codec". A platform
+// with DNG_ENABLE_HEIF=ON but WITH_AOM_*=OFF -- exactly the Windows dist
+// before 2026-08-31, and the macOS *committed* dylib still today -- reported
+// AVIF == 1 and then failed on every real AVIF file, with the failure visible
+// only as a runtime libheif error.
+//
+// libheif answers this itself. heif_have_decoder_for_format /
+// heif_have_encoder_for_format report on the codecs actually compiled into the
+// loaded libheif, which is the exact distinction that was missing.
+//
+// Guarded on DNG_ENABLE_HEIF so a HEIF-less build still DEFINES both helpers
+// (returning 0) and references no libheif symbol -- the same
+// degrade-to-a-defined-answer rule cmake/heif.cmake applies by listing this TU
+// on both branches of its if/else.
+namespace {
+#if DNG_ENABLE_HEIF
+bool MapFormatToCompression(int32_t format, heif_compression_format *out) {
+  switch (format) {
+    case kCeyxFormatHeic: *out = heif_compression_HEVC; return true;
+    case kCeyxFormatAvif: *out = heif_compression_AV1;  return true;
+    default: return false;   // WebP/JXL/JPEG do not travel the HEIF route
+  }
+}
+#endif
+}  // namespace
+
+__attribute__((visibility("hidden")))
+extern "C" int32_t CeyxHeifHasDecoderFor(int32_t format) {
+#if DNG_ENABLE_HEIF
+  heif_compression_format compression;
+  if (!MapFormatToCompression(format, &compression)) return 0;
+  return heif_have_decoder_for_format(compression) ? 1 : 0;
+#else
+  (void)format;
+  return 0;
+#endif
+}
+
+__attribute__((visibility("hidden")))
+extern "C" int32_t CeyxHeifHasEncoderFor(int32_t format) {
+#if DNG_ENABLE_HEIF
+  heif_compression_format compression;
+  if (!MapFormatToCompression(format, &compression)) return 0;
+  return heif_have_encoder_for_format(compression) ? 1 : 0;
+#else
+  (void)format;
+  return 0;
+#endif
+}
+
 /* Maps a HeifErrorCode (-301..-310) onto the CeyxStillErrorCode (-501..-511)
  * scale. NOT static: still_ffi_api.cpp calls it from ceyx_still_probe, which is
  * why still_codec_internal.h declares it. */

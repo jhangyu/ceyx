@@ -52,6 +52,19 @@ int32_t ceyx_heif_encode_impl(int32_t format,
 int32_t ceyx_heif_still_decode_impl(const char *path, int32_t max_dim,
                                     CeyxStillResult *out);
 
+/* Per-codec runtime queries (Task 6, 2026-09-01 D3-a probe-semantics split):
+ * ask the loaded libheif whether it was actually built with the HEVC (HEIC)
+ * or AV1 (AVIF) codec, rather than only whether the HEIF route is compiled
+ * in. `format` is kCeyxFormatHeic or kCeyxFormatAvif; any other value (and
+ * every value when DNG_ENABLE_HEIF=0) returns 0 without touching libheif.
+ *
+ * D3-a requires NO new exported FFI symbol: hidden visibility keeps these out
+ * of the dylib's exported-symbol table (still_ffi_api.cpp / encode_ffi_api.cpp
+ * / test_codec_heif.cpp link the same translation unit and see them as
+ * ordinary cross-TU C symbols; nothing outside this binary can look them up). */
+__attribute__((visibility("hidden"))) int32_t CeyxHeifHasDecoderFor(int32_t format);
+__attribute__((visibility("hidden"))) int32_t CeyxHeifHasEncoderFor(int32_t format);
+
 /* Maps a HeifErrorCode (-301..-310) onto the CeyxStillErrorCode (-501..-511)
  * scale. Defined in heif_encode.cpp (Task 7) but called by still_ffi_api.cpp
  * (Task 8) as well, so it is declared here and is NOT a file-local static.

@@ -197,6 +197,40 @@ static void RoundTrip(int32_t format, const char *label, const char *path) {
   ceyx_still_release(&out);
 }
 
+// Regression for the parity-matrix §2 defect: ceyx_still_decode_supports and
+// ceyx_encode_supports answered HEIC and AVIF through the same HEIF-route
+// gate, so a libheif built WITHOUT the AV1 codec reported AVIF == 1 and then
+// failed to decode any AVIF file. The failure surfaced only as a runtime
+// libheif error, never as a capability 0.
+//
+// This binary is a separate executable linked against dng_decoder_native's
+// dylib, not a TU compiled into it -- and D3-a requires CeyxHeifHasDecoderFor
+// / CeyxHeifHasEncoderFor to be hidden-visibility, not a new exported FFI
+// symbol (heif_encode.cpp / still_codec_internal.h). So this out-of-process
+// gate cannot call them directly; it pins the PUBLIC surface's answer on
+// THIS build (full HEIF stack, both HEVC and AV1 compiled in) instead. The
+// complementary "answers the codec, not the route" proof -- that these same
+// two calls become 0 when the underlying codec is absent -- is the
+// -DDNG_ENABLE_HEIF=OFF build gate (native/build-noheif + the capability
+// probe), which the route-flag version of this arm could not produce: it
+// always answered 1 whenever HEIF was compiled in at all.
+static void CodecCapabilityAnswersTheCodecNotTheRoute() {
+  check_eq(ceyx_still_decode_supports(kCeyxFormatHeic), 1,
+           "HEIC decode-supports == 1 on a full HEIF+HEVC build");
+  check_eq(ceyx_encode_supports(kCeyxFormatHeic), 1,
+           "HEIC encode-supports == 1 on a full HEIF+HEVC build");
+  check_eq(ceyx_still_decode_supports(kCeyxFormatAvif), 1,
+           "AVIF decode-supports == 1 on a full HEIF+AV1 build");
+  check_eq(ceyx_encode_supports(kCeyxFormatAvif), 1,
+           "AVIF encode-supports == 1 on a full HEIF+AV1 build");
+
+  // Pinned so the JPEG decode arm cannot be "tidied" into returning 1: this
+  // surface has no libjpeg decode arm and answering 1 would poison the
+  // Dart-side capability model (user ruling Q4).
+  check_eq(ceyx_still_decode_supports(kCeyxFormatJpeg), 0,
+           "JPEG decode-supports stays 0 on purpose");
+}
+
 static void ContractCases() {
   const int w = 8, h = 8;
   const std::vector<uint8_t> src = MakeSource(w, h);
@@ -299,6 +333,7 @@ int main(int argc, char **argv) {
   RoundTrip(kCeyxFormatHeic, "heic", (dir + "/rt_heic.heic").c_str());
   RoundTrip(kCeyxFormatAvif, "avif", (dir + "/rt_avif.avif").c_str());
   ContractCases();
+  CodecCapabilityAnswersTheCodecNotTheRoute();
 
   if (want_latency) {
     RecordLatency();
