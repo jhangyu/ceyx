@@ -176,7 +176,8 @@ def test_c8_compliant_fixture_passes(tmp_path, monkeypatch):
     sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
     import render_expectations as re_mod
     monkeypatch.setattr(re_mod, "load_ledger", lambda path=None: {
-        "fake-leg": {"instrument": "capability-probe", "expect": {"jpeg:encode": 1}}
+        "fake-leg": {"instrument": "capability-probe", "workflow": "fake.yml",
+                     "expect": {"jpeg:encode": 1}}
     })
     _write(tmp_path, "fake.yml", "  - run: probe.py --expect jpeg:encode=1\n")
     assert cc.check_c8_ledger_sync(tmp_path) == []
@@ -186,8 +187,30 @@ def test_c8_violation_fixture_fails(tmp_path, monkeypatch):
     sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
     import render_expectations as re_mod
     monkeypatch.setattr(re_mod, "load_ledger", lambda path=None: {
-        "fake-leg": {"instrument": "capability-probe", "expect": {"jpeg:encode": 1}}
+        "fake-leg": {"instrument": "capability-probe", "workflow": "fake.yml",
+                     "expect": {"jpeg:encode": 1}}
     })
     _write(tmp_path, "fake.yml", "  - run: probe.py --expect jpeg:decode=0\n")
     violations = cc.check_c8_ledger_sync(tmp_path)
     assert violations  # jpeg:encode=1 claimed by ledger, not asserted anywhere
+
+
+def test_c8_catches_cross_leg_drift_union_missed(tmp_path, monkeypatch):
+    """C8 must inherit the per-leg fix: a wrong-vector leg hiding behind
+    another leg's legitimate token must fail C8 too, not just render_expectations
+    directly (round-1 should-fix #3 reproduced at the ci_conventions_check layer)."""
+    sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
+    import render_expectations as re_mod
+    monkeypatch.setattr(re_mod, "load_ledger", lambda path=None: {
+        "leg-macos": {"instrument": "configure-log", "workflow": "macos.yml",
+                      "expect": {"avif:encode": 0}},
+        "leg-linux": {"instrument": "capability-probe", "workflow": "linux.yml",
+                      "expect": {"avif:encode": 1}},
+        "leg-windows": {"instrument": "capability-probe", "workflow": "windows.yml",
+                        "expect": {"avif:encode": 1}},
+    })
+    _write(tmp_path, "macos.yml", "  - run: probe.py --expect avif:encode=0\n")
+    _write(tmp_path, "linux.yml", "  - run: probe.py --expect avif:encode=1\n")
+    _write(tmp_path, "windows.yml", "  - run: probe.py --expect avif:encode=0\n")
+    violations = cc.check_c8_ledger_sync(tmp_path)
+    assert any("leg-windows" in v for v in violations), violations

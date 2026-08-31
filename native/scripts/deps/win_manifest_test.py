@@ -34,6 +34,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deps import manifest, render  # noqa: E402
 
+VCPKG_JSON_PATH = Path(__file__).resolve().parents[2] / "vcpkg" / "vcpkg.json"
+
+
+def _vcpkg_dependency_names(vcpkg_json_path: Path = VCPKG_JSON_PATH) -> set[str]:
+    """Flatten every dependency name vcpkg.json can resolve: top-level
+    `dependencies`, plus every `features.<name>.dependencies` entry. Each
+    entry is either a bare string (the port name) or a table with a `name`
+    key (used when the entry also carries `features`/`default-features`)."""
+    import json
+
+    with open(vcpkg_json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    names: set[str] = set()
+
+    def _collect(dep_list):
+        for dep in dep_list:
+            if isinstance(dep, str):
+                names.add(dep)
+            elif isinstance(dep, dict) and "name" in dep:
+                names.add(dep["name"])
+
+    _collect(data.get("dependencies", []))
+    for feature in data.get("features", {}).values():
+        _collect(feature.get("dependencies", []))
+    return names
+
+
 # libheif's WITH_<SWITCH> -> the manifest component that must supply it.
 # LIBDE265 is included as the positive control: it IS on for Windows, and it
 # DOES have a source.windows block, so it must pass the same invariant that
@@ -56,15 +84,26 @@ def _rendered(loaded, component: str = "libheif") -> dict[str, str]:
     return flags
 
 
-def _has_windows_acquisition(component_block: dict) -> bool:
+def _has_windows_acquisition(component_block: dict, component_name: str | None = None) -> bool:
     """True when the component can actually be OBTAINED on Windows.
 
-    A ``source.windows`` block qualifies. A ``source.default`` of
-    ``kind = "registry"`` ALSO qualifies as of D1-a (2026-08-31,
-    spec-windows-codec-full-green.md): `native/vcpkg/triplets/x64-windows-heif.cmake`
-    exists and names aom as a static vcpkg port, so vcpkg's registry leg now
-    covers Windows too -- it is no longer macOS/Linux-only, which is what made
-    a registry-resolved component unacquirable on Windows before this ruling.
+    A ``source.windows`` block qualifies outright.
+
+    A ``source.default`` of ``kind = "registry"`` ALSO qualifies, but ONLY
+    conditionally as of round-2 should-fix #4: D1-a (2026-08-31,
+    spec-windows-codec-full-green.md) established that
+    `native/vcpkg/triplets/x64-windows-heif.cmake` makes vcpkg's registry leg
+    cover Windows too, but that says nothing about whether THIS PARTICULAR
+    component is actually a name vcpkg.json resolves -- registry-kind was
+    previously accepted for ANY component sight-unseen, which would pass
+    silently for a future registry component switched ON with no matching
+    vcpkg.json dependency/feature entry (no Windows port at all). A registry
+    component is only acquirable if `component_name` appears in
+    native/vcpkg/vcpkg.json's flattened dependency set (top-level
+    `dependencies` plus every feature's `dependencies`). Callers that cannot
+    supply a name (there are none left in this file) get the pre-round-2
+    unconditional accept.
+
     Any OTHER `source.default` kind (tarball/git) still needs a concrete URL
     or ref and is treated as acquirable outright, same as before.
     """
@@ -72,7 +111,14 @@ def _has_windows_acquisition(component_block: dict) -> bool:
     if "windows" in source:
         return True
     default = source.get("default", {})
-    return bool(default) and default.get("kind") in ("registry", "tarball", "git")
+    if not default:
+        return False
+    kind = default.get("kind")
+    if kind == "registry":
+        if component_name is None:
+            return True
+        return component_name in _vcpkg_dependency_names()
+    return kind in ("tarball", "git")
 
 
 class TestWindowsCodecAcquirability(unittest.TestCase):
@@ -88,7 +134,7 @@ class TestWindowsCodecAcquirability(unittest.TestCase):
         for switch, component in _CODEC_SWITCH_TO_COMPONENT.items():
             if self.flags.get(switch) != "ON":
                 continue
-            if not _has_windows_acquisition(self.components[component]):
+            if not _has_windows_acquisition(self.components[component], component):
                 unsatisfiable.append(f"{switch}=ON but {component} has no Windows acquisition")
         self.assertEqual(unsatisfiable, [], "; ".join(unsatisfiable))
 
@@ -98,7 +144,7 @@ class TestWindowsCodecAcquirability(unittest.TestCase):
         lookup returns None, nothing is ON, and the test would pass while
         checking nothing. libde265 IS on for Windows, so this must hold."""
         self.assertEqual(self.flags.get("WITH_LIBDE265"), "ON")
-        self.assertTrue(_has_windows_acquisition(self.components["libde265"]))
+        self.assertTrue(_has_windows_acquisition(self.components["libde265"], "libde265"))
         self.assertIn("windows", self.components["libde265"]["source"])
 
     def test_the_invariant_actually_fires_when_violated(self) -> None:
@@ -118,7 +164,7 @@ class TestWindowsCodecAcquirability(unittest.TestCase):
         unsatisfiable = [
             f"{switch}=ON but {component} has no Windows acquisition"
             for switch, component in switches.items()
-            if flags.get(switch) == "ON" and not _has_windows_acquisition(components[component])
+            if flags.get(switch) == "ON" and not _has_windows_acquisition(components[component], component)
         ]
         self.assertEqual(len(unsatisfiable), 1, unsatisfiable)
         self.assertIn("_unacquirable_test_component", unsatisfiable[0])
@@ -160,6 +206,47 @@ class TestWindowsDistIsFullCapability(unittest.TestCase):
         self.assertEqual(self.flags.get("CMAKE_MSVC_RUNTIME_LIBRARY"), "MultiThreaded")
 
 
+class TestRegistryAcquisitionRequiresVcpkgJsonEntry(unittest.TestCase):
+    """Round-2 should-fix #4: `kind = "registry"` alone used to be accepted
+    for ANY component, sight-unseen -- a future registry component switched
+    ON with no matching vcpkg.json dependency/feature entry (i.e. no actual
+    Windows vcpkg port wired up) would have passed silently. The predicate
+    now also requires the component name to appear in
+    native/vcpkg/vcpkg.json's flattened dependency set."""
+
+    def test_real_aom_registry_component_is_accepted(self) -> None:
+        """Positive control: aom is a real vcpkg.json feature dependency."""
+        self.assertTrue(_has_windows_acquisition({"source": {"default": {"kind": "registry"}}}, "aom"))
+
+    def test_fake_registry_component_with_no_vcpkg_json_entry_is_rejected(self) -> None:
+        """The demonstrated red: a component whose source.default is
+        kind=registry but whose name never appears anywhere in
+        vcpkg.json's dependencies/features must be rejected. The OLD
+        predicate (bool(default) and default.get('kind') in (...)) accepted
+        this unconditionally -- this is the fixture that would have passed
+        under it and must now fail."""
+        fake_block = {"source": {"default": {"kind": "registry"}}}
+        self.assertFalse(_has_windows_acquisition(fake_block, "_unregistered_fake_registry_component"))
+
+    def test_old_unconditional_predicate_would_have_accepted_the_fake(self) -> None:
+        """Pins the actual regression: reproduces the pre-round-2 predicate
+        inline (bool(default) and kind in (registry, tarball, git), no name
+        check) and shows it says True for the same fixture the new
+        predicate rejects above -- proving this is a real tightening, not a
+        no-op."""
+        fake_block = {"source": {"default": {"kind": "registry"}}}
+        default = fake_block["source"]["default"]
+        old_predicate_result = bool(default) and default.get("kind") in ("registry", "tarball", "git")
+        self.assertTrue(old_predicate_result)
+        self.assertFalse(_has_windows_acquisition(fake_block, "_unregistered_fake_registry_component"))
+
+    def test_non_registry_kinds_are_unaffected_by_the_name_check(self) -> None:
+        """tarball/git kinds still need no vcpkg.json entry (they resolve via
+        their own URL/ref, same as before this round's change)."""
+        tarball_block = {"source": {"default": {"kind": "tarball"}}}
+        self.assertTrue(_has_windows_acquisition(tarball_block, "_anything_not_in_vcpkg_json"))
+
+
 class TestWindowsLibheifFullCapabilityFlags(unittest.TestCase):
     """Windows must render the same encoder flag set as macOS/Linux.
 
@@ -195,7 +282,7 @@ class TestWindowsLibheifFullCapabilityFlags(unittest.TestCase):
         """
         loaded = manifest.load()
         aom = loaded["manifest"]["component"]["aom"]
-        self.assertTrue(_has_windows_acquisition(aom))
+        self.assertTrue(_has_windows_acquisition(aom, "aom"))
         src = aom["source"].get("windows") or aom["source"]["default"]
         self.assertIn(src["kind"], ("registry", "tarball", "git"))
 

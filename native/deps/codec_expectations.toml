@@ -10,6 +10,16 @@
 #
 # Schema, per leg table [<leg-id>]:
 #   instrument = "capability-probe" | "configure-log" | "on-device" | "none (accepted gap)"
+#   workflow   = "<filename>.yml"          -- the leg's OWN workflow file
+#                                              under .github/workflows/. Required:
+#                                              render_expectations.py --check (and
+#                                              ci_conventions_check.py's C8) compare
+#                                              this leg's expect table against ONLY
+#                                              this file's --expect tokens, never the
+#                                              union of every leg (round-2 should-fix
+#                                              #3 -- a union comparison lets a leg
+#                                              wired with the wrong vector hide behind
+#                                              another leg's legitimate token).
 #   [<leg-id>.expect]
 #     "<format>:<direction>" = 1            -- a plain 1 needs no annotation.
 #     "<format>:<direction>" = { value = 0, reason = "...", owner = "..." }
@@ -32,6 +42,7 @@
 
 [macos-arm64]
 instrument = "capability-probe"
+workflow = "macos_build.yml"
 
 [macos-arm64.expect]
 "jpeg:encode" = 1
@@ -50,6 +61,7 @@ instrument = "capability-probe"
 # of calling codec_capability_probe.py.
 [macos-x86_64]
 instrument = "configure-log"
+workflow = "macos_build.yml"
 
 [macos-x86_64.expect]
 "jpeg:encode" = 1
@@ -68,6 +80,7 @@ instrument = "configure-log"
 
 [linux-x86_64]
 instrument = "capability-probe"
+workflow = "linux_build.yml"
 
 [linux-x86_64.expect]
 "jpeg:encode" = 1
@@ -90,6 +103,7 @@ instrument = "capability-probe"
 # on this ledger existing).
 [windows-x86_64]
 instrument = "capability-probe"
+workflow = "windows_build.yml"
 
 [windows-x86_64.expect]
 "jpeg:encode" = 1
@@ -109,6 +123,7 @@ instrument = "capability-probe"
 # probe was removed. Every cell is an honest, permanently-accepted zero.
 [android-arm64-v8a]
 instrument = "none (accepted gap)"
+workflow = "android_build.yml"
 
 [android-arm64-v8a.expect]
 "jpeg:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }

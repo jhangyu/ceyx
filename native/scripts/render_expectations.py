@@ -36,12 +36,21 @@ class LedgerError(Exception):
 
 
 def load_ledger(path=None):
-    """Parse and validate the ledger. Returns {leg: {"instrument": str, "expect": {pair: int}}}.
+    """Parse and validate the ledger. Returns {leg: {"instrument": str, "workflow": str, "expect": {pair: int}}}.
 
     Every `0` cell must be a table carrying non-empty `reason` and `owner`
     strings, or this raises LedgerError. The returned `expect` dict values
     are plain ints (0 or 1); reason/owner are validation-only metadata, not
     part of the CLI vector.
+
+    `workflow` is the leg's own workflow filename under .github/workflows/
+    (e.g. "windows_build.yml") -- required so `check()` can compare each
+    leg's expectations against ONLY its own workflow file, not the union of
+    every leg's tokens against the union of every workflow's tokens (round-2
+    should-fix #3: a union comparison lets a leg wired with the wrong vector
+    pass silently whenever some OTHER leg legitimately asserts the same
+    token, in both directions -- a leg's wrong 0 hides behind another leg's
+    honest 0, and that leg's missing 1 hides behind a third leg's honest 1).
     """
     path = pathlib.Path(path) if path is not None else DEFAULT_LEDGER_PATH
     with open(path, "rb") as f:
@@ -51,6 +60,8 @@ def load_ledger(path=None):
     for leg, table in raw.items():
         if "instrument" not in table:
             raise LedgerError(f"leg {leg!r} is missing required key 'instrument'")
+        if "workflow" not in table:
+            raise LedgerError(f"leg {leg!r} is missing required key 'workflow'")
         expect_raw = table.get("expect", {})
         expect = {}
         for pair, entry in expect_raw.items():
@@ -83,7 +94,7 @@ def load_ledger(path=None):
                 expect[pair] = 0
             else:
                 raise LedgerError(f"leg {leg!r} pair {pair!r}: unrecognised entry type {type(entry)}")
-        legs[leg] = {"instrument": table["instrument"], "expect": expect}
+        legs[leg] = {"instrument": table["instrument"], "workflow": table["workflow"], "expect": expect}
     return legs
 
 
@@ -100,48 +111,65 @@ def render(leg, ledger=None):
     return fragment
 
 
-def _tokens_in_workflows(workflows_dir):
-    """Return {leg-agnostic token-set} of every FMT:DIR=VAL token found across all workflow files.
-
-    Round-1 note: as of this ledger's introduction, no workflow has yet been
-    rewired to call codec_capability_probe.py's multi-format vector syntax
-    (that call-site replacement is CI-T1's separate, later task); this scan
-    simply reports what it finds today.
-    """
+def _tokens_in_file(path):
+    """Return the FMT:DIR=VAL token set found in a single workflow file."""
     tokens = set()
-    for wf in sorted(pathlib.Path(workflows_dir).glob("*.yml")):
-        text = wf.read_text()
-        for match in _EXPECT_TOKEN_RE.finditer(text):
-            tokens.add(match.group(1))
+    text = pathlib.Path(path).read_text()
+    for match in _EXPECT_TOKEN_RE.finditer(text):
+        tokens.add(match.group(1))
     return tokens
 
 
 def check(ledger=None, workflows_dir=None):
-    """Compare the ledger's full expectation set against tokens found in the workflows.
+    """Compare each leg's own expectation set against tokens found ONLY in
+    that leg's own workflow file (per `leg["workflow"]`).
 
     Returns a list of human-readable disagreement strings (empty == ok).
-    Disagreements are two-directional: a workflow token the ledger's union
-    does not contain, or a ledger token no workflow asserts.
+    Disagreements are two-directional per leg: a token the leg's workflow
+    asserts that the leg's ledger entry does not claim, or a token the leg's
+    ledger claims that the leg's workflow does not assert.
 
-    Note: this compares the UNION of all legs' pairs (the ledger does not
-    encode which workflow file corresponds to which leg id in a way this
-    script can standalone-verify without a leg->file map, so the check
-    proves the ledger's overall vocabulary of asserted pairs matches what is
-    literally present as --expect tokens in .github/workflows/*.yml).
+    This is deliberately PER LEG, not a union of all legs' tokens against a
+    union of all workflow files' tokens: a leg-agnostic union lets a leg
+    wired with the wrong vector pass silently whenever some OTHER leg
+    legitimately asserts the identical token -- in both directions (a leg's
+    wrong 0 hides behind a different leg's honest 0; that leg's missing
+    correct 1 hides behind a third leg's honest 1). See
+    test_check_catches_cross_leg_drift_union_missed in
+    native/scripts/tests/test_render_expectations.py for the reproduction.
+
+    Round-1 note: as of this ledger's introduction, no workflow has yet been
+    rewired to call codec_capability_probe.py's multi-format vector syntax
+    (that call-site replacement is CI-T1's separate, later task), so --check
+    stays red against the real tree until that wiring lands.
     """
     legs = ledger if ledger is not None else load_ledger()
-    ledger_tokens = set()
-    for leg, table in legs.items():
-        for pair, value in table["expect"].items():
-            ledger_tokens.add(f"{pair}={value}")
-
-    workflow_tokens = _tokens_in_workflows(workflows_dir or DEFAULT_WORKFLOWS_DIR)
+    workflows_dir = pathlib.Path(workflows_dir or DEFAULT_WORKFLOWS_DIR)
 
     disagreements = []
-    for token in sorted(workflow_tokens - ledger_tokens):
-        disagreements.append(f"workflow asserts {token!r} but no ledger leg claims it")
-    for token in sorted(ledger_tokens - workflow_tokens):
-        disagreements.append(f"ledger claims {token!r} but no workflow asserts it")
+    for leg in sorted(legs):
+        table = legs[leg]
+        workflow_name = table.get("workflow")
+        if not workflow_name:
+            disagreements.append(f"leg {leg!r} has no 'workflow' mapping to check against")
+            continue
+        leg_tokens = {f"{pair}={value}" for pair, value in table["expect"].items()}
+        wf_path = workflows_dir / workflow_name
+        if not wf_path.exists():
+            disagreements.append(
+                f"leg {leg!r} declares workflow {workflow_name!r} but that file "
+                f"does not exist under {workflows_dir}"
+            )
+            continue
+        wf_tokens = _tokens_in_file(wf_path)
+        for token in sorted(wf_tokens - leg_tokens):
+            disagreements.append(
+                f"leg {leg!r} workflow {workflow_name!r} asserts {token!r} but the ledger leg does not claim it"
+            )
+        for token in sorted(leg_tokens - wf_tokens):
+            disagreements.append(
+                f"leg {leg!r} ledger claims {token!r} but its workflow {workflow_name!r} does not assert it"
+            )
     return disagreements
 
 
