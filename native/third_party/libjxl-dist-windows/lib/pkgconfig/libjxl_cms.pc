@@ -1,0 +1,13 @@
+prefix=D:/a/ceyx/ceyx/native/third_party/libjxl-dist-windows
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libjxl_cms
+Description: CMS support library for libjxl
+Version: 0.12.0
+Requires: 
+Libs: -L${libdir} -ljxl_cms 
+Libs.private: -lm 
+Cflags: -I${includedir}
+Cflags.private: -DJXL_CMS_STATIC_DEFINE
