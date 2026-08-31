@@ -43,6 +43,7 @@ outright, so this module must be invoked from native Windows Python.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -142,11 +143,23 @@ def want_pins(loaded: dict[str, Any], arch: str = "x86_64") -> str:
 
 def _source_pin(comp: dict[str, Any], platform: str) -> str:
     """The strongest identifier the component's resolved source offers:
-    sha256 for a tarball, tag for a git overlay, version for a registry port."""
+    sha256 for a tarball, tag for a git overlay, version for a registry port.
+
+    A ``tag`` value is a TEMPLATE (e.g. kvazaar's ``"v{version}"``), not a
+    literal -- the same shape ``execute.acquire()`` resolves via
+    ``_substitute_version`` before cloning. Returning the raw placeholder
+    here would make the stamp identical across every kvazaar release, so a
+    version bump would never invalidate ``.pins`` and the rebuild the stamp
+    exists to force would be silently skipped.
+    """
     src = comp["source"].get(platform) or comp["source"]["default"]
+    version = str(comp["version"])
     for key in ("sha256", "tag", "version"):
         if key in src:
-            return str(src[key])
+            value = str(src[key])
+            if key == "tag":
+                value = execute_mod._substitute_version(value, version)
+            return value
     raise _fail(f"source block for {comp.get('role', '?')} has no pinnable key")
 
 
@@ -205,6 +218,28 @@ def build_kvazaar(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) ->
     execute_mod.build_component(loaded, "kvazaar", PLATFORM, arch, dist, stage)
 
 
+def _vcpkg_prefix(what: str) -> Path:
+    """Resolve ``CEYX_VCPKG_PREFIX``, hard-failing when unset.
+
+    Same contract as ``deps/heif.py``'s helper of the same name (macOS/Linux):
+    there is deliberately no fallback to a source build -- a silent fallback
+    would hide exactly the wiring the vcpkg migration exists to prove.
+    """
+    prefix = os.environ.get("CEYX_VCPKG_PREFIX", "")
+    if not prefix or not Path(prefix).is_dir():
+        raise _fail(
+            f"{what} comes from vcpkg (D1-a), but CEYX_VCPKG_PREFIX is unset or "
+            f"not a directory (value: {prefix!r}).\n"
+            f"  Install it first, e.g.:\n"
+            f"    <vcpkg>/vcpkg install --x-manifest-root=native/vcpkg \\\n"
+            f"        --x-install-root=<root> --triplet=x64-windows-heif \\\n"
+            f"        --x-no-default-features --x-feature=de265 --x-feature=aom\n"
+            f"  then export CEYX_VCPKG_PREFIX=<root>/x64-windows-heif.\n"
+            f"  There is deliberately no fallback to a source build."
+        )
+    return Path(prefix)
+
+
 def build_aom(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> None:
     """AV1 encoder + decoder, STATIC, merged into libheif.
 
@@ -212,10 +247,44 @@ def build_aom(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> Non
     native/vcpkg/vcpkg.json `overrides`, resolved against the PINNED baseline,
     never the floating one) using the x64-windows-heif triplet, then copied
     into {dist} -- the same install-and-copy shape D5 leg 3 left on
-    macOS/Linux. Nothing is compiled here.
+    macOS/Linux (deps/heif.py's own build_aom). Nothing is compiled here.
+
+    NOT routed through ``execute_mod.build_component``: [component.aom]'s
+    resolved source ``kind`` is "registry" on every platform (D1-a adds no
+    ``source.windows`` override -- manifest.toml says so explicitly), and
+    ``execute.acquire()`` raises unconditionally for ``kind == "registry"``
+    by design ("a registry component is not built here at all... copying it
+    into the dist is the caller's job", execute.py). This function IS that
+    caller's job for Windows, mirroring deps/heif.py's build_aom instead of
+    execute.py's cmake-driven path.
     """
-    _log(f"acquiring aom {execute_mod.component_version(loaded, 'aom')}")
-    execute_mod.build_component(loaded, "aom", PLATFORM, arch, dist, stage)
+    # arch is accepted for signature symmetry with the other build_* stages
+    # but unused: aom is never cross-built on the Windows runner (x86_64-only).
+    target = dist / "lib" / "aom.lib"
+    if target.is_file():
+        _log(f"aom already installed at {target}, skipping")
+        return
+
+    _log(f"copying aom {execute_mod.component_version(loaded, 'aom')} out of the vcpkg prefix")
+    prefix = _vcpkg_prefix("aom")
+    src = prefix / "lib" / "aom.lib"
+    if not src.is_file():
+        raise _fail(
+            f"{src} missing\n"
+            f"  contents:\n"
+            + "\n".join(sorted(p.name for p in (prefix / "lib").iterdir())) + "\n"
+            f"  aom must be a STATIC archive: it is linked INTO heif.dll "
+            f"(ENABLE_PLUGIN_LOADING=OFF), and a DLL here would have to be "
+            f"shipped and resolved at runtime instead."
+        )
+
+    (dist / "lib").mkdir(parents=True, exist_ok=True)
+    (dist / "include").mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, target)
+    include_dst = dist / "include" / "aom"
+    if include_dst.exists():
+        shutil.rmtree(include_dst)
+    shutil.copytree(prefix / "include" / "aom", include_dst)
 
 
 def build_libheif(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> None:
@@ -234,6 +303,90 @@ def build_libheif(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) ->
     extra = [f"-DLIBDE265_LIBRARY={Path(dist) / implib}"]
     _log(f"building libheif {execute_mod.component_version(loaded, 'libheif')}")
     execute_mod.build_component(loaded, "libheif", PLATFORM, arch, dist, stage, extra_args=extra)
+
+
+def vendor_licences(loaded: dict[str, Any], dist: Path, stage: Path) -> None:
+    """Vendor every shipped component's licence into ``{dist}/share/licenses``.
+
+    Ported from ``deps/heif.py``'s ``vendor_licences`` (macOS/Linux), which is
+    the model this function must stay behaviourally identical to modulo the
+    two acquisition-shape differences Windows actually has:
+
+    * ``kvazaar`` is git-cloned here (``[component.kvazaar.source.windows]``
+      ``kind = "git"``), not tarball-fetched, but ``execute.acquire()`` clones
+      it to the SAME ``stage/{name}-{version}`` path a tarball extracts to, so
+      the re-fetch-on-demand branch below works unmodified for it.
+    * ``aom`` is copied out of the vcpkg prefix by ``build_aom`` above (never
+      downloaded as a tarball here either), so -- exactly as on macOS/Linux --
+      its licence is vendored from the vcpkg install's own
+      ``share/aom/copyright``, which the AOM patent grant (PATENTS) makes a
+      SEPARATE, non-optional file: shipping only LICENSE/COPYING would drop
+      the Alliance for Open Media Patent License 1.0.
+
+    Called AFTER all four build stages and BEFORE stage cleanup: a resumed
+    run (a stage already installed and returned early) never re-extracts a
+    source tree that a fresh run's own extraction step would have provided,
+    so this function re-acquires on demand rather than assuming the tree
+    still exists.
+    """
+    dist = Path(dist)
+    stage = Path(stage)
+
+    prefix = _vcpkg_prefix("aom licence")
+    aom_copyright = prefix / "share" / "aom" / "copyright"
+    if not aom_copyright.is_file():
+        raise _fail(
+            f"aom copyright file not found at {aom_copyright}\n"
+            f"  aom is supplied by vcpkg (D1-a), so its licence is vendored from "
+            f"the install prefix. Set CEYX_VCPKG_PREFIX (see build_aom).\n"
+            f"  Shipping the binary without it is an unmet attribution duty."
+        )
+    (dist / "share" / "licenses" / "aom").mkdir(parents=True, exist_ok=True)
+    shutil.copy(aom_copyright, dist / "share" / "licenses" / "aom" / "copyright")
+    _log("ASSERT aom licence (incl. PATENTS) vendored from vcpkg prefix OK")
+
+    for name in ("libheif", "libde265", "kvazaar"):
+        comp = _component(loaded, name)
+        version = str(comp["version"])
+        src_dir = stage / f"{name}-{version}"
+        if not src_dir.is_dir():
+            _refetch_source_for_licence(loaded, name, comp, version, stage)
+        dest = dist / "share" / "licenses" / name
+        dest.mkdir(parents=True, exist_ok=True)
+        copied = _copy_licence_files(src_dir, dest, comp.get("licence_files", []))
+        if not copied:
+            raise _fail(f"no licence file found for {name} in {src_dir}")
+        _log(f"ASSERT {name} licence vendored ({len(copied)} file(s)) OK")
+
+
+def _refetch_source_for_licence(
+    loaded: dict[str, Any], name: str, comp: dict[str, Any], version: str, stage: Path
+) -> None:
+    """Re-acquire ``name``'s Windows source purely to vendor its licence
+    files, going through the SAME ``execute.acquire()`` path the real build
+    stage uses (tarball fetch+verify for libheif/libde265, git clone for
+    kvazaar) rather than re-implementing fetch/verify/extract here."""
+    del comp, version  # resolved by execute.acquire() itself from the manifest
+    execute_mod.acquire(loaded, name, PLATFORM, stage)
+
+
+def _copy_licence_files(src_dir: Path, dest: Path, patterns: list) -> list[Path]:
+    """Case-insensitive, depth-1 glob over ``src_dir`` for the manifest's
+    ``licence_files`` patterns. Returns the files copied."""
+    import fnmatch
+
+    lowered = [str(p).lower() for p in patterns]
+    copied: list[Path] = []
+    if not Path(src_dir).is_dir():
+        return copied
+    for entry in sorted(Path(src_dir).iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name.lower()
+        if any(fnmatch.fnmatch(name, pattern) for pattern in lowered):
+            shutil.copy(entry, Path(dest) / entry.name)
+            copied.append(entry)
+    return copied
 
 
 def assert_layout(dist: Path) -> str:
@@ -390,6 +543,7 @@ def build(
 
     de265_dll = assert_layout(dist)
     assert_capabilities(dist, de265_dll)
+    vendor_licences(loaded, dist, stage)
 
     (dist / ".pins").write_text(want_pins(loaded, arch), encoding="utf-8")
     shutil.rmtree(stage, ignore_errors=True)

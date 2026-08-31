@@ -212,6 +212,28 @@ def _make_full_dist(tmp_path: Path) -> Path:
     return dist
 
 
+def test_source_pin_renders_the_version_template() -> None:
+    """kvazaar's [component.kvazaar.source.windows] tag is the literal string
+    ``"v{version}"`` -- a template, not a value. _source_pin must substitute
+    {version} before returning; a stamp containing the raw placeholder would
+    be IDENTICAL for every kvazaar release, so a version bump would never
+    invalidate .pins and the rebuild it exists to force would be skipped."""
+    loaded = manifest.load()
+    kvazaar = loaded["manifest"]["component"]["kvazaar"]
+    pin = win_heif_dist._source_pin(kvazaar, "windows")
+    assert "{version}" not in pin
+    assert pin == f"v{kvazaar['version']}"
+
+
+def test_want_pins_never_contains_the_raw_template_placeholder() -> None:
+    """End-to-end check on the assembled stamp, not just the helper: a
+    template leak anywhere in want_pins() defeats the stamp's entire purpose
+    (see test_source_pin_renders_the_version_template)."""
+    loaded = manifest.load()
+    pins = win_heif_dist.want_pins(loaded)
+    assert "{version}" not in pins
+
+
 def test_want_pins_includes_kvazaar_and_aom() -> None:
     """The stamp must cover every component whose bytes land in the dist.
 
@@ -234,6 +256,7 @@ def test_build_installs_dependencies_before_libheif(monkeypatch, tmp_path) -> No
                              lambda *a, _n=name, **k: calls.append(_n))
     monkeypatch.setattr(win_heif_dist, "assert_layout", lambda d: "bin/libde265.dll")
     monkeypatch.setattr(win_heif_dist, "assert_capabilities", lambda d, x: None)
+    monkeypatch.setattr(win_heif_dist, "vendor_licences", lambda *a, **k: None)
     monkeypatch.setattr(win_heif_dist, "stamp_is_current", lambda *a, **k: False)
     monkeypatch.setattr(win_heif_dist, "want_pins", lambda *a, **k: "pins")
     win_heif_dist.build(manifest.load(), tmp_path)
@@ -304,6 +327,101 @@ def test_assert_capabilities_accepts_full_static_dist(monkeypatch, tmp_path) -> 
     dist = _make_full_dist(tmp_path)
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
     win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+
+
+def test_build_aom_copies_static_archive_and_headers_from_vcpkg_prefix(monkeypatch, tmp_path) -> None:
+    """[component.aom]'s resolved source kind is 'registry' on every platform
+    (D1-a adds no source.windows override), and execute.acquire() raises
+    unconditionally for kind=='registry'. build_aom must NOT route through
+    execute_mod.build_component -- it must copy lib/aom.lib + include/aom out
+    of CEYX_VCPKG_PREFIX, mirroring deps/heif.py's build_aom."""
+    vcpkg_prefix = tmp_path / "vcpkg-installed" / "x64-windows-heif"
+    (vcpkg_prefix / "lib").mkdir(parents=True)
+    (vcpkg_prefix / "lib" / "aom.lib").write_bytes(b"!<arch>\n")
+    (vcpkg_prefix / "include" / "aom").mkdir(parents=True)
+    (vcpkg_prefix / "include" / "aom" / "aom.h").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("CEYX_VCPKG_PREFIX", str(vcpkg_prefix))
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    win_heif_dist.build_aom(manifest.load(), "x86_64", dist, tmp_path / "stage")
+
+    assert (dist / "lib" / "aom.lib").is_file()
+    assert (dist / "include" / "aom" / "aom.h").is_file()
+
+
+def test_build_aom_fails_loud_when_vcpkg_prefix_unset(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("CEYX_VCPKG_PREFIX", raising=False)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
+        win_heif_dist.build_aom(manifest.load(), "x86_64", dist, tmp_path / "stage")
+    assert "CEYX_VCPKG_PREFIX" in str(exc.value)
+
+
+def test_vendor_licences_copies_aom_copyright_and_component_licences(monkeypatch, tmp_path) -> None:
+    vcpkg_prefix = tmp_path / "vcpkg-installed" / "x64-windows-heif"
+    (vcpkg_prefix / "share" / "aom").mkdir(parents=True)
+    (vcpkg_prefix / "share" / "aom" / "copyright").write_text("BSD-2 + PATENTS", encoding="utf-8")
+    monkeypatch.setenv("CEYX_VCPKG_PREFIX", str(vcpkg_prefix))
+
+    loaded = manifest.load()
+    stage = tmp_path / "stage"
+    for name in ("libheif", "libde265", "kvazaar"):
+        version = loaded["manifest"]["component"][name]["version"]
+        src = stage / f"{name}-{version}"
+        src.mkdir(parents=True)
+        (src / "COPYING").write_text(f"{name} licence text", encoding="utf-8")
+    monkeypatch.setattr(win_heif_dist.execute_mod, "acquire", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("acquire() must not be called when the source tree already exists")))
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    win_heif_dist.vendor_licences(loaded, dist, stage)
+
+    assert (dist / "share" / "licenses" / "aom" / "copyright").read_text(encoding="utf-8") == "BSD-2 + PATENTS"
+    for name in ("libheif", "libde265", "kvazaar"):
+        assert (dist / "share" / "licenses" / name / "COPYING").is_file()
+
+
+def test_vendor_licences_reacquires_a_source_tree_missing_after_a_resumed_run(monkeypatch, tmp_path) -> None:
+    """A stage the fast path skipped (component already installed) never
+    extracted a source tree; vendor_licences must re-fetch it rather than
+    raising 'no licence file found' against an empty directory."""
+    vcpkg_prefix = tmp_path / "vcpkg-installed" / "x64-windows-heif"
+    (vcpkg_prefix / "share" / "aom").mkdir(parents=True)
+    (vcpkg_prefix / "share" / "aom" / "copyright").write_text("BSD-2 + PATENTS", encoding="utf-8")
+    monkeypatch.setenv("CEYX_VCPKG_PREFIX", str(vcpkg_prefix))
+
+    loaded = manifest.load()
+    stage = tmp_path / "stage"
+
+    def _fake_acquire(loaded_arg, name, platform, stage_arg):
+        version = loaded_arg["manifest"]["component"][name]["version"]
+        src = Path(stage_arg) / f"{name}-{version}"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "LICENSE").write_text(f"{name} refetched licence", encoding="utf-8")
+        return src
+
+    monkeypatch.setattr(win_heif_dist.execute_mod, "acquire", _fake_acquire)
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    win_heif_dist.vendor_licences(loaded, dist, stage)
+
+    for name in ("libheif", "libde265", "kvazaar"):
+        assert (dist / "share" / "licenses" / name / "LICENSE").is_file()
+
+
+def test_vendor_licences_fails_loud_when_aom_copyright_absent(monkeypatch, tmp_path) -> None:
+    vcpkg_prefix = tmp_path / "vcpkg-installed" / "x64-windows-heif"
+    vcpkg_prefix.mkdir(parents=True)
+    monkeypatch.setenv("CEYX_VCPKG_PREFIX", str(vcpkg_prefix))
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
+        win_heif_dist.vendor_licences(manifest.load(), dist, tmp_path / "stage")
+    assert "aom" in str(exc.value)
 
 
 if __name__ == "__main__":
