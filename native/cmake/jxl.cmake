@@ -75,6 +75,23 @@ if(CEYX_ENABLE_JXL)
        AND CEYX_HWY_LIBRARY AND CEYX_BROTLIDEC_LIBRARY AND CEYX_BROTLIENC_LIBRARY
        AND CEYX_BROTLICOMMON_LIBRARY)
         target_include_directories(dng_decoder_native PRIVATE ${CEYX_JXL_INCLUDE_DIR})
+        if(WIN32)
+            # Windows-only: libjxl's public headers default to the DLL-consumer
+            # mode (JXL_EXPORT expands to __declspec(dllimport)), because
+            # upstream ships both a shared and this static build from the same
+            # headers. The vendored dist here is static (module header above),
+            # so the *_EXPORT macros must expand to nothing instead -- without
+            # this, lld-link fails with "a relevant symbol is available in
+            # jxl.lib but cannot be used because it is not an import library"
+            # even though the archive and the symbol are both present. Scoped
+            # to the consumer target only (not a global define) and to WIN32
+            # only: macOS/Linux visibility defaults do not hit this failure
+            # mode (no import-library concept there).
+            target_compile_definitions(dng_decoder_native PRIVATE
+                JXL_STATIC_DEFINE
+                JXL_THREADS_STATIC_DEFINE
+                JXL_CMS_STATIC_DEFINE)
+        endif()
         # Order matters for static archives on ld: jxl before its dependencies,
         # jxl_cms right after jxl (it satisfies jxl's own undefined
         # JxlGetDefaultCms), brotlicommon last because both brotli halves
