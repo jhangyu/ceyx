@@ -310,8 +310,19 @@ jobs:
     # The guard is in `needs:` as well as the legs: depending on the legs alone
     # would let a SKIPPED leg satisfy the dependency (see all-platforms-green).
     needs: [macos, linux, windows, android, all-platforms-green]
-    # Tag-gated. `v*` only — a push to main or a PR must never reach a release.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Deliberately NOT `if: startsWith(github.ref, 'refs/tags/v')`.
+    #
+    # The tag gate is applied to the UPLOAD, not to the job: on a non-tag run
+    # this job still downloads every artifact and runs publish_release.py with
+    # `--dry-run`, which packages the tar.gz set, writes artifacts.lock and
+    # prints the plan while making zero `gh` calls. Skipping the whole job on
+    # non-tag runs would mean the packaging path is exercised for the very
+    # first time on the one run where being wrong is expensive — a release. A
+    # dry-run on every branch push makes an artifact-name or layout mistake
+    # fail on the push that introduced it.
+    #
+    # `--dry-run` performs no authenticated operation, so this is safe on
+    # pull_request runs, including from forks.
     permissions:
       contents: write
     steps:
@@ -338,7 +349,24 @@ jobs:
       - name: List downloaded artifacts
         run: find "${{ github.workspace }}/downloaded-artifacts" -maxdepth 2 | sort
 
-      - name: Publish release assets + artifacts.lock
+      # Dry run on every non-tag event. Packaging, canonical naming, the
+      # atomic-group assertion and artifacts.lock generation all execute; no
+      # `gh` call is made and nothing is published.
+      - name: Package + lock (dry run, non-tag events)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set +e
+          python3 native/scripts/publish_release.py \
+            --dry-run \
+            --artifacts-dir "${GITHUB_WORKSPACE}/downloaded-artifacts" \
+            --staging-dir "${GITHUB_WORKSPACE}/release-staging"
+          rc=$?
+          set -e
+          echo "PUBLISH_DRY_RUN_RC=${rc}"
+          exit "${rc}"
+
+      - name: Publish release assets + artifacts.lock (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
