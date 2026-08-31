@@ -25,8 +25,10 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 45
     env:
-      # D5: same pinned baseline as native/vcpkg/vcpkg.json,
-      # vcpkg-configuration.json and port_spike.yml (N30).
+      # D5: same pinned baseline as native/vcpkg/vcpkg.json and
+      # vcpkg-configuration.json (N30). port_spike.yml, the round-2 spike that
+      # used to be the fourth place this SHA was pinned, was deleted in round
+      # 5 (task #6, superseded by the shipped D5 vcpkg overlay work).
       VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
       VCPKG_TRIPLET: arm64-osx-heif
       # The vcpkg PATHS deliberately do NOT live here. The `runner` context is

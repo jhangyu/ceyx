@@ -74,7 +74,7 @@ native/third_party/libraw-cmake/
 !native/third_party/libraw/PROVENANCE.md
 
 # Vendored HEIF decode distribution (libheif + libde265, built by
-# native/scripts/fetch_heif_deps.sh). Source is fetched and built, never
+# native/scripts/build_deps.py build heif-stack). Source is fetched and built, never
 # tracked -- the same policy as Halide and LibRaw. PROVENANCE.md IS tracked so
 # the pinned versions, hashes and configure flags survive without the tree.
 native/third_party/heif-dist/*

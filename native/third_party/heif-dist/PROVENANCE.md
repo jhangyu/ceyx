@@ -1,7 +1,9 @@
 # HEIF distribution — provenance
 
-Built by `native/scripts/fetch_heif_deps.sh`. Nothing under this directory is
-tracked except this file.
+Built by `native/scripts/fetch_heif_deps.sh` (deleted, D9; superseded by
+`native/scripts/build_deps.py build heif-stack`, the Python carrier proven
+equivalent by the D6 gate). Nothing under this directory is tracked except
+this file.
 
 | Component | Version | Source | SHA-256 |
 |---|---|---|---|

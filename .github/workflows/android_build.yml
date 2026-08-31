@@ -128,16 +128,58 @@ jobs:
         # Android heif-dist exists, so the Stage 2 cross-compile configure opts
         # out of the hard heif gate. Passed to both configure stages; Stage 1
         # (DNG_HOST_GENERATORS_ONLY) guards heif.cmake out anyway.
+        # G1 fix (round-5 gap closure, task #9): native/scripts/fetch_libjxl_dist.sh
+        # has no Android/NDK cross-compile support (it builds a host-arch static
+        # dist via a plain source cmake configure), so there is no acquisition
+        # path for this platform today — unlike macOS/Linux, adding one is a new
+        # feature, not a CI-assertion fix, and is out of scope here. Per task #9's
+        # ruling ("fetch a real dist and assert it landed, OR set an explicit,
+        # asserted OFF"), this leg takes the explicit-OFF branch: -DCEYX_ENABLE_JXL=OFF
+        # (was already the de-facto outcome via cmake/jxl.cmake's silent soft-degrade;
+        # this makes it an explicit, loud, asserted decision instead of an
+        # accidental one) and the log is captured + grepped below to prove the
+        # OFF branch was actually taken, not just requested.
         working-directory: ${{ github.workspace }}
+        shell: bash
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
+          # round-5-review BLOCKER fix: the explicit `shell: bash` key above is
+          # what supplies pipefail — GitHub's default for a keyless `run:` is
+          # `bash -e {0}` (NO pipefail), which silently makes `rc=$?` below
+          # capture tee's exit code (always 0), not the build's. Removing this
+          # key re-inverts the gate; do not remove it.
+          #
+          # With `shell: bash` in effect: `set +e` below disables errexit but
+          # pipefail stays active, so `$?` after the pipe reflects the PYTHON
+          # process's exit code, not tee's — ${PIPESTATUS[0]} is deliberately
+          # NOT used here (08-23 lesson: it does not reliably expand in every
+          # shell).
+          set +e
           python3 native/scripts/build_native_watchdog.py \
             --platform android \
             --target dng_decoder_native \
             --android-ndk "${ANDROID_NDK_HOME}" \
             --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
-            --idle-timeout-sec 180
+            --cmake-arg=-DCEYX_ENABLE_JXL=OFF \
+            --idle-timeout-sec 180 2>&1 | tee android_build.log
+          rc=$?
+          set -e
+          echo "BUILD_RC=${rc}"
+          exit "${rc}"
+
+      - name: Assert JXL was explicitly disabled, not silently degraded (G1)
+        shell: bash
+        run: |
+          set +e
+          grep -q "JXL: disabled (CEYX_ENABLE_JXL=OFF)" android_build.log
+          rc=$?
+          set -e
+          echo "ASSERT JXL explicit-OFF RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::configure log does not show the expected 'JXL: disabled (CEYX_ENABLE_JXL=OFF)' line from cmake/jxl.cmake; the -DCEYX_ENABLE_JXL=OFF flag above may not have taken effect." >&2
+            exit 1
+          fi
 
       - name: Stage native artifacts
         run: |
@@ -153,6 +195,57 @@ jobs:
           libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
           if [ ${#libs[@]} -eq 0 ]; then
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
+            exit 1
+          fi
+
+      # G6 fix (round-5 gap closure, task #9): this .so is a target-arm64 ELF
+      # cross-compiled on an x86_64 host, so the NDK's own llvm-nm (not host
+      # binutils) is used to read its dynamic symbol table — same toolchain
+      # already set up for the Stage 2 cross-compile above (ANDROID_NDK_HOME),
+      # matching this repo's convention of using the platform's own tool
+      # rather than assuming host tooling parses foreign-arch ELF correctly.
+      # Prior to this fix android_build.yml had ZERO symbol-level verification
+      # — only a file-existence check — the thinnest-verified platform of the
+      # four per r5-rel-coverage-matrix.md's G6 finding. dng_decode_and_process
+      # is the POSITIVE CONTROL (exported since the first Android build); its
+      # absence means this check itself is broken, not that the build
+      # regressed. Output to a FILE, then grepped — never `nm | grep -q`
+      # (pipefail would turn a SIGPIPE on a successful match into a false
+      # failure).
+      - name: Assert required FFI exports present in Android .so (G6)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
+          echo "Checking: ${SO}"
+          LLVM_NM="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          if [ ! -x "${LLVM_NM}" ]; then
+            echo "::error::llvm-nm not found at ${LLVM_NM} — NDK layout may have changed (r27c expected)." >&2
+            exit 1
+          fi
+          set +e
+          "${LLVM_NM}" -D "${SO}" > android_so_dynsyms.txt 2>&1
+          rc=$?
+          set -e
+          echo "NM_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::llvm-nm -D failed on ${SO} (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
+            cat android_so_dynsyms.txt || true
+            exit 1
+          fi
+          missing=""
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
+            set +e
+            grep -q "${sym}" android_so_dynsyms.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} ${sym}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing exported symbol(s) in ${SO}:${missing} — the .so does not export the FFI surface Dart looks up." >&2
             exit 1
           fi
 

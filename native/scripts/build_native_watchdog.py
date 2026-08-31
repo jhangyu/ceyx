@@ -138,7 +138,7 @@ def run_with_watchdog(cmd: list[str], cwd: Path, idle_timeout_sec: int, native_d
 
 
 def default_vcpkg_triplet() -> Optional[str]:
-    """Best-effort triplet matching port_spike.yml's matrix. Returns None
+    """Best-effort triplet matching the CI vcpkg build matrix. Returns None
     when it cannot be determined confidently (caller must then require
     CEYX_VCPKG_PREFIX instead of guessing)."""
     import platform as _platform

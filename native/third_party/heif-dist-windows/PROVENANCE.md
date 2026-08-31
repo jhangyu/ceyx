@@ -1,6 +1,8 @@
 # HEIF decode distribution (Windows x86-64) — provenance
 
-Built by `native/scripts/build_heif_dist_windows.sh`, run on a `windows-latest`
+Built by `native/scripts/build_heif_dist_windows.sh` (deleted, D9; the
+workflow now runs the Python carrier — see
+`.github/workflows/heif_dist_windows.yml`), run on a `windows-latest`
 GitHub Actions runner via `.github/workflows/heif_dist_windows.yml`. Unlike the
 macOS dist (which is produced locally and untracked), **this tree is committed**:
 no contributor machine in this project can build Windows binaries, so the built
@@ -44,8 +46,9 @@ linking into `dng_decoder_native` is deliberately NOT done, because it would
 trigger the 4(d)(0) duty to ship relinkable object files with every release.
 
 The corresponding source for any shipped binary is the tarball at the URL and
-hash above, plus the exact configure flags recorded in
-`native/scripts/build_heif_dist_windows.sh`.
+hash above, plus the exact configure flags recorded in the now-deleted
+`native/scripts/build_heif_dist_windows.sh` (git tag `r5-pre-d9-legacy-scripts`
+still has the file, for historical reference).
 
 ## Decode-only build
 

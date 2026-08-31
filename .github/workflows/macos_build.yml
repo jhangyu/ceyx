@@ -115,8 +115,9 @@ jobs:
       X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
       HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
       # D5: pinned vcpkg baseline. Same SHA as native/vcpkg/vcpkg.json's
-      # builtin-baseline, vcpkg-configuration.json's default-registry baseline
-      # and port_spike.yml's VCPKG_BASELINE (N30 — four places, one value).
+      # builtin-baseline and vcpkg-configuration.json's default-registry
+      # baseline (N30). port_spike.yml, the round-2 spike that used to be the
+      # fourth place this SHA was pinned, was deleted in round 5 (task #6).
       VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
       VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
       # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
@@ -131,11 +132,36 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          # D6 layer-1 (below) resolves the deleted legacy script from the
+          # r5-pre-d9-legacy-scripts tag via `git show <tag>:<path>`.
+          # fetch-tags: true alone (with the default depth-1) fetches the
+          # tag REF but not the tagged commit's tree when that commit is
+          # outside the shallow history window (confirmed by CI failure:
+          # `git show <tag>:<path>` -> rc=128 not found). fetch-depth: 0
+          # (full history) is required so the tagged commit's tree is
+          # actually present. Do not remove this key or shrink the depth.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # D6 layer 1 (round-5 task #1, snippet by impl-d6-opus,
+      # docs/logs/2026-08-31/r5-d6-ci-snippet.md): pure argv-rendering
+      # equivalence between the carrier renderer, the golden fixtures and the
+      # legacy shell scripts. No dist and no build required, so it runs here
+      # before any of the expensive fetch/build steps below and catches a
+      # renderer/manifest regression cheaply. The `echo` on its own line is
+      # deliberate self-captured-RC discipline (ledger 2026-08-23) — do not
+      # rewrite as a pipeline or add `| tee`.
+      - name: D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)
+        run: |
+          set -u
+          python3 native/tests/run_dist_equivalence.py \
+              --layers l1 \
+              --report "${GITHUB_WORKSPACE}/d6-layer1-report-${{ matrix.arch_tag }}.md"
+          echo "D6_LAYER1_RC=$?"
 
       # nasm/yasm are required by fetch_heif_deps.sh's aom build: aom's x86_64
       # codepath is hand-written assembly (unlike the arm64 codepath, which is
@@ -198,6 +224,33 @@ jobs:
       - name: Fetch vendored LibRaw distribution
         run: native/scripts/fetch_libraw_dist.sh
 
+      # G1 fix (round-5 gap closure, task #9): cmake/jxl.cmake defaults
+      # CEYX_ENABLE_JXL=ON but SOFT-degrades to CEYX_JXL_ENABLED=0 with only a
+      # message(WARNING) when native/third_party/libjxl-dist is absent — a
+      # configure that silently ships no JPEG XL codec was indistinguishable
+      # from one that ships it, in every green run before this fix. Fetch the
+      # real dist (native/scripts/fetch_libjxl_dist.sh builds it from source;
+      # same script the plan intends, unlike the HEIF/libwebp dists this one
+      # has no committed/vcpkg alternative) so this leg can prove ENABLED=1
+      # after the product build below, not just attempt it.
+      #
+      # CEYX_JXL_ARCH mirrors DNG_HEIF_ARCH/fetch_heif_deps.sh's arch-suffixed
+      # dist convention (native/cmake/jxl.cmake's WIN32/APPLE hint search):
+      # matrix.arch_tag equals the host arch on the native leg (unsuffixed
+      # dist) and differs on the cross leg (arch-suffixed dist), exactly what
+      # jxl.cmake's CMAKE_OSX_ARCHITECTURES search expects.
+      - name: Cache vendored libjxl distribution
+        id: cache-jxl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist${{ matrix.cross == 'true' && format('-{0}', matrix.arch_tag) || '' }}
+          key: jxl-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/fetch_libjxl_dist.sh') }}
+
+      - name: Fetch vendored libjxl distribution
+        env:
+          CEYX_JXL_ARCH: ${{ matrix.arch_tag }}
+        run: native/scripts/fetch_libjxl_dist.sh
+
       # D5 (2026-08-31): libwebp is supplied by vcpkg, pinned to exactly 1.6.0 in
       # native/vcpkg/vcpkg.json. cmake/encode.cmake resolves it with
       # find_package(WebP CONFIG) and HARD-FAILS the configure when it is
@@ -215,9 +268,9 @@ jobs:
       # so installing it from vcpkg would build a second unused copy and pay for
       # aom+kvazaar twice.
       #
-      # Bootstrap mirrors port_spike.yml's (clone, checkout the pinned baseline,
-      # bootstrap-vcpkg.sh) rather than using a marketplace action, so both
-      # workflows acquire vcpkg the same way.
+      # Bootstrap (clone, checkout the pinned baseline, bootstrap-vcpkg.sh)
+      # rather than using a marketplace action, matching this repo's other
+      # vcpkg-consuming workflows (e.g. linux_build.yml).
       - name: Bootstrap vcpkg at the pinned baseline (D5)
         run: |
           git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
@@ -369,6 +422,47 @@ jobs:
             exit 1
           fi
 
+      # D4/R-7 (round-5 contract AC4): native/scripts/deps/probe/probe_codecs.c
+      # has never been compiled or run anywhere (Spec §5.6). It is run here,
+      # on the native (non-cross) arm64 leg only, against the dist this same
+      # job just fetched two steps above -- the dist is NOT committed to git
+      # (native/third_party/heif-dist/* is gitignored except PROVENANCE.md),
+      # so the probe must consume the freshly-built dist in this job rather
+      # than assuming a checked-in one. The dist carries kvazaar (HEVC
+      # encoder) + aom (AV1 encoder/decoder) + libde265 (HEVC decoder) per
+      # Spec §3.2, so all four capability bits are expected clear (RC=0).
+      #
+      # Restricted to matrix.cross == 'false': the cross leg's dist
+      # (heif-dist-x86_64) is built for x86_64 and cannot be exec'd on this
+      # arm64 runner without Rosetta, which this workflow does not provision.
+      - name: Compile + run functional capability probe (D4/R-7)
+        if: matrix.cross == 'false'
+        run: |
+          set -e
+          DIST="$GITHUB_WORKSPACE/${{ matrix.heif_dist_dir }}"
+          PROBE_DIR="$GITHUB_WORKSPACE/native/scripts/deps/probe"
+          clang \
+            -I"$DIST/include" \
+            -L"$DIST/lib" \
+            -Wl,-rpath,"$DIST/lib" \
+            -o "$PROBE_DIR/probe_codecs" \
+            "$PROBE_DIR/probe_codecs.c" \
+            -lheif
+          file "$PROBE_DIR/probe_codecs"
+          set +e
+          "$PROBE_DIR/probe_codecs"
+          RC=$?
+          set -e
+          echo "RC=${RC}"
+          # Bit convention (probe_codecs.c): bit0=HEVC-ENC,bit1=AV1-ENC,
+          # bit2=HEVC-DEC,bit3=AV1-DEC; a SET bit means that capability is
+          # ABSENT. This dist ships all four, so any set bit is a real defect.
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::probe_codecs exited ${RC} (nonzero bits = missing capabilities)"
+            exit "${RC}"
+          fi
+          echo "A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0"
+
       - name: Cache CMake build directory
         uses: actions/cache@v4
         with:
@@ -418,7 +512,20 @@ jobs:
       - name: Cross-compile dng_decoder_native for x86_64 (cross stage 2)
         if: matrix.cross == 'true'
         working-directory: ${{ github.workspace }}
+        shell: bash
         run: |
+          # round-5-review BLOCKER fix: the explicit `shell: bash` key above is
+          # what supplies pipefail — GitHub's default for a keyless `run:` on
+          # macOS runners is `bash -e {0}` (NO pipefail), which silently makes
+          # `rc=$?` below capture tee's exit code (always 0), not the build's.
+          # Removing this key re-inverts the gate; do not remove it.
+          #
+          # Output is captured to a file (in addition to the live log) so the
+          # G1 cross-leg assertion below can grep the configure line without
+          # depending on the watchdog itself persisting one — with `shell: bash`
+          # in effect, pipefail keeps $? as the watchdog's own exit code (last
+          # non-zero wins).
+          set +e
           export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
@@ -426,7 +533,11 @@ jobs:
             --idle-timeout-sec 600 \
             --cmake-arg=-DDNG_CROSS_BUILD=ON \
             "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
-            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64
+            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64 2>&1 | tee cross_stage2_build.log
+          rc=$?
+          set -e
+          echo "CROSS_STAGE2_RC=${rc}"
+          exit "${rc}"
 
       # AC: the run log must show the intel dylib reporting x86_64. `lipo -archs`
       # output is both printed and asserted — printing alone would let a wrong
@@ -446,6 +557,91 @@ jobs:
             exit 1
           fi
           otool -L "$DYLIB"
+
+      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
+      # the original nm-grep assertion tested an UNSATISFIABLE claim.
+      # JxlEncoderInitBasicInfo is compiled into the vendored static libjxl.a
+      # with hidden visibility (JXL_STATIC_DEFINE -> JXL_EXPORT expands to
+      # nothing in jxl_export.h), so it can never appear in ANY export table
+      # regardless of whether the codec is correctly linked — confirmed via
+      # nm -m on the archive (`private external`) vs. the linked dylib
+      # (`non-external`), a disabled-build control (identical 0-hit result),
+      # and the +5.2MB size delta / 548-symbol full-symtab count proving the
+      # code IS present. The correct instrument is OUR OWN exported FFI
+      # capability surface, called end-to-end: a green link with
+      # CEYX_ENABLE_JXL=1 entails libjxl.a was linked (a mismatch would fail
+      # to link at all, not silently answer wrong), so calling
+      # ceyx_still_decode_supports/ceyx_encode_supports and checking the
+      # returned value is strictly stronger than a symbol-presence check.
+      #
+      # Native (non-cross) leg only: dlopen requires a same-architecture,
+      # same-OS process, exactly the same constraint the D4/R-7 probe above
+      # already applies (matrix.cross == 'false') — an arm64 host process
+      # cannot dlopen the Intel leg's x86_64 dylib.
+      - name: Assert JXL capability via FFI (G1, native leg)
+        if: matrix.cross == 'false'
+        run: |
+          set +e
+          python3 native/scripts/jxl_capability_probe.py "$DYLIB" --expect 1
+          rc=$?
+          set -e
+          echo "JXL_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
+      # Cross leg: cannot dlopen a foreign-arch (x86_64) dylib from this
+      # arm64 host process, so the achievable proof is the compile-time one —
+      # the SAME configure that produced this dylib printed cmake/jxl.cmake's
+      # success line, which is only reachable from the branch that also sets
+      # CEYX_JXL_ENABLED=1 (see the diagnosis doc's falsification of "cmake
+      # took the soft-degrade path"). Weaker than the native leg's runtime
+      # call, but honest about what this leg can actually prove.
+      - name: Assert JXL enabled in cross-compile configure log (G1, cross leg)
+        if: matrix.cross == 'true'
+        run: |
+          set +e
+          grep -q -- "-- JXL: static" cross_stage2_build.log
+          rc=$?
+          set -e
+          echo "ASSERT cross-leg JXL enabled RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::cross_stage2_build.log does not show '-- JXL: static ...' from cmake/jxl.cmake's success branch; the x86_64 cross-compile configure may not have enabled JXL." >&2
+            exit 1
+          fi
+
+      # G3 fix (task #9): macOS had no FFI export-symbol assertion at all,
+      # unlike Linux (AC-L5) and Windows (AC-W4) — a definition missing
+      # FFI_EXPORT would pass every check above and fail only at a Dart
+      # consumer's lookupFunction. dng_decode_and_process is the POSITIVE
+      # CONTROL (exported since the first build); its absence means this
+      # check itself is broken, not that the build regressed. Output to a
+      # file, then grepped, same pipefail-avoidance reasoning as above.
+      - name: Assert required FFI exports present in dylib (G3)
+        run: |
+          set +e
+          nm -gU "$DYLIB" > dylib_exports.txt 2>&1
+          rc=$?
+          set -e
+          echo "NM_EXPORTS_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::nm failed on $DYLIB (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
+            cat dylib_exports.txt || true
+            exit 1
+          fi
+          missing=""
+          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 ceyx_encode_webp_rgba8; do
+            set +e
+            grep -q "${sym}" dylib_exports.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} ${sym}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing exported symbol(s) in $DYLIB:${missing} — the dylib does not export the FFI surface Dart looks up." >&2
+            exit 1
+          fi
 
       - name: Stage native artifact
         run: |

@@ -23,7 +23,12 @@ on:
       - "native/scripts/deps/**"
       - "native/scripts/build_deps.py"
       - "native/deps/manifest.toml"
-      - "native/scripts/build_heif_dist_windows.sh"
+      # S3 (round-4 parking-lot): arch_map.toml drives the carrier's
+      # platform/arch vocabulary (render.py resolves cmake args through it),
+      # so a manifest-affecting change to it must trigger this leg the same
+      # way manifest.toml already does -- otherwise an arch_map edit could
+      # silently desync the Windows dist from what the carrier now renders.
+      - "native/deps/arch_map.toml"
       - ".github/workflows/heif_dist_windows.yml"
 
 concurrency:
