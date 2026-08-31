@@ -16,6 +16,17 @@ name: libjxl dist (Windows)
 # the primary entry point. Sole producer of the committed
 # native/third_party/libjxl-dist-windows tree — see heif_dist_windows.yml for
 # the full rationale and for why this leg is not in build.yml's per-push matrix.
+#
+# 2026-09-01 (contract item 10 / ENTRY-POINT RULE): built by the PYTHON
+# CARRIER (native/scripts/deps/win_jxl_dist.py via
+# `build_deps.py build jxl-stack`), not by build_libjxl_dist_windows.sh --
+# same migration heif_dist_windows.yml already made for the HEIF dist. The
+# path trigger below follows suit: it names the carrier module paths, the
+# same S2/S3 trigger-coverage rationale heif_dist_windows.yml documents (a
+# carrier change must be able to trigger the leg that proves it).
+# build_libjxl_dist_windows.sh stays in the tree (round 2 deletes it once
+# the carrier-built dist is committed and green) but is no longer a trigger
+# path, because it is no longer consumed by this job.
 on:
   workflow_call:
   workflow_dispatch:
@@ -23,7 +34,8 @@ on:
     branches:
       - "ci/**"
     paths:
-      - "native/scripts/build_libjxl_dist_windows.sh"
+      - "native/scripts/deps/**"
+      - "native/scripts/build_deps.py"
       - ".github/workflows/jxl_dist_windows.yml"
 
 concurrency:
@@ -84,18 +96,30 @@ jobs:
           echo "clang-cl: $CLANG_CL"
           "$CLANG_CL" --version
 
-      - name: Build the libjxl dist
-        shell: bash
+      # Built by the PYTHON CARRIER, not by build_libjxl_dist_windows.sh.
+      #
+      # `shell: pwsh` rather than bash is the substantive change here, not a
+      # style preference -- same rationale as heif_dist_windows.yml's
+      # equivalent step: under Git-Bash every path-shaped argument is
+      # eligible for MSYS rewriting, and Git-Bash can put an MSYS Python on
+      # PATH, which deps/run.py refuses to run under by design. pwsh + native
+      # Windows Python means argv reaches CreateProcessW unmodified.
+      #
+      # $LASTEXITCODE is captured on the line IMMEDIATELY after the command
+      # and echoed from the step itself, mirroring heif_dist_windows.yml.
+      #
+      # Invoked through the SINGLE CARRIER ENTRY POINT (build_deps.py), the
+      # ENTRY-POINT RULE (2026-09-01 contract item 10): every migrated
+      # capability lands as a build_deps.py subcommand, `jxl-stack` here.
+      - name: Build the libjxl dist (Python carrier)
+        shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
-          # set +e so the literal RC=$? below actually runs: the default
-          # `bash -eo pipefail` shell would abort the step first, leaving a log
-          # that could only ever record RC=0.
-          set +e
-          bash native/scripts/build_libjxl_dist_windows.sh
-          RC=$?
-          set -e
-          echo "JXL_DIST_WINDOWS_RC=$RC"
+          python native/scripts/build_deps.py build jxl-stack `
+            --platform windows --arch x86_64 `
+            --dist "${{ github.workspace }}/native/third_party/libjxl-dist-windows"
+          $RC = $LASTEXITCODE
+          Write-Host "JXL_DIST_WINDOWS_RC=$RC"
           exit $RC
 
       # Unfiltered on purpose: a '*.lib'-filtered listing looks like a full

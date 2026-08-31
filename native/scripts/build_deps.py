@@ -58,6 +58,18 @@ from deps.run import SubprocessError, assert_native_windows_interpreter  # noqa:
 _PLATFORM_CHOICES = ("auto", "macos", "linux", "windows")
 _ARCH_CHOICES = ("auto", "arm64", "x86_64")
 
+# Pseudo-component migrating the Windows libjxl dist build off
+# build_libjxl_dist_windows.sh (2026-09-01 contract item 10 / ENTRY-POINT
+# RULE, docs/logs/2026-09-01/contract-windows-codec-round.md). Unlike
+# heif-stack this has no macOS/Linux implementation here: those platforms
+# already build libjxl through the ordinary manifest component ("libjxl",
+# self-built from git via deps/execute.py) and have no shell script or
+# committed dist to migrate away from -- jxl-stack exists purely to give the
+# Windows-only build_libjxl_dist_windows.sh replacement a
+# `build_deps.py build <name>` home, per the ENTRY-POINT RULE that every
+# migrated capability lands as a build_deps.py subcommand.
+_JXL_STACK_COMPONENT = "jxl-stack"
+
 
 def detect_platform() -> str:
     """Resolve ``auto`` to one of macos/linux/windows using the running
@@ -379,12 +391,62 @@ def _run_build(argv: list) -> int:
                 stage_arg=args.stage,
             )
 
+        if args.component == _JXL_STACK_COMPONENT:
+            # Windows-only (see the constant's docstring above). macOS/Linux
+            # requests are rejected loudly rather than silently no-op'd or
+            # routed to the ordinary "libjxl" manifest component under a
+            # different name -- a caller who typed jxl-stack on macOS/Linux
+            # almost certainly meant the manifest component "libjxl" and
+            # should be told so, not given a surprising alias.
+            if resolved_platform != "windows":
+                print(
+                    f"[build_deps] error: {_JXL_STACK_COMPONENT!r} currently only "
+                    "supports --platform windows. macOS/Linux build libjxl through "
+                    "the ordinary manifest component 'libjxl' directly "
+                    "(build_deps.py build libjxl ...), which already has a "
+                    "self-built git acquisition on both platforms.",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.stage != "all":
+                print(
+                    f"[build_deps] error: --stage {args.stage!r} is a macOS/Linux "
+                    f"heif-stack concept; the Windows libjxl dist is built in one "
+                    f"pass and has no stage split. Rejected rather than silently "
+                    f"ignored.",
+                    file=sys.stderr,
+                )
+                return 1
+            from deps import win_jxl_dist  # noqa: PLC0415 - lazy, see docstring
+
+            if args.dry_run:
+                # jxl-stack is NOT manifest-rendered (win_jxl_dist.py module
+                # docstring: [component.libjxl] has no source.windows to
+                # render against) -- there is no argv preview to print here,
+                # unlike heif-stack's --dry-run branch above.
+                print(
+                    f"# {_JXL_STACK_COMPONENT} (windows): self-contained git-clone "
+                    f"recipe transcribed from build_libjxl_dist_windows.sh, tag="
+                    f"{win_jxl_dist.JXL_TAG} -- not manifest-rendered, no argv preview"
+                )
+                return 0
+            try:
+                win_jxl_dist.build(dist, arch=resolved_arch, force=args.force)
+            except (
+                win_jxl_dist.WindowsJxlError,
+                win_jxl_dist.win_pe.PeInspectionError,
+                win_jxl_dist.win_pe.PeAssertionFailed,
+            ) as exc:
+                print(f"[jxl-win] {exc}", file=sys.stderr)
+                return 1
+            return 0
+
         known_components = sorted(loaded["manifest"].get("component", {}))
         if args.component not in known_components:
             print(
                 f"[build_deps] error: unknown component {args.component!r} (not present "
                 f"in native/deps/manifest.toml; known components: {known_components}, "
-                f"plus the group {heif_module.COMPONENT!r})",
+                f"plus the groups {heif_module.COMPONENT!r} and {_JXL_STACK_COMPONENT!r})",
                 file=sys.stderr,
             )
             return 1
