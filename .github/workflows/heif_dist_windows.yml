@@ -50,6 +50,12 @@ jobs:
     name: libheif + libde265 + kvazaar + aom dist (windows x86_64, clang-cl, encode+decode)
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      # D1-a: aom reaches the Windows HEIF build via vcpkg, same mechanism and
+      # same PINNED baseline as macos_build.yml/linux_build.yml (D5). One pin,
+      # three platforms -- see native/deps/manifest.toml [component.aom].
+      VCPKG_BASELINE: abb6dda5cc32914d2e64d7d72b974dc301d1fc8a
+      VCPKG_TRIPLET: x64-windows-heif
     steps:
       # MUST run BEFORE actions/checkout, same reason as windows_build.yml:
       # Git for Windows ships core.autocrlf=true system-wide, and a checkout
@@ -98,6 +104,74 @@ jobs:
           fi
           echo "clang-cl: $CLANG_CL"
           "$CLANG_CL" --version
+
+      # D1-a: bootstrap vcpkg at the pinned baseline, same shape as
+      # macos_build.yml/linux_build.yml (bootstrap-vcpkg.sh runs under
+      # Git-Bash on windows-latest exactly as it does under native bash on
+      # macOS/Linux). MSYS_NO_PATHCONV=1 disables Git-Bash's POSIX-path
+      # auto-conversion for these two steps only (R4: MSYS argv translation is
+      # one of the four independent path-rewriting triggers this repo has hit
+      # before) -- neither vcpkg's own CLI nor its portfiles expect that
+      # conversion, and $RUNNER_TEMP/$GITHUB_WORKSPACE are already
+      # Windows-native paths here.
+      - name: Bootstrap vcpkg at the pinned baseline (D1-a)
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          "$RUNNER_TEMP/vcpkg/vcpkg.exe" version
+
+      # --x-feature=de265 --x-feature=aom mirrors linux_build.yml/macos_build.yml's
+      # feature set for this dist: de265 for licence vendoring's copyright
+      # source (win_heif_dist.py still self-builds libde265's DLL from source,
+      # per [component.libde265.source.windows]'s three durable blockers, but
+      # vendor_licences() re-fetches its tarball independently of vcpkg) and
+      # aom for the static archive win_heif_dist.build_aom() copies out of the
+      # install prefix below.
+      - name: vcpkg install de265 + aom (x64-windows-heif)
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          set +e
+          "$RUNNER_TEMP/vcpkg/vcpkg.exe" install \
+              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
+              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
+              --triplet="$VCPKG_TRIPLET" \
+              --x-no-default-features \
+              --x-feature=de265 \
+              --x-feature=aom \
+              --no-print-usage
+          rc=$?
+          echo "VCPKG_INSTALL_RC=${rc}"
+          exit $rc
+
+      # Assert BEFORE the carrier consumes it: a triplet mistake here would
+      # otherwise surface only as build_aom's much-later "aom.lib missing"
+      # failure, three steps away from the actual cause.
+      - name: Assert the vcpkg aom artefact (static)
+        shell: bash
+        run: |
+          set -e
+          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          ls -la "$VCPKG_PREFIX/lib"
+          test -f "$VCPKG_PREFIX/lib/aom.lib" \
+            || { echo "FAIL: aom.lib absent (expected a static archive) under $VCPKG_PREFIX/lib"; exit 1; }
+          test -f "$VCPKG_PREFIX/share/aom/copyright" \
+            || { echo "FAIL: share/aom/copyright absent -- vendor_licences() needs it for the PATENTS grant"; exit 1; }
+
+      # Consumed by win_heif_dist.build_aom() (copies lib/aom.lib +
+      # include/aom out of this prefix -- aom's resolved source kind is
+      # "registry" on every platform, so execute.acquire() never builds it)
+      # and by win_heif_dist.vendor_licences() (share/aom/copyright, incl.
+      # PATENTS). GITHUB_ENV rather than a step-local `env:` because both
+      # consumers run inside the LATER "Build the HEIF dist" step.
+      - name: Export CEYX_VCPKG_PREFIX for the carrier
+        shell: bash
+        run: echo "CEYX_VCPKG_PREFIX=$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET" >> "$GITHUB_ENV"
 
       # R4: built by the PYTHON CARRIER, not by build_heif_dist_windows.sh.
       #
