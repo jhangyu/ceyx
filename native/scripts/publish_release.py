@@ -11,13 +11,20 @@ hashing/locking, upload, and download-back verification are delegated to
 canonical asset names via ``native/deps/arch_map.toml``, and orchestrates
 the calls.
 
-Usage::
+Usage (explicit manifest)::
 
     python3 publish_release.py --manifest manifest.json --tag v0.1.7 \\
-        --repo jhangyu/ceyx --work-dir /tmp/release-work [--dry-run] \\
+        --repo jhangyu/ceyx --staging-dir /tmp/release-work [--dry-run] \\
         [--title TITLE] [--notes-file NOTES.md]
 
-Manifest format (JSON)::
+Usage (CI: one subdirectory per ``actions/download-artifact`` artifact,
+subdirectory name == canonical ``<component>-<platform>-<arch>``)::
+
+    python3 publish_release.py --artifacts-dir downloaded-artifacts \\
+        --tag "${GITHUB_REF#refs/tags/}" --repo "${{ github.repository }}" \\
+        --staging-dir release-staging [--dry-run]
+
+Manifest format (JSON, used with ``--manifest``)::
 
     {
       "assets": [
@@ -26,6 +33,13 @@ Manifest format (JSON)::
         ...
       ]
     }
+
+With ``--artifacts-dir DIR``, one manifest entry is derived per immediate
+subdirectory of ``DIR``: the subdirectory name is split from the right into
+``<component>-<platform>-<arch>`` (arch and platform are the last two
+hyphen-separated segments; component is everything before them, so
+component names containing hyphens, e.g. ``libjxl-dist``, work correctly).
+Exactly one of ``--manifest`` / ``--artifacts-dir`` must be given.
 
 Canonical asset name is always ``<component>-<platform>-<arch>.tar.gz``;
 ``arch`` is normalized against ``native/deps/arch_map.toml`` (accepts any
@@ -61,11 +75,15 @@ from deps.publish import (  # noqa: E402
 ARCH_MAP_PATH = NATIVE_DIR / "deps" / "arch_map.toml"
 
 # Component/platform combinations that must ship as a single atomic archive
-# containing a fixed set of files (round-6 contract: "Windows DLL trio
-# travels as one atomic group everywhere"). Extend this table -- never
+# containing (at least) a fixed set of required files (round-6 contract:
+# "Windows DLL trio travels as one atomic group everywhere"). Checked as a
+# subset -- extra files (e.g. an optional .lib import library) are allowed,
+# but every required name must be present. Extend this table -- never
 # special-case a filename check outside it.
-ATOMIC_FILE_COUNTS: Dict[tuple, int] = {
-    ("dng_decoder_native", "windows"): 3,  # dng_decoder_native.dll, heif.dll, libde265.dll
+ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
+    ("dng_decoder_native", "windows"): frozenset(
+        {"dng_decoder_native.dll", "heif.dll", "libde265.dll"}
+    ),
 }
 
 
@@ -111,21 +129,53 @@ def load_manifest(path: Path) -> List[Dict[str, str]]:
     return assets
 
 
-def _assert_atomic_file_count(dist_dir: Path, component: str, platform: str) -> None:
-    expected = ATOMIC_FILE_COUNTS.get((component, platform))
-    if expected is None:
+def _assert_atomic_required_files(dist_dir: Path, component: str, platform: str) -> None:
+    required = ATOMIC_REQUIRED_FILES.get((component, platform))
+    if required is None:
         return
-    actual = sum(1 for p in dist_dir.rglob("*") if p.is_file())
-    if actual != expected:
+    present = {p.name for p in dist_dir.rglob("*") if p.is_file()}
+    missing = required - present
+    if missing:
         raise PublishError(
             f"[publish_release] atomic group check failed for "
-            f"{component}-{platform}: expected {expected} files in "
-            f"{dist_dir}, found {actual}"
+            f"{component}-{platform}: missing required files {sorted(missing)} "
+            f"in {dist_dir} (found: {sorted(present)})"
         )
     print(
         f"[publish_release] ASSERT ok atomic group {component}-{platform}: "
-        f"{actual} files"
+        f"all required files present ({sorted(required)})"
     )
+
+
+def derive_manifest_from_artifacts_dir(artifacts_dir: Path) -> List[Dict[str, str]]:
+    """Build manifest entries from a directory of one-subdir-per-artifact
+    layout (``actions/download-artifact`` with no ``name:`` filter), where
+    each subdirectory's name is the canonical ``<component>-<platform>-
+    <arch>`` artifact name."""
+    if not artifacts_dir.is_dir():
+        raise ManifestError(f"--artifacts-dir does not exist: {artifacts_dir}")
+    entries: List[Dict[str, str]] = []
+    for sub in sorted(artifacts_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        parts = sub.name.rsplit("-", 2)
+        if len(parts) != 3:
+            raise ManifestError(
+                f"artifact directory name {sub.name!r} does not match "
+                f"<component>-<platform>-<arch> (in {artifacts_dir})"
+            )
+        component, platform, arch = parts
+        entries.append(
+            {
+                "dist_dir": str(sub),
+                "component": component,
+                "platform": platform,
+                "arch": arch,
+            }
+        )
+    if not entries:
+        raise ManifestError(f"--artifacts-dir {artifacts_dir} contains no subdirectories")
+    return entries
 
 
 def build_plan(
@@ -159,10 +209,13 @@ def build_plan(
 
 def run_publish(args: argparse.Namespace) -> int:
     arch_map = load_arch_map()
-    manifest_assets = load_manifest(Path(args.manifest))
+    if args.artifacts_dir:
+        manifest_assets = derive_manifest_from_artifacts_dir(Path(args.artifacts_dir))
+    else:
+        manifest_assets = load_manifest(Path(args.manifest))
     plan = build_plan(manifest_assets, arch_map)
 
-    work_dir = Path(args.work_dir)
+    work_dir = Path(args.staging_dir)
     package_dir = work_dir / "package"
     archive_paths: List[Path] = []
 
@@ -170,7 +223,7 @@ def run_publish(args: argparse.Namespace) -> int:
         dist_dir = item["dist_dir"]
         if not dist_dir.is_dir():
             raise ManifestError(f"dist_dir does not exist: {dist_dir}")
-        _assert_atomic_file_count(dist_dir, item["component"], item["platform"])
+        _assert_atomic_required_files(dist_dir, item["component"], item["platform"])
         archive_path = package_dist(dist_dir, package_dir, item["asset_name"])
         archive_paths.append(archive_path)
         print(f"[publish_release] packaged {item['asset_name']} <- {dist_dir}")
@@ -222,15 +275,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "+ --tag), never hardcoded."
         )
     )
-    parser.add_argument(
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
         "--manifest",
-        required=True,
+        default="",
         help="Path to a JSON manifest describing dist_dir/component/platform/arch entries.",
+    )
+    source_group.add_argument(
+        "--artifacts-dir",
+        default="",
+        help=(
+            "Directory containing one subdirectory per artifact (as produced by "
+            "actions/download-artifact with no name filter), each subdirectory "
+            "named <component>-<platform>-<arch>."
+        ),
     )
     parser.add_argument("--tag", default="", help="Release tag (required unless --dry-run).")
     parser.add_argument("--repo", default="", help="GitHub repo, e.g. jhangyu/ceyx.")
     parser.add_argument(
+        "--staging-dir",
         "--work-dir",
+        dest="staging_dir",
         default="native/scripts/tmp/round6-ci/publish-work",
         help="Scratch directory for packaged archives, artifacts.lock, and download-back verification.",
     )
