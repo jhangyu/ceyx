@@ -67,6 +67,16 @@ PLATFORM = "windows"
 _DE265_IMPLIB_CANDIDATES = ("lib/de265.lib", "lib/libde265.lib")
 _DE265_DLL_CANDIDATES = ("bin/libde265.dll", "bin/de265.dll")
 
+# Same asymmetry, same reason: kvazaar's CMake target is named "kvazaar" but
+# clang-cl+Ninja installed it as libkvazaar.lib (observed in CI run
+# 33415312766 -- "-- Installing: .../lib/libkvazaar.lib"), while the manifest's
+# KVAZAAR_LIBRARY hint states the nominal "{dist}/lib/kvazaar.lib" spelling for
+# the same reason LIBDE265_LIBRARY's nominal spelling can be wrong: the
+# manifest must render deterministically with no dist on disk. Guessing wrong
+# does not fail loudly -- it yields a silent kvazaar-not-found inside
+# libheif's Findkvazaar.cmake probe, i.e. a green build with no HEVC encoder.
+_KVAZAAR_LIB_CANDIDATES = ("lib/kvazaar.lib", "lib/libkvazaar.lib")
+
 # Encode-capable dist (un-parked 2026-08-31, spec-windows-codec-full-green.md).
 _REQUIRED_HEIF_SYMBOL = "heif_decode_image"
 _REQUIRED_HEIF_DEPENDENCY = "de265"
@@ -83,7 +93,11 @@ _FORBIDDEN_HEIF_SYMBOL = "x265"
 # surviving claim is libheif's own heif_have_encoder_for_format answer, queried
 # by probe_codecs in the product leg. Do not add an export grep here to
 # compensate -- it would have zero discriminating power.
-_REQUIRED_STATIC_ARCHIVES = ("lib/kvazaar.lib", "lib/aom.lib")
+# aom is fixed ("lib/aom.lib"): build_aom() controls its own copy-out
+# filename, so there is no installed-spelling asymmetry to resolve. kvazaar
+# is NOT fixed -- see _KVAZAAR_LIB_CANDIDATES -- and is asserted separately
+# in assert_capabilities() via resolve_kvazaar_library().
+_REQUIRED_STATIC_ARCHIVES = ("lib/aom.lib",)
 
 # If heif.dll imports either of these, find_package resolved an IMPORT
 # library instead of the static archive: the dist would run on the build
@@ -218,6 +232,21 @@ def build_kvazaar(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) ->
     execute_mod.build_component(loaded, "kvazaar", PLATFORM, arch, dist, stage)
 
 
+def resolve_kvazaar_library(dist: Path) -> str:
+    """Return the kvazaar static archive that was ACTUALLY installed.
+
+    Same asymmetry as :func:`resolve_de265_import_library`: the manifest's
+    KVAZAAR_LIBRARY hint states the nominal ``lib/kvazaar.lib`` spelling (it
+    must render deterministically with no dist on disk), but clang-cl+Ninja
+    installed it as ``lib/libkvazaar.lib`` (observed in CI run 33415312766).
+    Guessing wrong does not fail loudly -- libheif's Findkvazaar.cmake probe
+    is non-fatal, so a wrong guess yields a green build with no HEVC encoder.
+    """
+    resolved = win_pe.resolve_existing(dist, _KVAZAAR_LIB_CANDIDATES, what="kvazaar static archive")
+    _log(f"kvazaar static archive: {resolved}")
+    return resolved
+
+
 def _vcpkg_prefix(what: str) -> Path:
     """Resolve ``CEYX_VCPKG_PREFIX``, hard-failing when unset.
 
@@ -288,19 +317,26 @@ def build_aom(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> Non
 
 
 def build_libheif(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> None:
-    """Build libheif against the just-installed libde265.
+    """Build libheif against the just-installed libde265 and kvazaar.
 
-    ``LIBDE265_LIBRARY`` is passed again as an extra argument with the
-    by-presence-resolved path. The manifest declares the nominal spelling
-    (``{dist}/lib/de265.lib``) because it must render deterministically on a
-    macOS dev machine with no dist on disk; this call supplies the real one.
-    A later ``-D`` on a cmake command line wins for the same cache variable,
-    so this overrides the rendered value rather than conflicting with it -- the
-    manifest stays the declaration of WHICH options exist, and only this one
-    path is resolved from the filesystem.
+    ``LIBDE265_LIBRARY`` and ``KVAZAAR_LIBRARY`` are each passed again as an
+    extra argument with the by-presence-resolved path. The manifest declares
+    nominal spellings (``{dist}/lib/de265.lib``, ``{dist}/lib/kvazaar.lib``)
+    because it must render deterministically on a macOS dev machine with no
+    dist on disk; this call supplies the real ones. A later ``-D`` on a cmake
+    command line wins for the same cache variable, so this overrides the
+    rendered value rather than conflicting with it -- the manifest stays the
+    declaration of WHICH options exist, and only these two paths are resolved
+    from the filesystem. AOM_LIBRARY needs no equivalent override:
+    build_aom() controls the copy-out filename itself (always lib/aom.lib),
+    so there is no asymmetry to resolve.
     """
     implib = resolve_de265_import_library(dist)
-    extra = [f"-DLIBDE265_LIBRARY={Path(dist) / implib}"]
+    kvazaar_lib = resolve_kvazaar_library(dist)
+    extra = [
+        f"-DLIBDE265_LIBRARY={Path(dist) / implib}",
+        f"-DKVAZAAR_LIBRARY={Path(dist) / kvazaar_lib}",
+    ]
     _log(f"building libheif {execute_mod.component_version(loaded, 'libheif')}")
     execute_mod.build_component(loaded, "libheif", PLATFORM, arch, dist, stage, extra_args=extra)
 
@@ -448,6 +484,23 @@ def assert_capabilities(dist: Path, de265_dll: str) -> None:
     _log("ASSERT no-x265 OK")
 
     _log("== static encoder archives (inputs, not exports -- see module docstring) ==")
+    try:
+        kvazaar_lib = win_pe.resolve_existing(dist, _KVAZAAR_LIB_CANDIDATES, what="kvazaar static archive")
+    except win_pe.PeInspectionError as exc:
+        # Re-raised as WindowsHeifError: this function's contract is "raises
+        # WindowsHeifError on any missing capability" (see class docstring).
+        raise _fail(
+            f"kvazaar static archive missing or empty under {dist} (tried: "
+            f"{', '.join(_KVAZAAR_LIB_CANDIDATES)}). libheif configured with "
+            "WITH_KVAZAAR=ON does NOT fail when it is absent -- Findkvazaar's "
+            "probe is non-fatal -- so this check is the only thing between a "
+            "green build and a dist that reports HEIC encode support and then "
+            f"encodes nothing.\n{exc}"
+        ) from exc
+    if (dist / kvazaar_lib).stat().st_size == 0:
+        raise _fail(f"{kvazaar_lib} is empty under {dist} -- an empty archive is not a built capability.")
+    _log(f"ASSERT static archive {kvazaar_lib} OK ({(dist / kvazaar_lib).stat().st_size} bytes)")
+
     for rel in _REQUIRED_STATIC_ARCHIVES:
         path = Path(dist) / rel
         if not path.is_file() or path.stat().st_size == 0:

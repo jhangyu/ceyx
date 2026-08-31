@@ -329,6 +329,55 @@ def test_assert_capabilities_accepts_full_static_dist(monkeypatch, tmp_path) -> 
     win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
 
 
+def test_resolve_kvazaar_library_accepts_the_lib_prefixed_spelling(tmp_path) -> None:
+    """kvazaar's CMake target is named 'kvazaar' but clang-cl+Ninja installed
+    it as libkvazaar.lib (CI run 33415312766: '-- Installing: .../lib/
+    libkvazaar.lib'), while the manifest's KVAZAAR_LIBRARY hint states the
+    nominal 'lib/kvazaar.lib'. resolve_kvazaar_library must resolve the
+    ACTUALLY installed spelling by presence, same as libde265's import lib."""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "libkvazaar.lib").write_bytes(b"!<arch>\n")
+    assert win_heif_dist.resolve_kvazaar_library(tmp_path) == "lib/libkvazaar.lib"
+
+
+def test_resolve_kvazaar_library_prefers_the_nominal_spelling_when_both_exist(tmp_path) -> None:
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "kvazaar.lib").write_bytes(b"!<arch>\n")
+    (tmp_path / "lib" / "libkvazaar.lib").write_bytes(b"!<arch>\n")
+    assert win_heif_dist.resolve_kvazaar_library(tmp_path) == "lib/kvazaar.lib"
+
+
+def test_build_libheif_overrides_both_libde265_and_kvazaar_library(monkeypatch, tmp_path) -> None:
+    """A later -D on the cmake command line wins for the same cache variable;
+    both LIBDE265_LIBRARY and KVAZAAR_LIBRARY must be resolved by presence
+    and passed as overrides, not left to the manifest's nominal spelling."""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "de265.lib").write_bytes(b"x")
+    (tmp_path / "lib" / "libkvazaar.lib").write_bytes(b"!<arch>\n")
+
+    captured = {}
+
+    def _fake_build_component(loaded, name, platform, arch, dist, stage, *, extra_args=None):
+        captured["extra_args"] = extra_args
+
+    monkeypatch.setattr(win_heif_dist.execute_mod, "build_component", _fake_build_component)
+    win_heif_dist.build_libheif(manifest.load(), "x86_64", tmp_path, tmp_path / "stage")
+
+    joined = " ".join(captured["extra_args"])
+    assert f"-DLIBDE265_LIBRARY={tmp_path / 'lib' / 'de265.lib'}" in joined
+    assert f"-DKVAZAAR_LIBRARY={tmp_path / 'lib' / 'libkvazaar.lib'}" in joined
+
+
+def test_assert_capabilities_accepts_the_lib_prefixed_kvazaar_spelling(monkeypatch, tmp_path) -> None:
+    """Positive control for the CI-observed spelling: assert_capabilities must
+    not vacuously reject a dist whose kvazaar archive is libkvazaar.lib."""
+    dist = _make_minimal_dist(tmp_path)
+    (dist / "lib" / "libkvazaar.lib").write_bytes(b"!<arch>\n")
+    (dist / "lib" / "aom.lib").write_bytes(b"!<arch>\n")
+    _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
+    win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+
+
 def test_build_aom_copies_static_archive_and_headers_from_vcpkg_prefix(monkeypatch, tmp_path) -> None:
     """[component.aom]'s resolved source kind is 'registry' on every platform
     (D1-a adds no source.windows override), and execute.acquire() raises
