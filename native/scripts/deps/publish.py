@@ -133,7 +133,23 @@ def publish_release_assets(
             "--repo", repo,
             "--title", title or tag,
             "--notes", notes or f"Hash-pinned dependency assets for {tag} (D12).",
-            "--prerelease" if prerelease else "--latest=false",
+            # A real (non-prerelease) release must explicitly claim the
+            # "Latest" label. The previous value here was `--latest=false`
+            # -- every production release was actively told NOT to be
+            # latest, which is why two consecutive releases published
+            # without the label and needed a manual correction each time;
+            # this was never a matter of relying on an implicit default.
+            # A prerelease is excluded from "latest" consideration by
+            # GitHub regardless, so it gets only --prerelease.
+            #
+            # Limitation: this flag is only applied when this call creates
+            # the release (the branch above, `gh release view` not found).
+            # If the release already exists, execution falls through
+            # straight to `gh release upload` below and this flag is never
+            # applied -- a re-run against an already-created release, or a
+            # release created by some other path, will not retroactively
+            # gain the Latest label from this function.
+            "--prerelease" if prerelease else "--latest",
         ]
         run(create_argv)
     upload_argv = ["gh", "release", "upload", tag, "--repo", repo, "--clobber"]
