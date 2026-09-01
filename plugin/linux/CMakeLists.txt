@@ -47,7 +47,44 @@ project(ceyx_library LANGUAGES CXX)
 # .so must reach the default branch TOGETHER. Landing the platform declaration
 # first turns every consuming `flutter build linux` red until the binary
 # follows.
-set(ceyx_bundled_libraries
-  "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/libdng_decoder_native.so"
-  PARENT_SCOPE
-)
+#
+# GLOB, NOT a hardcoded single-file list (task #18, 2026-09-01): since the
+# Linux leg started building the HEIF stack (92a234c), dng_decoder_native.so
+# dynamically links libheif.so.1/libde265.so.0 (LGPL-3 requires they stay
+# separate shared libraries -- see
+# native/third_party/heif-dist-linux/PROVENANCE.md), and a bundle missing
+# either one fails to dlopen with an error naming only the decoder. Mirrors
+# windows/CMakeLists.txt's `file(GLOB ... *.dll)` derivation: globbing what is
+# actually staged here (by cmake/heif.cmake's UNIX-AND-NOT-APPLE POST_BUILD
+# copy) is the single decision point, rather than a second hand-maintained
+# list of "which .so files to ship" that can drift from it.
+#
+# CONFIGURE_DEPENDS re-runs the glob when the directory changes, so a .so
+# committed after the first configure is still picked up.
+file(GLOB ceyx_bundled_libraries_local CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/*.so"
+     "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/*.so.*")
+
+if(NOT ceyx_bundled_libraries_local)
+    message(FATAL_ERROR
+        "ceyx/plugin/linux: no bundled libraries found in "
+        "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/.\n"
+        "Expected at least libdng_decoder_native.so plus its libheif.so.1 "
+        "and libde265.so.0 dependencies.")
+endif()
+
+set(ceyx_have_decoder FALSE)
+foreach(_lib IN LISTS ceyx_bundled_libraries_local)
+    get_filename_component(_libname "${_lib}" NAME)
+    if(_libname STREQUAL "libdng_decoder_native.so")
+        set(ceyx_have_decoder TRUE)
+    endif()
+endforeach()
+if(NOT ceyx_have_decoder)
+    message(FATAL_ERROR
+        "ceyx/plugin/linux: Libraries/ has files but none is named "
+        "libdng_decoder_native.so -- refusing to ship a bundle with no "
+        "decoder (found: ${ceyx_bundled_libraries_local}).")
+endif()
+
+set(ceyx_bundled_libraries ${ceyx_bundled_libraries_local} PARENT_SCOPE)

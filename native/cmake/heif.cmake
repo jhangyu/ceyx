@@ -206,6 +206,37 @@ if(DNG_ENABLE_HEIF)
                     "${HEIF_DIST_DIR}/bin/libde265.dll"
                     "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.dll"
             COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
+    elseif(UNIX AND NOT APPLE)
+        # Stage the two versioned .so files NEXT TO the built decoder .so
+        # (task #18, 2026-09-01 -- this branch was entirely missing: the
+        # APPLE and WIN32 siblings above both stage; Linux silently did not,
+        # even though DNG_ENABLE_HEIF links libheif/libde265 dynamically here
+        # too). ffi.cmake's UNIX-AND-NOT-APPLE branch sets an $ORIGIN RPATH
+        # on dng_decoder_native so a sibling file in the SAME directory is
+        # what the loader actually resolves -- staging anywhere else (e.g.
+        # only into the dist tree) would not be found once the .so is copied
+        # out of the build tree.
+        #
+        # Source is <dist>/lib/libheif.so.1 and <dist>/lib/libde265.so.0 --
+        # the VERSIONED real files (native/scripts/deps/heif.py's
+        # build_libde265()/build_libheif() install the versioned name as the
+        # real file and the unversioned name as a symlink; HEIF_LIBRARY /
+        # DE265_LIBRARY above resolved via find_library(NAMES heif/de265),
+        # which follows the unversioned symlink to that real file). The
+        # SONAME each library records at build time is the versioned name
+        # (heif.py's _assert_de265_recorded_name asserts this for de265), so
+        # staging under the versioned name is what the dynamic loader's
+        # DT_NEEDED lookup actually needs to find -- staging the unversioned
+        # symlink target alone, without the versioned name present, would
+        # fail to resolve.
+        add_custom_command(TARGET dng_decoder_native POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HEIF_DIST_DIR}/lib/libheif.so.1"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.so.1"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HEIF_DIST_DIR}/lib/libde265.so.0"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.so.0"
+            COMMENT "Staging libheif.so.1/libde265.so.0 next to dng_decoder_native")
     endif()
 else()
     target_compile_definitions(dng_decoder_native PRIVATE DNG_ENABLE_HEIF=0)

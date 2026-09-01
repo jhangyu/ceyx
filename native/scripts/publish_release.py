@@ -86,6 +86,17 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
     ("dng_decoder_native", "windows"): frozenset(
         {"dng_decoder_native.dll", "heif.dll", "libde265.dll"}
     ),
+    # Linux variant of the same atomic-group requirement (task #18,
+    # 2026-09-01): since the Linux leg started building the HEIF stack
+    # (92a234c), libdng_decoder_native.so dynamically links the versioned
+    # libheif.so.1/libde265.so.0 (staged next to it by cmake/heif.cmake's
+    # UNIX-AND-NOT-APPLE POST_BUILD copy; see linux_build.yml's "Stage
+    # native artifacts" step, which is this asset's producer). A release
+    # asset missing either companion is unloadable on the consumer's
+    # machine with an error naming only the decoder.
+    ("dng_decoder_native", "linux"): frozenset(
+        {"libdng_decoder_native.so", "libheif.so.1", "libde265.so.0"}
+    ),
 }
 
 

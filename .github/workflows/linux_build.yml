@@ -435,11 +435,25 @@ jobs:
           echo "A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0"
 
       - name: Stage native artifacts
+        # Companions added (task #18, 2026-09-01): since the Linux leg
+        # started building the HEIF stack (92a234c), dng_decoder_native.so
+        # dynamically links libheif.so.1/libde265.so.0 (staged next to it at
+        # build time by cmake/heif.cmake's POST_BUILD copy, same source dist
+        # this leg's earlier "Build HEIF stack" step produced). Omitting
+        # either one from the artifact/release asset produces a bundle that
+        # fails to dlopen on the consumer's machine with an error naming only
+        # the decoder -- the exact Windows DLL-trio failure mode, Linux
+        # variant. NOT `|| true`: a missing companion here must fail the
+        # step, not silently ship an incomplete group.
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
           cp "${NATIVE_DIR}/build-linux/libdng_decoder_native.so" \
-            "${ARTIFACT_DIR}/native/" || true
-          ls -la "${ARTIFACT_DIR}/native" || true
+            "${ARTIFACT_DIR}/native/"
+          cp "${NATIVE_DIR}/build-linux/libheif.so.1" \
+            "${ARTIFACT_DIR}/native/"
+          cp "${NATIVE_DIR}/build-linux/libde265.so.0" \
+            "${ARTIFACT_DIR}/native/"
+          ls -la "${ARTIFACT_DIR}/native"
 
       - name: Fail if no shared library was produced
         run: |
@@ -449,6 +463,46 @@ jobs:
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; the Linux build did not emit the expected artifact." >&2
             exit 1
           fi
+
+      # ATOMIC-GROUP GATE (task #18), mirrors windows_build.yml's "Assert the
+      # Windows DLL trio is complete" step for this leg's shared-library
+      # group. Counts the staged copy in ${ARTIFACT_DIR}/native -- the
+      # directory that is actually uploaded -- so the instrument can see the
+      # failure it exists to catch.
+      - name: Assert the Linux shared-lib group is complete (atomic group)
+        run: |
+          ls -la "${ARTIFACT_DIR}/native"
+          for f in libdng_decoder_native.so libheif.so.1 libde265.so.0; do
+            if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
+              echo "::error::atomic group member missing: ${f}" >&2
+              exit 1
+            fi
+          done
+          echo "ATOMIC_GROUP_COMPLETE=1"
+
+      # DT_NEEDED verification (AC1): prove the staged .so actually declares
+      # a runtime dependency on the staged companions -- not merely that
+      # files with the right names sit next to it. De-pipelined (readelf
+      # output to a file, then grep the file) per the pipefail lesson (08-17):
+      # `readelf | grep -q` inverts on a SUCCESSFUL match under `set -o
+      # pipefail` (grep exits first, readelf dies of SIGPIPE, pipeline
+      # reports 141).
+      - name: Verify DT_NEEDED references the staged HEIF companions
+        run: |
+          SO="${ARTIFACT_DIR}/native/libdng_decoder_native.so"
+          readelf -d "$SO" > "${RUNNER_TEMP}/dt_needed.txt"
+          cat "${RUNNER_TEMP}/dt_needed.txt"
+          for needed in libheif.so.1 libde265.so.0; do
+            set +e
+            grep -F "${needed}" "${RUNNER_TEMP}/dt_needed.txt"
+            rc=$?
+            set -e
+            echo "RC=${rc} (DT_NEEDED ${needed})"
+            if [ "${rc}" -ne 0 ]; then
+              echo "::error::${SO} has no DT_NEEDED entry for ${needed} — the staged companion would never be loaded." >&2
+              exit 1
+            fi
+          done
 
       # Round 6, Plan B: the artifact name is now the SINGLE naming decision
       # this workflow makes. It is also the release asset stem — the publish

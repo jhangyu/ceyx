@@ -129,6 +129,27 @@ elseif(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
     target_link_libraries(dng_decoder_native ${CMAKE_DL_LIBS} Threads::Threads)
 
+    # $ORIGIN rpath (task #18, 2026-09-01): dng_decoder_native.so dynamically
+    # links libheif.so.1/libde265.so.0 (see cmake/heif.cmake's POST_BUILD
+    # staging in this same UNIX-AND-NOT-APPLE family). Without this, CMake's
+    # default build-tree RPATH bakes in the ABSOLUTE build-machine path to
+    # native/third_party/heif-dist-linux/lib -- which resolves fine for the
+    # in-tree `ldd`/CI verify step (surfacing no failure there) but is
+    # meaningless once the .so is copied elsewhere (plugin/linux/Libraries,
+    # a Halcyon app bundle, a release tarball): the loader looks for a path
+    # that only ever existed on the CI runner. BUILD_RPATH_USE_ORIGIN +
+    # INSTALL_RPATH "$ORIGIN" makes the recorded RPATH relative to wherever
+    # the .so itself ends up, so a sibling libheif.so.1/libde265.so.0 staged
+    # next to it (same directory) is always found, mirroring the intent of
+    # the APPLE branch's @rpath/@loader_path pair and the WIN32 branch's
+    # directory-relative DLL search order.
+    set_target_properties(dng_decoder_native PROPERTIES
+        BUILD_RPATH_USE_ORIGIN TRUE
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN"
+        INSTALL_RPATH_USE_LINK_PATH FALSE
+    )
+
     # Size fix (2026-08-29): the Linux .so came out at 22.7MB vs ~6MB elsewhere.
     # Measured on the CI artifact (run 33186830473): .debug_* = 16.78MB = 74% of
     # the file, dominated by .debug_gnu_pubnames/pubtypes; .symtab is already
