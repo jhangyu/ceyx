@@ -673,6 +673,14 @@ def assemble(
         if not dep.is_file():
             raise _fail(f"{dep} missing -- run libde265/kvazaar/aom/libheif stages first")
 
+    if platform == "android":
+        # STRIP FIRST, ASSERT SECOND. The assertions must run against the bytes
+        # that ship, not against a richer intermediate: checking an unstripped
+        # library and shipping a stripped one measures a binary nobody
+        # receives. --strip-debug keeps .symtab/.dynsym/SONAME/DT_NEEDED, so
+        # every check below still has its evidence.
+        strip_android_artefacts(dist, [heif_lib, de265_lib, dist / _KVAZAAR_LIB, dist / _AOM_LIB], ndk)
+
     assert_libheif_capabilities(platform, heif_lib, ndk=ndk)
     assert_arch(platform, arch, [heif_lib, de265_lib], ndk=ndk)
     if platform == "android":
@@ -807,18 +815,68 @@ def assert_arch(
             _log(f"ASSERT ok      {library.name} is a 64-bit ELF")
 
 
+ANDROID_MIN_PAGE_ALIGN = 16384
+
+
+def strip_android_artefacts(dist: Path, artefacts: list[Path], ndk: Optional[str]) -> list[Path]:
+    """``llvm-strip --strip-debug`` every android artefact this dist produces.
+
+    An NDK cross-build embeds full debug info by default -- CMAKE_BUILD_TYPE=
+    Release does NOT strip it -- and this dist is COMMITTED. Measured on CI run
+    33460559016: libheif.so 90.5 MB and libaom.a 99.55 MB, the latter within
+    half a megabyte of GitHub's 100 MB per-file hard limit (the same wall that
+    rejected the libjxl android dist push outright at 199 MB).
+
+    ``--strip-debug``, never ``--strip-all``, and the distinction is
+    load-bearing here rather than conventional: it removes debug sections only,
+    so ``.symtab``, ``.dynsym``, the SONAME and DT_NEEDED all survive and every
+    assertion in this module still has the evidence it reads. assemble() calls
+    this BEFORE the assertions for exactly that reason -- the checks must run
+    on the bytes that ship.
+
+    The generic android path has an equivalent helper
+    (:func:`deps.android_dist.strip_archives`), which cannot be reused as-is
+    because it resolves its file list from that module's per-component
+    EXPECTATIONS table, and the heif stack has no row there. Consolidating the
+    two is a recorded follow-up, not something to do while this path is being
+    exercised by CI.
+    """
+    strip = ndk_tool(ndk, "llvm-strip")
+    stripped: list[Path] = []
+    for artefact in artefacts:
+        path = Path(artefact)
+        if not path.is_file():
+            # Absence is not this function's failure to report: the assertions
+            # that follow name every missing artefact precisely.
+            continue
+        before = path.stat().st_size
+        run([strip, "--strip-debug", str(path)])
+        after = path.stat().st_size
+        _log(f"STRIP          {path.name}: {before} -> {after} bytes")
+        stripped.append(path)
+    if not stripped:
+        raise _fail(f"nothing to strip under {dist} -- the build produced no artefacts")
+    return stripped
+
+
 def measure_android_alignment(dist: Path, libraries: list[Path], ndk: Optional[str]) -> Path:
-    """MEASURE (not assert) the LOAD-segment alignment of every shipped .so and
-    record it in the dist.
+    """Measure the LOAD-segment alignment of every shipped .so, record it in
+    the dist, AND assert it is at least 16 KB.
 
     Android 15+ devices may use 16 KB pages; a library whose LOAD segments are
-    aligned to 4 KB fails to load there. Nothing in this repo handled page
-    alignment before this task, and the handoff note claiming NDK r27c's
-    default was unverified -- so this records what the toolchain ACTUALLY
-    produced instead of asserting a remembered value. If any value is below
-    16384, the remediation is `-Wl,-z,max-page-size=16384` in the component's
-    android overlay; the decision is made against this file's contents, not
-    against a recollection.
+    aligned to 4 KB does not load there at all, and this project has no device
+    or emulator instrument that would ever notice.
+
+    The assertion was added only AFTER the measurement existed (plan F5): CI
+    run 33460559016 produced both libraries with p_align 0x1000 on every LOAD
+    segment, which falsified the handoff note claiming NDK r27c aligns to 16 KB
+    by default. The remediation is CMAKE_SHARED_LINKER_FLAGS
+    ``-Wl,-z,max-page-size=16384`` in the component's android overlay; this
+    check exists so that flag cannot silently stop taking effect -- passing a
+    linker flag and the artefact carrying its effect are different facts.
+
+    The report file is written BEFORE the assertion fires, so a failing run
+    still leaves the measurement behind to read.
 
     Returned path is committed with the dist, so the CI gate and PROVENANCE.md
     quote a measurement that travels with the binaries it describes.
@@ -826,6 +884,7 @@ def measure_android_alignment(dist: Path, libraries: list[Path], ndk: Optional[s
     report = Path(dist) / "share" / "provenance" / "android_so_alignment.txt"
     report.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
+    measured: list[tuple[str, list[str]]] = []
     for library in libraries:
         segments = run([ndk_tool(ndk, "llvm-readelf"), "-l", str(library)]).stdout
         lines.append(f"=== {library.name} ===")
@@ -837,8 +896,30 @@ def measure_android_alignment(dist: Path, libraries: list[Path], ndk: Optional[s
         ]
         lines.append(f"{library.name} LOAD alignments: {' '.join(aligns) or '<none parsed>'}")
         _log(f"MEASURE        {library.name} LOAD p_align: {' '.join(aligns) or '<none parsed>'}")
+        measured.append((library.name, aligns))
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _log(f"MEASURE        alignment report written to {report}")
+
+    for name, aligns in measured:
+        if not aligns:
+            # No LOAD line parsed at all means the INSTRUMENT failed, not that
+            # the library is fine. Silence here would read as a pass.
+            raise _fail(
+                f"no LOAD segment alignment could be parsed for {name}; see {report}"
+            )
+        for value in aligns:
+            if int(value, 16) < ANDROID_MIN_PAGE_ALIGN:
+                raise _fail(
+                    f"{name} has a LOAD segment aligned to {value} "
+                    f"({int(value, 16)} bytes), below the {ANDROID_MIN_PAGE_ALIGN}-byte "
+                    f"minimum. Android 15+ devices with 16 KB pages cannot load it, and "
+                    f"no test in this project executes on such a device.\n"
+                    f"  Remediation: CMAKE_SHARED_LINKER_FLAGS "
+                    f"'-Wl,-z,max-page-size=16384' in that component's android overlay "
+                    f"in native/deps/manifest.toml.\n"
+                    f"  Full measurement: {report}"
+                )
+        _log(f"ASSERT ok      {name} LOAD segments are >= {ANDROID_MIN_PAGE_ALIGN}-byte aligned")
     return report
 
 

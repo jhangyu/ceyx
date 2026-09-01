@@ -192,17 +192,66 @@ runner is x86_64, and the emulator that could have run it was removed by the
 proxy is substituted for it: a same-source x86_64 build is a different binary
 and would measure the Linux leg.
 
+## What is committed here, and what is not
+
+Ruled 2026-09-01 (A-T4 Finding 3, option c). The build produces more than the
+consumer needs, and this tree is committed to git and consumed by path, so the
+committed set is deliberately smaller than the built set:
+
+| Committed | Excluded (`.gitignore` in this directory) |
+|---|---|
+| `include/` | `bin/` — aomenc (52.8 MB), aomdec (48.9 MB), kvazaar, dec265 |
+| `lib/libheif.so`, `lib/libde265.so` (stripped) | `lib/*.a` — libaom.a, libkvazaar.a |
+| `share/licenses/`, `share/provenance/`, `.pins` | `lib/pkgconfig/`, `lib/cmake/`, `.stage/` |
+
+Reasons, not preferences: the command-line tools never run inside an APK; the
+static archives are build INPUTS already merged into `libheif.so`, so keeping
+them would commit the same code twice; and `libaom.a` measured **99,554,482
+bytes** on CI run 33460559016 — about 450 KB below GitHub's 100 MB per-file
+hard limit. That is luck, not headroom: the same wall rejected a sibling
+android dist push outright. Everything excluded is reproducible by re-running
+the producer workflow against the pins recorded above.
+
+**Stripping.** An NDK cross-build embeds full debug info by default
+(`CMAKE_BUILD_TYPE=Release` does not strip it): the first green run shipped
+`libheif.so` at 90.5 MB "with debug_info, not stripped". The carrier now runs
+`llvm-strip --strip-debug` over the artefacts **before** the assertions, so the
+checks read the bytes that actually ship rather than a richer intermediate.
+`--strip-debug`, never `--strip-all`: it removes debug sections only, leaving
+`.symtab`, `.dynsym`, the SONAME and `DT_NEEDED` intact — every assertion below
+still has its evidence, and a full strip would silently weaken the capability
+checks to a `.dynsym`-only test without any of them going red.
+
 ## 16 KB page alignment
 
 Android 15+ devices may use 16 KB pages, and a library whose LOAD segments are
 aligned to 4 KB does not load there. Nothing in this repository handled page
 alignment before this dist, and the handoff note that claimed a particular NDK
-r27c default was never verified — so the carrier **measures** it with
-`llvm-readelf -l` on every produced `.so` and writes the result to
+r27c default was never verified — so the carrier **measured** it with
+`llvm-readelf -l` on every produced `.so`, writing the result to
 `share/provenance/android_so_alignment.txt`, committed beside the binaries it
-describes. No threshold is asserted from memory. If the measured `p_align` is
-below `16384`, the remediation is `-Wl,-z,max-page-size=16384` added to the
-component's android overlay — a decision made against that file's contents.
+describes.
+
+**The measurement falsified the handoff note.** CI run 33460559016 produced
+both libraries with `p_align 0x1000` (4096) on *every* LOAD segment:
+
+```
+libheif.so  LOAD alignments: 0x1000 0x1000 0x1000
+libde265.so LOAD alignments: 0x1000 0x1000 0x1000
+```
+
+Those binaries would not have loaded on a 16 KB-page device, and this project
+runs nothing on a device or emulator that would ever have noticed. Both android
+overlays therefore carry `CMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384`,
+and the measurement has been promoted from a record to an **assertion**
+(`ANDROID_MIN_PAGE_ALIGN` in `deps/heif.py`): the build now fails if any LOAD
+segment is below 16384, so the flag cannot silently stop taking effect. Passing
+a linker flag and the artefact carrying its effect are different facts. The
+report file is still written before the assertion fires, so a failing run
+leaves its numbers behind to read.
+
+This is plan F5's ordering honoured exactly: measure first, gate on the
+measured value second — never assert a remembered default.
 
 ## Producer run
 

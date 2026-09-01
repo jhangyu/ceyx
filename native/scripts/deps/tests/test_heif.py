@@ -517,7 +517,7 @@ def _fake_ndk(tmp_path: Path) -> Path:
     ndk = tmp_path / "ndk"
     binaries = ndk / "toolchains" / "llvm" / "prebuilt" / "darwin-x86_64" / "bin"
     binaries.mkdir(parents=True)
-    for tool in ("llvm-nm", "llvm-readelf"):
+    for tool in ("llvm-nm", "llvm-readelf", "llvm-strip"):
         (binaries / tool).write_text("#!/bin/sh\n", encoding="utf-8")
     (ndk / "source.properties").write_text(
         "Pkg.Desc = Android NDK\nPkg.Revision = 27.2.12479018\n", encoding="utf-8"
@@ -658,6 +658,50 @@ def test_android_alignment_is_measured_and_recorded(tmp_path: Path) -> None:
     assert "libheif.so LOAD alignments: 0x4000 0x4000" in text
 
 
+def test_android_alignment_below_16kb_is_red(tmp_path: Path) -> None:
+    """CI run 33460559016 shipped both libraries with p_align 0x1000, which is
+    what turned this from a measurement into an assertion (plan F5 order:
+    measure first, then gate on the measured value). A 4 KB-aligned library
+    does not load on a 16 KB-page device, and nothing in this project executes
+    on one -- so this check is the only thing standing between that defect and
+    a user."""
+    ndk = str(_fake_ndk(tmp_path))
+    library = tmp_path / "libheif.so"
+    library.write_bytes(b"")
+    four_kb = (
+        "  Type   Offset   VirtAddr   PhysAddr   FileSiz  MemSiz   Flg Align\n"
+        "  LOAD   0x000000 0x00000000 0x00000000 0x001000 0x001000 R   0x1000\n"
+    )
+    with mock.patch.object(heif, "run", _fake_runner({heif.ndk_tool(ndk, "llvm-readelf"): four_kb})):
+        with pytest.raises(heif.HeifError) as exc:
+            heif.measure_android_alignment(tmp_path, [library], ndk)
+    assert "max-page-size=16384" in str(exc.value)
+    # The measurement must survive the failure: a run that goes red still has
+    # to leave the numbers behind to read.
+    assert (tmp_path / "share" / "provenance" / "android_so_alignment.txt").is_file()
+
+
+def test_android_alignment_unparseable_output_is_red_not_silent(tmp_path: Path) -> None:
+    ndk = str(_fake_ndk(tmp_path))
+    library = tmp_path / "libheif.so"
+    library.write_bytes(b"")
+    with mock.patch.object(heif, "run", _fake_runner({heif.ndk_tool(ndk, "llvm-readelf"): "no LOAD here\n"})):
+        with pytest.raises(heif.HeifError) as exc:
+            heif.measure_android_alignment(tmp_path, [library], ndk)
+    assert "no LOAD segment alignment" in str(exc.value)
+
+
+def test_both_shared_libraries_carry_the_16kb_linker_flag_on_android_only() -> None:
+    from deps import render as render_mod
+
+    for component in ("libheif", "libde265"):
+        android = render_mod.render(REAL, component, "android", "arm64-v8a", dist="/D", ndk="/ndk")
+        assert "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384" in android
+        for platform, arch in (("macos", "arm64"), ("linux", "x86_64"), ("windows", "x86_64")):
+            rendered = render_mod.render(REAL, component, platform, arch, dist="/D")
+            assert not any("max-page-size" in token for token in rendered)
+
+
 def test_android_dist_path_is_abi_suffixed() -> None:
     # publish_release.py parses the ABI spelling out of this directory name.
     assert heif.default_dist(Path("/n"), "arm64-v8a", "android").name == (
@@ -714,3 +758,29 @@ def test_libheif_outputs_accept_the_unversioned_android_spelling(tmp_path: Path)
     (tmp_path / "lib" / "libheif.so.1").write_bytes(b"")
     found = execute_mod.verify_outputs(REAL, "libheif", tmp_path)
     assert [p.name for p in found] == ["libheif.so.1"]
+
+
+def test_android_artefacts_are_stripped_with_strip_debug_not_strip_all(tmp_path: Path) -> None:
+    """--strip-debug keeps .symtab/.dynsym/SONAME/DT_NEEDED, which every
+    assertion in deps/heif.py reads. --strip-all would remove .symtab and turn
+    the capability checks into a weaker dynsym-only test WITHOUT any of them
+    going red -- the silent-weakening shape this project keeps meeting.
+    """
+    ndk = str(_fake_ndk(tmp_path))
+    lib = tmp_path / "libheif.so"
+    lib.write_bytes(b"x" * 100)
+    runner = _fake_runner({heif.ndk_tool(ndk, "llvm-strip"): ""})
+    with mock.patch.object(heif, "run", runner):
+        stripped = heif.strip_android_artefacts(tmp_path, [lib, tmp_path / "absent.a"], ndk)
+    assert stripped == [lib]
+    argv = runner.calls[0]
+    assert "--strip-debug" in argv
+    assert "--strip-all" not in argv
+
+
+def test_android_strip_with_no_artefacts_at_all_is_red(tmp_path: Path) -> None:
+    ndk = str(_fake_ndk(tmp_path))
+    with mock.patch.object(heif, "run", _fake_runner({})):
+        with pytest.raises(heif.HeifError) as exc:
+            heif.strip_android_artefacts(tmp_path, [tmp_path / "nothing.so"], ndk)
+    assert "no artefacts" in str(exc.value)

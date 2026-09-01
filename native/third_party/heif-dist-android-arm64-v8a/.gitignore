@@ -1,6 +1,29 @@
-# Belt-and-braces for a COMMITTED dist directory: the carrier's stage
-# directory defaults to `<dist>/.stage` and holds downloaded source tarballs.
-# deps/heif.py deletes it on a successful assemble, but a run that fails
-# midway leaves it behind, and .gitignore's un-ignore rule for this directory
-# would otherwise offer those archives up for commit.
+# What of this dist is COMMITTED, and what is only a build by-product.
+#
+# Ruled 2026-09-01 (lead, A-T4 Finding 3, option c). The committed tree is what
+# a CONSUMER needs: include/, the two stripped shared objects, and share/
+# (licences + provenance). Everything excluded below is a build INPUT or a
+# developer tool, reproducible from the pinned sources by re-running the
+# producer workflow.
+#
+# bin/            -- aomenc (52.8 MB), aomdec (48.9 MB), kvazaar, dec265.
+#                    Command-line tools; nothing inside an APK ever runs them.
+#                    Same exclusion the other dists make (903ce30 precedent).
+# lib/*.a         -- libaom.a (99.55 MB) and libkvazaar.a. These are the STATIC
+#                    INPUTS already merged into libheif.so; keeping them would
+#                    commit the same code twice. libaom.a measured 99,554,482
+#                    bytes on CI run 33460559016 -- under GitHub's 100 MB
+#                    per-file hard limit by roughly 450 KB, which is luck, not
+#                    headroom, and the wall that rejected the libjxl android
+#                    dist push outright.
+# lib/pkgconfig/, lib/cmake/ -- build-time discovery files for a prefix layout
+#                    that does not exist on the consumer's machine.
+#
+# .stage/ is the carrier's own scratch directory (downloaded source tarballs).
+# deps/heif.py deletes it on a successful assemble; this entry covers the run
+# that fails midway, so source archives can never be offered up for commit.
+bin/
+lib/*.a
+lib/pkgconfig/
+lib/cmake/
 .stage/

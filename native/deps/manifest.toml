@@ -296,13 +296,22 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   # A-T4. No CMAKE_INSTALL_NAME_DIR here: "@rpath" is a Mach-O install-name
   # concept, and Android's loader has no rpath equivalent inside an APK -- the
   # loader resolves a DT_NEEDED SONAME against lib/<abi>/ of the archive. What
-  # matters instead is that the SONAME stays the plain "libde265.so.0"
+  # matters instead is that the SONAME stays the plain "libde265.so"
   # spelling with no absolute host path baked in, which deps/heif.py asserts
   # with the NDK's llvm-readelf after the install (a set value and the
   # artefact carrying it are different facts).
   CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
   ANDROID_ABI          = "{arch.android_abi}"
   ANDROID_PLATFORM     = "{arch.android_platform}"
+  # 16 KB PAGE ALIGNMENT, added on MEASUREMENT, not on belief (plan F5).
+  # CI run 33460559016 produced this library with LOAD p_align 0x1000 (4096) on
+  # every segment -- read out of the shipped ELF, and it falsifies the handoff
+  # note that claimed NDK r27c aligns to 16 KB by default. Android 15+ devices
+  # may use 16 KB pages, where a 4 KB-aligned library does not load at all, and
+  # this project has no device or emulator instrument that would ever catch it.
+  # deps/heif.py now ASSERTS the measured value, so this flag cannot silently
+  # stop taking effect.
+  CMAKE_SHARED_LINKER_FLAGS = "-Wl,-z,max-page-size=16384"
 
   [component.libde265.cmake.windows]
   _generator                   = "Ninja"
@@ -577,6 +586,11 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
   CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
   ANDROID_ABI          = "{arch.android_abi}"
   ANDROID_PLATFORM     = "{arch.android_platform}"
+  # 16 KB page alignment -- see the identical note on
+  # [component.libde265.cmake.android]. Measured 0x1000 in CI run 33460559016
+  # on THIS library too; both shipped .so files need the flag, and both are
+  # asserted afterwards.
+  CMAKE_SHARED_LINKER_FLAGS = "-Wl,-z,max-page-size=16384"
   LIBDE265_LIBRARY = "{dist}/lib/libde265.so"
   KVAZAAR_LIBRARY  = "{dist}/lib/libkvazaar.a"
   AOM_LIBRARY      = "{dist}/lib/libaom.a"
