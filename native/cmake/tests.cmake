@@ -796,11 +796,57 @@ if(DNG_ENABLE_GENERIC_RAW)
                                         ERROR_QUIET RESULT_VARIABLE _dng_jpeg_dyn_rc)
                         if(_dng_jpeg_dyn_rc EQUAL 0
                            AND "${_dng_jpeg_dyn_have}" MATCHES "(^| )${_dng_jpeg_want_arch}( |$)")
+                            # ARTIFACT-ID FIX (2026-09-01): identical defect
+                            # class as LCMS2-X86_64's — this vendored dir is a
+                            # raw extracted Homebrew bottle whose own
+                            # `otool -D` is the literal unresolved token
+                            # "@@HOMEBREW_PREFIX@@/opt/jpeg-turbo/lib/
+                            # libjpeg.8.dylib", not a real path. Linking
+                            # directly against it would bake that broken
+                            # token into the decoder's LC_LOAD_DYLIB
+                            # verbatim (ld/dyld record a dependency's load
+                            # command from ITS OWN LC_ID_DYLIB, not from the
+                            # path used to find it). Reuse the same
+                            # copy-then-rewrite shape as the OpenMP
+                            # consumption path above and the LCMS2 fix
+                            # immediately above it, rather than inventing a
+                            # third one.
+                            set(_dng_jpeg_dyn_vendored "${CMAKE_BINARY_DIR}/libjpeg.8.dylib")
+                            if(NOT EXISTS "${_dng_jpeg_dyn_vendored}"
+                               OR "${_dng_jpeg_dyn_lib_first}" IS_NEWER_THAN "${_dng_jpeg_dyn_vendored}")
+                                file(COPY "${_dng_jpeg_dyn_lib_first}"
+                                     DESTINATION "${CMAKE_BINARY_DIR}"
+                                     FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                                                      GROUP_READ GROUP_EXECUTE
+                                                      WORLD_READ WORLD_EXECUTE)
+                                get_filename_component(_dng_jpeg_dyn_lib_first_name
+                                                        "${_dng_jpeg_dyn_lib_first}" NAME)
+                                if(NOT _dng_jpeg_dyn_lib_first_name STREQUAL "libjpeg.8.dylib")
+                                    file(RENAME "${CMAKE_BINARY_DIR}/${_dng_jpeg_dyn_lib_first_name}"
+                                                 "${_dng_jpeg_dyn_vendored}")
+                                endif()
+                                execute_process(COMMAND install_name_tool -id "@rpath/libjpeg.8.dylib"
+                                                        "${_dng_jpeg_dyn_vendored}"
+                                                RESULT_VARIABLE _dng_jpeg_dyn_id_rc)
+                                execute_process(COMMAND codesign --force --sign -
+                                                        "${_dng_jpeg_dyn_vendored}"
+                                                RESULT_VARIABLE _dng_jpeg_dyn_sign_rc)
+                                if(NOT _dng_jpeg_dyn_id_rc EQUAL 0 OR NOT _dng_jpeg_dyn_sign_rc EQUAL 0)
+                                    message(FATAL_ERROR
+                                        "[ceyx] failed to vendor libjpeg.8.dylib "
+                                        "(install_name_tool rc=${_dng_jpeg_dyn_id_rc}, "
+                                        "codesign rc=${_dng_jpeg_dyn_sign_rc}). Refusing "
+                                        "to continue: a partially-vendored copy would "
+                                        "ship the same broken-placeholder-ID defect this "
+                                        "fix exists to close.")
+                                endif()
+                                message(STATUS "[ceyx] vendored libjpeg.8.dylib -> ${_dng_jpeg_dyn_vendored} (@rpath/libjpeg.8.dylib)")
+                            endif()
                             set(_dng_shim_jpeg_include_dirs "${_dng_jpeg_dyn_dir}/include")
-                            set(_dng_shim_jpeg_libraries "${_dng_jpeg_dyn_lib_first}")
+                            set(_dng_shim_jpeg_libraries "${_dng_jpeg_dyn_vendored}")
                             message(STATUS
                                 "[ceyx] RawSpeed3 JPEG: using arch-verified "
-                                "DYNAMIC ${_dng_jpeg_dyn_lib_first} from "
+                                "DYNAMIC ${_dng_jpeg_dyn_vendored} vendored from "
                                 "${_dng_jpeg_dyn_dir} (companion parity with "
                                 "the arm64 leg's own incidental dynamic jpeg "
                                 "dependency); DNG SDK's own static jpeg link "
@@ -1080,7 +1126,59 @@ set(JPEG_VERSION_STRING \"62\")
             set(LCMS2_INCLUDE_DIR "${_ceyx_lcms_resolved_dir}/include" CACHE PATH "" FORCE)
             file(GLOB _ceyx_lcms_lib "${_ceyx_lcms_resolved_dir}/lib/liblcms2*.dylib")
             list(GET _ceyx_lcms_lib 0 _ceyx_lcms_lib_first)
-            set(LCMS2_LIBRARIES "${_ceyx_lcms_lib_first}" CACHE FILEPATH "" FORCE)
+            # ARTIFACT-ID FIX (2026-09-01, caught in review before push): the
+            # vendored dir is a raw extracted Homebrew bottle, and Homebrew
+            # bottles record their OWN install name as an UNRESOLVED
+            # relocation placeholder token (confirmed via `otool -D` on the
+            # actual file: "@@HOMEBREW_PREFIX@@/opt/little-cms2/lib/
+            # liblcms2.2.dylib", literally, not a real path) -- `brew`
+            # itself rewrites that token to a real path as part of a normal
+            # `brew install`, a step this project's raw-extraction sourcing
+            # route does not perform. Linking directly against the resolved
+            # file bakes that broken token into the decoder's own
+            # LC_LOAD_DYLIB verbatim, which cannot be resolved on any
+            # machine -- ld/dyld record a dependency's load command from the
+            # DEPENDENCY's own LC_ID_DYLIB, not from the filesystem path used
+            # to find it, so pointing LCMS2_LIBRARIES straight at the raw
+            # file (as this branch used to) ships a dead reference despite a
+            # perfectly correct arch-verified resolution.
+            #
+            # The OpenMP consumption path above (this same file, the
+            # "ONE OpenMP runtime image" block) already solves exactly this
+            # for an IDENTICALLY-broken raw libomp.dylib bottle by copying it
+            # into the build tree and rewriting ITS OWN id to @rpath/<name>
+            # before ever linking against it. Reuse that shape here instead
+            # of inventing a second one.
+            set(_ceyx_lcms_vendored "${CMAKE_BINARY_DIR}/liblcms2.2.dylib")
+            if(NOT EXISTS "${_ceyx_lcms_vendored}"
+               OR "${_ceyx_lcms_lib_first}" IS_NEWER_THAN "${_ceyx_lcms_vendored}")
+                file(COPY "${_ceyx_lcms_lib_first}"
+                     DESTINATION "${CMAKE_BINARY_DIR}"
+                     FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                                      GROUP_READ GROUP_EXECUTE
+                                      WORLD_READ WORLD_EXECUTE)
+                get_filename_component(_ceyx_lcms_lib_first_name "${_ceyx_lcms_lib_first}" NAME)
+                if(NOT _ceyx_lcms_lib_first_name STREQUAL "liblcms2.2.dylib")
+                    file(RENAME "${CMAKE_BINARY_DIR}/${_ceyx_lcms_lib_first_name}"
+                                 "${_ceyx_lcms_vendored}")
+                endif()
+                execute_process(COMMAND install_name_tool -id "@rpath/liblcms2.2.dylib"
+                                        "${_ceyx_lcms_vendored}"
+                                RESULT_VARIABLE _ceyx_lcms_id_rc)
+                execute_process(COMMAND codesign --force --sign -
+                                        "${_ceyx_lcms_vendored}"
+                                RESULT_VARIABLE _ceyx_lcms_sign_rc)
+                if(NOT _ceyx_lcms_id_rc EQUAL 0 OR NOT _ceyx_lcms_sign_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "[ceyx] failed to vendor liblcms2.2.dylib (install_name_tool "
+                        "rc=${_ceyx_lcms_id_rc}, codesign rc=${_ceyx_lcms_sign_rc}). "
+                        "Refusing to continue: a partially-vendored copy would ship "
+                        "the same broken-placeholder-ID defect this fix exists to "
+                        "close.")
+                endif()
+                message(STATUS "[ceyx] vendored liblcms2.2.dylib -> ${_ceyx_lcms_vendored} (@rpath/liblcms2.2.dylib)")
+            endif()
+            set(LCMS2_LIBRARIES "${_ceyx_lcms_vendored}" CACHE FILEPATH "" FORCE)
             message(STATUS
                 "[ceyx] LCMS2: seeding arch-verified ${_ceyx_lcms_resolved_dir} "
                 "(target arch(es): ${_ceyx_lcms_want_archs})")
