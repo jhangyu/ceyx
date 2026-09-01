@@ -167,3 +167,11 @@ image_samples/raw_corpus/*
 # clean checkout.
 plugin/windows/Libraries/*.dll
 !plugin/windows/Libraries/.gitkeep
+
+# Placed-at-build/fetch Android native libraries (ruling 2026-08-31, option a,
+# A-T12). Same policy as plugin/windows/Libraries/*.dll above: a committed .so
+# here goes stale relative to the release pin, so the binary is placed by the
+# build/fetch step instead of tracked. .gitkeep IS tracked so the directory
+# survives a clean checkout; see README-jnilibs.md for the fetch policy.
+plugin/android/src/main/jniLibs/*/*.so
+!plugin/android/src/main/jniLibs/*/.gitkeep
