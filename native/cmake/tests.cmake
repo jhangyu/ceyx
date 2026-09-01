@@ -739,15 +739,97 @@ if(DNG_ENABLE_GENERIC_RAW)
         # this product's critical path: DNG files never reach LibRaw at all —
         # the router delegates them to the DNG SDK entry
         # (src/pipeline/raw_gpu_pipeline.cpp:561-566).
+        # JPEG-WIRING-X86_64 (2026-09-01): on native (non-cross) macOS, this
+        # whole `if(DNG_CROSS_BUILD OR WIN32)` block is skipped, so
+        # RawSpeed3's bare find_package(JPEG) runs UNSHIMMED and resolves via
+        # CMake's own builtin FindJPEG.cmake — which, on this host, finds
+        # Homebrew's SHARED libjpeg.dylib (not the DNG SDK's carefully
+        # arch-checked STATIC ${JPEG_LIBRARIES} from third_party.cmake's
+        # elseif(APPLE) branch just above, a completely separate consumer).
+        # That is confirmed, not assumed: inspecting the real committed
+        # decoder's load commands (native/scripts/tmp/real-artifact-check/
+        # libdng_decoder_native.dylib.deps.txt) shows @rpath/libjpeg.8.dylib
+        # as a direct dependency, while libheif.1.dylib's own deps
+        # (native/scripts/tmp/ci-t11-parity/libheif.1.dylib.build.otool.txt)
+        # do NOT reference jpeg at all — ruling out "it's transitive via
+        # HEIF" and pointing at RawSpeed3's own unshimmed dynamic resolution,
+        # which propagates through LibRaw's static link into the shared
+        # decoder as an INTERFACE dependency. On the macOS x86_64 CROSS leg,
+        # this same shim block IS active (DNG_CROSS_BUILD=ON) and currently
+        # points RawSpeed3 at the same STATIC vendored archive the DNG SDK
+        # uses — correct and working, but it means x86_64 produces NO dynamic
+        # jpeg dependency at all, so there is nothing for
+        # bundle_macos_dylib_deps.py to vendor and the shipped Intel decoder
+        # ends up missing the jpeg companion arm64 has. This is a genuine
+        # missing-companion capability gap, not a wrong-architecture bug like
+        # the OpenMP/LCMS2 fixes above — verified via this exact configure:
+        # before this override, "Looking for JPEG - found" resolves to the
+        # STATIC archive with no cache entry or resulting library anywhere
+        # named libjpeg*.dylib.
+        #
+        # Fix: on the macOS x86_64 cross leg specifically, if a vendored
+        # DYNAMIC x86_64 jpeg-turbo exists at the arch-suffixed vendored dir
+        # (mirroring the libomp-<arch>/, lcms2-<arch>/ convention above),
+        # point ONLY this shim (RawSpeed3's consumer) at it instead of the
+        # static archive — reproducing the exact edge the arm64 leg produces
+        # by accident. The DNG SDK's own direct static jpeg link
+        # (third_party.cmake, used for its own App-Sandbox-safety reasons)
+        # is completely untouched by this — only RawSpeed3's separate,
+        # already-independent JPEG resolution changes.
+        set(_dng_shim_jpeg_include_dirs "${JPEG_INCLUDE_DIRS}")
+        set(_dng_shim_jpeg_libraries "${JPEG_LIBRARIES}")
+        if(APPLE AND DNG_CROSS_BUILD)
+            set(_dng_jpeg_want_archs "${CMAKE_OSX_ARCHITECTURES}")
+            if(NOT _dng_jpeg_want_archs)
+                set(_dng_jpeg_want_archs "${CMAKE_SYSTEM_PROCESSOR}")
+            endif()
+            foreach(_dng_jpeg_want_arch IN LISTS _dng_jpeg_want_archs)
+                set(_dng_jpeg_dyn_dir "${THIRD_PARTY_DIR}/jpegturbo-${_dng_jpeg_want_arch}")
+                if(EXISTS "${_dng_jpeg_dyn_dir}/include/jpeglib.h")
+                    file(GLOB _dng_jpeg_dyn_lib "${_dng_jpeg_dyn_dir}/lib/libjpeg.*.dylib")
+                    list(LENGTH _dng_jpeg_dyn_lib _dng_jpeg_dyn_lib_count)
+                    if(_dng_jpeg_dyn_lib_count GREATER 0)
+                        list(GET _dng_jpeg_dyn_lib 0 _dng_jpeg_dyn_lib_first)
+                        execute_process(COMMAND lipo -archs "${_dng_jpeg_dyn_lib_first}"
+                                        OUTPUT_VARIABLE _dng_jpeg_dyn_have
+                                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                                        ERROR_QUIET RESULT_VARIABLE _dng_jpeg_dyn_rc)
+                        if(_dng_jpeg_dyn_rc EQUAL 0
+                           AND "${_dng_jpeg_dyn_have}" MATCHES "(^| )${_dng_jpeg_want_arch}( |$)")
+                            set(_dng_shim_jpeg_include_dirs "${_dng_jpeg_dyn_dir}/include")
+                            set(_dng_shim_jpeg_libraries "${_dng_jpeg_dyn_lib_first}")
+                            message(STATUS
+                                "[ceyx] RawSpeed3 JPEG: using arch-verified "
+                                "DYNAMIC ${_dng_jpeg_dyn_lib_first} from "
+                                "${_dng_jpeg_dyn_dir} (companion parity with "
+                                "the arm64 leg's own incidental dynamic jpeg "
+                                "dependency); DNG SDK's own static jpeg link "
+                                "is unaffected.")
+                        else()
+                            message(STATUS
+                                "[ceyx] ${_dng_jpeg_dyn_dir} has jpeglib.h but "
+                                "no matching-arch dylib (lipo -archs => "
+                                "'${_dng_jpeg_dyn_have}', wanted "
+                                "'${_dng_jpeg_want_arch}'); RawSpeed3 stays on "
+                                "the static vendored jpeg-turbo (no capability "
+                                "regression, just no jpeg companion in the "
+                                "release asset for this leg).")
+                        endif()
+                    endif()
+                endif()
+            endforeach()
+        endif()
         file(WRITE ${_dng_jpeg_shim_dir}/FindJPEG.cmake
 "# Generated by cmake/tests.cmake for hosts with no system libjpeg (NDK
 # cross builds and Windows); resolves JPEG to the
-# vendored libjpeg-turbo built by cmake/third_party.cmake in this build tree.
+# vendored libjpeg-turbo built by cmake/third_party.cmake in this build tree
+# (or, on the macOS x86_64 cross leg when one is vendored, to a DYNAMIC
+# arch-matched jpeg-turbo -- see JPEG-WIRING-X86_64 above).
 set(JPEG_FOUND TRUE)
-set(JPEG_INCLUDE_DIRS \"${JPEG_INCLUDE_DIRS}\")
+set(JPEG_INCLUDE_DIRS \"${_dng_shim_jpeg_include_dirs}\")
 list(GET JPEG_INCLUDE_DIRS 0 JPEG_INCLUDE_DIR)
-set(JPEG_LIBRARIES \"${JPEG_LIBRARIES}\")
-set(JPEG_LIBRARY \"${JPEG_LIBRARIES}\")
+set(JPEG_LIBRARIES \"${_dng_shim_jpeg_libraries}\")
+set(JPEG_LIBRARY \"${_dng_shim_jpeg_libraries}\")
 set(JPEG_VERSION 62)
 set(JPEG_VERSION_STRING \"62\")
 ")
