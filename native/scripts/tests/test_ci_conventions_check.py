@@ -274,3 +274,34 @@ def test_c9_ignores_unrelated_40_hex_tokens(tmp_path):
         "          ZLIB_SHA=\"9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23\"\n",
     )
     assert cc.check_c9_no_hardcoded_vcpkg_baseline(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# C10 (A-T12 option a, ruling 2026-08-31): .gitignore excludes
+# plugin/android/src/main/jniLibs/*/*.so, so the placed-at-build/fetch policy
+# can't be silently reverted. Checks the repo-root .gitignore, not a
+# workflow -- workflows_dir is accepted but unused, monkeypatch
+# cc._GITIGNORE_PATH to point at a fixture instead.
+# ---------------------------------------------------------------------------
+
+def test_c10_compliant_fixture_passes(tmp_path, monkeypatch):
+    gi = _write(tmp_path, ".gitignore",
+                "plugin/android/src/main/jniLibs/*/*.so\n"
+                "!plugin/android/src/main/jniLibs/*/.gitkeep\n")
+    monkeypatch.setattr(cc, "_GITIGNORE_PATH", gi)
+    assert cc.check_c10_android_jnilibs_so_gitignored(tmp_path) == []
+
+
+def test_c10_violation_fixture_fails(tmp_path, monkeypatch):
+    """Injected drift: .gitignore missing the exclusion -- must be caught red
+    before it is fixed."""
+    gi = _write(tmp_path, ".gitignore", "*.log\n")
+    monkeypatch.setattr(cc, "_GITIGNORE_PATH", gi)
+    violations = cc.check_c10_android_jnilibs_so_gitignored(tmp_path)
+    assert any("C10" in v for v in violations), violations
+
+
+def test_c10_missing_gitignore_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "_GITIGNORE_PATH", tmp_path / "does-not-exist")
+    violations = cc.check_c10_android_jnilibs_so_gitignored(tmp_path)
+    assert any("C10" in v for v in violations), violations

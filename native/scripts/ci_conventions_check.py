@@ -7,9 +7,10 @@ any CI workflow. It runs by hand, from each task's own acceptance criteria and
 from CI-T10's sign-off (which must record that it stays unwired). Do not add
 a workflow step that invokes this script.
 
-Implements rules C1, C2, C3, C4, C5, C6, C8 from CI-T2 (C7 -- "android_build.yml
+Implements rules C1, C2, C3, C4, C5, C6, C8, C9 from CI-T2 (C7 -- "android_build.yml
 contains an emulator job" -- was REMOVED per the 2026-08-31 compile-only
-ruling and is not implemented here).
+ruling and is not implemented here). C10 (A-T12 option a) guards the
+plugin/android jniLibs .gitignore exclusion.
 
 Every rule has a paired negative-control fixture proving it actually detects
 a violation (native/scripts/tests/test_ci_conventions_check.py, R8): a rule
@@ -265,6 +266,32 @@ def check_c8_ledger_sync(workflows_dir):
     return [f"C8: {d}" for d in disagreements]
 
 
+_GITIGNORE_PATH = REPO_ROOT / ".gitignore"
+
+
+def check_c10_android_jnilibs_so_gitignored(workflows_dir):
+    """.gitignore excludes plugin/android/src/main/jniLibs/*/*.so.
+
+    Ruling 2026-08-31, A-T12 option (a): the Android jniLibs .so is
+    placed-at-build/fetch, never committed (same policy as
+    plugin/windows/Libraries/*.dll). This rule guards against someone
+    silently reverting the .gitignore exclusion and re-committing a
+    trust-on-first-use binary. `workflows_dir` is unused -- this rule checks
+    the repo-root .gitignore, not a workflow file -- but is accepted for a
+    uniform RULES call signature.
+    """
+    if not _GITIGNORE_PATH.exists():
+        return ["C10: .gitignore is missing"]
+    text = _GITIGNORE_PATH.read_text()
+    if "plugin/android/src/main/jniLibs/*/*.so" not in text:
+        return [
+            "C10: .gitignore does not exclude plugin/android/src/main/jniLibs/*/*.so "
+            "(ruling 2026-08-31 option a, A-T12) -- the Android jniLibs .so must stay "
+            "placed-at-build/fetch, not committed"
+        ]
+    return []
+
+
 RULES = [
     check_c1_roles,
     check_c2_naming,
@@ -274,6 +301,7 @@ RULES = [
     check_c6_required_asset_set,
     check_c8_ledger_sync,
     check_c9_no_hardcoded_vcpkg_baseline,
+    check_c10_android_jnilibs_so_gitignored,
 ]
 
 
