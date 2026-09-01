@@ -97,6 +97,21 @@ def _substitute_version(value: str, version: str) -> str:
     return value.replace("{version}", version)
 
 
+def source_dirname(block: dict[str, Any], component: str, version: str) -> str:
+    """The directory name a tarball extracts to, under ``stage``.
+
+    Defaults to the ``<component>-<version>`` convention every component in
+    this manifest followed until aom's android tarball, whose top-level
+    directory is ``libaom-<version>``. A manifest may declare the real name
+    with ``src_dirname``; it is DECLARED data rather than a code special case
+    so the fact stays next to the URL it belongs to, and so the mismatch
+    surfaces as an explicit manifest key rather than as
+    "did not extract to ..." three steps later.
+    """
+    raw = block.get("src_dirname") or f"{component}-{{version}}"
+    return _substitute_version(str(raw), version)
+
+
 def acquire(
     loaded: dict[str, Any],
     component: str,
@@ -137,7 +152,7 @@ def acquire(
         url = _substitute_version(str(block["url"]), version)
         sha256 = str(block["sha256"])
         tarball = stage / f"{component}-{version}.tar.gz"
-        src_dir = stage / f"{component}-{version}"
+        src_dir = stage / source_dirname(block, component, version)
         if tarball.exists():
             # Re-verify rather than trusting a cached file: a truncated or
             # tampered leftover from an interrupted earlier run is exactly

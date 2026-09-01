@@ -94,6 +94,27 @@ path_keys = ["CMAKE_INSTALL_PREFIX"]
   repo   = "https://github.com/ultravideo/kvazaar.git"
   tag    = "v{version}"
 
+  [component.kvazaar.source.android]
+  # A-T4. Same class of override as source.windows above: the
+  # registry-vs-self-built decision is unchanged (kvazaar is self-built on
+  # every platform), only the ACQUISITION MECHANISM differs -- hence
+  # override_only.
+  #
+  # HONEST SCOPE OF THE REASON: the file the release tarball omits
+  # (src/threadwrapper/src/pthread.cpp) is added to the kvazaar target only
+  # when WIN32 is true, which it is not for an NDK cross-compile, so the
+  # tarball would in all likelihood build here too. The clone is used anyway
+  # on the plan's explicit instruction (plan-android-codec-full-green.md §3:
+  # "Android must inherit the clone-based acquisition, not the tarball"): the
+  # tagged tree is a superset of the tarball, nothing is lost, and the two
+  # cross-built legs (windows, android) then share one acquisition path
+  # rather than differing in a way no assertion would catch.
+  override_only = true
+  kind   = "git"
+  reason = "acquisition parity with source.windows for the second cross-built leg: the v2.3.1 release tarball omits src/threadwrapper/src/pthread.cpp (load-bearing only under WIN32, so not a blocker here) and the tagged git tree is a superset of it; plan-android-codec-full-green.md §3 mandates the clone for android"
+  repo   = "https://github.com/ultravideo/kvazaar.git"
+  tag    = "v{version}"
+
   [component.kvazaar.cmake.base]
   CMAKE_BUILD_TYPE                = "Release"
   CMAKE_INSTALL_PREFIX            = "{dist}"
@@ -114,6 +135,25 @@ path_keys = ["CMAKE_INSTALL_PREFIX"]
 
   [component.kvazaar.cmake.linux]
   CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+
+  [component.kvazaar.cmake.android]
+  # A-T4. kvazaar is linked STATIC into the shared libheif.so, so PIC is
+  # mandatory rather than stylistic: without it the aarch64 link fails with a
+  # relocation error naming LIBHEIF, not the archive -- the error points at
+  # the wrong file, which is why it is pinned here instead of being left to
+  # be rediscovered.
+  #
+  # ENABLE_PLUGIN_LOADING=OFF on libheif (cmake.base) is what forces static:
+  # a dlopen-ed plugin directory does not survive APK packaging.
+  #
+  # The toolchain trio mirrors [component.libwebp.cmake.android] verbatim;
+  # "{ndk}" comes from build_deps.py's --android-ndk and ANDROID_ABI /
+  # ANDROID_PLATFORM from arch_map.toml [arm64-v8a], so this dist cannot
+  # drift from native/CMakePresets.json's "android-vulkan" API level.
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+  CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
+  ANDROID_ABI          = "{arch.android_abi}"
+  ANDROID_PLATFORM     = "{arch.android_platform}"
 
   [component.kvazaar.cmake.windows]
   _generator                   = "Ninja"
@@ -183,6 +223,28 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   url    = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
   sha256 = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
 
+  [component.libde265.source.android]
+  # A-T4, same shape and same reason class as [component.libwebp.source.android]:
+  # the registry route does not exist on this platform (no android triplet in
+  # native/vcpkg/, vcpkg is never invoked on the android leg), so libde265 is
+  # built from source here. NOT `override_only` -- this genuinely changes the
+  # registry-vs-self-built decision for android, so the reason carries an A1.2
+  # taxonomy keyword.
+  #
+  # The url/sha256 are byte-identical to the historical_* pair above (the exact
+  # bytes the pre-D5 source build used, and the same upstream 1.1.1 release the
+  # overlay port pins by SHA-512): promoted from history back into a live
+  # instruction for this platform only, never re-derived, so the android dist is
+  # provably the same upstream release as the desktop one.
+  #
+  # LGPL-3 note: this stays a SHARED library on android too (cmake.base's
+  # BUILD_SHARED_LIBS=ON), which is a §4(d)(1) obligation, not a preference --
+  # see the dist's PROVENANCE.md.
+  kind   = "tarball"
+  reason = "no registry acquisition path exists for android in this repo: the CEYX overlay port native/vcpkg/ports/libde265 supplies macOS/Linux through vcpkg, but native/vcpkg/ declares no android triplet and vcpkg is never invoked on the android leg, so it cannot supply this platform; built from the identical upstream 1.1.1 release tarball instead"
+  url    = "https://github.com/strukturag/libde265/releases/download/v{version}/libde265-{version}.tar.gz"
+  sha256 = "fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219"
+
   [component.libde265.cmake.base]
   CMAKE_BUILD_TYPE                       = "Release"
   CMAKE_INSTALL_PREFIX                   = "{dist}"
@@ -205,6 +267,18 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
 
   [component.libde265.cmake.linux]
   CMAKE_INSTALL_NAME_DIR = "@rpath"
+
+  [component.libde265.cmake.android]
+  # A-T4. No CMAKE_INSTALL_NAME_DIR here: "@rpath" is a Mach-O install-name
+  # concept, and Android's loader has no rpath equivalent inside an APK -- the
+  # loader resolves a DT_NEEDED SONAME against lib/<abi>/ of the archive. What
+  # matters instead is that the SONAME stays the plain "libde265.so.0"
+  # spelling with no absolute host path baked in, which deps/heif.py asserts
+  # with the NDK's llvm-readelf after the install (a set value and the
+  # artefact carrying it are different facts).
+  CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
+  ANDROID_ABI          = "{arch.android_abi}"
+  ANDROID_PLATFORM     = "{arch.android_platform}"
 
   [component.libde265.cmake.windows]
   _generator                   = "Ninja"
@@ -268,6 +342,36 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   historical_url    = "https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz"
   historical_sha256 = "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
 
+  [component.aom.source.android]
+  # A-T4. Same reason class as [component.libde265.source.android]: vcpkg is
+  # never invoked on the android leg, so the registry pin above cannot supply
+  # this platform and aom is built from its upstream release tarball here.
+  #
+  # VERSION: 3.15.0 -- the component-level pin, NOT the 3.12.1 recorded in
+  # historical_*. The plan text was written before D5 leg 3 bumped this
+  # component, and the schema has exactly one `version` per component
+  # (execute.component_version drives both the URL substitution and the
+  # extracted directory name), so shipping 3.12.1 on android would require a
+  # per-platform version mechanism that does not exist and would put the
+  # android AV1 codec on a different release from every other platform. One
+  # pin, four platforms.
+  #
+  # SHA-256 PROVENANCE: no upstream-published checksum exists for this asset
+  # (the same gap source.default's historical_sha256 had). The value below was
+  # obtained by downloading this exact URL on 2026-09-01 and hashing the bytes
+  # (`curl -sSL ... | shasum -a 256`), and every later fetch is verified
+  # against it -- trust-on-first-use, recorded as such in the dist's
+  # PROVENANCE.md rather than presented as an upstream fact.
+  kind        = "tarball"
+  reason      = "no registry acquisition path exists for android in this repo: native/vcpkg/ declares no android triplet and vcpkg is never invoked on the android leg, so the `overrides` pin that supplies aom 3.15.0 on macOS/Linux/Windows cannot supply it here; built from the upstream 3.15.0 release tarball at the same version instead"
+  url         = "https://storage.googleapis.com/aom-releases/libaom-{version}.tar.gz"
+  sha256      = "ea08c38ecc078bc85bb1b691020e52b06250f1a81fe7ca5b624629225081af96"
+  # The archive's top-level directory is "libaom-<version>", which does not
+  # match the "<component>-<version>" convention every other component here
+  # follows. Declared rather than special-cased in code (execute.acquire
+  # reads this key when present).
+  src_dirname = "libaom-{version}"
+
   [component.aom.cmake.base]
   CMAKE_BUILD_TYPE                       = "Release"
   CMAKE_INSTALL_PREFIX                   = "{dist}"
@@ -304,6 +408,23 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   [component.aom.cmake.linux]
   CMAKE_POSITION_INDEPENDENT_CODE = "ON"
   # No AOM_TARGET_CPU overlay on Linux -- see the note above (K16).
+
+  [component.aom.cmake.android]
+  # A-T4. PIC is mandatory (static archive linked into the shared
+  # libheif.so; without it the link fails naming libheif, not this archive).
+  #
+  # No AOM_TARGET_CPU override, for the SAME reason Linux has none (K16): the
+  # NDK toolchain file sets CMAKE_SYSTEM_PROCESSOR=aarch64 and aom normalises
+  # that spelling internally through its own branch, so an explicit override
+  # would not match aom's later string comparisons. This is a case where the
+  # right value is "let aom detect", and the check that it actually detected
+  # arm64 (rather than falling back to a generic C build -- a silent
+  # performance loss, not a failure) is a configure-log read recorded in the
+  # dist's PROVENANCE.md, not a flag.
+  CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+  CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
+  ANDROID_ABI          = "{arch.android_abi}"
+  ANDROID_PLATFORM     = "{arch.android_platform}"
 
   [component.aom.cmake.windows]
   _generator                   = "Ninja"
@@ -400,6 +521,36 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
 
   [component.libheif.cmake.linux]
   CMAKE_INSTALL_NAME_DIR = "@rpath"
+  LIBDE265_LIBRARY = "{dist}/lib/libde265.so"
+  KVAZAAR_LIBRARY  = "{dist}/lib/libkvazaar.a"
+  AOM_LIBRARY      = "{dist}/lib/libaom.a"
+
+  [component.libheif.cmake.android]
+  # A-T4, D1 option 1 (full parity) + D2 (packaging 4a). Every capability flag
+  # this dist needs is already ON in cmake.base -- WITH_LIBDE265, WITH_KVAZAAR,
+  # WITH_AOM_DECODER, WITH_AOM_ENCODER -- and every excluded one is already OFF
+  # there, including WITH_X265 (GPL-2.0; its ABSENCE is asserted against the
+  # built artefact's symbol table, not merely passed as a flag). This overlay
+  # therefore adds only the cross-compile trio and the three artefact paths.
+  #
+  # No CMAKE_INSTALL_NAME_DIR: Mach-O concept, meaningless on ELF/Android.
+  # No CMAKE_IGNORE_PREFIX_PATH: the Homebrew trap K20 guards against is
+  # macOS-specific, and the NDK toolchain file already confines find_* to the
+  # sysroot plus CMAKE_PREFIX_PATH={dist}.
+  #
+  # LIBDE265_LIBRARY points at the UNVERSIONED "libde265.so" spelling: libheif's
+  # FindLIBDE265 does a find_library() against a file on disk, so libde265 must
+  # be installed BEFORE libheif configures (build order is load-bearing, not
+  # stylistic -- deps/heif.py enforces it). libheif then records the SONAME the
+  # file carries (libde265.so.0), which is what ends up in DT_NEEDED.
+  #
+  # libheif's Findkvazaar / FindAOM probes are NON-FATAL: a configure with
+  # missing inputs succeeds and the capability silently disappears. That is why
+  # deps/heif.py checks these input files exist on disk before configuring AND
+  # checks the codec symbols in the output afterwards.
+  CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
+  ANDROID_ABI          = "{arch.android_abi}"
+  ANDROID_PLATFORM     = "{arch.android_platform}"
   LIBDE265_LIBRARY = "{dist}/lib/libde265.so"
   KVAZAAR_LIBRARY  = "{dist}/lib/libkvazaar.a"
   AOM_LIBRARY      = "{dist}/lib/libaom.a"
@@ -507,6 +658,25 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   # no `source.windows` block is fabricated here (red line: do not invent a
   # build step that does not exist).
 
+  [component.libwebp.source.android]
+  # A-T2. Android is the one platform where the registry route does not
+  # exist: this repo never invokes vcpkg on the android leg (no android
+  # triplet in native/vcpkg/, no NDK-aware toolchain wiring there), so the
+  # android dist is built from the SAME upstream 1.6.0 release tarball the
+  # registry resolves to. The url/sha256 below are byte-identical to the
+  # historical_* pair recorded in source.default -- promoted from history
+  # back into an instruction for this platform only, NOT re-derived, so the
+  # android dist is provably the same upstream release as the desktop one.
+  #
+  # NOT `override_only`: this genuinely changes the registry-vs-self-built
+  # decision for android (unlike kvazaar's windows block, which only swaps
+  # tarball->git), so the reason carries an A1.2 taxonomy keyword and is
+  # meant to be re-read if vcpkg ever grows an android leg here.
+  kind   = "tarball"
+  reason = "no registry acquisition path exists for android in this repo: native/vcpkg/ declares no android triplet and vcpkg is never invoked on the android leg, so the vcpkg `overrides` pin that supplies libwebp on macOS/Linux cannot supply it here; built from the identical upstream 1.6.0 release tarball instead"
+  url    = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-{version}.tar.gz"
+  sha256 = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+
   [component.libwebp.cmake.base]
   # Transcribed from fetch_libwebp_dist.sh:90-104. CMAKE_POSITION_INDEPENDENT_CODE
   # is unconditional here (unlike kvazaar/aom's F2 Unix-only placement) because
@@ -550,6 +720,16 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
   ANDROID_ABI          = "{arch.android_abi}"
   ANDROID_PLATFORM     = "{arch.android_platform}"
+  # A-T2, plan Task 2 constraint list: WEBPMUX is the one tool flag turned ON
+  # for android. The committed desktop dists show libwebpmux is produced even
+  # with the base's OFF (native/third_party/libwebp-dist-windows/lib/
+  # libwebpmux.lib exists, built with the same OFF), so this override is belt
+  # AND braces: EXIF/XMP/ICC embedding needs the mux writer, and
+  # [component.libwebp.outputs] marks libwebpmux required, so a silently
+  # missing archive fails the build rather than the link three steps later.
+  # Every other WEBP_BUILD_* tool flag stays OFF (base): tools are useless in
+  # a cross dist and some of them do not cross-compile.
+  WEBP_BUILD_WEBPMUX   = "ON"
 
   [component.libwebp.outputs]
   # WEBP_BUILD_WEBPMUX=OFF disables only the cwebp/dwebp/etc CLI tools; the
@@ -626,6 +806,21 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   [component.libjxl.cmake.macos]
   CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
   CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
+
+  [component.libjxl.cmake.android]
+  # Android is cross-compile-only (render.py's _PLATFORMS comment). Mirrors
+  # [component.libwebp.cmake.android]'s toolchain trio verbatim -- "{ndk}"
+  # comes from build_deps.py's --android-ndk (never ANDROID_NDK_HOME inside
+  # render(), which is pure), and ANDROID_ABI/ANDROID_PLATFORM come from
+  # arch_map.toml [arm64-v8a] so this dist and native/CMakePresets.json's
+  # "android-vulkan" preset cannot drift apart on API level. Kept in the
+  # android overlay, not cmake.base, for the same A1.4 reason documented on
+  # libwebp's android overlay above: "{arch.android_abi}" only exists under
+  # [arm64-v8a], and putting it in base would render an unresolvable token
+  # for macOS/Linux/Windows builds of this same component.
+  CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
+  ANDROID_ABI          = "{arch.android_abi}"
+  ANDROID_PLATFORM     = "{arch.android_platform}"
 
   [component.libjxl.outputs]
   # libjxl_cms.a is REQUIRED (see JPEGXL_ENABLE_SKCMS comment above), not

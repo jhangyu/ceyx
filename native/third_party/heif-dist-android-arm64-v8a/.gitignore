@@ -1,0 +1,6 @@
+# Belt-and-braces for a COMMITTED dist directory: the carrier's stage
+# directory defaults to `<dist>/.stage` and holds downloaded source tarballs.
+# deps/heif.py deletes it on a successful assemble, but a run that fails
+# midway leaves it behind, and .gitignore's un-ignore rule for this directory
+# would otherwise offer those archives up for commit.
+.stage/

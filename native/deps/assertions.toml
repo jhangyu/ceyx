@@ -18,7 +18,7 @@ id        = "A-SRC-HASH"
 tests     = "each downloaded source archive's SHA-256 matches the manifest pin"
 method    = "sha256"
 measures  = "hashlib.sha256(archive_bytes).hexdigest() vs component.<name>.source.<platform>.sha256"
-valid_on  = ["macos", "linux", "windows"]
+valid_on  = ["macos", "linux", "windows", "android"]
 why_valid = "content hash is a platform-independent fact about the downloaded bytes"
 red_state = "flip one hex digit of a manifest sha256 pin; fetch.py must refuse to accept the download"
 
@@ -63,7 +63,11 @@ id        = "A-PUBAPI"
 tests     = "libheif's genuinely-public API symbols are present in the shipped binary's symbol table"
 method    = "symbol-table"
 measures  = "presence of heif_decode_image and heif_context_get_encoder_for_format in the export/dynamic symbol table"
-valid_on  = ["macos", "linux", "windows"]
+# android added by A-T4: deps/heif.py runs this check against the NDK-built
+# libheif.so with the NDK's own llvm-nm. It is a STATIC TRIPWIRE there, not
+# capability evidence -- Android's capability probe is NOT RUNNABLE IN CI
+# (foreign-arch artefact, no emulator; accepted coverage gap, plan D4).
+valid_on  = ["macos", "linux", "windows", "android"]
 why_valid = "these are LIBHEIF_API-marked in heif_export.h -- libheif's own declared public API, unlike the static-archive symbols layer 7 misused"
 red_state = "strip the shared library's dynamic symbol table; check must fail to find either symbol"
 
@@ -72,7 +76,11 @@ id        = "A-NO-GPL"
 tests     = "no GPL-licensed codec symbol leaked into the artefact"
 method    = "symbol-table"
 measures  = "absence of any x265/x264 symbol in the artefact's symbol table"
-valid_on  = ["macos", "linux", "windows"]
+# android added by A-T4. On android the check reads BOTH tables (.dynsym and
+# .symtab): WITH_REDUCED_VISIBILITY=ON keeps merged static-archive symbols out
+# of .dynsym, so a dynamic-only dump would let a GPL symbol hide in the table
+# nobody read -- the exact contamination this assertion exists to catch.
+valid_on  = ["macos", "linux", "windows", "android"]
 why_valid = "checking a negative by absence is legitimate: a symbol absent from a permissive-visibility table (ELF/Mach-O) is genuinely absent; on PE the check is weaker but never wrong, and is backed by A-DEPS"
 red_state = "link a stub object exporting x265_encoder_open into the artefact; check must fail"
 
@@ -81,7 +89,10 @@ id        = "A-DEPS"
 tests     = "libheif's import/load-command table names the libde265 runtime"
 method    = "dependents"
 measures  = "presence of the libde265 shared-library entry in libheif's import table / load commands"
-valid_on  = ["macos", "linux", "windows"]
+# android added by A-T4: llvm-readelf -d on libheif.so, DT_NEEDED searched in a
+# captured file. Doubles as the LGPL-3 §4(d)(1) evidence for the APK, where the
+# replaceable-library obligation is what makes the shared split mandatory.
+valid_on  = ["macos", "linux", "windows", "android"]
 why_valid = "a real fact about the binary; also serves as LGPL dynamic-linkage compliance evidence"
 red_state = "statically link libde265 into libheif; check must fail to find a separate libde265 runtime entry"
 
@@ -90,7 +101,10 @@ id        = "A-LINK"
 tests     = "declared linkage matches reality per component"
 method    = "linkage"
 measures  = "libheif and libde265 ship as shared objects; kvazaar and aom ship as static archives with no corresponding shared object"
-valid_on  = ["macos", "linux", "windows"]
+# android added by A-T4: same compliance asymmetry, higher stakes -- an APK
+# distributes the LGPL-3 components to end users, so the shared split is the
+# §4(d)(1) route the dist's PROVENANCE.md records.
+valid_on  = ["macos", "linux", "windows", "android"]
 why_valid = "directly guards the manifest's compliance asymmetry (spec §4.4): LGPL components must be dynamically linked"
 red_state = "flip libde265's manifest linkage to static; check must fail against the dist inventory"
 
@@ -117,9 +131,46 @@ id        = "A-LICENCE"
 tests     = "a licence file was vendored for every component, PATENTS* included for aom"
 method    = "file-presence"
 measures  = "presence of a licence file per component directory, plus PATENTS* for aom"
-valid_on  = ["macos", "linux", "windows"]
+valid_on  = ["macos", "linux", "windows", "android"]
 why_valid = "file presence is platform-independent"
 red_state = "delete aom's PATENTS file from the dist; check must fail"
+
+[[assertion]]
+id        = "A-ANDROID-SONAME"
+tests     = "each shared object in the android HEIF dist records an UNVERSIONED, path-free SONAME"
+method    = "dependents"
+measures  = "the SONAME line of `llvm-readelf -d` (captured to a variable, then searched) equals exactly [libheif.so] / [libde265.so]"
+valid_on  = ["android"]
+why_valid = "Android's loader resolves DT_NEEDED against lib/<abi>/ inside the APK by exact file name, and packaging drops any file whose name does not end in '.so'. A versioned SONAME (libheif.so.1 -- the desktop spelling, and what the plan's prose originally called for) therefore builds, links and installs perfectly on the build machine and fails only on a device, which is the one place this project has no instrument. The ELF's own recorded name is the only witness available at build time."
+red_state = "unset CMAKE_PLATFORM_NO_VERSIONED_SONAME so the install produces libde265.so.0; deps/heif.py must fail naming the versioned spelling. Demonstrated in tests/test_heif.py::test_android_soname_must_be_unversioned."
+
+[[assertion]]
+id        = "A-ANDROID-PAGE-ALIGN"
+tests     = "the LOAD-segment alignment of every shipped android .so is recorded with the dist"
+method    = "file-presence"
+measures  = "share/provenance/android_so_alignment.txt exists and carries one 'LOAD alignments:' line per shipped .so, read from `llvm-readelf -l`"
+expected  = "measure"
+valid_on  = ["android"]
+why_valid = "this is deliberately a MEASUREMENT, not a threshold: nothing in this repo handled 16 KB page alignment before this task (F5), and the handoff note claiming a particular NDK r27c default was never verified. Writing a gate against a remembered value would be asserting from memory; the value is recorded next to the binaries it describes so the later gate quotes a measurement instead."
+red_state = "delete the report or ship a .so it does not cover; the check must fail. The DERIVED gate (p_align < 16384) is deliberately NOT asserted here until the measurement exists -- see the dist's PROVENANCE.md."
+
+[[assertion]]
+id        = "A-ANDROID-SYMS"
+tests     = "each android dist archive contains the symbol standing for the capability it is shipped for"
+method    = "symbol-table"
+measures  = "presence of WebPEncodeRGBA/WebPDecodeRGBA (libwebp.a), SharpYuvConvert (libsharpyuv.a), WebPMuxCreateInternal (libwebpmux.a) and WebPDemuxInternal (libwebpdemux.a) in an llvm-nm dump CAPTURED TO A FILE and searched afterwards"
+valid_on  = ["android"]
+why_valid = "a static archive's symbol table is the artefact's own account of what was compiled into it; unlike a shared library's EXPORT table (which is empty by default on Windows -- 2026-08-30), an archive's nm output is not filtered by visibility, so absence here means the code is genuinely not there. The symbols are chosen per capability (encode, sharp-YUV conversion, mux writing, demux reading), never merely 'the file is non-empty'."
+red_state = "build libwebp with WEBP_BUILD_WEBPMUX=OFF and delete lib/libwebpmux.a; deps/android_dist.py:assert_dist must exit non-zero naming the missing archive. Demonstrated in native/scripts/deps/tests/test_android_dist.py (missing-archive and missing-symbol cases both asserted red)."
+
+[[assertion]]
+id        = "A-ANDROID-ARCH"
+tests     = "the android dist's objects are AArch64, not the host's architecture"
+method    = "arch"
+measures  = "llvm-readelf -h lib/libwebp.a captured to a file, searched for 'AArch64'"
+valid_on  = ["android"]
+why_valid = "a cross-compile whose toolchain file was silently ignored produces a complete, plausible, GREEN dist full of host objects; the ELF machine field is the only witness that distinguishes it. The NDK's own llvm-readelf is used, never the host's binutils, which report on the wrong object format."
+red_state = "point the build at the host compiler instead of the NDK toolchain file; the check must fail on the machine field (the x86-64 header case is asserted in test_android_dist.py)."
 
 [[assertion]]
 id        = "A-KVZ-SIMD"

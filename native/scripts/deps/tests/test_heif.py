@@ -423,7 +423,13 @@ def test_licence_vendoring_succeeds_and_writes_every_component(tmp_path, monkeyp
 def test_windows_is_rejected_with_a_pointer_to_the_right_script() -> None:
     with pytest.raises(heif.HeifError) as exc:
         heif.build(REAL, "windows", "x86_64", Path("/dist"))
-    assert "build_heif_dist_windows.sh" in str(exc.value)
+    # A-T4: the remediation pointer names the module that OWNS the Windows dist
+    # today. It used to name build_heif_dist_windows.sh, which no longer exists
+    # in the tree (that recipe moved into deps/win_heif_dist.py), so the old
+    # assertion pinned a dead path -- a remediation message naming a file that
+    # is not there is the documented-but-false claim this repo has been bitten
+    # by before, and the fix is the message, not the check.
+    assert "win_heif_dist" in str(exc.value)
 
 
 def test_unknown_stage_is_rejected() -> None:
@@ -497,3 +503,174 @@ def test_kvazaar_configure_argv_is_static_and_pic() -> None:
     # libheif rather than the archive.
     assert "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" in argv
     assert "-DBUILD_SHARED_LIBS=OFF" in argv
+
+
+# ---------------------------------------------------------------------------
+# A-T4: android (NDK cross-compile) leg.
+#
+# Every test below is a mechanical encoding of a failure this leg can produce
+# SILENTLY -- a stamp that cannot see a missing component, a capability lost
+# to a non-fatal cmake probe, a versioned SONAME that only fails on a device.
+# ---------------------------------------------------------------------------
+def _fake_ndk(tmp_path: Path) -> Path:
+    """A directory shaped enough like an NDK for tool/revision resolution."""
+    ndk = tmp_path / "ndk"
+    binaries = ndk / "toolchains" / "llvm" / "prebuilt" / "darwin-x86_64" / "bin"
+    binaries.mkdir(parents=True)
+    for tool in ("llvm-nm", "llvm-readelf"):
+        (binaries / tool).write_text("#!/bin/sh\n", encoding="utf-8")
+    (ndk / "source.properties").write_text(
+        "Pkg.Desc = Android NDK\nPkg.Revision = 27.2.12479018\n", encoding="utf-8"
+    )
+    return ndk
+
+
+def test_android_pin_string_names_every_component(tmp_path: Path) -> None:
+    # Plan Step 4.3, the round's highest-risk defect made mechanical: a stamp
+    # missing a component reports a stale decode-only dist as "already at the
+    # pinned versions" and the encoders silently never appear.
+    stamp = heif.android_pin_string(REAL, "arm64-v8a", str(_fake_ndk(tmp_path)))
+    for token in ("libheif", "libde265", "kvazaar", "aom", "arm64-v8a", "27.2.12479018"):
+        assert token in stamp
+
+
+def test_android_pin_string_quotes_the_android_source_pins_not_the_desktop_ones(
+    tmp_path: Path,
+) -> None:
+    # macOS/Linux take libde265 and aom from vcpkg; android builds them from
+    # tarballs. A stamp carrying the desktop 'vcpkg' token would describe bytes
+    # this dist does not contain.
+    stamp = heif.android_pin_string(REAL, "arm64-v8a", str(_fake_ndk(tmp_path)))
+    assert "vcpkg" not in stamp
+    assert "fd48a927" in stamp  # libde265 1.1.1 tarball
+    assert "git:v2.3.1" in stamp  # kvazaar clone, not tarball
+
+
+def test_android_stamp_without_ndk_revision_is_a_failure(tmp_path: Path) -> None:
+    ndk = _fake_ndk(tmp_path)
+    (ndk / "source.properties").unlink()
+    with pytest.raises(heif.HeifError) as exc:
+        heif.android_pin_string(REAL, "arm64-v8a", str(ndk))
+    assert "source.properties" in str(exc.value)
+
+
+def test_android_build_refuses_to_run_without_an_ndk(tmp_path: Path) -> None:
+    # Falling back to a host toolchain here would produce a dist whose NAME
+    # promises arm64-v8a and whose BYTES are the host's.
+    with pytest.raises(heif.HeifError) as exc:
+        heif.build(REAL, "android", "arm64-v8a", tmp_path, ndk=None)
+    assert "--android-ndk" in str(exc.value)
+
+
+def test_ndk_tool_missing_instrument_is_a_failure_not_a_skip(tmp_path: Path) -> None:
+    with pytest.raises(heif.HeifError) as exc:
+        heif.ndk_tool(str(tmp_path / "not-an-ndk"), "llvm-nm")
+    assert "llvm-nm" in str(exc.value)
+
+
+def test_android_required_symbols_may_live_in_the_full_table(tmp_path: Path) -> None:
+    # WITH_REDUCED_VISIBILITY=ON keeps the merged kvazaar/aom symbols out of
+    # .dynsym. Checking only the dynamic table would measure VISIBILITY and
+    # report a present capability as absent.
+    dynamic = (
+        "0000000000001000 T heif_decode_image\n"
+        "0000000000002000 T heif_context_get_encoder_for_format\n"
+    )
+    full = (
+        dynamic
+        + "0000000000003000 t kvz_api_get\n"
+        + "0000000000004000 t aom_codec_av1_cx\n"
+        + "0000000000005000 t aom_codec_av1_dx\n"
+    )
+    heif.check_symbols(dynamic, "0x1 (NEEDED) [libde265.so]", full_symbols=full)
+    with pytest.raises(heif.HeifError):
+        heif.check_symbols(dynamic, "0x1 (NEEDED) [libde265.so]")
+
+
+def test_android_x265_absence_is_checked_against_the_full_table_too() -> None:
+    # The forbidden check must see EVERY table: a GPL symbol hiding in the one
+    # we did not read is exactly the contamination it exists to catch.
+    dynamic = (
+        "0000000000001000 T heif_decode_image\n"
+        "0000000000002000 T heif_context_get_encoder_for_format\n"
+    )
+    full = (
+        dynamic
+        + "0000000000003000 t kvz_api_get\n"
+        + "0000000000004000 t aom_codec_av1_cx\n"
+        + "0000000000005000 t aom_codec_av1_dx\n"
+        + "0000000000006000 t x265_encoder_open\n"
+    )
+    with pytest.raises(heif.HeifError) as exc:
+        heif.check_symbols(dynamic, "0x1 (NEEDED) [libde265.so]", full_symbols=full)
+    assert "GPL" in str(exc.value)
+
+
+def test_android_soname_must_be_unversioned(tmp_path: Path) -> None:
+    ndk = str(_fake_ndk(tmp_path))
+    library = tmp_path / "libde265.so"
+    library.write_bytes(b"")
+    versioned = _fake_runner({heif.ndk_tool(ndk, "llvm-readelf"): " 0x0e (SONAME) Library soname: [libde265.so.0]\n"})
+    with mock.patch.object(heif, "run", versioned):
+        with pytest.raises(heif.HeifError) as exc:
+            heif._assert_android_soname(library, "libde265.so", ndk)
+    assert "libde265.so.0" in str(exc.value)
+
+    plain = _fake_runner({heif.ndk_tool(ndk, "llvm-readelf"): " 0x0e (SONAME) Library soname: [libde265.so]\n"})
+    with mock.patch.object(heif, "run", plain):
+        heif._assert_android_soname(library, "libde265.so", ndk)
+
+
+def test_android_arch_check_rejects_a_host_arch_object(tmp_path: Path) -> None:
+    ndk = str(_fake_ndk(tmp_path))
+    library = tmp_path / "libheif.so"
+    library.write_bytes(b"")
+    x86 = _fake_runner(
+        {heif.ndk_tool(ndk, "llvm-readelf"): "  Class: ELF64\n  Machine: Advanced Micro Devices X86-64\n"}
+    )
+    with mock.patch.object(heif, "run", x86):
+        with pytest.raises(heif.HeifError) as exc:
+            heif.assert_arch("android", "arm64-v8a", [library], ndk=ndk)
+    assert "AArch64" in str(exc.value)
+
+    aarch64 = _fake_runner(
+        {heif.ndk_tool(ndk, "llvm-readelf"): "  Class: ELF64\n  Machine: AArch64\n"}
+    )
+    with mock.patch.object(heif, "run", aarch64):
+        heif.assert_arch("android", "arm64-v8a", [library], ndk=ndk)
+
+
+def test_android_alignment_is_measured_and_recorded(tmp_path: Path) -> None:
+    # F5/R4: nothing in this repo handled 16 KB pages before. The value is
+    # MEASURED and written next to the binaries it describes, never asserted
+    # from memory.
+    ndk = str(_fake_ndk(tmp_path))
+    library = tmp_path / "libheif.so"
+    library.write_bytes(b"")
+    segments = (
+        "  Type   Offset   VirtAddr   PhysAddr   FileSiz  MemSiz   Flg Align\n"
+        "  LOAD   0x000000 0x00000000 0x00000000 0x001000 0x001000 R   0x4000\n"
+        "  LOAD   0x002000 0x00002000 0x00002000 0x001000 0x001000 R E 0x4000\n"
+    )
+    with mock.patch.object(heif, "run", _fake_runner({heif.ndk_tool(ndk, "llvm-readelf"): segments})):
+        report = heif.measure_android_alignment(tmp_path, [library], ndk)
+    text = report.read_text(encoding="utf-8")
+    assert "libheif.so LOAD alignments: 0x4000 0x4000" in text
+
+
+def test_android_dist_path_is_abi_suffixed() -> None:
+    # publish_release.py parses the ABI spelling out of this directory name.
+    assert heif.default_dist(Path("/n"), "arm64-v8a", "android").name == (
+        "heif-dist-android-arm64-v8a"
+    )
+
+
+def test_aom_android_tarball_extracts_to_libaom_not_aom() -> None:
+    # The archive's top-level directory is "libaom-<version>"; declaring it in
+    # the manifest is what stops "did not extract to ..." three steps later.
+    from deps import execute as execute_mod
+
+    block = execute_mod.resolve_source(REAL, "aom", "android")
+    version = execute_mod.component_version(REAL, "aom")
+    assert execute_mod.source_dirname(block, "aom", version) == f"libaom-{version}"
+    assert execute_mod.source_dirname({}, "kvazaar", "2.3.1") == "kvazaar-2.3.1"

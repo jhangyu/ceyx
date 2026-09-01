@@ -546,19 +546,6 @@ def _run_build(argv: list) -> int:
             # OPTION 1 ruling. Their assertion sets therefore differ in kind --
             # demanding kvz_api_get/aom_codec_av1_cx of the Windows dist would
             # require encoders it intentionally does not contain.
-            if resolved_platform == "android":
-                # A-T1 teaches the CARRIER the android platform; the android
-                # HEIF stack recipe itself is A-T4. Reject explicitly rather
-                # than fall through to the Unix branch below, which would run
-                # a host-toolchain build under an android label.
-                print(
-                    "[build_deps] error: 'heif-stack' has no --platform android "
-                    "implementation yet (plan A-T4 owns it). The android carrier "
-                    "surface (--platform android --arch arm64-v8a --android-ndk) "
-                    "is available for manifest components only.",
-                    file=sys.stderr,
-                )
-                return 1
             if resolved_platform == "windows":
                 from deps import win_heif_dist  # noqa: PLC0415 - lazy, see docstring
 
@@ -598,10 +585,21 @@ def _run_build(argv: list) -> int:
                 )
                 return 1
             if args.dry_run:
-                for name in ("kvazaar", "libheif"):
+                # Which components this stack actually CONFIGURES differs by
+                # platform, so the preview must too: macOS/Linux take libde265
+                # and aom from vcpkg (nothing to render), while android has no
+                # vcpkg leg and builds all four from source. Printing only two
+                # on android would hide exactly the argv a reviewer opens
+                # --dry-run to inspect.
+                previewed = (
+                    ("libde265", "kvazaar", "aom", "libheif")
+                    if resolved_platform == "android"
+                    else ("kvazaar", "libheif")
+                )
+                for name in previewed:
                     print(f"# {name}")
                     for token in render_module.render(
-                        loaded, name, resolved_platform, resolved_arch, dist=str(dist)
+                        loaded, name, resolved_platform, resolved_arch, dist=str(dist), ndk=ndk
                     ):
                         print(token)
                 return 0
@@ -611,6 +609,10 @@ def _run_build(argv: list) -> int:
                 resolved_arch,
                 dist,
                 stage_arg=args.stage,
+                # android is a cross-compile: the NDK root reaches the renderer's
+                # "{ndk}" token AND the llvm-nm/llvm-readelf instruments the
+                # assertions use, always explicitly, never from the environment.
+                ndk=ndk,
             )
 
         if args.component == _JXL_STACK_COMPONENT:
@@ -722,16 +724,44 @@ def _run_build(argv: list) -> int:
                 print(token)
             return 0
 
+        stage = dist / ".stage"
         execute_module.build_component(
             loaded,
             args.component,
             resolved_platform,
             resolved_arch,
             dist,
-            dist / ".stage",
+            stage,
             ndk=ndk,
             jobs=args.jobs,
         )
+        if resolved_platform == "android":
+            # A-T2: an android dist is REDISTRIBUTED (committed under
+            # native/third_party/ and shipped inside the APK), so it is not
+            # finished when cmake --install returns: its licences must be
+            # vendored and its capability claims must be asserted against the
+            # artefacts with the NDK's own instruments. Failure here is a
+            # non-zero exit, so "the build passed" cannot mean "the archives
+            # exist but contain no encoder".
+            from deps import android_dist  # noqa: PLC0415 - lazy, see docstring
+
+            try:
+                copied = android_dist.vendor_licences(loaded, args.component, dist, stage)
+                evidence = android_dist.assert_dist(
+                    args.component, dist, ndk, resolved_arch,
+                    # Build scratch, not the shipped tree: android dists are
+                    # committed, and the captured nm/readelf dumps are
+                    # evidence about the artefact, not part of it.
+                    evidence_dir=stage / "assertions",
+                )
+            except (android_dist.AndroidDistError, android_dist.assertions_mod.AssertionFailed) as exc:
+                print(f"[android-dist] {exc}", file=sys.stderr)
+                return 1
+            print(
+                f"[android-dist] ok: {len(copied)} licence file(s) vendored, "
+                f"assertions green, evidence in {evidence}",
+                file=sys.stderr,
+            )
         return 0
     except (
         execute_module.ExecuteError,
