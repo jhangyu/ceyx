@@ -361,9 +361,24 @@ if(DNG_ENABLE_GENERIC_RAW)
 
     # --- Desktop OpenMP (RAW decode accel round, 2026-08-27) ---------------
     # User ruling: OpenMP ON for desktop (macOS/Linux/Windows), OFF for mobile
-    # (iOS/Android) per the P17 five-platform policy. DNG_CROSS_BUILD is this
-    # project's mobile/cross switch; ANDROID/IOS are belt-and-braces so the
-    # intent survives someone cross-compiling without setting DNG_CROSS_BUILD.
+    # (iOS/Android) per the P17 five-platform policy.
+    #
+    # OMP-CROSS-FIX (2026-09-01): this used to also gate OFF on DNG_CROSS_BUILD,
+    # on the premise that "cross-compiling" implies "cannot build/link OpenMP
+    # for the target arch". That premise is false for this project's ONLY
+    # DNG_CROSS_BUILD=ON desktop leg (macOS x86_64, built on an arm64 runner):
+    # DNG_CROSS_BUILD exists solely to skip Halide's two-stage AOT generator
+    # scheme (the arm64 host cannot EXECUTE x86_64 generator binaries — see
+    # halide_aot.cmake), not because the toolchain cannot compile/link x86_64
+    # code. Apple clang on this host accepts -arch x86_64 for ordinary
+    # compile+link (no execution of target-arch code required to build a
+    # library), so RawSpeed3/LibRaw's OpenMP-guarded loops are exactly as
+    # buildable for the x86_64 leg as for the native arm64 leg, PROVIDED an
+    # x86_64 libomp is available (see the vendored/brew search below — a
+    # missing binary still degrades to OFF via the explicit "no libomp found"
+    # branch, never a silent skip). The true mobile precondition is ANDROID/IOS
+    # (no OpenMP runtime in those NDK/iOS-SDK toolchains at all), which is
+    # exactly what remains here.
     #
     # This unlocks parallelism that already exists in the vendored trees but
     # was compiled out: RawSpeed3's FujiDecompressor `#pragma omp parallel`
@@ -372,7 +387,7 @@ if(DNG_ENABLE_GENERIC_RAW)
     # OpenMP at all -- round-2 patch 09 (2026-08-28) replaced its OpenMP branch
     # with an unconditional std::thread pool on every platform, so the Fuji
     # path stays parallel even on mobile and any OpenMP-less toolchain.
-    if(DNG_CROSS_BUILD OR ANDROID OR IOS)
+    if(ANDROID OR IOS)
         set(CEYX_ENABLE_DESKTOP_OPENMP OFF)
     else()
         set(CEYX_ENABLE_DESKTOP_OPENMP ON)
@@ -391,6 +406,39 @@ if(DNG_ENABLE_GENERIC_RAW)
         # printed path alone yields a false positive and then a silent
         # non-OpenMP build.
         set(_ceyx_libomp_prefix "")
+
+        # OMP-CROSS-FIX (2026-09-01): shared arch-verification helper. Before
+        # this fix, the Homebrew-prefix branches below only checked
+        # `include/omp.h` existence and never verified the *dylib's* arch —
+        # harmless while this block only ran for the native (host-arch) build,
+        # but removing the DNG_CROSS_BUILD gate above exposed it: this host's
+        # Homebrew ships an arm64 libomp only, and the unchecked branch would
+        # have confidently selected it for the x86_64 cross leg, producing an
+        # arch-mismatched link failure at build time (a link error, not a
+        # silent wrong-arch binary — but a late, confusing one instead of an
+        # honest "not found" at configure time). Reuses the same lipo -archs
+        # check the vendored-copy branch already performs.
+        macro(_ceyx_omp_dylib_matches_target_arch _dir _outvar)
+            set(${_outvar} FALSE)
+            if(EXISTS "${_dir}/lib/libomp.dylib")
+                set(_ceyx_helper_want "${CMAKE_OSX_ARCHITECTURES}")
+                if(NOT _ceyx_helper_want)
+                    set(_ceyx_helper_want "${CMAKE_SYSTEM_PROCESSOR}")
+                endif()
+                execute_process(COMMAND lipo -archs "${_dir}/lib/libomp.dylib"
+                                OUTPUT_VARIABLE _ceyx_helper_have
+                                OUTPUT_STRIP_TRAILING_WHITESPACE
+                                ERROR_QUIET RESULT_VARIABLE _ceyx_helper_rc)
+                if(_ceyx_helper_rc EQUAL 0)
+                    set(${_outvar} TRUE)
+                    foreach(_ceyx_helper_w IN LISTS _ceyx_helper_want)
+                        if(NOT "${_ceyx_helper_have}" MATCHES "(^| )${_ceyx_helper_w}( |$)")
+                            set(${_outvar} FALSE)
+                        endif()
+                    endforeach()
+                endif()
+            endif()
+        endmacro()
 
         # Vendored copy first: native/third_party/libomp/ is committed (756 KB)
         # so a blank checkout builds with full OpenMP and no Homebrew
@@ -440,11 +488,63 @@ if(DNG_ENABLE_GENERIC_RAW)
             endif()
         endif()
 
+        # OMP-CROSS-FIX (2026-09-01): arch-suffixed vendored directory, one per
+        # non-default architecture, mirroring the existing heif-dist-<arch> /
+        # libjxl-dist-<arch> convention (fetch_heif_deps.sh, jxl.cmake) used
+        # for the macOS x86_64 cross leg's other companions. Tried only when
+        # the default (host-arch) vendored copy above did not already resolve
+        # a match, so a fat native/third_party/libomp/lib/libomp.dylib always
+        # wins. This directory is not committed by this fix — it is the
+        # landing spot for whatever trustworthy x86_64 libomp binary task
+        # OMP-BINARY-SOURCE (#15) provides with recorded provenance; its
+        # absence is not an error, just a cache miss that falls through to the
+        # Homebrew/brew search below (and finally the explicit "not found"
+        # warning, never a silent skip).
+        if(NOT _ceyx_libomp_prefix)
+            set(_ceyx_want_archs_suffix "${CMAKE_OSX_ARCHITECTURES}")
+            if(NOT _ceyx_want_archs_suffix)
+                set(_ceyx_want_archs_suffix "${CMAKE_SYSTEM_PROCESSOR}")
+            endif()
+            foreach(_want_arch IN LISTS _ceyx_want_archs_suffix)
+                set(_ceyx_arch_omp_dir "${THIRD_PARTY_DIR}/libomp-${_want_arch}")
+                if(NOT _ceyx_libomp_prefix
+                   AND EXISTS "${_ceyx_arch_omp_dir}/include/omp.h"
+                   AND EXISTS "${_ceyx_arch_omp_dir}/lib/libomp.dylib")
+                    execute_process(COMMAND lipo -archs
+                                            "${_ceyx_arch_omp_dir}/lib/libomp.dylib"
+                                    OUTPUT_VARIABLE _ceyx_arch_omp_have
+                                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                                    ERROR_QUIET RESULT_VARIABLE _ceyx_arch_omp_rc)
+                    if(_ceyx_arch_omp_rc EQUAL 0
+                       AND "${_ceyx_arch_omp_have}" MATCHES "(^| )${_want_arch}( |$)")
+                        set(_ceyx_libomp_prefix "${_ceyx_arch_omp_dir}")
+                        message(STATUS
+                            "[ceyx] desktop OpenMP: using arch-vendored libomp "
+                            "(${_ceyx_arch_omp_have}) at ${_ceyx_arch_omp_dir}")
+                    else()
+                        message(STATUS
+                            "[ceyx] ${_ceyx_arch_omp_dir}/lib/libomp.dylib exists "
+                            "but does not report arch '${_want_arch}' "
+                            "(lipo -archs => '${_ceyx_arch_omp_have}', rc="
+                            "${_ceyx_arch_omp_rc}); ignoring it.")
+                    endif()
+                endif()
+            endforeach()
+        endif()
+
         foreach(_candidate IN ITEMS "$ENV{HOMEBREW_PREFIX}/opt/libomp"
                                     "/opt/homebrew/opt/libomp"
                                     "/usr/local/opt/libomp")
             if(NOT _ceyx_libomp_prefix AND EXISTS "${_candidate}/include/omp.h")
-                set(_ceyx_libomp_prefix "${_candidate}")
+                _ceyx_omp_dylib_matches_target_arch("${_candidate}" _ceyx_candidate_arch_ok)
+                if(_ceyx_candidate_arch_ok)
+                    set(_ceyx_libomp_prefix "${_candidate}")
+                else()
+                    message(STATUS
+                        "[ceyx] ${_candidate} has omp.h but its libomp.dylib "
+                        "does not match the target arch; skipping (would be "
+                        "a wrong-arch link failure otherwise).")
+                endif()
             endif()
         endforeach()
         if(NOT _ceyx_libomp_prefix)
@@ -455,7 +555,15 @@ if(DNG_ENABLE_GENERIC_RAW)
                                 OUTPUT_STRIP_TRAILING_WHITESPACE
                                 ERROR_QUIET RESULT_VARIABLE _brew_rc)
                 if(_brew_rc EQUAL 0 AND EXISTS "${_brew_libomp}/include/omp.h")
-                    set(_ceyx_libomp_prefix "${_brew_libomp}")
+                    _ceyx_omp_dylib_matches_target_arch("${_brew_libomp}" _ceyx_brew_arch_ok)
+                    if(_ceyx_brew_arch_ok)
+                        set(_ceyx_libomp_prefix "${_brew_libomp}")
+                    else()
+                        message(STATUS
+                            "[ceyx] brew --prefix libomp (${_brew_libomp}) has "
+                            "omp.h but its libomp.dylib does not match the "
+                            "target arch; skipping.")
+                    endif()
                 endif()
             endif()
         endif()
