@@ -48,10 +48,15 @@ def test_a4_1_validate_accepts_a_complete_record():
 def test_a4_1_load_real_assertions_toml_is_schema_valid():
     records = assertions.load()
     ids = {r["id"] for r in records}
-    # The full §5.3 table (13 assertions) must be present.
-    assert len(records) == 13
+    # The full §5.3 table (13 assertions) must be present. Later rounds ADD
+    # declarations (A-T2 added the two android ones below), so the floor is
+    # 13 rather than an exact count -- a shrinking suite is the failure this
+    # guards against, not a growing one.
+    assert len(records) >= 13
     assert "A-SRC-HASH" in ids
     assert "A-KVZ-SIMD" in ids
+    # A-T2: the android dist assertions are declared, not merely implemented.
+    assert {"A-ANDROID-SYMS", "A-ANDROID-ARCH"} <= ids
 
 
 # --- A4.2: no assertion check function branches on source.kind ------------

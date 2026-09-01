@@ -93,3 +93,90 @@ def assert_src_hash(archive_bytes: bytes, expected_sha256: str) -> None:
         raise AssertionFailed(
             f"A-SRC-HASH: sha256 mismatch (expected {expected}, got {actual})"
         )
+
+
+# ---------------------------------------------------------------------------
+# ELF-flavoured helpers (A-T2). These serve the android dists, whose artefacts
+# are ELF (static archives of ELF objects) and whose instruments are the NDK's
+# own llvm-nm / llvm-readelf.
+#
+# CAPTURE THEN GREP, always. Never `llvm-nm x.a | grep -q SYM`: under
+# `set -o pipefail`, grep -q exits at the first match, nm dies of SIGPIPE and
+# the pipeline reports 141 -- the check fails BECAUSE the symbol is present
+# (2026-08-28 lesson). These helpers make that shape unavailable: the tool's
+# stdout is written to a file, the file is read back, and the search runs in
+# Python. `deps.run.run()` additionally refuses any argv element containing
+# '|', so no pipeline can be constructed here at all.
+
+
+def ndk_tool(ndk: Path | str, tool: str) -> Path:
+    """Resolve an NDK-bundled LLVM binary (e.g. "llvm-nm", "llvm-readelf").
+
+    The NDK ships exactly one prebuilt host directory per host OS, and its
+    name is not derivable from ``platform.system()`` alone (darwin-x86_64 is
+    used on Apple silicon too, via Rosetta or a universal binary), so the
+    single existing directory is discovered rather than guessed.
+    """
+    ndk = Path(ndk)
+    prebuilt = ndk / "toolchains" / "llvm" / "prebuilt"
+    if not prebuilt.is_dir():
+        raise AssertionFailed(
+            f"NDK layout not recognised: {prebuilt} does not exist (is "
+            f"{ndk} really an NDK root?)"
+        )
+    for host_dir in sorted(prebuilt.iterdir()):
+        candidate = host_dir / "bin" / tool
+        if candidate.is_file():
+            return candidate
+    raise AssertionFailed(
+        f"{tool} not found under {prebuilt}/*/bin -- cannot run the ELF "
+        f"assertions with this NDK"
+    )
+
+
+def capture_tool_output(argv: list, out_path: Path | str) -> Path:
+    """Run ``argv``, write its stdout+stderr to ``out_path``, return the path.
+
+    The artefact is written BEFORE anything reads it, so a failing assertion
+    always leaves the evidence it judged on disk (and CI can upload it).
+    """
+    from . import run as run_mod  # local import: keeps this module import-light
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    result = run_mod.run([str(a) for a in argv], check=False)
+    out_path.write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
+    if result.returncode != 0:
+        raise AssertionFailed(
+            f"{argv[0]} exited {result.returncode} (output captured to {out_path})"
+        )
+    return out_path
+
+
+def assert_symbols_present(symbol_dump: Path | str, symbols: list, *, label: str) -> None:
+    """Every name in ``symbols`` must appear in the captured symbol dump."""
+    text = Path(symbol_dump).read_text(encoding="utf-8", errors="replace")
+    missing = [s for s in symbols if s not in text]
+    if missing:
+        raise AssertionFailed(
+            f"{label}: symbol(s) {missing} absent from {symbol_dump} -- the "
+            f"capability they stand for is genuinely not in the archive"
+        )
+
+
+def assert_elf_machine(header_dump: Path | str, expected_machine: str, *, label: str) -> None:
+    """The captured ELF header dump must report ``expected_machine`` (e.g.
+    "AArch64"). Reads the file the tool wrote; performs no piping."""
+    text = Path(header_dump).read_text(encoding="utf-8", errors="replace")
+    if expected_machine not in text:
+        raise AssertionFailed(
+            f"{label}: {header_dump} does not report Machine {expected_machine!r} "
+            f"-- the artefact was built for the wrong architecture"
+        )
+
+
+def assert_dir_non_empty(directory: Path | str, *, label: str) -> None:
+    """A-LICENCE flavour: the directory exists and contains at least one file."""
+    d = Path(directory)
+    if not d.is_dir() or not any(p.is_file() for p in d.iterdir()):
+        raise AssertionFailed(f"{label}: {d} is missing or contains no files")

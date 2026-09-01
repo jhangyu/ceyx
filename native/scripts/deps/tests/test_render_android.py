@@ -139,15 +139,6 @@ def test_detect_platform_never_resolves_to_android() -> None:
     assert build_deps.detect_platform() in ("macos", "linux", "windows")
 
 
-def test_heif_stack_android_is_rejected_pending_its_own_task(capsys) -> None:
-    rc = build_deps.main(
-        ["build", "heif-stack", "--platform", "android", "--arch", "arm64-v8a",
-         "--android-ndk", _NDK, "--dist", "/android/dist", "--dry-run"]
-    )
-    assert rc != 0
-    assert "no --platform android implementation yet" in capsys.readouterr().err
-
-
 def test_legacy_component_form_accepts_android(capsys) -> None:
     rc = build_deps.main(
         ["--component", "libwebp", "--platform", "android", "--arch", "arm64-v8a",
