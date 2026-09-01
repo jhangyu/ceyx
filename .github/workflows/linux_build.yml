@@ -387,6 +387,20 @@ jobs:
       - name: Assert full codec capability vector via probe (G1)
         run: |
           SO="native/build-linux/libdng_decoder_native.so"
+          # LINUX-HEIF (round 3, 2nd failure layer, run 33454974377):
+          # dng_decoder_native.so's own $ORIGIN RPATH (ffi.cmake, task #18)
+          # resolves libheif.so.1 -- staged beside it in build-linux/ -- fine,
+          # but that RPATH does not transitively help libheif.so.1 find
+          # libde265.so.0: modern ld defaults to --enable-new-dtags, which
+          # emits a non-transitive DT_RUNPATH rather than the old transitive
+          # DT_RPATH, and heif.py's build_libheif()/build_libde265() give
+          # libheif.so.1 no RPATH of its own pointing at $ORIGIN. Exporting
+          # LD_LIBRARY_PATH here is the CI-only fallback that makes the
+          # dlopen()-based probe resolve regardless of that transitivity gap
+          # -- the shipped-artifact equivalent of this same gap is why task
+          # #18 (ship libheif.so/libde265.so with the Linux plugin) is a
+          # pre-tag blocker; this line does not fix the shipped bundle.
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/native/third_party/heif-dist-linux/lib:${LD_LIBRARY_PATH:-}"
           set +e
           python3 native/scripts/codec_capability_probe.py "$SO" \
             --expect jpeg:encode=1 --expect jpeg:decode=0 \
@@ -422,6 +436,11 @@ jobs:
             "$PROBE_DIR/probe_codecs.c" \
             -lheif
           file "$PROBE_DIR/probe_codecs"
+          # Same transitivity gap as the G1 step above: -Wl,-rpath here only
+          # covers probe_codecs's OWN direct dependency (libheif.so.1), not
+          # libheif's own dependency on libde265.so.0 under a non-transitive
+          # DT_RUNPATH linker default. Belt-and-braces LD_LIBRARY_PATH.
+          export LD_LIBRARY_PATH="$DIST/lib:${LD_LIBRARY_PATH:-}"
           set +e
           "$PROBE_DIR/probe_codecs" > "$PROBE_DIR/probe_codecs.txt" 2>&1
           RC=$?
