@@ -149,6 +149,11 @@ native/third_party/libjxl-dist-*/
 # rationale as the libomp entries above.
 !native/third_party/lcms2-x86_64/lib/liblcms2.2.dylib
 
+# Vendored jpeg-turbo runtime, x86_64 macOS companion (OMP-BINARY-SOURCE
+# follow-on, see native/third_party/jpegturbo-x86_64/PROVENANCE.md). Same
+# rationale as the libomp/lcms2 entries above.
+!native/third_party/jpegturbo-x86_64/lib/libjpeg.8.dylib
+
 # Session/tool scratch state (never tracked)
 .claude/tmp/
 .pi/
