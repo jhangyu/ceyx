@@ -144,6 +144,11 @@ native/third_party/libjxl-dist-*/
 # to produce the full six-dylib companion set without a Homebrew prerequisite.
 !native/third_party/libomp-x86_64/lib/libomp.dylib
 
+# Vendored little-cms2 (lcms2) runtime, x86_64 macOS companion (task #16
+# LCMS2-X86_64, see native/third_party/lcms2-x86_64/PROVENANCE.md). Same
+# rationale as the libomp entries above.
+!native/third_party/lcms2-x86_64/lib/liblcms2.2.dylib
+
 # Session/tool scratch state (never tracked)
 .claude/tmp/
 .pi/
