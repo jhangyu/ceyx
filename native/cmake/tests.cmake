@@ -690,7 +690,26 @@ if(DNG_ENABLE_GENERIC_RAW)
     #   Windows - none of the above; RawSpeed3 hard-errors
     #             "Did not find JPEG!" / "Did not find ZLIB!".
     # Observed on CI run 33171988843.
-    if(DNG_CROSS_BUILD OR WIN32)
+    # SYMMETRIC-PINNING (2026-09-01, user ruling): widened from
+    # `DNG_CROSS_BUILD OR WIN32` to also include native (non-cross) macOS.
+    # Established by observation, not by reading the code and assuming it
+    # already worked: before this widening, a native-macOS configure with a
+    # real vendored native/third_party/jpegturbo-arm64/ directory in place
+    # still resolved JPEG to `/opt/homebrew/lib/libjpeg.dylib` (live off this
+    # machine's package manager) -- the whole shim block below, including the
+    # JPEG-WIRING-X86_64 arch-suffixed vendored-dir lookup, was unreachable on
+    # native macOS because it lived entirely inside this cross/Windows-only
+    # gate. Widening it here is what lets a pinned native/third_party/
+    # jpegturbo-arm64/ (or lcms2-arm64/, already covered -- its own gate,
+    # `if(APPLE AND NOT ANDROID AND NOT IOS)`, already ran unconditionally on
+    # every Apple leg and needed NO change, confirmed the same way: a real
+    # vendored native/third_party/lcms2-arm64/ resolved correctly with zero
+    # code changes) replace the live-off-this-machine resolution on the
+    # native leg too, matching the ruling's symmetric-pinning intent.
+    # The BINARY_PACKAGE_BUILD sub-block just below stays genuinely
+    # cross-only via its own nested `if(DNG_CROSS_BUILD)` -- this widening
+    # only affects the JPEG shim past it.
+    if(DNG_CROSS_BUILD OR WIN32 OR APPLE)
         # RawSpeed3 probes the CPU it is *configuring on* via three try_run()s
         # (cmake/Modules/cpu-{cache-line,page,large-page}-size.cmake), which
         # CMake refuses in cross mode. Upstream's own binary-distribution
@@ -767,18 +786,22 @@ if(DNG_ENABLE_GENERIC_RAW)
         # STATIC archive with no cache entry or resulting library anywhere
         # named libjpeg*.dylib.
         #
-        # Fix: on the macOS x86_64 cross leg specifically, if a vendored
-        # DYNAMIC x86_64 jpeg-turbo exists at the arch-suffixed vendored dir
+        # Fix: on ANY macOS leg (native or cross — SYMMETRIC-PINNING widened
+        # this from cross-only, see the outer gate's own comment above), if a
+        # vendored DYNAMIC jpeg-turbo exists at the arch-suffixed vendored dir
         # (mirroring the libomp-<arch>/, lcms2-<arch>/ convention above),
         # point ONLY this shim (RawSpeed3's consumer) at it instead of the
         # static archive — reproducing the exact edge the arm64 leg produces
-        # by accident. The DNG SDK's own direct static jpeg link
+        # by accident today (and, once a pinned native/third_party/
+        # jpegturbo-arm64/ lands, replacing that accident with a deterministic
+        # pinned resolution instead of "whatever this machine's Homebrew has
+        # installed"). The DNG SDK's own direct static jpeg link
         # (third_party.cmake, used for its own App-Sandbox-safety reasons)
         # is completely untouched by this — only RawSpeed3's separate,
         # already-independent JPEG resolution changes.
         set(_dng_shim_jpeg_include_dirs "${JPEG_INCLUDE_DIRS}")
         set(_dng_shim_jpeg_libraries "${JPEG_LIBRARIES}")
-        if(APPLE AND DNG_CROSS_BUILD)
+        if(APPLE)
             set(_dng_jpeg_want_archs "${CMAKE_OSX_ARCHITECTURES}")
             if(NOT _dng_jpeg_want_archs)
                 set(_dng_jpeg_want_archs "${CMAKE_SYSTEM_PROCESSOR}")
