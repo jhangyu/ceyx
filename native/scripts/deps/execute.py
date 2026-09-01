@@ -179,6 +179,25 @@ def acquire(
         tag = _substitute_version(str(block["tag"]), version)
         src_dir = stage / f"{component}-{version}"
         fetch_mod.fetch_git(repo, tag, src_dir)
+        # A-T3 fix (2026-09-01): a manifest `submodules` list (e.g. libjxl's
+        # brotli/highway/skcms -- no upstream tarball ever bundles them, see
+        # component.libjxl.source.default's comment) was previously read only
+        # by the desktop-only fetch_libjxl.py carrier, never by this generic
+        # acquire() path. Every OTHER caller of acquire() with kind="git"
+        # (e.g. android, which has no dedicated per-component fetch module)
+        # therefore produced a source tree with the submodule directories
+        # empty, surfacing three steps later as cmake's "Highway library not
+        # found" rather than as a fetch-time error naming the real cause.
+        # Declared, not hard-coded to libjxl: any future git-kind component
+        # with submodules gets this for free.
+        submodules = block.get("submodules")
+        if submodules:
+            run(
+                [
+                    "git", "-C", str(src_dir), "submodule", "update",
+                    "--init", "--depth", "1", "--", *[str(s) for s in submodules],
+                ]
+            )
         return src_dir
 
     raise ExecuteError(f"component.{component}: unknown source kind {kind!r}")
