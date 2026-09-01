@@ -116,22 +116,27 @@ jobs:
         # --idle-timeout-sec is raised above the script's 60s default as a
         # margin for CI hosts, which can be slower/noisier than local dev
         # machines during long Halide codegen steps.
-        # -DDNG_ENABLE_HEIF=OFF (cmake/heif.cmake's documented escape hatch):
-        # the HEIC route vendors only a macOS libheif/libde265 dylib dist; no
-        # Android heif-dist exists, so the Stage 2 cross-compile configure opts
-        # out of the hard heif gate. Passed to both configure stages; Stage 1
-        # (DNG_HOST_GENERATORS_ONLY) guards heif.cmake out anyway.
-        # G1 fix (round-5 gap closure, task #9): native/scripts/build_deps.py fetch libjxl
-        # has no Android/NDK cross-compile support (it builds a host-arch static
-        # dist via a plain source cmake configure), so there is no acquisition
-        # path for this platform today — unlike macOS/Linux, adding one is a new
-        # feature, not a CI-assertion fix, and is out of scope here. Per task #9's
-        # ruling ("fetch a real dist and assert it landed, OR set an explicit,
-        # asserted OFF"), this leg takes the explicit-OFF branch: -DCEYX_ENABLE_JXL=OFF
-        # (was already the de-facto outcome via cmake/jxl.cmake's silent soft-degrade;
-        # this makes it an explicit, loud, asserted decision instead of an
-        # accidental one) and the log is captured + grepped below to prove the
-        # OFF branch was actually taken, not just requested.
+        # -DDNG_ENABLE_HEIF=ON (A-T8-FIX, 2026-09-01): FLIPPED from the prior
+        # OFF. native/third_party/heif-dist-android-arm64-v8a is now a real,
+        # committed dist (libheif.so/libde265.so + headers + licences, landed
+        # by jxl_dist_android.yml's sibling heif_dist_android.yml producer
+        # workflow) and cmake/heif.cmake now has an ANDROID branch that finds
+        # and stages it -- the "no Android heif-dist exists" rationale this
+        # comment used to record is stale and has been corrected. The
+        # configure log is captured + grepped below (positive assertion) to
+        # prove HEIF was actually linked, not just requested.
+        #
+        # -DCEYX_ENABLE_JXL=OFF remains UNCHANGED (contract-ci-completion-round.md
+        # AC7, per team-lead ruling 2026-09-01): unlike heif-dist-android,
+        # native/third_party/libjxl-dist-android-arm64-v8a has ONLY a
+        # PROVENANCE.md committed -- `git ls-files` on that directory returns
+        # exactly one path -- no lib/include archives were ever landed by a
+        # producer run, so there is no dist to link against yet. Flipping this
+        # flag ON today would not be a config mistake to fix in cmake, it
+        # would fail for the true and separate reason "artifact missing";
+        # escalated to the user as part of A-T8-FIX's report. The G1 assertion
+        # below (unchanged) still names an accurate fact about a real state
+        # and must not be touched until that separate ruling lands.
         working-directory: ${{ github.workspace }}
         shell: bash
         env:
@@ -153,13 +158,32 @@ jobs:
             --platform android \
             --target dng_decoder_native \
             --android-ndk "${ANDROID_NDK_HOME}" \
-            --cmake-arg=-DDNG_ENABLE_HEIF=OFF \
+            --cmake-arg=-DDNG_ENABLE_HEIF=ON \
             --cmake-arg=-DCEYX_ENABLE_JXL=OFF \
             --idle-timeout-sec 180 2>&1 | tee android_build.log
           rc=$?
           set -e
           echo "BUILD_RC=${rc}"
           exit "${rc}"
+
+      - name: Assert HEIF was actually linked, not silently degraded (A-T8-FIX)
+        # Positive assertion, mirroring the G1 pattern below but inverted: a
+        # missing/mismatched Android heif-dist must fail configure LOUDLY
+        # (cmake/heif.cmake's ANDROID branch uses message(FATAL_ERROR), so a
+        # broken dist already fails the build step above) -- this assertion
+        # additionally proves the SUCCESS path actually took the HEIF-enabled
+        # branch and not some other silently-OK-looking log shape.
+        shell: bash
+        run: |
+          set +e
+          grep -q "HEIF: libheif .* + libde265 .* (dynamic)" android_build.log
+          rc=$?
+          set -e
+          echo "ASSERT HEIF enabled RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::configure log does not show the expected 'HEIF: libheif ... + libde265 ... (dynamic)' line from cmake/heif.cmake; -DDNG_ENABLE_HEIF=ON above may not have taken effect, or the Android dist was not found." >&2
+            exit 1
+          fi
 
       - name: Assert JXL was explicitly disabled, not silently degraded (G1)
         shell: bash
@@ -175,19 +199,41 @@ jobs:
           fi
 
       - name: Stage native artifacts
+        # A-T8-FIX: multi-.so packaging. cmake/heif.cmake's ANDROID branches
+        # (HEIF companions + the unconditional libc++_shared.so block) stage
+        # every companion .so NEXT TO libdng_decoder_native.so in the build
+        # dir (same directory the POST_BUILD copy_if_different commands
+        # target), so a single glob on *.so here collects the whole atomic
+        # set with no separately-maintained file list to drift out of sync.
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
           find "${NATIVE_DIR}/build-android/android-arm64" -maxdepth 1 \
-            -name "libdng_decoder_native*.so" \
+            -name "*.so" \
             -exec cp {} "${ARTIFACT_DIR}/native/" \; || true
           ls -la "${ARTIFACT_DIR}/native" || true
 
-      - name: Fail if no shared library was produced
+      - name: Fail if the required Android .so set is incomplete (A-T8-FIX atomic group)
+        # Required today: the decoder, its HEIF companions (DNG_ENABLE_HEIF=ON
+        # above), and libc++_shared.so (ANDROID_STL=c++_shared, staged
+        # unconditionally). Mirrors publish_release.py's ATOMIC_REQUIRED_FILES
+        # pattern for windows/linux -- keep this list and any future Android
+        # entry added there in sync.
         run: |
           shopt -s nullglob
           libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
           if [ ${#libs[@]} -eq 0 ]; then
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
+            exit 1
+          fi
+          required=("libheif.so" "libde265.so" "libc++_shared.so")
+          missing=""
+          for f in "${required[@]}"; do
+            if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
+              missing="${missing} ${f}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing required companion .so(s) in ${ARTIFACT_DIR}/native:${missing} — the Android atomic group (decoder + HEIF companions + libc++_shared) is incomplete." >&2
             exit 1
           fi
 
@@ -242,6 +288,45 @@ jobs:
             exit 1
           fi
 
+      # A-T8-FIX: prove libc++_shared.so is a real, satisfied runtime
+      # dependency of the decoder -- not just a file that happens to be
+      # present in the artifact dir. Capture `llvm-readelf -d` to a FILE
+      # first, then grep the file (2026-08-28 lesson: under `set -euo
+      # pipefail`, `readelf -d ... | grep -q PATTERN` returns 141 and
+      # INVERTS the verdict when the pattern IS found, because grep exits
+      # early and readelf takes SIGPIPE -- never pipe straight into grep -q
+      # here).
+      - name: Assert decoder DT_NEEDED lists libc++_shared.so (A-T8-FIX libc++_shared handling)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
+          LLVM_READELF="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          if [ ! -x "${LLVM_READELF}" ]; then
+            echo "::error::llvm-readelf not found at ${LLVM_READELF} — NDK layout may have changed (r27c expected)." >&2
+            exit 1
+          fi
+          set +e
+          "${LLVM_READELF}" -d "${SO}" > android_decoder_dynamic.txt 2>&1
+          rc=$?
+          set -e
+          echo "READELF_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::llvm-readelf -d failed on ${SO} (rc=${rc}); DT_NEEDED is UNVERIFIED, refusing to publish." >&2
+            cat android_decoder_dynamic.txt || true
+            exit 1
+          fi
+          set +e
+          grep -q "libc++_shared.so" android_decoder_dynamic.txt
+          rc=$?
+          set -e
+          echo "RC=${rc} (libc++_shared.so in DT_NEEDED)"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::${SO}'s DT_NEEDED does not list libc++_shared.so — ANDROID_STL=c++_shared expects this dependency; staging without an actual link-time need (or a build that silently dropped it) would ship a dead file." >&2
+            cat android_decoder_dynamic.txt
+            exit 1
+          fi
+
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`
       # verbatim, so no rename step exists between here and the release. The
@@ -249,14 +334,16 @@ jobs:
       # deleted; release attachment is the publish job's exclusive
       # responsibility (.github/CI-CONVENTIONS.md rule 3).
       #
-      # NOTE for the round-6 dist-artifact gap closure: unlike linux_build.yml,
-      # this leg builds NO third-party distribution of its own. It configures
-      # with -DDNG_ENABLE_HEIF=OFF and -DCEYX_ENABLE_JXL=OFF (both asserted
-      # above), and there is no vcpkg/libwebp step here at all, so there is
-      # nothing third-party produced in this job to upload. Closing the
-      # Android JXL/HEIF capability gap is explicitly out of scope for round 6;
-      # when a dist is built here, it gets an upload-artifact step named
-      # `<component>-android-arm64-v8a` alongside the one below.
+      # UPDATED (A-T8-FIX, 2026-09-01): this leg still builds NO third-party
+      # distribution of its own here (the heif-dist/libjxl-dist/libwebp-dist
+      # committed trees are pre-built PRODUCER artifacts consumed by cmake,
+      # not built by this job), but it now CONSUMES the committed heif-dist
+      # and packages its runtime companions -- the artifact this step uploads
+      # is the multi-.so atomic group (decoder + libheif.so + libde265.so +
+      # libc++_shared.so), asserted complete by the "Fail if the required
+      # Android .so set is incomplete" step above, not a single file. JXL
+      # remains excluded (-DCEYX_ENABLE_JXL=OFF): no Android libjxl dist has
+      # actually been committed yet (see the build step's comment above).
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:

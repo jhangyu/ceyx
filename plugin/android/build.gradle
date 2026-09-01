@@ -22,6 +22,13 @@ android {
     // today (native/build-android/android-arm64). x86_64 emulators get no
     // library and RAW decode will fail there. Add more ABIs when the upstream
     // native build emits them.
+    //
+    // A-T8-FIX (2026-09-01): jniLibs.srcDirs packs every *.so it finds, not
+    // just the decoder — arm64-v8a/ now needs libdng_decoder_native.so,
+    // libheif.so, libde265.so, and libc++_shared.so together (see
+    // src/main/jniLibs/README-jnilibs.md). No Gradle change was needed for
+    // this: the glob below already covers a multi-.so directory by
+    // construction.
     sourceSets {
         main {
             jniLibs.srcDirs = ['src/main/jniLibs']

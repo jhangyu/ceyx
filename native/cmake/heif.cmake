@@ -36,6 +36,19 @@ if(DNG_ENABLE_HEIF)
         # native/scripts/fetch_heif_deps.sh; same hazard applies to a dist left
         # behind by build_deps.py's heif-stack build.)
         set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-windows")
+    elseif(ANDROID)
+        # ANDROID-HEIF (A-T8-FIX, 2026-09-01): the committed dist is
+        # arch-suffixed (native/third_party/heif-dist-android-${ANDROID_ABI}),
+        # never the unsuffixed ${HEIF_DIST_DIR} -- same isolation rationale as
+        # the WIN32/Linux branches: an unsuffixed heif-dist/ left behind by a
+        # macOS or Linux build holds foreign-arch bytes (Mach-O or x86_64 ELF)
+        # that would surface as an opaque "wrong architecture" failure rather
+        # than naming the real mismatch. ANDROID must be checked before the
+        # UNIX-AND-NOT-APPLE branch below: the NDK toolchain sets ANDROID
+        # while CMAKE_SYSTEM_NAME is still effectively UNIX, so an elseif
+        # ordering with UNIX-AND-NOT-APPLE first would silently swallow this
+        # branch and search the Linux desktop dist path instead.
+        set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-android-${ANDROID_ABI}")
     elseif(UNIX AND NOT APPLE)
         # LINUX-HEIF (round 3, user ruling 2026-09-01): the Linux dist is
         # built in-CI (native/scripts/build_deps.py build heif-stack
@@ -60,18 +73,33 @@ if(DNG_ENABLE_HEIF)
         list(APPEND HEIF_LIB_HINTS "${_heif_hint}/lib")
     endforeach()
 
+    # NO_CMAKE_FIND_ROOT_PATH (A-T8-FIX, 2026-09-01, verified against a real
+    # NDK configure -- not a guess): the Android NDK's android.toolchain.cmake
+    # sets CMAKE_FIND_ROOT_PATH_MODE_LIBRARY/_INCLUDE to ONLY, which makes
+    # find_library()/find_path() search ONLY inside CMAKE_FIND_ROOT_PATH (the
+    # NDK sysroot) regardless of an explicit HINTS path outside it -- NOT
+    # bypassed by NO_DEFAULT_PATH, which only suppresses the standard system
+    # search locations, not the sysroot-only restriction. Without this flag,
+    # a real committed dist at HINTS still resolves to *-NOTFOUND on Android
+    # (reproduced locally: `heif.h = 'HEIF_INCLUDE_DIR-NOTFOUND'` even though
+    # the file exists at the exact hinted path). No other platform's find
+    # calls go through a root-path-restricting toolchain file, so this flag
+    # is a no-op everywhere else.
     find_path(HEIF_INCLUDE_DIR
         NAMES libheif/heif.h
         HINTS ${HEIF_INCLUDE_HINTS}
-        NO_DEFAULT_PATH)
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH)
     find_library(HEIF_LIBRARY
         NAMES heif
         HINTS ${HEIF_LIB_HINTS}
-        NO_DEFAULT_PATH)
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH)
     find_library(DE265_LIBRARY
         NAMES de265
         HINTS ${HEIF_LIB_HINTS}
-        NO_DEFAULT_PATH)
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH)
 
     # NO_DEFAULT_PATH on all three is deliberate: silently linking a Homebrew
     # libheif would stamp an absolute /opt/homebrew load command into the
@@ -206,6 +234,28 @@ if(DNG_ENABLE_HEIF)
                     "${HEIF_DIST_DIR}/bin/libde265.dll"
                     "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.dll"
             COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
+    elseif(ANDROID)
+        # Stage the two UNVERSIONED .so files NEXT TO the built decoder .so
+        # (A-T8-FIX, 2026-09-01). Unlike the Linux desktop branch below,
+        # the Android dist ships unversioned names only (round2-heif-baton.md
+        # measured fact: "Filenames are unversioned. Stage libheif.so and
+        # libde265.so. There is no libheif.so.1 / libde265.so.0 on this
+        # platform, and Gradle would not pack them if there were" -- Android
+        # packaging drops any jniLibs file not ending exactly in ".so").
+        # Android's dynamic linker resolves a loaded library's DT_NEEDED
+        # entries against the same native-library directory the loading .so
+        # was found in (no explicit $ORIGIN RPATH needed the way Linux
+        # desktop requires one), so staging here next to dng_decoder_native
+        # -- which is also what the packaging step below copies into the
+        # artifact/jniLibs set -- is sufficient for the loader to find them.
+        add_custom_command(TARGET dng_decoder_native POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HEIF_DIST_DIR}/lib/libheif.so"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.so"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HEIF_DIST_DIR}/lib/libde265.so"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.so"
+            COMMENT "Staging libheif.so/libde265.so next to dng_decoder_native")
     elseif(UNIX AND NOT APPLE)
         # Stage the two versioned .so files NEXT TO the built decoder .so
         # (task #18, 2026-09-01 -- this branch was entirely missing: the
@@ -251,6 +301,52 @@ else()
     # Today the glob guarantees it, and this line is belt-and-braces.
     target_sources(dng_decoder_native PRIVATE ${SRC_DIR}/heif_encode.cpp)
     message(STATUS "HEIF: disabled (DNG_ENABLE_HEIF=OFF) — no heif_ symbols will be exported")
+endif()
+
+# libc++_shared.so staging (A-T8-FIX, 2026-09-01) -- UNCONDITIONAL, not gated
+# on DNG_ENABLE_HEIF. native/CMakePresets.json's android-vulkan preset sets
+# ANDROID_STL=c++_shared, so dng_decoder_native itself links the NDK's shared
+# C++ runtime regardless of which codecs are enabled; without staging this
+# file next to (and therefore into the same jniLibs/packaging set as) the
+# decoder .so, the app fails to load the decoder at all with an error naming
+# libc++_shared.so, not any codec. This is safe alongside the HEIF dist's own
+# libheif.so/libde265.so, which link libc++ STATICALLY (round2-heif-baton.md
+# measured fact) -- no duplicate-symbol or ABI-crossing hazard, because no
+# C++ ABI crosses the libheif C API boundary either library uses.
+if(ANDROID)
+    # ANDROID_NDK (not CMAKE_ANDROID_NDK) is the variable the NDK's OWN
+    # android.toolchain.cmake sets -- this project configures via that
+    # toolchain file (native/CMakePresets.json's toolchainFile, invoked with
+    # -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake by
+    # build_native_watchdog.py), not CMake's own built-in
+    # CMAKE_SYSTEM_NAME=Android cross-compiling support, which is what sets
+    # CMAKE_ANDROID_NDK instead. Using the wrong one here would silently
+    # resolve to an empty/undefined variable.
+    if(NOT DEFINED ANDROID_NDK OR NOT ANDROID_NDK)
+        message(FATAL_ERROR
+            "ANDROID build but ANDROID_NDK is not set -- cannot locate "
+            "libc++_shared.so. This should be set by the NDK's own "
+            "android.toolchain.cmake; check native/CMakePresets.json's "
+            "toolchainFile entry.")
+    endif()
+    # Host toolchain directory name varies (linux-x86_64, darwin-x86_64), so
+    # glob it rather than hardcoding -- same approach as
+    # native/tests/run_decode_matrix.py's _libcxx_path() for the same file.
+    file(GLOB CEYX_ANDROID_LIBCXX_SHARED
+         "${ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so")
+    list(LENGTH CEYX_ANDROID_LIBCXX_SHARED _ceyx_libcxx_count)
+    if(_ceyx_libcxx_count EQUAL 0)
+        message(FATAL_ERROR
+            "libc++_shared.so not found under ${ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/ "
+            "-- dng_decoder_native is built with ANDROID_STL=c++_shared and "
+            "cannot load without this file staged alongside it.")
+    endif()
+    list(GET CEYX_ANDROID_LIBCXX_SHARED 0 CEYX_ANDROID_LIBCXX_SHARED_PATH)
+    add_custom_command(TARGET dng_decoder_native POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CEYX_ANDROID_LIBCXX_SHARED_PATH}"
+                "$<TARGET_FILE_DIR:dng_decoder_native>/libc++_shared.so"
+        COMMENT "Staging libc++_shared.so next to dng_decoder_native (ANDROID_STL=c++_shared)")
 endif()
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
