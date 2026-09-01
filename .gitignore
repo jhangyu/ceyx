@@ -84,6 +84,11 @@ native/third_party/heif-dist/*
 # policy, no PROVENANCE.md carve-out because none of these is a reviewed,
 # committed INPUT (unlike heif-dist-windows below).
 native/third_party/heif-dist-*/
+# EXCEPTION: the Android dist IS committed (A-T4/D5 ruling 2026-08-31:
+# CI-built once by heif_dist_android.yml, committed as a reviewed, pinned
+# INPUT because Android cannot be rebuilt casually on the dev machine --
+# same policy as heif-dist-windows).
+!native/third_party/heif-dist-android-arm64-v8a/
 
 # Vendored libwebp encode distribution (static, built by
 # native/scripts/fetch_libwebp_dist.sh). Same policy as the HEIF dist above:
@@ -96,6 +101,9 @@ native/third_party/libwebp-dist-*/
 # locally, so unlike the macOS/Linux dist above, the Windows one is a
 # reviewed, pinned INPUT, same policy as heif-dist-windows.
 !native/third_party/libwebp-dist-windows/
+# EXCEPTION: the Android dist IS committed (A-T2/D5 ruling 2026-08-31),
+# same rationale as heif-dist-android-arm64-v8a above.
+!native/third_party/libwebp-dist-android-arm64-v8a/
 
 # Vendored static libjxl distribution (+ bundled highway, brotli; built by
 # native/scripts/fetch_libjxl_dist.sh). Same policy as the HEIF/libwebp dists
@@ -106,6 +114,9 @@ native/third_party/libjxl-dist-*/
 # EXCEPTION: libjxl-dist-windows IS committed (Task 6, 2026-08-30 codec
 # expansion) -- same rationale as the libwebp-dist-windows exception above.
 !native/third_party/libjxl-dist-windows/
+# EXCEPTION: the Android dist IS committed (A-T3/D5 ruling 2026-08-31),
+# same rationale as the android exceptions above.
+!native/third_party/libjxl-dist-android-arm64-v8a/
 
 # Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
 # native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
