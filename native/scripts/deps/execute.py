@@ -246,6 +246,7 @@ def build_component(
     *,
     jobs: Optional[int] = None,
     extra_args: Optional[Sequence[str]] = None,
+    ndk: Optional[str] = None,
 ) -> list[Path]:
     """Acquire, configure, build, install and verify one manifest component.
 
@@ -254,11 +255,17 @@ def build_component(
     ``-DCMAKE_PREFIX_PATH`` into a per-run vcpkg prefix). It never replaces
     a rendered flag: the manifest stays the single declaration of what the
     build options ARE.
+
+    ``ndk`` is the Android NDK root forwarded to ``render()`` for the "{ndk}"
+    token in android overlays (cross-compile-only platform); it is passed
+    explicitly, never read from the environment.
     """
     dist = Path(dist)
     stage = Path(stage)
     src_dir = acquire(loaded, component, platform, stage)
-    cmake_argv = list(render_mod.render(loaded, component, platform, arch, dist=str(dist)))
+    cmake_argv = list(
+        render_mod.render(loaded, component, platform, arch, dist=str(dist), ndk=ndk)
+    )
     if extra_args:
         cmake_argv += list(extra_args)
     build_dir = stage / f"build-{component}"

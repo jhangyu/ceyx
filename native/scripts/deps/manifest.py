@@ -18,7 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MANIFEST_PATH = _REPO_ROOT / "native" / "deps" / "manifest.toml"
 DEFAULT_ARCH_MAP_PATH = _REPO_ROOT / "native" / "deps" / "arch_map.toml"
 
-_KNOWN_PLATFORMS = ("default", "macos", "linux", "windows")
+_KNOWN_PLATFORMS = ("default", "macos", "linux", "windows", "android")
 _ARCH_REF_RE = re.compile(r"\{arch\.([a-zA-Z0-9_]+)\}")
 
 # R-1a's reason taxonomy (Spec §3.2): a self-built component's reason must
@@ -103,7 +103,7 @@ def _validate_component(name: str, comp: dict[str, Any], arch_map: dict[str, Any
     for platform_key, table in cmake.items():
         if platform_key == "base":
             continue
-        if platform_key not in ("macos", "linux", "windows"):
+        if platform_key not in ("macos", "linux", "windows", "android"):
             raise ManifestError(
                 f"component.{name}.cmake.{platform_key}: unknown platform overlay key"
             )

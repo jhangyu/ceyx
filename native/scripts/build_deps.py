@@ -4,8 +4,9 @@
 Spec: docs/logs/2026-08-30/Spec_build_rewrite.md §4.1.
 
     python3 native/scripts/build_deps.py --component heif-stack \
-        --platform <auto|macos|linux|windows> --arch <auto|arm64|x86_64> \
-        [--only <name>] [--dry-run]
+        --platform <auto|macos|linux|windows|android> \
+        --arch <auto|arm64|x86_64|arm64-v8a> \
+        [--android-ndk <path>] [--only <name>] [--dry-run]
 
 Round 2 (Plan_build_rewrite.md D3 completion / F4 remediation): this file
 parses the CLI surface described above, performs the Windows-native-
@@ -18,9 +19,17 @@ resolved component/platform/arch, one argv element per line, and exits 0.
 Round 4 (D3 execution layer) adds the form that actually BUILDS:
 
     python3 native/scripts/build_deps.py build <component> \
-        --platform <auto|macos|linux|windows> \
-        --arch <auto|arm64|x86_64> \
-        --dist <dir> [--stage <name>] [--jobs N] [--dry-run]
+        --platform <auto|macos|linux|windows|android> \
+        --arch <auto|arm64|x86_64|arm64-v8a> \
+        --dist <dir> [--android-ndk <path>] [--stage <name>] [--jobs N] \
+        [--dry-run]
+
+``android`` (plan A-T1) is CROSS-COMPILE-ONLY: ``--platform auto`` never
+resolves to it, ``--arch`` accepts only the Android ABI spelling
+``arm64-v8a`` (``arm64`` is a hard error, not an alias), and
+``--android-ndk`` is required -- the NDK root is rendered into the configure
+argv explicitly, never inherited from ``ANDROID_NDK_HOME`` inside
+``deps.render.render()`` (which reads no environment at all).
 
 ``<component>`` is either a manifest component (built generically through
 ``deps.execute``) or the pseudo-component ``heif-stack``, which runs the
@@ -55,8 +64,14 @@ from deps.fetch import FetchError  # noqa: E402
 from deps.run import SubprocessError, assert_native_windows_interpreter  # noqa: E402
 
 
-_PLATFORM_CHOICES = ("auto", "macos", "linux", "windows")
-_ARCH_CHOICES = ("auto", "arm64", "x86_64")
+_PLATFORM_CHOICES = ("auto", "macos", "linux", "windows", "android")
+# "arm64-v8a" is the Android ABI spelling and is ONLY valid with
+# --platform android; "arm64"/"x86_64" are the host/canonical spellings and are
+# rejected for android. The two vocabularies are kept separate because
+# publish_release.py parses the ABI spelling verbatim out of dist/asset names
+# (native/deps/arch_map.toml [arm64-v8a]).
+_ARCH_CHOICES = ("auto", "arm64", "x86_64", "arm64-v8a")
+_ANDROID_ARCH_CHOICES = ("arm64-v8a",)
 
 # Pseudo-component migrating the Windows libjxl dist build off
 # build_libjxl_dist_windows.sh (2026-09-01 contract item 10 / ENTRY-POINT
@@ -91,6 +106,74 @@ def detect_platform() -> str:
     if system == "Windows":
         return "windows"
     raise RuntimeError(f"unsupported host platform: {system!r}")
+
+
+class TargetError(ValueError):
+    """A --platform/--arch/--android-ndk combination the CLI refuses to guess at."""
+
+
+def resolve_target(args, *, require_ndk: bool) -> tuple:
+    """Resolve ``--platform``/``--arch`` (honouring ``auto``) and enforce the
+    android cross-compile rules in ONE place, so every entry point
+    (``build``, ``publish``, the legacy ``--component`` form) agrees.
+
+    Android rules (plan A-T1):
+      - ``auto`` never resolves to android -- no host is Android, so
+        ``--platform android`` is always an explicit caller decision.
+      - android speaks the ABI vocabulary only: ``arm64-v8a``. ``arm64`` is a
+        hard error rather than a silent alias, because the dist directory and
+        release asset names carry the ABI spelling verbatim.
+      - ``--android-ndk`` is required for anything that renders/builds argv;
+        it is passed explicitly into ``render()`` and never read from
+        ``ANDROID_NDK_HOME`` inside it.
+    """
+    resolved_platform = detect_platform() if args.platform == "auto" else args.platform
+    if resolved_platform == "android" and args.platform == "auto":
+        # Unreachable via detect_platform() today; asserted so a future host
+        # mapping cannot quietly turn a cross-compile-only platform into a
+        # host default.
+        raise TargetError(
+            "--platform auto resolved to 'android', which is impossible: android "
+            "is a cross-compile-only target and must be requested explicitly."
+        )
+
+    if resolved_platform == "android":
+        if args.arch == "auto":
+            raise TargetError(
+                "--platform android cannot use --arch auto: the host arch says "
+                "nothing about the target ABI. Pass --arch "
+                f"{_ANDROID_ARCH_CHOICES[0]}."
+            )
+        if args.arch not in _ANDROID_ARCH_CHOICES:
+            raise TargetError(
+                f"--platform android uses the Android ABI vocabulary; got --arch "
+                f"{args.arch!r}, expected one of {_ANDROID_ARCH_CHOICES} (see "
+                f"native/deps/arch_map.toml [arm64-v8a]). 'arm64' is NOT accepted "
+                f"as a spelling of 'arm64-v8a': the ABI name is what the dist "
+                f"directory and the release asset are named after, and "
+                f"publish_release.py parses it back out verbatim."
+            )
+        if require_ndk and not getattr(args, "android_ndk", None):
+            raise TargetError(
+                "--platform android requires --android-ndk <path> (no host is "
+                "android; this is always a cross-compile, and the NDK root is "
+                "passed explicitly into the renderer rather than read from "
+                "ANDROID_NDK_HOME)."
+            )
+        return resolved_platform, args.arch
+
+    if args.arch in _ANDROID_ARCH_CHOICES:
+        raise TargetError(
+            f"--arch {args.arch!r} is the Android ABI vocabulary and is only valid "
+            f"with --platform android; {resolved_platform} uses "
+            f"{tuple(a for a in _ARCH_CHOICES if a not in _ANDROID_ARCH_CHOICES)}."
+        )
+    if getattr(args, "android_ndk", None):
+        raise TargetError(
+            f"--android-ndk is only meaningful with --platform android (got "
+            f"platform {resolved_platform!r}); rejected rather than silently ignored."
+        )
+    return resolved_platform, (detect_arch() if args.arch == "auto" else args.arch)
 
 
 def detect_arch() -> str:
@@ -138,6 +221,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--component", required=True, help="component or component-group name from the manifest")
     parser.add_argument("--platform", choices=_PLATFORM_CHOICES, default="auto")
     parser.add_argument("--arch", choices=_ARCH_CHOICES, default="auto")
+    parser.add_argument(
+        "--android-ndk",
+        default=None,
+        help="android only: NDK root; its build/cmake/android.toolchain.cmake is "
+             "rendered into the configure argv. Required with --platform android.",
+    )
     parser.add_argument("--only", default=None, help="restrict to a single named component within the group")
     parser.add_argument("--dry-run", action="store_true", help="resolve inputs and report without building")
     return parser
@@ -158,6 +247,12 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     parser.add_argument("--platform", choices=_PLATFORM_CHOICES, default="auto")
     parser.add_argument("--arch", choices=_ARCH_CHOICES, default="auto")
     parser.add_argument("--dist", required=True, help="install prefix the built artefacts land in")
+    parser.add_argument(
+        "--android-ndk",
+        default=None,
+        help="android only: NDK root; its build/cmake/android.toolchain.cmake is "
+             "rendered into the configure argv. Required with --platform android.",
+    )
     parser.add_argument(
         "--stage",
         default="all",
@@ -356,8 +451,14 @@ def publish_subcommand_parser() -> argparse.ArgumentParser:
 def _run_publish(argv: list) -> int:
     """Handler for ``build_deps.py publish ...`` (D12)."""
     args = publish_subcommand_parser().parse_args(argv)
-    resolved_platform = detect_platform() if args.platform == "auto" else args.platform
-    resolved_arch = detect_arch() if args.arch == "auto" else args.arch
+    # require_ndk=False: publishing packages an ALREADY-built dist and renders
+    # no configure argv, so an NDK root would be meaningless here. The android
+    # ABI-vocabulary rule still applies -- the asset name carries it.
+    try:
+        resolved_platform, resolved_arch = resolve_target(args, require_ndk=False)
+    except TargetError as exc:
+        print(f"[build_deps] error: {exc}", file=sys.stderr)
+        return 1
 
     from deps import publish as publish_module  # noqa: PLC0415
     from deps.run import SubprocessError as _SubprocessError  # noqa: PLC0415
@@ -398,8 +499,12 @@ def _run_build(argv: list) -> int:
     breaks an import in deps/execute.py or deps/heif.py."""
     args = build_subcommand_parser().parse_args(argv)
 
-    resolved_platform = detect_platform() if args.platform == "auto" else args.platform
-    resolved_arch = detect_arch() if args.arch == "auto" else args.arch
+    try:
+        resolved_platform, resolved_arch = resolve_target(args, require_ndk=True)
+    except TargetError as exc:
+        print(f"[build_deps] error: {exc}", file=sys.stderr)
+        return 1
+    ndk = args.android_ndk
 
     manifest_module = _load_manifest_module()
     render_module = _load_render_module()
@@ -441,6 +546,19 @@ def _run_build(argv: list) -> int:
             # OPTION 1 ruling. Their assertion sets therefore differ in kind --
             # demanding kvz_api_get/aom_codec_av1_cx of the Windows dist would
             # require encoders it intentionally does not contain.
+            if resolved_platform == "android":
+                # A-T1 teaches the CARRIER the android platform; the android
+                # HEIF stack recipe itself is A-T4. Reject explicitly rather
+                # than fall through to the Unix branch below, which would run
+                # a host-toolchain build under an android label.
+                print(
+                    "[build_deps] error: 'heif-stack' has no --platform android "
+                    "implementation yet (plan A-T4 owns it). The android carrier "
+                    "surface (--platform android --arch arm64-v8a --android-ndk) "
+                    "is available for manifest components only.",
+                    file=sys.stderr,
+                )
+                return 1
             if resolved_platform == "windows":
                 from deps import win_heif_dist  # noqa: PLC0415 - lazy, see docstring
 
@@ -599,7 +717,7 @@ def _run_build(argv: list) -> int:
 
         if args.dry_run:
             for token in render_module.render(
-                loaded, args.component, resolved_platform, resolved_arch, dist=str(dist)
+                loaded, args.component, resolved_platform, resolved_arch, dist=str(dist), ndk=ndk
             ):
                 print(token)
             return 0
@@ -611,6 +729,7 @@ def _run_build(argv: list) -> int:
             resolved_arch,
             dist,
             dist / ".stage",
+            ndk=ndk,
             jobs=args.jobs,
         )
         return 0
@@ -643,8 +762,11 @@ def main(argv: Optional[list] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(tokens)
 
-    resolved_platform = detect_platform() if args.platform == "auto" else args.platform
-    resolved_arch = detect_arch() if args.arch == "auto" else args.arch
+    try:
+        resolved_platform, resolved_arch = resolve_target(args, require_ndk=True)
+    except TargetError as exc:
+        print(f"[build_deps] error: {exc}", file=sys.stderr)
+        return 1
 
     manifest_module = _load_manifest_module()
     if manifest_module is None:
@@ -686,7 +808,13 @@ def main(argv: Optional[list] = None) -> int:
         return 1
 
     try:
-        argv = render_module.render(loaded, args.component, resolved_platform, resolved_arch)
+        argv = render_module.render(
+            loaded,
+            args.component,
+            resolved_platform,
+            resolved_arch,
+            ndk=args.android_ndk,
+        )
     except render_module.RenderError as exc:
         print(f"[build_deps] error: render failed: {exc}", file=sys.stderr)
         return 1

@@ -45,6 +45,14 @@ cmake_system = "x86_64"
 # exact ABI name for Android assets.
 uname = ["arm64-v8a"]
 cmake_system = "aarch64"
+# Substituted by render.py into the android cmake overlays as
+# {arch.android_abi} / {arch.android_platform}. android-24 matches
+# native/CMakePresets.json's "android-vulkan" preset ANDROID_PLATFORM
+# (CMakePresets.json:41) -- the dist and
+# the consumer MUST target the same API level, or the dist's symbols can
+# reference a newer libc than the decoder is allowed to link against.
+android_abi = "arm64-v8a"
+android_platform = "android-24"
 
 # Release-asset naming vocabulary: <component>-<platform>-<arch>.tar.gz.
 # native/scripts/publish_release.py's --artifacts-dir mode splits an

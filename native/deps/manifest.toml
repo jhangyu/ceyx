@@ -530,6 +530,27 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
   CMAKE_OSX_ARCHITECTURES     = "{arch.apple}"
 
+  [component.libwebp.cmake.android]
+  # Android is cross-compile-only (render.py's _PLATFORMS comment). The NDK
+  # toolchain file drives the whole cross build; "{ndk}" is substituted from
+  # build_deps.py's --android-ndk, never from ANDROID_NDK_HOME inside
+  # render() (pure function). ANDROID_ABI/ANDROID_PLATFORM come from
+  # arch_map.toml [arm64-v8a] so the dist and native/CMakePresets.json's
+  # "android-vulkan" consumer cannot drift apart on API level.
+  #
+  # These keys are android-only ADDITIONS to the base table, which overlays
+  # are allowed to make (manifest.py:110-119, spec §4.2 rule 1 -- overlays are
+  # additive-only; only "!delete" is rejected). They are deliberately NOT in
+  # cmake.base: "{arch.android_abi}" exists only under [arm64-v8a], and a base
+  # key referencing it would still LOAD fine (A1.4 only asks whether the field
+  # exists somewhere in arch_map) but would then render an unresolvable token
+  # for arm64/x86_64 at build time -- exactly the late failure A1.4 exists to
+  # prevent. Keeping the android substitutions in the android overlay keeps
+  # every render of every other platform free of them.
+  CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
+  ANDROID_ABI          = "{arch.android_abi}"
+  ANDROID_PLATFORM     = "{arch.android_platform}"
+
   [component.libwebp.outputs]
   # WEBP_BUILD_WEBPMUX=OFF disables only the cwebp/dwebp/etc CLI tools; the
   # mux and demux LIBRARIES are built regardless (fetch_libwebp_dist.sh:118-120,
