@@ -16,6 +16,12 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fake NDK tools here are POSIX shebang scripts (chmod +x); "
+    "Windows cannot execve them (WinError 193). Android-only concern anyway.",
+)
+
 _SCRIPTS = Path(__file__).resolve().parents[2]  # native/scripts
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
