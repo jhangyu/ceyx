@@ -497,9 +497,15 @@ jobs:
           restore-keys: |
             native-build-${{ runner.os }}-${{ matrix.arch_tag }}-
 
+      # CI-T11 (MACOS-ASSET, follow-up, 2026-09-01): `shell: bash` is required
+      # here (not the default keyless `bash -e {0}`, which has NO pipefail on
+      # macOS runners — see the cross-stage2 step's comment below for the
+      # same reasoning) so that piping through `tee` cannot mask a nonzero
+      # exit from the watchdog itself.
       - name: Build dng_decoder_native via watchdog (native arm64)
         if: matrix.cross == 'false'
         working-directory: ${{ github.workspace }}
+        shell: bash
         run: |
           # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's own resolver runs
           # before every non-Android configure, is mandatory, and aborts when it
@@ -509,7 +515,28 @@ jobs:
           export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_native_watchdog.py \
             --target dng_decoder_native \
-            --idle-timeout-sec 180
+            --idle-timeout-sec 180 2>&1 | tee "${{ github.workspace }}/native_build_native_arm64.log"
+
+          # CI-T11 (MACOS-ASSET): this is the mechanical instrument for the
+          # "does lcms2 exist at CI staging time" question
+          # (docs/logs/2026-09-01/ci-t11-findings.md) — a build-time fact,
+          # captured as a log line, not inferred from a local dev build (this
+          # dev machine's Homebrew state is not evidence for what the CI
+          # runner image provides). Configure log grepped from a saved file,
+          # not piped directly to grep, so a zero-match `grep -q` cannot
+          # itself trip SIGPIPE against a still-writing producer (2026-08-28
+          # ledger: `nm | grep -q` under pipefail dies on early grep exit).
+          set +e
+          grep -q "Libraw will be compiled with LCMS support .................... YES" \
+            "${{ github.workspace }}/native_build_native_arm64.log"
+          LCMS_RC=$?
+          set -e
+          echo "LCMS_CONFIGURE_RC=${LCMS_RC}"
+          if [ "${LCMS_RC}" -ne 0 ]; then
+            echo "::error::LibRaw's configure did not report LCMS support as YES on this runner — liblcms2.2.dylib will not be produced, and the release asset would silently ship without ICC colour management (a capability regression versus the currently-committed dylibs). See native_build_native_arm64.log for the actual 'Libraw will be compiled with LCMS support' line." >&2
+            grep "Libraw will be compiled with LCMS support" "${{ github.workspace }}/native_build_native_arm64.log" || echo "(line not found in log at all)"
+            exit 1
+          fi
 
       # Cross leg, stage 1: arm64 host generators, emitting x86_64 AOT code.
       - name: Build host Halide generators + x86_64 AOT (cross stage 1)
@@ -706,10 +733,47 @@ jobs:
             exit 1
           fi
 
+      # CI-T11 (MACOS-ASSET, user ruling 4a / contract AC9, 2026-09-01): the
+      # release asset used to carry only the decoder itself. Five downstream
+      # consumers require all six interdependent dylibs together (the
+      # committed plugin/macos/Libraries tree this asset is meant to replace,
+      # plugin/macos/ceyx.podspec:46-51's `vendored_libraries`, and Halcyon's
+      # verify_macos_heif_rpaths / HEIF_RUNTIME_LIBS checks) — a release
+      # containing only the decoder would place 1 file where 6 are required.
+      # bundle_macos_dylib_deps.py (native/cmake/pipeline.cmake:151-160)
+      # already vendors liblcms2/libjpeg next to the decoder at build time,
+      # and heif.cmake's POST_BUILD copy already stages libheif/libde265
+      # there too, so all six exist side by side in $(dirname "$DYLIB")
+      # by this point in the job — confirmed empirically from a real
+      # successful CI run's `otool -L` output on the built dylib (run
+      # 33343548641, apple-silicon leg), not inferred from a local dev
+      # build. libomp is vendored from this repo's own
+      # native/third_party/libomp (not Homebrew), so it is reproducible on
+      # every run, not just this dev machine's.
+      #
+      # Restricted to the native (non-cross) leg: the six committed
+      # plugin/macos/Libraries files this asset is meant to replace are all
+      # single-arch arm64 (confirmed via `dwarfdump --uuid` parity check,
+      # docs/logs/2026-09-01/ci-t11-findings.md), and the cross leg does not
+      # even produce all six (its build disables desktop OpenMP, so no
+      # libomp.dylib — see the "Build host Halide generators" step's
+      # DNG_CROSS_BUILD comment). The cross leg keeps shipping the
+      # decoder-only artifact it always has; only the arm64 leg's asset gains
+      # the five companions.
       - name: Stage native artifact
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
           cp "$DYLIB" "${ARTIFACT_DIR}/native/"
+          if [ "${{ matrix.cross }}" = "false" ]; then
+            NATIVE_DYLIB_DIR="$(dirname "$DYLIB")"
+            for companion in liblcms2.2.dylib libjpeg.8.dylib libheif.1.dylib libde265.0.dylib libomp.dylib; do
+              if [ ! -f "${NATIVE_DYLIB_DIR}/${companion}" ]; then
+                echo "::error::expected companion dylib ${companion} not found in ${NATIVE_DYLIB_DIR} — the release asset would ship the decoder without a dependency the podspec vendors." >&2
+                exit 1
+              fi
+              cp "${NATIVE_DYLIB_DIR}/${companion}" "${ARTIFACT_DIR}/native/"
+            done
+          fi
           ls -la "${ARTIFACT_DIR}/native"
 
       # Round 6, Plan B naming normalization: the artifact name is built from
@@ -730,9 +794,18 @@ jobs:
       # (rule 3), and running it once per matrix leg is precisely the race the
       # single publish job removes.
       #
-      # Contract note: macOS artifacts are still produced and published, but
-      # halcyon deliberately does NOT consume macOS from releases — it uses the
-      # committed dylibs under plugin/macos/Libraries.
+      # Contract note (updated CI-T11 MACOS-ASSET, 2026-09-01): the native
+      # (arm64) leg's artifact now carries all six dylibs the podspec vendors
+      # (see the "Stage native artifact" step above), not just the decoder —
+      # a necessary but not yet sufficient condition for release-fetch
+      # consumption. As of this change halcyon STILL does NOT consume macOS
+      # from releases; it continues to use the committed dylibs under
+      # plugin/macos/Libraries. Halcyon's own migration to fetching this
+      # asset (CEYX_FETCH_SPECS["macos"] + ceyx_release_pin.json) is a
+      # separate, sequenced step (plan-ci-codec-integration.md CI-T11) that
+      # requires a tagged release built from this workflow to exist first —
+      # do not read the artifact carrying six files as halcyon already
+      # consuming them.
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:
@@ -740,6 +813,22 @@ jobs:
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 14
+
+      # CI-T11 (MACOS-ASSET follow-up): preserves the configure log this job
+      # actually produced (docs/logs/2026-09-01/ci-t11-findings.md's "no
+      # artifact answers this question either way" gap) so the LCMS/OpenMP
+      # support lines are a re-readable build artifact instead of only
+      # existing inside the ephemeral Actions step log. `if: always()` so a
+      # failed LCMS assertion above still uploads the evidence that failed
+      # it (R3/R7). Native leg only — the cross leg does not produce this log.
+      - name: Upload native build log (native arm64)
+        if: always() && matrix.cross == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native_build_log_macos_arm64
+          path: ${{ github.workspace }}/native_build_native_arm64.log
+          if-no-files-found: warn
+          retention-days: 7
 
       # CI-T3 (task #11 spec, section 2): probe_codecs.txt/capability.json
       # are only produced on the native (arm64) leg (matrix.cross == 'false'
