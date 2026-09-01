@@ -213,6 +213,54 @@ def vendor_licences(loaded: dict, component: str, dist: Path, stage: Path) -> li
     return copied
 
 
+def pin_string(loaded: dict, component: str, arch: str, ndk: Path | str) -> str:
+    """The android ``.pins`` stamp for a component built through the GENERIC
+    carrier path (execute.py's ``acquire()``/``build_component()`` -- libjxl,
+    libwebp; heif-stack has its own dedicated ``heif.pin_string()``).
+
+    Format mirrors ``heif.android_pin_string()``'s token shape
+    (``{component}={version}:{pin} arch=... abi=... ndk=...``) so CI-T8's
+    staleness digest check can parse one stamp format across every android
+    dist, not two subtly different ones.
+
+    Discovered missing the hard way: the generic path had NO ``.pins`` write
+    step at all (for any platform), unlike heif-stack's dedicated android
+    orchestration -- both the committed libjxl and libwebp android dists
+    shipped without a staleness stamp, silently defeating CI-T8's purpose.
+    """
+    from . import execute as execute_mod  # local import: avoid a module-load cycle
+    from . import heif as heif_mod  # local import: heif.py is heavy; reuse ndk_revision()
+
+    block = execute_mod.resolve_source(loaded, component, "android")
+    version = execute_mod.component_version(loaded, component)
+    kind = block.get("kind")
+    if kind == "git":
+        pin = "git:" + str(block["tag"]).replace("{version}", version)
+    elif kind == "tarball":
+        pin = str(block["sha256"])
+    else:
+        raise AndroidDistError(
+            f"component.{component}: unsupported source kind {kind!r} for a .pins stamp "
+            f"(only 'git' and 'tarball' are handled)"
+        )
+    tokens = [
+        f"{component}={version}:{pin}",
+        f"arch={arch}",
+        f"abi={arch}",
+        f"ndk={heif_mod.ndk_revision(str(ndk))}",
+    ]
+    return " ".join(tokens)
+
+
+def write_pins(dist: Path, loaded: dict, component: str, arch: str, ndk: Path | str) -> Path:
+    """Write ``<dist>/.pins``. Callers run this LAST, after strip/vendor/
+    assert all succeed (mirrors heif.build_android()'s ordering exactly): a
+    partially-built dist must never carry a stamp claiming it is current."""
+    path = Path(dist) / ".pins"
+    path.write_text(pin_string(loaded, component, arch, ndk), encoding="utf-8")
+    return path
+
+
 def _find_source_dir(component: str, stage: Path) -> Path:
     """Locate the extracted/cloned source tree inside ``stage``.
 

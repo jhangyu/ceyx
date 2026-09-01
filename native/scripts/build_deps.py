@@ -761,9 +761,17 @@ def _run_build(argv: list) -> int:
                     # evidence about the artefact, not part of it.
                     evidence_dir=stage / "assertions",
                 )
+                # LAST, after strip/vendor/assert all succeed (mirrors
+                # heif.build_android()'s ordering): a partially-built dist
+                # must never carry a stamp claiming it is current. Absent
+                # until this fix -- the generic carrier path had no .pins
+                # write step at all, silently defeating CI-T8's staleness
+                # digest check for every component that goes through it.
+                android_dist.write_pins(dist, loaded, args.component, resolved_arch, ndk)
             except (
                 android_dist.AndroidDistError,
                 android_dist.assertions_mod.AssertionFailed,
+                heif_module.HeifError,
                 SubprocessError,
             ) as exc:
                 print(f"[android-dist] {exc}", file=sys.stderr)
