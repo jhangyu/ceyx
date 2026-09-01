@@ -213,11 +213,20 @@ jobs:
           ls -la "${ARTIFACT_DIR}/native" || true
 
       - name: Fail if the required Android .so set is incomplete (A-T8-FIX atomic group)
-        # Required today: the decoder, its HEIF companions (DNG_ENABLE_HEIF=ON
-        # above), and libc++_shared.so (ANDROID_STL=c++_shared, staged
-        # unconditionally). Mirrors publish_release.py's ATOMIC_REQUIRED_FILES
-        # pattern for windows/linux -- keep this list and any future Android
-        # entry added there in sync.
+        # Required today: the decoder and its HEIF companions
+        # (DNG_ENABLE_HEIF=ON above). libc++_shared.so is DELIBERATELY NOT in
+        # this fixed list: cmake/heif.cmake's ANDROID libc++_shared block
+        # (corrected 2026-09-01 after a pre-gate replay against the real NDK
+        # caught the original unconditional version's false premise) only
+        # stages it when CMAKE_ANDROID_STL_TYPE actually resolves to
+        # c++_shared. Today's build path (build_native_watchdog.py's Stage 2
+        # invocation never passes -DANDROID_STL) defaults to c++_static, so
+        # libc++_shared.so correctly does NOT exist in the artifact dir --
+        # treating its absence as a missing-artifact failure here would be
+        # asserting the same false premise the DT_NEEDED check below already
+        # had to be corrected for. The bidirectional STL check below is where
+        # libc++_shared.so's presence/absence is actually verified, against
+        # the real DT_NEEDED table rather than a fixed file-existence list.
         run: |
           shopt -s nullglob
           libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
@@ -225,7 +234,7 @@ jobs:
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
             exit 1
           fi
-          required=("libheif.so" "libde265.so" "libc++_shared.so")
+          required=("libheif.so" "libde265.so")
           missing=""
           for f in "${required[@]}"; do
             if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
@@ -233,7 +242,7 @@ jobs:
             fi
           done
           if [ -n "${missing}" ]; then
-            echo "::error::missing required companion .so(s) in ${ARTIFACT_DIR}/native:${missing} — the Android atomic group (decoder + HEIF companions + libc++_shared) is incomplete." >&2
+            echo "::error::missing required companion .so(s) in ${ARTIFACT_DIR}/native:${missing} — the Android atomic group (decoder + HEIF companions) is incomplete." >&2
             exit 1
           fi
 
@@ -288,15 +297,36 @@ jobs:
             exit 1
           fi
 
-      # A-T8-FIX: prove libc++_shared.so is a real, satisfied runtime
-      # dependency of the decoder -- not just a file that happens to be
-      # present in the artifact dir. Capture `llvm-readelf -d` to a FILE
-      # first, then grep the file (2026-08-28 lesson: under `set -euo
-      # pipefail`, `readelf -d ... | grep -q PATTERN` returns 141 and
-      # INVERTS the verdict when the pattern IS found, because grep exits
-      # early and readelf takes SIGPIPE -- never pipe straight into grep -q
-      # here).
-      - name: Assert decoder DT_NEEDED lists libc++_shared.so (A-T8-FIX libc++_shared handling)
+      # A-T8-FIX, CORRECTED 2026-09-01: prove the decoder's libc++_shared.so
+      # DT_NEEDED state actually MATCHES what cmake/heif.cmake's STATUS line
+      # claims -- BIDIRECTIONAL, not a one-way "must be present" check.
+      #
+      # The original version of this step unconditionally asserted
+      # libc++_shared.so IS in DT_NEEDED, on the false premise that
+      # ANDROID_STL=c++_shared always applies (see heif.cmake's corrected
+      # comment for the full root-cause trail: build_native_watchdog.py's
+      # Stage 2 invocation never passes -DANDROID_STL, so the NDK toolchain
+      # defaults CMAKE_ANDROID_STL_TYPE to c++_static, and a real build+readelf
+      # against the committed heif-dist confirmed no libc++_shared.so entry --
+      # libomp.so WAS present, proving the linker does record genuine shared
+      # deps, so the absence is a true negative, not a broken check). That
+      # made the fixed leg fail on an assertion that was checking the wrong
+      # thing, not on a real defect.
+      #
+      # This replacement checks BOTH directions against the real DT_NEEDED
+      # table, keyed off which branch heif.cmake's STATUS line says it took:
+      #   c++_shared -> libc++_shared.so MUST be listed (catches a future
+      #     flip that stages the file but silently fails to actually link it
+      #     -- the failure mode the original assertion was reaching for).
+      #   c++_static (or anything else) -> libc++_shared.so must NOT be
+      #     listed (catches an accidental partial/shared link creeping in
+      #     without the STL flag actually changing).
+      # Capture `llvm-readelf -d` to a FILE first, then grep the file
+      # (2026-08-28 lesson: under `set -euo pipefail`, `readelf -d ... |
+      # grep -q PATTERN` returns 141 and INVERTS the verdict when the
+      # pattern IS found, because grep exits early and readelf takes
+      # SIGPIPE -- never pipe straight into grep -q here).
+      - name: Assert decoder DT_NEEDED matches the resolved Android STL (A-T8-FIX libc++_shared handling)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
@@ -316,15 +346,37 @@ jobs:
             cat android_decoder_dynamic.txt || true
             exit 1
           fi
+
+          set +e
+          grep -q "^-- Android STL: c++_shared -- staged libc++_shared.so next to dng_decoder_native$" android_build.log
+          stl_shared_rc=$?
+          grep -q "^-- Android STL: c++_static -- libc++_shared.so not required, nothing staged$" android_build.log
+          stl_static_rc=$?
+          set -e
+          echo "STL_SHARED_LOG_RC=${stl_shared_rc} STL_STATIC_LOG_RC=${stl_static_rc}"
+          if [ "${stl_shared_rc}" -ne 0 ] && [ "${stl_static_rc}" -ne 0 ]; then
+            echo "::error::configure log shows neither of heif.cmake's expected 'Android STL: ...' lines — the STL branch that ran cannot be identified, refusing to publish an unverified decoder." >&2
+            exit 1
+          fi
+
           set +e
           grep -q "libc++_shared.so" android_decoder_dynamic.txt
-          rc=$?
+          dt_has_libcxx_rc=$?
           set -e
-          echo "RC=${rc} (libc++_shared.so in DT_NEEDED)"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::${SO}'s DT_NEEDED does not list libc++_shared.so — ANDROID_STL=c++_shared expects this dependency; staging without an actual link-time need (or a build that silently dropped it) would ship a dead file." >&2
-            cat android_decoder_dynamic.txt
-            exit 1
+          echo "DT_NEEDED_HAS_LIBCXX_SHARED_RC=${dt_has_libcxx_rc}"
+
+          if [ "${stl_shared_rc}" -eq 0 ]; then
+            if [ "${dt_has_libcxx_rc}" -ne 0 ]; then
+              echo "::error::${SO}'s DT_NEEDED does not list libc++_shared.so, but the configure log says CMAKE_ANDROID_STL_TYPE=c++_shared — staging without an actual link-time need (or a build that silently dropped it) would ship a dead file." >&2
+              cat android_decoder_dynamic.txt
+              exit 1
+            fi
+          else
+            if [ "${dt_has_libcxx_rc}" -eq 0 ]; then
+              echo "::error::${SO}'s DT_NEEDED lists libc++_shared.so, but the configure log says the STL is c++_static (not c++_shared) — an unexpected partial/shared C++ link crept in." >&2
+              cat android_decoder_dynamic.txt
+              exit 1
+            fi
           fi
 
       # Round 6, Plan B: this artifact name is also the release asset stem —
@@ -339,11 +391,15 @@ jobs:
       # committed trees are pre-built PRODUCER artifacts consumed by cmake,
       # not built by this job), but it now CONSUMES the committed heif-dist
       # and packages its runtime companions -- the artifact this step uploads
-      # is the multi-.so atomic group (decoder + libheif.so + libde265.so +
-      # libc++_shared.so), asserted complete by the "Fail if the required
-      # Android .so set is incomplete" step above, not a single file. JXL
-      # remains excluded (-DCEYX_ENABLE_JXL=OFF): no Android libjxl dist has
-      # actually been committed yet (see the build step's comment above).
+      # is the multi-.so atomic group (decoder + libheif.so + libde265.so,
+      # asserted complete by the "Fail if the required Android .so set is
+      # incomplete" step above; libc++_shared.so joins the set only if
+      # CMAKE_ANDROID_STL_TYPE resolves to c++_shared, which today's build
+      # path does not -- see heif.cmake's corrected comment and the
+      # bidirectional STL assertion below for why this is not a fixed
+      # count), not a single file. JXL remains excluded
+      # (-DCEYX_ENABLE_JXL=OFF): no Android libjxl dist has actually been
+      # committed yet (see the build step's comment above).
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:

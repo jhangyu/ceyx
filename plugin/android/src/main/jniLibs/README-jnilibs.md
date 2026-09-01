@@ -4,9 +4,9 @@
 directory (e.g. `arm64-v8a/`) are **not committed** to this repository
 (ruling 2026-08-31, option a, A-T12).
 
-## The full .so set (A-T8-FIX, 2026-09-01)
+## The full .so set (A-T8-FIX, 2026-09-01; corrected same day)
 
-As of the HEIF Android leg going live, `arm64-v8a/` needs FOUR files, not
+As of the HEIF Android leg going live, `arm64-v8a/` needs THREE files, not
 one — Gradle's `jniLibs.srcDirs` packs every `.so` it finds, but a partial
 set fails to load at runtime with an error naming only the first missing
 dependency:
@@ -15,15 +15,33 @@ dependency:
 - `libheif.so`, `libde265.so` — HEIC/AVIF decode route (dynamically linked,
   unversioned names on Android — see
   `native/third_party/heif-dist-android-arm64-v8a/PROVENANCE.md`).
-- `libc++_shared.so` — the NDK's shared C++ runtime; the decoder is built
-  with `ANDROID_STL=c++_shared` (`native/CMakePresets.json`) regardless of
-  which codecs are enabled, so this file is required unconditionally.
 
-`native/cmake/heif.cmake`'s `ANDROID` branches stage all four files next to
-each other in the build output directory (`build-android/android-arm64/`)
+**Correction, not a downgrade**: the original version of this doc claimed a
+FOURTH file, `libc++_shared.so`, was required "unconditionally" because
+`ANDROID_STL=c++_shared` per `native/CMakePresets.json`. That premise was
+false for the actual build path — `native/scripts/build_native_watchdog.py`'s
+Stage 2 cmake invocation (what `android_build.yml` and every local Android
+build actually run) never passes `-DANDROID_STL`, so the NDK toolchain
+defaults it to `c++_static`, confirmed directly by reading `llvm-readelf -d`
+on a real built `.so`: `libomp.so` IS listed in `DT_NEEDED` (proving the
+linker does record genuine shared deps) but `libc++_shared.so` is not — the
+C++ runtime is statically linked in, same as `libheif.so`/`libde265.so`
+already are. No C++ ABI crosses any `.so` boundary here (the codec libraries
+expose a plain C API), so a statically-linked libc++ inside the decoder
+alongside statically-linked libc++ inside the codec libs is not an
+ODR/duplicate-symbol hazard. `libc++_shared.so` joins the set ONLY if a
+future build ever configures `ANDROID_STL=c++_shared` — `native/cmake/heif.cmake`'s
+`ANDROID` block now stages+asserts it conditionally on the real resolved
+`CMAKE_ANDROID_STL_TYPE`, not unconditionally.
+
+`native/cmake/heif.cmake`'s `ANDROID` branches stage the required files next
+to each other in the build output directory (`build-android/android-arm64/`)
 via `POST_BUILD` copy commands, so copying every `*.so` from that directory
-into `arm64-v8a/` picks up the complete set. `.github/workflows/android_build.yml`
-does the equivalent copy + a completeness assertion for the CI artifact.
+into `arm64-v8a/` picks up the complete set (three today, four if a future
+build ever switches to `c++_shared`). `.github/workflows/android_build.yml`
+does the equivalent copy + a completeness assertion for the CI artifact, plus
+a bidirectional check that the decoder's real `DT_NEEDED` table matches
+whichever STL branch the configure log says was taken.
 
 libjxl is NOT yet part of this set: no Android libjxl dist has been
 committed (only `native/third_party/libjxl-dist-android-arm64-v8a/PROVENANCE.md`

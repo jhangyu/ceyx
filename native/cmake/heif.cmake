@@ -303,50 +303,79 @@ else()
     message(STATUS "HEIF: disabled (DNG_ENABLE_HEIF=OFF) — no heif_ symbols will be exported")
 endif()
 
-# libc++_shared.so staging (A-T8-FIX, 2026-09-01) -- UNCONDITIONAL, not gated
-# on DNG_ENABLE_HEIF. native/CMakePresets.json's android-vulkan preset sets
-# ANDROID_STL=c++_shared, so dng_decoder_native itself links the NDK's shared
-# C++ runtime regardless of which codecs are enabled; without staging this
-# file next to (and therefore into the same jniLibs/packaging set as) the
-# decoder .so, the app fails to load the decoder at all with an error naming
-# libc++_shared.so, not any codec. This is safe alongside the HEIF dist's own
-# libheif.so/libde265.so, which link libc++ STATICALLY (round2-heif-baton.md
-# measured fact) -- no duplicate-symbol or ABI-crossing hazard, because no
-# C++ ABI crosses the libheif C API boundary either library uses.
+# libc++_shared.so staging (A-T8-FIX, 2026-09-01; CORRECTED same day after a
+# local pre-gate replay against the real NDK caught the previous version's
+# false premise -- see below) -- gated on DNG_ENABLE_HEIF, on the ACTUAL
+# resolved STL type.
+#
+# CORRECTION, not a narrowing: the original version of this block assumed
+# "native/CMakePresets.json's android-vulkan preset sets ANDROID_STL=c++_shared,
+# so dng_decoder_native always links the shared C++ runtime" and staged/asserted
+# unconditionally on that basis. That premise was FALSE for the actual CI build
+# path: native/scripts/build_native_watchdog.py's Stage 2 cmake invocation (the
+# real entry point used by android_build.yml and every local Android build) does
+# NOT pass -DANDROID_STL at all -- that flag exists only in the unused
+# `cmake --preset android-vulkan` path. With ANDROID_STL unset, the NDK's
+# android.toolchain.cmake (`if(ANDROID_STL) set(CMAKE_ANDROID_STL_TYPE ...) endif()`)
+# never fires, and CMake defaults CMAKE_ANDROID_STL_TYPE to c++_static for NDK
+# cross-compiles. A real build+readelf against the committed heif-dist confirmed
+# this directly: `llvm-readelf -d` on the built libdng_decoder_native.so lists
+# libomp.so (proving the linker DOES record genuine shared deps) but no
+# libc++_shared.so entry at all -- there is nothing to link against because the
+# C++ runtime is statically linked in, exactly like libheif.so/libde265.so
+# (round2-heif-baton.md measured fact). No C++ ABI crosses any .so boundary in
+# this build: dng_decoder_native<->libheif/libde265 is a plain C API, so a
+# statically-linked libc++ inside the decoder alongside statically-linked libc++
+# inside the codec libs is NOT an ODR/duplicate-symbol hazard -- there is no
+# shared C++ object model between them to collide.
+#
+# The block below now stages+requires libc++_shared.so ONLY when
+# CMAKE_ANDROID_STL_TYPE actually resolves to c++_shared (a future flag flip),
+# and explicitly announces the branch taken via message(STATUS ...), mirroring
+# this file's existing HEIF/JXL STATUS-line convention so both outcomes stay
+# log-verifiable. android_build.yml's companion CI step asserts BOTH directions
+# against the real DT_NEEDED table (shared -> must be listed; static -> must NOT
+# be listed), not just the log line, so a future flip that stages the file but
+# fails to actually link it cannot silently pass.
 if(ANDROID)
-    # ANDROID_NDK (not CMAKE_ANDROID_NDK) is the variable the NDK's OWN
-    # android.toolchain.cmake sets -- this project configures via that
-    # toolchain file (native/CMakePresets.json's toolchainFile, invoked with
-    # -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake by
-    # build_native_watchdog.py), not CMake's own built-in
-    # CMAKE_SYSTEM_NAME=Android cross-compiling support, which is what sets
-    # CMAKE_ANDROID_NDK instead. Using the wrong one here would silently
-    # resolve to an empty/undefined variable.
-    if(NOT DEFINED ANDROID_NDK OR NOT ANDROID_NDK)
-        message(FATAL_ERROR
-            "ANDROID build but ANDROID_NDK is not set -- cannot locate "
-            "libc++_shared.so. This should be set by the NDK's own "
-            "android.toolchain.cmake; check native/CMakePresets.json's "
-            "toolchainFile entry.")
+    if(CMAKE_ANDROID_STL_TYPE STREQUAL "c++_shared")
+        # ANDROID_NDK (not CMAKE_ANDROID_NDK) is the variable the NDK's OWN
+        # android.toolchain.cmake sets -- this project configures via that
+        # toolchain file (native/CMakePresets.json's toolchainFile, invoked
+        # with -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake
+        # by build_native_watchdog.py), not CMake's own built-in
+        # CMAKE_SYSTEM_NAME=Android cross-compiling support, which is what
+        # sets CMAKE_ANDROID_NDK instead. Using the wrong one here would
+        # silently resolve to an empty/undefined variable.
+        if(NOT DEFINED ANDROID_NDK OR NOT ANDROID_NDK)
+            message(FATAL_ERROR
+                "ANDROID build with CMAKE_ANDROID_STL_TYPE=c++_shared but "
+                "ANDROID_NDK is not set -- cannot locate libc++_shared.so. "
+                "This should be set by the NDK's own android.toolchain.cmake; "
+                "check native/CMakePresets.json's toolchainFile entry.")
+        endif()
+        # Host toolchain directory name varies (linux-x86_64, darwin-x86_64),
+        # so glob it rather than hardcoding -- same approach as
+        # native/tests/run_decode_matrix.py's _libcxx_path() for the same file.
+        file(GLOB CEYX_ANDROID_LIBCXX_SHARED
+             "${ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so")
+        list(LENGTH CEYX_ANDROID_LIBCXX_SHARED _ceyx_libcxx_count)
+        if(_ceyx_libcxx_count EQUAL 0)
+            message(FATAL_ERROR
+                "libc++_shared.so not found under ${ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/ "
+                "-- dng_decoder_native is built with ANDROID_STL=c++_shared and "
+                "cannot load without this file staged alongside it.")
+        endif()
+        list(GET CEYX_ANDROID_LIBCXX_SHARED 0 CEYX_ANDROID_LIBCXX_SHARED_PATH)
+        add_custom_command(TARGET dng_decoder_native POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CEYX_ANDROID_LIBCXX_SHARED_PATH}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/libc++_shared.so"
+            COMMENT "Staging libc++_shared.so next to dng_decoder_native (ANDROID_STL=c++_shared)")
+        message(STATUS "Android STL: c++_shared -- staged libc++_shared.so next to dng_decoder_native")
+    else()
+        message(STATUS "Android STL: ${CMAKE_ANDROID_STL_TYPE} -- libc++_shared.so not required, nothing staged")
     endif()
-    # Host toolchain directory name varies (linux-x86_64, darwin-x86_64), so
-    # glob it rather than hardcoding -- same approach as
-    # native/tests/run_decode_matrix.py's _libcxx_path() for the same file.
-    file(GLOB CEYX_ANDROID_LIBCXX_SHARED
-         "${ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so")
-    list(LENGTH CEYX_ANDROID_LIBCXX_SHARED _ceyx_libcxx_count)
-    if(_ceyx_libcxx_count EQUAL 0)
-        message(FATAL_ERROR
-            "libc++_shared.so not found under ${ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/ "
-            "-- dng_decoder_native is built with ANDROID_STL=c++_shared and "
-            "cannot load without this file staged alongside it.")
-    endif()
-    list(GET CEYX_ANDROID_LIBCXX_SHARED 0 CEYX_ANDROID_LIBCXX_SHARED_PATH)
-    add_custom_command(TARGET dng_decoder_native POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CEYX_ANDROID_LIBCXX_SHARED_PATH}"
-                "$<TARGET_FILE_DIR:dng_decoder_native>/libc++_shared.so"
-        COMMENT "Staging libc++_shared.so next to dng_decoder_native (ANDROID_STL=c++_shared)")
 endif()
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
