@@ -21,6 +21,13 @@ from pathlib import Path
 
 HOMEBREW_PREFIXES = ("/opt/homebrew/", "/usr/local/")
 
+# Dependency forms this script already knows are fine as-is: relative-path
+# conventions this project's own build already uses (@rpath, and the two
+# lower-level loader tokens in case something ever emits them directly), and
+# genuine OS-provided absolute paths that exist identically on every Mac and
+# need no vendoring.
+KNOWN_SAFE_PREFIXES = ("@rpath/", "@loader_path/", "@executable_path/", "/usr/lib/", "/System/")
+
 
 def otool_deps(path: Path) -> list[str]:
     out = subprocess.run(["otool", "-L", str(path)], capture_output=True, text=True, check=True).stdout
@@ -61,8 +68,41 @@ def bundle(dylib: Path, dest_dir: Path) -> None:
         current = queue.pop()
         rewrote = False
         for dep in otool_deps(current):
-            if not dep.startswith(HOMEBREW_PREFIXES):
+            if dep.startswith(KNOWN_SAFE_PREFIXES):
                 continue
+            if not dep.startswith(HOMEBREW_PREFIXES):
+                # BUNDLER-BLIND-SPOT fix (2026-09-01): this branch used to be
+                # a silent `continue`. That silence is exactly how a broken
+                # release artifact reached a green CI run: a raw Homebrew
+                # bottle's own install name is an UNSUBSTITUTED relocation
+                # placeholder token of the literal form
+                # "@@HOMEBREW_PREFIX@@/opt/<formula>/lib/<name>.dylib" (only
+                # `brew install` itself rewrites that token to a real path;
+                # extracting a bottle without running `brew` leaves it as-is)
+                # -- which does not start with either Homebrew prefix above,
+                # so this check always let it straight through unexamined,
+                # and it got linked into the decoder and shipped verbatim.
+                # A dependency this script cannot classify is a shape nobody
+                # anticipated, which is precisely the failure this project
+                # cannot silently ignore in a release-asset-producing step:
+                # hard error, not a warning, because a warning is exactly
+                # the kind of output this same defect already proved can
+                # sit unnoticed in a green run's log.
+                print(
+                    f"[bundle] ERROR: {current} depends on {dep!r}, which this "
+                    "script cannot classify (not @rpath/@loader_path/"
+                    "@executable_path, not /usr/lib or /System, not a "
+                    "Homebrew-prefixed absolute path). This is exactly the "
+                    "shape of an unsubstituted package-manager relocation "
+                    "token (e.g. a raw Homebrew bottle's own "
+                    "'@@HOMEBREW_PREFIX@@/...' install name) and would ship "
+                    "an unresolvable dependency reference in the release "
+                    "asset. Refusing to continue -- fix the dependency's "
+                    "recorded install name (e.g. vendor-and-rewrite it "
+                    "before linking) rather than relaxing this check.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             name = Path(dep).name
             dest = dest_dir / name
             if name not in seen:
