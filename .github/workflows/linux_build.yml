@@ -499,29 +499,57 @@ jobs:
           done
           echo "ATOMIC_GROUP_COMPLETE=1"
 
-      # DT_NEEDED verification (AC1): prove the staged .so actually declares
-      # a runtime dependency on the staged companions -- not merely that
-      # files with the right names sit next to it. De-pipelined (readelf
-      # output to a file, then grep the file) per the pipefail lesson (08-17):
-      # `readelf | grep -q` inverts on a SUCCESSFUL match under `set -o
-      # pipefail` (grep exits first, readelf dies of SIGPIPE, pipeline
-      # reports 141).
+      # DT_NEEDED verification (AC1; fixed post-run-33455862800 diagnosis,
+      # task #18 follow-up). ORIGINAL BUG: this step asserted BOTH
+      # libheif.so.1 AND libde265.so.0 as direct DT_NEEDED entries of
+      # libdng_decoder_native.so. That is not what the linker produces --
+      # GNU ld's default --enable-new-dtags/--as-needed only records a
+      # DIRECT dependency for a symbol the .so actually references, and no
+      # translation unit in this project calls a de265_* symbol directly
+      # (only libheif ones); libheif.so.1 itself depends on libde265.so.0.
+      # This is the EXACT situation windows_build.yml already documents and
+      # gates in two separate steps ("dng_decoder_native.dll imports
+      # heif.dll only... it is heif.dll that imports libde265.dll") --
+      # verified against the actual run-33455862800 readelf -d output: the
+      # decoder's dynamic section lists NEEDED libheif.so.1 and nothing
+      # de265-named at all, RC=1 on the libde265.so.0 check was correct
+      # behaviour of a wrongly-designed check, not a build defect. Split
+      # into the same two levels here: (1) the decoder needs libheif.so.1
+      # directly, (2) the staged libheif.so.1 itself needs libde265.so.0
+      # transitively. De-pipelined (readelf output to a file, then grep the
+      # file) per the pipefail lesson (08-17): `readelf | grep -q` inverts
+      # on a SUCCESSFUL match under `set -o pipefail` (grep exits first,
+      # readelf dies of SIGPIPE, pipeline reports 141).
       - name: Verify DT_NEEDED references the staged HEIF companions
         run: |
           SO="${ARTIFACT_DIR}/native/libdng_decoder_native.so"
-          readelf -d "$SO" > "${RUNNER_TEMP}/dt_needed.txt"
-          cat "${RUNNER_TEMP}/dt_needed.txt"
-          for needed in libheif.so.1 libde265.so.0; do
-            set +e
-            grep -F "${needed}" "${RUNNER_TEMP}/dt_needed.txt"
-            rc=$?
-            set -e
-            echo "RC=${rc} (DT_NEEDED ${needed})"
-            if [ "${rc}" -ne 0 ]; then
-              echo "::error::${SO} has no DT_NEEDED entry for ${needed} — the staged companion would never be loaded." >&2
-              exit 1
-            fi
-          done
+          HEIF_SO="${ARTIFACT_DIR}/native/libheif.so.1"
+
+          echo "== Level 1: decoder's own NEEDED (expect libheif.so.1) =="
+          readelf -d "$SO" > "${RUNNER_TEMP}/dt_needed_decoder.txt"
+          cat "${RUNNER_TEMP}/dt_needed_decoder.txt"
+          set +e
+          grep -F "libheif.so.1" "${RUNNER_TEMP}/dt_needed_decoder.txt"
+          rc=$?
+          set -e
+          echo "RC=${rc} (DT_NEEDED libheif.so.1 in ${SO})"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::${SO} has no DT_NEEDED entry for libheif.so.1 — the staged companion would never be loaded." >&2
+            exit 1
+          fi
+
+          echo "== Level 2: libheif.so.1's own NEEDED (expect libde265.so.0, transitive) =="
+          readelf -d "$HEIF_SO" > "${RUNNER_TEMP}/dt_needed_heif.txt"
+          cat "${RUNNER_TEMP}/dt_needed_heif.txt"
+          set +e
+          grep -F "libde265.so.0" "${RUNNER_TEMP}/dt_needed_heif.txt"
+          rc=$?
+          set -e
+          echo "RC=${rc} (DT_NEEDED libde265.so.0 in ${HEIF_SO})"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::${HEIF_SO} has no DT_NEEDED entry for libde265.so.0 — the HEVC decoder linkage is UNVERIFIED, refusing to publish." >&2
+            exit 1
+          fi
 
       # Round 6, Plan B: the artifact name is now the SINGLE naming decision
       # this workflow makes. It is also the release asset stem — the publish
