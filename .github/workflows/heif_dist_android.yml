@@ -2,7 +2,7 @@ name: HEIF dist (Android)
 
 # DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml: this job
 # builds the libheif/libde265/kvazaar/aom distribution that is then COMMITTED
-# to native/third_party/heif-dist-android/, exactly as the macOS/Windows
+# to native/third_party/heif-dist-android-arm64-v8a/, exactly as the macOS/Windows
 # dists are. It is not part of the per-commit Android build: the dist is a
 # pinned, reviewed input (upstream tarball + SHA-256 + a fixed flag set), and
 # rebuilding it on every push would make the shipped bytes a moving target
@@ -96,7 +96,7 @@ jobs:
           python3 native/scripts/build_deps.py build heif-stack \
             --platform android --arch arm64-v8a \
             --android-ndk "${ANDROID_NDK_HOME}" \
-            --dist native/third_party/heif-dist-android
+            --dist native/third_party/heif-dist-android-arm64-v8a
           RC=$?
           set -e
           echo "HEIF_DIST_ANDROID_RC=$RC"
@@ -108,13 +108,13 @@ jobs:
         if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: find native/third_party/heif-dist-android -type f | sort
+        run: find native/third_party/heif-dist-android-arm64-v8a -type f | sort
 
       # Canonical artifact name <component>-<platform>-<arch> (rule C4).
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
           name: heif-dist-android-arm64-v8a
-          path: ${{ github.workspace }}/native/third_party/heif-dist-android
+          path: ${{ github.workspace }}/native/third_party/heif-dist-android-arm64-v8a
           if-no-files-found: error
           retention-days: 7
