@@ -118,6 +118,19 @@ native/third_party/libjxl-dist-*/
 # same rationale as the android exceptions above.
 !native/third_party/libjxl-dist-android-arm64-v8a/
 
+# The three directory exceptions above re-include the DIRECTORIES, but a
+# committed android dist's payload is static archives, and the blanket `*.a`
+# rule near the top of this file still matches those FILES -- last matching
+# pattern wins, and `!.../<dir>/` does not match `<dir>/lib/libwebp.a`. Without
+# the `/**` negations below, `git add` on a produced dist silently stages the
+# headers, .pc and cmake files while dropping every archive: a dist directory
+# that looks complete in `git status` and links against nothing. Same family
+# as the jniLibs ignore hole (task #9). Verified with `git check-ignore -v`
+# against a real built dist, not by reading the rules.
+!native/third_party/heif-dist-android-arm64-v8a/**
+!native/third_party/libwebp-dist-android-arm64-v8a/**
+!native/third_party/libjxl-dist-android-arm64-v8a/**
+
 # Vendored LLVM OpenMP runtime (committed on purpose, 756 KB - see
 # native/third_party/libomp/PROVENANCE.md). The blanket `*.dylib` rule above
 # would otherwise sweep the library, silently leaving a blank checkout without

@@ -110,9 +110,70 @@ which would report on the wrong object format.
 
 ## Producer run and committed bytes
 
-**PENDING** — this section is filled in the same commit that adds the built
-bytes, and must name: the `webp_dist_android.yml` run URL, the commit it ran
-against, the NDK version the runner used, and the SHA-256 of every committed
-file. Until then this directory contains provenance only, no artefacts: a
-PROVENANCE.md that describes bytes which are not here yet is a description of
-intent, and is marked as such rather than left to look like a record.
+| Field | Value |
+|---|---|
+| Run | https://github.com/jhangyu/ceyx/actions/runs/33454853873 (`webp_dist_android.yml`, `workflow_dispatch`) |
+| Commit built | `0061ef120bfaa0a422e10528a29c93a701a6457c` |
+| Runner | `ubuntu-latest`, CMake 3.31.6 |
+| NDK | **r27c**, pinned in the workflow (`nttld/setup-ndk`), resolved to `/opt/hostedtoolcache/ndk/r27c/x64` — not the runner image's preinstalled NDK, which can drift when GitHub bumps the image |
+| Build step exit code | `WEBP_DIST_ANDROID_RC=0`, self-captured on the line after the command inside the step |
+| Assertions | `[android-dist] ok: 1 licence file(s) vendored, assertions green` |
+
+### Independently re-verified before committing
+
+The run's assertions used the NDK's `llvm-nm`/`llvm-readelf`. The bytes were
+then checked again on a second machine with a **different instrument** — the
+ELF headers parsed directly out of the archive bytes (`e_machine` at offset
+18 of each member), and the capability symbol names searched in the raw
+archive — because two independent instruments agreeing is worth more than
+trusting one twice. Result: every member of all four archives reports
+`e_machine = 0xb7` (EM_AARCH64) and nothing else, and all five capability
+symbols are present. Driver: `native/scripts/tmp/a-t2-harvest.py`.
+
+### Not committed from the build output
+
+- `.stage/` — build scratch (source tree, CMake cache, and the captured
+  assertion dumps). Evidence about the artefact, not part of it.
+- `bin/webpmux`, `share/man/man1/webpmux.1` — `WEBP_BUILD_WEBPMUX=ON` builds
+  the CLI tool and its manpage as a side effect of building the mux library.
+  Nothing consumes them, and unused CLI/manpages were already ruled out of
+  dists (commit `903ce30`).
+
+`lib/libwebpdecoder.a`, `lib/libcpufeatures-webp.a`, `lib/pkgconfig/` and
+`share/WebP/cmake/` ARE kept: they are part of what `cmake --install`
+produces, they are what `find_package(WebP CONFIG)` consumes, and the
+committed Windows dist keeps its equivalents.
+
+### SHA-256 of every committed file
+
+| SHA-256 | File |
+|---|---|
+| `928e8d3ed502baa0f47ed10913ee018ed6172afcd4f308e0ea005a126b83f27e` | include/webp/encode.h |
+| `e554551d085f234e930f36b5879a77ef58bfea34c48ebfd620426e63b224025c` | include/webp/decode.h |
+| `c72cf593f8194c671efcade33f1678294380120d45a337511d612a3acb643f35` | include/webp/mux.h |
+| `9b0d10c0fa1ac2dc750c4d687b038e40a685bb9240cb045759f5b9546017361d` | include/webp/demux.h |
+| `ca789c9fe2edc52f759cb3888e9171ee44b5c12f2db21458f96176d578bc897e` | include/webp/mux_types.h |
+| `992d2ffe864adb6d80cc91b7a062074d167ed96772f28d104a650148eca31794` | include/webp/types.h |
+| `4fcb150246232b0e8e605752deb66ca861872f86dd692308d9f854e10ad964ee` | include/webp/sharpyuv/sharpyuv.h |
+| `80c23c727edb1ce6a42b38f9458c3d75c572856c898f0cd913ba03468afb9d3a` | include/webp/sharpyuv/sharpyuv_csp.h |
+| `bd5831988b34cb0a34631564a8537b40d2a76758d576d7e9561b904b237ec20b` | lib/libwebp.a |
+| `1343f5ae08037b9e3608e9610e0bdf03233daec07386dd3043b24caa6e0f2f62` | lib/libsharpyuv.a |
+| `d59af7bd0d1b14374cff4d0b32e7c15127ae3e5c74917f9b586dd70537696620` | lib/libwebpmux.a |
+| `bacd909552de4921be1c8fd2bfc2e2a7ca15692deb0e78ce9903afc5c4f46139` | lib/libwebpdemux.a |
+| `90f3637b474bb8d813b11d56bcde0164cbe6e5da8618e1450ac80a4bc7e50c03` | lib/libwebpdecoder.a |
+| `4d9fb96ac6c9881e6912b13b96b0d67651c861c5d4ffef7b48c76f4b4f6aba73` | lib/libcpufeatures-webp.a |
+| `85677cf683dabd9e6e92ac47d6223322648eb07523c51650b37c554f111ebac2` | lib/pkgconfig/libwebp.pc |
+| `5d60e08ab582fc81dba706cfe8e32eeb1aa36deeeb213ae4865e57f9bb56b357` | lib/pkgconfig/libsharpyuv.pc |
+| `f185a04d402c8edfb34a1b0e8935786a6f472a207f41310e375a394052c45dbf` | lib/pkgconfig/libwebpmux.pc |
+| `a684cb6d89d82a9556360cc78e90412958d74ab179952950446d1c52d72859ca` | lib/pkgconfig/libwebpdemux.pc |
+| `ff1a2df284a269cd80842e0bb11f3da45134f73f2d595ace9aacb24ec77323a0` | lib/pkgconfig/libwebpdecoder.pc |
+| `f4c6bfab9f3e53f8e126ddee597d7ec7c096f7427218b3b404ed97f7497074e1` | share/WebP/cmake/WebPConfig.cmake |
+| `c9be14d51d2108603dd1bd53c9e27945cea0d40bd970e5f27c6318373af3ade0` | share/WebP/cmake/WebPConfigVersion.cmake |
+| `f674b32d8a4c949f65302b30dd214267e87b066935cb81e4f2b3c3d28beb5ef6` | share/WebP/cmake/WebPTargets.cmake |
+| `81786edc8d8742a94cc9d55ce15d5d02fa875049daf94fef59c60dec7fa49b22` | share/WebP/cmake/WebPTargets-release.cmake |
+| `5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf` | share/licenses/libwebp/COPYING |
+
+Static-library builds are not bit-for-bit reproducible (accepted limitation,
+plan §9), so re-running the workflow will produce different hashes for the
+same sources. These hashes pin *these* committed bytes, not a claim of
+reproducibility.

@@ -1,0 +1,11 @@
+prefix=/home/runner/work/ceyx/ceyx/native/third_party/libwebp-dist-android-arm64-v8a
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libwebpdecoder
+Description: Library for the WebP graphics format (decode only)
+Version: 1.6.0
+Cflags: -I${includedir}
+Libs: -L${libdir} -lwebpdecoder
+Libs.private:   -pthread
