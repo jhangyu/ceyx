@@ -97,6 +97,31 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
     ("dng_decoder_native", "linux"): frozenset(
         {"libdng_decoder_native.so", "libheif.so.1", "libde265.so.0"}
     ),
+    # macOS variant (CI-T11 MACOS-ATOMIC-KEY, 2026-09-01, user ruling 5a):
+    # previously absent, so this assertion silently no-op'd for macOS (a
+    # missing key means _assert_atomic_required_files's `.get()` returns
+    # None and the function returns without checking anything -- confirmed
+    # at runtime, not just by reading: impl-covmatrix-sonnet's rehearsal-log
+    # grep found atomic-group asserts for linux and windows only, zero for
+    # android, the same no-op shape this key closes for macOS).
+    # macos_build.yml's "Stage native artifact" step (CI-T11 MACOS-ASSET)
+    # now stages exactly these six basenames together on the arm64 leg --
+    # this key is the publish-time assertion that they travel as one group,
+    # the same role the windows/linux entries already play. The member list
+    # mirrors plugin/macos/ceyx.podspec:46-51's `vendored_libraries` (the
+    # actual consumer this asset exists to satisfy) exactly, not just
+    # macos_build.yml's own copy of the same list, so both sides of the
+    # requirement are pinned to the same source of truth.
+    ("dng_decoder_native", "macos"): frozenset(
+        {
+            "libdng_decoder_native.dylib",
+            "liblcms2.2.dylib",
+            "libjpeg.8.dylib",
+            "libheif.1.dylib",
+            "libde265.0.dylib",
+            "libomp.dylib",
+        }
+    ),
 }
 
 
