@@ -923,17 +923,31 @@ set(JPEG_VERSION_STRING \"62\")
         # host's Homebrew copy, exactly like the OpenMP vendored-dir search.
         foreach(_lcms_want_arch IN LISTS _ceyx_lcms_want_archs)
             set(_ceyx_lcms_arch_dir "${THIRD_PARTY_DIR}/lcms2-${_lcms_want_arch}")
+            # Glob (not a hardcoded "liblcms2.dylib") because the real
+            # artifact ships VERSIONED (liblcms2.2.dylib is both the
+            # Homebrew bottle's own install name and the release asset's
+            # canonical six-file name) with no unversioned symlink —
+            # requiring the unversioned name here silently skipped the
+            # vendored dir once a real binary was placed at it (caught in
+            # review: the combination of an honest-OFF fallback plus a
+            # wrong filename produces a GREEN run that quietly ships without
+            # colour management, exactly what this fix exists to prevent).
             if(NOT _ceyx_lcms_resolved_dir
-               AND EXISTS "${_ceyx_lcms_arch_dir}/include/lcms2.h"
-               AND EXISTS "${_ceyx_lcms_arch_dir}/lib/liblcms2.dylib")
-                execute_process(COMMAND lipo -archs
-                                        "${_ceyx_lcms_arch_dir}/lib/liblcms2.dylib"
-                                OUTPUT_VARIABLE _ceyx_lcms_arch_have
-                                OUTPUT_STRIP_TRAILING_WHITESPACE
-                                ERROR_QUIET RESULT_VARIABLE _ceyx_lcms_arch_rc)
-                if(_ceyx_lcms_arch_rc EQUAL 0
-                   AND "${_ceyx_lcms_arch_have}" MATCHES "(^| )${_lcms_want_arch}( |$)")
-                    set(_ceyx_lcms_resolved_dir "${_ceyx_lcms_arch_dir}")
+               AND EXISTS "${_ceyx_lcms_arch_dir}/include/lcms2.h")
+                file(GLOB _ceyx_lcms_arch_dylib
+                     "${_ceyx_lcms_arch_dir}/lib/liblcms2*.dylib")
+                list(LENGTH _ceyx_lcms_arch_dylib _ceyx_lcms_arch_dylib_count)
+                if(_ceyx_lcms_arch_dylib_count GREATER 0)
+                    list(GET _ceyx_lcms_arch_dylib 0 _ceyx_lcms_arch_first_dylib)
+                    execute_process(COMMAND lipo -archs
+                                            "${_ceyx_lcms_arch_first_dylib}"
+                                    OUTPUT_VARIABLE _ceyx_lcms_arch_have
+                                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                                    ERROR_QUIET RESULT_VARIABLE _ceyx_lcms_arch_rc)
+                    if(_ceyx_lcms_arch_rc EQUAL 0
+                       AND "${_ceyx_lcms_arch_have}" MATCHES "(^| )${_lcms_want_arch}( |$)")
+                        set(_ceyx_lcms_resolved_dir "${_ceyx_lcms_arch_dir}")
+                    endif()
                 endif()
             endif()
         endforeach()
