@@ -266,28 +266,38 @@ def check_c8_ledger_sync(workflows_dir):
     return [f"C8: {d}" for d in disagreements]
 
 
-_GITIGNORE_PATH = REPO_ROOT / ".gitignore"
+_CANONICAL_ANDROID_SO_PATH = "plugin/android/src/main/jniLibs/arm64-v8a/libdng_decoder_native.so"
 
 
-def check_c10_android_jnilibs_so_gitignored(workflows_dir):
-    """.gitignore excludes plugin/android/src/main/jniLibs/*/*.so.
+def check_c10_android_jnilibs_so_gitignored(workflows_dir, repo_root=None):
+    """git's actual ignore decision excludes the Android jniLibs .so.
 
     Ruling 2026-08-31, A-T12 option (a): the Android jniLibs .so is
     placed-at-build/fetch, never committed (same policy as
-    plugin/windows/Libraries/*.dll). This rule guards against someone
-    silently reverting the .gitignore exclusion and re-committing a
-    trust-on-first-use binary. `workflows_dir` is unused -- this rule checks
-    the repo-root .gitignore, not a workflow file -- but is accepted for a
-    uniform RULES call signature.
+    plugin/windows/Libraries/*.dll). This is a BEHAVIOR check (`git
+    check-ignore`), not a declaration check (grepping for the pattern string
+    in the root .gitignore) -- a declaration check cannot see a competing
+    negation in a nested .gitignore (e.g. plugin/.gitignore's
+    `!android/src/main/jniLibs/**/*.so`, discovered 2026-09-01, Task #9,
+    07-10 declaration-vs-behavior family) silently defeating the root
+    exclusion. `workflows_dir` is unused -- this rule checks git's ignore
+    evaluation against the repo working tree, not a workflow file -- but is
+    accepted for a uniform RULES call signature. `repo_root` defaults to
+    REPO_ROOT; overridable for tests against a fixture git repo.
     """
-    if not _GITIGNORE_PATH.exists():
-        return ["C10: .gitignore is missing"]
-    text = _GITIGNORE_PATH.read_text()
-    if "plugin/android/src/main/jniLibs/*/*.so" not in text:
+    import subprocess
+    root = pathlib.Path(repo_root) if repo_root is not None else REPO_ROOT
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", _CANONICAL_ANDROID_SO_PATH],
+        cwd=root, capture_output=True,
+    )
+    if result.returncode != 0:
         return [
-            "C10: .gitignore does not exclude plugin/android/src/main/jniLibs/*/*.so "
-            "(ruling 2026-08-31 option a, A-T12) -- the Android jniLibs .so must stay "
-            "placed-at-build/fetch, not committed"
+            f"C10: git check-ignore reports {_CANONICAL_ANDROID_SO_PATH!r} is NOT "
+            "ignored -- a competing negation (e.g. in a nested .gitignore) is "
+            "defeating the root .gitignore exclusion required by ruling 2026-08-31 "
+            "option (a), A-T12: the Android jniLibs .so must stay placed-at-build/fetch, "
+            "not committed"
         ]
     return []
 

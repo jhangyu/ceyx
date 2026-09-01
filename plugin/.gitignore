@@ -3,9 +3,14 @@
 build/
 .flutter-plugins-dependencies
 
-# The vendored native libraries ARE the deliverable of this package, but the
-# repo-root .gitignore excludes *.dylib (line 31). Without these negations the
+# The vendored native library IS the deliverable of this package, but the
+# repo-root .gitignore excludes *.dylib (line 31). Without this negation the
 # dylib is silently left out of commits and a fresh clone builds a host app
 # with no RAW decoding — the exact failure this package exists to prevent.
 !macos/Libraries/*.dylib
-!android/src/main/jniLibs/**/*.so
+
+# NOTE: android/src/main/jniLibs/**/*.so is deliberately NOT re-included here.
+# A-T12 (ruling 2026-08-31, option a) moved the Android .so to a
+# placed-at-build/fetch policy (root .gitignore:187) -- unlike the macOS
+# dylib above, it must stay untracked. A prior negation here used to defeat
+# that root exclusion; removed 2026-09-01 (Task #9).

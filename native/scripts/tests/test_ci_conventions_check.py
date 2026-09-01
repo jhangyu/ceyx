@@ -277,31 +277,55 @@ def test_c9_ignores_unrelated_40_hex_tokens(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# C10 (A-T12 option a, ruling 2026-08-31): .gitignore excludes
-# plugin/android/src/main/jniLibs/*/*.so, so the placed-at-build/fetch policy
-# can't be silently reverted. Checks the repo-root .gitignore, not a
-# workflow -- workflows_dir is accepted but unused, monkeypatch
-# cc._GITIGNORE_PATH to point at a fixture instead.
+# C10 (A-T12 option a, ruling 2026-08-31; strengthened 2026-09-01, Task #9):
+# git's ACTUAL ignore decision (not just the declared pattern string) must
+# exclude plugin/android/src/main/jniLibs/arm64-v8a/libdng_decoder_native.so.
+# A declaration check (grep for the pattern in the root .gitignore) cannot
+# see a competing negation in a nested .gitignore silently defeating it --
+# the exact hole found in plugin/.gitignore's pre-existing
+# `!android/src/main/jniLibs/**/*.so`. Fixtures are real temp git repos
+# (git check-ignore needs a working tree); workflows_dir is unused by C10
+# but required for the uniform RULES call signature.
 # ---------------------------------------------------------------------------
 
-def test_c10_compliant_fixture_passes(tmp_path, monkeypatch):
-    gi = _write(tmp_path, ".gitignore",
-                "plugin/android/src/main/jniLibs/*/*.so\n"
-                "!plugin/android/src/main/jniLibs/*/.gitkeep\n")
-    monkeypatch.setattr(cc, "_GITIGNORE_PATH", gi)
+import subprocess
+
+
+def _init_repo(root):
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+
+def test_c10_compliant_fixture_passes(tmp_path):
+    _init_repo(tmp_path)
+    _write(tmp_path, ".gitignore", "plugin/android/src/main/jniLibs/*/*.so\n")
+    assert cc.check_c10_android_jnilibs_so_gitignored(tmp_path, repo_root=tmp_path) == []
+
+
+def test_c10_missing_root_exclusion_fails(tmp_path):
+    """Injected drift: root .gitignore missing the exclusion entirely --
+    must be caught red before it is fixed."""
+    _init_repo(tmp_path)
+    _write(tmp_path, ".gitignore", "*.log\n")
+    violations = cc.check_c10_android_jnilibs_so_gitignored(tmp_path, repo_root=tmp_path)
+    assert any("C10" in v for v in violations), violations
+
+
+def test_c10_nested_negation_defeats_root_exclusion_fails(tmp_path):
+    """Reproduces the real 2026-09-01 hole: a nested plugin/.gitignore
+    negation re-includes the path the root .gitignore excludes. A pure
+    declaration check (pattern-string-present-in-root-.gitignore) would
+    stay green here -- that is exactly why C10 must be a behavior check."""
+    _init_repo(tmp_path)
+    _write(tmp_path, ".gitignore", "plugin/android/src/main/jniLibs/*/*.so\n")
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    _write(plugin_dir, ".gitignore", "!android/src/main/jniLibs/**/*.so\n")
+    violations = cc.check_c10_android_jnilibs_so_gitignored(tmp_path, repo_root=tmp_path)
+    assert any("C10" in v for v in violations), violations
+
+
+def test_c10_real_repo_passes(tmp_path):
+    """Positive control against the actual repository state (post-Task #9
+    fix): the real REPO_ROOT's git check-ignore decision must exclude the
+    canonical path."""
     assert cc.check_c10_android_jnilibs_so_gitignored(tmp_path) == []
-
-
-def test_c10_violation_fixture_fails(tmp_path, monkeypatch):
-    """Injected drift: .gitignore missing the exclusion -- must be caught red
-    before it is fixed."""
-    gi = _write(tmp_path, ".gitignore", "*.log\n")
-    monkeypatch.setattr(cc, "_GITIGNORE_PATH", gi)
-    violations = cc.check_c10_android_jnilibs_so_gitignored(tmp_path)
-    assert any("C10" in v for v in violations), violations
-
-
-def test_c10_missing_gitignore_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(cc, "_GITIGNORE_PATH", tmp_path / "does-not-exist")
-    violations = cc.check_c10_android_jnilibs_so_gitignored(tmp_path)
-    assert any("C10" in v for v in violations), violations
