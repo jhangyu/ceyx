@@ -207,10 +207,50 @@ jobs:
       # select it while yasm is present) and because other vendored deps in this
       # tree may still expect it on PATH; removing it is not necessary to fix
       # this failure.
+      # little-cms2 (CI-T11 MACOS-DEPS-DETERMINISM, 2026-09-01, user ruling
+      # 6a): previously NOT installed here. LibRaw's
+      # native/third_party/libraw-cmake/CMakeLists.txt:143-166 probes it via
+      # a plain, non-REQUIRED `find_package(LCMS2)` — if absent, the
+      # configure silently proceeds with LCMS_SUPPORT_CAN_BE_COMPILED=false
+      # and LibRaw builds WITHOUT ICC colour-management support, with no
+      # error, just a "Libraw will be compiled with LCMS support ... NO"
+      # configure-log line. A run on 2026-08-31 (run 33343548641, evidence in
+      # native/scripts/tmp/ci-t11-lcms2-evidence.txt, gitignored) found the
+      # macos-14 runner image had little-cms2 preinstalled at that time, so
+      # this had not yet manifested — but that is a fact about a runner-image
+      # snapshot, not a guarantee (images are updated by GitHub without this
+      # repo's involvement). Installing it explicitly here, the same way
+      # jpeg-turbo already is, makes ICC colour-management support (and
+      # therefore liblcms2.2.dylib's presence for the six-dylib release
+      # asset, see the "Stage native artifact" step below) a DECLARED
+      # dependency of this workflow rather than an accident of the runner
+      # image's current package set. "little-cms2" is Homebrew's canonical
+      # formula name (confirmed via `brew info little-cms2`); "lcms2" is
+      # only an alias, so the canonical name is used here to not depend on
+      # the alias continuing to resolve.
+      #
+      # BREW, NOT VENDORED — deliberate, and not the same choice this repo
+      # made for libomp two sections below. Compare the two: libomp is
+      # vendored (native/third_party/libomp, see tests.cmake's "Desktop
+      # OpenMP" block) because Apple clang ships NO libomp at all — the
+      # dependency is categorically absent from the toolchain, Homebrew
+      # `brew --prefix libomp` is documented there as printing a plausible
+      # path even when NOT installed (a measured false-positive footgun),
+      # and OpenMP's ABI is stable enough that a single committed arm64
+      # dylib is a reasonable one-time cost. lcms2 has none of those
+      # properties: it is a normal, actively-maintained, widely-bottled
+      # Homebrew formula with no equivalent false-positive hazard in
+      # `find_package(LCMS2)` (CMake's own FindLCMS2 either finds a real
+      # instance or reports not-found, LibRaw's CMakeLists.txt:145 checks
+      # `LCMS2_FOUND` off that, not a printed prefix path). Vendoring it
+      # would trade a one-line dependency declaration for an ongoing
+      # maintenance burden (security patches, ICC-engine correctness fixes)
+      # this project has no reason to take on for a library this common —
+      # `brew install little-cms2` is the proportionate fix for THIS gap.
       - name: Install build prerequisites (Homebrew)
         run: |
           brew update
-          brew install cmake ninja jpeg-turbo nasm yasm
+          brew install cmake ninja jpeg-turbo little-cms2 nasm yasm
 
       - name: Cache vendored Halide v21 distribution
         id: cache-halide
