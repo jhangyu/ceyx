@@ -498,7 +498,7 @@ def assert_arch(platform: str, arch: str, libraries: list[Path]) -> None:
         else:
             # Linux has no lipo/universal-binary concept; prove each output is
             # a real 64-bit ELF instead.
-            file_out = run(["file", str(library)]).stdout
+            file_out = run(["file", "-L", str(library)]).stdout
             if "ELF 64-bit" not in file_out:
                 raise _fail(f"{library} is not a 64-bit ELF: {file_out.strip()}")
             _log(f"ASSERT ok      {library.name} is a 64-bit ELF")
