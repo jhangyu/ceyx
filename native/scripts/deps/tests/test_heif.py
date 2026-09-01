@@ -692,3 +692,25 @@ def test_kvazaar_android_disables_the_x86_assembler_flag_branch() -> None:
     assert "-DLINUX=ON" in android
     for platform, arch in (("macos", "arm64"), ("linux", "x86_64"), ("windows", "x86_64")):
         assert "-DLINUX=ON" not in render_mod.render(REAL, "kvazaar", platform, arch, dist="/D")
+
+
+def test_libheif_outputs_accept_the_unversioned_android_spelling(tmp_path: Path) -> None:
+    """The android install produces lib/libheif.so (the NDK sets
+    CMAKE_PLATFORM_NO_VERSIONED_SONAME because Android packaging drops files
+    not ending in '.so'). A candidate list carrying only the desktop spellings
+    made a perfectly good build report its required output missing
+    (CI run 33457406073).
+
+    Also pins the ORDER: the desktop versioned name must still win where both
+    exist, so Linux keeps reporting libheif.so.1 rather than its symlink.
+    """
+    from deps import execute as execute_mod
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "libheif.so").write_bytes(b"")
+    found = execute_mod.verify_outputs(REAL, "libheif", tmp_path)
+    assert [p.name for p in found] == ["libheif.so"]
+
+    (tmp_path / "lib" / "libheif.so.1").write_bytes(b"")
+    found = execute_mod.verify_outputs(REAL, "libheif", tmp_path)
+    assert [p.name for p in found] == ["libheif.so.1"]

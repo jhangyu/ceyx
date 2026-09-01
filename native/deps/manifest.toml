@@ -566,7 +566,9 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
   # FindLIBDE265 does a find_library() against a file on disk, so libde265 must
   # be installed BEFORE libheif configures (build order is load-bearing, not
   # stylistic -- deps/heif.py enforces it). libheif then records the SONAME the
-  # file carries (libde265.so.0), which is what ends up in DT_NEEDED.
+  # file carries. On android that SONAME is the plain "libde265.so" (the NDK
+  # toolchain sets CMAKE_PLATFORM_NO_VERSIONED_SONAME because Android packaging
+  # drops any file not ending in ".so"), and that is what ends up in DT_NEEDED.
   #
   # libheif's Findkvazaar / FindAOM probes are NON-FATAL: a configure with
   # missing inputs succeeds and the capability silently disappears. That is why
@@ -635,7 +637,17 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
   BUILD_DOCUMENTATION   = "OFF"
 
   [component.libheif.outputs]
-  shared_lib.candidates = ["lib/libheif.1.dylib", "lib/libheif.so.1", "bin/heif.dll"]
+  # "lib/libheif.so" (unversioned) is the ANDROID spelling and is listed LAST so
+  # the desktop platforms keep reporting their versioned primary artefact: on
+  # Linux both spellings exist (the unversioned one is a symlink), and the first
+  # existing candidate wins. The NDK toolchain sets
+  # CMAKE_PLATFORM_NO_VERSIONED_SONAME -- Android packaging ships only files
+  # ending in ".so" -- so no versioned name is ever produced there. Without this
+  # entry the android install succeeds and the CARRIER then reports the required
+  # output missing (CI run 33457406073), which is the check doing its job
+  # against an incomplete candidate list rather than a build defect.
+  # libde265's candidate list already carried "lib/libde265.so" and so passed.
+  shared_lib.candidates = ["lib/libheif.1.dylib", "lib/libheif.so.1", "bin/heif.dll", "lib/libheif.so"]
   shared_lib.required   = true
   import_lib.candidates = ["lib/heif.lib"]
   import_lib.required   = false
