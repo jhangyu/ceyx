@@ -1,0 +1,64 @@
+=== libheif.so ===
+
+Elf file type is DYN (Shared object file)
+Entry point 0x0
+There are 9 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0001f8 0x0001f8 R   0x8
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x89cf50 0x89cf50 R E 0x4000
+  LOAD           0x89cf50 0x00000000008a0f50 0x00000000008a0f50 0x023648 0x0240b0 RW  0x4000
+  LOAD           0x8c0598 0x00000000008c8598 0x00000000008c8598 0x002920 0x0378c0 RW  0x4000
+  DYNAMIC        0x8b8300 0x00000000008bc300 0x00000000008bc300 0x0001c0 0x0001c0 RW  0x8
+  GNU_RELRO      0x89cf50 0x00000000008a0f50 0x00000000008a0f50 0x023648 0x0240b0 R   0x1
+  GNU_EH_FRAME   0x19ce7c 0x000000000019ce7c 0x000000000019ce7c 0x012dfc 0x012dfc R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x0
+  NOTE           0x000238 0x0000000000000238 0x0000000000000238 0x0000bc 0x0000bc R   0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .note.android.ident .note.gnu.build-id .dynsym .gnu.version .gnu.version_r .gnu.hash .dynstr .rela.dyn .rela.plt .gcc_except_table .rodata .eh_frame_hdr .eh_frame .text .plt 
+   02     .data.rel.ro .fini_array .init_array .dynamic .got .got.plt .relro_padding 
+   03     .data .bss 
+   04     .dynamic 
+   05     .data.rel.ro .fini_array .init_array .dynamic .got .got.plt .relro_padding 
+   06     .eh_frame_hdr 
+   07     
+   08     .note.android.ident .note.gnu.build-id 
+   None   .comment .symtab .shstrtab .strtab 
+
+libheif.so LOAD alignments: 0x4000 0x4000 0x4000
+=== libde265.so ===
+
+Elf file type is DYN (Shared object file)
+Entry point 0x0
+There are 9 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0001f8 0x0001f8 R   0x8
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x125e40 0x125e40 R E 0x4000
+  LOAD           0x125e40 0x0000000000129e40 0x0000000000129e40 0x008dd8 0x0091c0 RW  0x4000
+  LOAD           0x12ec18 0x0000000000136c18 0x0000000000136c18 0x000280 0x0063f8 RW  0x4000
+  DYNAMIC        0x12d5e8 0x00000000001315e8 0x00000000001315e8 0x0001b0 0x0001b0 RW  0x8
+  GNU_RELRO      0x125e40 0x0000000000129e40 0x0000000000129e40 0x008dd8 0x0091c0 R   0x1
+  GNU_EH_FRAME   0x05213c 0x000000000005213c 0x000000000005213c 0x004ef4 0x004ef4 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x0
+  NOTE           0x000238 0x0000000000000238 0x0000000000000238 0x0000bc 0x0000bc R   0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .note.android.ident .note.gnu.build-id .dynsym .gnu.version .gnu.version_r .gnu.hash .dynstr .rela.dyn .rela.plt .gcc_except_table .rodata .eh_frame_hdr .eh_frame .text .plt 
+   02     .data.rel.ro .fini_array .init_array .dynamic .got .got.plt .relro_padding 
+   03     .data .bss 
+   04     .dynamic 
+   05     .data.rel.ro .fini_array .init_array .dynamic .got .got.plt .relro_padding 
+   06     .eh_frame_hdr 
+   07     
+   08     .note.android.ident .note.gnu.build-id 
+   None   .comment .symtab .shstrtab .strtab 
+
+libde265.so LOAD alignments: 0x4000 0x4000 0x4000

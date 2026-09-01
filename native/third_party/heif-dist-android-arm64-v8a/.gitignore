@@ -23,6 +23,10 @@
 # deps/heif.py deletes it on a successful assemble; this entry covers the run
 # that fails midway, so source archives can never be offered up for commit.
 bin/
+# share/man/ -- the kvazaar CLI's man page; the CLI itself is excluded above,
+# so its manual is documentation for a program this tree does not ship (same
+# exclusion the sibling android dists make).
+share/man/
 lib/*.a
 lib/pkgconfig/
 lib/cmake/

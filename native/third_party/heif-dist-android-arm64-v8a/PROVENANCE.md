@@ -255,16 +255,104 @@ measured value second — never assert a remembered default.
 
 ## Producer run
 
-<!-- FILLED FROM THE PRODUCER RUN. Until a run id appears here, the code path
-     above has been exercised only by unit tests and a dry render; do not read
-     this section's absence as a pass. -->
+Filled from the run that produced the committed binaries. Every value below was
+either printed by the run or re-measured by hand on the downloaded artefact —
+never copied from the step's green conclusion.
 
-- Workflow run id: _pending_
-- Wall-clock build time: _pending_
-- `HEIF_DIST_ANDROID_RC`: _pending_
-- aom configure-log target line (arm64 vs generic C): _pending_
-- Measured LOAD `p_align` per `.so`: see
-  `share/provenance/android_so_alignment.txt` (_pending_)
-- `DT_NEEDED` set of `libheif.so`: _pending_
-- Assertion transcript (`ASSERT ok` / `ASSERT absent` lines): _pending_
-- `.pins` stamp contents: _pending_
+- **Workflow run**: <https://github.com/jhangyu/ceyx/actions/runs/33464077144>,
+  head SHA `ecdc7262be814d60453257c935e7e6442169fc02`.
+- **`HEIF_DIST_ANDROID_RC`: 0**, echoed by the step itself on the line
+  immediately after the command (never a harness-reported status).
+- **Wall clock**: build step 02:51:55Z → 02:54:49Z (2 min 54 s); whole job
+  3 min 44 s. Well inside the workflow's `timeout-minutes: 90`.
+- **Three earlier runs failed**, and the failures are part of this provenance
+  because each one was a real defect this dist would otherwise have shipped:
+  33454839588 (kvazaar's x86 assembler flag on aarch64, misreported by CMake as
+  "Could NOT find Threads"), 33457406073 (the carrier's output-candidate list
+  had no unversioned android spelling), 33460559016 (green, but produced
+  4 KB-aligned libraries — see the alignment section).
+
+**aom really targeted arm64**, not a generic C fallback: its configure ran
+`arm_feature_flag_neon_available`, `arm_crc32`, `neon_dotprod` and `neon_i8mm`
+probes, and the produced `libaom.a` carries 8171 NEON symbols. This is the check
+the manifest's "no `AOM_TARGET_CPU` override" note defers to.
+
+**Strip, measured before → after:**
+
+| Artefact | Unstripped | Stripped |
+|---|---|---|
+| `libheif.so` | 90,472,744 | 10,480,104 |
+| `libde265.so` | 5,019,008 | 1,711,936 |
+| `libaom.a` (not committed) | 99,554,482 | 10,468,842 |
+| `libkvazaar.a` (not committed) | 3,891,174 | 813,262 |
+
+The whole committed tree is now ~12.9 MB.
+
+**LOAD `p_align` (the 16 KB gate), full text in
+`share/provenance/android_so_alignment.txt`:**
+
+```
+libheif.so  LOAD alignments: 0x4000 0x4000 0x4000
+libde265.so LOAD alignments: 0x4000 0x4000 0x4000
+```
+
+0x4000 = 16384 on every segment of both libraries, up from 0x1000 before the
+linker flag. Asserted, not merely recorded.
+
+**`DT_NEEDED` of `libheif.so`** — `libde265.so`, `libm.so`, `libdl.so`,
+`libc.so`. Every entry is either shipped in this dist or supplied by the Android
+platform; nothing else is required at load time. Note there is no
+`libc++_shared.so`: both libraries link libc++ statically, so this dist does not
+impose an STL dependency on its consumer.
+
+**SONAMEs** — `libheif.so`, `libde265.so`. Unversioned and path-free, as APK
+packaging requires.
+
+**Assertion transcript, as printed by the run:**
+
+```
+ASSERT ok      libde265.so SONAME is libde265.so
+STRIP          libheif.so: 90472744 -> 10480104 bytes
+STRIP          libde265.so: 5019008 -> 1711936 bytes
+STRIP          libkvazaar.a: 3891174 -> 813262 bytes
+STRIP          libaom.a: 99554482 -> 10468842 bytes
+ASSERT ok      present in libheif: heif_decode_image
+ASSERT ok      present in libheif: heif_context_get_encoder_for_format
+ASSERT ok      present in libheif: kvz_api_get
+ASSERT ok      present in libheif: aom_codec_av1_cx
+ASSERT ok      present in libheif: aom_codec_av1_dx
+ASSERT absent  correctly not in libheif: x265_encoder
+ASSERT ok      libheif records a libde265 runtime dependency
+ASSERT ok      libheif.so is a 64-bit AArch64 ELF (arm64-v8a)
+ASSERT ok      libde265.so is a 64-bit AArch64 ELF (arm64-v8a)
+ASSERT ok      libheif.so SONAME is libheif.so
+MEASURE        libheif.so LOAD p_align: 0x4000 0x4000 0x4000
+MEASURE        libde265.so LOAD p_align: 0x4000 0x4000 0x4000
+ASSERT ok      libheif.so LOAD segments are >= 16384-byte aligned
+ASSERT ok      libde265.so LOAD segments are >= 16384-byte aligned
+ASSERT ok      libheif licences vendored: ['COPYING']
+ASSERT ok      libde265 licences vendored: ['COPYING']
+ASSERT ok      kvazaar licences vendored: ['LICENSE', 'LICENSE.EXT.greatest']
+ASSERT ok      aom licences vendored: ['LICENSE', 'PATENTS']
+ASSERT ok      aom patent grant vendored: ['PATENTS']
+```
+
+**Independent re-verification of the shipped bytes** (done on the downloaded
+artefact with a host `objdump`, *after* stripping, so it measures what is
+committed here rather than what the build claimed): `heif_decode_image`,
+`heif_context_get_encoder_for_format`, `kvz_api_get`, `aom_codec_av1_cx` and
+`aom_codec_av1_dx` all present in both `.dynsym` and `.symtab`; `x265_encoder`
+and `x264_encoder` return **zero** matches in either table.
+
+**`.pins` stamp** (names every component, the ABI and the NDK revision, so a
+dist missing an encoder can never match):
+
+```
+libheif=1.23.2:8bd5d41d19dc84536d118b04774709f244df6104ef66d623dad5fa4650143405 libde265=1.1.1:fd48a927e94ed74fc7ce8829d222b9d8599fcbfe8b6448ba66705babc56ab219 kvazaar=2.3.1:git:v2.3.1 aom=3.15.0:ea08c38ecc078bc85bb1b691020e52b06250f1a81fe7ca5b624629225081af96 arch=arm64-v8a abi=arm64-v8a ndk=27.2.12479018
+```
+
+**What this evidence does NOT establish.** Nothing here executes the library.
+Every check above is a static tripwire on a foreign-architecture ELF; the
+capability probe is NOT RUNNABLE IN CI on Android and no host-architecture proxy
+was substituted. HEIC/AVIF encode and decode are evidenced by symbol presence,
+libheif's own backend selection, and this provenance — not by a decode.
