@@ -137,6 +137,33 @@ jobs:
     secrets: inherit
 
   # --------------------------------------------------------------------------
+  # Android third-party dist legs (task CI-T6). Same conditional shape and
+  # rationale as the Windows dist legs directly above: each is a pinned,
+  # reviewed, committed input, not rebuilt per push, and runs on a release tag
+  # or when a human asks. Deliberately sharing the SAME run_dists boolean
+  # (DP-3 ruled: no per-platform split) rather than adding a second dispatch
+  # input -- one knob for "also build every third-party dist, on every
+  # platform".
+  # --------------------------------------------------------------------------
+  heif-dist-android:
+    name: HEIF dist (Android)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.run_dists }}
+    uses: ./.github/workflows/heif_dist_android.yml
+    secrets: inherit
+
+  jxl-dist-android:
+    name: libjxl dist (Android)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.run_dists }}
+    uses: ./.github/workflows/jxl_dist_android.yml
+    secrets: inherit
+
+  webp-dist-android:
+    name: libwebp dist (Android)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.run_dists }}
+    uses: ./.github/workflows/webp_dist_android.yml
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
   # Merged gates.
   #
   # These two jobs are the former dart_smoke.yml and native_test_targets.yml,
@@ -390,6 +417,9 @@ jobs:
       - heif-dist-windows
       - jxl-dist-windows
       - webp-dist-windows
+      - heif-dist-android
+      - jxl-dist-android
+      - webp-dist-android
     # `always()` is required now that some `needs:` entries are conditional:
     # without it, a skipped dist leg would skip this job too, and the non-tag
     # dry-run (the thing that proves packaging before release day) would never
@@ -432,14 +462,20 @@ jobs:
           HEIF_RESULT: ${{ needs.heif-dist-windows.result }}
           JXL_RESULT: ${{ needs.jxl-dist-windows.result }}
           WEBP_RESULT: ${{ needs.webp-dist-windows.result }}
+          HEIF_ANDROID_RESULT: ${{ needs.heif-dist-android.result }}
+          JXL_ANDROID_RESULT: ${{ needs.jxl-dist-android.result }}
+          WEBP_ANDROID_RESULT: ${{ needs.webp-dist-android.result }}
         run: |
-          echo "heif=${HEIF_RESULT} jxl=${JXL_RESULT} webp=${WEBP_RESULT}"
+          echo "heif=${HEIF_RESULT} jxl=${JXL_RESULT} webp=${WEBP_RESULT} heif-android=${HEIF_ANDROID_RESULT} jxl-android=${JXL_ANDROID_RESULT} webp-android=${WEBP_ANDROID_RESULT}"
           bad=""
-          for leg in heif jxl webp; do
+          for leg in heif jxl webp heif-android jxl-android webp-android; do
             case "${leg}" in
-              heif) result="${HEIF_RESULT}" ;;
-              jxl)  result="${JXL_RESULT}" ;;
-              webp) result="${WEBP_RESULT}" ;;
+              heif)         result="${HEIF_RESULT}" ;;
+              jxl)          result="${JXL_RESULT}" ;;
+              webp)         result="${WEBP_RESULT}" ;;
+              heif-android) result="${HEIF_ANDROID_RESULT}" ;;
+              jxl-android)  result="${JXL_ANDROID_RESULT}" ;;
+              webp-android) result="${WEBP_ANDROID_RESULT}" ;;
             esac
             if [ "${result}" != "success" ] && [ "${result}" != "skipped" ]; then
               bad="${bad} ${leg}=${result:-<empty>}"
@@ -502,6 +538,9 @@ jobs:
           dng_decoder_native-macos-x86_64
           libjxl-dist-linux-x86_64
           libjxl-dist-windows-x86_64
+          heif-dist-android-arm64-v8a
+          libjxl-dist-android-arm64-v8a
+          libwebp-dist-android-arm64-v8a
           "
           missing=""
           for name in ${required}; do

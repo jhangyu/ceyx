@@ -1,0 +1,102 @@
+name: libwebp dist (Android)
+
+# DISPATCH-ONLY BY DESIGN, same rationale as webp_dist_windows.yml /
+# heif_dist_windows.yml: the dist is a pinned, reviewed input that is
+# COMMITTED to native/third_party/libwebp-dist-android/, not rebuilt per
+# push.
+#
+# ci/** is included so the workflow can be verified from a bootstrap branch:
+# a workflow file only becomes dispatchable once it exists on a ref that runs
+# it.
+#
+# `workflow_call` lets build.yml invoke this leg on demand (Option B, task
+# CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
+# wired into build.yml's per-push platform matrix for the same "moving
+# target under a committed dist" reason documented on the Windows dist legs
+# -- see build.yml's "Windows third-party dist legs" comment block, which
+# this leg's build.yml entry sits directly beside and shares the run_dists
+# input with (DP-3 ruled: one boolean, no per-platform split).
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/**"
+    paths:
+      - "native/scripts/deps/**"
+      - "native/scripts/build_deps.py"
+      - "native/deps/manifest.toml"
+      - "native/deps/arch_map.toml"
+      - ".github/workflows/webp_dist_android.yml"
+
+concurrency:
+  group: webp-dist-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-webp-dist:
+    name: libwebp dist (android arm64-v8a, NDK, static, encode+decode+mux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Pinned NDK revision, same choice and rationale as android_build.yml:
+      # not the runner image's preinstalled NDK, which can drift silently
+      # when GitHub bumps the image.
+      - name: Set up Android NDK
+        id: setup_ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      # CMake ships with the runner image; Ninja does not reliably.
+      - name: Install Ninja
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          ninja --version
+
+      # Single carrier entry point (build_deps.py), same contract as every
+      # other dist producer. RC captured on the line immediately after the
+      # command, echoed from the step itself -- a harness-reported status has
+      # lied about which process's exit code it forwarded before on this
+      # project (08-23 lesson).
+      - name: Build the libwebp dist (Python carrier)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          set +e
+          python3 native/scripts/build_deps.py build libwebp \
+            --platform android --arch arm64-v8a \
+            --android-ndk "${ANDROID_NDK_HOME}" \
+            --dist native/third_party/libwebp-dist-android
+          RC=$?
+          set -e
+          echo "WEBP_DIST_ANDROID_RC=$RC"
+          exit $RC
+
+      # Unfiltered on purpose: a '*.a'-filtered listing looks like a full
+      # inventory while silently omitting the headers.
+      - name: List the produced dist (complete)
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: find native/third_party/libwebp-dist-android -type f | sort
+
+      # Canonical artifact name <component>-<platform>-<arch> (rule C4).
+      - name: Upload the dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: libwebp-dist-android-arm64-v8a
+          path: ${{ github.workspace }}/native/third_party/libwebp-dist-android
+          if-no-files-found: error
+          retention-days: 7

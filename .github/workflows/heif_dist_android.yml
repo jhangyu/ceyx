@@ -1,0 +1,120 @@
+name: HEIF dist (Android)
+
+# DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml: this job
+# builds the libheif/libde265/kvazaar/aom distribution that is then COMMITTED
+# to native/third_party/heif-dist-android/, exactly as the macOS/Windows
+# dists are. It is not part of the per-commit Android build: the dist is a
+# pinned, reviewed input (upstream tarball + SHA-256 + a fixed flag set), and
+# rebuilding it on every push would make the shipped bytes a moving target
+# under an LGPL source-availability obligation.
+#
+# ci/** is included so the workflow can be verified from a bootstrap branch:
+# a workflow file only becomes dispatchable once it exists on a ref that runs
+# it.
+#
+# `workflow_call` lets build.yml invoke this leg on demand (Option B, task
+# CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
+# wired into build.yml's per-push platform matrix -- see build.yml's
+# "Windows third-party dist legs" comment block, which this leg's build.yml
+# entry sits directly beside and shares the run_dists input with (DP-3
+# ruled: one boolean, no per-platform split).
+#
+# timeout-minutes is 90, not the 45 used by the webp/jxl Android dist legs:
+# the desktop (Windows) HEIF dist takes ~40min on clang-cl alone, this leg
+# additionally cross-compiles libheif + libde265 + kvazaar + aom for arm64
+# via the NDK, so the budget is doubled with margin rather than measured and
+# tightened after the fact.
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/**"
+    paths:
+      - "native/scripts/deps/**"
+      - "native/scripts/build_deps.py"
+      - "native/deps/manifest.toml"
+      - "native/deps/arch_map.toml"
+      - ".github/workflows/heif_dist_android.yml"
+
+concurrency:
+  group: heif-dist-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-heif-dist:
+    name: libheif + libde265 + kvazaar + aom dist (android arm64-v8a, NDK, encode+decode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Pinned NDK revision, same choice and rationale as android_build.yml:
+      # not the runner image's preinstalled NDK, which can drift silently
+      # when GitHub bumps the image.
+      - name: Set up Android NDK
+        id: setup_ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      # CMake ships with the runner image; Ninja does not reliably.
+      - name: Install Ninja
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          ninja --version
+
+      # cmake/nasm/etc. that the aom/kvazaar/de265 CMake subbuilds may need on
+      # the host side of a cross-compile; mirrors android_build.yml's apt
+      # prerequisite step.
+      - name: Install build prerequisites (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build build-essential
+
+      # Single carrier entry point (build_deps.py), same contract as every
+      # other dist producer, invoked through the "heif-stack" group exactly
+      # as heif_dist_windows.yml does. RC captured on the line immediately
+      # after the command, echoed from the step itself -- a harness-reported
+      # status has lied about which process's exit code it forwarded before
+      # on this project (08-23 lesson).
+      - name: Build the HEIF dist (Python carrier)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          set +e
+          python3 native/scripts/build_deps.py build heif-stack \
+            --platform android --arch arm64-v8a \
+            --android-ndk "${ANDROID_NDK_HOME}" \
+            --dist native/third_party/heif-dist-android
+          RC=$?
+          set -e
+          echo "HEIF_DIST_ANDROID_RC=$RC"
+          exit $RC
+
+      # Complete listing, deliberately unfiltered -- same rationale as
+      # heif_dist_windows.yml's equivalent step.
+      - name: List the produced dist (complete)
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: find native/third_party/heif-dist-android -type f | sort
+
+      # Canonical artifact name <component>-<platform>-<arch> (rule C4).
+      - name: Upload the dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: heif-dist-android-arm64-v8a
+          path: ${{ github.workspace }}/native/third_party/heif-dist-android
+          if-no-files-found: error
+          retention-days: 7
