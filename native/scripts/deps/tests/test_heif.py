@@ -674,3 +674,21 @@ def test_aom_android_tarball_extracts_to_libaom_not_aom() -> None:
     version = execute_mod.component_version(REAL, "aom")
     assert execute_mod.source_dirname(block, "aom", version) == f"libaom-{version}"
     assert execute_mod.source_dirname({}, "kvazaar", "2.3.1") == "kvazaar-2.3.1"
+
+
+def test_kvazaar_android_disables_the_x86_assembler_flag_branch() -> None:
+    """kvazaar 2.3.1's CMakeLists:238 prepends `-Wa,-muse-unaligned-vector-move`
+    (an x86 assembler flag) whenever the target is not MSVC/Linux/Apple, which
+    on an aarch64 NDK cross-compile makes EVERY try_compile fail and surfaces
+    as `Could NOT find Threads` -- a message naming the wrong subsystem
+    entirely (CI run 33454839588). LINUX=ON takes the other branch.
+
+    Asserted per platform, not globally: the flag is CORRECT on Windows/MinGW,
+    so this must never leak into another platform's argv.
+    """
+    from deps import render as render_mod
+
+    android = render_mod.render(REAL, "kvazaar", "android", "arm64-v8a", dist="/D", ndk="/ndk")
+    assert "-DLINUX=ON" in android
+    for platform, arch in (("macos", "arm64"), ("linux", "x86_64"), ("windows", "x86_64")):
+        assert "-DLINUX=ON" not in render_mod.render(REAL, "kvazaar", platform, arch, dist="/D")

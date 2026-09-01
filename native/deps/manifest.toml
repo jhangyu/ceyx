@@ -154,6 +154,30 @@ path_keys = ["CMAKE_INSTALL_PREFIX"]
   CMAKE_TOOLCHAIN_FILE = "{ndk}/build/cmake/android.toolchain.cmake"
   ANDROID_ABI          = "{arch.android_abi}"
   ANDROID_PLATFORM     = "{arch.android_platform}"
+  # LINUX=ON is NOT a claim that this is a Linux build. It is the only lever
+  # that disables kvazaar's own x86-assembler flag on an aarch64 cross-compile.
+  #
+  # CMakeLists.txt:238-239 (tag v2.3.1, read directly, not recalled):
+  #     if((NOT MSVC AND NOT LINUX AND NOT APPLE) OR (CYGWIN OR MSYS OR MINGW))
+  #       set(CMAKE_C_FLAGS "-Wa,-muse-unaligned-vector-move ${CMAKE_C_FLAGS}")
+  # The flag exists for MinGW/x86 assembly, but the guard is written against
+  # the platforms upstream HAD (MSVC / Linux / Apple) rather than against its
+  # true precondition (an x86 assembler). Android is none of those three, so
+  # the branch is taken and an x86-only flag is PREPENDED to CMAKE_C_FLAGS.
+  # aarch64 clang rejects it, which makes every subsequent try_compile fail --
+  # observed as the misleading `Check if compiler accepts -pthread - no` ->
+  # `Could NOT find Threads (missing: Threads_FOUND)` at CMakeLists.txt:244
+  # (CI run 33454839588). The reported failure names threads; the cause is an
+  # assembler flag, which is why this comment records the mechanism.
+  #
+  # Why this lever and not another: the flag is injected by `set()` AFTER
+  # project(), so no value we pass in CMAKE_C_FLAGS can remove it, and there is
+  # no patch pipeline for the HEIF-stack components. `LINUX` is referenced
+  # EXACTLY ONCE in kvazaar 2.3.1's entire CMakeLists (grep at the pinned tag:
+  # line 238, the guard above), so setting it changes this one branch and
+  # nothing else -- verified against the pin, and it must be re-verified if the
+  # kvazaar version ever moves.
+  LINUX = "ON"
 
   [component.kvazaar.cmake.windows]
   _generator                   = "Ninja"
