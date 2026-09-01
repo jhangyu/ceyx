@@ -31,6 +31,16 @@ from . import fetch_libjxl as fetch_libjxl_mod
 #             a file being non-empty.
 #   headers:  public headers a consumer compiles against.
 #   licence_dir: must exist and hold at least one file (A-LICENCE flavour).
+#   submodule_licences: OPTIONAL list of (relative-path-under-the-cloned-source,
+#             licence-dir-name) pairs for vendored submodules whose object code
+#             ships in the dist but whose source tree is not the component's
+#             own top-level checkout (e.g. libjxl's bundled brotli/highway/
+#             skcms). Each pair gets its own share/licenses/<name>/, copied
+#             from <source>/<relative-path> with the SAME licence_files glob
+#             as the component's own licence copy -- mirrors what the
+#             desktop-only fetch_libjxl.vendor_licenses() already does for
+#             the same four components. Empty/absent for components with no
+#             vendored submodules (libwebp, heif-stack members).
 #   machine_probe: the archive whose ELF header is checked for the target
 #             machine; one is enough because they come out of one toolchain
 #             invocation, and this check exists to catch a HOST build
@@ -90,16 +100,18 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
             "include/jxl/encode.h",
             "include/jxl/decode.h",
         ],
-        # NOTE: the plan calls for share/licenses/{libjxl,highway,brotli,skcms}
-        # (four dirs -- highway/brotli/skcms are vendored submodules under
-        # third_party/, not the top-level source). The generic
-        # android_dist.vendor_licences() call site in build_deps.py only
-        # copies ONE component's own licence globs into ONE directory
-        # (share/licenses/<component>), so only share/licenses/libjxl is
-        # populated by the current pipeline -- the submodule licences are a
-        # known gap, flagged rather than silently left unshipped (raised to
-        # the team lead alongside this row).
+        # Plan Task 3: share/licenses/{libjxl,highway,brotli,skcms} (four
+        # dirs) -- highway/brotli/skcms are vendored submodules under the
+        # cloned source's third_party/, not a separately-acquired component,
+        # so vendor_licences() below copies each from
+        # <cloned-libjxl-source>/<relative-path> using submodule_licences.
+        # Mirrors fetch_libjxl.vendor_licenses()'s desktop pairs verbatim.
         "licence_dir": "share/licenses/libjxl",
+        "submodule_licences": [
+            ("third_party/highway", "highway"),
+            ("third_party/brotli", "brotli"),
+            ("third_party/skcms", "skcms"),
+        ],
         "machine_probe": "lib/libjxl.a",
     },
 }
@@ -133,6 +145,25 @@ def vendor_licences(loaded: dict, component: str, dist: Path, stage: Path) -> li
             f"no licence file matched {patterns} in {src_dir} -- refusing to ship "
             f"a dist with no licence text (the dist is redistributed)"
         )
+
+    # Vendored submodules (e.g. libjxl's bundled highway/brotli/skcms) ship
+    # object code inside the component's own archives, so their licences are
+    # every bit as mandatory as the component's own -- same glob, copied from
+    # a subdirectory of the SAME cloned source tree rather than a separate
+    # acquisition. Data-driven (EXPECTATIONS row), not a per-component branch,
+    # so libwebp/heif rows are unaffected (the field is simply absent there).
+    for rel_path, name in EXPECTATIONS.get(component, {}).get("submodule_licences", []):
+        sub_src = src_dir / rel_path
+        sub_dest = Path(dist) / "share" / "licenses" / name
+        sub_dest.mkdir(parents=True, exist_ok=True)
+        sub_copied = heif_mod.copy_licence_files(sub_src, sub_dest, patterns)
+        if not sub_copied:
+            raise AndroidDistError(
+                f"no licence file matched {patterns} in {sub_src} (submodule {name!r} of "
+                f"{component}) -- refusing to ship a dist with no licence text for a "
+                f"vendored submodule whose object code is redistributed"
+            )
+        copied += sub_copied
     return copied
 
 
@@ -205,4 +236,8 @@ def assert_dist(
             raise AndroidDistError(f"required public header missing from the dist: {dist / rel}")
 
     assertions_mod.assert_dir_non_empty(dist / spec["licence_dir"], label="A-LICENCE")
+    for _rel_path, name in spec.get("submodule_licences", []):
+        assertions_mod.assert_dir_non_empty(
+            dist / "share" / "licenses" / name, label=f"A-LICENCE[{name}]"
+        )
     return evidence

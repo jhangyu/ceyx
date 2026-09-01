@@ -63,7 +63,9 @@ def _fake_ndk_with_symbol_tool(tmp_path: Path, symbols_text: str) -> Path:
     nm = bindir / "llvm-nm"
     nm.write_text(f"#!{sys.executable}\nprint({symbols_text!r})\n", encoding="utf-8")
     nm.chmod(nm.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    (bindir / "llvm-readelf").write_text("", encoding="utf-8")
+    readelf = bindir / "llvm-readelf"
+    readelf.write_text(f"#!{sys.executable}\nprint('Machine: AArch64')\n", encoding="utf-8")
+    readelf.chmod(readelf.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return ndk
 
 
@@ -76,3 +78,83 @@ def test_assert_dist_fails_loudly_when_libjxl_cms_is_missing(tmp_path: Path) -> 
     with pytest.raises(android_dist.AndroidDistError) as exc:
         android_dist.assert_dist("libjxl", dist, ndk, "arm64-v8a")
     assert "libjxl_cms.a" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# submodule licences (highway/brotli/skcms bundled inside the cloned source)
+
+
+def test_libjxl_declares_the_three_bundled_submodule_licences() -> None:
+    spec = android_dist.EXPECTATIONS["libjxl"]
+    assert dict(spec["submodule_licences"]) == {
+        "third_party/highway": "highway",
+        "third_party/brotli": "brotli",
+        "third_party/skcms": "skcms",
+    }
+
+
+def test_libwebp_has_no_submodule_licences_field_by_default() -> None:
+    """Data-driven, not a code path: components with no vendored submodules
+    are unaffected -- the field is simply absent."""
+    assert "submodule_licences" not in android_dist.EXPECTATIONS["libwebp"]
+
+
+def _make_libjxl_source_tree(stage: Path) -> Path:
+    src = stage / "libjxl-0.12.0"
+    (src / "third_party" / "highway").mkdir(parents=True)
+    (src / "third_party" / "highway" / "LICENSE").write_text("Apache-2.0", encoding="utf-8")
+    (src / "third_party" / "brotli").mkdir(parents=True)
+    (src / "third_party" / "brotli" / "LICENSE").write_text("MIT", encoding="utf-8")
+    (src / "third_party" / "skcms").mkdir(parents=True)
+    (src / "third_party" / "skcms" / "LICENSE").write_text("BSD-3-Clause", encoding="utf-8")
+    (src / "LICENSE").write_text("BSD-3-Clause", encoding="utf-8")
+    return src
+
+
+def _loaded_libjxl() -> dict:
+    return {
+        "manifest": {
+            "component": {
+                "libjxl": {"licence_files": ["LICENSE*", "COPYING*"]},
+            }
+        }
+    }
+
+
+def test_vendor_licences_copies_all_four_submodule_licence_dirs(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    _make_libjxl_source_tree(stage)
+    dist = tmp_path / "dist"
+    copied = android_dist.vendor_licences(_loaded_libjxl(), "libjxl", dist, stage)
+    assert len(copied) == 4  # libjxl itself + highway + brotli + skcms
+    for name in ("libjxl", "highway", "brotli", "skcms"):
+        assert (dist / "share" / "licenses" / name / "LICENSE").is_file()
+
+
+def test_vendor_licences_refuses_a_missing_submodule_licence(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    src = _make_libjxl_source_tree(stage)
+    (src / "third_party" / "highway" / "LICENSE").unlink()
+    with pytest.raises(android_dist.AndroidDistError) as exc:
+        android_dist.vendor_licences(_loaded_libjxl(), "libjxl", tmp_path / "dist", stage)
+    assert "highway" in str(exc.value)
+
+
+def test_assert_dist_requires_the_submodule_licence_dirs_non_empty(tmp_path: Path) -> None:
+    symbols = "\n".join(fetch_libjxl_mod.REQUIRED_SYMBOLS + ("JxlGetDefaultCms",))
+    ndk = _fake_ndk_with_symbol_tool(tmp_path, symbols)
+    dist = tmp_path / "dist"
+    for rel in android_dist.EXPECTATIONS["libjxl"]["archives"]:
+        p = dist / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"")
+    for rel in android_dist.EXPECTATIONS["libjxl"]["headers"]:
+        p = dist / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("", encoding="utf-8")
+    (dist / "share" / "licenses" / "libjxl").mkdir(parents=True)
+    (dist / "share" / "licenses" / "libjxl" / "LICENSE").write_text("x", encoding="utf-8")
+    # Deliberately leave highway/brotli/skcms licence dirs absent.
+    with pytest.raises(android_dist.assertions_mod.AssertionFailed) as exc:
+        android_dist.assert_dist("libjxl", dist, ndk, "arm64-v8a")
+    assert "highway" in str(exc.value)
