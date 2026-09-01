@@ -1,0 +1,23 @@
+# What of this dist is COMMITTED, and what is only a build by-product.
+# Same convention as heif-dist-android-arm64-v8a/.gitignore (A-T4 Finding 3,
+# option c): the committed tree is what a CONSUMER needs. Unlike the HEIF
+# dist, lib/*.a here is NOT excluded -- these static archives ARE the shipped
+# artifact (jxl.cmake's find_library() calls resolve directly against them;
+# there is no shared .so this project links instead).
+#
+# lib/pkgconfig/, lib/cmake/ -- build-time discovery files (hwy's CMake
+# package config, pkg-config .pc files) for a prefix layout that does not
+# exist on the consumer's machine. native/cmake/jxl.cmake resolves every
+# archive with a direct find_library(... HINTS ${JXL_LIB_HINTS}) call, never
+# through find_package(hwy) or pkg-config, so these are dead weight.
+# share/man/ -- man pages for the libjxl CLI tools, which are not built
+# (JPEGXL_ENABLE_TOOLS=OFF) and not shipped; documentation for a program this
+# tree does not ship.
+# .stage/ -- the carrier's own build scratch (cloned source tree, unstripped
+# intermediate .a files, captured nm/readelf assertion evidence). Reproducible
+# from the pinned sources in PROVENANCE.md by re-running the producer command;
+# never intended for commit.
+lib/pkgconfig/
+lib/cmake/
+share/man/
+.stage/
