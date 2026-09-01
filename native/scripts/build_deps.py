@@ -746,6 +746,13 @@ def _run_build(argv: list) -> int:
             from deps import android_dist  # noqa: PLC0415 - lazy, see docstring
 
             try:
+                # Strip debug info BEFORE licence-vendoring/assertions: an
+                # NDK cross-build embeds full debug info by default, which
+                # made libjxl.a ship at 199 MB and get rejected outright by
+                # GitHub's 100 MB per-file push limit (--strip-debug leaves
+                # global symbols and .dynsym/SONAME intact, so this runs
+                # before the capability/linkage assertions, not after).
+                android_dist.strip_archives(dist, args.component, ndk)
                 copied = android_dist.vendor_licences(loaded, args.component, dist, stage)
                 evidence = android_dist.assert_dist(
                     args.component, dist, ndk, resolved_arch,
@@ -754,7 +761,11 @@ def _run_build(argv: list) -> int:
                     # evidence about the artefact, not part of it.
                     evidence_dir=stage / "assertions",
                 )
-            except (android_dist.AndroidDistError, android_dist.assertions_mod.AssertionFailed) as exc:
+            except (
+                android_dist.AndroidDistError,
+                android_dist.assertions_mod.AssertionFailed,
+                SubprocessError,
+            ) as exc:
                 print(f"[android-dist] {exc}", file=sys.stderr)
                 return 1
             print(

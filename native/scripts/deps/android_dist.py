@@ -23,6 +23,7 @@ from typing import Any
 
 from . import assertions as assertions_mod
 from . import fetch_libjxl as fetch_libjxl_mod
+from .run import run
 
 # Per-component android dist expectations.
 #   archives: paths under <dist> that must exist; each maps to the symbols
@@ -125,6 +126,51 @@ class AndroidDistError(RuntimeError):
     the plan say it must be."""
 
 
+# GitHub's hard per-file push limit is 100 MB; 95 MB gives headroom for the
+# archive to grow slightly between rounds without silently creeping back over
+# the wall. Named here, not re-derived, so the message in the tripwire and
+# this comment cannot drift apart.
+GITHUB_FILE_SIZE_LIMIT_MB = 100
+SIZE_TRIPWIRE_MB = 95
+
+
+def strip_archives(dist: Path, component: str, ndk: Path | str) -> list[Path]:
+    """Strip debug info from every archive/shared-object EXPECTATIONS lists
+    for ``component``, using the NDK's own ``llvm-strip``.
+
+    Runs BEFORE vendor_licences/assert_dist in the android post-install
+    pipeline. ``--strip-debug`` (not a full strip) matches the desktop
+    carrier's non-Darwin choice (fetch_libjxl.strip_archives) precisely
+    because it removes ONLY debug sections: a static archive's global
+    ``.symtab`` entries survive (so the capability nm checks below still
+    find them) and a shared object's ``.dynsym``/SONAME/DT_NEEDED survive
+    (so the heif-stack's dynamic-linkage assertions are unaffected).
+
+    Discovered necessary the hard way: an NDK cross-build embeds full debug
+    info by default (CMAKE_BUILD_TYPE=Release alone does not strip it), and
+    the desktop-only fetch_libjxl.py has its own strip step that the
+    generic android path never inherited -- libjxl.a shipped at 199 MB
+    unstripped versus the desktop dist's 8 MB stripped, and GitHub's
+    pre-receive hook rejected the push outright (100 MB per-file limit).
+    """
+    spec = EXPECTATIONS.get(component)
+    if spec is None:
+        raise AndroidDistError(
+            f"no android dist expectations declared for {component!r} -- cannot strip "
+            f"an undeclared archive set"
+        )
+    strip = assertions_mod.ndk_tool(ndk, "llvm-strip")
+    dist = Path(dist)
+    stripped = []
+    for rel in spec["archives"]:
+        path = dist / rel
+        if not path.is_file():
+            continue  # assert_dist (run right after) names the missing file
+        run([str(strip), "--strip-debug", str(path)], check=True)
+        stripped.append(path)
+    return stripped
+
+
 def vendor_licences(loaded: dict, component: str, dist: Path, stage: Path) -> list:
     """Copy the component's licence files into ``<dist>/share/licenses/<component>/``.
 
@@ -220,6 +266,15 @@ def assert_dist(
         archive = dist / rel
         if not archive.is_file():
             raise AndroidDistError(f"required archive missing from the dist: {archive}")
+        size_mb = archive.stat().st_size / (1024 * 1024)
+        if size_mb >= SIZE_TRIPWIRE_MB:
+            raise AndroidDistError(
+                f"{archive} is {size_mb:.1f} MB (tripwire: {SIZE_TRIPWIRE_MB} MB) -- "
+                f"GitHub rejects any single committed file >= {GITHUB_FILE_SIZE_LIMIT_MB} MB; "
+                f"this almost always means the archive was never stripped (see "
+                f"android_dist.strip_archives, run it in the android post-install "
+                f"pipeline before this assertion)"
+            )
         dump = assertions_mod.capture_tool_output(
             [nm, archive], evidence / f"{Path(rel).name}.nm.txt"
         )
