@@ -154,6 +154,13 @@ native/third_party/libjxl-dist-*/
 # rationale as the libomp/lcms2 entries above.
 !native/third_party/jpegturbo-x86_64/lib/libjpeg.8.dylib
 
+# Vendored lcms2/jpeg-turbo runtimes, arm64 macOS companions (symmetric-pin
+# follow-on to the x86_64 entries above, see
+# native/third_party/lcms2-arm64/PROVENANCE.md and
+# native/third_party/jpegturbo-arm64/PROVENANCE.md).
+!native/third_party/lcms2-arm64/lib/liblcms2.2.dylib
+!native/third_party/jpegturbo-arm64/lib/libjpeg.8.dylib
+
 # Session/tool scratch state (never tracked)
 .claude/tmp/
 .pi/
