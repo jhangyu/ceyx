@@ -791,30 +791,84 @@ jobs:
       # native/third_party/libomp (not Homebrew), so it is reproducible on
       # every run, not just this dev machine's.
       #
-      # Restricted to the native (non-cross) leg: the six committed
-      # plugin/macos/Libraries files this asset is meant to replace are all
-      # single-arch arm64 (confirmed via `dwarfdump --uuid` parity check,
-      # docs/logs/2026-09-01/ci-t11-findings.md), and the cross leg does not
-      # even produce all six (its build disables desktop OpenMP, so no
-      # libomp.dylib — see the "Build host Halide generators" step's
-      # DNG_CROSS_BUILD comment). The cross leg keeps shipping the
-      # decoder-only artifact it always has; only the arm64 leg's asset gains
-      # the five companions.
+      # WIDENED TO BOTH LEGS (2026-09-01, user ruling: Intel artifact must
+      # carry the same six files as Apple Silicon). Previously restricted to
+      # matrix.cross == 'false' because the cross leg could not yet produce
+      # libomp/lcms2/jpeg-turbo companions at all; the OMP-CROSS-FIX /
+      # OMP-BINARY-SOURCE / LCMS2-X86_64 / JPEG-X86_64 chain (commits
+      # 2c40d17..dd91eea) now vendors and correctly wires all three on the
+      # x86_64 leg too. Companion list is derived ONCE (COMPANIONS below) and
+      # reused for staging and all three verification gates, so the four
+      # lists can never drift apart.
+      #
+      # THREE INDEPENDENT GATES, none implies the others (each was proven to
+      # catch a distinct real or realistic defect before being written here):
+      #   1. Architecture: `lipo -archs` on the staged file itself. A file
+      #      can be present and wrong-architecture.
+      #   2. Reachability: the companion's basename appears somewhere in the
+      #      decoder's OWN dependency listing (self-reference excluded — see
+      #      below). A file can be right-architecture and dead (nothing
+      #      depends on it).
+      #   3. Path convention: that dependency line must specifically begin
+      #      `@rpath/<companion>`, not an absolute path or an unresolved
+      #      package-manager token. A file can be present, right-arch, and
+      #      genuinely depended upon through a reference that only resolves
+      #      on the build machine — this is the exact defect that shipped in
+      #      run 33472670989 (Intel decoder linked liblcms2.2.dylib through
+      #      the literal unresolved Homebrew bottle token
+      #      "@@HOMEBREW_PREFIX@@/opt/little-cms2/lib/liblcms2.2.dylib",
+      #      fixed in b0a0573) and check 2 alone would NOT have caught it —
+      #      reachability-by-substring still matches a broken absolute-path
+      #      line.
+      #
+      # Self-reference handling: `otool -L`'s line 1 is the inspected file's
+      # own path header, but line 2 is the file's OWN LC_ID_DYLIB entry (a
+      # self-dependency) — `tail -n +2` alone does NOT strip it (measured
+      # directly: the decoder's own otool -L line 2 names itself). Stripped
+      # by NAME (`grep -v "@rpath/${DYLIB_BASENAME}"`), not by a positional
+      # line offset, since an offset silently rots if the output shape ever
+      # changes. Proven: a naive loop iterating the decoder alongside the
+      # five companions against unstripped `tail -n +2` output reports a
+      # FALSE PASS for the decoder-depends-on-itself entry (verified against
+      # a real downloaded artifact); the fix here iterates the five
+      # companions only, never the decoder's own name.
       - name: Stage native artifact
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
           cp "$DYLIB" "${ARTIFACT_DIR}/native/"
-          if [ "${{ matrix.cross }}" = "false" ]; then
-            NATIVE_DYLIB_DIR="$(dirname "$DYLIB")"
-            for companion in liblcms2.2.dylib libjpeg.8.dylib libheif.1.dylib libde265.0.dylib libomp.dylib; do
-              if [ ! -f "${NATIVE_DYLIB_DIR}/${companion}" ]; then
-                echo "::error::expected companion dylib ${companion} not found in ${NATIVE_DYLIB_DIR} — the release asset would ship the decoder without a dependency the podspec vendors." >&2
-                exit 1
-              fi
-              cp "${NATIVE_DYLIB_DIR}/${companion}" "${ARTIFACT_DIR}/native/"
-            done
-          fi
+          NATIVE_DYLIB_DIR="$(dirname "$DYLIB")"
+          DYLIB_BASENAME="$(basename "$DYLIB")"
+          COMPANIONS="liblcms2.2.dylib libjpeg.8.dylib libheif.1.dylib libde265.0.dylib libomp.dylib"
+          for companion in ${COMPANIONS}; do
+            if [ ! -f "${NATIVE_DYLIB_DIR}/${companion}" ]; then
+              echo "::error::expected companion dylib ${companion} not found in ${NATIVE_DYLIB_DIR} — the release asset would ship the decoder without a dependency the podspec vendors." >&2
+              exit 1
+            fi
+            cp "${NATIVE_DYLIB_DIR}/${companion}" "${ARTIFACT_DIR}/native/"
+          done
           ls -la "${ARTIFACT_DIR}/native"
+
+          echo "--- Gate 1: architecture (every staged companion reports ${{ matrix.arch_tag }}) ---"
+          for companion in ${COMPANIONS}; do
+            archs="$(lipo -archs "${ARTIFACT_DIR}/native/${companion}" 2>&1)"
+            echo "arch(${companion}): ${archs}"
+            echo "${archs}" | grep -qw "${{ matrix.arch_tag }}" \
+              || { echo "::error::${companion} archs '${archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+          done
+
+          echo "--- Gates 2+3: reachability + path convention (decoder's own dependency graph) ---"
+          dylib_deps="$(otool -L "$DYLIB" | tail -n +2 | grep -v "@rpath/${DYLIB_BASENAME}")"
+          echo "${dylib_deps}"
+          for companion in ${COMPANIONS}; do
+            companion_line="$(grep "${companion}" <<< "${dylib_deps}" || true)"
+            if [ -z "${companion_line}" ]; then
+              echo "::error::$DYLIB does not depend on ${companion} at all — staged but unlinked (dead file)."
+              exit 1
+            fi
+            echo "dependency line for ${companion}: ${companion_line}"
+            grep -q "^[[:space:]]*@rpath/${companion} " <<< "${companion_line}" \
+              || { echo "::error::${companion} is depended upon via a non-relative reference (${companion_line}) — expected the line to start with @rpath/${companion}. This would fail to load on any machine but the build host (the exact class of defect fixed in b0a0573)."; exit 1; }
+          done
 
       # Round 6, Plan B naming normalization: the artifact name is built from
       # `matrix.arch_tag` (arm64 / x86_64). Before round 6 it was built from a

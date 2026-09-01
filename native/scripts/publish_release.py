@@ -136,29 +136,27 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
             "libomp.dylib",
         }
     ),
-    # x86_64: a deliberate, explicit ONE-file group. Not omitting this arch
-    # entirely -- an absent key is exactly the silent-no-op shape this task
-    # exists to close (the android gap), so the x86_64 artifact's (lesser,
-    # correct-for-that-leg) requirement is stated rather than left
-    # unconstrained. A single-member group is a trivial assertion today, but
-    # it names what this artifact IS required to contain and will start
-    # failing loudly, not silently, if a future change accidentally drops
-    # even the decoder from it.
-    #
-    # PROVISIONAL, NOT A RULED ANSWER (2026-09-01): this key records an
-    # ASSUMPTION -- that the x86_64 (Intel Mac) macOS leg is decoder-only
-    # because it genuinely cannot build libomp under the current
-    # cross-build configuration (OpenMP is disabled when DNG_CROSS_BUILD is
-    # set, see tests.cmake's "Desktop OpenMP" block) -- not a decision
-    # anyone has actually made. Whether an Intel-Mac release consumer
-    # exists at all, and if so what its true required companion set should
-    # be, is a user question that has been escalated and is UNRESOLVED as
-    # of this commit. Do not read this key as a settled answer to that
-    # question. If the user rules differently, this is a one-line change:
-    # widen or narrow the frozenset above, nothing else in this module
-    # needs to move.
+    # x86_64: WIDENED TO THE SAME SIX (2026-09-01, user ruling): the interim
+    # decoder-only key above this comment recorded an unresolved assumption
+    # (OpenMP genuinely could not be built on this leg at the time). That
+    # gap is closed -- the OMP-CROSS-FIX / OMP-BINARY-SOURCE / LCMS2-X86_64 /
+    # JPEG-X86_64 chain (native repo commits 2c40d17..dd91eea) vendors and
+    # correctly wires all three previously-missing companions on the Intel
+    # leg, verified via macos_build.yml's three-gate staging check
+    # (architecture, reachability, and path-convention -- the last of which
+    # exists specifically because of a real defect, run 33472670989, an
+    # unresolved-token install name that would have shipped a companion
+    # nothing could actually load). The user ruled the Intel artifact must
+    # carry the same six files as Apple Silicon; this key now matches.
     ("dng_decoder_native", "macos", "x86_64"): frozenset(
-        {"libdng_decoder_native.dylib"}
+        {
+            "libdng_decoder_native.dylib",
+            "liblcms2.2.dylib",
+            "libjpeg.8.dylib",
+            "libheif.1.dylib",
+            "libde265.0.dylib",
+            "libomp.dylib",
+        }
     ),
 }
 
