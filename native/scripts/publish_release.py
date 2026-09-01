@@ -97,22 +97,36 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
     ("dng_decoder_native", "linux"): frozenset(
         {"libdng_decoder_native.so", "libheif.so.1", "libde265.so.0"}
     ),
-    # macOS variant (CI-T11 MACOS-ATOMIC-KEY, 2026-09-01, user ruling 5a):
-    # previously absent, so this assertion silently no-op'd for macOS (a
-    # missing key means _assert_atomic_required_files's `.get()` returns
-    # None and the function returns without checking anything -- confirmed
-    # at runtime, not just by reading: impl-covmatrix-sonnet's rehearsal-log
-    # grep found atomic-group asserts for linux and windows only, zero for
-    # android, the same no-op shape this key closes for macOS).
-    # macos_build.yml's "Stage native artifact" step (CI-T11 MACOS-ASSET)
-    # now stages exactly these six basenames together on the arm64 leg --
-    # this key is the publish-time assertion that they travel as one group,
-    # the same role the windows/linux entries already play. The member list
-    # mirrors plugin/macos/ceyx.podspec:46-51's `vendored_libraries` (the
-    # actual consumer this asset exists to satisfy) exactly, not just
-    # macos_build.yml's own copy of the same list, so both sides of the
-    # requirement are pinned to the same source of truth.
-    ("dng_decoder_native", "macos"): frozenset(
+    # macOS variants (CI-T11 MACOS-ATOMIC-KEY, 2026-09-01, user ruling 5a):
+    # previously absent entirely, so this assertion silently no-op'd for
+    # macOS (a missing key means _assert_atomic_required_files's `.get()`
+    # returns None and the function returns without checking anything --
+    # confirmed at runtime, not just by reading: impl-covmatrix-sonnet's
+    # rehearsal-log grep found atomic-group asserts for linux and windows
+    # only, zero for android, the same no-op shape this closes for macOS).
+    #
+    # KEYED ON (component, platform, arch) rather than (component, platform)
+    # LIKE THE LINUX/WINDOWS ENTRIES ABOVE, deliberately: macOS is the one
+    # platform this workflow ships as two DIFFERENT artifacts with two
+    # DIFFERENT correct file sets. macos_build.yml's "Stage native artifact"
+    # step (CI-T11 MACOS-ASSET) stages all six dylibs only on the arm64 leg;
+    # the x86_64 (cross-compiled) leg genuinely does not produce a fifth of
+    # them (libomp.dylib -- OpenMP is disabled under DNG_CROSS_BUILD, see
+    # tests.cmake's "Desktop OpenMP" block) and correctly ships the decoder
+    # alone. A first attempt at this key used a plain two-tuple
+    # ("dng_decoder_native", "macos") and it matched BOTH artifacts,
+    # demanding six files from the x86_64 one -- caught live on run
+    # 33470245637 (arm64 leg: "ASSERT ok ... all required files present";
+    # x86_64 leg: "ERROR: ... missing required files [...5 files...]").
+    # `_assert_atomic_required_files` below tries the three-tuple key first
+    # and falls back to the two-tuple form so linux/windows (single-arch,
+    # genuinely arch-invariant) are unaffected.
+    #
+    # arm64: the six-dylib group, mirroring plugin/macos/ceyx.podspec:46-51's
+    # `vendored_libraries` (the actual downstream consumer) exactly, not
+    # just macos_build.yml's own copy of the same list, so both sides of the
+    # requirement are pinned to one source of truth.
+    ("dng_decoder_native", "macos", "arm64"): frozenset(
         {
             "libdng_decoder_native.dylib",
             "liblcms2.2.dylib",
@@ -121,6 +135,30 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
             "libde265.0.dylib",
             "libomp.dylib",
         }
+    ),
+    # x86_64: a deliberate, explicit ONE-file group. Not omitting this arch
+    # entirely -- an absent key is exactly the silent-no-op shape this task
+    # exists to close (the android gap), so the x86_64 artifact's (lesser,
+    # correct-for-that-leg) requirement is stated rather than left
+    # unconstrained. A single-member group is a trivial assertion today, but
+    # it names what this artifact IS required to contain and will start
+    # failing loudly, not silently, if a future change accidentally drops
+    # even the decoder from it.
+    #
+    # PROVISIONAL, NOT A RULED ANSWER (2026-09-01): this key records an
+    # ASSUMPTION -- that the x86_64 (Intel Mac) macOS leg is decoder-only
+    # because it genuinely cannot build libomp under the current
+    # cross-build configuration (OpenMP is disabled when DNG_CROSS_BUILD is
+    # set, see tests.cmake's "Desktop OpenMP" block) -- not a decision
+    # anyone has actually made. Whether an Intel-Mac release consumer
+    # exists at all, and if so what its true required companion set should
+    # be, is a user question that has been escalated and is UNRESOLVED as
+    # of this commit. Do not read this key as a settled answer to that
+    # question. If the user rules differently, this is a one-line change:
+    # widen or narrow the frozenset above, nothing else in this module
+    # needs to move.
+    ("dng_decoder_native", "macos", "x86_64"): frozenset(
+        {"libdng_decoder_native.dylib"}
     ),
 }
 
@@ -167,8 +205,56 @@ def load_manifest(path: Path) -> List[Dict[str, str]]:
     return assets
 
 
-def _assert_atomic_required_files(dist_dir: Path, component: str, platform: str) -> None:
-    required = ATOMIC_REQUIRED_FILES.get((component, platform))
+# Derived, not hardcoded (do not add a "macos is arch-scoped" literal):
+# every (component, platform) pair that has AT LEAST ONE three-tuple key in
+# ATOMIC_REQUIRED_FILES is "arch-scoped" -- once a pair opts into per-arch
+# requirements, an arch that matches none of its registered keys must be
+# treated as a gap to report, not as "no requirement", because platform-only
+# entries no longer exist for a pair once ANY arch-specific entry is added
+# for it (see the tightening note in _assert_atomic_required_files below).
+_ARCH_SCOPED_PAIRS: frozenset = frozenset(
+    (key[0], key[1]) for key in ATOMIC_REQUIRED_FILES if len(key) == 3
+)
+
+
+def _assert_atomic_required_files(
+    dist_dir: Path, component: str, platform: str, arch: Optional[str] = None
+) -> None:
+    # Arch-specific key first (macOS today: arm64 and x86_64 genuinely ship
+    # different file sets from the SAME platform, see the macOS entries'
+    # comment above ATOMIC_REQUIRED_FILES), falling back to the
+    # platform-only key so linux/windows -- single-arch and arch-invariant
+    # -- are unaffected by this lookup change.
+    required = None
+    label = f"{component}-{platform}"
+    if arch is not None:
+        required = ATOMIC_REQUIRED_FILES.get((component, platform, arch))
+        if required is not None:
+            label = f"{component}-{platform}-{arch}"
+        elif (component, platform) in _ARCH_SCOPED_PAIRS:
+            # TIGHTENING (2026-09-01, post-review): without this branch, an
+            # arch that matches none of a pair's registered arch-specific
+            # keys would fall through to the platform-only `.get()` below,
+            # find nothing (macOS has no bare (component, platform) key any
+            # more), and silently `return` -- re-introducing, one level up,
+            # exactly the silent-no-op failure mode this whole task exists
+            # to close (the android gap). A future macOS arch, a typo in
+            # normalize_arch's mapping, or a renamed artifact directory must
+            # all be a loud failure here, not a quiet pass-through.
+            registered = sorted(
+                key[2]
+                for key in ATOMIC_REQUIRED_FILES
+                if len(key) == 3 and (key[0], key[1]) == (component, platform)
+            )
+            raise PublishError(
+                f"[publish_release] atomic group check failed for "
+                f"{label}-{arch}: this (component, platform) pair has "
+                f"arch-scoped atomic requirements ({registered}) but arch "
+                f"{arch!r} matches none of them -- refusing to silently skip "
+                f"the atomic check for an unrecognised arch"
+            )
+    if required is None:
+        required = ATOMIC_REQUIRED_FILES.get((component, platform))
     if required is None:
         return
     present = {p.name for p in dist_dir.rglob("*") if p.is_file()}
@@ -176,11 +262,11 @@ def _assert_atomic_required_files(dist_dir: Path, component: str, platform: str)
     if missing:
         raise PublishError(
             f"[publish_release] atomic group check failed for "
-            f"{component}-{platform}: missing required files {sorted(missing)} "
+            f"{label}: missing required files {sorted(missing)} "
             f"in {dist_dir} (found: {sorted(present)})"
         )
     print(
-        f"[publish_release] ASSERT ok atomic group {component}-{platform}: "
+        f"[publish_release] ASSERT ok atomic group {label}: "
         f"all required files present ({sorted(required)})"
     )
 
@@ -291,7 +377,9 @@ def run_publish(args: argparse.Namespace) -> int:
         dist_dir = item["dist_dir"]
         if not dist_dir.is_dir():
             raise ManifestError(f"dist_dir does not exist: {dist_dir}")
-        _assert_atomic_required_files(dist_dir, item["component"], item["platform"])
+        _assert_atomic_required_files(
+            dist_dir, item["component"], item["platform"], item.get("arch")
+        )
         archive_path = package_dist(dist_dir, package_dir, item["asset_name"])
         archive_paths.append(archive_path)
         print(f"[publish_release] packaged {item['asset_name']} <- {dist_dir}")
