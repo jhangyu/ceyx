@@ -138,6 +138,12 @@ native/third_party/libjxl-dist-*/
 # provide. The negation must name the file, since `*.dylib` matches at any depth.
 !native/third_party/libomp/lib/libomp.dylib
 
+# Vendored LLVM OpenMP runtime, x86_64 macOS companion (task #15
+# OMP-BINARY-SOURCE, see native/third_party/libomp-x86_64/PROVENANCE.md).
+# Same rationale as the arm64 entry above -- the x86_64 cross leg needs this
+# to produce the full six-dylib companion set without a Homebrew prerequisite.
+!native/third_party/libomp-x86_64/lib/libomp.dylib
+
 # Session/tool scratch state (never tracked)
 .claude/tmp/
 .pi/
