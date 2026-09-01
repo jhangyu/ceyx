@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import assertions as assertions_mod
+from . import fetch_libjxl as fetch_libjxl_mod
 
 # Per-component android dist expectations.
 #   archives: paths under <dist> that must exist; each maps to the symbols
@@ -55,6 +56,51 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         ],
         "licence_dir": "share/licenses/libwebp",
         "machine_probe": "lib/libwebp.a",
+    },
+    # A-T3. Symbol choice note: the plan's own Task 3 constraint warns that
+    # JXL_STATIC_DEFINE makes JXL_EXPORT expand to nothing, so a symbol-table
+    # check "can never appear ... regardless of correctness" -- that claim is
+    # about the DYNAMIC symbol table of a linked .so. Verified directly
+    # against the desktop libjxl-dist precedent (the same static .a produced
+    # by the same upstream build): `nm -g libjxl.a` DOES list
+    # JxlEncoderProcessOutput/JxlDecoderProcessInput/JxlEncoderAddBox as
+    # externally-defined ("T") -- static-archive member object files are not
+    # subject to the shared-library export-table hiding, only the final
+    # linked .so is. These three are exactly REQUIRED_SYMBOLS in
+    # deps/fetch_libjxl.py (the desktop carrier this dist's pin is copied
+    # from) -- imported, not re-picked, so the two platforms can never assert
+    # a different capability set for the same pinned source. JxlGetDefaultCms
+    # in libjxl_cms.a is the plan's own link-order trap made mechanical
+    # (undefined in libjxl.a, defined only in libjxl_cms.a -- a consumer
+    # linking libjxl.a without libjxl_cms.a fails at final link, not here).
+    # The remaining four archives (threads/hwy/brotli*) get a presence-only
+    # check (empty symbol list): they are dependencies libjxl.a needs at
+    # final link, not capability surfaces in their own right.
+    "libjxl": {
+        "archives": {
+            "lib/libjxl.a": list(fetch_libjxl_mod.REQUIRED_SYMBOLS),
+            "lib/libjxl_cms.a": ["JxlGetDefaultCms"],
+            "lib/libjxl_threads.a": [],
+            "lib/libhwy.a": [],
+            "lib/libbrotlicommon.a": [],
+            "lib/libbrotlidec.a": [],
+            "lib/libbrotlienc.a": [],
+        },
+        "headers": [
+            "include/jxl/encode.h",
+            "include/jxl/decode.h",
+        ],
+        # NOTE: the plan calls for share/licenses/{libjxl,highway,brotli,skcms}
+        # (four dirs -- highway/brotli/skcms are vendored submodules under
+        # third_party/, not the top-level source). The generic
+        # android_dist.vendor_licences() call site in build_deps.py only
+        # copies ONE component's own licence globs into ONE directory
+        # (share/licenses/<component>), so only share/licenses/libjxl is
+        # populated by the current pipeline -- the submodule licences are a
+        # known gap, flagged rather than silently left unshipped (raised to
+        # the team lead alongside this row).
+        "licence_dir": "share/licenses/libjxl",
+        "machine_probe": "lib/libjxl.a",
     },
 }
 
