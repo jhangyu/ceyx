@@ -1110,10 +1110,24 @@ int main(int argc, char** argv) {
                    dev_on.auto_exposure_ev >= 0.0f && dev_on.auto_exposure_ev <= 2.0f,
                detail_on);
 
-        if (std::strcmp(fc.label, "xtrans") == 0) {
-            std::string name_pos = std::string("auto-ev-positive-") + fc.label;
-            report(name_pos.c_str(), id.c_str(), dev_on.auto_exposure_ev > 0.0f, detail_on);
-        }
+        // Prior to Task 1.7 (b5e90a2) this block additionally asserted
+        // auto_exposure_ev > 0.0f on fuji_xt3, pinned to the withdrawn
+        // raw-domain formula. The output-domain bisection solve now
+        // correctly computes 0.0 on that file (it renders 10.6% brighter
+        // than the LibRaw oracle even without gain -- no headroom to add),
+        // so that magnitude assertion is stale and has been removed.
+        // RawDevelopParams carries no solver-status field to assert kOk
+        // directly (auto_exposure_ev is output-only by design, see the
+        // header), so what "the X-Trans path executed and classified rather
+        // than being silently skipped" reduces to observably is exactly the
+        // auto-ev-populated-on/-off pair below: ok_on true, a finite value
+        // in [0,2] with the mode on, and exactly 0.0f with the mode off --
+        // kUnsupportedLayout is in any case structurally unreachable for a
+        // real corpus file here, since this adapter's colour_of_site
+        // construction folds every RawColorKey into 0..2 and never emits a
+        // table entry >= 3, and kNoRenderEval cannot occur because the
+        // adapter always passes the non-null production raw_render_eval
+        // callback.
 
         LibRawFrontendContext ctx_off;
         LibRawGpuInputAdapter adapter_off;
