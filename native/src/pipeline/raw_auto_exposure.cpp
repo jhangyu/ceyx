@@ -23,9 +23,39 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
                                                   uint32_t stride_x, uint32_t stride_y,
                                                   const float black[4], float white_level,
                                                   const float wb_gain[4],
-                                                  uint32_t cfa_channel_of[4],
+                                                  const uint8_t* colour_of_site,
+                                                  uint32_t pattern_w, uint32_t pattern_h,
                                                   float auto_bright_thr) {
     RawAutoExposureResult result;
+
+    // Revision 2.1: pattern_w == 0 means interleaved components (Foveon/
+    // linear RGB) -- pattern_h is reused to carry components_per_pixel in
+    // that mode; colour_of_site is unused. Otherwise colour_of_site is a
+    // pattern_w x pattern_h lookup table and must be present and valid.
+    const bool interleaved = (pattern_w == 0);
+    if (!interleaved) {
+        if (colour_of_site == nullptr || pattern_w == 0 || pattern_h == 0) {
+            result.status = RawAutoExposureStatus::kUnsupportedLayout;
+            result.auto_ev = 0.0f;
+            setReason(result, "colour_of_site missing for a patterned layout");
+            return result;
+        }
+        const size_t table_len = static_cast<size_t>(pattern_w) * pattern_h;
+        for (size_t i = 0; i < table_len; ++i) {
+            if (colour_of_site[i] >= 3) {
+                result.status = RawAutoExposureStatus::kUnsupportedLayout;
+                result.auto_ev = 0.0f;
+                setReason(result, "colour_of_site entry out of range (>= 3)");
+                return result;
+            }
+        }
+    } else if (pattern_h == 0) {
+        result.status = RawAutoExposureStatus::kUnsupportedLayout;
+        result.auto_ev = 0.0f;
+        setReason(result, "components_per_pixel is zero in interleaved mode");
+        return result;
+    }
+    const uint32_t components_per_pixel = pattern_h;  // only meaningful when interleaved
 
     const uint32_t sx = stride_x < 1 ? 1 : stride_x;
     const uint32_t sy = stride_y < 1 ? 1 : stride_y;
@@ -59,10 +89,16 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
     values.reserve(static_cast<size_t>(num_sampled));
     for (uint64_t row = 0; row < height; row += sy) {
         const uint16_t* row_ptr = samples + static_cast<size_t>(row) * row_pitch_samples;
-        const uint32_t cfa_row = static_cast<uint32_t>(row) & 1u;
         for (uint64_t col = 0; col < width; col += sx) {
-            const uint32_t cfa_col = static_cast<uint32_t>(col) & 1u;
-            const uint32_t ch = cfa_channel_of[cfa_row * 2 + cfa_col];
+            uint32_t ch;
+            if (interleaved) {
+                ch = static_cast<uint32_t>(col) % components_per_pixel;
+                if (ch >= 4) ch = ch % 4;  // clamp into the black[]/wb_gain[] range
+            } else {
+                const uint32_t site_row = static_cast<uint32_t>(row) % pattern_h;
+                const uint32_t site_col = static_cast<uint32_t>(col) % pattern_w;
+                ch = colour_of_site[site_row * pattern_w + site_col];
+            }
             const float black_ch = black[ch];
             const float denom = white_level - black_ch;
             float v = (static_cast<float>(row_ptr[col]) - black_ch) / denom;

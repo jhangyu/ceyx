@@ -14,6 +14,9 @@ enum class RawAutoExposureStatus {
     kOk = 0,
     kDegenerateFrame,
     kInsufficientSamples,
+    kUnsupportedLayout,  // Revision 2.1: a layout we cannot classify says so,
+                         // rather than returning 0 EV that reads as "this
+                         // frame needed no gain".
 };
 
 struct RawAutoExposureResult {
@@ -30,15 +33,24 @@ struct RawAutoExposureResult {
 //   only -- LibRaw builds its histogram after white balance, and a strongly
 //   tinted frame would otherwise clip on a single channel. The pixel path is
 //   NOT touched.
-// cfa_channel_of: maps a 2x2 CFA cell position (row%2)*2 + (col%2) to one of
-//   the four black[]/wb_gain[] channel indices.
+// colour_of_site: per-SITE colour class (0..2, R/G/B), not CFA geometry.
+//   colour_of_site[(y % pattern_h) * pattern_w + (x % pattern_w)] gives the
+//   class of the sample at (x, y).
+//     Bayer:             pattern 2x2.
+//     X-Trans:           pattern 6x6, fed straight from
+//                        LibRawRawView::xtrans_pattern (36 bytes row-major).
+//     Foveon/linear RGB: pattern_w == 0 means interleaved components; class =
+//                        sample_index % components_per_pixel.
+//   colour_of_site == nullptr with pattern_w != 0 => kUnsupportedLayout, as
+//   does any table entry >= 3.
 RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
                                                   uint32_t width, uint32_t height,
                                                   uint32_t row_pitch_samples,
                                                   uint32_t stride_x, uint32_t stride_y,
                                                   const float black[4], float white_level,
                                                   const float wb_gain[4],
-                                                  uint32_t cfa_channel_of[4],
+                                                  const uint8_t* colour_of_site,
+                                                  uint32_t pattern_w, uint32_t pattern_h,
                                                   float auto_bright_thr = 0.01f);
 
 #endif  // RAW_AUTO_EXPOSURE_H_

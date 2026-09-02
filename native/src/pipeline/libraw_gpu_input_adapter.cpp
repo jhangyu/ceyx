@@ -509,7 +509,21 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
             wb_gain[c] = out_input->as_shot_neutral[c] > 1e-6f
                              ? 1.0f / out_input->as_shot_neutral[c] : 1.0f;
         }
-        uint32_t cfa_channel_of[4] = {0, 1, 2, 3};
+        // Revision 2.1 pattern descriptor: a 2x2 RGGB colour-class table
+        // (0=R, 1=G, 2=B) -- Task 1.5 generalised the estimator away from
+        // cfa_channel_of[4]. This call site stays Bayer-only (2x2 table
+        // built from cfa_pattern_); per-format wiring (X-Trans/Foveon) is
+        // Task 1.6.
+        // RawColorKey: kRed=0, kGreen=1, kBlue=2 line up directly with the
+        // estimator's R/G/B classes for the Bayer word; any other key (Fuji
+        // green, cyan/magenta/yellow, unknown) folds into 1 (green-ish) --
+        // does not arise for a genuine 2x2 Bayer word, kept defensive.
+        uint8_t colour_of_site[4];
+        for (int pos = 0; pos < 4; ++pos) {
+            const int cfa_val = static_cast<int>(cfa_pattern_[pos]);
+            colour_of_site[pos] = (cfa_val >= 0 && cfa_val <= 2)
+                                       ? static_cast<uint8_t>(cfa_val) : 1;
+        }
         // Task 1.1's decision gate (native/scripts/tmp/round1_histogram_spike.md):
         // a full scan costs 12-16% of raw_unpack_ms on the largest corpus file,
         // above the 10% threshold, so stride 4x4 (plan B) is required here.
@@ -518,7 +532,8 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
         const RawAutoExposureResult est = raw_auto_exposure_estimate(
             static_cast<const uint16_t*>(v.plane.data), v.raw_width, v.raw_height,
             row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4, black4,
-            out_input->white_level[0], wb_gain, cfa_channel_of);
+            out_input->white_level[0], wb_gain, colour_of_site, /*pattern_w=*/2,
+            /*pattern_h=*/2);
         if (est.status == RawAutoExposureStatus::kOk) {
             out_develop->auto_exposure_ev = est.auto_ev;
         }
