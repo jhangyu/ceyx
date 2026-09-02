@@ -101,6 +101,7 @@ LibRaw's originals by every LibRaw re-clone.
 | 02.Makernotes-processing.patch | ce6245bbc12a8493add42444c51a4217bd177ff203c40f18cd610ec539d717fc |
 | 03.remove-limits-and-logging.patch | dea6e247b55b52ef97112fcc791a581b9f568c7d76a87f03f98216034c53e14b |
 | 05.no-phase-one-correction.patch | 7d972f23760337b48b36ba8d7b913fee1c0821bc9254b530690955be1a3ea24a |
+| 06.lower-macos-deployment-floor.patch | 986b4dc55922b67480efa652b9c67412b58ccca602678ddda283463d513f98b4 |
 
 ## Project-authored LibRaw patches
 
