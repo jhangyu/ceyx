@@ -1400,7 +1400,8 @@ if(DNG_ENABLE_GENERIC_RAW)
         tests/test_libraw_adapter.cpp
         src/pipeline/libraw_frontend.cpp
         src/pipeline/libraw_gpu_input_adapter.cpp
-        src/pipeline/raw_contract_validate.cpp)
+        src/pipeline/raw_contract_validate.cpp
+        src/pipeline/raw_auto_exposure.cpp)
     target_include_directories(test_libraw_adapter PRIVATE ${INC_DIR})
     target_link_libraries(test_libraw_adapter PRIVATE libraw_vendored)
 

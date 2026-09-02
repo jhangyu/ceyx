@@ -1059,6 +1059,54 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Round 1 Task 1.3 acceptance: auto_ev_populated. On a corpus Bayer file
+    // the adapter returns auto_exposure_ev in [0,2] and finite (mode on,
+    // default); on the same file with the mode off, exactly 0.0f.
+    if (!bayer_paths.empty()) {
+        const std::string& path = bayer_paths.front();
+        const std::string& id = bayer_ids.front();
+
+        LibRawFrontendContext ctx_on;
+        LibRawGpuInputAdapter adapter_on;
+        RawGpuInput input_on{};
+        RawDevelopParams dev_on{};
+        char reason_on[256] = {0};
+        const bool ok_on =
+            ctx_on.open_and_unpack(path.c_str()) == kRawSuccess &&
+            adapter_on.build(ctx_on, &input_on, &dev_on, reason_on, sizeof(reason_on)) ==
+                kRawSuccess;
+        char detail_on[200];
+        std::snprintf(detail_on, sizeof(detail_on),
+                      "ok=%d auto_exposure_mode=%d auto_exposure_ev=%.7f (%s)",
+                      ok_on, dev_on.auto_exposure_mode, dev_on.auto_exposure_ev, reason_on);
+        report("auto-ev-populated-on", id.c_str(),
+               ok_on && dev_on.auto_exposure_mode == kRawAutoExposureOn &&
+                   std::isfinite(dev_on.auto_exposure_ev) &&
+                   dev_on.auto_exposure_ev >= 0.0f && dev_on.auto_exposure_ev <= 2.0f,
+               detail_on);
+
+        LibRawFrontendContext ctx_off;
+        LibRawGpuInputAdapter adapter_off;
+        RawGpuInput input_off{};
+        RawDevelopParams dev_off{};
+        dev_off.auto_exposure_mode = kRawAutoExposureOff;
+        char reason_off[256] = {0};
+        const bool ok_off =
+            ctx_off.open_and_unpack(path.c_str()) == kRawSuccess &&
+            adapter_off.build(ctx_off, &input_off, &dev_off, reason_off, sizeof(reason_off)) ==
+                kRawSuccess;
+        char detail_off[200];
+        std::snprintf(detail_off, sizeof(detail_off),
+                      "ok=%d auto_exposure_mode=%d auto_exposure_ev=%.7f (%s)",
+                      ok_off, dev_off.auto_exposure_mode, dev_off.auto_exposure_ev, reason_off);
+        report("auto-ev-populated-off", id.c_str(),
+               ok_off && dev_off.auto_exposure_mode == kRawAutoExposureOff &&
+                   dev_off.auto_exposure_ev == 0.0f,
+               detail_off);
+    } else {
+        std::printf("[LibRawAdapter] SKIP auto-ev-populated (no Bayer sample built)\n");
+    }
+
     if (checked == 0) {
         std::printf("[LibRawAdapter] FAIL no corpus files were present\n");
         return 1;

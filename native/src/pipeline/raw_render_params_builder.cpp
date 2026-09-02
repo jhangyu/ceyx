@@ -170,7 +170,18 @@ bool raw_build_render_params(const RawGpuInput& input,
     // this value MUST treat <= -900 as absent. A `!= 0` test passes -999 straight
     // through and would fold -999 EV into the exposure. Measured 2026-08-28 on
     // ARW, RAF and X3F; evidence in tmp/verify/ab_renders/README_AB_probe_report.md.
-    const real64 exposure = static_cast<real64>(develop.exposure_ev);
+    //
+    // Round 1 Task 1.3 (explore_codebase_color_gap.md §6 H1): the darkness
+    // defect's root cause is that LibRaw's own auto-brighten gain -- which
+    // only runs inside the forbidden dcraw_process call (spec §13.1) -- is
+    // never applied on this route. develop.auto_exposure_ev is the adapter's
+    // own histogram-estimator replacement (raw_auto_exposure.h), already
+    // guaranteed 0.0f when auto_exposure_mode is off or the estimate was not
+    // kOk (LibRawGpuInputAdapter::build()) -- folded additively in log space
+    // at the same point develop.exposure_ev is, so auto gain and any future
+    // user EV compose exactly like two exposure_ev contributions would.
+    const real64 exposure = static_cast<real64>(develop.exposure_ev) +
+                            static_cast<real64>(develop.auto_exposure_ev);
     const real64 white = 1.0 / std::pow(2.0, std::max<real64>(0.0, exposure));
 
     // Shadows black lift, matching dng_render_halide.cpp:794-797:

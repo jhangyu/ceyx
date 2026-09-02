@@ -23,8 +23,10 @@ extern "C" {
  * change cannot pass review.
  *   1 - Phase 17 (implicit): Bayer 2x2 and X-Trans 6x6 only.
  *   2 - Phase 19: linear RGB accepted as a production layout; RawGpuInput
- *       gains component_black[4]. */
-#define kRawContractVersion 2
+ *       gains component_black[4].
+ *   3 - Round 1 Task 1.3: RawDevelopParams gains auto_exposure_mode and
+ *       auto_exposure_ev (appended at the end, no existing offset moves). */
+#define kRawContractVersion 3
 
 typedef enum RawSampleModel {
     kRawSampleModelCfa = 0,
@@ -203,11 +205,33 @@ typedef enum RawOutputColorSpace {
     kRawOutputColorSpaceSrgb = 0
 } RawOutputColorSpace;
 
+typedef enum RawAutoExposureMode {
+    kRawAutoExposureOn = 0,  /* DEFAULT: the darkness fix is on by default (decision D-9) */
+    kRawAutoExposureOff = 1
+} RawAutoExposureMode;
+
 typedef struct RawDevelopParams {
     float exposure_ev;
     float tone_curve_strength;
     RawOutputColorSpace output_space;
     uint32_t max_output_long_edge; /* 0 = full resolution */
+
+    /* Round 1 Task 1.3, contract version 3. Appended at the end on purpose:
+     * no existing field's offset changes.
+     *
+     * auto_exposure_mode is the one field of this struct the adapter reads as
+     * INPUT (LibRawGpuInputAdapter::build() otherwise treats RawDevelopParams
+     * as purely its own output) -- set it before calling build() to request
+     * kRawAutoExposureOff; the adapter preserves whatever value the caller
+     * supplied through its own struct reset for exactly this reason.
+     *
+     * auto_exposure_ev is adapter-computed OUTPUT ONLY: any caller-supplied
+     * value is ignored and overwritten. It is adapter-owned, not a caller
+     * knob, so it must never be copied from a caller's original
+     * RawDevelopParams after adapter.build() runs (raw_gpu_pipeline.cpp's
+     * caller-knob restore explicitly excludes it). */
+    int32_t auto_exposure_mode;   /* RawAutoExposureMode, default kRawAutoExposureOn */
+    float   auto_exposure_ev;     /* adapter-computed; caller-supplied value is ignored */
 } RawDevelopParams;
 
 /* Every field required by spec section 6.5. */

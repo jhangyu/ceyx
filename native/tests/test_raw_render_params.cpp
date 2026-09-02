@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -429,6 +431,30 @@ bool librawParamsForFile(const char* path, LibRawFrontendContext& ctx,
     return true;
 }
 
+// Parses native/scripts/tmp/round1_baseline_dump.cpp's "TAG idx value" output
+// format for round1_baseline_tables.txt (Round 1 Task 1.3 Step 1, captured at
+// HEAD a80ba700b707bf4e5967a51a32311d566ef8e98f, before the auto-exposure fold
+// existed). Returns false if the file or a requested tag is missing.
+bool loadBaselineTable(const char* path, const char* tag, std::vector<float>& out) {
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+    std::string word;
+    size_t idx;
+    float value;
+    std::string line;
+    bool any = false;
+    while (std::getline(in, line)) {
+        std::istringstream iss(line);
+        if (!(iss >> word)) continue;
+        if (word != tag) continue;
+        if (!(iss >> idx >> value)) continue;
+        if (out.size() <= idx) out.resize(idx + 1);
+        out[idx] = value;
+        any = true;
+    }
+    return any;
+}
+
 bool fileExists(const char* path) {
     std::FILE* f = std::fopen(path, "rb");
     if (!f) return false;
@@ -828,6 +854,112 @@ int main() {
                        worst_at >= 0 && worst_basis_at >= 0,
                    detail);
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Round 1 Task 1.3: automatic exposure baseline fold.
+    // ----------------------------------------------------------------------
+
+    // auto_off_is_bit_identical: with kRawAutoExposureOff, the real adapter's
+    // output on the corpus Bayer sample must equal the pre-change tables
+    // captured to native/scripts/tmp/round1_baseline_tables.txt entry-for-entry.
+    {
+        const char* kBaselinePath = "native/scripts/tmp/round1_baseline_tables.txt";
+        std::vector<float> want_ramp, want_tone;
+        const bool have_baseline =
+            loadBaselineTable(kBaselinePath, "EXP_RAMP", want_ramp) &&
+            loadBaselineTable(kBaselinePath, "TONE_CURVE", want_tone);
+        if (!have_baseline) {
+            report("auto-off-is-bit-identical", false,
+                   "round1_baseline_tables.txt missing or unparsable");
+        } else {
+            // Not librawParamsForFile: that helper zero-inits RawDevelopParams
+            // (auto_exposure_mode defaults to kRawAutoExposureOn), and this case
+            // specifically needs auto_exposure_mode set to Off BEFORE
+            // adapter.build() -- the one field build() reads as input.
+            LibRawFrontendContext ctx;
+            LibRawGpuInputAdapter adapter;
+            RawGpuInput input{};
+            RenderParams p;
+            char why[300] = {0};
+            bool ok = ctx.open_and_unpack("image_samples/raw_sample.arw") == kRawSuccess;
+            if (!ok) std::snprintf(why, sizeof(why), "open_and_unpack failed");
+            RawDevelopParams develop{};
+            develop.auto_exposure_mode = kRawAutoExposureOff;
+            char reason[256] = {0};
+            if (ok) {
+                ok = adapter.build(ctx, &input, &develop, reason, sizeof(reason)) == kRawSuccess;
+                if (!ok) {
+                    std::snprintf(why, sizeof(why), "adapter.build failed: %s", reason);
+                }
+            }
+            if (ok) {
+                ok = raw_build_render_params(input, develop, p);
+                if (!ok) std::snprintf(why, sizeof(why), "raw_build_render_params returned false");
+            }
+            char mode_detail[120];
+            std::snprintf(mode_detail, sizeof(mode_detail),
+                          "auto_exposure_mode=%d auto_exposure_ev=%.7f (want mode=1, ev=0)",
+                          develop.auto_exposure_mode, develop.auto_exposure_ev);
+            report("auto-off-mode-honoured",
+                   ok && develop.auto_exposure_mode == kRawAutoExposureOff &&
+                       develop.auto_exposure_ev == 0.0f,
+                   mode_detail);
+            bool same = ok && p.exp_ramp.size() == want_ramp.size() &&
+                        p.tone_curve.size() == want_tone.size();
+            size_t first_mismatch = static_cast<size_t>(-1);
+            for (size_t i = 0; same && i < want_ramp.size(); ++i) {
+                if (p.exp_ramp[i] != want_ramp[i]) { same = false; first_mismatch = i; }
+            }
+            for (size_t i = 0; same && i < want_tone.size(); ++i) {
+                if (p.tone_curve[i] != want_tone[i]) { same = false; first_mismatch = i; }
+            }
+            char detail[240];
+            std::snprintf(detail, sizeof(detail),
+                          "ok=%d sizes(ramp %zu/%zu, tone %zu/%zu) first_mismatch_index=%zu (%s)",
+                          ok, p.exp_ramp.size(), want_ramp.size(), p.tone_curve.size(),
+                          want_tone.size(), first_mismatch, ok ? "" : why);
+            report("auto-off-is-bit-identical", same, detail);
+        }
+    }
+
+    // auto_ev_shifts_the_curve: auto_exposure_ev=1.0f must visibly raise a
+    // curve relative to auto_exposure_ev=0.0f at the quarter-point index.
+    //
+    // DEVIATION FROM THE PLAN, WITH EVIDENCE: the plan (Task 1.3 acceptance)
+    // named tone_curve. Red-first run against exp_ramp/tone_curve showed
+    // tone_curve diff == 0.0000000 exactly for every non-negative exposure,
+    // which traces to the DNG SDK itself, not a wiring bug:
+    // dng_render.cpp:77-127, dng_function_exposure_tone::dng_function_exposure_tone
+    // sets `fIsNOP (exposure >= 0.0)` -- the exposure-tone stage is an
+    // architectural NOP whenever exposure is non-negative, and
+    // raw_auto_exposure.h clamps auto_ev to [0, +2], so auto_exposure_ev can
+    // NEVER make exposure negative here. tone_curve is therefore
+    // mathematically incapable of moving from this fold, by the SDK's own
+    // design (positive exposure lightens through the `white` term of exp_ramp
+    // instead, dng_render_halide.cpp:794-806). This case is gated on exp_ramp,
+    // which the same red-first run confirmed DOES move (this is also the
+    // curve the darkness-fix render actually depends on -- Task 1.4's
+    // mid-grey oracle measures the rendered image, not this table directly).
+    {
+        RawGpuInput in = makeInput(true);
+        RawDevelopParams dev0 = makeDevelop();
+        dev0.auto_exposure_ev = 0.0f;
+        RawDevelopParams dev1 = makeDevelop();
+        dev1.auto_exposure_ev = 1.0f;
+        RenderParams p0, p1;
+        const bool ok = raw_build_render_params(in, dev0, p0) &&
+                        raw_build_render_params(in, dev1, p1);
+        const size_t idx = ok ? p0.exp_ramp.size() / 4 : 0;
+        const bool shifted =
+            ok && idx < p0.exp_ramp.size() && idx < p1.exp_ramp.size() &&
+            (p1.exp_ramp[idx] - p0.exp_ramp[idx]) > 1e-3f;
+        char detail[200];
+        std::snprintf(detail, sizeof(detail),
+                      "ok=%d idx=%zu exp_ramp[idx] auto_ev=0 -> %.7f, auto_ev=1 -> %.7f, diff=%.7f",
+                      ok, idx, ok ? p0.exp_ramp[idx] : -1.0f, ok ? p1.exp_ramp[idx] : -1.0f,
+                      ok ? (p1.exp_ramp[idx] - p0.exp_ramp[idx]) : 0.0f);
+        report("auto-ev-shifts-the-curve", shifted, detail);
     }
 
     if (failures != 0) {

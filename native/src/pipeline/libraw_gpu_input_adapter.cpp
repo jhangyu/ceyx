@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "raw_auto_exposure.h"
 #include "raw_contract_validate.h"
 
 namespace {
@@ -307,8 +308,15 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     if (reason_out && reason_cap > 0) reason_out[0] = '\0';
     if (!out_input || !out_develop) return kRawErrMetadataInvalid;
 
+    // auto_exposure_mode is the one RawDevelopParams field build() reads as
+    // INPUT: every other field here is pure output (reset below), but the
+    // caller must be able to request kRawAutoExposureOff before the adapter
+    // computes anything. Captured before the reset that follows.
+    const int32_t requested_auto_exposure_mode = out_develop->auto_exposure_mode;
+
     *out_input = RawGpuInput{};
     *out_develop = RawDevelopParams{};
+    out_develop->auto_exposure_mode = requested_auto_exposure_mode;
 
     if (!ctx.is_open()) {
         if (reason_out && reason_cap) {
@@ -467,6 +475,54 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
                                   reason_cap);
 
     out_input->decoder_backend = ctx.diagnostics().unpack_backend;
+
+    // --- automatic exposure baseline (Round 1 Task 1.3;
+    // explore_codebase_color_gap.md §6 H1: LibRaw's own CPU render entry point
+    // (the forbidden dcraw_process call, spec §13.1) is never invoked here, so
+    // LibRaw's own auto-brighten gain never applies -- this ports the
+    // histogram estimator (raw_auto_exposure.h) as our own replacement) ------
+    // Bayer-only: the estimator's cfa_channel_of is a plain 2x2 map, and a
+    // true 2x2-periodic Bayer word is the only layout this adapter can express
+    // that way without inventing a mapping no LibRaw metadata supports (the
+    // 6x6 X-Trans tile and non-CFA linear-RGB layouts are out of scope here).
+    // Left at its zero-initialised 0.0f default in those cases and when the
+    // mode is off -- never a fabricated value, spec section 4.1.9.
+    out_develop->auto_exposure_ev = 0.0f;
+    if (out_develop->auto_exposure_mode == kRawAutoExposureOn &&
+        layout.sample_model == kRawSampleModelCfa &&
+        layout.cfa_repeat_width == 2 && layout.cfa_repeat_height == 2 &&
+        v.plane.data != nullptr && v.plane.pixel_stride_bytes == sizeof(uint16_t)) {
+        float black4[4];
+        for (int pos = 0; pos < 4; ++pos) {
+            const uint32_t row = static_cast<uint32_t>(pos / 2);
+            const uint32_t col = static_cast<uint32_t>(pos % 2);
+            const uint32_t idx =
+                (row % out_input->black.repeat_height) * out_input->black.repeat_width +
+                (col % out_input->black.repeat_width);
+            black4[pos] = out_input->black.values[idx];
+        }
+        // wb_gain per the header contract: the gain implied by as_shot_neutral,
+        // green-referenced (as_shot_neutral itself is already green-referenced
+        // by raw_white_balance_from_libraw, so its reciprocal is too).
+        float wb_gain[4];
+        for (int c = 0; c < 4; ++c) {
+            wb_gain[c] = out_input->as_shot_neutral[c] > 1e-6f
+                             ? 1.0f / out_input->as_shot_neutral[c] : 1.0f;
+        }
+        uint32_t cfa_channel_of[4] = {0, 1, 2, 3};
+        // Task 1.1's decision gate (native/scripts/tmp/round1_histogram_spike.md):
+        // a full scan costs 12-16% of raw_unpack_ms on the largest corpus file,
+        // above the 10% threshold, so stride 4x4 (plan B) is required here.
+        const uint32_t row_pitch_samples = static_cast<uint32_t>(
+            v.plane.row_stride_bytes / static_cast<int64_t>(sizeof(uint16_t)));
+        const RawAutoExposureResult est = raw_auto_exposure_estimate(
+            static_cast<const uint16_t*>(v.plane.data), v.raw_width, v.raw_height,
+            row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4, black4,
+            out_input->white_level[0], wb_gain, cfa_channel_of);
+        if (est.status == RawAutoExposureStatus::kOk) {
+            out_develop->auto_exposure_ev = est.auto_ev;
+        }
+    }
 
     // --- develop defaults --------------------------------------------------
     out_develop->exposure_ev = 0.0f;

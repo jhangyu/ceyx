@@ -36,6 +36,22 @@ static_assert(offsetof(RawGpuInput, component_black) == 460,
              "component_black offset moved - must stay APPENDED, never inserted");
 static_assert(sizeof(RawGpuInput) == 480, "RawGpuInput size changed");
 
+// Round 1 Task 1.3, contract version 3: RawDevelopParams gains
+// auto_exposure_mode/auto_exposure_ev, appended at the end. Same guard
+// pattern as RawGpuInput above -- offsets pinned so a future mid-struct
+// insertion fails to compile.
+static_assert(offsetof(RawDevelopParams, exposure_ev) == 0, "exposure_ev offset moved");
+static_assert(offsetof(RawDevelopParams, tone_curve_strength) == 4,
+             "tone_curve_strength offset moved");
+static_assert(offsetof(RawDevelopParams, output_space) == 8, "output_space offset moved");
+static_assert(offsetof(RawDevelopParams, max_output_long_edge) == 12,
+             "max_output_long_edge offset moved");
+static_assert(offsetof(RawDevelopParams, auto_exposure_mode) == 16,
+             "auto_exposure_mode offset moved - must stay APPENDED, never inserted");
+static_assert(offsetof(RawDevelopParams, auto_exposure_ev) == 20,
+             "auto_exposure_ev offset moved - must stay APPENDED, never inserted");
+static_assert(sizeof(RawDevelopParams) == 24, "RawDevelopParams size changed");
+
 namespace {
 
 int failures = 0;
@@ -118,10 +134,19 @@ int main() {
     check("color_transform_capacity",
           sizeof(xform.m) / sizeof(xform.m[0]) == 12);
 
-    // P19: the contract version is bumped whenever the plain-C surface changes.
-    // Phase 17 shipped version 1 implicitly; Phase 19 adds the linear-RGB
-    // acceptance and RawGpuInput::component_black, so the value is 2.
-    check("contract_version", kRawContractVersion == 2);
+    // P19/Round 1: the contract version is bumped whenever the plain-C
+    // surface changes. Phase 17 shipped version 1 implicitly; Phase 19 added
+    // the linear-RGB acceptance and RawGpuInput::component_black (2); Round 1
+    // Task 1.3 adds RawDevelopParams::auto_exposure_mode/auto_exposure_ev (3).
+    check("contract_version", kRawContractVersion == 3);
+
+    RawDevelopParams dev;
+    std::memset(&dev, 0, sizeof(dev));
+    check("auto_exposure_mode_default_is_on", kRawAutoExposureOn == 0);
+    check("auto_exposure_mode_off_value", kRawAutoExposureOff == 1);
+    check("develop_params_is_zeroable_to_auto_exposure_on",
+          dev.auto_exposure_mode == kRawAutoExposureOn &&
+          dev.auto_exposure_ev == 0.0f);
 
     RawGpuInput cb;
     std::memset(&cb, 0, sizeof(cb));
