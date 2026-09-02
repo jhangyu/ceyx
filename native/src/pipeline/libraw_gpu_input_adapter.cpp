@@ -476,31 +476,21 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
 
     out_input->decoder_backend = ctx.diagnostics().unpack_backend;
 
-    // --- automatic exposure baseline (Round 1 Task 1.3;
+    // --- automatic exposure baseline (Round 1 Task 1.3, generalised Task 1.6;
     // explore_codebase_color_gap.md §6 H1: LibRaw's own CPU render entry point
     // (the forbidden dcraw_process call, spec §13.1) is never invoked here, so
     // LibRaw's own auto-brighten gain never applies -- this ports the
     // histogram estimator (raw_auto_exposure.h) as our own replacement) ------
-    // Bayer-only: the estimator's cfa_channel_of is a plain 2x2 map, and a
-    // true 2x2-periodic Bayer word is the only layout this adapter can express
-    // that way without inventing a mapping no LibRaw metadata supports (the
-    // 6x6 X-Trans tile and non-CFA linear-RGB layouts are out of scope here).
-    // Left at its zero-initialised 0.0f default in those cases and when the
-    // mode is off -- never a fabricated value, spec section 4.1.9.
+    // Per-format: CFA layouts (Bayer 2x2, X-Trans 6x6) feed the estimator's
+    // colour_of_site pattern built from cfa_pattern_ (already carries the
+    // right tile for either); linear-RGB/Foveon feeds pattern_w == 0
+    // (interleaved). Any layout the estimator cannot classify reports
+    // kUnsupportedLayout, and auto_exposure_ev is left at its zero-initialised
+    // default with the reason preserved in out_develop's diagnostics path --
+    // never a fabricated value, spec section 4.1.9.
     out_develop->auto_exposure_ev = 0.0f;
     if (out_develop->auto_exposure_mode == kRawAutoExposureOn &&
-        layout.sample_model == kRawSampleModelCfa &&
-        layout.cfa_repeat_width == 2 && layout.cfa_repeat_height == 2 &&
-        v.plane.data != nullptr && v.plane.pixel_stride_bytes == sizeof(uint16_t)) {
-        float black4[4];
-        for (int pos = 0; pos < 4; ++pos) {
-            const uint32_t row = static_cast<uint32_t>(pos / 2);
-            const uint32_t col = static_cast<uint32_t>(pos % 2);
-            const uint32_t idx =
-                (row % out_input->black.repeat_height) * out_input->black.repeat_width +
-                (col % out_input->black.repeat_width);
-            black4[pos] = out_input->black.values[idx];
-        }
+        v.plane.data != nullptr) {
         // wb_gain per the header contract: the gain implied by as_shot_neutral,
         // green-referenced (as_shot_neutral itself is already green-referenced
         // by raw_white_balance_from_libraw, so its reciprocal is too).
@@ -509,34 +499,81 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
             wb_gain[c] = out_input->as_shot_neutral[c] > 1e-6f
                              ? 1.0f / out_input->as_shot_neutral[c] : 1.0f;
         }
-        // Revision 2.1 pattern descriptor: a 2x2 RGGB colour-class table
-        // (0=R, 1=G, 2=B) -- Task 1.5 generalised the estimator away from
-        // cfa_channel_of[4]. This call site stays Bayer-only (2x2 table
-        // built from cfa_pattern_); per-format wiring (X-Trans/Foveon) is
-        // Task 1.6.
-        // RawColorKey: kRed=0, kGreen=1, kBlue=2 line up directly with the
-        // estimator's R/G/B classes for the Bayer word; any other key (Fuji
-        // green, cyan/magenta/yellow, unknown) folds into 1 (green-ish) --
-        // does not arise for a genuine 2x2 Bayer word, kept defensive.
-        uint8_t colour_of_site[4];
-        for (int pos = 0; pos < 4; ++pos) {
-            const int cfa_val = static_cast<int>(cfa_pattern_[pos]);
-            colour_of_site[pos] = (cfa_val >= 0 && cfa_val <= 2)
-                                       ? static_cast<uint8_t>(cfa_val) : 1;
+
+        RawAutoExposureResult est;
+        bool attempted = false;
+
+        if (layout.sample_model == kRawSampleModelCfa &&
+            (layout.cfa_repeat_width == 2 || layout.cfa_repeat_width == 6) &&
+            layout.cfa_repeat_width == layout.cfa_repeat_height &&
+            v.plane.pixel_stride_bytes == sizeof(uint16_t)) {
+            // RawColorKey: kRed=0, kGreen=1, kBlue=2 line up directly with the
+            // estimator's R/G/B classes; any other key (Fuji green,
+            // cyan/magenta/yellow, unknown) folds into 1 (green-ish) -- Fuji
+            // green (kRawColorKeyFujiGreen) is the one that legitimately
+            // arises here, for the X-Trans tile.
+            const uint32_t pw = layout.cfa_repeat_width;
+            const uint32_t ph = layout.cfa_repeat_height;
+            const uint32_t tile_n = pw * ph;
+            uint8_t colour_of_site[kRawMaxCfaPatternCount];
+            float black_sum[3] = {0.0f, 0.0f, 0.0f};
+            uint32_t black_count[3] = {0, 0, 0};
+            for (uint32_t pos = 0; pos < tile_n; ++pos) {
+                const int cfa_val = static_cast<int>(cfa_pattern_[pos]);
+                const uint8_t cls = (cfa_val >= 0 && cfa_val <= 2)
+                                         ? static_cast<uint8_t>(cfa_val) : 1;
+                colour_of_site[pos] = cls;
+                const uint32_t row = pos / pw;
+                const uint32_t col = pos % pw;
+                const uint32_t bidx =
+                    (row % out_input->black.repeat_height) * out_input->black.repeat_width +
+                    (col % out_input->black.repeat_width);
+                black_sum[cls] += out_input->black.values[bidx];
+                black_count[cls] += 1;
+            }
+            float black3[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (int c = 0; c < 3; ++c) {
+                black3[c] = black_count[c] > 0 ? black_sum[c] / black_count[c] : 0.0f;
+            }
+            // Task 1.1's decision gate (native/scripts/tmp/round1_histogram_spike.md):
+            // a full scan costs 12-16% of raw_unpack_ms on the largest corpus
+            // file, above the 10% threshold, so stride 4x4 (plan B) is
+            // required here.
+            const uint32_t row_pitch_samples = static_cast<uint32_t>(
+                v.plane.row_stride_bytes / static_cast<int64_t>(sizeof(uint16_t)));
+            est = raw_auto_exposure_estimate(
+                static_cast<const uint16_t*>(v.plane.data), v.raw_width, v.raw_height,
+                row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4, black3,
+                out_input->white_level[0], wb_gain, colour_of_site, pw, ph);
+            attempted = true;
+        } else if (layout.sample_model == kRawSampleModelLinearRgb &&
+                   layout.components_per_pixel >= 1 &&
+                   layout.components_per_pixel <= 4 &&
+                   v.plane.pixel_stride_bytes ==
+                       static_cast<int64_t>(layout.components_per_pixel * sizeof(uint16_t))) {
+            // Interleaved mode: pattern_w == 0, pattern_h carries
+            // components_per_pixel; width is expressed in SAMPLES (pixels *
+            // components), matching how the buffer is actually laid out.
+            const uint32_t sample_width = v.plane.width * layout.components_per_pixel;
+            const uint32_t row_pitch_samples = static_cast<uint32_t>(
+                v.plane.row_stride_bytes / static_cast<int64_t>(sizeof(uint16_t)));
+            est = raw_auto_exposure_estimate(
+                static_cast<const uint16_t*>(v.plane.data), sample_width, v.plane.height,
+                row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4,
+                out_input->component_black, out_input->white_level[0], wb_gain,
+                /*colour_of_site=*/nullptr, /*pattern_w=*/0,
+                /*pattern_h=*/layout.components_per_pixel);
+            attempted = true;
         }
-        // Task 1.1's decision gate (native/scripts/tmp/round1_histogram_spike.md):
-        // a full scan costs 12-16% of raw_unpack_ms on the largest corpus file,
-        // above the 10% threshold, so stride 4x4 (plan B) is required here.
-        const uint32_t row_pitch_samples = static_cast<uint32_t>(
-            v.plane.row_stride_bytes / static_cast<int64_t>(sizeof(uint16_t)));
-        const RawAutoExposureResult est = raw_auto_exposure_estimate(
-            static_cast<const uint16_t*>(v.plane.data), v.raw_width, v.raw_height,
-            row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4, black4,
-            out_input->white_level[0], wb_gain, colour_of_site, /*pattern_w=*/2,
-            /*pattern_h=*/2);
-        if (est.status == RawAutoExposureStatus::kOk) {
+
+        if (attempted && est.status == RawAutoExposureStatus::kOk) {
             out_develop->auto_exposure_ev = est.auto_ev;
         }
+        // kUnsupportedLayout (and any other non-kOk status, or a layout this
+        // adapter did not attempt at all) leaves auto_exposure_ev at 0.0f --
+        // the est.reason string is not threaded further here because this
+        // develop-params struct carries no reason field; RawColorDiagnostics
+        // (Round 2 Task 2.4) is the channel for that, out of this task's scope.
     }
 
     // --- develop defaults --------------------------------------------------

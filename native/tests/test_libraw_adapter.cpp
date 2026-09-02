@@ -787,6 +787,10 @@ int main(int argc, char** argv) {
     const std::vector<Sample> samples = loadManifest(manifest);
     std::vector<std::string> bayer_paths;
     std::vector<std::string> bayer_ids;
+    std::vector<std::string> xtrans_paths;
+    std::vector<std::string> xtrans_ids;
+    std::vector<std::string> foveon_paths;
+    std::vector<std::string> foveon_ids;
 
     for (const Sample& s : samples) {
         if (s.id.rfind("malformed_", 0) == 0) continue;
@@ -874,6 +878,8 @@ int main(int argc, char** argv) {
                        input.layout.cfa_pattern_count == 36 &&
                        greens == 20 && reds == 8 && blues == 8,
                    detail);
+            xtrans_paths.push_back(s.path);
+            xtrans_ids.push_back(s.id);
         } else if (s.expect_layout == "linear_rgb") {
             // P19 T8 erratum: this manifest loop predates the linear-RGB
             // route (Phase 17 assumed every non-CFA layout must fail), so the
@@ -891,6 +897,8 @@ int main(int argc, char** argv) {
                        input.layout.components_per_pixel == 3 &&
                        input.layout.plane_count == 1,
                    detail);
+            foveon_paths.push_back(s.path);
+            foveon_ids.push_back(s.id);
         } else {
             std::snprintf(detail, sizeof(detail), "class=%s rc=%s want=%s",
                           raw_layout_class_name(cls), raw_error_name(rc),
@@ -1059,12 +1067,28 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Round 1 Task 1.3 acceptance: auto_ev_populated. On a corpus Bayer file
-    // the adapter returns auto_exposure_ev in [0,2] and finite (mode on,
-    // default); on the same file with the mode off, exactly 0.0f.
-    if (!bayer_paths.empty()) {
-        const std::string& path = bayer_paths.front();
-        const std::string& id = bayer_ids.front();
+    // Round 1 Task 1.3 acceptance, promoted per-format by Task 1.6: on one
+    // corpus file per format (Bayer, X-Trans, Foveon), the adapter returns
+    // auto_exposure_ev finite and in [0,2] with the mode on (default), and
+    // exactly 0.0f with the mode off. X-Trans additionally asserts auto_ev
+    // > 0 on the real corpus file -- the whole point of generalising past
+    // Bayer; if it computed exactly 0.0 that would need investigating before
+    // being accepted as a passing case, not asserted around.
+    struct FormatCase { const char* label; const std::vector<std::string>* paths;
+                        const std::vector<std::string>* ids; };
+    const FormatCase format_cases[] = {
+        {"bayer", &bayer_paths, &bayer_ids},
+        {"xtrans", &xtrans_paths, &xtrans_ids},
+        {"foveon", &foveon_paths, &foveon_ids},
+    };
+    for (const FormatCase& fc : format_cases) {
+        if (fc.paths->empty()) {
+            std::printf("[LibRawAdapter] SKIP auto-ev-populated-%s (no %s sample built)\n",
+                        fc.label, fc.label);
+            continue;
+        }
+        const std::string& path = fc.paths->front();
+        const std::string& id = fc.ids->front();
 
         LibRawFrontendContext ctx_on;
         LibRawGpuInputAdapter adapter_on;
@@ -1079,11 +1103,17 @@ int main(int argc, char** argv) {
         std::snprintf(detail_on, sizeof(detail_on),
                       "ok=%d auto_exposure_mode=%d auto_exposure_ev=%.7f (%s)",
                       ok_on, dev_on.auto_exposure_mode, dev_on.auto_exposure_ev, reason_on);
-        report("auto-ev-populated-on", id.c_str(),
+        std::string name_on = std::string("auto-ev-populated-on-") + fc.label;
+        report(name_on.c_str(), id.c_str(),
                ok_on && dev_on.auto_exposure_mode == kRawAutoExposureOn &&
                    std::isfinite(dev_on.auto_exposure_ev) &&
                    dev_on.auto_exposure_ev >= 0.0f && dev_on.auto_exposure_ev <= 2.0f,
                detail_on);
+
+        if (std::strcmp(fc.label, "xtrans") == 0) {
+            std::string name_pos = std::string("auto-ev-positive-") + fc.label;
+            report(name_pos.c_str(), id.c_str(), dev_on.auto_exposure_ev > 0.0f, detail_on);
+        }
 
         LibRawFrontendContext ctx_off;
         LibRawGpuInputAdapter adapter_off;
@@ -1099,12 +1129,11 @@ int main(int argc, char** argv) {
         std::snprintf(detail_off, sizeof(detail_off),
                       "ok=%d auto_exposure_mode=%d auto_exposure_ev=%.7f (%s)",
                       ok_off, dev_off.auto_exposure_mode, dev_off.auto_exposure_ev, reason_off);
-        report("auto-ev-populated-off", id.c_str(),
+        std::string name_off = std::string("auto-ev-populated-off-") + fc.label;
+        report(name_off.c_str(), id.c_str(),
                ok_off && dev_off.auto_exposure_mode == kRawAutoExposureOff &&
                    dev_off.auto_exposure_ev == 0.0f,
                detail_off);
-    } else {
-        std::printf("[LibRawAdapter] SKIP auto-ev-populated (no Bayer sample built)\n");
     }
 
     if (checked == 0) {
