@@ -6,6 +6,8 @@
 
 #include "raw_auto_exposure.h"
 #include "raw_contract_validate.h"
+#include "raw_render_eval.h"           // Round 1 Task 1.7: RawRenderEvalFn implementation
+#include "raw_render_params_builder.h" // matrices-only RenderParams for the estimator's bisection
 
 namespace {
 
@@ -500,6 +502,29 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
                              ? 1.0f / out_input->as_shot_neutral[c] : 1.0f;
         }
 
+        // Round 1 Task 1.7: build a matrices-only RenderParams to hand the
+        // estimator's bisection its render_eval callback. Uses a THROWAWAY
+        // local RawDevelopParams rather than out_develop -- out_develop's
+        // output_space/exposure_ev fields are not populated yet at this point
+        // in build() (they land in the "--- develop defaults" block below),
+        // and camera_white/camera_to_rgb/rgb_to_final do not depend on
+        // exposure_ev or auto_exposure_ev anyway (only exp_ramp/tone_curve
+        // do, and raw_render_eval_from_params rebuilds those itself per
+        // candidate ev). The REAL RenderParams used for the actual render is
+        // built later, downstream, from out_develop after auto_exposure_ev is
+        // set below -- this instance exists only to drive the solve.
+        RenderParams render_params_for_eval;
+        RawDevelopParams develop_for_eval = {};
+        develop_for_eval.output_space = kRawOutputColorSpaceSrgb;
+        develop_for_eval.tone_curve_strength = 1.0f;
+        develop_for_eval.exposure_ev = 0.0f;
+        develop_for_eval.auto_exposure_ev = 0.0f;
+        const bool have_render_eval =
+            raw_build_render_params(*out_input, develop_for_eval, render_params_for_eval);
+        RawRenderEvalFn render_eval =
+            have_render_eval ? &raw_render_eval_from_params : nullptr;
+        void* render_eval_ctx = have_render_eval ? &render_params_for_eval : nullptr;
+
         RawAutoExposureResult est;
         bool attempted = false;
 
@@ -544,7 +569,8 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
             est = raw_auto_exposure_estimate(
                 static_cast<const uint16_t*>(v.plane.data), v.raw_width, v.raw_height,
                 row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4, black3,
-                out_input->white_level[0], wb_gain, colour_of_site, pw, ph);
+                out_input->white_level[0], wb_gain, colour_of_site, pw, ph,
+                render_eval, render_eval_ctx);
             attempted = true;
         } else if (layout.sample_model == kRawSampleModelLinearRgb &&
                    layout.components_per_pixel >= 1 &&
@@ -562,7 +588,8 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
                 row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4,
                 out_input->component_black, out_input->white_level[0], wb_gain,
                 /*colour_of_site=*/nullptr, /*pattern_w=*/0,
-                /*pattern_h=*/layout.components_per_pixel);
+                /*pattern_h=*/layout.components_per_pixel,
+                render_eval, render_eval_ctx);
             attempted = true;
         }
 

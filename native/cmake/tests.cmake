@@ -1396,14 +1396,26 @@ if(DNG_ENABLE_GENERIC_RAW)
     # P17 T7: the single LibRaw -> RawGpuInput adapter and its test.
     # (F-R4-05: the round-4 EXISTS guard is gone — the sources are committed,
     # and a guarded target drops silently with no red signal.)
+    # Round 1 Task 1.7: libraw_gpu_input_adapter.cpp now calls
+    # raw_build_render_params/raw_render_eval_from_params (DNG SDK, and
+    # transitively dng_render_halide.cpp's toIdentityHueSatMap/Curve and the
+    # Halide AOT archives) to drive the auto-exposure bisection's render_eval
+    # callback. Rather than hand-duplicating that dependency chain's source
+    # list here, link the production library directly -- it already compiles
+    # every one of these pipeline sources via NATIVE_SOURCES' GLOB_RECURSE and
+    # already carries the AOT link deps test_raw_render_params relies on the
+    # same way.
     add_executable(test_libraw_adapter
-        tests/test_libraw_adapter.cpp
-        src/pipeline/libraw_frontend.cpp
-        src/pipeline/libraw_gpu_input_adapter.cpp
-        src/pipeline/raw_contract_validate.cpp
-        src/pipeline/raw_auto_exposure.cpp)
+        tests/test_libraw_adapter.cpp)
     target_include_directories(test_libraw_adapter PRIVATE ${INC_DIR})
-    target_link_libraries(test_libraw_adapter PRIVATE libraw_vendored)
+    target_link_libraries(test_libraw_adapter PRIVATE dng_decoder_native libraw_vendored dng_sdk)
+    if(APPLE)
+        target_link_libraries(test_libraw_adapter PRIVATE
+            ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+    endif()
+    if(DNG_LINUX_TEST_LIBS)
+        target_link_libraries(test_libraw_adapter PRIVATE ${DNG_LINUX_TEST_LIBS})
+    endif()
 
     # P17 T10: the generic RAW route end to end. Links the production dylib on
     # purpose, so the exported C ABI and the SHARED RGBA pool are the ones under

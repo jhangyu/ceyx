@@ -31,25 +31,97 @@ void uniformBlackWb(float black[4], float wb_gain[4]) {
     for (int i = 0; i < 4; ++i) { black[i] = 0.0f; wb_gain[i] = 1.0f; }
 }
 
+// Analytic render_eval stub (Revision 2.2's Behavior block: "the tests pass
+// an analytic stub instead"). Models a linear-response, clip-only pipeline:
+// luma(h, ev) = clamp(max(h) * 2^ev, 0, 1). This is deliberately the SAME
+// shape the withdrawn raw-domain formula assumed (max(h) plays the role of
+// clip_value), so retained cases keep their original expectations under the
+// bisection solve, while round_trip_recovers_applied_gain exercises it
+// against arithmetic rather than any file.
+float stubRenderEval(void* /*ctx*/, const float rgb[3], float ev) {
+    const float m = std::fmax(rgb[0], std::fmax(rgb[1], rgb[2]));
+    const float v = m * std::exp2(ev);
+    if (!std::isfinite(v)) return v;
+    return std::fmin(1.0f, std::fmax(0.0f, v));
+}
+
 }  // namespace
 
 int main() {
-    // Case 1: flat_midgray_frame -- 25% of white level everywhere -> auto_ev
-    // hits the +2 EV ceiling with status kOk.
+    // Case 1 (Revision 2.2): round_trip_recovers_applied_gain -- a synthetic
+    // scene at v0 = g * white_level (flat, so the quantile reads back g
+    // exactly) run against the analytic render_eval stub must recover
+    // -log2(g) within 0.1 EV. This is the real regression guard: it tests
+    // the estimator against arithmetic, not any file, so a future "fix"
+    // cannot be silently tuned to the single local Bayer sample. Replaces
+    // the DELETED flat_midgray_frame case, whose hardcoded 2.0 expectation
+    // encoded the withdrawn raw-domain formula.
+    {
+        const float gains[] = {0.5f, 0.7f, 1.0f};
+        for (float g : gains) {
+            const uint32_t w = 128, h = 128;
+            const uint16_t level = static_cast<uint16_t>(g * 65535.0f);
+            std::vector<uint16_t> buf(static_cast<size_t>(w) * h, level);
+            float black[4], wb[4];
+            uniformBlackWb(black, wb);
+            uint8_t cfa[4];
+            identityChannelMap(cfa);
+            RawAutoExposureResult r = raw_auto_exposure_estimate(
+                buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2,
+                &stubRenderEval, nullptr, 0.01f);
+            const float expected_ev = -std::log2(g);
+            char detail[200];
+            std::snprintf(detail, sizeof(detail),
+                          "g=%.2f auto_ev=%.4f expected=%.4f status=%d",
+                          g, r.auto_ev, expected_ev, static_cast<int>(r.status));
+            CHECK("round-trip-recovers-applied-gain",
+                  r.status == RawAutoExposureStatus::kOk &&
+                      std::fabs(r.auto_ev - expected_ev) < 0.1f,
+                  detail);
+        }
+    }
+
+    // Case 1b (Revision 2.2): render_chain_is_monotone_in_ev -- the analytic
+    // stub (and by construction the real render_eval, since exp2(ev) is
+    // strictly increasing and every stage downstream of it in the pipeline
+    // is non-decreasing) must be non-decreasing in ev over [0, 2] for a probe
+    // triple. Bisection over a non-monotone function returns a plausible
+    // wrong root without failing, so this is what makes that silent failure
+    // mode visible.
+    {
+        const float probe[3] = {0.2f, 0.35f, 0.15f};
+        bool monotone = true;
+        float prev = stubRenderEval(nullptr, probe, 0.0f);
+        const int steps = 40;
+        for (int i = 1; i <= steps; ++i) {
+            const float ev = 2.0f * static_cast<float>(i) / steps;
+            const float cur = stubRenderEval(nullptr, probe, ev);
+            if (cur < prev - 1e-6f) { monotone = false; break; }
+            prev = cur;
+        }
+        CHECK("render-chain-is-monotone-in-ev", monotone,
+              "render_eval(probe, ev) must be non-decreasing over [0,2]");
+    }
+
+    // Case 1c (Revision 2.2): no_render_eval_is_reported -- render_eval ==
+    // nullptr must report kNoRenderEval with auto_ev == 0 and a non-empty
+    // reason, never a silent fallback to the withdrawn raw-domain formula.
     {
         const uint32_t w = 128, h = 128;
-        std::vector<uint16_t> buf(static_cast<size_t>(w) * h, 16384);  // ~0.25 * 65535
+        std::vector<uint16_t> buf(static_cast<size_t>(w) * h, 16384);
         float black[4], wb[4];
         uniformBlackWb(black, wb);
         uint8_t cfa[4];
         identityChannelMap(cfa);
         RawAutoExposureResult r = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, 0.01f);
-        char detail[160];
-        std::snprintf(detail, sizeof(detail), "auto_ev=%.4f status=%d clip=%.5f",
-                      r.auto_ev, static_cast<int>(r.status), r.clip_value);
-        CHECK("flat-midgray-frame",
-              r.status == RawAutoExposureStatus::kOk && std::fabs(r.auto_ev - 2.0f) < 0.05f,
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2,
+            /*render_eval=*/nullptr, /*render_eval_ctx=*/nullptr, 0.01f);
+        char detail[200];
+        std::snprintf(detail, sizeof(detail), "status=%d auto_ev=%.4f reason=\"%s\"",
+                      static_cast<int>(r.status), r.auto_ev, r.reason);
+        CHECK("no-render-eval-is-reported",
+              r.status == RawAutoExposureStatus::kNoRenderEval && r.auto_ev == 0.0f &&
+                  r.reason[0] != '\0',
               detail);
     }
 
@@ -63,7 +135,7 @@ int main() {
         uint8_t cfa[4];
         identityChannelMap(cfa);
         RawAutoExposureResult r = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[160];
         std::snprintf(detail, sizeof(detail), "auto_ev=%.7f status=%d clip=%.5f",
                       r.auto_ev, static_cast<int>(r.status), r.clip_value);
@@ -83,7 +155,7 @@ int main() {
         identityChannelMap(cfa);
         // white_level below the raw values present -> normalised > 1.
         RawAutoExposureResult r = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 50000.0f, wb, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 50000.0f, wb, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[200];
         std::snprintf(detail, sizeof(detail), "auto_ev=%.7f status=%d reason=\"%s\"",
                       r.auto_ev, static_cast<int>(r.status), r.reason);
@@ -100,7 +172,7 @@ int main() {
         uint8_t cfa[4];
         identityChannelMap(cfa);
         RawAutoExposureResult r = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 1000.0f, wb, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 1000.0f, wb, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[160];
         std::snprintf(detail, sizeof(detail), "status=%d auto_ev=%.4f",
                       static_cast<int>(r.status), r.auto_ev);
@@ -117,7 +189,7 @@ int main() {
         uint8_t cfa[4];
         identityChannelMap(cfa);
         RawAutoExposureResult r = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[160];
         std::snprintf(detail, sizeof(detail), "status=%d auto_ev=%.4f",
                       static_cast<int>(r.status), r.auto_ev);
@@ -148,9 +220,9 @@ int main() {
         uint8_t cfa[4];
         identityChannelMap(cfa);
         RawAutoExposureResult r_flat = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb_flat, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb_flat, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         RawAutoExposureResult r_tint = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb_tinted, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb_tinted, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[220];
         std::snprintf(detail, sizeof(detail),
                       "flat auto_ev=%.4f clip=%.5f; tinted auto_ev=%.4f clip=%.5f",
@@ -180,9 +252,9 @@ int main() {
         uint8_t cfa[4];
         identityChannelMap(cfa);
         RawAutoExposureResult r_full = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         RawAutoExposureResult r_strided = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 4, 4, black, 65535.0f, wb, cfa, 2, 2, 0.01f);
+            buf.data(), w, h, w, 4, 4, black, 65535.0f, wb, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[220];
         std::snprintf(detail, sizeof(detail),
                       "full auto_ev=%.4f status=%d; strided auto_ev=%.4f status=%d",
@@ -233,9 +305,9 @@ int main() {
         uint8_t bayer_cfa[4];
         identityChannelMap(bayer_cfa);
         RawAutoExposureResult r_xtrans = raw_auto_exposure_estimate(
-            buf_xtrans.data(), w, h, w, 1, 1, black, 65535.0f, wb, kXTrans6x6, 6, 6, 0.01f);
+            buf_xtrans.data(), w, h, w, 1, 1, black, 65535.0f, wb, kXTrans6x6, 6, 6, &stubRenderEval, nullptr, 0.01f);
         RawAutoExposureResult r_bayer = raw_auto_exposure_estimate(
-            buf_bayer.data(), w, h, w, 1, 1, black, 65535.0f, wb, bayer_cfa, 2, 2, 0.01f);
+            buf_bayer.data(), w, h, w, 1, 1, black, 65535.0f, wb, bayer_cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[220];
         std::snprintf(detail, sizeof(detail),
                       "xtrans auto_ev=%.4f status=%d; bayer auto_ev=%.4f status=%d",
@@ -267,7 +339,7 @@ int main() {
         uniformBlackWb(black, wb);
         RawAutoExposureResult r = raw_auto_exposure_estimate(
             buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, /*colour_of_site=*/nullptr,
-            /*pattern_w=*/0, /*pattern_h=*/components, 0.01f);
+            /*pattern_w=*/0, /*pattern_h=*/components, &stubRenderEval, nullptr, 0.01f);
         char detail[160];
         std::snprintf(detail, sizeof(detail), "auto_ev=%.4f status=%d clip=%.5f",
                       r.auto_ev, static_cast<int>(r.status), r.clip_value);
@@ -288,7 +360,7 @@ int main() {
 
         RawAutoExposureResult r_null = raw_auto_exposure_estimate(
             buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, /*colour_of_site=*/nullptr,
-            /*pattern_w=*/2, /*pattern_h=*/2, 0.01f);
+            /*pattern_w=*/2, /*pattern_h=*/2, &stubRenderEval, nullptr, 0.01f);
         char detail_null[200];
         std::snprintf(detail_null, sizeof(detail_null), "status=%d auto_ev=%.4f reason=\"%s\"",
                       static_cast<int>(r_null.status), r_null.auto_ev, r_null.reason);
@@ -299,7 +371,7 @@ int main() {
 
         uint8_t bad_table[4] = {0, 1, 3, 2};  // entry 3 is out of the 0..2 range
         RawAutoExposureResult r_bad = raw_auto_exposure_estimate(
-            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, bad_table, 2, 2, 0.01f);
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb, bad_table, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail_bad[200];
         std::snprintf(detail_bad, sizeof(detail_bad), "status=%d auto_ev=%.4f reason=\"%s\"",
                       static_cast<int>(r_bad.status), r_bad.auto_ev, r_bad.reason);

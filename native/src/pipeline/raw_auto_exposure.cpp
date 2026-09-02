@@ -25,6 +25,8 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
                                                   const float wb_gain[4],
                                                   const uint8_t* colour_of_site,
                                                   uint32_t pattern_w, uint32_t pattern_h,
+                                                  RawRenderEvalFn render_eval,
+                                                  void* render_eval_ctx,
                                                   float auto_bright_thr) {
     RawAutoExposureResult result;
 
@@ -75,6 +77,19 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
 
     float max_black = black[0];
     for (int c = 1; c < 4; ++c) max_black = std::max(max_black, black[c]);
+
+    // Revision 2.2: no render-chain callback -> kNoRenderEval, auto_ev = 0.
+    // Checked before the (otherwise wasted) histogram scan and before the
+    // white/black geometry guard -- a missing callback is a caller-config
+    // error, not a frame-content one, and must never silently fall back to
+    // the withdrawn raw-domain formula.
+    if (render_eval == nullptr) {
+        result.status = RawAutoExposureStatus::kNoRenderEval;
+        result.auto_ev = 0.0f;
+        setReason(result, "no render_eval callback supplied");
+        return result;
+    }
+
     if (!std::isfinite(white_level) || white_level <= max_black) {
         result.status = RawAutoExposureStatus::kDegenerateFrame;
         result.auto_ev = 0.0f;
@@ -82,11 +97,15 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
         return result;
     }
 
-    // Black-subtracted, white-normalised, WB-scaled histogram values. WB
-    // scaling is applied to these bins only -- the pixel path is untouched --
-    // matching LibRaw's post-white-balance auto-bright histogram.
-    std::vector<float> values;
-    values.reserve(static_cast<size_t>(num_sampled));
+    // Black-subtracted, white-normalised, WB-scaled histogram values, kept
+    // PER COLOUR CLASS (Revision 2.2's Behavior block): the estimator needs
+    // the highlight triple h = (q_R, q_G, q_B) -- exactly the triple Stage 4
+    // receives -- not one pooled quantile, so a strongly tinted frame cannot
+    // have its clipped channel averaged away by the other two. WB scaling is
+    // applied to these bins only -- the pixel path is untouched -- matching
+    // LibRaw's post-white-balance auto-bright histogram.
+    std::vector<float> values[3];
+    for (int c = 0; c < 3; ++c) values[c].reserve(static_cast<size_t>(num_sampled) / 2 + 1);
     for (uint64_t row = 0; row < height; row += sy) {
         const uint16_t* row_ptr = samples + static_cast<size_t>(row) * row_pitch_samples;
         for (uint64_t col = 0; col < width; col += sx) {
@@ -103,44 +122,83 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
             const float denom = white_level - black_ch;
             float v = (static_cast<float>(row_ptr[col]) - black_ch) / denom;
             v = std::max(0.0f, v) * wb_gain[ch];
-            values.push_back(v);
+            const uint32_t colour_class = ch < 3 ? ch : (ch % 3);
+            values[colour_class].push_back(v);
         }
     }
 
     const float thr = auto_bright_thr <= 0.0f ? 0.01f : auto_bright_thr;
     const double keep_fraction = 1.0 - static_cast<double>(thr);
-    size_t quantile_idx = static_cast<size_t>(
-        std::min<double>(values.size() - 1,
-                          std::max<double>(0.0, keep_fraction * static_cast<double>(values.size()))));
-    std::nth_element(values.begin(), values.begin() + static_cast<long>(quantile_idx), values.end());
-    const float clip_value = values[quantile_idx];
+    float h[3] = {0.0f, 0.0f, 0.0f};
+    for (int c = 0; c < 3; ++c) {
+        if (values[c].empty()) continue;  // a class this layout never emits
+        size_t quantile_idx = static_cast<size_t>(std::min<double>(
+            values[c].size() - 1,
+            std::max<double>(0.0, keep_fraction * static_cast<double>(values[c].size()))));
+        std::nth_element(values[c].begin(), values[c].begin() + static_cast<long>(quantile_idx),
+                          values[c].end());
+        h[c] = values[c][quantile_idx];
+    }
 
-    if (!std::isfinite(clip_value) || clip_value <= 0.0f) {
+    // clip_value stays the GREEN-class quantile for diagnostics (Revision
+    // 2.2's Behavior block); it no longer determines auto_ev directly.
+    const float clip_value = h[1];
+    if (!std::isfinite(h[0]) || !std::isfinite(h[1]) || !std::isfinite(h[2]) ||
+        (h[0] <= 0.0f && h[1] <= 0.0f && h[2] <= 0.0f)) {
         result.status = RawAutoExposureStatus::kDegenerateFrame;
         result.auto_ev = 0.0f;
         result.clip_value = std::isfinite(clip_value) ? clip_value : 0.0f;
-        setReason(result, "clip_value non-finite or <= 0");
+        setReason(result, "highlight triple non-finite or all <= 0");
         return result;
     }
 
     result.clip_value = clip_value;
     result.status = RawAutoExposureStatus::kOk;
 
-    float ev = std::log2(1.0f / clip_value);
-    if (!std::isfinite(ev)) {
+    // Bisection solve (Revision 2.2): find ev in [0, 2] such that
+    // render_eval(ctx, h, ev) == 1.0. There is no closed form -- render_eval
+    // samples a tone curve that itself depends on ev, so the dependency is
+    // circular. 30 iterations on the ONE triple h, not an image.
+    const float f_lo = render_eval(render_eval_ctx, h, 0.0f);
+    if (!std::isfinite(f_lo)) {
         result.status = RawAutoExposureStatus::kDegenerateFrame;
         result.auto_ev = 0.0f;
-        setReason(result, "computed EV non-finite");
+        setReason(result, "render_eval returned non-finite at ev=0");
+        return result;
+    }
+    if (f_lo >= 1.0f) {
+        // Already at or above output white with no gain: the reported defect
+        // is darkness, so a would-be-negative EV is clamped to 0, not applied
+        // -- and that clamp is observable, not silent.
+        result.auto_ev = 0.0f;
+        setReason(result, "already at or above output white at ev=0; no gain applied");
         return result;
     }
 
-    if (ev < 0.0f) {
-        // The reported defect is darkness; an auto-darkening result means the
-        // estimator is wrong and must be visible, not applied.
+    float lo = 0.0f, hi = 2.0f;
+    const float f_hi = render_eval(render_eval_ctx, h, hi);
+    if (!std::isfinite(f_hi)) {
+        result.status = RawAutoExposureStatus::kDegenerateFrame;
         result.auto_ev = 0.0f;
-        setReason(result, "computed gain below 1.0 (negative EV) clamped to 0");
+        setReason(result, "render_eval returned non-finite at ev=2");
+        return result;
+    }
+    if (f_hi < 1.0f) {
+        // The render never reaches output white inside the [0, 2] ceiling:
+        // clamp to the ceiling rather than extrapolate past the contract's
+        // range.
+        result.auto_ev = hi;
     } else {
-        result.auto_ev = std::min(ev, 2.0f);
+        for (int i = 0; i < 30; ++i) {
+            const float mid = 0.5f * (lo + hi);
+            const float f_mid = render_eval(render_eval_ctx, h, mid);
+            if (!std::isfinite(f_mid) || f_mid < 1.0f) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        result.auto_ev = 0.5f * (lo + hi);
     }
 
     // Guard: never let a non-finite value escape, whichever branch produced
@@ -148,7 +206,7 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
     if (!std::isfinite(result.auto_ev)) {
         result.status = RawAutoExposureStatus::kDegenerateFrame;
         result.auto_ev = 0.0f;
-        setReason(result, "auto_ev non-finite after clamp");
+        setReason(result, "auto_ev non-finite after bisection");
     }
 
     return result;
