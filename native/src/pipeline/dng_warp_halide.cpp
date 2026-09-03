@@ -60,8 +60,8 @@ functions:
   - name: "copyHalideOutputToHost"
     description: "將 Halide device output 同步回 caller-owned host buffer，並依 centralized timing config 拆分 sync/copy。"
     lines: "522-527"
-  - name: "getOrGrowZeroBuf"
-    description: "Lazy-zero mmap arena reused for the warp ABI placeholder buffers; avoids per-call ~292 MB zero-fill."
+  - name: "ZeroCoordBuffer / acquireZeroCoordBuffer"
+    description: "Per-decode move-only RAII holder over a lazy-zero mmap/VirtualAlloc (calloc fallback) region for the warp ABI placeholder buffers; avoids per-call ~292 MB zero-fill without sharing the mapping across decodes (mutex rework B2, 2026-09-03)."
     lines: "632-652"
   - name: "runWarpHalideAot"
     description: "建立 Halide Buffer 與 tile bounds，呼叫 rectilinear_warp AOT kernel。"
@@ -98,6 +98,7 @@ functions:
 #include "dng_warp_halide.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -126,7 +127,7 @@ functions:
 #include <dng_rect.h>
 #include <dng_utils.h>
 // W4 (2026-08-21, Windows port): POSIX mapping headers are unavailable under
-// MSVC/clang-cl; getOrGrowZeroBuf below uses VirtualAlloc there. (The
+// MSVC/clang-cl; acquireZeroCoordBuffer below uses VirtualAlloc there. (The
 // LazyZeroBuf helper further down is already inside an __ANDROID__ guard.)
 #if defined(_WIN32)
 #include <windows.h>
@@ -194,20 +195,28 @@ inline int quantizeSubsampleIndex(double fract) {
 }
 
 const float* bicubicWeightsForSubsample(int subsampleIndex) {
-    static float table[kResampleSubsampleCount2D][4];
-    static bool initialized = false;
-
-    if (!initialized) {
+    // Mutex rework (2026-09-03, B3): was `static float table[...]; static bool
+    // initialized;` with a non-atomic guard. Under a shared decode lock a
+    // second thread could observe initialized==true while `table` was still
+    // half-written and read garbage resample weights (wrong interpolation ->
+    // subtle, image-dependent detail/colour defect; also formally UB).
+    // A C++11 magic static is thread-safe by construction: exactly one thread
+    // runs the initialiser, every other blocks until it completes.
+    // This data is genuinely shared and read-only, so it stays shared; it does
+    // NOT move onto a per-decode context.
+    using Table = std::array<std::array<float, 4>, kResampleSubsampleCount2D>;
+    static const Table table = []() {
+        Table t{};
         for (int i = 0; i < kResampleSubsampleCount2D; ++i) {
             const float fract = static_cast<float>(i) /
                                 static_cast<float>(kResampleSubsampleCount2D);
-            computeBicubicWeights(fract, table[i]);
+            computeBicubicWeights(fract, t[i].data());
         }
-        initialized = true;
-    }
+        return t;
+    }();
 
     const int clamped = std::max(0, std::min(kResampleSubsampleCount2D - 1, subsampleIndex));
-    return table[clamped];
+    return table[clamped].data();
 }
 
 struct WarpRuntimeParams {
@@ -542,64 +551,102 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
     return true;
 }
 
-// T4-A: Shared static zero buffer for the warp coord ABI placeholder.
-// Avoids allocating + zero-filling ~73 MB on every call.
-// Phase 10 Sprint D-B: mmap MAP_ANON lazy zero pages. The Halide kernel
-// never reads these inputs when precompute_coords=false, so committed
-// physical pages stay near zero RSS. Avoids the ~290ms eager zero-fill
-// of a 73M-element int32 buffer (=~292MB) on every first call.
-static std::mutex s_zero_buf_mutex;
-static int32_t*   s_zero_buf_ptr   = nullptr;
-static size_t     s_zero_buf_bytes = 0;
-// The VirtualAlloc/mmap paths both have a std::calloc fallback, and calloc'd
-// memory must not be handed to VirtualFree/munmap. Remember where the current
-// buffer came from so the release below matches its allocation origin.
-static bool       s_zero_buf_is_calloc = false;
+// T4-A: zero-filled coord buffer for the warp ABI placeholder.
+//
+// Mutex rework (2026-09-03, B2): was a single shared, growable static buffer
+// (three file statics for pointer/size/allocation-origin, plus a mutex) whose
+// mutex covered the grow but NOT the returned pointer's lifetime -- a second
+// decode with a larger frame would munmap pages the first decode's warp kernel
+// was still
+// reading (SIGSEGV, or recycled pages delivering arbitrary warp coordinates).
+// Now allocated per decode and owned by a move-only RAII holder.
+//
+// Per-decode allocation is nearly free here: the ~290ms this buffer used to
+// avoid came from TOUCHING ~292MB, not from mapping it. MAP_ANON /
+// MEM_RESERVE|MEM_COMMIT hand back lazily-backed zero pages, and the kernel
+// never reads these inputs when precompute_coords=false, so the pages stay
+// uncommitted. Only the address space is per-decode, not resident memory.
+//
+// The calloc fallback and its origin tracking are preserved deliberately:
+// calloc'd memory must never reach munmap/VirtualFree (see commit e05a9a4,
+// "fix(native): free getOrGrowZeroBuf by allocation origin"). The origin flag
+// moved from a file static into the holder, which is where it belonged.
+class ZeroCoordBuffer {
+public:
+    ZeroCoordBuffer() = default;
+    ZeroCoordBuffer(int32_t* ptr, size_t bytes, bool from_calloc)
+        : ptr_(ptr), bytes_(bytes), from_calloc_(from_calloc) {}
+    ZeroCoordBuffer(ZeroCoordBuffer&& o) noexcept { *this = std::move(o); }
+    ZeroCoordBuffer& operator=(ZeroCoordBuffer&& o) noexcept {
+        if (this != &o) {
+            release();
+            ptr_ = o.ptr_;
+            bytes_ = o.bytes_;
+            from_calloc_ = o.from_calloc_;
+            o.ptr_ = nullptr;
+            o.bytes_ = 0;
+            o.from_calloc_ = false;
+        }
+        return *this;
+    }
+    ZeroCoordBuffer(const ZeroCoordBuffer&) = delete;
+    ZeroCoordBuffer& operator=(const ZeroCoordBuffer&) = delete;
+    ~ZeroCoordBuffer() { release(); }
 
-const int32_t* getOrGrowZeroBuf(int width, int height) {
+    const int32_t* data() const { return ptr_; }
+    explicit operator bool() const { return ptr_ != nullptr; }
+
+private:
+    void release() {
+        if (!ptr_) {
+            return;
+        }
+        if (from_calloc_) {
+            std::free(ptr_);
+        } else {
+#if defined(_WIN32)
+            VirtualFree(ptr_, 0, MEM_RELEASE);
+#else
+            munmap(ptr_, bytes_);
+#endif
+        }
+        ptr_ = nullptr;
+        bytes_ = 0;
+        from_calloc_ = false;
+    }
+
+    int32_t* ptr_ = nullptr;
+    size_t bytes_ = 0;
+    bool from_calloc_ = false;
+};
+
+ZeroCoordBuffer acquireZeroCoordBuffer(int width, int height) {
     const size_t needed_elems = static_cast<size_t>(width) * height * 3u;
     const size_t needed_bytes = needed_elems * sizeof(int32_t);
-    std::lock_guard<std::mutex> lock(s_zero_buf_mutex);
-    if (needed_bytes > s_zero_buf_bytes) {
-        if (s_zero_buf_ptr) {
-            if (s_zero_buf_is_calloc) {
-                std::free(s_zero_buf_ptr);
-            } else {
+    bool from_calloc = false;
 #if defined(_WIN32)
-                VirtualFree(s_zero_buf_ptr, 0, MEM_RELEASE);
-#else
-                munmap(s_zero_buf_ptr, s_zero_buf_bytes);
-#endif
-            }
-            s_zero_buf_ptr = nullptr;
-            s_zero_buf_bytes = 0;
-            s_zero_buf_is_calloc = false;
-        }
-        bool from_calloc = false;
-#if defined(_WIN32)
-        // MEM_RESERVE|MEM_COMMIT gives lazily-backed zero pages, matching the
-        // MAP_ANON property this buffer depends on (the kernel never reads it
-        // when precompute_coords=false, so pages stay uncommitted).
-        void* p = VirtualAlloc(nullptr, needed_bytes, MEM_RESERVE | MEM_COMMIT,
-                               PAGE_READWRITE);
-        if (p == nullptr) {
-            p = std::calloc(needed_elems, sizeof(int32_t));
-            from_calloc = true;
-        }
-#else
-        void* p = mmap(nullptr, needed_bytes,
-                       PROT_READ | PROT_WRITE,
-                       MAP_ANON | MAP_PRIVATE, -1, 0);
-        if (p == MAP_FAILED) {
-            p = std::calloc(needed_elems, sizeof(int32_t));
-            from_calloc = true;
-        }
-#endif
-        s_zero_buf_ptr = static_cast<int32_t*>(p);
-        s_zero_buf_bytes = needed_bytes;
-        s_zero_buf_is_calloc = from_calloc && s_zero_buf_ptr != nullptr;
+    // MEM_RESERVE|MEM_COMMIT gives lazily-backed zero pages, matching the
+    // MAP_ANON property this buffer depends on (the kernel never reads it
+    // when precompute_coords=false, so pages stay uncommitted).
+    void* p = VirtualAlloc(nullptr, needed_bytes, MEM_RESERVE | MEM_COMMIT,
+                           PAGE_READWRITE);
+    if (p == nullptr) {
+        p = std::calloc(needed_elems, sizeof(int32_t));
+        from_calloc = true;
     }
-    return s_zero_buf_ptr;
+#else
+    void* p = mmap(nullptr, needed_bytes,
+                   PROT_READ | PROT_WRITE,
+                   MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (p == MAP_FAILED) {
+        p = std::calloc(needed_elems, sizeof(int32_t));
+        from_calloc = true;
+    }
+#endif
+    if (!p) {
+        return ZeroCoordBuffer{};
+    }
+    return ZeroCoordBuffer(static_cast<int32_t*>(p), needed_bytes, from_calloc);
 }
 
 bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
@@ -641,10 +688,21 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
                                     tile_grid.tiles_y);
 
     // The rectilinear_warp ABI lists 4 coord buffers as Inputs (base_x/base_y/
-    // frac_x/frac_y), but the production kernel never reads them. Feed a shared
-    // lazy-zero mmap placeholder for all four — no per-call zero-fill (~73 MB
-    // saved).
-    const int32_t* zero_ptr = getOrGrowZeroBuf(width, height);
+    // frac_x/frac_y), but the production kernel never reads them. Feed a
+    // per-decode lazy-zero mmap placeholder for all four — no per-call
+    // zero-fill (~73 MB saved).
+    //
+    // LIFETIME (B2): the holder must outlive every buffer view built over it
+    // AND every dispatch that may copy_to_device from it. It is declared in
+    // this function's scope, which ends at the `return true;` below (the four
+    // views, the rectilinear_warp dispatch, and copyHalideOutputToHost all sit
+    // inside it) and the raw pointer never escapes that scope. This is exactly
+    // the discipline the old shared static got wrong.
+    ZeroCoordBuffer zero_buf = acquireZeroCoordBuffer(width, height);
+    if (!zero_buf) {
+        return false;
+    }
+    const int32_t* zero_ptr = zero_buf.data();
     Buffer<int32_t> base_x_buf(const_cast<int32_t*>(zero_ptr), width, height, 3);
     Buffer<int32_t> base_y_buf = base_x_buf;
     Buffer<int32_t> frac_x_buf = base_x_buf;
