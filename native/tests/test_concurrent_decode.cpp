@@ -24,8 +24,63 @@
 #include <vector>
 
 #include "dng_pipeline.h"
+#include "dng_pipeline_config.h"
+#include "pipeline/concurrent_dng_host.h"
 
 namespace {
+
+// Plan Task 6 invariant 2 (R8/N2): PerformAreaTaskThreads() divides the
+// area-task fan-out by the in-flight decode count, floored at 1, and does so
+// AFTER the explicit > env > hardware_concurrency chain resolves. The host is
+// constructed exactly the way production constructs it — a non-zero explicit
+// requestedThreads_ (dng_pipeline.cpp passes kDefaultAreaThreads by default)
+// — so this exercises the branch production actually takes rather than the
+// zero-argument fallback, which is the mistake N2 calls out.
+int runThreadsDivisorTest() {
+  const uint32_t hwRaw = std::thread::hardware_concurrency();
+  const uint32_t hw = hwRaw > 0 ? hwRaw : 1;
+  int failures = 0;
+  // Two production-shaped constructions, both with a non-zero explicit
+  // requestedThreads_ (the branch production takes):
+  //   requested = kDefaultAreaThreads (20) — the literal default in
+  //       dng_pipeline.cpp when DNG_AREA_THREADS is unset.
+  //   requested = hardware_concurrency() — what DNG_AREA_THREADS=<hw> yields,
+  //       and the case in which the AC's "hardware_concurrency() / T" is the
+  //       expected value literally. With requested=20 on a machine with more
+  //       than 20 logical cores the hw ceiling does not bind, so the resolved
+  //       base is 20 and the expected value is 20/T; expecting hw/T there
+  //       would be asserting a number the resolution chain never produces.
+  const uint32_t requestedCases[2] = {PipelineConfig::kDefaultAreaThreads, hw};
+  for (uint32_t requested : requestedCases) {
+    for (size_t T : {size_t{1}, size_t{2}, size_t{4}}) {
+      ConcurrentDngHost host(requested);
+      host.setInFlightOverrideForTest(T);
+      const uint32_t got = host.PerformAreaTaskThreads();
+      const uint32_t base = requested < hw ? requested : hw;  // ceiling at :62
+      uint32_t want = base / static_cast<uint32_t>(T);
+      if (want < 1) want = 1;
+      const bool ok = (got == want);
+      std::printf("[threads-test] requested=%u T=%zu hw=%u base=%u -> %u "
+                  "(want %u) %s\n",
+                  requested, T, hw, base, got, want, ok ? "OK" : "FAIL");
+      if (!ok) ++failures;
+    }
+  }
+  // Divisor must never produce zero: a zero thread count deadlocks the area
+  // task. Probe with an in-flight count far above hardware_concurrency().
+  {
+    ConcurrentDngHost host(PipelineConfig::kDefaultAreaThreads);
+    host.setInFlightOverrideForTest(static_cast<size_t>(hw) * 64 + 7);
+    const uint32_t got = host.PerformAreaTaskThreads();
+    const bool ok = (got >= 1);
+    std::printf("[threads-test] T=%u (oversubscribed) -> %u (want >=1) %s\n",
+                hw * 64 + 7, got, ok ? "OK" : "FAIL");
+    if (!ok) ++failures;
+  }
+  std::printf("THREADS_DIVISOR failures=%d\n", failures);
+  std::fflush(stdout);
+  return failures == 0 ? 0 : 1;
+}
 
 // Write interleaved RGB8. The fused path hands back RGBA8; drop alpha.
 bool writeRgb(const std::string &path, const DngPipelineResult &r) {
@@ -66,6 +121,15 @@ void releaseResult(DngPipelineResult &r) {
 } // namespace
 
 int main(int argc, char **argv) {
+  // Plan Task 6 Step 6: the gate driver needs N before it can oversubscribe by
+  // two, so this has to work without any decode arguments.
+  if (argc >= 2 && std::string(argv[1]) == "--print-slots") {
+    std::printf("%zu\n", dng_decode_slot_count());
+    return 0;
+  }
+  if (argc >= 2 && std::string(argv[1]) == "--threads-test") {
+    return runThreadsDivisorTest();
+  }
   if (argc < 4) {
     std::fprintf(stderr,
                  "usage: %s <out_dir> <threads> [--warmup] [--repeat R] "
@@ -102,6 +166,11 @@ int main(int argc, char **argv) {
 
   std::atomic<size_t> next{0};
   std::atomic<int> failures{0};
+  // Invariant 1 (R7): never more than N contexts live at once, even with more
+  // caller threads than slots. Sampled from the decode loop; the pool's own
+  // high-water counter (checked after the join) is the authoritative figure,
+  // because a sample taken here can miss a peak that occurred between calls.
+  std::atomic<size_t> maxObservedInFlight{0};
   std::atomic<bool> decodesDone{false};
 
   // Gate G0: a warmup thread looping dng_pipeline_warmup_for_size at varying
@@ -143,6 +212,12 @@ int main(int argc, char **argv) {
           failures.fetch_add(1);
           releaseResult(r);
           continue;
+        }
+        {
+          const size_t now = dng_decode_in_flight_count();
+          size_t prev = maxObservedInFlight.load();
+          while (now > prev &&
+                 !maxObservedInFlight.compare_exchange_weak(prev, now)) {}
         }
         // DUMP ONLY ON THE FIRST PASS (slot < files.size()).
         //
@@ -186,6 +261,47 @@ int main(int argc, char **argv) {
                  rgbOut);
     failures.fetch_add(1);
   }
+
+  // Plan Task 6 AC: with N slots and N+2 caller threads, at most N contexts may
+  // ever have been live. The pool's high-water counter is incremented under the
+  // same lock that hands out slots, so it cannot miss a peak.
+  const size_t slots = dng_decode_slot_count();
+  const size_t poolHighWater = dng_decode_max_in_flight_observed();
+  if (poolHighWater > slots) {
+    std::fprintf(stderr, "[concurrent] slot bound violated: %zu > %zu\n",
+                 poolHighWater, slots);
+    failures.fetch_add(1);
+  }
+  if (maxObservedInFlight.load() > slots) {
+    std::fprintf(stderr,
+                 "[concurrent] slot bound violated (sampled): %zu > %zu\n",
+                 maxObservedInFlight.load(), slots);
+    failures.fetch_add(1);
+  }
+
+  // Plan Task 7 AC: the Stage4 scratch free list must never exceed its cap.
+  // SIZE_MAX means Stage4ScratchPool was not compiled into this build
+  // (DNG_STAGE4_SPLIT_KERNEL undefined — i.e. the macOS Metal layout). Declare
+  // the skip rather than let an unobservable configuration read as a pass.
+  const size_t stage4FreeHighWater = dng_stage4_scratch_free_high_water();
+  constexpr size_t kStage4FreeCap = 4;  // Stage4ScratchPool::kMaxFreeSlots
+  const bool stage4PoolCompiled = (stage4FreeHighWater != static_cast<size_t>(-1));
+  if (!stage4PoolCompiled) {
+    std::printf("STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled "
+                "(DNG_STAGE4_SPLIT_KERNEL undefined)\n");
+  } else if (stage4FreeHighWater > kStage4FreeCap) {
+    std::fprintf(stderr,
+                 "[concurrent] stage4 scratch free-list cap violated: %zu > %zu\n",
+                 stage4FreeHighWater, kStage4FreeCap);
+    failures.fetch_add(1);
+  }
+
+  std::printf("SLOTS slots=%zu max_in_flight_pool=%zu max_in_flight_sampled=%zu "
+              "arena_high_water_bytes=%zu stage4_free_high_water=%zu "
+              "stage4_free_cap=%zu\n",
+              slots, poolHighWater, maxObservedInFlight.load(),
+              dng_decode_arena_high_water_bytes(), stage4FreeHighWater,
+              kStage4FreeCap);
 
   std::printf("CONCURRENT threads=%d files=%zu repeat=%d warmup=%d "
               "failures=%d\n",

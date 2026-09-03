@@ -10,9 +10,12 @@
 // correctness depends on the inventory being complete is the wrong bet when the
 // failure mode is wrong pixels).
 
+#include <algorithm>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -161,7 +164,132 @@ struct DecodeContext {
   Halide::Runtime::Buffer<uint16_t> stage2_device_dst;
   int stage2_dst_w = 0;
   int stage2_dst_h = 0;
+
+  // F2 (parking lot, R3 review): the ONE Stage-3 workspace this decode is
+  // allowed to bump-allocate. Both Stage-3 entry points call
+  // prepareStage3WorkspacePtr (dng_pipeline.cpp:699 and :896), and on the
+  // fused -> non-fused fallback BOTH run within one decode. The arena has no
+  // free(), so without this cache the decode charged two full W*H*3 uint16
+  // workspaces against a reserve sized for one — 1.73 GB against a 1.5 GiB
+  // reserve at the 12000x9000 design frame, i.e. allocate() returning nullptr
+  // where the old process-wide pool succeeded. Invisible on the 6000x4000
+  // corpus, which is why it needed to be reasoned about rather than measured.
+  //
+  // Safe to share between the two callers: the fused entry hands the pointer
+  // to a Halide buffer whose HOST side is only written by copy_to_host inside
+  // demosaic_warp_rectilinear_halide_finish/cancel (dng_warp_halide.cpp:1181
+  // wraps this pointer, :1267-1284 is the only writer), and every path that
+  // falls through to the second caller has already finished or abandoned that
+  // handle.
+  uint16_t *stage3_workspace = nullptr;
+  size_t stage3_workspace_elements = 0;
+
+  // Called when a pooled slot is handed back, never mid-decode. Must clear
+  // every pointer that names arena storage: reset() rewinds the bump offset,
+  // so a cached pointer would alias the NEXT decode's allocations.
+  void reset_for_reuse() {
+    arena.reset();
+    stage3_workspace = nullptr;
+    stage3_workspace_elements = 0;
+  }
 };
+
+// Fixed-size decode slot pool. Spec R7: without this, the in-flight decode
+// count is whatever the FFI caller supplies (dng_ffi_api.cpp is a plain
+// synchronous call with no admission control), so peak native memory is
+// unbounded and the worst-case footprint cannot be stated. With it the
+// footprint is N * (arena reserve + per-slot non-arena scratch) — a constant.
+//
+// It also supplies the in-flight count that bounds the nested area-task
+// fan-out (spec R8): the process-wide single-flight mutex used to be the only
+// thing keeping ConcurrentDngHost from spawning hardware_concurrency() threads
+// per area task per decode.
+class DecodeSlotPool {
+ public:
+  class Slot {
+   public:
+    Slot(DecodeSlotPool *owner, DecodeContext *ctx) : owner_(owner), ctx_(ctx) {}
+    Slot(Slot &&o) noexcept : owner_(o.owner_), ctx_(o.ctx_) {
+      o.owner_ = nullptr;
+      o.ctx_ = nullptr;
+    }
+    Slot(const Slot &) = delete;
+    Slot &operator=(const Slot &) = delete;
+    Slot &operator=(Slot &&) = delete;
+    ~Slot() {
+      if (owner_) owner_->release(ctx_);
+    }
+    DecodeContext &context() { return *ctx_; }
+
+   private:
+    DecodeSlotPool *owner_;
+    DecodeContext *ctx_;
+  };
+
+  DecodeSlotPool(size_t slots, size_t arena_reserve_bytes) {
+    if (slots < 1) slots = 1;
+    contexts_.reserve(slots);
+    free_.reserve(slots);
+    for (size_t i = 0; i < slots; ++i) {
+      contexts_.push_back(std::make_unique<DecodeContext>(arena_reserve_bytes));
+      free_.push_back(contexts_.back().get());
+    }
+  }
+
+  DecodeSlotPool(const DecodeSlotPool &) = delete;
+  DecodeSlotPool &operator=(const DecodeSlotPool &) = delete;
+
+  // Blocks while all N slots are in use. This is the admission control.
+  Slot acquire() {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait(lock, [this] { return !free_.empty(); });
+    DecodeContext *ctx = free_.back();
+    free_.pop_back();
+    ++in_flight_;
+    if (in_flight_ > high_water_in_flight_) high_water_in_flight_ = in_flight_;
+    return Slot(this, ctx);
+  }
+
+  // Read once per area task, not cached: T changes as decodes start/finish.
+  size_t in_flight() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return in_flight_;
+  }
+  size_t high_water_in_flight() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return high_water_in_flight_;
+  }
+  size_t slot_count() const { return contexts_.size(); }
+  size_t high_water_bytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t hw = 0;
+    for (const auto &c : contexts_) hw = std::max(hw, c->arena.high_water());
+    return hw;
+  }
+
+ private:
+  void release(DecodeContext *ctx) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      // Reset on RELEASE, not acquire: the next decode gets a clean slot, and
+      // the high-water figure stays meaningful across the pool's lifetime.
+      ctx->reset_for_reuse();
+      free_.push_back(ctx);
+      --in_flight_;
+    }
+    cv_.notify_one();
+  }
+
+  mutable std::mutex mu_;
+  std::condition_variable cv_;
+  std::vector<std::unique_ptr<DecodeContext>> contexts_;
+  std::vector<DecodeContext *> free_;
+  size_t in_flight_ = 0;
+  size_t high_water_in_flight_ = 0;
+};
+
+// Defined in dng_pipeline.cpp (function-local static, thread-safe init).
+DecodeSlotPool &decodeSlotPool();
 
 // Reaches the context from any dng_host the SDK hands to a bridge. Returns
 // nullptr for a plain dng_host (the test_decode harness constructs one), and

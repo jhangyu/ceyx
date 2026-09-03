@@ -389,6 +389,31 @@ RgbaOutputPool &rgbaOutputPool() {
   return pool;
 }
 
+}  // namespace (reopened below)
+
+// Mutex rework (plan Task 6, R7). N contexts, constructed once at first use.
+// N = min(hardware_concurrency, ceiling / per-slot), clamped to [1, 4] — see
+// PipelineConfig::decodeSlotCount() for the arithmetic and
+// docs/logs/2026-09-03/task6-memory.md for the measured figures. Capped at 4
+// deliberately: beyond that the GPU is the constraint and each extra slot
+// costs a full arena reserve plus ~192MB of non-arena scratch.
+DecodeSlotPool &decodeSlotPool() {
+  static DecodeSlotPool pool(PipelineConfig::decodeSlotCount(),
+                             PipelineConfig::kDecodeArenaReserveBytes);
+  return pool;
+}
+
+size_t dng_decode_slot_count() { return decodeSlotPool().slot_count(); }
+size_t dng_decode_in_flight_count() { return decodeSlotPool().in_flight(); }
+size_t dng_decode_max_in_flight_observed() {
+  return decodeSlotPool().high_water_in_flight();
+}
+size_t dng_decode_arena_high_water_bytes() {
+  return decodeSlotPool().high_water_bytes();
+}
+
+namespace {
+
 // W1 H-1: RAII guard for checkout-style RGBA output pool buffers. Releases
 // the buffer back to the pool on scope exit unless disarmed by commit().
 // Active only when config.fuse_rgba_output is true (checkout-pool path).
@@ -497,7 +522,15 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   // L-5: per-size warmed cache — skip redundant memset when the same
   // size was already warmed. Pools are grow-only (new[]), so a prior
   // acquire at this size guarantees the pages are already committed.
-  // No mutex needed: always called under pipelineSingleFlightMutex.
+  //
+  // No mutex needed: warmPipelinePoolsForSize is reached ONLY under the
+  // exclusive warmup lock, never from the shared decode path. That is the
+  // surviving invariant — the previous comment named
+  // pipelineSingleFlightMutex, which after the mutex rework no longer means
+  // "one caller at a time" for decodes. If the invariant ever breaks, the
+  // failure mode is benign: a redundant or skipped memset of pool memory that
+  // is about to be overwritten. It is stated so a future reader neither panics
+  // nor relies on more than it gives.
   static int32_t warmedW = 0, warmedH = 0;
   const bool alreadyWarmed = (width == warmedW && height == warmedH);
   if (!alreadyWarmed) {
@@ -562,8 +595,33 @@ uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
     callerWorkspace->resize(elements);
     ptr = callerWorkspace->data();
   } else if (ctx) {
-    ptr = static_cast<uint16_t *>(
-        ctx->arena.allocate(elements * sizeof(uint16_t)));
+    // F2 (R3 review parking lot, folded into Task 6): one Stage-3 workspace
+    // per decode, not one per call. runHalideStage3And4Fused (:896) and
+    // runHalideStage3ForBayer (:699) BOTH reach here within a single decode
+    // whenever the fused path falls back, and the bump arena has no free() —
+    // so the un-cached version charged two full W*H*3 uint16 workspaces
+    // against a reserve sized for one (1.73 GB vs the 1.5 GiB reserve at the
+    // 12000x9000 design frame => allocate() == nullptr, i.e. a decode failure
+    // the old process-wide pool did not have). Sizing the reserve for two was
+    // the alternative and was rejected: it doubles the per-slot figure that
+    // the slot count divides against, and on Windows that doubling is charged
+    // against the system commit limit (parking-lot F3) for a path that runs at
+    // most once per decode.
+    //
+    // Reuse is safe because the second caller only runs after the first has
+    // finished or abandoned its Halide handle — see the note on
+    // DecodeContext::stage3_workspace (decode_context.h).
+    if (ctx->stage3_workspace != nullptr &&
+        ctx->stage3_workspace_elements >= elements) {
+      ptr = ctx->stage3_workspace;
+    } else {
+      ptr = static_cast<uint16_t *>(
+          ctx->arena.allocate(elements * sizeof(uint16_t)));
+      if (ptr) {
+        ctx->stage3_workspace = ptr;
+        ctx->stage3_workspace_elements = elements;
+      }
+    }
   }
   const auto resizeEnd = Clock::now();
   if (timing) {
@@ -1619,12 +1677,24 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     const uint32_t decodeThreads =
         config.threads.area_threads > 0 ? config.threads.area_threads
                                         : PipelineConfig::kDefaultAreaThreads;
-    // Mutex rework (plan Task 4): per-decode state container. Reserved address
-    // space, not resident memory — pages arrive on first touch, so an
-    // over-generous reserve costs nothing at rest. The arithmetic behind
-    // kDecodeArenaReserveBytes is recorded in dng_pipeline_config.h; Task 6
-    // derives the concurrency slot count from it.
-    DecodeContext decodeCtx(PipelineConfig::kDecodeArenaReserveBytes);
+    // Mutex rework (plan Task 6, R7): per-decode state container, now drawn
+    // from the fixed slot pool instead of the stack. acquire() BLOCKS when N
+    // decodes are already in flight — this is the admission control that makes
+    // the worst-case footprint a stateable constant, since the FFI entry has
+    // none of its own (dng_ffi_api.cpp is a plain synchronous call, so
+    // concurrency is whatever the caller supplies).
+    //
+    // Ordering: acquired AFTER pendingDecodeCount().fetch_add above, so warmup
+    // still sees this decode as pending while it waits for a slot; and at
+    // function scope, so the RAII release runs on every exit path including
+    // exceptions.
+    //
+    // The arena is reserved address space, not resident memory — pages arrive
+    // on first touch. The arithmetic behind kDecodeArenaReserveBytes is in
+    // dng_pipeline_config.h; the slot arithmetic is in
+    // docs/logs/2026-09-03/task6-memory.md.
+    DecodeSlotPool::Slot decodeSlot = decodeSlotPool().acquire();
+    DecodeContext &decodeCtx = decodeSlot.context();
     ConcurrentDngHost host(decodeThreads);
     host.setDecodeContext(&decodeCtx);
     dng_file_stream stream(file_path);

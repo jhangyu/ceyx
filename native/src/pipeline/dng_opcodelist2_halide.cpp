@@ -894,13 +894,6 @@ void halide_prewarm_polynomial3_for_size(dng_host &host, int width, int height) 
     const uint64_t key = (static_cast<uint64_t>(width) << 32) |
                          static_cast<uint64_t>(static_cast<uint32_t>(height));
 
-    {
-        std::lock_guard<std::mutex> lock(cache_mu);
-        if (warmed.count(key)) {
-            return;
-        }
-    }
-
     // (Candidate A — P1) Pre-grow + page-touch the DeviceHandoffState scratch
     // vector so the first real run_polynomial3_kernel() call avoids the 144MB
     // page-fault zero-init that impl-instrument located as
@@ -923,6 +916,21 @@ void halide_prewarm_polynomial3_for_size(dng_host &host, int width, int height) 
             scratch.resize(scratch_elems);
         }
         std::memset(scratch.data(), 0, scratch.size() * sizeof(uint16_t));
+    }
+
+    // Round 4 review M1: the early return below is AFTER the pre-grow, not
+    // before it. `warmed` is per-PROCESS, but plan Task 5 moved the resource it
+    // used to guard (poly3_scratch) to per-DECODE — so gating the pre-grow on
+    // it meant only the first decode of a given (W,H) in the process got a
+    // pre-grown scratch and every later decode re-paid the ~6-8ms 144MB
+    // zero-fill inside run_polynomial3_kernel (reproduced 3/3, see
+    // docs/logs/2026-09-03/round4-review.md). The gate now covers only what is
+    // genuinely once-per-process: the Metal PSO warm-up dispatch below.
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        if (warmed.count(key)) {
+            return;
+        }
     }
 
     // W8/L-7: measured (docs/logs/2026-07-02/Task_w8_opcodelist2.md) that a

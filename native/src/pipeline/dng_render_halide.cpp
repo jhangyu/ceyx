@@ -239,10 +239,24 @@ public:
         size_t cap = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!free_.empty() && free_.back().cap >= count) {
-                buf = std::move(free_.back().buf);
-                cap = free_.back().cap;
-                free_.pop_back();
+            // Mutex rework (plan Task 7): best-fit scan, not back()-only. With
+            // a single-entry free list (all this ever held under serialised
+            // decodes) the two are identical; with the multi-entry list that
+            // concurrency produces, back()-only misses a usable buffer sitting
+            // anywhere else and allocates fresh instead. Mirrors the scan
+            // RgbaOutputPool already uses (dng_pipeline.cpp).
+            size_t bestIdx = free_.size();
+            size_t bestCap = SIZE_MAX;
+            for (size_t i = 0; i < free_.size(); ++i) {
+                if (free_[i].cap >= count && free_[i].cap < bestCap) {
+                    bestIdx = i;
+                    bestCap = free_[i].cap;
+                }
+            }
+            if (bestIdx < free_.size()) {
+                buf = std::move(free_[bestIdx].buf);
+                cap = free_[bestIdx].cap;
+                free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(bestIdx));
             }
         }
         if (!buf || cap < count) {
@@ -259,10 +273,38 @@ private:
     };
     void release(std::unique_ptr<T[]> buf, size_t cap) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Mutex rework (plan Task 7): was uncapped. Under serialised decodes
+        // the list never held more than one entry, so this was invisible;
+        // under concurrency it grows to the high-water simultaneous-decode
+        // count and never shrinks. Cap tracks the decode slot count
+        // (PipelineConfig::kMaxDecodeSlots via decode_context.h's pool), which
+        // is the real bound on how many buffers can be outstanding at once —
+        // if that changes, this changes with it.
+        if (free_.size() >= kMaxFreeSlots) {
+            size_t largest = 0;
+            for (size_t i = 1; i < free_.size(); ++i) {
+                if (free_[i].cap > free_[largest].cap) largest = i;
+            }
+            if (cap > free_[largest].cap) return;  // incoming is largest: drop it
+            free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(largest));
+        }
         free_.push_back({std::move(buf), cap});
+        if (free_.size() > freeHighWater_) freeHighWater_ = free_.size();
     }
-    std::mutex mutex_;
+    static constexpr size_t kMaxFreeSlots = 4;
+    mutable std::mutex mutex_;
     std::vector<Slot> free_;
+    size_t freeHighWater_ = 0;
+
+ public:
+    // Task 7 gate accessor: the largest the free list ever got. Asserting on
+    // this rather than on the instantaneous size means the gate cannot pass
+    // just because it sampled at a quiet moment.
+    size_t free_high_water() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return freeHighWater_;
+    }
+    static constexpr size_t free_cap() { return kMaxFreeSlots; }
 };
 
 using Stage4DstScratch = Stage4ScratchPool<uint8_t>;   // RGBA8 kernel output for legacy RGB8 callers
@@ -271,6 +313,19 @@ Stage4DstScratch& stage4DstScratch() {
     static Stage4DstScratch instance;
     return instance;
 }
+
+}  // namespace (reopened below)
+
+// Task 7 gate accessor (declared in dng_pipeline.h). Defined here, inside the
+// split-kernel guard, because Stage4ScratchPool only exists on those
+// platforms; the non-split build gets the SIZE_MAX "not compiled" answer
+// further down so the gate can DECLARE the skip instead of silently reporting
+// a comfortable zero.
+size_t dng_stage4_scratch_free_high_water() {
+    return stage4DstScratch().free_high_water();
+}
+
+namespace {
 
 // G2: RGBA8 -> RGB8 alpha-strip for legacy RGB8 callers (vector overloads /
 // matrix test path). The production fused path (fuse_rgba=true) needs no host
@@ -326,6 +381,21 @@ void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
 #endif
 
 #if !defined(DNG_STAGE4_SPLIT_KERNEL)
+// Task 7: Stage4ScratchPool (and therefore its capped free list) is compiled
+// only when DNG_STAGE4_SPLIT_KERNEL is defined — the Android/Windows layout.
+// On this build the pool does not exist, so there is nothing to bound and no
+// gate evidence to produce. SIZE_MAX is the "not compiled here" answer, which
+// the concurrent gate prints as an explicit skip: a plain 0 would be
+// indistinguishable from "the cap held", i.e. a green light for an
+// unobservable configuration.
+}  // namespace (reopened below)
+
+size_t dng_stage4_scratch_free_high_water() {
+    return static_cast<size_t>(-1);
+}
+
+namespace {
+
 // Mutex rework (plan Task 4): the two process-wide grow-only RGBA-strip
 // scratch statics and their acquire helper were DELETED here, not amended.
 // They handed the same buffer to every decode, which was only ever safe while
@@ -410,6 +480,27 @@ void copyRenderSettings(const dng_render& src, dng_render& dst) {
     dst.SetMaximumSize(src.MaximumSize());
 }
 
+// Mutex rework (plan Task 7, review finding A7): acquire() returns a raw
+// dng_host* that concurrent decodes share. AUDITED SAFE, cache retained
+// deliberately — recorded here so the next reader does not re-open a settled
+// question:
+//   - ConcurrentDngHost's only members are requestedThreads_ and
+//     cachedConfig_ (concurrent_dng_host.h:303-304), both written in the
+//     constructor (concurrent_dng_host.h:39-40) and read-only thereafter
+//     (concurrent_dng_host.h:46-49).
+//   - PerformAreaTask keeps every piece of mutable state on the stack —
+//     futures, exceptionMutex, caughtException, lastWorkDoneUs
+//     (concurrent_dng_host.h:164-166, :185).
+//   - The dng_host base's Allocator()/Sniffer() are SDK defaults, already
+//     shared across today's fresh-per-decode hosts, so sharing adds nothing
+//     new.
+//   - decodeContext_ (concurrent_dng_host.h:305) is per-decode state, but this
+//     cached host is only used by the quality-lock render path, which never
+//     calls setDecodeContext(); it stays null here.
+// The residual concern from this object is thread amplification, not
+// correctness, and that is handled by the fan-out divisor in
+// PerformAreaTaskThreads() (concurrent_dng_host.h:62-89). Do not "fix" this by
+// constructing a host per call without re-reading that analysis.
 class CachedRenderHost {
 public:
     dng_host* acquire(uint32_t requested_threads) {

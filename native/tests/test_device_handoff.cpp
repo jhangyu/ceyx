@@ -41,6 +41,8 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 // POSIX setenv/unsetenv for env override within the same process
@@ -71,6 +73,79 @@ struct DecodeOutput {
     uint32_t height = 0;
     bool ok = false;
 };
+
+// ---------------------------------------------------------------------------
+// Round 4 review M3 — engagement assertion.
+//
+// The PSNR gate alone cannot fail on lost engagement: every
+// restoreHostStage2() fallback inside runLossyStage2Stage4DeviceHandoff
+// (dng_pipeline.cpp) produces output byte-identical to handoff-OFF, i.e. PSNR
+// 999.00 dB, which is the gate's PASS value. That is the "unobservable
+// configuration" form of a false green, and since test_decode's handoff block
+// became a no-op this harness is the only observer left for plan Tasks 6-8.
+//
+// So: run the handoff-ON decode with DNG_MAP_POLY_TIMING=1, capture stderr,
+// and require exactly one "defer_handoff=1" line. Exactly one, not at least
+// one: two would mean the deferred dispatch ran twice for a single decode.
+// The captured text is echoed back to stderr afterwards so nothing is hidden
+// from the matrix driver, which merges stderr into stdout.
+// ---------------------------------------------------------------------------
+
+struct StderrCapture {
+    // Returns false if the capture could not be set up; callers then run
+    // uncaptured and the engagement assert reports the failure.
+    bool begin(const char* path) {
+        path_ = path;
+        fflush(stderr);
+        saved_fd_ = dup(fileno(stderr));
+        if (saved_fd_ < 0) return false;
+        if (!freopen(path, "w+", stderr)) {
+            close(saved_fd_);
+            saved_fd_ = -1;
+            return false;
+        }
+        active_ = true;
+        return true;
+    }
+
+    // Restores stderr and returns everything that was written while captured.
+    string end() {
+        if (!active_) return string();
+        fflush(stderr);
+        dup2(saved_fd_, fileno(stderr));
+        close(saved_fd_);
+        saved_fd_ = -1;
+        active_ = false;
+        string text;
+        FILE* fh = fopen(path_.c_str(), "rb");
+        if (fh) {
+            char buf[4096];
+            size_t n = 0;
+            while ((n = fread(buf, 1, sizeof(buf), fh)) > 0) text.append(buf, n);
+            fclose(fh);
+        }
+        remove(path_.c_str());
+        // Echo through, so captured diagnostics are not swallowed.
+        fwrite(text.data(), 1, text.size(), stderr);
+        fflush(stderr);
+        return text;
+    }
+
+    bool active_ = false;
+    int saved_fd_ = -1;
+    string path_;
+};
+
+static size_t countOccurrences(const string& haystack, const char* needle) {
+    size_t count = 0;
+    size_t pos = 0;
+    const size_t len = strlen(needle);
+    while ((pos = haystack.find(needle, pos)) != string::npos) {
+        ++count;
+        pos += len;
+    }
+    return count;
+}
 
 static DecodeOutput runDecode(const char* path) {
     DngPipelineResult result;
@@ -167,7 +242,8 @@ static bool testSample(
     const char* label,
     const char* path,
     const char* handoffEnvKey,      // e.g. "DNG_STAGE3_STAGE4_DEVICE_HANDOFF"
-    double psnrThreshold            // required ≥ this value
+    double psnrThreshold,           // required ≥ this value
+    bool requireEngagement          // M3: assert the deferred path was taken
 ) {
     cout << "\n[" << label << "] path=" << path << "\n";
     cout << "  handoff_env=" << handoffEnvKey << "\n";
@@ -175,7 +251,37 @@ static bool testSample(
     // --- Run with handoff ENABLED ---
     setenv(handoffEnvKey, "1", 1);
     cout << "  [Run] device-handoff ON\n";
+    StderrCapture capture;
+    bool captureOk = false;
+    if (requireEngagement) {
+        setenv("DNG_MAP_POLY_TIMING", "1", 1);
+        captureOk = capture.begin("test_device_handoff_engage.log");
+    }
     DecodeOutput handoffOut = runDecode(path);
+    string capturedStderr;
+    if (requireEngagement) {
+        capturedStderr = capture.end();
+        unsetenv("DNG_MAP_POLY_TIMING");
+    }
+    if (requireEngagement) {
+        const size_t engaged = countOccurrences(capturedStderr, "defer_handoff=1");
+        cout << "  [Engagement] defer_handoff=1 lines=" << engaged
+             << "  (required: exactly 1)"
+             << (captureOk ? "" : "  [capture-setup FAILED]") << "\n";
+        if (!captureOk || engaged != 1) {
+            cerr << "  [Engagement] FAIL: expected exactly one defer_handoff=1 "
+                    "line, saw " << engaged
+                 << (captureOk ? "" : " (stderr capture could not be set up)")
+                 << ".\n"
+                    "  A silent restoreHostStage2() fallback produces output "
+                    "byte-identical to handoff OFF, so the PSNR gate below "
+                    "would still read 999 dB. This assertion is what makes "
+                    "that observable.\n";
+            unsetenv(handoffEnvKey);
+            return false;
+        }
+        cout << "  [Engagement] PASS\n";
+    }
     if (!handoffOut.ok) {
         cerr << "  [FAIL] device-handoff ON decode failed\n";
         unsetenv(handoffEnvKey);
@@ -262,10 +368,15 @@ int main(int argc, char** argv) {
     bool allPassed = true;
 
     // Test 1: lossless — Stage3→Stage4 device handoff
+    // M3 note: requireEngagement=false here. The defer_handoff marker is
+    // emitted by the OpcodeList2 batched dispatch, which is the Stage2->Stage4
+    // path; the lossless sample exercises Stage3->Stage4 and never reaches it.
+    // Its engagement witness is the lossy sample below.
     if (!testSample("Lossless / Stage3-Stage4 handoff",
                     lossless,
                     "DNG_STAGE3_STAGE4_DEVICE_HANDOFF",
-                    kPsnrThreshold)) {
+                    kPsnrThreshold,
+                    /*requireEngagement=*/false)) {
         allPassed = false;
     }
 
@@ -291,7 +402,8 @@ int main(int argc, char** argv) {
     } else if (!testSample("Lossy / Stage2-Stage4 handoff",
                     lossy,
                     "DNG_STAGE2_STAGE4_DEVICE_HANDOFF",
-                    kPsnrThreshold)) {
+                    kPsnrThreshold,
+                    /*requireEngagement=*/true)) {
         allPassed = false;
     }
 #endif

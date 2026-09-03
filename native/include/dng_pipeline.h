@@ -46,6 +46,29 @@ size_t dng_rgba_output_checked_out_count();
 bool dng_rgb_output_release(uint8_t* ptr);
 size_t dng_rgb_output_checked_out_count();
 
+// Mutex rework (plan Task 6, spec R7/R8). Admission control accessors.
+//
+// dng_decode_slot_count()      — the configured N (constant after first use).
+// dng_decode_in_flight_count() — decodes holding a slot right now. Read per
+//                                area task by ConcurrentDngHost to divide the
+//                                nested fan-out; never cached.
+// dng_decode_max_in_flight_observed() — high-water of the above, for the gate
+//                                that asserts the bound was never exceeded.
+// dng_decode_arena_high_water_bytes() — largest bump-arena offset any slot has
+//                                reached; the RESIDENT figure the memory
+//                                disclosure needs, as opposed to the reserve.
+//
+// These are internal instrumentation, not the C ABI: dng_ffi_api.h is
+// unchanged.
+size_t dng_decode_slot_count();
+size_t dng_decode_in_flight_count();
+size_t dng_decode_max_in_flight_observed();
+size_t dng_decode_arena_high_water_bytes();
+
+// Task 7: high-water occupancy of Stage4ScratchPool's free list, so the gate
+// can assert the cap actually holds under N-way concurrency.
+size_t dng_stage4_scratch_free_high_water();
+
 struct DngPipelineStage3Timing {
   double extract_stage2_ms = 0.0;
   double make_image_ms = 0.0;

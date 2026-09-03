@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <thread>
 
 // ---------------------------------------------------------------------------
 // PipelineConfig — single source of truth for runtime env switches.
@@ -124,6 +125,54 @@ struct PipelineConfig {
   // a growing arena would move memory a caller is still holding.
   static constexpr size_t kDecodeArenaReserveBytes =
       static_cast<size_t>(1536) * 1024 * 1024;
+
+  // Mutex rework (plan Task 6, R7): non-arena state that a DecodeContext owns
+  // and that therefore multiplies with the slot count. Folded in from the
+  // Round 4 review item L1 (docs/logs/2026-09-03/round4-review.md, LOW):
+  //   stage2_device_dst    W*H uint16   Metal DEVICE memory = 48 MB @6000x4000
+  //   handoff.poly3_scratch W*H*3 uint16 host, zero-filled  = 144 MB @6000x4000
+  // Unlike the arena these are resident the moment they are sized, not reserved
+  // address space, so they belong in the ceiling arithmetic below.
+  static constexpr size_t kDecodePerSlotNonArenaBytes =
+      static_cast<size_t>(192) * 1024 * 1024;
+
+  // Budget the slot count divides against. Not a hard allocator limit — it is
+  // the figure the §6.3 memory disclosure is written against, recorded in
+  // docs/logs/2026-09-03/task6-memory.md.
+  //
+  // Windows is deliberately lower (parking-lot F3): VirtualAlloc is called with
+  // MEM_RESERVE|MEM_COMMIT, so each slot's 1.5 GiB is charged against the
+  // system commit limit whether or not the pages are ever touched. On POSIX the
+  // same reserve is MAP_ANON address space and costs nothing until first touch.
+#if defined(_WIN32)
+  static constexpr size_t kDecodeMemoryCeilingBytes =
+      static_cast<size_t>(4) * 1024 * 1024 * 1024;
+#else
+  static constexpr size_t kDecodeMemoryCeilingBytes =
+      static_cast<size_t>(8) * 1024 * 1024 * 1024;
+#endif
+
+  // Hard cap on concurrent full-frame decodes regardless of what the ceiling
+  // arithmetic permits: past this the GPU is the constraint, and every extra
+  // slot costs a full arena reserve plus kDecodePerSlotNonArenaBytes.
+  static constexpr size_t kMaxDecodeSlots = 4;
+
+  // N = min(hardware_concurrency(), ceiling / per-slot), clamped to
+  // [1, kMaxDecodeSlots]. Computed rather than constexpr because
+  // hardware_concurrency() is a runtime property; the pool reads it once, at
+  // first use. The arithmetic on the measuring machine is recorded in
+  // docs/logs/2026-09-03/task6-memory.md.
+  static size_t decodeSlotCount() {
+    const unsigned hwRaw = std::thread::hardware_concurrency();
+    const size_t hw = hwRaw > 0 ? static_cast<size_t>(hwRaw) : 1;
+    const size_t perSlot =
+        kDecodeArenaReserveBytes + kDecodePerSlotNonArenaBytes;
+    size_t n = kDecodeMemoryCeilingBytes / perSlot;
+    if (n > hw) n = hw;
+    if (n > kMaxDecodeSlots) n = kMaxDecodeSlots;
+    if (n < 1) n = 1;
+    return n;
+  }
 
   static PipelineConfig loadFromEnv() {
     PipelineConfig config;

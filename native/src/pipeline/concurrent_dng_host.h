@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -21,6 +22,12 @@
 // Mutex rework (plan Task 4): forward declaration only, so the include graph
 // stays acyclic — decode_context.h forward-declares dng_host in turn.
 struct DecodeContext;
+
+// Mutex rework (plan Task 6, R8): the in-flight decode count that divides the
+// area-task fan-out. Declared rather than included: dng_pipeline.h would drag
+// the pipeline result types into every consumer of this header. Defined in
+// dng_pipeline.cpp, which every target compiling this header also compiles.
+size_t dng_decode_in_flight_count();
 
 class ConcurrentDngHost : public dng_host {
 public:
@@ -56,8 +63,37 @@ public:
         if (hw > 0 && threads > hw) {
             threads = hw;
         }
+        // R8 (plan Task 6): bound the nested fan-out. PerformAreaTask spawns
+        // `threads` std::async workers PER AREA TASK, and Stage-1 enters it
+        // dozens of times per decode. Until the mutex rework the process-wide
+        // single-flight mutex was the only thing keeping one fan-out alive at
+        // a time; with T decodes in flight, T * hw workers would be runnable
+        // at once on an hw-core machine. That regresses the very throughput
+        // this work exists to buy, and no single-decode gate would see it.
+        //
+        // N2: applied HERE, after the explicit > env > hardware_concurrency
+        // chain has fully resolved and alongside the existing ceiling — NOT
+        // inside the `else` fallback branch. Production always constructs the
+        // host with a non-zero decodeThreads (dng_pipeline.cpp, defaulting to
+        // kDefaultAreaThreads = 20), so it always takes the first branch; a
+        // divisor in the fallback would never fire in production while still
+        // passing a unit test that built a host with zero.
+        //
+        // Read per call, never cached: T changes as decodes start and finish.
+        // Floored at 1 — a zero here deadlocks the area task.
+        const size_t inFlight = inFlightCount();
+        if (inFlight > 1) {
+            threads = std::max<uint32_t>(
+                1, threads / static_cast<uint32_t>(inFlight));
+        }
         return threads > 0 ? threads : 1;
     }
+
+    // Test seam (per-instance, not a global): lets the Task 6 divisor test
+    // exercise T = 1, 2, 4 against a host constructed the production way
+    // without spinning up that many real decodes. Production never calls this,
+    // so the live path always reads the real pool count.
+    void setInFlightOverrideForTest(size_t n) { inFlightOverride_ = n; }
 
     // Mutex rework (plan Task 4): per-decode state, set by
     // dng_pipeline_decode_to_rgb_sized immediately after construction.
@@ -257,6 +293,13 @@ private:
         return enabled;
     }
 
+    // R8 divisor source. Zero (the production value) means "ask the pool".
+    size_t inFlightCount() const {
+        return inFlightOverride_ > 0 ? inFlightOverride_
+                                     : dng_decode_in_flight_count();
+    }
+
+    size_t inFlightOverride_ = 0;
     uint32_t requestedThreads_ = 0;
     PipelineConfig cachedConfig_{};
     DecodeContext* decodeContext_ = nullptr;
