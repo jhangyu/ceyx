@@ -65,6 +65,18 @@ size_t dng_decode_in_flight_count();
 size_t dng_decode_max_in_flight_observed();
 size_t dng_decode_arena_high_water_bytes();
 
+// Round 5 review F2: the same bound observed from OUTSIDE the pool's
+// bookkeeping. dng_decode_max_in_flight_observed() reads a counter the pool
+// maintains against its own free list, so it cannot exceed the slot count by
+// construction — asserting on it is unfalsifiable. These two are maintained by
+// the decode body itself:
+//   dng_decode_body_max_in_flight() — high-water of decodes actually executing.
+//   dng_decode_body_alias_events()  — times a decode found its DecodeContext
+//                                     already occupied, i.e. the pool handed
+//                                     one context to two callers. Must be 0.
+size_t dng_decode_body_max_in_flight();
+size_t dng_decode_body_alias_events();
+
 // Task 7: high-water occupancy of Stage4ScratchPool's free list, so the gate
 // can assert the cap actually holds under N-way concurrency.
 size_t dng_stage4_scratch_free_high_water();

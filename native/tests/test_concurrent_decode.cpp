@@ -143,11 +143,27 @@ int main(int argc, char **argv) {
 
   bool warmupThread = false;
   int repeat = 1;
+  // Round 5 review F1: number of SERIAL decodes to run, to completion, before
+  // the concurrent burst starts. This is the only way to express the shape that
+  // discriminates the M1 fix: the prime decode both sets the process-global
+  // `warmed` key AND grows exactly one slot's poly3_scratch, so the burst that
+  // follows puts FRESH slots behind an ALREADY-CLOSED gate. With all threads
+  // starting together (the previous behaviour) they race through the gate
+  // before any of them inserts the key, and the pre-M1 code pre-grows too —
+  // which is why the earlier 8-decode run was green either way.
+  int primeCount = 0;
   std::vector<std::string> files;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--warmup") {
       warmupThread = true;
+    } else if (a == "--prime") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "--prime needs a value\n");
+        return 2;
+      }
+      primeCount = std::atoi(argv[++i]);
+      if (primeCount < 0) return 2;
     } else if (a == "--repeat") {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "--repeat needs a value\n");
@@ -162,6 +178,27 @@ int main(int argc, char **argv) {
   if (files.empty()) {
     std::fprintf(stderr, "no input files\n");
     return 2;
+  }
+
+  // Round 5 review F1: serial prime phase. Runs to completion before any
+  // worker thread exists, so the burst below starts with the `warmed` gate
+  // already closed and only ONE slot pre-grown.
+  for (int p = 0; p < primeCount; ++p) {
+    const std::string &f = files[static_cast<size_t>(p) % files.size()];
+    DngPipelineResult r{};
+    std::fprintf(stderr, "[prime %d/%d] %s\n", p + 1, primeCount, f.c_str());
+    std::fflush(stderr);
+    if (!dng_pipeline_decode_to_rgb_sized(f.c_str(), 0, r)) {
+      std::fprintf(stderr, "[concurrent] prime decode failed %s err=%d\n",
+                   f.c_str(), r.error_code);
+      releaseResult(r);
+      return 1;
+    }
+    releaseResult(r);
+  }
+  if (primeCount > 0) {
+    std::fprintf(stderr, "[prime] done, burst starts now\n");
+    std::fflush(stderr);
   }
 
   std::atomic<size_t> next{0};
@@ -267,6 +304,31 @@ int main(int argc, char **argv) {
   // same lock that hands out slots, so it cannot miss a peak.
   const size_t slots = dng_decode_slot_count();
   const size_t poolHighWater = dng_decode_max_in_flight_observed();
+
+  // Round 5 review F2: the LOAD-BEARING assertions are these two, because they
+  // are maintained by the decode body, not by the pool auditing its own free
+  // list. `poolHighWater <= slots` is an invariant of the pool's data structure
+  // and cannot fail; a pool that handed one context to two callers would keep
+  // it green. bodyAliases is exactly that failure, and bodyHighWater counts
+  // decodes actually executing.
+  const size_t bodyHighWater = dng_decode_body_max_in_flight();
+  const size_t bodyAliases = dng_decode_body_alias_events();
+  if (bodyHighWater > slots) {
+    std::fprintf(stderr,
+                 "[concurrent] slot bound violated (decode body): %zu > %zu\n",
+                 bodyHighWater, slots);
+    failures.fetch_add(1);
+  }
+  if (bodyAliases != 0) {
+    std::fprintf(stderr,
+                 "[concurrent] context aliasing: %zu decode(s) found their "
+                 "DecodeContext already occupied\n",
+                 bodyAliases);
+    failures.fetch_add(1);
+  }
+  // Kept for cross-checking only: if the pool's own count and the decode-body
+  // count disagree, one of the two instruments is wrong and the run is not
+  // evidence of anything.
   if (poolHighWater > slots) {
     std::fprintf(stderr, "[concurrent] slot bound violated: %zu > %zu\n",
                  poolHighWater, slots);
@@ -296,10 +358,12 @@ int main(int argc, char **argv) {
     failures.fetch_add(1);
   }
 
-  std::printf("SLOTS slots=%zu max_in_flight_pool=%zu max_in_flight_sampled=%zu "
+  std::printf("SLOTS slots=%zu max_in_flight_body=%zu context_alias_events=%zu "
+              "max_in_flight_pool=%zu max_in_flight_sampled=%zu "
               "arena_high_water_bytes=%zu stage4_free_high_water=%zu "
               "stage4_free_cap=%zu\n",
-              slots, poolHighWater, maxObservedInFlight.load(),
+              slots, bodyHighWater, bodyAliases, poolHighWater,
+              maxObservedInFlight.load(),
               dng_decode_arena_high_water_bytes(), stage4FreeHighWater,
               kStage4FreeCap);
 

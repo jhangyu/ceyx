@@ -484,19 +484,25 @@ void copyRenderSettings(const dng_render& src, dng_render& dst) {
 // dng_host* that concurrent decodes share. AUDITED SAFE, cache retained
 // deliberately — recorded here so the next reader does not re-open a settled
 // question:
-//   - ConcurrentDngHost's only members are requestedThreads_ and
-//     cachedConfig_ (concurrent_dng_host.h:303-304), both written in the
-//     constructor (concurrent_dng_host.h:39-40) and read-only thereafter
-//     (concurrent_dng_host.h:46-49).
+//   - ConcurrentDngHost has four members (concurrent_dng_host.h:302-305).
+//     requestedThreads_ and cachedConfig_ (:303-304) are written in the
+//     constructor (:39-40) and read-only thereafter (:46-49). decodeContext_
+//     (:305) is per-decode state, but this cached host is only used by the
+//     quality-lock render path, which never calls setDecodeContext(); it stays
+//     null here. inFlightOverride_ (:302) is a TEST SEAM with a public mutator
+//     (:96) — a write to it on a shared host WOULD be unsynchronised against
+//     every area task that reads it via inFlightCount() (:296-299), so the
+//     safety of this cache depends on production never calling that setter.
+//     Only native/tests/test_concurrent_decode.cpp does, and only on hosts it
+//     constructs itself. If that ever stops being true, this cache stops being
+//     safe — do not add a second caller of setInFlightOverrideForTest without
+//     revisiting this paragraph.
 //   - PerformAreaTask keeps every piece of mutable state on the stack —
 //     futures, exceptionMutex, caughtException, lastWorkDoneUs
 //     (concurrent_dng_host.h:164-166, :185).
 //   - The dng_host base's Allocator()/Sniffer() are SDK defaults, already
 //     shared across today's fresh-per-decode hosts, so sharing adds nothing
 //     new.
-//   - decodeContext_ (concurrent_dng_host.h:305) is per-decode state, but this
-//     cached host is only used by the quality-lock render path, which never
-//     calls setDecodeContext(); it stays null here.
 // The residual concern from this object is thread amplification, not
 // correctness, and that is handled by the fan-out divisor in
 // PerformAreaTaskThreads() (concurrent_dng_host.h:62-89). Do not "fix" this by

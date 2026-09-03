@@ -11,6 +11,7 @@
 // failure mode is wrong pixels).
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -145,6 +146,15 @@ struct DecodeContext {
       : arena(arena_reserve_bytes) {}
   DecodeArena arena;
 
+  // Round 5 review F2: occupancy flag owned by the DECODE, not by the pool.
+  // Set on entry to the decode body and cleared on exit (DecodeBodyCensus in
+  // dng_pipeline.cpp). It exists so the slot bound can be checked against
+  // something outside the pool's own bookkeeping: `in_flight_ <= slots` is an
+  // invariant of the pool's data structure and therefore unfalsifiable, but a
+  // pool that handed ONE context to TWO callers would be caught here, because
+  // the second caller would find this flag already true.
+  std::atomic<bool> body_occupied{false};
+
   // A2/A6: device-handoff state and its enable flag. No mutex: only the
   // decode that owns this context can name it, so publish -> consume -> reset
   // is safe by construction rather than by lock discipline.
@@ -167,7 +177,7 @@ struct DecodeContext {
 
   // F2 (parking lot, R3 review): the ONE Stage-3 workspace this decode is
   // allowed to bump-allocate. Both Stage-3 entry points call
-  // prepareStage3WorkspacePtr (dng_pipeline.cpp:699 and :896), and on the
+  // prepareStage3WorkspacePtr (dng_pipeline.cpp:757 and :954), and on the
   // fused -> non-fused fallback BOTH run within one decode. The arena has no
   // free(), so without this cache the decode charged two full W*H*3 uint16
   // workspaces against a reserve sized for one — 1.73 GB against a 1.5 GiB
@@ -175,12 +185,17 @@ struct DecodeContext {
   // where the old process-wide pool succeeded. Invisible on the 6000x4000
   // corpus, which is why it needed to be reasoned about rather than measured.
   //
-  // Safe to share between the two callers: the fused entry hands the pointer
-  // to a Halide buffer whose HOST side is only written by copy_to_host inside
-  // demosaic_warp_rectilinear_halide_finish/cancel (dng_warp_halide.cpp:1181
-  // wraps this pointer, :1267-1284 is the only writer), and every path that
-  // falls through to the second caller has already finished or abandoned that
-  // handle.
+  // Safe to share between the two callers. The fused entry hands the pointer to
+  // a Halide buffer that wraps it (dng_warp_halide.cpp:1181). The HOST side of
+  // that buffer is written in exactly one place: copy_to_host inside
+  // demosaic_warp_rectilinear_halide_finish (dng_warp_halide.cpp:1244-1284).
+  // demosaic_warp_rectilinear_halide_cancel (:1286-1294) does NOT copy — it
+  // deletes the impl and drops the device allocation — so a cancelled handle
+  // never touches this memory at all. Every path that falls through to the
+  // second caller has already finished or cancelled its handle, and the one
+  // path that returns with a handle still live (the Stage-4 output-buffer
+  // acquisition failure) leaks it without ever calling finish, so it too never
+  // writes here.
   uint16_t *stage3_workspace = nullptr;
   size_t stage3_workspace_elements = 0;
 

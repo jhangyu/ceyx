@@ -398,9 +398,72 @@ RgbaOutputPool &rgbaOutputPool() {
 // deliberately: beyond that the GPU is the constraint and each extra slot
 // costs a full arena reserve plus ~192MB of non-arena scratch.
 DecodeSlotPool &decodeSlotPool() {
-  static DecodeSlotPool pool(PipelineConfig::decodeSlotCount(),
-                             PipelineConfig::kDecodeArenaReserveBytes);
-  return pool;
+  // Round 5 review F5: DELIBERATELY LEAKED. A by-value function-local static
+  // would run N Metal device_free calls (stage2_device_dst survives
+  // reset_for_reuse by design) plus N x 1.5 GiB munmap during static
+  // destruction, ordered only by static-destruction rules relative to the
+  // Halide/Metal runtime's own teardown. That exit path did not exist while
+  // contexts were stack-scoped per decode, and no gate covers it for the
+  // dylib-inside-a-host-app case. Nothing observable depends on running these
+  // destructors: the OS reclaims the mapping and the device at process exit.
+  static DecodeSlotPool *pool =
+      new DecodeSlotPool(PipelineConfig::decodeSlotCount(),
+                         PipelineConfig::kDecodeArenaReserveBytes);
+  return *pool;
+}
+
+// Round 5 review F2: decode-body occupancy census, deliberately INDEPENDENT of
+// the pool's own counters. `DecodeSlotPool::in_flight_` can never exceed the
+// slot count — that is an invariant of the data structure, so asserting it
+// cannot fail. These counters are maintained by the decode itself, so a pool
+// that aliased one context to two callers, or that over-issued slots, shows up
+// here as a high-water above N or a non-zero alias count.
+std::atomic<int> &decodeBodyLive() {
+  static std::atomic<int> live{0};
+  return live;
+}
+std::atomic<int> &decodeBodyHighWater() {
+  static std::atomic<int> high{0};
+  return high;
+}
+std::atomic<int> &decodeBodyAliasEvents() {
+  static std::atomic<int> alias{0};
+  return alias;
+}
+
+class DecodeBodyCensus {
+ public:
+  explicit DecodeBodyCensus(DecodeContext &ctx) : ctx_(ctx) {
+    // An already-occupied context means two decodes hold the SAME
+    // DecodeContext — the failure the slot bound exists to prevent, and the
+    // one the pool's own accounting structurally cannot see.
+    if (ctx_.body_occupied.exchange(true, std::memory_order_acq_rel)) {
+      decodeBodyAliasEvents().fetch_add(1, std::memory_order_relaxed);
+    }
+    const int now = decodeBodyLive().fetch_add(1, std::memory_order_acq_rel) + 1;
+    int prev = decodeBodyHighWater().load(std::memory_order_relaxed);
+    while (now > prev && !decodeBodyHighWater().compare_exchange_weak(
+                             prev, now, std::memory_order_relaxed)) {
+    }
+  }
+  ~DecodeBodyCensus() {
+    decodeBodyLive().fetch_sub(1, std::memory_order_acq_rel);
+    ctx_.body_occupied.store(false, std::memory_order_release);
+  }
+  DecodeBodyCensus(const DecodeBodyCensus &) = delete;
+  DecodeBodyCensus &operator=(const DecodeBodyCensus &) = delete;
+
+ private:
+  DecodeContext &ctx_;
+};
+
+size_t dng_decode_body_max_in_flight() {
+  const int v = decodeBodyHighWater().load(std::memory_order_relaxed);
+  return v < 0 ? 0 : static_cast<size_t>(v);
+}
+size_t dng_decode_body_alias_events() {
+  const int v = decodeBodyAliasEvents().load(std::memory_order_relaxed);
+  return v < 0 ? 0 : static_cast<size_t>(v);
 }
 
 size_t dng_decode_slot_count() { return decodeSlotPool().slot_count(); }
@@ -596,8 +659,8 @@ uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
     ptr = callerWorkspace->data();
   } else if (ctx) {
     // F2 (R3 review parking lot, folded into Task 6): one Stage-3 workspace
-    // per decode, not one per call. runHalideStage3And4Fused (:896) and
-    // runHalideStage3ForBayer (:699) BOTH reach here within a single decode
+    // per decode, not one per call. runHalideStage3And4Fused (:954) and
+    // runHalideStage3ForBayer (:757) BOTH reach here within a single decode
     // whenever the fused path falls back, and the bump arena has no free() —
     // so the un-cached version charged two full W*H*3 uint16 workspaces
     // against a reserve sized for one (1.73 GB vs the 1.5 GiB reserve at the
@@ -1695,6 +1758,10 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     // docs/logs/2026-09-03/task6-memory.md.
     DecodeSlotPool::Slot decodeSlot = decodeSlotPool().acquire();
     DecodeContext &decodeCtx = decodeSlot.context();
+    // Round 5 review F2: counts THIS decode, not the pool's opinion of it.
+    // Declared after the slot and before any decode work, so its lifetime is
+    // exactly the body the bound is a claim about.
+    DecodeBodyCensus decodeCensus(decodeCtx);
     ConcurrentDngHost host(decodeThreads);
     host.setDecodeContext(&decodeCtx);
     dng_file_stream stream(file_path);
