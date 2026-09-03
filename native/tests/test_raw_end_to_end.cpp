@@ -1454,15 +1454,17 @@ int main(int argc, char** argv) {
              // +12.00% to +18.56% versus the oracle. The implementation is
              // correct per spec (verified by impl-solve, probe_foveon_black.cpp;
              // per-channel black and double-WB ruled out for this file --
-             // component_black uniform 256s, as_shot_neutral ~1.0). The cause is
-             // the SPEC's target: quantile-to-exactly-1.0 with no headroom. On a
-             // scene with compressed top-end dynamic range, forcing the top 1% to
-             // literal white necessarily raises the mean. Control variable
-             // (highlight) and acceptance variable (mid-grey) are not the same
-             // quantity and are not required to move together. Target semantics
-             // are parked for revisit with a wider corpus -- see the parking-lot
-             // entry "auto-exposure target semantics". This value is pinned to
-             // detect drift, NOT because it is acceptable.
+             // component_black uniform 256s, as_shot_neutral ~1.0). Throwaway vs
+             // real RenderParams proven byte-identical for both Foveon files
+             // (field-by-field diff, impl-solve). The cause is the SPEC's target:
+             // quantile-to-exactly-1.0 with no headroom. On a scene with
+             // compressed top-end dynamic range, forcing the top 1% to literal
+             // white necessarily raises the mean. Control variable (highlight)
+             // and acceptance variable (mid-grey) are not the same quantity and
+             // are not required to move together. Target semantics are parked
+             // for revisit with a wider corpus -- see the parking-lot entry
+             // "auto-exposure target semantics". This value is pinned to detect
+             // drift, NOT because it is acceptable.
              "foveon_1: diagnosed deviation, quantile-to-1.0 target with no headroom "
              "(see round1_midgray.md); pinned to detect drift, not acceptable"},
         };
