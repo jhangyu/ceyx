@@ -86,6 +86,39 @@ bool fileExists(const std::string& p) {
     return f.good();
 }
 
+// Round 2 Task 2.1 (diagnostic only): dump-only case. Iterates the FULL
+// manifest, including malformed_* ids that the assertion loop below skips by
+// name, and prints the camera-matrix route raw_camera_to_pcs_from_libraw
+// actually chose for every entry present on disk. Calls that function
+// directly (same one AC-1.2's checkRouteTable() pins with synthetic data) so
+// the printed route is not re-derived from a second predicate. No
+// assertions -- this function cannot fail the run; native/scripts/tmp/
+// captures its stdout into route_census.md together with RC=$? and the HEAD
+// hash at capture time.
+void dumpRouteCensus(const std::vector<Sample>& samples) {
+    for (const Sample& s : samples) {
+        if (!fileExists(s.path)) {
+            std::printf("[RouteCensus] %s SKIP-missing-file\n", s.id.c_str());
+            continue;
+        }
+        LibRawFrontendContext ctx;
+        if (ctx.open_and_unpack(s.path.c_str()) != kRawSuccess) {
+            std::printf("[RouteCensus] %s ROUTE=open-failed\n", s.id.c_str());
+            continue;
+        }
+        const LibRawRawView& v = ctx.raw_view();
+        RawColorTransform xf{};
+        char reason[256] = {0};
+        const int route = raw_camera_to_pcs_from_libraw(
+            v.rgb_cam, v.cam_xyz, v.raw_color, v.colors, &xf, reason, sizeof(reason));
+        const char* label =
+            route == 1 ? "rgb_cam" : route == 2 ? "cam_xyz" : "none";
+        std::printf(
+            "[RouteCensus] %s ROUTE=%s raw_color=%u colors=%u reason=\"%s\"\n",
+            s.id.c_str(), label, v.raw_color, v.colors, reason);
+    }
+}
+
 // Everything in RawGpuInput except the borrowed pixel pointer: this is what
 // must not move when the unpack backend changes.
 struct MetaFingerprint {
@@ -785,6 +818,7 @@ int main(int argc, char** argv) {
     checkWhiteBalanceChain();
 
     const std::vector<Sample> samples = loadManifest(manifest);
+    dumpRouteCensus(samples);
     std::vector<std::string> bayer_paths;
     std::vector<std::string> bayer_ids;
     std::vector<std::string> xtrans_paths;
