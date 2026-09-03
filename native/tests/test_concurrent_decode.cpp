@@ -144,14 +144,30 @@ int main(int argc, char **argv) {
           releaseResult(r);
           continue;
         }
-        char name[64];
-        std::snprintf(name, sizeof(name), "/decode_%zu.raw", i);
-        if (!writeRgb(outDir + name, r)) {
-          std::fprintf(stderr, "[concurrent] write failed index %zu\n", i);
-          failures.fetch_add(1);
+        // DUMP ONLY ON THE FIRST PASS (slot < files.size()).
+        //
+        // With --repeat R the work queue is R*N slots and the file index is
+        // slot % N, so passes 2..R revisit the same indices. Writing on every
+        // pass let two threads open and write the SAME decode_<i>.raw
+        // concurrently, outside any lock — which could fabricate a pixel
+        // mismatch out of interleaved writes, or mask a real one by having the
+        // last writer overwrite a corrupt dump with a good one. Either way the
+        // gate's own instrument would be producing the signal it is supposed
+        // to be measuring.
+        //
+        // Every slot still DECODES, so the repeats keep exercising pool
+        // growth/reuse/eviction exactly as intended; only the dump is
+        // first-pass-only, which is all the comparison needs.
+        if (slot < files.size()) {
+          char name[64];
+          std::snprintf(name, sizeof(name), "/decode_%zu.raw", i);
+          if (!writeRgb(outDir + name, r)) {
+            std::fprintf(stderr, "[concurrent] write failed index %zu\n", i);
+            failures.fetch_add(1);
+          }
+          std::snprintf(name, sizeof(name), "/decode_%zu.dims", i);
+          writeDims(outDir + name, r);
         }
-        std::snprintf(name, sizeof(name), "/decode_%zu.dims", i);
-        writeDims(outDir + name, r);
         releaseResult(r);
       }
     });
