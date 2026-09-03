@@ -13,7 +13,10 @@
 #include <string>
 #include <vector>
 
+#include "dng_1d_function.h"
+#include "dng_1d_table.h"
 #include "dng_color_space.h"
+#include "dng_render.h"
 #include "dng_render_params.h"
 #include "libraw_frontend.h"
 #include "libraw_gpu_input_adapter.h"
@@ -84,6 +87,7 @@ RawDevelopParams makeDevelop() {
     d.tone_curve_strength = 1.0f;
     d.output_space = kRawOutputColorSpaceSrgb;
     d.max_output_long_edge = 0;
+    d.shadows = 5.0f;  // explicit: the SDK renderer default (also the NSDMI).
     return d;
 }
 
@@ -183,6 +187,28 @@ void oldNormalizeRowsToNeutral(float m[9], const float neutral[3]) {
             for (int c = 0; c < 3; ++c) m[r * 3 + c] /= sum;
         }
     }
+}
+
+// TEST-ONLY counterfactual, reimplemented byte-for-byte from the deleted
+// raw_render_params_builder.cpp pre-Task-2.3 black term (literal
+// `5.0 * 1.0 * 1.0 * 0.001`, capped at 0.99*white) and the production
+// sampleFunction shape (same file, kTableSize+2 entries, final slot pinned).
+// Task 2.3's AC-2.3 requires the grep count for that literal in the
+// production file to be ZERO, so this is where the pre-change value has to
+// live now -- same pattern the V8 saturated-discrimination case above already
+// uses for the deleted row-normalisation helper.
+void oldExpRamp(double exposure_ev, std::vector<float>& table) {
+    const real64 white = 1.0 / std::pow(2.0, std::max<real64>(0.0, exposure_ev));
+    const real64 black = std::min<real64>(5.0 * 1.0 * 1.0 * 0.001, 0.99 * white);
+    const dng_function_exposure_ramp ramp_fn(white, black, black);
+    table.resize(static_cast<size_t>(dng_1d_table::kTableSize) + 2u);
+    for (int i = 0; i <= dng_1d_table::kTableSize; ++i) {
+        const real64 x =
+            static_cast<real64>(i) / static_cast<real64>(dng_1d_table::kTableSize);
+        table[static_cast<size_t>(i)] = static_cast<float>(ramp_fn.Evaluate(x));
+    }
+    table[static_cast<size_t>(dng_1d_table::kTableSize) + 1u] =
+        table[static_cast<size_t>(dng_1d_table::kTableSize)];
 }
 
 void apply3x3(const float m[9], const float v[3], float out[3]) {
@@ -960,6 +986,107 @@ int main() {
                       ok, idx, ok ? p0.exp_ramp[idx] : -1.0f, ok ? p1.exp_ramp[idx] : -1.0f,
                       ok ? (p1.exp_ramp[idx] - p0.exp_ramp[idx]) : 0.0f);
         report("auto-ev-shifts-the-curve", shifted, detail);
+    }
+
+    // ----------------------------------------------------------------------
+    // Round 2 Task 2.3: shadows black-lift field.
+    // ----------------------------------------------------------------------
+
+    // shadows_default_is_bit_identical: shadows=5.0f must reproduce the
+    // pre-change exp_ramp table entry-for-entry (==). The pre-change baseline
+    // (oldExpRamp, exposure_ev=0) is captured to
+    // native/scripts/tmp/round2_baseline_ramp.txt with RC=$? BEFORE the
+    // comparison, as its own artifact, per the task's acceptance wording --
+    // separately from the in-process `==` gate below, which is what actually
+    // fails the run if the two diverge.
+    {
+        std::vector<float> baseline;
+        oldExpRamp(0.0, baseline);
+        int rc = baseline.empty() ? 1 : 0;
+        std::ofstream out("native/scripts/tmp/round2_baseline_ramp.txt");
+        if (out.is_open()) {
+            out << "# pre-Task-2.3 exp_ramp baseline (exposure_ev=0, black=5.0*1.0*1.0*0.001)\n";
+            for (size_t i = 0; i < baseline.size(); ++i) {
+                out << "EXP_RAMP " << i << " " << baseline[i] << "\n";
+            }
+            out << "RC=" << rc << "\n";
+        } else {
+            rc = 1;
+        }
+        out.close();
+
+        RawGpuInput in = makeInput(true);
+        RawDevelopParams dev = makeDevelop();
+        dev.shadows = 5.0f;
+        RenderParams p;
+        const bool ok = raw_build_render_params(in, dev, p);
+        bool same = ok && rc == 0 && p.exp_ramp.size() == baseline.size();
+        size_t first_mismatch = static_cast<size_t>(-1);
+        for (size_t i = 0; same && i < baseline.size(); ++i) {
+            if (p.exp_ramp[i] != baseline[i]) { same = false; first_mismatch = i; }
+        }
+        char detail[220];
+        std::snprintf(detail, sizeof(detail),
+                      "ok=%d rc=%d sizes(%zu/%zu) first_mismatch_index=%zu "
+                      "(baseline captured to native/scripts/tmp/round2_baseline_ramp.txt)",
+                      ok, rc, p.exp_ramp.size(), baseline.size(), first_mismatch);
+        report("shadows-default-is-bit-identical", same, detail);
+    }
+
+    // shadows_zero_removes_black_lift: shadows=0.0f => exp_ramp[0] == 0.0f.
+    {
+        RawGpuInput in = makeInput(true);
+        RawDevelopParams dev = makeDevelop();
+        dev.shadows = 0.0f;
+        RenderParams p;
+        const bool ok = raw_build_render_params(in, dev, p);
+        const bool zero = ok && !p.exp_ramp.empty() && p.exp_ramp[0] == 0.0f;
+        char detail[160];
+        std::snprintf(detail, sizeof(detail),
+                      "ok=%d exp_ramp[0]=%.7f (want 0.0 exactly)",
+                      ok, ok && !p.exp_ramp.empty() ? p.exp_ramp[0] : -1.0f);
+        report("shadows-zero-removes-black-lift", zero, detail);
+    }
+
+    // shadows_clamped: shadows=500.0f clamps to 50.0f, black term stays
+    // <= 0.99*white. exp_ramp[0] alone cannot discriminate a broken clamp:
+    // dng_function_exposure_ramp::Evaluate returns exactly 0.0 for ANY
+    // x <= fBlack - fRadius, which holds at x=0 whenever black>0, clamped or
+    // not (dng_render.cpp:63-64) -- an un-clamped black=0.5 would ALSO give
+    // exp_ramp[0]==0.0, silently passing a broken clamp. So this compares the
+    // WHOLE table between shadows=500 and shadows=50 elementwise (`==`): the
+    // clamped-vs-not black terms (0.05 vs 0.5, both < 0.99*white=0.99 so the
+    // 0.99*white cap alone would NOT catch this either) diverge visibly
+    // through the curve's slope, so a missing clamp fails at many indices,
+    // not just index 0.
+    {
+        RawGpuInput in = makeInput(true);
+        RawDevelopParams dev_clamped = makeDevelop();
+        dev_clamped.shadows = 500.0f;
+        RawDevelopParams dev_at_bound = makeDevelop();
+        dev_at_bound.shadows = 50.0f;
+        RenderParams p_clamped, p_at_bound;
+        const bool ok = raw_build_render_params(in, dev_clamped, p_clamped) &&
+                        raw_build_render_params(in, dev_at_bound, p_at_bound);
+        const double white = 1.0;  // exposure_ev=0, auto_exposure_ev=0
+        bool same = ok && p_clamped.exp_ramp.size() == p_at_bound.exp_ramp.size();
+        size_t first_mismatch = static_cast<size_t>(-1);
+        for (size_t i = 0; same && i < p_clamped.exp_ramp.size(); ++i) {
+            if (p_clamped.exp_ramp[i] != p_at_bound.exp_ramp[i]) {
+                same = false;
+                first_mismatch = i;
+            }
+        }
+        const bool under_cap =
+            ok && !p_clamped.exp_ramp.empty() &&
+            static_cast<double>(50.0 * 1.0 * 1.0 * 0.001) <= 0.99 * white + 1e-9;
+        char detail[260];
+        std::snprintf(detail, sizeof(detail),
+                      "ok=%d shadows=500 table == shadows=50 table elementwise "
+                      "(first_mismatch_index=%zu of %zu), and clamped black "
+                      "0.05 <= 0.99*white=%.7f (cap)",
+                      ok, first_mismatch, p_clamped.exp_ramp.size(), 0.99 * white);
+        report("shadows-clamped", same && under_cap, detail);
     }
 
     if (failures != 0) {

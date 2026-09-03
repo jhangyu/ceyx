@@ -25,8 +25,15 @@ extern "C" {
  *   2 - Phase 19: linear RGB accepted as a production layout; RawGpuInput
  *       gains component_black[4].
  *   3 - Round 1 Task 1.3: RawDevelopParams gains auto_exposure_mode and
- *       auto_exposure_ev (appended at the end, no existing offset moves). */
-#define kRawContractVersion 3
+ *       auto_exposure_ev (appended at the end, no existing offset moves).
+ *   4 - Round 2 Task 2.3: RawDevelopParams gains shadows (appended at the
+ *       end, no existing offset moves). Default-member-initialised to 5.0f
+ *       (the DNG SDK renderer's Shadows() default) so every existing
+ *       aggregate-init call site (`RawDevelopParams{}`) keeps the pre-Task-2.3
+ *       black-lift value without editing those call sites; a raw memset(0)
+ *       still yields 0.0f (removes the black lift), same as any other field
+ *       here. */
+#define kRawContractVersion 4
 
 typedef enum RawSampleModel {
     kRawSampleModelCfa = 0,
@@ -232,6 +239,20 @@ typedef struct RawDevelopParams {
      * caller-knob restore explicitly excludes it). */
     int32_t auto_exposure_mode;   /* RawAutoExposureMode, default kRawAutoExposureOn */
     float   auto_exposure_ev;     /* adapter-computed; caller-supplied value is ignored */
+
+    /* Round 2 Task 2.3, contract version 4. Appended at the end on purpose: no
+     * existing field's offset changes.
+     *
+     * Shadows black-lift strength, matching the DNG SDK renderer's
+     * dng_negative::Shadows() default (raw_render_params_builder.cpp folds it
+     * into black = shadows * ShadowScale * Stage3Gain * 0.001, capped at
+     * 0.99*white -- ShadowScale/Stage3Gain have no LibRaw analogue and stay
+     * fixed at 1.0, see that file for the documented limitation). Range
+     * [0,50]; out-of-range clamps in the builder. The default member
+     * initialiser (5.0f) is what keeps `RawDevelopParams{}` at every existing
+     * call site hash-identical to the pre-Task-2.3 hard-coded literal --
+     * memset(0)/malloc+zero callers get 0.0f (no black lift) instead. */
+    float shadows = 5.0f;
 } RawDevelopParams;
 
 /* Every field required by spec section 6.5. */

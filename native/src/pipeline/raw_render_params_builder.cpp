@@ -186,15 +186,23 @@ bool raw_build_render_params(const RawGpuInput& input,
 
     // Shadows black lift, matching dng_render_halide.cpp:794-797:
     //   black = Shadows * ShadowScale * Stage3Gain * 0.001, capped at 0.99*white.
-    // Shadows is the SDK renderer default of 5.0.
+    // Shadows is develop.shadows (Round 2 Task 2.3, contract version 4),
+    // default-member-initialised to the SDK renderer's default of 5.0
+    // (raw_pipeline_contract.h) so an unset/aggregate-initialised
+    // RawDevelopParams reproduces the pre-Task-2.3 hard-coded literal
+    // bit-for-bit. Clamped to [0,50] per the Global Constraints ranges;
+    // non-finite falls back to the same default.
     //
     // DOCUMENTED ASSUMPTIONS: ShadowScale and Stage3Gain are dng_negative
     // properties with no LibRaw analogue, so both are taken as 1.0 -- their DNG
-    // defaults -- giving black = 0.005. Stage3Gain also appears in the DNG
-    // exposure term as -log2(Stage3Gain), which is 0 at gain 1.0 and so drops out
-    // above. If a camera ever has a real Stage3Gain != 1 this substitution is
-    // wrong, and nothing here detects that.
-    const real64 black = std::min<real64>(5.0 * 1.0 * 1.0 * 0.001, 0.99 * white);
+    // defaults -- giving black = 0.005 at the default shadows=5.0. Stage3Gain
+    // also appears in the DNG exposure term as -log2(Stage3Gain), which is 0 at
+    // gain 1.0 and so drops out above. If a camera ever has a real
+    // Stage3Gain != 1 this substitution is wrong, and nothing here detects
+    // that.
+    const float shadows_in = std::isfinite(develop.shadows) ? develop.shadows : 5.0f;
+    const real64 shadows = std::clamp<real64>(static_cast<real64>(shadows_in), 0.0, 50.0);
+    const real64 black = std::min<real64>(shadows * 1.0 * 1.0 * 0.001, 0.99 * white);
     const dng_function_exposure_ramp ramp_fn(white, black, black);
     sampleFunction(params.exp_ramp, ramp_fn);
 

@@ -50,7 +50,11 @@ static_assert(offsetof(RawDevelopParams, auto_exposure_mode) == 16,
              "auto_exposure_mode offset moved - must stay APPENDED, never inserted");
 static_assert(offsetof(RawDevelopParams, auto_exposure_ev) == 20,
              "auto_exposure_ev offset moved - must stay APPENDED, never inserted");
-static_assert(sizeof(RawDevelopParams) == 24, "RawDevelopParams size changed");
+// Round 2 Task 2.3, contract version 4: RawDevelopParams gains shadows,
+// appended at the end. Same guard pattern.
+static_assert(offsetof(RawDevelopParams, shadows) == 24,
+             "shadows offset moved - must stay APPENDED, never inserted");
+static_assert(sizeof(RawDevelopParams) == 28, "RawDevelopParams size changed");
 
 namespace {
 
@@ -134,11 +138,12 @@ int main() {
     check("color_transform_capacity",
           sizeof(xform.m) / sizeof(xform.m[0]) == 12);
 
-    // P19/Round 1: the contract version is bumped whenever the plain-C
+    // P19/Round 1/Round 2: the contract version is bumped whenever the plain-C
     // surface changes. Phase 17 shipped version 1 implicitly; Phase 19 added
     // the linear-RGB acceptance and RawGpuInput::component_black (2); Round 1
-    // Task 1.3 adds RawDevelopParams::auto_exposure_mode/auto_exposure_ev (3).
-    check("contract_version", kRawContractVersion == 3);
+    // Task 1.3 adds RawDevelopParams::auto_exposure_mode/auto_exposure_ev (3);
+    // Round 2 Task 2.3 adds RawDevelopParams::shadows (4).
+    check("contract_version", kRawContractVersion == 4);
 
     RawDevelopParams dev;
     std::memset(&dev, 0, sizeof(dev));
@@ -147,6 +152,15 @@ int main() {
     check("develop_params_is_zeroable_to_auto_exposure_on",
           dev.auto_exposure_mode == kRawAutoExposureOn &&
           dev.auto_exposure_ev == 0.0f);
+    // memset(0) bypasses the C++ default member initialiser (there is no
+    // portable way for a POD field to survive a raw zero-fill), so this is
+    // 0.0f here -- documented above the field in raw_pipeline_contract.h.
+    // The 5.0f default is exercised by aggregate-init, checked next.
+    check("develop_params_shadows_is_zeroable", dev.shadows == 0.0f);
+
+    RawDevelopParams dev_aggregate_init{};
+    check("develop_params_shadows_default_is_5",
+          dev_aggregate_init.shadows == 5.0f);
 
     RawGpuInput cb;
     std::memset(&cb, 0, sizeof(cb));
