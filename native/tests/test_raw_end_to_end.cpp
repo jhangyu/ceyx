@@ -88,6 +88,28 @@ bool alphaAll255(const uint8_t* rgba, size_t pixels) {
     return true;
 }
 
+// Mean of (R+G+B)/3 over the central 20% crop ([0.4W,0.6W) x [0.4H,0.6H)),
+// normalised to [0,1] by /255. Same formula as the scratch oracle harness
+// (native/scripts/tmp/midgray_oracle.cpp) so the two numbers are comparable.
+// Round 1 Task 1.4 (docs/logs/2026-09-03/raw_color_implementation_plan.md
+// Task 1.4; evidence native/scripts/tmp/round1_midgray.md, HEAD 20ab0ad).
+double centralCropMeanLumaRgba(const uint8_t* rgba, uint32_t w, uint32_t h) {
+    uint32_t x0 = static_cast<uint32_t>(w * 0.4);
+    uint32_t x1 = static_cast<uint32_t>(w * 0.6);
+    uint32_t y0 = static_cast<uint32_t>(h * 0.4);
+    uint32_t y1 = static_cast<uint32_t>(h * 0.6);
+    double sum = 0.0;
+    uint64_t n = 0;
+    for (uint32_t y = y0; y < y1; ++y) {
+        for (uint32_t x = x0; x < x1; ++x) {
+            const uint8_t* px = rgba + (static_cast<size_t>(y) * w + x) * 4;
+            sum += (static_cast<double>(px[0]) + px[1] + px[2]) / 3.0 / 255.0;
+            ++n;
+        }
+    }
+    return n ? sum / static_cast<double>(n) : -1.0;
+}
+
 // ---------------------------------------------------------------------------
 // Minimal SHA-256 (FIPS 180-4). Self-contained so the corpus hash gate needs no
 // extra dependency and behaves identically on every platform.
@@ -1338,6 +1360,140 @@ int main(int argc, char** argv) {
         std::printf("[RawE2E] xtrans-timing %s rawspeed3_ms=%.2f "
                     "libraw_native_ms=%.2f (informational)\n",
                     s.id.c_str(), ms[0][1], ms[1][1]);
+    }
+
+    // Round 1 Task 1.4: mid-grey acceptance against the LibRaw oracle
+    // (docs/logs/2026-09-03/raw_color_implementation_plan.md Task 1.4, Revision
+    // 2.3/2.4). Pre-registered tolerance, oracle values, red (auto OFF) and
+    // green (auto ON) captures, and the foveon_1 diagnosis are all recorded in
+    // native/scripts/tmp/round1_midgray.md at HEAD 20ab0ad -- that artifact
+    // is the evidence trail; this case is the permanent regression guard.
+    // midgray_within_tolerance: central 20% crop mean luma within +-12%
+    // (relative, "<=", matching the pre-registered rule
+    // abs(ours-target)/target <= 0.12) of the recorded oracle target, for the
+    // two corpus files that conform under the current auto-exposure solve.
+    {
+        struct MidgrayTolerance {
+            const char* id;
+            const char* path;
+            double oracle_target;
+        };
+        // Recorded oracle targets, round1_midgray.md "Task #7 step 2 full
+        // re-capture" table.
+        const MidgrayTolerance kTolerance[] = {
+            {"local_sony_bayer", "image_samples/raw_sample.arw", 0.347886},
+            {"fuji_xt3_xtrans", "image_samples/raw_corpus/fuji_xt3.raf", 0.489281},
+        };
+        for (const auto& t : kTolerance) {
+            if (!fileExists(t.path)) {
+                std::printf("[RawE2E] SKIP midgray_within_tolerance %s (missing file)\n", t.id);
+                continue;
+            }
+            RawDevelopParams develop{};
+            develop.tone_curve_strength = 1.0f;
+            develop.output_space = kRawOutputColorSpaceSrgb;
+            // auto_exposure_mode left at its zero-init default, kRawAutoExposureOn.
+            RawPipelineResult result{};
+            const RawErrorCode rc = raw_pipeline_decode_file(t.path, develop, result);
+            bool ok = false;
+            char detail[220];
+            if (rc == kRawSuccess && result.rgba_ptr && result.width > 0 && result.height > 0) {
+                const double luma =
+                    centralCropMeanLumaRgba(result.rgba_ptr, result.width, result.height);
+                const double reldiff = std::fabs(luma - t.oracle_target) / t.oracle_target;
+                ok = reldiff <= 0.12;
+                std::snprintf(detail, sizeof(detail),
+                              "ours=%.6f oracle=%.6f reldiff=%.4f (<=0.12 required)", luma,
+                              t.oracle_target, reldiff);
+            } else {
+                std::snprintf(detail, sizeof(detail), "decode FAILED rc=%s",
+                              raw_error_name(rc));
+            }
+            report("midgray_within_tolerance", t.id, ok, detail);
+            ++checked;
+            if (result.rgba_ptr) dng_rgba_output_release(result.rgba_ptr);
+        }
+    }
+
+    // midgray_known_deviations: xt5 and foveon_2 sit outside the +-12% oracle
+    // tolerance at zero gain (over-bright, which auto-exposure cannot cause or
+    // cure -- suspected vendor-curve double-apply, Round 2 Task 2.4 owns the
+    // investigation). foveon_1 is a DIAGNOSED deviation, not an unexplained
+    // one -- see the comment on its entry below, copied verbatim from the
+    // designer's ruling into round1_midgray.md. All three are pinned to their
+    // MEASURED value (not the oracle) with a +-2% drift band, so regression
+    // is still caught without hiding the deviation behind a widened bound or
+    // calling it "expected"/"acceptable".
+    {
+        struct MidgrayKnownDeviation {
+            const char* id;
+            const char* path;
+            double recorded_value;
+            const char* comment;
+        };
+        const MidgrayKnownDeviation kKnownDeviations[] = {
+            {"fuji_xt5_xtrans", "image_samples/raw_corpus/fuji_xt5.raf", 0.256020,
+             // xt5: unexplained deviation, over-bright at zero gain (ours=0.256020
+             // vs oracle=0.227676, +12.45%). Owner: Round 2 Task 2.4 (vendor-curve
+             // double-apply investigation). Pinned to the measured value, not the
+             // oracle -- drift detector, not a correctness claim.
+             "xt5: over-bright at zero gain, +12.45% vs oracle; owner Round 2 Task 2.4"},
+            {"foveon_x3f_linear_2", "image_samples/raw_corpus/sigma_sd_quattro_h_23.x3f",
+             0.794617,
+             // foveon_2: unexplained deviation, over-bright at zero gain
+             // (ours=0.794617 vs oracle=0.574845, +38.23%). Owner: Round 2 Task
+             // 2.4 (vendor-curve double-apply investigation). Pinned to the
+             // measured value, not the oracle -- drift detector, not a
+             // correctness claim.
+             "foveon_2: over-bright at zero gain, +38.23% vs oracle; owner Round 2 Task 2.4"},
+            {"foveon_x3f_linear", "image_samples/raw_corpus/sigma_sd_quattro_h_19.x3f",
+             0.726914,
+             // foveon_1: DIAGNOSED DEVIATION, not an unexplained one. At ev=0 its
+             // top-1% quantile renders to f_lo=0.980946; the solver closes that
+             // 1.9% gap with ev=0.310145, which lifts the mid-grey mean from
+             // +12.00% to +18.56% versus the oracle. The implementation is
+             // correct per spec (verified by impl-solve, probe_foveon_black.cpp;
+             // per-channel black and double-WB ruled out for this file --
+             // component_black uniform 256s, as_shot_neutral ~1.0). The cause is
+             // the SPEC's target: quantile-to-exactly-1.0 with no headroom. On a
+             // scene with compressed top-end dynamic range, forcing the top 1% to
+             // literal white necessarily raises the mean. Control variable
+             // (highlight) and acceptance variable (mid-grey) are not the same
+             // quantity and are not required to move together. Target semantics
+             // are parked for revisit with a wider corpus -- see the parking-lot
+             // entry "auto-exposure target semantics". This value is pinned to
+             // detect drift, NOT because it is acceptable.
+             "foveon_1: diagnosed deviation, quantile-to-1.0 target with no headroom "
+             "(see round1_midgray.md); pinned to detect drift, not acceptable"},
+        };
+        for (const auto& t : kKnownDeviations) {
+            if (!fileExists(t.path)) {
+                std::printf("[RawE2E] SKIP midgray_known_deviations %s (missing file)\n", t.id);
+                continue;
+            }
+            RawDevelopParams develop{};
+            develop.tone_curve_strength = 1.0f;
+            develop.output_space = kRawOutputColorSpaceSrgb;
+            RawPipelineResult result{};
+            const RawErrorCode rc = raw_pipeline_decode_file(t.path, develop, result);
+            bool ok = false;
+            char detail[320];
+            if (rc == kRawSuccess && result.rgba_ptr && result.width > 0 && result.height > 0) {
+                const double luma =
+                    centralCropMeanLumaRgba(result.rgba_ptr, result.width, result.height);
+                const double reldiff = std::fabs(luma - t.recorded_value) / t.recorded_value;
+                ok = reldiff <= 0.02;
+                std::snprintf(detail, sizeof(detail),
+                              "ours=%.6f recorded=%.6f reldiff=%.4f (<=0.02 drift band) -- %s",
+                              luma, t.recorded_value, reldiff, t.comment);
+            } else {
+                std::snprintf(detail, sizeof(detail), "decode FAILED rc=%s -- %s",
+                              raw_error_name(rc), t.comment);
+            }
+            report("midgray_known_deviations", t.id, ok, detail);
+            ++checked;
+            if (result.rgba_ptr) dng_rgba_output_release(result.rgba_ptr);
+        }
     }
 
     // Nothing may stay checked out, on success or failure.
