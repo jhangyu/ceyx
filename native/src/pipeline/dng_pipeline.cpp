@@ -36,7 +36,7 @@ functions:
     description: "DNG parse + Stage1/2/3/4 decode orchestration. H-1 ScopedRgbaCheckout guard in decodeStages."
     lines: "974-1140"
   - name: "pipelineSingleFlightMutex"
-    description: "File-scope std::shared_mutex accessor; warmup always exclusive, decode shared only under DNG_CONCURRENT_DECODE=1."
+    description: "File-scope std::shared_mutex accessor; warmup always exclusive, decodes always shared (overlap)."
     lines: "1143-1146"
   - name: "dng_pipeline_warmup_for_size"
     description: "Idle-time warm hook; locks single-flight mutex and primes pipeline pools."
@@ -640,12 +640,34 @@ class ScopedStage2DeviceHandoff {
 };
 
 // Returns a raw pointer to Stage3 workspace.
-// If caller supplied a pre-sized vector (harness path), use it directly.
-// If caller supplied an empty/wrong-size vector, resize and use it.
-// Otherwise (FFI path), bump-allocate from the per-decode arena.
-// No release path: the arena is reclaimed wholesale at decode end.
-// A null ctx (plain dng_host harness) with no caller workspace yields nullptr,
-// and the caller takes its existing allocation-failure path.
+// If the caller supplied a PRE-SIZED vector (harness path), use it directly.
+// Otherwise, with a DecodeContext (FFI path), bump-allocate from the per-decode
+// arena — no release path; the arena is reclaimed wholesale at decode end.
+// Otherwise, with any caller vector (plain-host path), resize and use it.
+// A null ctx AND no caller workspace yields nullptr, and the caller takes its
+// existing allocation-failure path.
+//
+// PRIORITY ORDER, and the two opposite ways it has been got wrong (both found
+// on 2026-09-03):
+//   1. a caller vector that is ALREADY the right size  -> use it as-is
+//   2. otherwise, a DecodeContext                      -> per-decode arena
+//   3. otherwise, a caller vector of any size          -> resize and use it
+//
+// (a) An EMPTY caller vector is NOT a request to use that vector. decodeStages
+//     declares a local empty `stage3Workspace` (:1382) and passes it on the
+//     Bayer path precisely so this function hands back lazy arena memory; the
+//     comment there — "do NOT eagerly resize ... eliminates the ~262ms
+//     zero-fill" — is the entire point. Making an empty vector authoritative
+//     bypasses the arena, which was observed directly as the slot census's
+//     arena_high_water_bytes dropping from 146022912 to 0, and reinstates the
+//     per-decode zero-fill the arena exists to avoid.
+// (b) But an empty caller vector with NO DecodeContext must still work. A
+//     plain `dng_host` caller has no arena, and the original code let that
+//     case fall through every branch and return nullptr, which broke
+//     dng_pipeline_run_stage3 for its own documented usage
+//     (docs/logs/2026-09-03/task8-matrix-pre.txt:114).
+// Branch 3 serves (b) without breaking (a): it is reached only when ctx is
+// null, i.e. exactly the plain-host case.
 uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
                                     size_t elements,
                                     DngPipelineStage3Timing *timing,
@@ -653,9 +675,6 @@ uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
   const auto resizeStart = Clock::now();
   uint16_t *ptr = nullptr;
   if (callerWorkspace && callerWorkspace->size() == elements) {
-    ptr = callerWorkspace->data();
-  } else if (callerWorkspace && !callerWorkspace->empty()) {
-    callerWorkspace->resize(elements);
     ptr = callerWorkspace->data();
   } else if (ctx) {
     // F2 (R3 review parking lot, folded into Task 6): one Stage-3 workspace
@@ -685,6 +704,14 @@ uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
         ctx->stage3_workspace_elements = elements;
       }
     }
+  } else if (callerWorkspace) {
+    // Plain-host fallback (b): no DecodeContext, so no arena. Resize the
+    // caller's vector — it owns the memory for the duration of its own decode,
+    // so this is still unshareable by construction. `resize()` handles every
+    // size including 0; do NOT gate this on !empty(), which is the bug that
+    // made dng_pipeline_run_stage3 fail for plain-host callers.
+    callerWorkspace->resize(elements);
+    ptr = callerWorkspace->data();
   }
   const auto resizeEnd = Clock::now();
   if (timing) {
@@ -1479,25 +1506,15 @@ size_t dng_rgb_output_checked_out_count() {
 // warmup invoked from idle could race a concurrent decode and corrupt those
 // shared resources.  Function-local static guarantees thread-safe init.
 //
-// Mutex rework (2026-09-03): now a shared_mutex. WARMUP IS ALWAYS EXCLUSIVE,
-// in every configuration — that is what keeps the invariant above true. The
-// decode side is exclusive by default and takes the shared lock only when
-// DNG_CONCURRENT_DECODE=1, a TEMPORARY flag that exists so the concurrent
-// stress gate can be observed RED before the per-decode scratch is isolated.
-// The flag is removed once every audited item has its own guard; see
-// docs/logs/2026-09-03/mutex-rework-spec.md §2.
+// Mutex rework (2026-09-03): a shared_mutex. WARMUP IS ALWAYS EXCLUSIVE (all
+// five sub-steps) — that is what keeps the invariant above true. Decodes hold
+// the SHARED lock and overlap; every item the exclusive decode lock used to
+// protect now has its own guard. See
+// docs/logs/2026-09-03/mutex-rework-spec.md §2 for the audit and
+// docs/logs/2026-09-03/gate-results.md for the evidence.
 static std::shared_mutex &pipelineSingleFlightMutex() {
   static std::shared_mutex m;
   return m;
-}
-
-// TEMPORARY (removed in Task 8): opt-in to the shared decode lock.
-static bool concurrentDecodeEnabled() {
-  static const bool enabled = []() {
-    const char *v = std::getenv("DNG_CONCURRENT_DECODE");
-    return v && v[0] == '1' && v[1] == '\0';
-  }();
-  return enabled;
 }
 
 void dngRaceDelay() {
@@ -1687,17 +1704,13 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     }
   } pendingGuard;
 
-  // Default (flag unset) is byte-identical to the previous behaviour: a fully
-  // exclusive decode. Only DNG_CONCURRENT_DECODE=1 lets decodes overlap.
-  std::shared_lock<std::shared_mutex> sharedGuard(pipelineSingleFlightMutex(),
-                                                  std::defer_lock);
-  std::unique_lock<std::shared_mutex> exclusiveGuard(pipelineSingleFlightMutex(),
-                                                     std::defer_lock);
-  if (concurrentDecodeEnabled()) {
-    sharedGuard.lock();
-  } else {
-    exclusiveGuard.lock();
-  }
+  // Mutex rework (2026-09-03): decodes hold the SHARED lock and overlap.
+  // Warmup holds the EXCLUSIVE lock (all five sub-steps), which is what keeps
+  // the invariant above true. Every item the exclusive decode lock used to
+  // protect now has its own guard — see
+  // docs/logs/2026-09-03/mutex-rework-spec.md §2 for the audit and
+  // docs/logs/2026-09-03/gate-results.md for the evidence.
+  std::shared_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
   result = DngPipelineResult{};
   if (!file_path || !file_path[0]) {
     result.error_code = kDngErrNullPath;
