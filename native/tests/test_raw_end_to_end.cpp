@@ -1584,14 +1584,30 @@ int main(int argc, char** argv) {
                             const double ev_diff = std::fabs(delta_ev - 1.0);
                             const double luma_reldiff =
                                 std::fabs(scaled_luma - baseline_luma) / baseline_luma;
-                            ok = ev_diff <= 0.15 && luma_reldiff <= 0.05;
+                            // Rev 2.6 guard: both measured endpoints must be
+                            // STRICTLY unclamped (0 < ev < 2). If either
+                            // saturates, the delta would silently measure the
+                            // [0,2] clamp instead of the estimator and still
+                            // look like a clean pass -- the same failure
+                            // shape that hid sony's true -0.81 EV baseline
+                            // behind a clamped 0.0 reading above.
+                            const bool baseline_unclamped =
+                                baseline_ev > 0.0 && baseline_ev < 2.0;
+                            const bool scaled_unclamped =
+                                scaled_develop.auto_exposure_ev > 0.0 &&
+                                scaled_develop.auto_exposure_ev < 2.0;
+                            ok = ev_diff <= 0.15 && luma_reldiff <= 0.05 &&
+                                 baseline_unclamped && scaled_unclamped;
                             std::snprintf(
                                 detail, sizeof(detail),
-                                "baseline_ev=%.4f scaled_ev=%.4f delta_ev=%.4f (want "
-                                "1.00+-0.15) baseline_luma=%.6f scaled_luma=%.6f "
-                                "luma_reldiff=%.4f (<=0.05)",
-                                baseline_ev, scaled_develop.auto_exposure_ev, delta_ev,
-                                baseline_luma, scaled_luma, luma_reldiff);
+                                "baseline_ev=%.4f (unclamped=%s) scaled_ev=%.4f "
+                                "(unclamped=%s) delta_ev=%.4f (want 1.00+-0.15) "
+                                "baseline_luma=%.6f scaled_luma=%.6f luma_reldiff=%.4f "
+                                "(<=0.05)",
+                                baseline_ev, baseline_unclamped ? "true" : "false",
+                                scaled_develop.auto_exposure_ev,
+                                scaled_unclamped ? "true" : "false", delta_ev, baseline_luma,
+                                scaled_luma, luma_reldiff);
                         } else {
                             std::snprintf(detail, sizeof(detail), "scaled render FAILED rc=%s",
                                           raw_error_name(rrc));
