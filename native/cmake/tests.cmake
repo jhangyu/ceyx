@@ -1531,6 +1531,19 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_device_handoff ${DNG_LINUX_TEST_LIBS})
 endif()
 
+# Task 1 (mutex rework): concurrency probe over the already-lock-free RAW path.
+# Measures Halide's own GPU serialisation with the DNG single-flight mutex out
+# of the picture. Not a correctness test; produces timings only.
+add_executable(probe_concurrent_raw tests/probe_concurrent_raw.cpp)
+target_include_directories(probe_concurrent_raw PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(probe_concurrent_raw dng_decoder_native)
+add_dependencies(probe_concurrent_raw dng_decoder_native)
+
 
 # Sized decode (targetWidth) R1: standalone gate for the box-filter-scaled
 # Stage4 AOT. Self-contained — synthesises a Stage3-shaped source and its
