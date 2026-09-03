@@ -97,13 +97,16 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
         return result;
     }
 
-    // Black-subtracted, white-normalised, WB-scaled histogram values, kept
-    // PER COLOUR CLASS (Revision 2.2's Behavior block): the estimator needs
-    // the highlight triple h = (q_R, q_G, q_B) -- exactly the triple Stage 4
-    // receives -- not one pooled quantile, so a strongly tinted frame cannot
-    // have its clipped channel averaged away by the other two. WB scaling is
-    // applied to these bins only -- the pixel path is untouched -- matching
-    // LibRaw's post-white-balance auto-bright histogram.
+    // Black-subtracted, white-normalised histogram values, kept PER COLOUR
+    // CLASS (Revision 2.2's Behavior block, corrected by Revision 2.4): the
+    // estimator needs the highlight triple h = (q_R, q_G, q_B) -- exactly the
+    // triple Stage 4 receives -- not one pooled quantile, so a strongly
+    // tinted frame cannot have its clipped channel averaged away by the other
+    // two. Revision 2.4: NOT WB-scaled here. render_eval already folds white
+    // balance through camera_to_rgb * diag(gain); scaling these bins too
+    // would stack two WB architectures. wb_gain is accepted for signature
+    // compatibility / diagnostics only and is unused in this computation.
+    (void)wb_gain;
     std::vector<float> values[3];
     for (int c = 0; c < 3; ++c) values[c].reserve(static_cast<size_t>(num_sampled) / 2 + 1);
     for (uint64_t row = 0; row < height; row += sy) {
@@ -121,7 +124,7 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
             const float black_ch = black[ch];
             const float denom = white_level - black_ch;
             float v = (static_cast<float>(row_ptr[col]) - black_ch) / denom;
-            v = std::max(0.0f, v) * wb_gain[ch];
+            v = std::max(0.0f, v);
             const uint32_t colour_class = ch < 3 ? ch : (ch % 3);
             values[colour_class].push_back(v);
         }

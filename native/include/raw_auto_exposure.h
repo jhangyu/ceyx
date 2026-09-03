@@ -44,10 +44,11 @@ struct RawAutoExposureResult {
 // samples: unpacked u16 raw, row-major, `stride_x`/`stride_y` >= 1 subsampling.
 // black/white: per-CFA-channel black level and white level, already known to
 //   the adapter.
-// wb_gain: the gains implied by as_shot_neutral, applied to the HISTOGRAM BINS
-//   only -- LibRaw builds its histogram after white balance, and a strongly
-//   tinted frame would otherwise clip on a single channel. The pixel path is
-//   NOT touched.
+// wb_gain: Revision 2.4 -- UNUSED in this computation. Kept in the signature
+//   for call-site compatibility / diagnostics only. Previously scaled the
+//   histogram bins, but render_eval already folds white balance through
+//   camera_to_rgb * diag(gain); scaling here too stacked two WB architectures,
+//   wrong by construction on any tinted as_shot_neutral. Do not reintroduce.
 // colour_of_site: per-SITE colour class (0..2, R/G/B), not CFA geometry.
 //   colour_of_site[(y % pattern_h) * pattern_w + (x % pattern_w)] gives the
 //   class of the sample at (x, y).

@@ -196,9 +196,16 @@ int main() {
         CHECK("tiny-frame", r.status == RawAutoExposureStatus::kInsufficientSamples, detail);
     }
 
-    // Case 6: wb_scaling_changes_estimate -- a 2x2 CFA-patterned frame (R/B
-    // low, G high) must give a different auto_ev under a non-trivial wb_gain
-    // than under {1,1,1,1}, proving the WB-scaled histogram is actually used.
+    // Case 6 (RETIRED by Revision 2.4 / Task 2.5): wb_scaling_changes_estimate
+    // used to assert that a non-trivial wb_gain moved auto_ev relative to
+    // {1,1,1,1} -- i.e. it asserted the double-WB bug's own symptom (the
+    // estimator's histogram bins responding to wb_gain at all). Task 2.5
+    // removes WB scaling from the estimator side entirely: wb_gain is now
+    // unused in the computation, so this case's premise is gone. Leaving it
+    // green under the old assertion would mean the double-application bug is
+    // still present. Replaced by "no-double-wb-on-tinted-input" below, which
+    // asserts the CORRECT invariant instead: wb_gain must NOT move auto_ev
+    // when render_eval independently folds the same neutral.
     {
         const uint32_t w = 128, h = 128;
         std::vector<uint16_t> buf(static_cast<size_t>(w) * h);
@@ -212,10 +219,6 @@ int main() {
         }
         float black[4], wb_flat[4];
         uniformBlackWb(black, wb_flat);
-        // Strongly tints R relative to G/B so the top-1% quantile the
-        // estimator picks moves from the G/B group to the R-only group,
-        // without either case saturating the +2 EV ceiling (which would
-        // mask the difference the way a flatter tint choice did).
         float wb_tinted[4] = {2.0f, 1.0f, 1.5f, 1.0f};  // R, G, (unused), B
         uint8_t cfa[4];
         identityChannelMap(cfa);
@@ -225,12 +228,66 @@ int main() {
             buf.data(), w, h, w, 1, 1, black, 65535.0f, wb_tinted, cfa, 2, 2, &stubRenderEval, nullptr, 0.01f);
         char detail[220];
         std::snprintf(detail, sizeof(detail),
-                      "flat auto_ev=%.4f clip=%.5f; tinted auto_ev=%.4f clip=%.5f",
+                      "flat auto_ev=%.4f clip=%.5f; tinted auto_ev=%.4f clip=%.5f "
+                      "(wb_gain no longer scales the histogram -- must agree)",
                       r_flat.auto_ev, r_flat.clip_value, r_tint.auto_ev, r_tint.clip_value);
-        CHECK("wb-scaling-changes-estimate",
+        CHECK("wb-gain-no-longer-scales-histogram",
               r_flat.status == RawAutoExposureStatus::kOk &&
                   r_tint.status == RawAutoExposureStatus::kOk &&
-                  std::fabs(r_flat.auto_ev - r_tint.auto_ev) > 1e-3f,
+                  std::fabs(r_flat.auto_ev - r_tint.auto_ev) < 1e-6f,
+              detail);
+    }
+
+    // Case 6b (Revision 2.4 / Task 2.5): no_double_wb_on_tinted_input -- a
+    // flat, unWB'd frame at fraction g of white on every channel, with
+    // as_shot_neutral folded into render_eval as a per-channel gain
+    // (2.0, 1.0, 1.5) applied ONCE (camera_to_rgb * diag(gain), modelled here
+    // by the analytic stub multiplying rgb[c] by gain[c] before the exp2(ev)
+    // clip). wb_gain is ALSO passed to the estimator with the SAME values --
+    // pre-fix, the estimator would scale its histogram bins by wb_gain too,
+    // so the effective triple handed to render_eval would carry gain twice
+    // (once from the histogram, once from render_eval's own fold), solving
+    // for the wrong ev. Reference: post-fix, h = (g,g,g) unscaled, so
+    // render_eval's peak channel is R at g*2.0; solved ev = -log2(g*2.0).
+    // Pre-fix, h = (g*2.0, g*1.0, g*1.5) (histogram-scaled), so render_eval's
+    // peak is R at g*2.0*2.0 = g*4.0; solved ev = -log2(g*4.0) -- exactly 1
+    // EV darker than correct, a large, unambiguous divergence.
+    {
+        struct GainCtx { float gain[3]; };
+        auto renderEvalWithGain = [](void* ctx, const float rgb[3], float ev) -> float {
+            const GainCtx* g = static_cast<const GainCtx*>(ctx);
+            float m = 0.0f;
+            for (int c = 0; c < 3; ++c) m = std::fmax(m, rgb[c] * g->gain[c]);
+            const float v = m * std::exp2(ev);
+            if (!std::isfinite(v)) return v;
+            return std::fmin(1.0f, std::fmax(0.0f, v));
+        };
+        GainCtx ctx{{2.0f, 1.0f, 1.5f}};  // folded from as_shot_neutral (2.0, 1.0, 1.5)
+
+        const float g = 0.2f;  // fraction of white, unWB'd raw level
+        const uint32_t w = 128, h = 128;
+        const uint16_t level = static_cast<uint16_t>(g * 65535.0f);
+        std::vector<uint16_t> buf(static_cast<size_t>(w) * h, level);
+        float black[4];
+        for (int i = 0; i < 4; ++i) black[i] = 0.0f;
+        float wb_gain[4] = {2.0f, 1.0f, 1.5f, 1.0f};  // same neutral as render_eval's gain
+        uint8_t cfa[4];
+        identityChannelMap(cfa);
+
+        typedef float (*RenderEvalFnRaw)(void*, const float[3], float);
+        RawAutoExposureResult r = raw_auto_exposure_estimate(
+            buf.data(), w, h, w, 1, 1, black, 65535.0f, wb_gain, cfa, 2, 2,
+            static_cast<RenderEvalFnRaw>(renderEvalWithGain), &ctx, 0.01f);
+
+        const float expected_ev = -std::log2(g * 2.0f);  // correct: gain applied ONCE
+        const float double_wb_ev = -std::log2(g * 4.0f);  // pre-fix: gain applied TWICE
+        char detail[260];
+        std::snprintf(detail, sizeof(detail),
+                      "g=%.2f auto_ev=%.6f expected=%.6f (double-wb-would-be=%.6f) status=%d",
+                      g, r.auto_ev, expected_ev, double_wb_ev, static_cast<int>(r.status));
+        CHECK("no-double-wb-on-tinted-input",
+              r.status == RawAutoExposureStatus::kOk &&
+                  std::fabs(r.auto_ev - expected_ev) < 1e-3f,
               detail);
     }
 
