@@ -1363,63 +1363,59 @@ int main(int argc, char** argv) {
     }
 
     // Round 1 Task 1.4 (docs/logs/2026-09-03/raw_color_implementation_plan.md
-    // Task 1.4, Revision 2.5, decision D-10). User ruling, final, after A/B
-    // image review (artifacts/exposure_ab/): the auto-exposure ON render is
-    // the CORRECT rendering; default stays ON; the LibRaw oracle is RETIRED
-    // as a correctness reference -- it was the wrong yardstick, and the
-    // user's expectation aligns with brighter camera/Adobe-style rendering,
-    // not LibRaw's own render. The former LibRaw-oracle +-12% framing
-    // (`midgray_within_tolerance`) and the "known deviation vs oracle" framing
-    // (`midgray_known_deviations`) are both retired; their measurements
-    // remain in native/scripts/tmp/round1_midgray.md as historical record
-    // (evidence trail, not a live correctness claim).
+    // Task 1.4, Revision 2.5). Case `midgray_pins` replaces both the retired
+    // `midgray_within_tolerance` and `midgray_known_deviations`.
     //
-    // midgray_pinned_to_approved_render: all five corpus files pinned to
-    // their CURRENT auto-ON central-20%-crop mean luma with a +-2% drift
-    // band. Purpose is not "prove this value is correct" -- the user already
-    // approved it by image review -- but "any future render shift must be an
-    // attributable, signed decision", i.e. a regression/drift detector.
+    // Reference: user-approved rendering, ruled 2026-09-03 after A/B image
+    // review (decision D-10). The LibRaw-oracle +-12% framing is retired --
+    // it is a LibRaw-class reference and the user's expectation is
+    // camera/Adobe-brighter, so the oracle was measuring against the wrong
+    // target. Its measurements remain on the record in
+    // native/scripts/tmp/round1_midgray.md as historical development data.
+    // These pins detect drift. They do not validate the rendering: with the
+    // oracle retired there is no independent correctness check on these five
+    // values. Their job is to make any future change to these renders an
+    // attributable, signed decision rather than a silent shift. (The
+    // synthetic-underexposure case immediately below is the estimator's only
+    // remaining behavioural validation -- these pins validate nothing on
+    // their own.)
+    //
+    // All five values re-measured at HEAD 5b71ced (native/scripts/tmp/
+    // round1_midgray.md, "Decision D-10" section; RC=0) -- not reused from
+    // any prior quote.
     {
         struct MidgrayPin {
             const char* id;
             const char* path;
-            double approved_value;
+            double pinned_value;
             const char* comment;
         };
         const MidgrayPin kPins[] = {
             {"local_sony_bayer", "image_samples/raw_sample.arw", 0.371977,
-             "sony: user-approved rendering, ruled 2026-09-03 after A/B image review "
-             "(artifacts/exposure_ab/); pinned to detect drift, LibRaw-oracle framing retired"},
+             "sony: user-approved rendering (D-10); pinned to detect drift"},
             {"fuji_xt3_xtrans", "image_samples/raw_corpus/fuji_xt3.raf", 0.661903,
-             "xt3: user-approved rendering, ruled 2026-09-03 after A/B image review "
-             "(artifacts/exposure_ab/); pinned to detect drift, LibRaw-oracle framing retired"},
+             "xt3: user-approved rendering (D-10); pinned to detect drift"},
             {"fuji_xt5_xtrans", "image_samples/raw_corpus/fuji_xt5.raf", 0.328131,
-             "xt5: user-approved rendering, ruled 2026-09-03 after A/B image review "
-             "(artifacts/exposure_ab/); pinned to detect drift, LibRaw-oracle framing retired"},
+             "xt5: user-approved rendering (D-10); pinned to detect drift"},
             {"foveon_x3f_linear_2", "image_samples/raw_corpus/sigma_sd_quattro_h_23.x3f",
-             0.794617,
-             "foveon_2: user-approved rendering, ruled 2026-09-03 after A/B image review "
-             "(artifacts/exposure_ab/); pinned to detect drift, LibRaw-oracle framing retired"},
+             0.794617, "foveon_2: user-approved rendering (D-10); pinned to detect drift"},
             {"foveon_x3f_linear", "image_samples/raw_corpus/sigma_sd_quattro_h_19.x3f",
              0.727365,
-             // foveon_1: user-approved rendering, ruled 2026-09-03 after A/B
-             // image review (artifacts/exposure_ab/). Mechanism note (kept as
-             // explanation, no longer framed as a deviation from anything):
-             // at ev=0 its top-1% quantile renders to f_lo=0.980946; the
-             // output-domain solve closes that 1.9% highlight gap with
-             // +0.31 EV, which is what shifts the mid-grey mean here. Target
-             // semantics (quantile-to-exactly-1.0 with no headroom) remain
-             // parked for revisit with a wider corpus -- see the parking-lot
-             // entry "auto-exposure target semantics". Pinned to detect
-             // drift, LibRaw-oracle framing retired.
-             "foveon_1: user-approved rendering, ruled 2026-09-03 after A/B image review "
-             "(artifacts/exposure_ab/); mechanism: solve closes 1.9% highlight gap with "
-             "+0.31 EV; pinned to detect drift, LibRaw-oracle framing retired"},
+             // foveon_1: user-approved rendering (D-10). Mechanism, retained
+             // as explanation of why ON brightens this file: at ev=0 its
+             // top-1% quantile renders to f_lo=0.980946; the output-domain
+             // solve closes that 1.9% highlight gap with +0.31 EV, which is
+             // what shifts the mid-grey mean here. The no-headroom target
+             // (top-1% quantile driven to literal white) is the reason, and
+             // target semantics remain parked for revisit with a wider
+             // corpus -- see the parking-lot entry "auto-exposure target
+             // semantics". Pinned to detect drift.
+             "foveon_1: user-approved rendering (D-10); mechanism: solve closes 1.9% "
+             "highlight gap with +0.31 EV; pinned to detect drift"},
         };
         for (const auto& t : kPins) {
             if (!fileExists(t.path)) {
-                std::printf("[RawE2E] SKIP midgray_pinned_to_approved_render %s (missing file)\n",
-                            t.id);
+                std::printf("[RawE2E] SKIP midgray_pins %s (missing file)\n", t.id);
                 continue;
             }
             RawDevelopParams develop{};
@@ -1434,18 +1430,187 @@ int main(int argc, char** argv) {
             if (rc == kRawSuccess && result.rgba_ptr && result.width > 0 && result.height > 0) {
                 const double luma =
                     centralCropMeanLumaRgba(result.rgba_ptr, result.width, result.height);
-                const double reldiff = std::fabs(luma - t.approved_value) / t.approved_value;
+                const double reldiff = std::fabs(luma - t.pinned_value) / t.pinned_value;
                 ok = reldiff <= 0.02;
                 std::snprintf(detail, sizeof(detail),
-                              "ours=%.6f approved=%.6f reldiff=%.4f (<=0.02 drift band) -- %s",
-                              luma, t.approved_value, reldiff, t.comment);
+                              "ours=%.6f pinned=%.6f reldiff=%.4f (<=0.02 drift band) -- %s",
+                              luma, t.pinned_value, reldiff, t.comment);
             } else {
                 std::snprintf(detail, sizeof(detail), "decode FAILED rc=%s -- %s",
                               raw_error_name(rc), t.comment);
             }
-            report("midgray_pinned_to_approved_render", t.id, ok, detail);
+            report("midgray_pins", t.id, ok, detail);
             ++checked;
             if (result.rgba_ptr) dng_rgba_output_release(result.rgba_ptr);
+        }
+    }
+
+    // Round 2 exit-gate close acceptance (plan L1060-1069, Revision 2.5):
+    // synthetic-underexposure proof, the estimator's ONLY remaining
+    // behavioural validation now that the oracle is retired and the pins
+    // above validate nothing on their own (drift detectors only). We hold no
+    // genuinely underexposed capture, so this synthetic case is the whole of
+    // the evidence for "the estimator does the right thing in the direction
+    // it exists for".
+    //
+    // DELTA form, not absolute (measured against sony first -- see below):
+    // auto_exposure_ev is clamped to [0,2], and the clamp hides each real
+    // corpus file's TRUE unclamped baseline solve. Probing local_sony_bayer
+    // with a real 2^-2 scale gave scaled_ev=1.19, not the naively-expected
+    // 2.00 -- backing out the arithmetic showed sony's true unclamped
+    // baseline is -0.81 EV (its quantile already sits above the render
+    // target before any scaling), so -0.81 + 2.00 = 1.19 exactly, matching
+    // measurement. A real file's baseline margin does not cancel in an
+    // ABSOLUTE assertion; it exactly cancels in a DELTA one (both endpoints
+    // measured in the same run, same chain), which is what this case
+    // asserts instead. The unit-level `round_trip_recovers_applied_gain`
+    // (native/tests/test_raw_auto_exposure.cpp) already covers the absolute
+    // recovery arithmetic against an analytic render_eval stub with a
+    // hand-constructed zero baseline; THIS case proves the real chain
+    // end-to-end on a real file, where only a delta is well-defined.
+    //
+    // File+scale pair: foveon_1 (sigma_sd_quattro_h_19.x3f), whose baseline
+    // unclamped solve measures +0.314 EV (probe_auto_ev_foveon.cpp) -- safely
+    // inside (0,2), not clamp-saturated -- scaled by 2^-1 (true -1 EV, not
+    // -2), so the predicted post-scale total (~1.314) also stays inside
+    // (0,2) at both ends. This is the only file+scale pair among the 5
+    // corpus files with both endpoints provably inside the clamp range (the
+    // other four either start clamp-saturated at 0, like sony/foveon_2, or
+    // have a large enough positive baseline that even a -1 EV scale would
+    // approach or cross the +2 ceiling, like xt3 at +0.774/xt5 at +0.581).
+    //
+    // Layer choice: raw file bytes are not trivially scalable pre-container-
+    // decode (compressed/mosaic-packed), so this scales the closest reachable
+    // real samples -- LibRawFrontendContext's own unpacked u16 buffer, in
+    // place, between open_and_unpack() and LibRawGpuInputAdapter::build().
+    // RawGpuInput::planes[0].data aliases that same buffer (the adapter's
+    // ownership contract, libraw_gpu_input_adapter.h), so the scaled samples
+    // flow through BOTH the auto-exposure estimator's histogram and the
+    // downstream render unmodified -- a true -1 EV synthetic capture, not a
+    // post-hoc darkened render.
+    //
+    // Scaling math: a true -N EV capture only halves the LIGHT-dependent
+    // signal -- the sensor's black floor is a physical constant that does
+    // not scale with exposure -- so this scales (code - black) by 2^-N and
+    // adds black back, not the raw code verbatim (which would also crush the
+    // black level and read as near-total clipping downstream, not
+    // underexposure; this was tried first on sony and caught before this
+    // file). foveon_1 is linear-RGB/interleaved (Foveon), so black is
+    // per-COMPONENT (RawGpuInput::component_black[4], indexed by sample
+    // position mod components_per_pixel), not the spatial CFA pattern
+    // Bayer/X-Trans use.
+    //
+    // Recorded in native/scripts/tmp/round2_synthetic_underexposure.md with
+    // RC=$? and the HEAD hash.
+    {
+        const char* path = "image_samples/raw_corpus/sigma_sd_quattro_h_19.x3f";
+        if (!fileExists(path)) {
+            std::printf("[RawE2E] SKIP synthetic_underexposure_recovers (missing file)\n");
+        } else {
+            RawDevelopParams baseline_develop{};
+            baseline_develop.tone_curve_strength = 1.0f;
+            baseline_develop.output_space = kRawOutputColorSpaceSrgb;
+            RawPipelineResult baseline_result{};
+            const RawErrorCode brc =
+                raw_pipeline_decode_file(path, baseline_develop, baseline_result);
+
+            LibRawFrontendContext ctx;
+            const RawErrorCode orc = ctx.open_and_unpack(path);
+
+            bool ok = false;
+            char detail[500];
+            RawPipelineResult scaled_result{};
+            if (brc == kRawSuccess && baseline_result.rgba_ptr && orc == kRawSuccess) {
+                const double baseline_luma = centralCropMeanLumaRgba(
+                    baseline_result.rgba_ptr, baseline_result.width, baseline_result.height);
+
+                // Baseline (unscaled) adapter build, to measure the
+                // baseline auto_exposure_ev in the SAME run/chain (delta
+                // endpoint 1) and to resolve component_black for the scaling
+                // step below.
+                const LibRawRawView& v = ctx.raw_view();
+                LibRawGpuInputAdapter probe_adapter;
+                RawGpuInput probe_input{};
+                RawDevelopParams probe_develop{};
+                char probe_reason[256] = {0};
+                const RawErrorCode probe_rc = probe_adapter.build(
+                    ctx, &probe_input, &probe_develop, probe_reason, sizeof(probe_reason));
+                if (probe_rc != kRawSuccess) {
+                    std::snprintf(detail, sizeof(detail),
+                                  "probe adapter.build FAILED rc=%s reason=%s",
+                                  raw_error_name(probe_rc), probe_reason);
+                } else {
+                    const double baseline_ev = probe_develop.auto_exposure_ev;
+                    const uint32_t comps = probe_input.layout.components_per_pixel
+                                                ? probe_input.layout.components_per_pixel
+                                                : 1;
+                    const uint32_t sample_width = v.raw_width * comps;
+                    uint16_t* samples =
+                        const_cast<uint16_t*>(static_cast<const uint16_t*>(v.plane.data));
+                    for (uint32_t y = 0; y < v.raw_height; ++y) {
+                        uint8_t* row = reinterpret_cast<uint8_t*>(samples) +
+                                       static_cast<int64_t>(y) * v.plane.row_stride_bytes;
+                        for (uint32_t x = 0; x < sample_width; ++x) {
+                            uint16_t* px = reinterpret_cast<uint16_t*>(
+                                row + static_cast<int64_t>(x) * sizeof(uint16_t));
+                            const uint32_t comp = x % comps;
+                            const float black_val = comp < 4 ? probe_input.component_black[comp]
+                                                              : 0.0f;
+                            const float signal = static_cast<float>(*px) - black_val;
+                            float new_code = black_val + signal * 0.5f;
+                            if (new_code < 0.0f) new_code = 0.0f;
+                            if (new_code > 65535.0f) new_code = 65535.0f;
+                            *px = static_cast<uint16_t>(std::lround(new_code));
+                        }
+                    }
+
+                    LibRawGpuInputAdapter adapter;
+                    RawGpuInput input{};
+                    RawDevelopParams scaled_develop{};
+                    scaled_develop.tone_curve_strength = 1.0f;
+                    scaled_develop.output_space = kRawOutputColorSpaceSrgb;
+                    char reason[256] = {0};
+                    const RawErrorCode arc =
+                        adapter.build(ctx, &input, &scaled_develop, reason, sizeof(reason));
+                    if (arc == kRawSuccess) {
+                        const RawErrorCode rrc =
+                            raw_pipeline_decode_to_rgba(input, scaled_develop, scaled_result);
+                        if (rrc == kRawSuccess && scaled_result.rgba_ptr) {
+                            const double scaled_luma = centralCropMeanLumaRgba(
+                                scaled_result.rgba_ptr, scaled_result.width,
+                                scaled_result.height);
+                            const double delta_ev =
+                                scaled_develop.auto_exposure_ev - baseline_ev;
+                            const double ev_diff = std::fabs(delta_ev - 1.0);
+                            const double luma_reldiff =
+                                std::fabs(scaled_luma - baseline_luma) / baseline_luma;
+                            ok = ev_diff <= 0.15 && luma_reldiff <= 0.05;
+                            std::snprintf(
+                                detail, sizeof(detail),
+                                "baseline_ev=%.4f scaled_ev=%.4f delta_ev=%.4f (want "
+                                "1.00+-0.15) baseline_luma=%.6f scaled_luma=%.6f "
+                                "luma_reldiff=%.4f (<=0.05)",
+                                baseline_ev, scaled_develop.auto_exposure_ev, delta_ev,
+                                baseline_luma, scaled_luma, luma_reldiff);
+                        } else {
+                            std::snprintf(detail, sizeof(detail), "scaled render FAILED rc=%s",
+                                          raw_error_name(rrc));
+                        }
+                    } else {
+                        std::snprintf(detail, sizeof(detail),
+                                      "adapter.build FAILED rc=%s reason=%s",
+                                      raw_error_name(arc), reason);
+                    }
+                }
+            } else {
+                std::snprintf(detail, sizeof(detail),
+                              "setup FAILED baseline_rc=%s frontend_rc=%s", raw_error_name(brc),
+                              raw_error_name(orc));
+            }
+            report("synthetic_underexposure_recovers", "foveon_x3f_linear", ok, detail);
+            ++checked;
+            if (scaled_result.rgba_ptr) dng_rgba_output_release(scaled_result.rgba_ptr);
+            if (baseline_result.rgba_ptr) dng_rgba_output_release(baseline_result.rgba_ptr);
         }
     }
 
