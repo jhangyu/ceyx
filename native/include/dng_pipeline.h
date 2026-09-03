@@ -81,6 +81,35 @@ size_t dng_decode_body_alias_events();
 // can assert the cap actually holds under N-way concurrency.
 size_t dng_stage4_scratch_free_high_water();
 
+// Round 7 task #2: Stage-3 workspace exclusivity, and the coverage counter that
+// makes its absence loud.
+//
+// WHY THIS EXISTS RATHER THAN A PIXEL COMPARE. On 2026-09-03 the concurrent
+// pixel-compare gate (G3) was run against a deliberately SHARED process-wide
+// Stage-3 workspace and came back byte-identical, i.e. green on a defect it was
+// built to catch. Root cause (docs/logs/2026-09-04/r7g3-root-cause.md): only
+// Bayer files reach the Stage-3 workspace at all — decodeStages branches on
+// isBayer — and the corpus held exactly ONE Bayer file, so every decode that
+// could touch the shared workspace was decoding the SAME image and wrote
+// byte-identical values into it. No delay setting and no repeat count could
+// have made that arm go red.
+//
+//   dng_stage3_workspace_alias_events() — times a decode found the Stage-3
+//        workspace it was handed already registered to a DIFFERENT live decode.
+//        Must be 0. This detects the ALIASING ITSELF, so unlike a pixel compare
+//        it does not depend on the two decodes holding different data, on the
+//        race window being hit, or on the delay knob. Nested acquisitions
+//        within one decode (the fused path and the Bayer path both call
+//        prepareStage3WorkspacePtr for one decode) are refcounted by owner and
+//        are NOT alias events.
+//   dng_stage3_workspace_registrations() — how many decodes reached the Stage-3
+//        workspace at all. A gate that asserts alias_events == 0 while this is
+//        0 has asserted nothing; the gate must FAIL on zero rather than read an
+//        unexercised route as a clean pass. That silent pass is the defect that
+//        produced the 2026-09-03 green.
+size_t dng_stage3_workspace_alias_events();
+size_t dng_stage3_workspace_registrations();
+
 struct DngPipelineStage3Timing {
   double extract_stage2_ms = 0.0;
   double make_image_ms = 0.0;

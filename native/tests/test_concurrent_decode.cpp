@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
   if (argc < 4) {
     std::fprintf(stderr,
                  "usage: %s <out_dir> <threads> [--warmup] [--repeat R] "
-                 "<dng_file>...\n",
+                 "[--require-stage3-route] <dng_file>...\n",
                  argv[0]);
     return 2;
   }
@@ -142,6 +142,10 @@ int main(int argc, char **argv) {
   if (threads < 1) return 2;
 
   bool warmupThread = false;
+  // Round 7 task #2: assert that the corpus actually exercised the Stage-3
+  // workspace route. Opt-in, because a single-file serial reference process
+  // over a non-Bayer file legitimately does not reach it.
+  bool requireStage3Route = false;
   int repeat = 1;
   // Round 5 review F1: number of SERIAL decodes to run, to completion, before
   // the concurrent burst starts. This is the only way to express the shape that
@@ -157,6 +161,8 @@ int main(int argc, char **argv) {
     const std::string a = argv[i];
     if (a == "--warmup") {
       warmupThread = true;
+    } else if (a == "--require-stage3-route") {
+      requireStage3Route = true;
     } else if (a == "--prime") {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "--prime needs a value\n");
@@ -326,6 +332,55 @@ int main(int argc, char **argv) {
                  bodyAliases);
     failures.fetch_add(1);
   }
+  // Round 7 task #2: Stage-3 workspace exclusivity, and the coverage check that
+  // makes an unexercised route fail loudly instead of passing silently.
+  //
+  // The 2026-09-03 run of this gate was GREEN against a deliberately shared
+  // process-wide Stage-3 workspace. Root cause
+  // (docs/logs/2026-09-04/r7g3-root-cause.md): only Bayer files reach the
+  // Stage-3 workspace, the corpus held exactly one Bayer file, so every decode
+  // that could touch the shared buffer decoded the SAME image and wrote
+  // identical bytes. The pixel compare was not weak — it was measuring a
+  // property that could not differ.
+  //
+  // These two assertions do not depend on the corpus holding differing data,
+  // on the race window being hit, or on DNG_RACE_DELAY_US:
+  //   aliasEvents  — a second live decode registered a workspace already owned.
+  //   registrations — how many decodes reached the route at all. Zero here
+  //                   means the alias assertion above asserted NOTHING, so it
+  //                   is a FAILURE, not a pass. That silent pass is exactly the
+  //                   defect that produced the 2026-09-03 green.
+  const size_t s3Aliases = dng_stage3_workspace_alias_events();
+  const size_t s3Registrations = dng_stage3_workspace_registrations();
+  if (s3Aliases != 0) {
+    std::fprintf(stderr,
+                 "[concurrent] STAGE-3 WORKSPACE ALIASING: %zu decode(s) were "
+                 "handed a Stage-3 workspace already owned by another live "
+                 "decode\n",
+                 s3Aliases);
+    failures.fetch_add(1);
+  }
+  // Scope note (found by this assertion firing on its first run): coverage is a
+  // property of a GATE RUN over the whole corpus, not of every process.
+  // task2_serial_ref.sh decodes ONE FILE PER PROCESS, and a lone non-Bayer file
+  // legitimately never reaches the Stage-3 route — failing there would be a
+  // false alarm. So the requirement is opt-in: the concurrent gate driver,
+  // which knows its corpus is supposed to cover the route, passes
+  // --require-stage3-route. The alias assertion above stays unconditional
+  // because it is valid in every configuration.
+  if (requireStage3Route && s3Registrations == 0) {
+    std::fprintf(stderr,
+                 "[concurrent] ROUTE NOT EXERCISED: no decode reached the "
+                 "Stage-3 workspace (route: decodeStages isBayer -> "
+                 "runHalideStage3And4Fused / runHalideStage3ForBayer). The "
+                 "Stage-3 aliasing assertion therefore certified nothing. The "
+                 "corpus needs at least one Bayer/lossless DNG; a corpus of "
+                 "only non-Bayer files bypasses this route entirely.\n");
+    failures.fetch_add(1);
+  }
+  std::printf("STAGE3_WORKSPACE alias_events=%zu registrations=%zu\n",
+              s3Aliases, s3Registrations);
+
   // Kept for cross-checking only: if the pool's own count and the decode-body
   // count disagree, one of the two instruments is wrong and the run is not
   // evidence of anything.

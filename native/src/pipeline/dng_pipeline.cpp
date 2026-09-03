@@ -51,6 +51,7 @@ functions:
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -466,6 +467,111 @@ size_t dng_decode_body_alias_events() {
   return v < 0 ? 0 : static_cast<size_t>(v);
 }
 
+// Round 7 task #2: Stage-3 workspace exclusivity registry.
+//
+// Two decodes must never hold the same Stage-3 workspace at the same time. The
+// concurrent pixel-compare gate cannot see that violation unless the two
+// decodes happen to hold DIFFERENT data and the race window is actually hit —
+// on 2026-09-03 neither was true and a fully shared workspace produced
+// byte-identical output (docs/logs/2026-09-04/r7g3-root-cause.md). This detects
+// the aliasing directly, so it is independent of corpus, timing and delay.
+//
+// Ownership, not just presence, is what is recorded: ONE decode legitimately
+// acquires the same workspace pointer more than once (runHalideStage3And4Fused
+// falling back into runHalideStage3ForBayer reuses ctx->stage3_workspace by
+// design, dng_pipeline.cpp:696). Those nested acquisitions are refcounted
+// against the same owner and are not alias events. Only a second, DIFFERENT
+// owner is.
+class Stage3WorkspaceRegistry {
+ public:
+  // Returns true if this call took ownership (and must therefore release).
+  // Returns false when the pointer is already owned by another live decode —
+  // that is the alias event; the caller must NOT release someone else's entry.
+  bool acquire(const void *ptr, const void *owner) {
+    if (!ptr) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++registrations_;
+    auto it = live_.find(ptr);
+    if (it == live_.end()) {
+      live_.emplace(ptr, Entry{owner, 1});
+      return true;
+    }
+    if (it->second.owner == owner) {
+      ++it->second.depth;  // legitimate nested acquisition within one decode
+      return true;
+    }
+    ++alias_events_;
+    return false;
+  }
+
+  void release(const void *ptr) {
+    if (!ptr) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = live_.find(ptr);
+    if (it == live_.end()) return;
+    if (--it->second.depth <= 0) live_.erase(it);
+  }
+
+  size_t alias_events() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return alias_events_;
+  }
+  size_t registrations() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return registrations_;
+  }
+
+ private:
+  struct Entry {
+    const void *owner;
+    int depth;
+  };
+  mutable std::mutex mutex_;
+  std::map<const void *, Entry> live_;
+  size_t alias_events_ = 0;
+  size_t registrations_ = 0;
+};
+
+Stage3WorkspaceRegistry &stage3WorkspaceRegistry() {
+  static Stage3WorkspaceRegistry r;
+  return r;
+}
+
+// RAII scope covering the whole live range of one decode's Stage-3 workspace:
+// constructed as soon as the pointer is handed out, destroyed when the last
+// consumer of those pixels has finished.
+class ScopedStage3Workspace {
+ public:
+  ScopedStage3Workspace(const void *ptr, const void *owner) : ptr_(ptr) {
+    owned_ = stage3WorkspaceRegistry().acquire(ptr_, owner);
+  }
+  ~ScopedStage3Workspace() {
+    if (owned_) stage3WorkspaceRegistry().release(ptr_);
+  }
+  ScopedStage3Workspace(const ScopedStage3Workspace &) = delete;
+  ScopedStage3Workspace &operator=(const ScopedStage3Workspace &) = delete;
+
+ private:
+  const void *ptr_;
+  bool owned_ = false;
+};
+
+// Owner token for the registry. The DecodeContext is the per-decode identity
+// (one context per in-flight decode, enforced by DecodeBodyCensus above), so it
+// is the correct key. Plain-host callers have no context; the dng_host is then
+// per-decode by construction and serves as the token.
+const void *stage3WorkspaceOwner(dng_host &host) {
+  const void *ctx = dng_decode_context_for(host);
+  return ctx ? ctx : static_cast<const void *>(&host);
+}
+
+size_t dng_stage3_workspace_alias_events() {
+  return stage3WorkspaceRegistry().alias_events();
+}
+size_t dng_stage3_workspace_registrations() {
+  return stage3WorkspaceRegistry().registrations();
+}
+
 size_t dng_decode_slot_count() { return decodeSlotPool().slot_count(); }
 size_t dng_decode_in_flight_count() { return decodeSlotPool().in_flight(); }
 size_t dng_decode_max_in_flight_observed() {
@@ -847,6 +953,11 @@ bool runHalideStage3ForBayer(dng_host &host,
   uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing,
                                                   dng_decode_context_for(host));
   if (!stage3Ptr) return false;
+  // Round 7 task #2: the workspace is live from here until the last read of its
+  // pixels below. A second decode registering the same pointer inside this
+  // scope is an alias event, whether or not it changes a single output byte.
+  ScopedStage3Workspace stage3WorkspaceScope(
+      stage3Ptr, stage3WorkspaceOwner(host));
 
   int cfaRedX = 0;
   int cfaRedY = 0;
@@ -942,6 +1053,13 @@ bool runHalideStage3ForBayer(dng_host &host,
     }
   }
 
+  // Round 7 task #2 item 3: the Stage-3 workspace is now fully written and is
+  // about to be read. THIS is the window in which a second decode's write
+  // corrupts this decode's pixels. Until now dngRaceDelay() had exactly one
+  // call site (the Stage-2 OL2 window at :1399), so DNG_RACE_DELAY_US widened a
+  // window that had nothing to do with Stage-3 — which is part of why the
+  // 2026-09-03 shared-workspace arm could not go red.
+  dngRaceDelay();
   if (fused && stage3Allocated) {
     // Stage3 image was pre-allocated during latency hiding; copy pixels in.
     const auto putStart = Clock::now();
@@ -1044,6 +1162,13 @@ bool runHalideStage3And4Fused(dng_host &host,
   uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing,
                                                   dng_decode_context_for(host));
   if (!stage3Ptr) return false;
+  // Round 7 task #2: same exclusivity scope as the Bayer host route. On the
+  // shipped device-handoff path these pixels are never read back — the poison
+  // probe proved that — but the workspace is still HANDED OUT here, and a
+  // registry that only watched the read would miss a sharing defect on the
+  // path production actually takes.
+  ScopedStage3Workspace stage3WorkspaceScope(
+      stage3Ptr, stage3WorkspaceOwner(host));
 
   int cfaRedX = 0;
   int cfaRedY = 0;
