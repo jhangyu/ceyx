@@ -36,7 +36,7 @@ functions:
     description: "DNG parse + Stage1/2/3/4 decode orchestration. H-1 ScopedRgbaCheckout guard in decodeStages."
     lines: "974-1140"
   - name: "pipelineSingleFlightMutex"
-    description: "File-scope std::mutex accessor; serializes warmup vs decode."
+    description: "File-scope std::shared_mutex accessor; warmup always exclusive, decode shared only under DNG_CONCURRENT_DECODE=1."
     lines: "1143-1146"
   - name: "dng_pipeline_warmup_for_size"
     description: "Idle-time warm hook; locks single-flight mutex and primes pipeline pools."
@@ -54,6 +54,8 @@ functions:
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 // W4 (2026-08-21, Windows port): <sys/mman.h>/<unistd.h> do not exist in the
@@ -1238,6 +1240,7 @@ bool decodeStages(ConcurrentDngHost &host,
     ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
     // M-6: clear any stale dispatch-failure flag before entering BuildStage2.
     halide_stage2_ol2_clear_dispatch_failure();
+    dngRaceDelay();  // widen the clear -> BuildStage2 -> check window (B1)
     negative.BuildStage2Image(host);
     // M-6: check the dispatch-failure flag set by the OL2 bridge (status-return
     // path, replaces the old DngOl2DispatchError throw-as-control-flow).
@@ -1364,9 +1367,36 @@ size_t dng_rgb_output_checked_out_count() {
 // pool, polynomial scratch caches) and DeviceHandoffState; without this lock a
 // warmup invoked from idle could race a concurrent decode and corrupt those
 // shared resources.  Function-local static guarantees thread-safe init.
-static std::mutex &pipelineSingleFlightMutex() {
-  static std::mutex m;
+//
+// Mutex rework (2026-09-03): now a shared_mutex. WARMUP IS ALWAYS EXCLUSIVE,
+// in every configuration — that is what keeps the invariant above true. The
+// decode side is exclusive by default and takes the shared lock only when
+// DNG_CONCURRENT_DECODE=1, a TEMPORARY flag that exists so the concurrent
+// stress gate can be observed RED before the per-decode scratch is isolated.
+// The flag is removed once every audited item has its own guard; see
+// docs/logs/2026-09-03/mutex-rework-spec.md §2.
+static std::shared_mutex &pipelineSingleFlightMutex() {
+  static std::shared_mutex m;
   return m;
+}
+
+// TEMPORARY (removed in Task 8): opt-in to the shared decode lock.
+static bool concurrentDecodeEnabled() {
+  static const bool enabled = []() {
+    const char *v = std::getenv("DNG_CONCURRENT_DECODE");
+    return v && v[0] == '1' && v[1] == '\0';
+  }();
+  return enabled;
+}
+
+void dngRaceDelay() {
+  static const int delay_us = []() {
+    const char *v = std::getenv("DNG_RACE_DELAY_US");
+    return v ? std::atoi(v) : 0;
+  }();
+  if (delay_us > 0) {
+    std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+  }
 }
 
 // L-4: atomic counter incremented at decode_to_rgb entry so warmup can
@@ -1398,7 +1428,7 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
 
   // Step 1: GPU capability check.
   {
-    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
     if (!requireGpuBackend("warmup")) {
       return false;
     }
@@ -1409,7 +1439,7 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
 
   // Step 2: Pool touch (stage3 workspace, RGB output, RGBA output pools).
   {
-    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
     if (!warmPipelinePoolsForSize(width, height)) {
       return false;
     }
@@ -1462,7 +1492,7 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
   // actual size so the first Bayer decode skips the Vulkan pipeline-creation
   // cold tax (no-op on non-Android; per-size cached inside).
   {
-    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
     dng_demosaic_warp_prewarm_for_size(width, height);
   }
 
@@ -1482,7 +1512,7 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
     const int32_t sensorW = width + 48;
     const int32_t sensorH = height + 24;
     if (sensorW != width || sensorH != height) {
-      std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+      std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
       dng_demosaic_warp_prewarm_for_size(sensorW, sensorH);
     }
   }
@@ -1496,7 +1526,7 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
   // pages production will target — eliminates ~63ms first-decode copy_host
   // cold penalty (SM8650 measurement: 80.5→17.0ms after this change).
   {
-    std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+    std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
     const size_t rgbaByteCount =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
     uint8_t *rgba = rgbaOutputPool().acquire(rgbaByteCount);
@@ -1546,7 +1576,17 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     }
   } pendingGuard;
 
-  std::lock_guard<std::mutex> guard(pipelineSingleFlightMutex());
+  // Default (flag unset) is byte-identical to the previous behaviour: a fully
+  // exclusive decode. Only DNG_CONCURRENT_DECODE=1 lets decodes overlap.
+  std::shared_lock<std::shared_mutex> sharedGuard(pipelineSingleFlightMutex(),
+                                                  std::defer_lock);
+  std::unique_lock<std::shared_mutex> exclusiveGuard(pipelineSingleFlightMutex(),
+                                                     std::defer_lock);
+  if (concurrentDecodeEnabled()) {
+    sharedGuard.lock();
+  } else {
+    exclusiveGuard.lock();
+  }
   result = DngPipelineResult{};
   if (!file_path || !file_path[0]) {
     result.error_code = kDngErrNullPath;

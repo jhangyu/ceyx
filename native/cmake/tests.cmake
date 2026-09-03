@@ -1531,6 +1531,55 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_device_handoff ${DNG_LINUX_TEST_LIBS})
 endif()
 
+# Task 2 (mutex rework): concurrent-vs-serial byte-for-byte correctness gate.
+# Source set and link list mirror test_device_handoff above — this target also
+# compiles the pipeline sources directly, so it needs the identical AOT
+# archives and dependency chain (including both DNG_STAGE4_SPLIT_KERNEL
+# branches and the platform link libs).
+add_executable(test_concurrent_decode tests/test_concurrent_decode.cpp
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/dng_render_halide.cpp)
+target_include_directories(test_concurrent_decode PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_concurrent_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(test_concurrent_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+endif()
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_concurrent_decode
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    add_dependencies(test_concurrent_decode dng_render_scaled_preavg_aot_target)
+endif()
+add_dependencies(test_concurrent_decode halide_runtime_target)
+add_dependencies(test_concurrent_decode dng_demosaic_aot_target)
+add_dependencies(test_concurrent_decode dng_demosaic_warp_aot_target)
+add_dependencies(test_concurrent_decode dng_warp_aot_target)
+add_dependencies(test_concurrent_decode dng_render_aot_target)
+add_dependencies(test_concurrent_decode dng_opcode_polynomial_aot_target)
+add_dependencies(test_concurrent_decode dng_opcode_polynomial3_aot_target)
+if(DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_concurrent_decode
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(test_concurrent_decode dng_render_android_aot_target)
+    endif()
+endif()
+if(APPLE)
+    target_link_libraries(test_concurrent_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_concurrent_decode ${DNG_LINUX_TEST_LIBS})
+endif()
+
 # Task 1 (mutex rework): concurrency probe over the already-lock-free RAW path.
 # Measures Halide's own GPU serialisation with the DNG single-flight mutex out
 # of the picture. Not a correctness test; produces timings only.

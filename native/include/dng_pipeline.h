@@ -76,6 +76,13 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
 
 bool dng_pipeline_warmup_for_size(int32_t width, int32_t height);
 
+// Test-only: widens race windows deterministically so the concurrency gate is
+// near-deterministic rather than probabilistic. DNG_RACE_DELAY_US=0 (the
+// default, including unset) makes this a predictable-branch no-op. Unlike
+// DNG_CONCURRENT_DECODE this is NOT removed after the migration — it stays as a
+// debugging instrument.
+void dngRaceDelay();
+
 bool dng_pipeline_run_stage3(dng_host &host,
                                 dng_negative &negative,
                                 bool use_halide_bayer,
