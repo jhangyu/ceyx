@@ -1364,9 +1364,25 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // Vulkan's descriptor-offset alignment constraints) is involved.
     // Deliberately a raw halide_buffer_t, NOT a Runtime::Buffer — Buffer's
     // decref() would device_free the borrowed handle on destruction.
-    // ponytail: borrowed handle without retain — decodes are single-flight
-    // through this path; switch to halide_device_crop/release_crop if
-    // concurrent decodes ever share producer buffers.
+    // ponytail: borrowed handle without retain. The borrow is sound because the
+    // producer buffer is PER-DECODE: stage3_device_buf is owned by the calling
+    // decode's DecodeContext (Task 4 arena / Task 5 handoff state), so no other
+    // decode can observe or free it while this reshape aliases it, and its
+    // lifetime is bounded by the caller's frame, which outlives this view.
+    //
+    // The ORIGINAL justification, now obsolete, was "decodes are single-flight
+    // through this path" — i.e. the process-wide exclusive decode mutex. That
+    // reason no longer holds: as of Task 8 (2026-09-04) decodes take a
+    // shared_lock and overlap by default. The borrow stays correct for the
+    // per-decode-ownership reason above, NOT for mutual exclusion.
+    //
+    // Upgrade path unchanged: if a producer buffer ever becomes shared between
+    // concurrent decodes, this must become halide_device_crop/release_crop.
+    //
+    // COVERAGE CAVEAT: this fused route is the Vulkan/split-kernel path, which
+    // the round's gate set does not exercise — G0-G6 are macOS/Metal only. The
+    // reasoning above is therefore not backed by a green gate on the platform
+    // where this code actually runs. See gate-results.md section 6.5.
     halide_dimension_t flat_dim(0, flat_len, 1);
     halide_buffer_t src_flat = *stage3_device_buf;  // copies device + flags (device_dirty)
     src_flat.dimensions = 1;
