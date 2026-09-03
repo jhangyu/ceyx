@@ -73,8 +73,19 @@ bool buildRenderParams(dng_host& host,
                        const PipelineConfig& config,
                        RenderParams& params);
 
+// Mutex rework (plan Task 4): per-decode state container. Forward declaration
+// only — the definition lives in src/pipeline/decode_context.h, which is not on
+// every consumer's include path. A null ctx means "no decode frame" (the plain
+// dng_host harness paths); see the two Stage-4 entry points below.
+struct DecodeContext;
+
 // THE shared Stage4 core. Plain buffers + RenderParams, no decoder state.
 // Signature transcribed from dng_render_halide.cpp:932-944.
+//
+// ctx (mutex rework Task 4): supplies the per-decode bump arena used for the
+// RGBA strip scratch on the !fuse_rgba path. Null is legal — the callers that
+// pass fuse_rgba=true never need it, and the harness paths fall back to a
+// per-call local allocation.
 bool runRenderStage4HalideAot(const uint16_t* src,
                               int src_w,
                               int src_h,
@@ -87,7 +98,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int dst_h,
                               const RenderParams& params,
                               uint8_t* dst,
-                              bool fuse_rgba = false);
+                              bool fuse_rgba = false,
+                              DecodeContext* ctx = nullptr);
 
 // Device-handoff form. Signature transcribed from dng_render_halide.cpp:1182-1192
 // (note the crop_l/crop_t/src_w/src_h parameters the plan placeholder omitted).
@@ -101,7 +113,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         int dst_h,
                                         const RenderParams& params,
                                         uint8_t* dst,
-                                        bool fuse_rgba = false);
+                                        bool fuse_rgba = false,
+                                        DecodeContext* ctx = nullptr);
 
 // Needed by the LibRaw builder so "identity" is explicit, never uninitialised
 // (spec section 7.1.4). Signatures transcribed from dng_render_halide.cpp:663-667

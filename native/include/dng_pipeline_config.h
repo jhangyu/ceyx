@@ -105,6 +105,26 @@ struct PipelineConfig {
   // cores never over-provision std::async workers per decode.
   static constexpr uint32_t kDefaultAreaThreads = 20;
 
+  // Mutex rework (plan Task 4): address space reserved per DecodeContext for
+  // its bump arena (decode_context.h). RESERVED, not resident — pages arrive
+  // on first touch (MAP_ANON / MEM_RESERVE|MEM_COMMIT), so an over-generous
+  // reserve costs nothing at rest.
+  //
+  // Arithmetic (recorded here because Task 6's slot count and the §6.3 memory
+  // disclosure both consume it). Sizing frame = 12000 x 9000 = 108,000,000 px,
+  // chosen to cover the largest still formats we intend to support (100 MP
+  // medium format is 11656 x 8742) with margin:
+  //   Stage-3 workspace  W*H*3 uint16 = 108e6 * 6 = 648,000,000 B
+  //   Stage-4 RGBA strip W*H*4 uint8  = 108e6 * 4 = 432,000,000 B
+  //   subtotal                                   = 1,080,000,000 B
+  //   + 64-byte alignment padding and Task 5 headroom
+  //   round up to 1.5 GiB                        = 1,610,612,736 B
+  // A decode whose frame exceeds this gets nullptr from arena.allocate() and
+  // takes its existing allocation-failure path; the arena never grows, because
+  // a growing arena would move memory a caller is still holding.
+  static constexpr size_t kDecodeArenaReserveBytes =
+      static_cast<size_t>(1536) * 1024 * 1024;
+
   static PipelineConfig loadFromEnv() {
     PipelineConfig config;
     config.route.fused_demosaic_warp =

@@ -18,6 +18,10 @@
 
 #include "dng_pipeline_config.h"
 
+// Mutex rework (plan Task 4): forward declaration only, so the include graph
+// stays acyclic — decode_context.h forward-declares dng_host in turn.
+struct DecodeContext;
+
 class ConcurrentDngHost : public dng_host {
 public:
     // W6-3 / TD-21: cache PipelineConfig at construction time so
@@ -54,6 +58,12 @@ public:
         }
         return threads > 0 ? threads : 1;
     }
+
+    // Mutex rework (plan Task 4): per-decode state, set by
+    // dng_pipeline_decode_to_rgb_sized immediately after construction.
+    // Non-owning — the context outlives the host within one decode frame.
+    void setDecodeContext(DecodeContext* ctx) { decodeContext_ = ctx; }
+    DecodeContext* decodeContext() const { return decodeContext_; }
 
     virtual void PerformAreaTask(dng_area_task &task, const dng_rect &area) override {
         uint32 threads = PerformAreaTaskThreads();
@@ -249,4 +259,5 @@ private:
 
     uint32_t requestedThreads_ = 0;
     PipelineConfig cachedConfig_{};
+    DecodeContext* decodeContext_ = nullptr;
 };

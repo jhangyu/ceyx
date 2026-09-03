@@ -18,7 +18,7 @@ functions:
     description: "H-1 RAII scope-guard for checkout pool + M-8 size-assert on reuse path."
     lines: "311-359"
   - name: "warmPipelinePoolsForSize"
-    description: "Idle-time pool prewarm; L-5 per-size warmed cache skips redundant memset."
+    description: "Idle-time pool prewarm for the process-wide RGB/RGBA checkout pools; L-5 per-size warmed cache skips redundant memset. Mutex rework Task 4 dropped the Stage-3 half (its pool no longer exists; arena pages belong to a decode that has not started)."
     lines: "361-406"
   - name: "extractStage2Bayer16"
     description: "Phase 11 W4 — borrow-or-copy Stage2 Bayer with timing."
@@ -59,8 +59,10 @@ functions:
 #include <unordered_map>
 #include <vector>
 // W4 (2026-08-21, Windows port): <sys/mman.h>/<unistd.h> do not exist in the
-// MSVC/clang-cl environment. The only user is Stage3WorkspacePool below, which
-// gets a VirtualAlloc branch with the same lazy-commit semantics.
+// MSVC/clang-cl environment. Their former user here, Stage3WorkspacePool, was
+// deleted by the mutex rework (plan Task 4); the same lazy-commit semantics
+// (mmap / VirtualAlloc MEM_RESERVE|MEM_COMMIT) now live in DecodeArena in
+// decode_context.h, which carries its own platform include block.
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -85,6 +87,7 @@ functions:
 #include <dng_render.h>
 
 #include "concurrent_dng_host.h"
+#include "decode_context.h"
 #include "dng_cfa_phase.h"
 #include "dng_error_codes.h"  // W5: unified DngErrorCode enum
 #include "dng_mosaic_halide.h"
@@ -201,53 +204,14 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
   return true;
 }
 
-// Phase 10 Sprint D-B F1: process-level mmap pool for Stage3 workspace.
-// Avoids ~262ms eager zero-fill in FFI path (dng_pipeline_decode_to_rgb).
-// test_decode harness passes a pre-sized vector; pool is bypassed in that case.
-class Stage3WorkspacePool {
- public:
-  uint16_t *acquire(size_t elements) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const size_t need_bytes = elements * sizeof(uint16_t);
-    if (need_bytes > capacity_bytes_) {
-      if (ptr_) {
-#if defined(_WIN32)
-        // MEM_RELEASE requires the size argument to be 0 and the address to be
-        // the exact base returned by VirtualAlloc.
-        VirtualFree(ptr_, 0, MEM_RELEASE);
-#else
-        munmap(ptr_, capacity_bytes_);
-#endif
-        ptr_ = nullptr;
-        capacity_bytes_ = 0;
-      }
-#if defined(_WIN32)
-      // MEM_RESERVE|MEM_COMMIT on Windows commits lazily backed zero pages,
-      // the same property MAP_ANON gives us here: the ~262ms eager zero-fill
-      // is avoided because physical pages arrive on first touch.
-      void *p = VirtualAlloc(nullptr, need_bytes, MEM_RESERVE | MEM_COMMIT,
-                             PAGE_READWRITE);
-      if (p == nullptr) return nullptr;
-#else
-      void *p = mmap(nullptr, need_bytes, PROT_READ | PROT_WRITE,
-                     MAP_ANON | MAP_PRIVATE, -1, 0);
-      if (p == MAP_FAILED) return nullptr;
-#endif
-      ptr_ = static_cast<uint16_t *>(p);
-      capacity_bytes_ = need_bytes;
-    }
-    return ptr_;
-  }
- private:
-  std::mutex mutex_;
-  uint16_t *ptr_ = nullptr;
-  size_t capacity_bytes_ = 0;
-};
-
-Stage3WorkspacePool &stage3WorkspacePool() {
-  static Stage3WorkspacePool pool;
-  return pool;
-}
+// Mutex rework (plan Task 4): the process-wide Stage-3 workspace pool class and
+// its singleton accessor were deleted here. That mmap pool handed the same
+// pointer to every
+// decode, so two concurrent decodes wrote the same Stage-3 workspace. The
+// replacement is the per-decode bump arena on DecodeContext (decode_context.h),
+// reached via dng_decode_context_for(host); it keeps the lazy-zero mmap
+// property the pool existed for (~262ms eager zero-fill avoided) while being
+// unshareable by construction. See prepareStage3WorkspacePtr below.
 
 // 7.1: checkout-style RGB output pool. Mirrors RgbaOutputPool ownership model
 // (checked_out_ tracking, capped free_ list, best-fit acquire, unknown-pointer
@@ -517,13 +481,16 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   }
   const size_t w = static_cast<size_t>(width);
   const size_t h = static_cast<size_t>(height);
-  const size_t stage3ElementCount = w * h * 3;
   const size_t rgbByteCount = w * h * 3;
 
-  uint16_t *stage3 = stage3WorkspacePool().acquire(stage3ElementCount);
+  // Mutex rework (plan Task 4): the Stage-3 half of the warm is gone. Its
+  // purpose was to pre-commit pages inside a process-wide pool that no longer
+  // exists; arena pages belong to a decode that has not started, so there is
+  // nothing here to pre-commit. Deliberate, small reduction in what warmup
+  // pre-commits. The RGB and RGBA pools below are still process-wide and are
+  // still warmed.
   uint8_t *rgb = rgbOutputPool().acquire(rgbByteCount);
-  if (!stage3 || !rgb) {
-    if (rgb) rgbOutputPool().release(rgb);
+  if (!rgb) {
     return false;
   }
 
@@ -534,7 +501,6 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
   static int32_t warmedW = 0, warmedH = 0;
   const bool alreadyWarmed = (width == warmedW && height == warmedH);
   if (!alreadyWarmed) {
-    std::memset(stage3, 0, stage3ElementCount * sizeof(uint16_t));
     std::memset(rgb, 0, rgbByteCount);
   }
   // 7.1: release RGB buffer back to checkout pool after warming.
@@ -573,10 +539,14 @@ class ScopedStage2DeviceHandoff {
 // Returns a raw pointer to Stage3 workspace.
 // If caller supplied a pre-sized vector (harness path), use it directly.
 // If caller supplied an empty/wrong-size vector, resize and use it.
-// Otherwise (FFI path with nullptr or empty), use the process pool (mmap lazy).
+// Otherwise (FFI path), bump-allocate from the per-decode arena.
+// No release path: the arena is reclaimed wholesale at decode end.
+// A null ctx (plain dng_host harness) with no caller workspace yields nullptr,
+// and the caller takes its existing allocation-failure path.
 uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
                                     size_t elements,
-                                    DngPipelineStage3Timing *timing) {
+                                    DngPipelineStage3Timing *timing,
+                                    DecodeContext *ctx) {
   const auto resizeStart = Clock::now();
   uint16_t *ptr = nullptr;
   if (callerWorkspace && callerWorkspace->size() == elements) {
@@ -584,8 +554,9 @@ uint16_t *prepareStage3WorkspacePtr(std::vector<uint16_t> *callerWorkspace,
   } else if (callerWorkspace && !callerWorkspace->empty()) {
     callerWorkspace->resize(elements);
     ptr = callerWorkspace->data();
-  } else {
-    ptr = stage3WorkspacePool().acquire(elements);
+  } else if (ctx) {
+    ptr = static_cast<uint16_t *>(
+        ctx->arena.allocate(elements * sizeof(uint16_t)));
   }
   const auto resizeEnd = Clock::now();
   if (timing) {
@@ -718,7 +689,8 @@ bool runHalideStage3ForBayer(dng_host &host,
   const dng_opcode_list &opcodeList3 = negative.OpcodeList3();
   // Phase 10 Sprint D-B F1: use pool-backed ptr instead of vector resize.
   const size_t stage3ElementCount = static_cast<size_t>(width) * height * 3;
-  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing);
+  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing,
+                                                  dng_decode_context_for(host));
   if (!stage3Ptr) return false;
 
   int cfaRedX = 0;
@@ -914,7 +886,8 @@ bool runHalideStage3And4Fused(dng_host &host,
 
   // Phase 10 Sprint D-B F1: use pool-backed ptr instead of vector resize.
   const size_t stage3ElementCount = static_cast<size_t>(width) * height * 3;
-  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing);
+  uint16_t *stage3Ptr = prepareStage3WorkspacePtr(stage3Workspace, stage3ElementCount, timing,
+                                                  dng_decode_context_for(host));
   if (!stage3Ptr) return false;
 
   int cfaRedX = 0;
@@ -1264,7 +1237,7 @@ bool decodeStages(ConcurrentDngHost &host,
 #endif
 
   // Phase 10 Sprint D-B F1: do NOT eagerly resize stage3Workspace here.
-  // FFI path gets a lazy mmap pool via prepareStage3WorkspacePtr; this
+  // FFI path gets lazy mmap arena memory via prepareStage3WorkspacePtr; this
   // eliminates the ~262ms zero-fill that was inside decodeStart-decodeEnd.
   // test_decode harness passes its own pre-sized vector so is unaffected.
   std::vector<uint16_t> stage3Workspace;
@@ -1337,6 +1310,16 @@ bool decodeStages(ConcurrentDngHost &host,
 }
 
 } // namespace
+
+// Mutex rework (plan Task 4): the one definition of the context accessor,
+// placed in the single translation unit that already sees both dng_host and
+// ConcurrentDngHost. Declared in decode_context.h.
+DecodeContext *dng_decode_context_for(dng_host &host) {
+  // dynamic_cast, not static_cast: the harness paths construct a plain
+  // dng_host, and a wrong answer here is silently catastrophic.
+  auto *concurrent = dynamic_cast<ConcurrentDngHost *>(&host);
+  return concurrent ? concurrent->decodeContext() : nullptr;
+}
 
 // W7-B (P15): public shared RGBA output pool accessors (declared in
 // dng_pipeline.h). Forward to the anonymous-namespace singleton, whose names
@@ -1629,7 +1612,14 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     const uint32_t decodeThreads =
         config.threads.area_threads > 0 ? config.threads.area_threads
                                         : PipelineConfig::kDefaultAreaThreads;
+    // Mutex rework (plan Task 4): per-decode state container. Reserved address
+    // space, not resident memory — pages arrive on first touch, so an
+    // over-generous reserve costs nothing at rest. The arithmetic behind
+    // kDecodeArenaReserveBytes is recorded in dng_pipeline_config.h; Task 6
+    // derives the concurrency slot count from it.
+    DecodeContext decodeCtx(PipelineConfig::kDecodeArenaReserveBytes);
     ConcurrentDngHost host(decodeThreads);
+    host.setDecodeContext(&decodeCtx);
     dng_file_stream stream(file_path);
 
     dng_info info;

@@ -139,6 +139,7 @@ functions:
 
 #include "HalideBuffer.h"
 #include "concurrent_dng_host.h"
+#include "decode_context.h"
 #include "dng_1d_function.h"
 #include "dng_1d_table.h"
 #include "dng_camera_profile.h"
@@ -325,20 +326,45 @@ void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
 #endif
 
 #if !defined(DNG_STAGE4_SPLIT_KERNEL)
-// W7 (M-11): persistent scratch for the macOS RGBA→RGB strip path (legacy
-// vector callers). Avoids a fresh 96MB allocation + first-touch page-fault per
-// decode (same Gotcha #62 pattern). Grow-only; safe because all decodes are
-// serialized by pipelineSingleFlightMutex in dng_pipeline.cpp.
-// ponytail: simple static, upgrade to Stage4ScratchPool pattern if concurrent decode needed.
-static std::unique_ptr<uint8_t[]> s_rgba_strip_scratch;
-static size_t s_rgba_strip_scratch_cap = 0;
+// Mutex rework (plan Task 4): the two process-wide grow-only RGBA-strip
+// scratch statics and their acquire helper were DELETED here, not amended.
+// They handed the same buffer to every decode, which was only ever safe while
+// pipelineSingleFlightMutex serialized all decodes in dng_pipeline.cpp.
+//
+// The replacement is the per-decode bump arena on DecodeContext
+// (src/pipeline/decode_context.h), threaded into the two Stage-4 entry points
+// below as `ctx`. When `ctx` is null — the plain-dng_host harness paths, which
+// have no decode frame and are outside this task's owned files — we fall back
+// to a per-call local allocation owned by the returned struct at the call site.
+// That is still unshareable by construction, which is the property this task
+// exists to establish; it only costs the harness a fresh W*H*4 allocation per
+// call instead of reusing one grow-only buffer.
+struct RgbaStripScratch {
+    uint8_t* ptr = nullptr;
+    std::unique_ptr<uint8_t[]> owned;  // engaged only on the ctx==nullptr path
+};
 
-static uint8_t* acquireRgbaStripScratch(size_t bytes) {
-    if (bytes > s_rgba_strip_scratch_cap) {
-        s_rgba_strip_scratch.reset(new (std::nothrow) uint8_t[bytes]);
-        s_rgba_strip_scratch_cap = s_rgba_strip_scratch ? bytes : 0;
+static RgbaStripScratch acquireRgbaStripScratchFor(DecodeContext* ctx,
+                                                   size_t bytes) {
+    RgbaStripScratch s;
+    if (ctx) {
+        s.ptr = static_cast<uint8_t*>(ctx->arena.allocate(bytes));
+        return s;
     }
-    return s_rgba_strip_scratch.get();
+    // INVARIANT — DO NOT "OPTIMISE" THIS BACK INTO A STATIC OR A POOL.
+    // ctx == nullptr means there is no decode frame (a plain dng_host, e.g. the
+    // test_decode harness). The allocation is then a PER-CALL local, owned by
+    // the returned struct and freed when the caller's scope ends: unshareable
+    // by construction, which is the whole point of the mutex rework. A static
+    // or a process-wide pool here would hand the same buffer to two concurrent
+    // decodes again and silently reintroduce the exact bug class Task 4 exists
+    // to remove. The production FFI path always has a ctx and never lands here,
+    // so the extra per-call allocation costs the harness only.
+    // (Lead ruling 2026-09-03, recorded in
+    //  docs/logs/2026-09-03/task4-implementation-notes.md.)
+    s.owned.reset(new (std::nothrow) uint8_t[bytes]);
+    s.ptr = s.owned.get();
+    return s;
 }
 #endif
 
@@ -928,10 +954,15 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int dst_h,
                               const RenderParams& params,
                               uint8_t* dst,
-                              bool fuse_rgba) {
+                              bool fuse_rgba,
+                              DecodeContext* ctx) {
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
         return false;
     }
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+    // Split-kernel (Vulkan) builds use Stage4DstScratch leases, not the arena.
+    (void)ctx;
+#endif
 
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // W2: zero-copy wrap the SDK interleaved RGB buffer as one flat 1D plane and
@@ -1008,11 +1039,16 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #else
     // W7 (M-11): macOS generator outputs RGBA8 (4 channels, alpha=255 in-kernel).
     // When fuse_rgba, the caller's buffer is already RGBA8 (W*H*4) — write directly.
-    // When !fuse_rgba (legacy vector callers), use persistent scratch for the
+    // When !fuse_rgba (legacy vector callers), use per-decode arena scratch for the
     // 4-channel kernel output, then strip alpha to RGB8 in the caller's buffer.
+    // Mutex rework (plan Task 4): per-decode arena, or a per-call local when
+    // there is no decode frame. `strip_scratch` must outlive dst_buf.
+    RgbaStripScratch strip_scratch;
     uint8_t* dst_rgba = dst;
     if (!fuse_rgba) {
-        dst_rgba = acquireRgbaStripScratch(static_cast<size_t>(dst_w) * dst_h * 4);
+        strip_scratch = acquireRgbaStripScratchFor(
+            ctx, static_cast<size_t>(dst_w) * dst_h * 4);
+        dst_rgba = strip_scratch.ptr;
         if (!dst_rgba) return false;
     }
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba, dst_w, dst_h, 4);
@@ -1176,11 +1212,16 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int dst_h,
                                          const RenderParams& params,
                                          uint8_t* dst,
-                                         bool fuse_rgba) {
+                                         bool fuse_rgba,
+                                         DecodeContext* ctx) {
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
         return false;
     }
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+    // Split-kernel (Vulkan) builds use Stage4DstScratch leases, not the arena.
+    (void)ctx;
+#endif
 
     const bool scaled = (src_w != dst_w || src_h != dst_h);
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1318,9 +1359,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         Buffer<uint8_t>::make_interleaved(dst_rgba_and, dst_w, dst_h, 4);
 #else
     // W7 (M-11): macOS generator outputs RGBA8. Persistent scratch for strip path.
+    // Mutex rework (plan Task 4): identical change to the runRenderStage4HalideAot
+    // site. `strip_scratch` must outlive dst_buf.
+    RgbaStripScratch strip_scratch;
     uint8_t* dst_rgba_fd = dst;
     if (!fuse_rgba) {
-        dst_rgba_fd = acquireRgbaStripScratch(static_cast<size_t>(dst_w) * dst_h * 4);
+        strip_scratch = acquireRgbaStripScratchFor(
+            ctx, static_cast<size_t>(dst_w) * dst_h * 4);
+        dst_rgba_fd = strip_scratch.ptr;
         if (!dst_rgba_fd) return false;
     }
     Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba_fd, dst_w, dst_h, 4);
@@ -1526,7 +1572,7 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     // so the zero-fill is wasted work. resize() is a no-op when out_rgb is already sized
     // by the caller (which avoids the 250ms first-touch page-fault cost on a 72MB buffer).
     // W7 (M-11): macOS generator outputs RGBA8 but the caller's vector stays RGB (W*H*3).
-    // The kernel writes into the persistent RGBA scratch (via runRenderStage4HalideAot's
+    // The kernel writes into the per-decode RGBA scratch (via runRenderStage4HalideAot's
     // fuse_rgba=false path), which strips to RGB in the caller's vector — no 4-channel
     // resize of the caller's vector (that realloc + page-fault was costing ~150ms).
     const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
@@ -1599,10 +1645,12 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          static_cast<int>(out_w),
                                                          static_cast<int>(out_h),
                                                          params,
-                                                         out_rgb.data());
+                                                         out_rgb.data(),
+                                                         /*fuse_rgba=*/false,
+                                                         dng_decode_context_for(host));
         if (render_ok) {
             // W7 (M-11): on macOS, runRenderStage4HalideAot already stripped
-            // RGBA→RGB via the persistent scratch (fuse_rgba=false). The caller's
+            // RGBA→RGB via the per-decode scratch (fuse_rgba=false). The caller's
             // vector is W*H*3 throughout — no resize needed.
             return true;
         }
@@ -1720,7 +1768,8 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          static_cast<int>(out_h),
                                                          params,
                                                          out_rgb_ptr,
-                                                         config.fuse_rgba_output);
+                                                         config.fuse_rgba_output,
+                                                         dng_decode_context_for(host));
         if (render_ok) {
             return true;
         }
@@ -1992,7 +2041,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     const dng_rect src_area = negative.DefaultCropArea();
 
     // W7 (M-11): caller's vector stays RGB (W*H*3). macOS kernel writes RGBA into
-    // persistent scratch; runRenderStage4HalideAotFromDevice strips to the caller's
+    // per-decode arena scratch; runRenderStage4HalideAotFromDevice strips to the caller's
     // buffer (fuse_rgba=false default).
     const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
     if (out_rgb.size() != needed) {
@@ -2009,7 +2058,8 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
-        params, out_rgb.data());
+        params, out_rgb.data(), /*fuse_rgba=*/false,
+        dng_decode_context_for(host));
 }
 
 // ---------------------------------------------------------------------------
@@ -2141,5 +2191,6 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
-        params, out_rgb_ptr, config.fuse_rgba_output);
+        params, out_rgb_ptr, config.fuse_rgba_output,
+        dng_decode_context_for(host));
 }
