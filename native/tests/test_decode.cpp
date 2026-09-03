@@ -617,12 +617,12 @@ StagePSNR testDNG(dng_host& host,
 
         if (!isBayer) {
             halide_prewarm_polynomial3_for_size(
-                static_cast<int>(width), static_cast<int>(height));
+                host, static_cast<int>(width), static_cast<int>(height));
         }
 
         if (enableStage2DeviceHandoff) {
-            halide_stage2_ol2_clear_device_handoff();
-            halide_stage2_ol2_set_device_handoff_enabled(true);
+            halide_stage2_ol2_clear_device_handoff(host);
+            halide_stage2_ol2_set_device_handoff_enabled(host, true);
         }
 
         cout << "\n--- Stage 2: BuildStage2Image ---\n";
@@ -638,9 +638,9 @@ StagePSNR testDNG(dng_host& host,
             // Restore host-side Stage2Image for contract check and PSNR comparison.
             // This mirrors the restoreHostStage2 path in runLossyStage2Stage4DeviceHandoff
             // when test_decode does not consume the device buffer directly.
-            halide_stage2_ol2_device_handoff_copy_to_host();
-            halide_stage2_ol2_set_device_handoff_enabled(false);
-            halide_stage2_ol2_clear_device_handoff();
+            halide_stage2_ol2_device_handoff_copy_to_host(host);
+            halide_stage2_ol2_set_device_handoff_enabled(host, false);
+            halide_stage2_ol2_clear_device_handoff(host);
         }
 
         // Extract Stage 2 image data

@@ -136,13 +136,13 @@ void dng_opcode_list::Apply (dng_host &host,
 					index += 2;
 					continue;
 					}
-				if (halide_stage2_ol2_dispatch_failed ())
+				if (halide_stage2_ol2_dispatch_failed (host))
 					break;
 				if (halide_try_dispatch_opcode2 (host, opcode, *image.Get ()))
 					{
 					continue;
 					}
-				if (halide_stage2_ol2_dispatch_failed ())
+				if (halide_stage2_ol2_dispatch_failed (host))
 					break;
 				}
 

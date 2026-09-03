@@ -42,11 +42,15 @@
 #include <vector>
 
 // M-6: dng_error_codes.h no longer needed here — DngOl2DispatchError removed,
-// dispatch failure now signaled via g_ol2_dispatch_failed flag.
+// dispatch failure now signaled via the per-decode OL2 error channel on
+// DecodeContext (plan Task 5, B1).
 #include <utility>
 
 #include "HalideBuffer.h"
 #include "HalideRuntime.h"
+// Mutex rework (plan Task 5): per-decode state container. DeviceHandoffState,
+// WritebackTarget and the OL2 error channel all live on it now.
+#include "decode_context.h"
 #include "dng_halide_device.h"
 #include "dng_opcode_polynomial.h"
 #include "dng_opcode_polynomial3.h"
@@ -172,82 +176,59 @@ struct PolynomialTiming {
 std::atomic<bool> g_polynomial_first_seen{false};
 std::atomic<bool> g_polynomial3_first_seen{false};
 
-// M-6: Dispatch failure flag.  Set by halide_try_dispatch_opcode2{_batch} on
-// GPU dispatch failure; checked by the SDK opcode loop (to break) and by
-// pipeline_v2 (to map to kDngErrOl2DispatchFailed).  Replaces the old
-// DngOl2DispatchError throw-as-control-flow.  Protected by
-// pipelineSingleFlightMutex (single-flight invariant).
-std::atomic<bool> g_ol2_dispatch_failed{false};
-std::string g_ol2_dispatch_failure_msg;  // NOT thread-safe to read without pipelineSingleFlightMutex
-
-// M-5: Value object grouping the writeback destination pointer and its
-// interleaved layout geometry.  Replaces the previous comment-only lifetime
-// contract on the raw image_base / img_*_step fields.  No heap allocation;
-// trivially copyable.
+// Mutex rework (plan Task 5): the B1 error-channel globals (an
+// std::atomic<bool> plus a bare std::string whose own comment named
+// pipelineSingleFlightMutex as its protection) were deleted here. They are now
+// DecodeContext::ol2_dispatch_failed / ol2_dispatch_failure_msg, reached via
+// dng_decode_context_for(host). Under a shared lock the globals let one
+// decode's clear land between another decode's set and check, returning
+// SUCCESS with MapPolynomial never applied.
 //
-// Lifetime contract: the caller of publish_device_handoff() guarantees that
-// `base` remains valid until halide_stage2_ol2_device_handoff_copy_to_host()
-// completes or halide_stage2_ol2_clear_device_handoff() is called.  This is
-// structurally enforced by the pipeline single-flight mutex
-// (pipelineSingleFlightMutex in dng_pipeline.cpp).
-struct WritebackTarget {
-    uint16_t *base = nullptr;
-    int32_t col_step = 0;
-    int32_t row_step = 0;
-    int32_t plane_step = 0;
+// WritebackTarget and DeviceHandoffState moved to decode_context.h (A2) and
+// the singleton accessor device_handoff_state() is gone with them.
 
-    // True iff a valid writeback destination has been captured.
-    bool has_target() const { return base != nullptr; }
-
-    // Reset to empty / invalid state.
-    void reset() { *this = WritebackTarget{}; }
-};
-
-struct DeviceHandoffState {
-    std::mutex mu;
-    bool requested = false;
-    bool valid = false;
-    bool host_copied = false;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t planes = 0;
-    uint32_t pixel_range = 0;
-    std::unique_ptr<Halide::Runtime::Buffer<uint16_t>> buffer;
-    // Interleaved RGB scratch host storage that backs dst_buf in
-    // run_polynomial3_kernel when defer_copy_to_host=true. Sized
-    // W*H*planes*sizeof(uint16_t); grows on demand but never shrinks. Lives
-    // here (under mu) so it outlives the call frame and the device buffer can
-    // safely reference it.
-    std::vector<uint16_t> poly3_scratch;
-    // M-5: Destination for scattering GPU results back into the dng_image host
-    // memory.  Validity is tied to the pipeline single-flight mutex; the
-    // writeback is consumed (or reset) before the mutex is released.
-    WritebackTarget writeback;
-};
-
-DeviceHandoffState &device_handoff_state() {
-    static DeviceHandoffState state;
-    return state;
+// B1 set site, shared by both dispatch entry points.
+//
+// N1: plain-dng_host callers do exist (raw_render_params_builder.cpp's
+// dng_render_params_for_test and two test files). They have no context, so a
+// dispatch failure would propagate nowhere and halide_stage2_ol2_dispatch_failed
+// would answer false — turning a hard failure into a silent wrong-pixels path
+// for exactly the diagnostic tooling most likely to be trusted. Make that case
+// loud. call_once, not per-call: the SDK opcode loop can reach it repeatedly
+// within one call.
+void record_ol2_dispatch_failure(dng_host &host, const char *msg) {
+    if (DecodeContext *ctx = dng_decode_context_for(host)) {
+        ctx->ol2_dispatch_failed = true;
+        ctx->ol2_dispatch_failure_msg = msg;
+        std::fprintf(stderr, "%s\n", ctx->ol2_dispatch_failure_msg.c_str());
+    } else {
+        std::fprintf(stderr, "%s\n", msg);
+        static std::once_flag noCtxOnce;
+        std::call_once(noCtxOnce, []() {
+            std::fprintf(stderr,
+                "[OpcodeList2Halide] dispatch failure with no DecodeContext "
+                "(plain dng_host caller); failure not propagated\n");
+        });
+    }
 }
 
-bool device_handoff_requested() {
-    DeviceHandoffState &state = device_handoff_state();
-    std::lock_guard<std::mutex> lock(state.mu);
-    return state.requested;
+bool device_handoff_requested(dng_host &host) {
+    const DecodeContext *ctx = dng_decode_context_for(host);
+    return ctx ? ctx->handoff_enabled : false;
 }
 
 // Publish the device-resident dst buffer together with the writeback target so
 // that copy_to_host() can scatter results back into the SDK image.
 // scratch_ptr must point to interleaved RGB memory already owned by
-// state.poly3_scratch.
-void publish_device_handoff(Halide::Runtime::Buffer<uint16_t> &&buffer,
+// ctx.handoff.poly3_scratch.
+void publish_device_handoff(DecodeContext &ctx,
+                            Halide::Runtime::Buffer<uint16_t> &&buffer,
                             uint32_t width,
                             uint32_t height,
                             uint32_t planes,
                             uint32_t pixel_range,
                             const WritebackTarget &target) {
-    DeviceHandoffState &state = device_handoff_state();
-    std::lock_guard<std::mutex> lock(state.mu);
+    DeviceHandoffState &state = ctx.handoff;
     state.buffer = std::make_unique<Halide::Runtime::Buffer<uint16_t>>(
         std::move(buffer));
     state.width = width;
@@ -356,66 +337,54 @@ double prewarm_polynomial_kernel_once() {
     return prewarm_ms;
 }
 
-// Persistent device-resident scratch. Single-thread Stage 2 decode means we
-// can rely on a global pair guarded by std::call_once for first-use init plus
-// a mutex around the (width,height) check for resize.
+// A3 (plan Task 5): device-resident dst scratch, per decode.
 //
-// W8/L-6: only the dst side stays a persistent dense device buffer. The src
-// side is now a fresh strided wrap over the caller's plane memory each call
-// (see run_polynomial_kernel below, ported from the polynomial3 strided
-// pattern at ~:596-609), so there is no longer a dense host-owned src buffer
-// to keep device-resident here.
-struct PersistentScratch {
-    Halide::Runtime::Buffer<uint16_t> dst;
-    int width = 0;
-    int height = 0;
-    bool ready = false;
-    std::mutex mu;
-};
-
-PersistentScratch &persistent_scratch() {
-    static PersistentScratch instance;
-    return instance;
-}
-
-// Ensure the persistent dst scratch matches the requested size and is bound
-// to the Metal device. Returns false if device_malloc fails (caller falls
-// back to a per-call temporary).
-bool ensure_persistent_scratch(int width, int height) {
-    PersistentScratch &s = persistent_scratch();
-    std::lock_guard<std::mutex> lock(s.mu);
-    if (s.ready && s.width == width && s.height == height) {
-        return true;
+// Was a process-global PersistentScratch pair (buffer + width/height + mutex).
+// It now lives on DecodeContext, so no mutex and no cross-decode resize can
+// invalidate the buffer another decode is dispatching against.
+//
+// W8/L-6: only the dst side is a dense device buffer. The src side is a fresh
+// strided wrap over the caller's plane memory each call (see
+// run_polynomial_kernel below), so there is no dense host-owned src buffer to
+// keep device-resident here.
+//
+// Returns nullptr when the device interface is unavailable or device_malloc
+// fails — exactly the condition the old ensure_persistent_scratch signalled
+// with `false`, so the caller's per-call-temporary fallback is unchanged.
+Halide::Runtime::Buffer<uint16_t> *ensureDeviceScratch(DecodeContext &ctx,
+                                                       int width, int height) {
+    if (ctx.stage2_dst_w == width && ctx.stage2_dst_h == height &&
+        ctx.stage2_device_dst.data() != nullptr &&
+        ctx.stage2_device_dst.raw_buffer()->device != 0) {
+        return &ctx.stage2_device_dst;
     }
     // Re-allocate a fresh host buffer — Halide::Runtime::Buffer frees device
     // memory on destruction, so simply assigning a new buffer drops the old
     // device allocation.
-    s.dst = Halide::Runtime::Buffer<uint16_t>(width, height);
-    s.width = width;
-    s.height = height;
-    s.ready = false;
+    ctx.stage2_device_dst = Halide::Runtime::Buffer<uint16_t>(width, height);
+    ctx.stage2_dst_w = width;
+    ctx.stage2_dst_h = height;
 
     const halide_device_interface_t *metal_iface =
         dng_halide_gpu_device_interface();
     if (!metal_iface) {
-        return false;
+        return nullptr;
     }
-    const int rc = s.dst.device_malloc(metal_iface);
+    const int rc = ctx.stage2_device_dst.device_malloc(metal_iface);
     if (rc != 0) {
         std::fprintf(stderr,
-                     "[OpcodeList2Halide] persistent dst device_malloc rc=%d\n",
-                     rc);
-        return false;
+                     "[OpcodeList2Halide] dst device_malloc rc=%d\n", rc);
+        return nullptr;
     }
-    s.ready = true;
-    return true;
+    return &ctx.stage2_device_dst;
 }
 
 // Run polynomial AOT kernel on a single plane. For interleaved layouts
 // (col_step != 1) we gather into a dense scratch buffer first, dispatch, then
 // scatter back. Persistent device-resident scratch is used when enabled so
 // that consecutive planes share a single MTLBuffer.
-bool run_polynomial_kernel(uint16_t *plane_ptr,
+bool run_polynomial_kernel(dng_host &host,
+                           uint16_t *plane_ptr,
                            int32_t width,
                            int32_t height,
                            int32_t col_step,         // pixels between adjacent x
@@ -441,12 +410,13 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
     Halide::Runtime::Buffer<uint16_t> local_dst;
     Halide::Runtime::Buffer<uint16_t> *dst_buf = nullptr;
 
-    const bool use_persistent =
-        ensure_persistent_scratch(width, height);
-    if (use_persistent) {
-        PersistentScratch &s = persistent_scratch();
-        dst_buf = &s.dst;
-    } else {
+    // A3: per-decode device scratch when this decode has a context; the
+    // pre-existing per-call temporary otherwise (plain-dng_host callers, and
+    // any device_malloc failure).
+    if (DecodeContext *ctx = dng_decode_context_for(host)) {
+        dst_buf = ensureDeviceScratch(*ctx, width, height);
+    }
+    if (!dst_buf) {
         local_dst = Halide::Runtime::Buffer<uint16_t>(width, height);
         dst_buf = &local_dst;
     }
@@ -564,9 +534,11 @@ bool run_polynomial_kernel(uint16_t *plane_ptr,
 // memory), so the change is proven correct even without fixture coverage.
 // Opt-in only (DNG_OL2_SELFTEST=1); never runs on the production/matrix
 // hot path.
-void ol2_selftest_strided_gather() {
+// `sdk_host` is spelled out because this function's body already uses `host`
+// for the synthetic padded source image it builds.
+void ol2_selftest_strided_gather(dng_host &sdk_host) {
     static std::once_flag once;
-    std::call_once(once, []() {
+    std::call_once(once, [&sdk_host]() {
         const char *v = std::getenv("DNG_OL2_SELFTEST");
         if (!(v && v[0] != '0' && v[0] != '\0')) {
             return;
@@ -606,7 +578,7 @@ void ol2_selftest_strided_gather() {
 
         std::vector<uint16_t> actual_host = host;
         const bool dispatched = run_polynomial_kernel(
-            actual_host.data(), width, height, col_step, row_step,
+            sdk_host, actual_host.data(), width, height, col_step, row_step,
             /*degree=*/1, coeff, pixel_range, /*timing=*/nullptr);
 
         bool ok = dispatched;
@@ -631,7 +603,8 @@ void ol2_selftest_strided_gather() {
     });
 }
 
-bool run_polynomial3_kernel(uint16_t *base,
+bool run_polynomial3_kernel(dng_host &host,
+                            uint16_t *base,
                             int32_t width,
                             int32_t height,
                             int32_t col_step,
@@ -666,18 +639,32 @@ bool run_polynomial3_kernel(uint16_t *base,
     const size_t scratch_elems =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
 
-    // Grow the scratch vector if needed, then grab a stable pointer.
-    // We must NOT hold the mutex while running the kernel (kernel may be
-    // long-running on GPU).  The pointer is stable because no other code path
-    // resizes poly3_scratch between here and the publish/scatter calls below.
-    DeviceHandoffState &state = device_handoff_state();
+    // A2 (plan Task 5): poly3_scratch lives on the per-decode context, so no
+    // lock and no cross-decode resize can invalidate the pointer taken here.
+    //
+    // Null context = plain-dng_host caller (raw_render_params_builder.cpp's
+    // dng_render_params_for_test and the test harnesses). Those callers can
+    // never request a device handoff (device_handoff_requested() answers false
+    // without a context), so the scratch does not have to outlive this call
+    // frame and a local vector is exactly equivalent. The defensive check
+    // below states that invariant instead of assuming it.
+    DecodeContext *ctx = dng_decode_context_for(host);
+    std::vector<uint16_t> local_scratch;
     uint16_t *scratch_ptr = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(state.mu);
-        if (state.poly3_scratch.size() < scratch_elems) {
-            state.poly3_scratch.resize(scratch_elems);
+    if (ctx) {
+        if (ctx->handoff.poly3_scratch.size() < scratch_elems) {
+            ctx->handoff.poly3_scratch.resize(scratch_elems);
         }
-        scratch_ptr = state.poly3_scratch.data();
+        scratch_ptr = ctx->handoff.poly3_scratch.data();
+    } else {
+        if (defer_copy_to_host) {
+            std::fprintf(stderr,
+                         "[OpcodeList2Halide] device handoff requested with no "
+                         "DecodeContext; refusing dispatch\n");
+            return false;
+        }
+        local_scratch.resize(scratch_elems);
+        scratch_ptr = local_scratch.data();
     }
 
     // src: original interleaved image layout (base + non-unit strides).
@@ -775,11 +762,13 @@ bool run_polynomial3_kernel(uint16_t *base,
         // Leave GPU result device-resident.  Publish dst_buf together with the
         // writeback target so the eventual copy_to_host() call can scatter
         // results back into the SDK image.  scratch_ptr remains valid because
-        // poly3_scratch is owned by DeviceHandoffState and is never freed until
-        // halide_stage2_ol2_clear_device_handoff() is called.
+        // poly3_scratch is owned by this decode's DeviceHandoffState (on the
+        // context) and is never freed until
+        // halide_stage2_ol2_clear_device_handoff() is called or the decode ends.
+        // ctx is non-null here: the defer path is unreachable without one.
         const WritebackTarget target{base, col_step, row_step, plane_step};
         const auto handoff_start = std::chrono::high_resolution_clock::now();
-        publish_device_handoff(std::move(dst_buf),
+        publish_device_handoff(*ctx, std::move(dst_buf),
                                static_cast<uint32_t>(width),
                                static_cast<uint32_t>(height),
                                3,
@@ -890,7 +879,7 @@ void emit_cold_subdivide_log(
 // warmed exactly once per process lifetime.
 // ---------------------------------------------------------------------------
 
-void halide_prewarm_polynomial3_for_size(int width, int height) {
+void halide_prewarm_polynomial3_for_size(dng_host &host, int width, int height) {
     if (!ol2_prewarm_enabled() || !stage2_opcodelist2_halide_enabled()) {
         return;
     }
@@ -921,16 +910,19 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
     // std::vector::resize default-inits to 0 for uint16_t, which already
     // commits and touches every page; the explicit std::memset(0) below makes
     // the intent durable against any future switch to uninitialised storage.
+    //
+    // Plan Task 5: the scratch is per-decode now, so the pre-grow lands on
+    // this decode's context. Plain-dng_host callers have none and simply skip
+    // the pre-grow — run_polynomial3_kernel's local fallback still sizes
+    // correctly, it just pays the page-fault cost this optimisation avoids.
     const size_t scratch_elems =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
-    {
-        DeviceHandoffState &state = device_handoff_state();
-        std::lock_guard<std::mutex> lock(state.mu);
-        if (state.poly3_scratch.size() < scratch_elems) {
-            state.poly3_scratch.resize(scratch_elems);
+    if (DecodeContext *ctx = dng_decode_context_for(host)) {
+        std::vector<uint16_t> &scratch = ctx->handoff.poly3_scratch;
+        if (scratch.size() < scratch_elems) {
+            scratch.resize(scratch_elems);
         }
-        std::memset(state.poly3_scratch.data(), 0,
-                    state.poly3_scratch.size() * sizeof(uint16_t));
+        std::memset(scratch.data(), 0, scratch.size() * sizeof(uint16_t));
     }
 
     // W8/L-7: measured (docs/logs/2026-07-02/Task_w8_opcodelist2.md) that a
@@ -989,25 +981,32 @@ void halide_prewarm_polynomial3_for_size(int width, int height) {
     }
 }
 
-// M-6: public dispatch-failure query and clear functions.
-bool halide_stage2_ol2_dispatch_failed() {
-    return g_ol2_dispatch_failed.load(std::memory_order_acquire);
+// M-6 / B1: public dispatch-failure query and clear functions. Per-decode as
+// of plan Task 5 — the flag they read and write lives on the caller's
+// DecodeContext. No context (plain dng_host) = nothing to clear and "no
+// failure recorded"; the set site makes that case loud (see N1 below).
+bool halide_stage2_ol2_dispatch_failed(dng_host &host) {
+    const DecodeContext *ctx = dng_decode_context_for(host);
+    return ctx ? ctx->ol2_dispatch_failed : false;
 }
 
-void halide_stage2_ol2_clear_dispatch_failure() {
-    g_ol2_dispatch_failed.store(false, std::memory_order_release);
-    g_ol2_dispatch_failure_msg.clear();
+void halide_stage2_ol2_clear_dispatch_failure(dng_host &host) {
+    if (DecodeContext *ctx = dng_decode_context_for(host)) {
+        ctx->ol2_dispatch_failed = false;
+        ctx->ol2_dispatch_failure_msg.clear();
+    }
 }
 
-void halide_stage2_ol2_set_device_handoff_enabled(bool enabled) {
-    DeviceHandoffState &state = device_handoff_state();
-    std::lock_guard<std::mutex> lock(state.mu);
-    state.requested = enabled;
+void halide_stage2_ol2_set_device_handoff_enabled(dng_host &host, bool enabled) {
+    if (DecodeContext *ctx = dng_decode_context_for(host)) {
+        ctx->handoff_enabled = enabled;
+    }
 }
 
-void halide_stage2_ol2_clear_device_handoff() {
-    DeviceHandoffState &state = device_handoff_state();
-    std::lock_guard<std::mutex> lock(state.mu);
+void halide_stage2_ol2_clear_device_handoff(dng_host &host) {
+    DecodeContext *ctx = dng_decode_context_for(host);
+    if (!ctx) return;
+    DeviceHandoffState &state = ctx->handoff;
     state.buffer.reset();
     state.valid = false;
     state.host_copied = false;
@@ -1020,9 +1019,14 @@ void halide_stage2_ol2_clear_device_handoff() {
     // allocation is reused across frames (grow-on-demand, never shrinks).
 }
 
-bool halide_stage2_ol2_get_device_handoff(Stage2Opcode2DeviceHandoff &out) {
-    DeviceHandoffState &state = device_handoff_state();
-    std::lock_guard<std::mutex> lock(state.mu);
+bool halide_stage2_ol2_get_device_handoff(dng_host &host,
+                                          Stage2Opcode2DeviceHandoff &out) {
+    DecodeContext *ctx = dng_decode_context_for(host);
+    if (!ctx) {
+        out = Stage2Opcode2DeviceHandoff{};
+        return false;
+    }
+    DeviceHandoffState &state = ctx->handoff;
     if (!state.valid || !state.buffer) {
         out = Stage2Opcode2DeviceHandoff{};
         return false;
@@ -1035,9 +1039,10 @@ bool halide_stage2_ol2_get_device_handoff(Stage2Opcode2DeviceHandoff &out) {
     return out.device_buffer != nullptr;
 }
 
-bool halide_stage2_ol2_device_handoff_copy_to_host() {
-    DeviceHandoffState &state = device_handoff_state();
-    std::lock_guard<std::mutex> lock(state.mu);
+bool halide_stage2_ol2_device_handoff_copy_to_host(dng_host &host) {
+    DecodeContext *ctx = dng_decode_context_for(host);
+    if (!ctx) return true;
+    DeviceHandoffState &state = ctx->handoff;
     if (!state.valid || !state.buffer || state.host_copied) {
         return true;
     }
@@ -1085,8 +1090,8 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     if (!stage2_opcodelist2_halide_enabled()) {
         return 0;
     }
-    ol2_selftest_strided_gather();  // W8/L-6: opt-in, no-op unless DNG_OL2_SELFTEST=1
-    halide_stage2_ol2_clear_device_handoff();
+    ol2_selftest_strided_gather(host);  // W8/L-6: opt-in, no-op unless DNG_OL2_SELFTEST=1
+    halide_stage2_ol2_clear_device_handoff(host);
     if (start_index + 2 >= list.Count()) {
         return 0;
     }
@@ -1161,10 +1166,11 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
 
     const int32_t width = static_cast<int32_t>(first_overlap->W());
     const int32_t height = static_cast<int32_t>(first_overlap->H());
-    const bool defer_copy_to_host = device_handoff_requested();
+    const bool defer_copy_to_host = device_handoff_requested(host);
     PolynomialTiming detail;
     const auto dispatch_start = std::chrono::high_resolution_clock::now();
-    const bool ok = run_polynomial3_kernel(base,
+    const bool ok = run_polynomial3_kernel(host,
+                                           base,
                                            width,
                                            height,
                                            pbuf.fColStep,
@@ -1182,10 +1188,10 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
         // M-6: set dispatch-failure flag and return 0 (= not handled) so the
         // SDK opcode loop can check the flag and break.  Replaces the old
         // throw-as-control-flow via DngOl2DispatchError.
-        g_ol2_dispatch_failed.store(true, std::memory_order_release);
-        g_ol2_dispatch_failure_msg =
-            "[OpcodeList2Halide] batched GPU dispatch failed; refusing SDK CPU fallback";
-        std::fprintf(stderr, "%s\n", g_ol2_dispatch_failure_msg.c_str());
+        record_ol2_dispatch_failure(
+            host,
+            "[OpcodeList2Halide] batched GPU dispatch failed; refusing SDK CPU "
+            "fallback");
         return 0;
     }
     if (map_poly_timing_enabled()) {
@@ -1215,7 +1221,7 @@ uint32_t halide_try_dispatch_opcode2_batch(dng_host &host,
     return 3;
 }
 
-bool halide_try_dispatch_opcode2(dng_host & /* host */,
+bool halide_try_dispatch_opcode2(dng_host &host,
                                  dng_opcode &opcode,
                                  dng_image &image) {
     if (!stage2_opcodelist2_halide_enabled()) {
@@ -1285,7 +1291,8 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
 
     PolynomialTiming detail;
     const auto dispatch_start = std::chrono::high_resolution_clock::now();
-    const bool ok = run_polynomial_kernel(base,
+    const bool ok = run_polynomial_kernel(host,
+                                          base,
                                           width,
                                           height,
                                           col_step,
@@ -1321,10 +1328,9 @@ bool halide_try_dispatch_opcode2(dng_host & /* host */,
         // M-6: set dispatch-failure flag and return false (= not handled) so
         // the SDK opcode loop can check the flag and break.  Replaces the old
         // throw-as-control-flow via DngOl2DispatchError.
-        g_ol2_dispatch_failed.store(true, std::memory_order_release);
-        g_ol2_dispatch_failure_msg =
-            "[OpcodeList2Halide] GPU dispatch failed; refusing SDK CPU fallback";
-        std::fprintf(stderr, "%s\n", g_ol2_dispatch_failure_msg.c_str());
+        record_ol2_dispatch_failure(
+            host,
+            "[OpcodeList2Halide] GPU dispatch failed; refusing SDK CPU fallback");
         return false;
     }
     return true;

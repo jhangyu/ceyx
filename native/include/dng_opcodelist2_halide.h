@@ -53,21 +53,37 @@ struct Stage2Opcode2DeviceHandoff {
 // copying back into the SDK Stage2 image. Callers must either consume the
 // device buffer or call halide_stage2_ol2_device_handoff_copy_to_host() before
 // returning to any host-owned Stage3 path.
-void halide_stage2_ol2_set_device_handoff_enabled(bool enabled);
-void halide_stage2_ol2_clear_device_handoff();
-bool halide_stage2_ol2_get_device_handoff(Stage2Opcode2DeviceHandoff &out);
-bool halide_stage2_ol2_device_handoff_copy_to_host();
+//
+// Mutex rework (plan Task 5, A2/A6): all of this state is per-decode now,
+// carried on the DecodeContext reached through `host`. A plain dng_host has no
+// context, so these become no-ops / "no handoff available" for harness callers
+// — the same behaviour those callers got before, since they never published a
+// handoff either.
+void halide_stage2_ol2_set_device_handoff_enabled(dng_host &host, bool enabled);
+void halide_stage2_ol2_clear_device_handoff(dng_host &host);
+bool halide_stage2_ol2_get_device_handoff(dng_host &host,
+                                          Stage2Opcode2DeviceHandoff &out);
+bool halide_stage2_ol2_device_handoff_copy_to_host(dng_host &host);
 
 // M-6: Query/clear the OL2 GPU dispatch failure flag.  Replaces the old
 // DngOl2DispatchError throw-as-control-flow path.  When a GPU dispatch fails,
 // the dispatch functions set this flag and return normally (0 for batch, false
 // for single); the caller (SDK opcode loop + pipeline) checks and acts on it.
-bool halide_stage2_ol2_dispatch_failed();
-void halide_stage2_ol2_clear_dispatch_failure();
+//
+// Mutex rework (plan Task 5, B1): the flag is per-decode, carried on the
+// DecodeContext reached through `host`. It used to be a process-global pair,
+// so under a shared decode lock one decode's clear could land between another
+// decode's set and check — returning success with the MapPolynomial colour
+// correction never applied.
+bool halide_stage2_ol2_dispatch_failed(dng_host &host);
+void halide_stage2_ol2_clear_dispatch_failure(dng_host &host);
 
 // Lazy actual-size prewarm for the batched 3-plane polynomial kernel.
 // Fires a dummy dispatch at (width x height) if that dimension pair has not
 // been warmed yet in this process. Safe to call concurrently; uses an internal
 // mutex-protected set keyed by (width << 32 | height). No-op when
 // DNG_STAGE2_OL2_PREWARM=0 or DNG_STAGE2_OL2_HALIDE=0.
-void halide_prewarm_polynomial3_for_size(int width, int height);
+//
+// Takes the host as of plan Task 5: besides the Metal warm-up it pre-grows the
+// poly3 scratch, which is now per-decode state on the host's DecodeContext.
+void halide_prewarm_polynomial3_for_size(dng_host &host, int width, int height);

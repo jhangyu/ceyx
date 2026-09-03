@@ -12,6 +12,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "HalideBuffer.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -87,11 +92,75 @@ class DecodeArena {
   size_t high_water_ = 0;
 };
 
+// M-5: Value object grouping the writeback destination pointer and its
+// interleaved layout geometry. Moved here from dng_opcodelist2_halide.cpp by
+// plan Task 5 (A2) together with DeviceHandoffState.
+struct WritebackTarget {
+  uint16_t *base = nullptr;
+  int32_t col_step = 0;
+  int32_t row_step = 0;
+  int32_t plane_step = 0;
+
+  // True iff a valid writeback destination has been captured.
+  bool has_target() const { return base != nullptr; }
+
+  // Reset to empty / invalid state.
+  void reset() { *this = WritebackTarget{}; }
+};
+
+// A2: Stage-2 -> Stage-4 device-handoff state. Moved verbatim from the
+// anonymous namespace of dng_opcodelist2_halide.cpp EXCEPT that its
+// `std::mutex mu` is gone: the object now lives on a per-decode context, so
+// only the decode that owns it can name it and publish -> consume -> reset
+// cannot interleave with another decode's sequence.
+// The old struct's `requested` field is NOT reproduced here: it was the
+// process-global enable flag that plan Task 5 (A6) replaces with
+// DecodeContext::handoff_enabled below. Keeping both would leave two writable
+// copies of one fact — exactly the shape this rework exists to remove.
+struct DeviceHandoffState {
+  bool valid = false;
+  bool host_copied = false;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t planes = 0;
+  uint32_t pixel_range = 0;
+  std::unique_ptr<Halide::Runtime::Buffer<uint16_t>> buffer;
+  // Interleaved RGB scratch host storage that backs dst_buf in
+  // run_polynomial3_kernel when defer_copy_to_host=true. Sized
+  // W*H*planes*sizeof(uint16_t); grows on demand but never shrinks within one
+  // decode. Lives here so it outlives the call frame and the device buffer can
+  // safely reference it.
+  std::vector<uint16_t> poly3_scratch;
+  // M-5: Destination for scattering GPU results back into the dng_image host
+  // memory. Owned by the decode that published it — no cross-decode validity
+  // question exists, which is what the single-flight mutex used to answer.
+  WritebackTarget writeback;
+};
+
 struct DecodeContext {
   explicit DecodeContext(size_t arena_reserve_bytes)
       : arena(arena_reserve_bytes) {}
   DecodeArena arena;
-  // Task 5 adds: device-handoff state, handoff enable flag, OL2 error channel.
+
+  // A2/A6: device-handoff state and its enable flag. No mutex: only the
+  // decode that owns this context can name it, so publish -> consume -> reset
+  // is safe by construction rather than by lock discipline.
+  DeviceHandoffState handoff;
+  bool handoff_enabled = false;
+
+  // B1: OpcodeList2 dispatch error channel. Was a process-global pair whose
+  // own comment named pipelineSingleFlightMutex as its protection. Under a
+  // shared lock, one decode clearing the flag between another's set and check
+  // made the second return SUCCESS with the MapPolynomial colour-correction
+  // opcode never applied. Per-decode makes that unreachable.
+  bool ol2_dispatch_failed = false;
+  std::string ol2_dispatch_failure_msg;
+
+  // A3: Stage-2 device-resident dst scratch. Device memory, so not arena
+  // memory; reused across planes within one decode, freed with the context.
+  Halide::Runtime::Buffer<uint16_t> stage2_device_dst;
+  int stage2_dst_w = 0;
+  int stage2_dst_h = 0;
 };
 
 // Reaches the context from any dng_host the SDK hands to a bridge. Returns

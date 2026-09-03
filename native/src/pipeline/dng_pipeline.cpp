@@ -526,14 +526,21 @@ bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
 
 class ScopedStage2DeviceHandoff {
  public:
-  explicit ScopedStage2DeviceHandoff(bool enabled) {
-    halide_stage2_ol2_clear_device_handoff();
-    halide_stage2_ol2_set_device_handoff_enabled(enabled);
+  // Mutex rework (plan Task 5): the signature gains the host so the guard can
+  // reach the per-decode context. No session mutex: the state is per-decode,
+  // so publish -> consume -> reset cannot interleave with another decode's
+  // sequence.
+  ScopedStage2DeviceHandoff(dng_host &host, bool enabled) : host_(host) {
+    halide_stage2_ol2_clear_device_handoff(host_);
+    halide_stage2_ol2_set_device_handoff_enabled(host_, enabled);
   }
 
   ~ScopedStage2DeviceHandoff() {
-    halide_stage2_ol2_set_device_handoff_enabled(false);
+    halide_stage2_ol2_set_device_handoff_enabled(host_, false);
   }
+
+ private:
+  dng_host &host_;
 };
 
 // Returns a raw pointer to Stage3 workspace.
@@ -1089,13 +1096,13 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
     return false;
 
   Stage2Opcode2DeviceHandoff handoff;
-  if (!halide_stage2_ol2_get_device_handoff(handoff))
+  if (!halide_stage2_ol2_get_device_handoff(host, handoff))
     return false;
-  auto restoreHostStage2 = [&restoreFailed]() {
-    if (!halide_stage2_ol2_device_handoff_copy_to_host()) {
+  auto restoreHostStage2 = [&host, &restoreFailed]() {
+    if (!halide_stage2_ol2_device_handoff_copy_to_host(host)) {
       restoreFailed = true;
     }
-    halide_stage2_ol2_clear_device_handoff();
+    halide_stage2_ol2_clear_device_handoff(host);
     return false;
   };
   if (negative.OpcodeList3().Count() != 0)
@@ -1124,7 +1131,7 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
       host, negative, renderer, handoff.device_buffer, srcScale, config,
       stage4_out_ptr, stage4_out_size, outW, outH);
   if (ok) {
-    halide_stage2_ol2_clear_device_handoff();
+    halide_stage2_ol2_clear_device_handoff(host);
     return true;
   }
 
@@ -1198,7 +1205,7 @@ bool decodeStages(ConcurrentDngHost &host,
   // the same size (per-size cache in halide_prewarm_polynomial3_for_size).
   if (!isBayer) {
     halide_prewarm_polynomial3_for_size(
-        static_cast<int>(inputWidth), static_cast<int>(inputHeight));
+        host, static_cast<int>(inputWidth), static_cast<int>(inputHeight));
   }
 
   // W0: Stage1/2 boundary timing for per-stage Android ledger.
@@ -1210,14 +1217,14 @@ bool decodeStages(ConcurrentDngHost &host,
   {
     const bool enableStage2DeviceHandoff =
         !isBayer && config.route.stage2_stage4_device_handoff;
-    ScopedStage2DeviceHandoff guard(enableStage2DeviceHandoff);
+    ScopedStage2DeviceHandoff guard(host, enableStage2DeviceHandoff);
     // M-6: clear any stale dispatch-failure flag before entering BuildStage2.
-    halide_stage2_ol2_clear_dispatch_failure();
+    halide_stage2_ol2_clear_dispatch_failure(host);
     dngRaceDelay();  // widen the clear -> BuildStage2 -> check window (B1)
     negative.BuildStage2Image(host);
     // M-6: check the dispatch-failure flag set by the OL2 bridge (status-return
     // path, replaces the old DngOl2DispatchError throw-as-control-flow).
-    if (halide_stage2_ol2_dispatch_failed()) {
+    if (halide_stage2_ol2_dispatch_failed(host)) {
       result.error_code = kDngErrOl2DispatchFailed;
       std::cerr << "[Pipeline] OL2 dispatch failed (status-return)\n";
       return false;
