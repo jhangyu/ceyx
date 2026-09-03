@@ -6,8 +6,22 @@
 
 #include "raw_auto_exposure.h"
 #include "raw_contract_validate.h"
+#include "raw_gpu_pipeline.h"          // Round 2 Task 2.6: RawColorPipelineDiagnostics sidecar
 #include "raw_render_eval.h"           // Round 1 Task 1.7: RawRenderEvalFn implementation
 #include "raw_render_params_builder.h" // matrices-only RenderParams for the estimator's bisection
+
+namespace {
+
+// Round 2 Task 2.6. See raw_adapter_last_color_diagnostics's declaration in
+// raw_gpu_pipeline.h for why this is thread-local state rather than a wider
+// build() signature.
+thread_local RawColorPipelineDiagnostics g_adapter_color_diag{};
+
+}  // namespace
+
+RawColorPipelineDiagnostics raw_adapter_last_color_diagnostics() {
+    return g_adapter_color_diag;
+}
 
 namespace {
 
@@ -308,6 +322,7 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
                                           RawDevelopParams* out_develop,
                                           char* reason_out, size_t reason_cap) {
     if (reason_out && reason_cap > 0) reason_out[0] = '\0';
+    g_adapter_color_diag = RawColorPipelineDiagnostics{};  // Round 2 Task 2.6
     if (!out_input || !out_develop) return kRawErrMetadataInvalid;
 
     // auto_exposure_mode is the one RawDevelopParams field build() reads as
@@ -472,11 +487,22 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
                                   reason_cap);
 
     // --- colour matrix -----------------------------------------------------
-    raw_camera_to_pcs_from_libraw(v.rgb_cam, v.cam_xyz, v.raw_color, v.colors,
-                                  &out_input->camera_to_pcs, reason_out,
-                                  reason_cap);
+    // Round 2 Task 2.6: the route this resolves to (previously discarded) is
+    // now kept for RawColorDiagnostics::matrix_route.
+    const int matrix_route = raw_camera_to_pcs_from_libraw(
+        v.rgb_cam, v.cam_xyz, v.raw_color, v.colors, &out_input->camera_to_pcs,
+        reason_out, reason_cap);
 
     out_input->decoder_backend = ctx.diagnostics().unpack_backend;
+
+    // Round 2 Task 2.6: matrix_route is the raw_camera_to_pcs_from_libraw
+    // return value captured above (previously discarded at the call site).
+    // vendor_curve_applied is Round 2 Task 2.4's frontend-level detection
+    // (LibRawRawView::vendor_curve_applied), carried through here because
+    // this is the last point in the LibRaw-owning call chain before the
+    // borrowed view goes out of scope.
+    g_adapter_color_diag.matrix_route = static_cast<uint32_t>(matrix_route);
+    g_adapter_color_diag.vendor_curve_applied = v.vendor_curve_applied;
 
     // --- automatic exposure baseline (Round 1 Task 1.3, generalised Task 1.6;
     // explore_codebase_color_gap.md §6 H1: LibRaw's own CPU render entry point
@@ -598,9 +624,17 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
         }
         // kUnsupportedLayout (and any other non-kOk status, or a layout this
         // adapter did not attempt at all) leaves auto_exposure_ev at 0.0f --
-        // the est.reason string is not threaded further here because this
-        // develop-params struct carries no reason field; RawColorDiagnostics
-        // (Round 2 Task 2.4) is the channel for that, out of this task's scope.
+        // out_develop carries no reason field for that. Round 2 Task 2.6:
+        // status/reason now go to the diagnostics sidecar instead (est.reason
+        // is empty when status == kOk, matching RawColorDiagnostics's contract).
+        if (attempted) {
+            g_adapter_color_diag.auto_exposure_ev = out_develop->auto_exposure_ev;
+            g_adapter_color_diag.auto_exposure_status =
+                static_cast<uint32_t>(est.status);
+            std::snprintf(g_adapter_color_diag.auto_exposure_reason,
+                          sizeof(g_adapter_color_diag.auto_exposure_reason), "%s",
+                          est.reason);
+        }
     }
 
     // --- develop defaults --------------------------------------------------

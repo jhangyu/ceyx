@@ -685,6 +685,11 @@ RawErrorCode decodeFileImpl(const char* file_path,
     char reason[256] = {0};
     const RawErrorCode build_rc =
         adapter.build(ctx, &input, &effective, reason, sizeof(reason));
+    // Round 2 Task 2.6: read back what build() computed but could not return
+    // directly (see raw_adapter_last_color_diagnostics's declaration). Must
+    // happen before anything else on this thread calls build() again -- there
+    // is nothing between here and the next build() call on this call path.
+    out.color_diag = raw_adapter_last_color_diagnostics();
     // The adapter owns the metadata half of RawDevelopParams; the develop knobs
     // stay the caller's.
     effective.max_output_long_edge = develop.max_output_long_edge;

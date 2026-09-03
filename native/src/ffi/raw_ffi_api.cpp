@@ -1,6 +1,7 @@
 // Generic RAW C ABI. Reuses the FROZEN DngResult layout, so Dart bindings need
 // no struct change (spec section 12.2). error_code carries a RawErrorCode,
 // whose values (<= -201) are disjoint from DngErrorCode.
+#include <cstdio>
 #include <cstdlib>
 
 #include "dng_pipeline.h"
@@ -54,17 +55,22 @@ RAW_FFI_EXPORT DngResult* raw_decode_and_process(const char* file_path,
     const RawErrorCode rc = raw_pipeline_decode_file(file_path, develop, out);
     g_last_diagnostics = out.diag;
 
-    // Round 2 Task 2.4: populate whatever this translation unit can actually
-    // see (see the KNOWN GAP comment on raw_last_color_diagnostics in
-    // raw_ffi_api.h for what is NOT reachable here and why).
+    // Round 2 Task 2.6: threaded from RawPipelineResult::color_diag, which
+    // decodeFileImpl (raw_gpu_pipeline.cpp) now fills in from the adapter's
+    // diagnostics sidecar (see RawColorPipelineDiagnostics in
+    // raw_gpu_pipeline.h). clamped_mask is not populated: no round-2 task
+    // computes per-field clamp bits yet (the ranges themselves are enforced
+    // by raw_contract_validate.cpp, but it does not report WHICH field
+    // clamped) -- left at 0 rather than guessed.
     RawColorDiagnostics color_diag{};
     color_diag.struct_size = static_cast<uint32_t>(sizeof(RawColorDiagnostics));
-    color_diag.auto_exposure_ev = 0.0f;
-    color_diag.auto_exposure_status = kRawColorAutoExposureStatusUnavailable;
-    color_diag.vendor_curve_applied = 0;
-    color_diag.matrix_route = kRawCameraMatrixRouteNone;
+    color_diag.auto_exposure_ev = out.color_diag.auto_exposure_ev;
+    color_diag.auto_exposure_status = out.color_diag.auto_exposure_status;
+    color_diag.vendor_curve_applied = out.color_diag.vendor_curve_applied;
+    color_diag.matrix_route = out.color_diag.matrix_route;
     color_diag.clamped_mask = 0;
-    color_diag.reason[0] = '\0';
+    std::snprintf(color_diag.reason, sizeof(color_diag.reason), "%s",
+                  out.color_diag.auto_exposure_reason);
     g_last_color_diagnostics = color_diag;
     g_have_color_diagnostics = true;
 

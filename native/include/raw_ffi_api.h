@@ -36,10 +36,9 @@ int32_t raw_last_diagnostics(struct RawDecodeDiagnostics *out);
  *
  * kRawCameraMatrixRoute* mirrors (by value, 0/1/2) the private constants
  * local to libraw_gpu_input_adapter.cpp (kRawCameraMatrixRouteNone/RgbCam/
- * CamXyz) -- that file is round-2-owned by a parallel task and its route
- * decision is NOT threaded into RawPipelineResult this round (see the
- * BLOCKED-partial note below and in round2_vendor_curve.md), so
- * matrix_route below always reads kRawCameraMatrixRouteNone in this build. */
+ * CamXyz). Round 2 Task 2.6 threads the real per-decode value through
+ * RawPipelineResult::color_diag (raw_gpu_pipeline.h) -- see
+ * raw_last_color_diagnostics's contract below for what is now live. */
 enum {
     kRawCameraMatrixRouteNone = 0,
     kRawCameraMatrixRouteRgbCam = 1,
@@ -48,9 +47,9 @@ enum {
 
 /* Mirrors RawAutoExposureStatus (raw_auto_exposure.h) by value; kept as a
  * plain uint32_t here rather than including that header, which is owned by
- * a parallel round-2 task. kOk=0 is the only value this build can currently
- * produce (see BLOCKED-partial note) -- it is NOT a claim that the solver
- * always succeeds, only that this channel cannot see its real status yet. */
+ * a parallel round-2 task. This name is retained as the literal 0 (== kOk)
+ * for source compatibility with existing callers written against Task 2.4's
+ * build; it is a real, meaningful status now (Task 2.6), not only a sentinel. */
 enum { kRawColorAutoExposureStatusUnavailable = 0 };
 
 typedef struct RawColorDiagnostics {
@@ -67,23 +66,22 @@ typedef struct RawColorDiagnostics {
  * raw_decode_and_process. Returns 0 on success, -1 when out is null or no
  * decode has run yet (mirrors raw_last_diagnostics's contract exactly).
  *
- * KNOWN GAP (Round 2 Task 2.4, reported rather than silently partial):
- * auto_exposure_ev/auto_exposure_status/matrix_route/clamped_mask are NOT
- * wired to their real per-decode values in this build. The data exists --
- * auto_exposure_ev and the solver's status/reason are computed inside
- * libraw_gpu_input_adapter.cpp::build() (round-2-owned by a parallel task,
- * off limits this round), matrix_route inside the same file's
- * cameraMatrixRoute() helper -- but RawPipelineResult (raw_gpu_pipeline.h,
- * also not owned by this task) carries only the frozen RawDecodeDiagnostics
- * back to this translation unit, with no field for any of the above. Wiring
- * this channel end to end requires adding fields to RawPipelineResult and
- * populating them in raw_gpu_pipeline.cpp / libraw_gpu_input_adapter.cpp,
- * both outside this task's file ownership boundary. vendor_curve_applied is
- * similarly computed by libraw_frontend.cpp (this task's file, see
- * LibRawRawView::vendor_curve_applied) but that view is consumed entirely
- * inside raw_pipeline_decode_file's local LibRawFrontendContext and never
- * handed back either, for the same reason.
- * `reason` is always empty in this build; `struct_size` is always valid. */
+ * Round 2 Task 2.6 threads the real values through RawPipelineResult
+ * (raw_gpu_pipeline.h's RawColorPipelineDiagnostics) from where each is
+ * actually computed: auto_exposure_ev/status/reason from the auto-exposure
+ * estimator inside LibRawGpuInputAdapter::build() (only when a CFA or
+ * linear-RGB layout was attempted -- an unattempted layout leaves all three
+ * at their zero-initialised default, matching auto_exposure_ev's existing
+ * "no gain" contract); matrix_route from that same build() call's colour-
+ * matrix routing; vendor_curve_applied from Round 2 Task 2.4's frontend-level
+ * detection (LibRawRawView::vendor_curve_applied). `reason` is empty when
+ * status is kOk or when auto-exposure was never attempted (DNG route,
+ * decode failure before the adapter ran).
+ * clamped_mask is NOT wired: no round-2 task reports WHICH RawDevelopParams
+ * field a value was clamped from -- raw_contract_validate.cpp enforces the
+ * ranges but does not report per-field clamp bits. Left at 0 rather than
+ * guessed; a future task owns adding that reporting.
+ * `struct_size` is always valid on a successful (0) return. */
 int32_t raw_last_color_diagnostics(RawColorDiagnostics *out);
 
 #ifdef __cplusplus

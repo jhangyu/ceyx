@@ -15,12 +15,42 @@
 #include "libraw_frontend.h"       // RawForcedBackend only (test-only override)
 #include "raw_pipeline_contract.h"
 
+// Round 2 Task 2.6: colour-pipeline diagnostics that RawDecodeDiagnostics
+// (frozen, Dart-visible) cannot carry. Additive field on RawPipelineResult,
+// not on the frozen struct. auto_exposure_status/matrix_route are stored as
+// plain uint32_t mirroring RawAutoExposureStatus (raw_auto_exposure.h) and
+// LibRawGpuInputAdapter's private kRawCameraMatrixRoute* by VALUE (0/1/2) --
+// this header must not include either owner's header (raw_auto_exposure.h is
+// round-2-owned by a parallel task; the matrix-route constants are
+// deliberately file-local to libraw_gpu_input_adapter.cpp, see that file's
+// comment on why). raw_ffi_api.cpp casts these straight through to
+// RawColorDiagnostics's identically-shaped fields.
+struct RawColorPipelineDiagnostics {
+    float    auto_exposure_ev = 0.0f;
+    uint32_t auto_exposure_status = 0;
+    char     auto_exposure_reason[96] = {};  // matches RawAutoExposureResult::reason
+    uint32_t matrix_route = 0;
+    uint32_t vendor_curve_applied = 0;
+};
+
+// Round 2 Task 2.6: reads back the diagnostics the most recent
+// LibRawGpuInputAdapter::build() call on THIS THREAD computed as locals
+// (auto-exposure status/reason, matrix route) but had no way to return
+// directly -- libraw_gpu_input_adapter.h is outside this task's file
+// ownership this round, so widening its build() signature was avoided; the
+// adapter's .cpp (which this task does own) stores the values in
+// thread-local state instead. Valid immediately after any build() call,
+// success or failure; call it right after build(), before anything else on
+// this thread could call build() again.
+RawColorPipelineDiagnostics raw_adapter_last_color_diagnostics();
+
 struct RawPipelineResult {
     uint8_t* rgba_ptr = nullptr;   // pool-owned; release with dng_rgba_output_release
     size_t   rgba_size = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     RawDecodeDiagnostics diag{};
+    RawColorPipelineDiagnostics color_diag{};
     RawErrorCode error = kRawSuccess;
 };
 
