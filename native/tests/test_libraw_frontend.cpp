@@ -126,6 +126,32 @@ void checkAcceptanceGate() {
     }
 }
 
+// Round 2 Task 2.4, acceptance bullet 1: synthetic identity curve -> flag 0;
+// one perturbed entry -> flag 1. Pure function, no LibRaw instance needed.
+void checkVendorCurveGate() {
+    static uint16_t identity[8];
+    for (uint16_t i = 0; i < 8; ++i) identity[i] = i;
+    {
+        const bool got = raw_frontend_vendor_curve_applied(identity, 8);
+        report("vendor-curve-identity", nullptr, got == false,
+               got ? "flag=1 want=0" : "flag=0 want=0");
+    }
+    {
+        static uint16_t perturbed[8];
+        for (uint16_t i = 0; i < 8; ++i) perturbed[i] = i;
+        perturbed[5] = 999;  // one perturbed entry
+        const bool got = raw_frontend_vendor_curve_applied(perturbed, 8);
+        report("vendor-curve-perturbed", nullptr, got == true,
+               got ? "flag=1 want=1" : "flag=0 want=1");
+    }
+    {
+        // Null curve: nothing to detect, must not crash.
+        const bool got = raw_frontend_vendor_curve_applied(nullptr, 8);
+        report("vendor-curve-null", nullptr, got == false,
+               got ? "flag=1 want=0" : "flag=0 want=0");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -136,6 +162,7 @@ int main(int argc, char** argv) {
 
     // Corpus-independent: the F2 acceptance gate truth table.
     checkAcceptanceGate();
+    checkVendorCurveGate();
 
     const std::vector<Sample> samples = loadManifest(manifest);
     if (samples.empty()) {
@@ -176,6 +203,14 @@ int main(int argc, char** argv) {
             }
             if (s.expect_layout == "bayer2x2" && first_bayer.empty()) {
                 first_bayer = s.path;
+            }
+
+            // Round 2 Task 2.4: census the vendor-curve flag for every
+            // successfully-unpacked corpus file (acceptance bullet: census
+            // line per id in route_census.md / round2_vendor_curve.md).
+            if (rc == kRawSuccess) {
+                std::printf("[VendorCurveCensus] id=%s vendor_curve_applied=%u\n",
+                            s.id.c_str(), ctx.raw_view().vendor_curve_applied);
             }
         }
     }

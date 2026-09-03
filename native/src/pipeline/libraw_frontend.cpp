@@ -59,6 +59,14 @@ bool raw_frontend_pixels_live_in_raw_image(const void* raw_alloc,
     return true;
 }
 
+bool raw_frontend_vendor_curve_applied(const uint16_t* curve, size_t count) {
+    if (!curve) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (curve[i] != static_cast<uint16_t>(i)) return true;
+    }
+    return false;
+}
+
 bool raw_frontend_pixels_live_in_color3_image(const void* raw_alloc,
                                               const void* color3_image,
                                               uint32_t filters,
@@ -264,6 +272,10 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     view.rgb_cam = &color.rgb_cam[0][0];
     view.as_shot_wb_applied =
         static_cast<uint32_t>(color.as_shot_wb_applied != 0);
+    // Round 2 Task 2.4: measured immediately post-unpack(), before any
+    // postprocessing call this project never makes (spec section 13.1).
+    view.vendor_curve_applied = static_cast<uint32_t>(
+        raw_frontend_vendor_curve_applied(color.curve, 0x10000));
     // ioparams, not idata: raw_color lives in internal_output_params, which
     // unpack() memmoves into rawdata.ioparams (unpack.cpp:504-510) once the
     // pixels are decoded. Reading it from there rather than from the private

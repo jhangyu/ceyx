@@ -15,8 +15,26 @@
 #define RAW_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #endif
 
+// Round 2 Task 2.4 acceptance bullet: RawDecodeDiagnostics is explicitly NOT
+// modified by this task (fixed Dart-visible layout, spec section 12). This
+// pins its pre-change size so a future accidental edit anywhere in this
+// header chain fails the build instead of silently reflowing the Dart FFI
+// struct. Measured via native/scripts/tmp/round2_sizeof_probe.cpp before
+// this assert was written (RC=0, see round2_syms.txt).
+static_assert(sizeof(RawDecodeDiagnostics) == 64,
+              "RawDecodeDiagnostics size changed -- this struct is Dart-visible "
+              "and frozen for Round 2 Task 2.4 (spec section 12)");
+
 namespace {
 thread_local RawDecodeDiagnostics g_last_diagnostics{};
+// Round 2 Task 2.4. Mirrors g_last_diagnostics's lifecycle: reset to a
+// not-yet-decoded sentinel at translation-unit init, overwritten at the end
+// of every raw_decode_and_process call. g_have_color_diagnostics is the
+// sentinel (rather than reusing RawDecodeDiagnostics::frontend the way
+// raw_last_diagnostics does) because struct_size is always non-zero here by
+// construction, so it cannot double as "nothing recorded yet".
+thread_local RawColorDiagnostics g_last_color_diagnostics{};
+thread_local bool g_have_color_diagnostics = false;
 }
 
 extern "C" {
@@ -36,6 +54,20 @@ RAW_FFI_EXPORT DngResult* raw_decode_and_process(const char* file_path,
     const RawErrorCode rc = raw_pipeline_decode_file(file_path, develop, out);
     g_last_diagnostics = out.diag;
 
+    // Round 2 Task 2.4: populate whatever this translation unit can actually
+    // see (see the KNOWN GAP comment on raw_last_color_diagnostics in
+    // raw_ffi_api.h for what is NOT reachable here and why).
+    RawColorDiagnostics color_diag{};
+    color_diag.struct_size = static_cast<uint32_t>(sizeof(RawColorDiagnostics));
+    color_diag.auto_exposure_ev = 0.0f;
+    color_diag.auto_exposure_status = kRawColorAutoExposureStatusUnavailable;
+    color_diag.vendor_curve_applied = 0;
+    color_diag.matrix_route = kRawCameraMatrixRouteNone;
+    color_diag.clamped_mask = 0;
+    color_diag.reason[0] = '\0';
+    g_last_color_diagnostics = color_diag;
+    g_have_color_diagnostics = true;
+
     result->error_code = static_cast<int32_t>(rc);
     result->decode_ms = out.diag.raw_unpack_ms;
     result->process_ms = out.diag.gpu_process_ms;
@@ -54,6 +86,13 @@ RAW_FFI_EXPORT int32_t raw_last_diagnostics(RawDecodeDiagnostics* out) {
     if (!out) return -1;
     if (g_last_diagnostics.frontend == kRawFrontendUnknown) return -1;
     *out = g_last_diagnostics;
+    return 0;
+}
+
+RAW_FFI_EXPORT int32_t raw_last_color_diagnostics(RawColorDiagnostics* out) {
+    if (!out) return -1;
+    if (!g_have_color_diagnostics) return -1;
+    *out = g_last_color_diagnostics;
     return 0;
 }
 

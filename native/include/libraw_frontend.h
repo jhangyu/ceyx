@@ -74,7 +74,29 @@ struct LibRawRawView {
     // adapter reads this instead of inferring component count from `colors`,
     // which describes the sensor, not the buffer.
     uint32_t components_per_pixel = 1;
+    // Round 2 Task 2.4 (vendor-curve double-apply investigation). 1 when
+    // imgdata.color.curve is non-identity at the point this view is built
+    // (immediately after unpack(), before any dcraw_process()/postprocessing
+    // call -- this project never calls dcraw_process() in production, spec
+    // section 13.1). Measured, not assumed: color.curve is LibRaw-internal
+    // and NOT populated by every vendor decoder at unpack() time (grep of
+    // third_party/libraw/src/decoders shows only decoders_libraw_dcrdefs.cpp's
+    // Nikon Coolscan path and decoders_libraw.cpp's Kodak path write it during
+    // load_raw; RAF and X3F do not touch it there). So a 0 here for RAF/X3F is
+    // NOT evidence against a vendor-curve effect -- it only rules out THIS
+    // specific mechanism (utils_libraw.cpp:341's is_curve_linear() pattern)
+    // for whichever decoder actually ran. See
+    // native/scripts/tmp/round2_vendor_curve.md for the measured verdict.
+    uint32_t vendor_curve_applied = 0;
 };
+
+// Pure, LibRaw-instance-free predicate mirroring LibRaw::is_curve_linear()
+// (utils_libraw.cpp:338-343): returns true iff curve[i] != i for ANY i in
+// [0, count). Factored out here so it is unit-testable with a synthetic
+// array (test_libraw_frontend.cpp) without needing a live LibRaw processor
+// -- the same shape as raw_frontend_pixels_live_in_raw_image above. A null
+// curve returns false (nothing to detect).
+bool raw_frontend_vendor_curve_applied(const uint16_t* curve, size_t count);
 
 // Ceiling handed to LibRaw before open_file (spec section 10.2).
 #define kRawMaxRawMemoryMb 4096
