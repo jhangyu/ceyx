@@ -76,9 +76,9 @@ struct LibRawRawView {
     uint32_t components_per_pixel = 1;
     // Round 2 Task 2.4 (vendor-curve double-apply investigation). 1 when
     // imgdata.color.curve is non-identity at the point this view is built
-    // (immediately after unpack(), before any dcraw_process()/postprocessing
-    // call -- this project never calls dcraw_process() in production, spec
-    // section 13.1). Measured, not assumed: color.curve is LibRaw-internal
+    // (immediately after unpack(), before any LibRaw postprocessing call --
+    // this project never invokes LibRaw's CPU render path in production,
+    // spec section 13.1). Measured, not assumed: color.curve is LibRaw-internal
     // and NOT populated by every vendor decoder at unpack() time (grep of
     // third_party/libraw/src/decoders shows only decoders_libraw_dcrdefs.cpp's
     // Nikon Coolscan path and decoders_libraw.cpp's Kodak path write it during
