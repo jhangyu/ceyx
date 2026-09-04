@@ -16,6 +16,23 @@ library;
 export 'src/dng_decoder_service.dart'
     show DngImage, DngErrorCode, DngDecodeException, DngDecoderService;
 
+export 'src/decode_pool.dart'
+    show
+        CeyxDecodePool,
+        CeyxPoolJobType,
+        CeyxPoolOutcome,
+        CeyxPoolWorkerEntry,
+        CeyxPoolDiscardedException,
+        CeyxPoolWorkerDiedException,
+        CeyxPoolUnavailableException,
+        ceyxDecodeWorkerMain,
+        kMsgReady,
+        kMsgUnavailable,
+        kMsgResult,
+        kMsgError,
+        kMsgJob,
+        kMsgShutdown;
+
 export 'src/raw_route.dart'
     show
         DecodeRoute,
