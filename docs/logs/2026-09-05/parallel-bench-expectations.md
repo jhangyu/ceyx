@@ -128,3 +128,80 @@ exactly one `test_concurrent_decode` process per timed sample.
 Thresholds above are final as of this file's commit. They may not be
 edited once `tmp/verify/r1-red-state.txt` (or any later bench artifact)
 contains a number.
+
+---
+
+## Section 2 — Corrected-baseline + Bayer-only experiments (pre-registered before either number exists)
+
+Written after reviewing experiment 1's result (ratio=3.805, INCONCLUSIVE,
+commit 81c3053) with lead-opus and t4-sonnet. Two independent problems
+with experiment 1's methodology were identified — NOT a "the number was
+disappointing" rationale, both would need fixing regardless of which
+direction they moved the ratio:
+
+1. **Route-coverage confound.** t4-sonnet independently measured
+   `STAGE3_WORKSPACE registrations` per file. Verified again here,
+   individually, on the unmodified tree:
+   `dng_01.dng` (bayer_conc_a) → `registrations=1`;
+   `dng_02.dng` (bayer_conc_b) → `registrations=1`;
+   `dng_03.dng`, `dng_04.dng`, `dng_05.dng` (batch_run_samples) →
+   `registrations=0` each. Only 2 of experiment 1's 5 files reach the
+   Stage-3 Bayer route into Halide Metal — the ONLY code path this
+   campaign's Lock A/B changes touch. The other 3 decode via a different
+   route that mostly does not contend on the process-wide `thread_lock`
+   under audit. A 5-file batch that is 2-contending/3-not is expected to
+   show a diluted ratio versus a fully-contending batch, independent of
+   whether the eventual fix works.
+2. **File-size / baseline-selection confound.** Experiment 1 compared
+   `wall_ms(threads=1, corpus[0]=dng_01 alone)` against
+   `wall_ms(threads=5, all 5 different files)`. The 5 files are not the
+   same pixel count (`dng_01`..`dng_05` range from ~4080×3056 up to
+   6000×4000, ~1.9x spread), so the ratio conflated per-file decode cost
+   with concurrency overlap, and its value depended on which specific file
+   happened to be picked as the N=1 sample.
+
+### Fix, pre-registered before running either experiment
+
+`run_parallel_bench.py` gained `--baseline-mode {matched,single}`
+(default `matched`). `single` reproduces experiment 1's exact method
+(kept for reference/reproducibility only — do not use for new baselines).
+`matched` is the corrected default: the N=1 sample is
+`threads=1` over the **same 5-file batch** used for the N=5 sample, run as
+ONE process (the binary decodes them serially, one after another, in
+argument order). Both arms then decode the literal same files — the only
+variable is concurrency, which removes the file-size confound entirely
+without needing to sum separately-measured single-file runs.
+
+### Experiment 2A — corrected-baseline, same 5-file DNG corpus as experiment 1
+
+- Corpus: identical to experiment 1 (`tmp/corpus/dng_01.dng` .. `dng_05.dng`,
+  sha256s as recorded above — unchanged, no re-selection).
+- Method: `run_parallel_bench.py --baseline-mode matched` (N=1 = serial
+  threads=1 over all 5 files in one process; N=5 = threads=5 over the same
+  5 files).
+- Thresholds: UNCHANGED from experiment 1 — `ratio >= 4.0` ⇒ STAIRCASE,
+  `< 2.5` ⇒ OVERLAPPED, else INCONCLUSIVE. Not re-derived, not tuned.
+
+### Experiment 2B — Bayer-only (Stage-3-registering files only)
+
+- Corpus: only the 2 files verified above to register Stage-3
+  (`dng_01.dng`, `dng_02.dng`). To exercise 5-way concurrency with only 2
+  distinct source files, the 5-file argument list for the N=5 sample
+  repeats them: `dng_01, dng_02, dng_01, dng_02, dng_01` (5 positional
+  arguments, 5 independent decode contexts/dumps — repeating a file path
+  decodes it again from scratch each time, it does not share state).
+  N=1 baseline (`--baseline-mode matched`) uses the identical 5-argument
+  list at `threads=1`.
+- Rationale: these are the only 2 corpus DNGs on the Stage-3/Metal path
+  the campaign is changing; this experiment answers "does the contract's
+  ~5x reproduce when every decode in the batch actually contends," isolated
+  from the route-coverage confound in experiment 1.
+- Thresholds: UNCHANGED — same frozen rule as above.
+
+### Verdict-independence statement (per plan §2 constraint)
+
+Both experiments are pre-registered here before either number exists, per
+lead-opus's explicit instruction. If either lands under 4.0, that is the
+finding — the fix documented here is a structural correction (route
+coverage, baseline matching), not a search for a passing number, and it
+would have been required even if it made the ratio worse.

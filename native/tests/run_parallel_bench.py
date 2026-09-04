@@ -85,9 +85,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", required=True)
     ap.add_argument("--corpus", nargs="+", required=True,
-                     help="corpus files; index 0 is used alone for the N=1 "
-                          "sample, the full list is used for the N=5 sample "
-                          "(len(corpus) must be >= 5 for the N=5 sample).")
+                     help="corpus files; the full list (first 5) is the N=5 "
+                          "batch. N=1 baseline depends on --baseline-mode.")
+    ap.add_argument("--baseline-mode", choices=("matched", "single"),
+                     default="matched",
+                     help="matched (default, corrected methodology): N=1 "
+                          "sample is `threads=1` over the SAME 5-file batch "
+                          "(one process, serial) — eliminates the file-size-"
+                          "mix confound found in experiment 1, since the "
+                          "concurrent and serial arms decode literally the "
+                          "same files. single (experiment-1 methodology, kept "
+                          "for reference only): N=1 sample is one file "
+                          "(corpus[0]) alone — do not use for new baselines, "
+                          "known confounded when corpus files differ in size.")
     ap.add_argument("--repeats", type=int, default=REPEATS_DEFAULT)
     ap.add_argument("--out", required=True)
     ap.add_argument("--self-test-missing-binary", action="store_true",
@@ -114,16 +124,17 @@ def main():
               f"script itself now exits non-zero too, per AC wording")
         sys.exit(1)
 
-    single_file = [args.corpus[0]]
     batch_files = args.corpus[:5]
     if len(batch_files) < 5:
         sys.exit(f"need >=5 corpus files for the N=5 sample, got {len(batch_files)}")
+    baseline_files = batch_files if args.baseline_mode == "matched" else [args.corpus[0]]
+    lines.append(f"bench|baseline_mode={args.baseline_mode}|baseline_files={','.join(baseline_files)}")
 
     any_failure = False
     results = {1: [], 5: []}
 
     out_dir = args.workdir
-    for concurrency, files in ((1, single_file), (5, batch_files)):
+    for concurrency, files in ((1, baseline_files), (5, batch_files)):
         # Warmup: one discarded run, absorbs the per-process Metal
         # library compile cost (metal_v21.cpp:667) so it does not land
         # inside a timed sample.
