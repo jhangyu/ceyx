@@ -270,6 +270,27 @@ class DngDecoderService {
     return result.toImage();
   }
 
+  /// Pool worker entry: decode [filePath] and return the transfer payload
+  /// `[TransferableTypedData rgba, int width, int height, double decodeMs,
+  /// double processMs]`.
+  ///
+  /// Same body as the [decodeOnWorker] worker half, minus the `Isolate.run` —
+  /// a persistent pool worker is ALREADY on a worker isolate and has ALREADY
+  /// loaded the dylib, so it calls this directly. Kept as a list rather than a
+  /// private result class so the pool's wire protocol stays inspectable.
+  ///
+  /// Must only be called on a worker isolate.
+  List<Object?> decodeForTransfer(String filePath, {int? maxDim}) {
+    final result = _decodeToTransferable(filePath, maxDim: maxDim);
+    return <Object?>[
+      result.rgbaData,
+      result.width,
+      result.height,
+      result.decodeMs,
+      result.processMs,
+    ];
+  }
+
   /// Extracts the embedded JPEG preview from the DNG file.
   /// Returns null if extraction fails.
   Uint8List? getPreviewJpeg(String filePath) {

@@ -51,10 +51,24 @@ class CeyxEncodeUnavailableException implements Exception {
 /// Both entry points run on a worker [Isolate] (via [Isolate.run]) so the
 /// caller's isolate is never blocked by the native encode call, matching the
 /// off-UI-isolate convention [DngDecoderService.decodeOnWorker] uses.
-/// `rgba` is copied into worker-isolate-owned bytes before crossing the
-/// isolate boundary and the returned [Uint8List] is fully Dart-owned — no
-/// native pointer survives the call, so no [Finalizable] bookkeeping is
-/// needed here (contrast [DngDecoderService]'s zero-copy decode path).
+///
+/// `rgba` crosses the isolate boundary as a [TransferableTypedData] rather
+/// than as a raw [Uint8List] captured by the [Isolate.run] closure. This
+/// matters because sending a live, still-mutable [Uint8List] as part of an
+/// isolate message requires the VM to copy it under an isolate-group-wide
+/// safepoint (every isolate in the group is paused while the copy happens).
+/// [TransferableTypedData.fromList] performs its copy synchronously on the
+/// calling isolate, *before* any cross-isolate message is sent, so the
+/// message itself carries only a cheap transferable handle — no
+/// group safepoint on the hot path. Note this is NOT a zero-copy transfer:
+/// [TransferableTypedData.fromList] still copies bytes once (the caller's
+/// `rgba` remains valid and unmodified afterwards, since `fromList` does not
+/// detach/neuter the source list), it just avoids paying for that copy
+/// through the isolate-message safepoint mechanism. The encoded result is
+/// transferred back the same way. The returned [Uint8List] is fully
+/// Dart-owned — no native pointer survives the call, so no [Finalizable]
+/// bookkeeping is needed here (contrast [DngDecoderService]'s zero-copy
+/// decode path).
 class CeyxEncodeService {
   /// Optional explicit dylib path, bypassing the platform candidate search
   /// in [DngNativeBindings.load]. Primarily for tests.
@@ -150,10 +164,11 @@ class CeyxEncodeService {
     }
 
     debugIsolateSpawnCount++;
+    final transferableRgba = TransferableTypedData.fromList([rgba]);
     try {
-      return await Isolate.run(
+      final transferableResult = await Isolate.run(
         () => _encodeOnWorker(
-          rgba,
+          transferableRgba,
           width: width,
           height: height,
           quality: quality,
@@ -161,6 +176,7 @@ class CeyxEncodeService {
           isWebp: isWebp,
         ),
       );
+      return transferableResult.materialize().asUint8List();
     } on CeyxEncodeUnavailableException catch (e) {
       _unavailableCache[libraryPath] = e;
       rethrow;
@@ -169,14 +185,20 @@ class CeyxEncodeService {
 
   /// Worker-isolate entry point. Static so [Isolate.run] does not capture
   /// parent-isolate state (matches [DngDecoderService._decodeFileToTransferable]).
-  static Uint8List _encodeOnWorker(
-    Uint8List rgba, {
+  ///
+  /// Takes and returns [TransferableTypedData] rather than [Uint8List] so
+  /// both the input pixels and the encoded output cross the isolate
+  /// boundary without paying an isolate-message safepoint copy (see the
+  /// class dartdoc).
+  static TransferableTypedData _encodeOnWorker(
+    TransferableTypedData rgbaTransfer, {
     required int width,
     required int height,
     required int quality,
     required String? libraryPath,
     required bool isWebp,
   }) {
+    final rgba = rgbaTransfer.materialize().asUint8List();
     final lib = libraryPath == null
         ? DngNativeBindings.load().library
         : DngNativeBindings.fromPath(libraryPath).library;
@@ -217,7 +239,8 @@ class CeyxEncodeService {
       }
 
       try {
-        return Uint8List.fromList(buffer.asTypedList(len));
+        final encoded = Uint8List.fromList(buffer.asTypedList(len));
+        return TransferableTypedData.fromList([encoded]);
       } finally {
         bindings.free(buffer);
       }
@@ -253,10 +276,11 @@ class CeyxEncodeService {
     if (memoized != null) throw memoized;
 
     debugIsolateSpawnCount++;
+    final transferableRgba = TransferableTypedData.fromList([rgba]);
     try {
-      return await Isolate.run(
+      final transferableResult = await Isolate.run(
         () => _encodeGenericOnWorker(
-          rgba,
+          transferableRgba,
           format: format.value,
           width: width,
           height: height,
@@ -269,6 +293,7 @@ class CeyxEncodeService {
           libraryPath: libraryPath,
         ),
       );
+      return transferableResult.materialize().asUint8List();
     } on CeyxEncodeUnavailableException catch (e) {
       _unavailableCache[libraryPath] = e;
       rethrow;
@@ -303,8 +328,8 @@ class CeyxEncodeService {
   /// and frees everything in a `finally` -- including the native output
   /// buffer via [CeyxEncodeBindings.free], which is reused rather than
   /// re-looked-up.
-  static Uint8List _encodeGenericOnWorker(
-    Uint8List rgba, {
+  static TransferableTypedData _encodeGenericOnWorker(
+    TransferableTypedData rgbaTransfer, {
     required int format,
     required int width,
     required int height,
@@ -316,6 +341,7 @@ class CeyxEncodeService {
     required Uint8List? icc,
     required String? libraryPath,
   }) {
+    final rgba = rgbaTransfer.materialize().asUint8List();
     final lib = libraryPath == null
         ? DngNativeBindings.load().library
         : DngNativeBindings.fromPath(libraryPath).library;
@@ -397,7 +423,8 @@ class CeyxEncodeService {
       }
 
       try {
-        return Uint8List.fromList(buffer.asTypedList(len));
+        final encoded = Uint8List.fromList(buffer.asTypedList(len));
+        return TransferableTypedData.fromList([encoded]);
       } finally {
         if (legacy.available) {
           legacy.free(buffer);
