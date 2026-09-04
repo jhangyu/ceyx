@@ -32,6 +32,7 @@ not the script."
 """
 import argparse
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -40,14 +41,36 @@ import time
 RATIO_STAIRCASE = 4.0
 RATIO_OVERLAPPED = 2.5
 REPEATS_DEFAULT = 5
+WALL_MS_RE = re.compile(r"wall_ms=([0-9.]+)")
 
 
-def run_one(binary, out_dir, threads, files):
-    """Run one test_concurrent_decode process. Returns (wall_ms, completions_ms, rc)."""
-    for name in os.listdir(out_dir):
-        if name.startswith("decode_") and (name.endswith(".raw") or name.endswith(".dims")):
-            os.remove(os.path.join(out_dir, name))
-    cmd = [binary, out_dir, str(threads), *files]
+def run_one(binary, out_dir, threads, files, driver="test_concurrent_decode"):
+    """Run one decode-bench process. Returns (wall_ms, completions_ms, rc, stdout, stderr).
+
+    driver="test_concurrent_decode": DNG-only, usage
+        `<binary> <out_dir> <threads> <file>...`; wall_ms is measured
+        externally (the binary emits no timing) and completions_ms is
+        derived from decode_<i>.raw dump mtimes in out_dir.
+    driver="probe_concurrent_raw": production ARW/RAW route
+        (raw_decode_and_process, probe_concurrent_raw.cpp:48), usage
+        `<binary> <threads> <file>...` (no out_dir argument); the binary
+        prints its OWN `PROBE threads=N files=M wall_ms=W` line, which is
+        used instead of external timing (matches native/tests/
+        probe_concurrent_raw.py's established parsing precedent). This
+        driver has no per-decode dump mechanism, so completions_ms is
+        always [] — no staircase SHAPE evidence from this driver, only the
+        aggregate ratio. Documented limitation, not engineered around.
+    """
+    if driver == "test_concurrent_decode":
+        for name in os.listdir(out_dir):
+            if name.startswith("decode_") and (name.endswith(".raw") or name.endswith(".dims")):
+                os.remove(os.path.join(out_dir, name))
+        cmd = [binary, out_dir, str(threads), *files]
+    elif driver == "probe_concurrent_raw":
+        cmd = [binary, str(threads), *files]
+    else:
+        raise ValueError(f"unknown driver {driver!r}")
+
     # Two independent clocks are needed and must not be mixed:
     #   perf_counter() -> monotonic, correct for measuring wall_ms duration,
     #       but its epoch is arbitrary (NOT comparable to file mtimes).
@@ -64,8 +87,19 @@ def run_one(binary, out_dir, threads, files):
         t1_perf = time.perf_counter()
         return (t1_perf - t0_perf) * 1000.0, [], 127, "", str(exc)
     t1_perf = time.perf_counter()
-    wall_ms = (t1_perf - t0_perf) * 1000.0
-    _ = proc.stdout  # captured for diagnostics, not asserted on
+    wall_ms_external = (t1_perf - t0_perf) * 1000.0
+
+    if driver == "probe_concurrent_raw":
+        m = WALL_MS_RE.search(proc.stdout)
+        if proc.returncode == 0 and not m:
+            # Binary succeeded but its self-reported timing line is
+            # missing — a real instrument failure, must not silently fall
+            # back to the (less precise, includes process-spawn overhead)
+            # external timer.
+            return wall_ms_external, [], 1, proc.stdout, \
+                proc.stderr + "\n[run_parallel_bench] no wall_ms= in stdout"
+        wall_ms = float(m.group(1)) if m else wall_ms_external
+        return wall_ms, [], proc.returncode, proc.stdout, proc.stderr
 
     completions = []
     for i in range(len(files)):
@@ -74,7 +108,7 @@ def run_one(binary, out_dir, threads, files):
             mtime = os.stat(p).st_mtime
             completions.append((mtime - t0_wall) * 1000.0)
     completions.sort()
-    return wall_ms, completions, proc.returncode, proc.stdout, proc.stderr
+    return wall_ms_external, completions, proc.returncode, proc.stdout, proc.stderr
 
 
 def median_or_none(xs):
@@ -106,6 +140,17 @@ def main():
                           "(experiment-1 methodology, kept for reference "
                           "only): N=1 sample is one file (corpus[0]) alone — "
                           "confounded when corpus files differ in size.")
+    ap.add_argument("--driver", choices=("test_concurrent_decode", "probe_concurrent_raw"),
+                     default="test_concurrent_decode",
+                     help="test_concurrent_decode (default): DNG-only, "
+                          "`<binary> <out_dir> <threads> <file>...`, external "
+                          "timing, per-decode dump-based completions_ms. "
+                          "probe_concurrent_raw: production ARW/RAW route "
+                          "(raw_decode_and_process), `<binary> <threads> "
+                          "<file>...`, self-reported wall_ms, NO "
+                          "completions_ms (binary has no per-decode dump "
+                          "mechanism — documented limitation, see "
+                          "expectations.md experiment 4).")
     ap.add_argument("--repeats", type=int, default=REPEATS_DEFAULT)
     ap.add_argument("--out", required=True)
     ap.add_argument("--self-test-missing-binary", action="store_true",
@@ -122,7 +167,7 @@ def main():
 
     if args.self_test_missing_binary:
         wall_ms, completions, rc, out, err = run_one(
-            "/nonexistent/test_concurrent_decode", args.workdir, 1, [args.corpus[0]])
+            "/nonexistent/test_concurrent_decode", args.workdir, 1, [args.corpus[0]], driver=args.driver)
         lines.append(f"selftest|binary=missing|rc={rc}|stderr={err.strip()!r}")
         with open(args.out, "w") as fh:
             fh.write("\n".join(lines) + "\n")
@@ -142,13 +187,13 @@ def main():
     out_dir = args.workdir
 
     # N=5 concurrent batch arm — unchanged across all baseline modes.
-    wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 5, batch_files)
+    wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 5, batch_files, driver=args.driver)
     lines.append(f"bench|concurrency=5|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
     if rc != 0:
         any_failure = True
         lines.append(f"bench|concurrency=5|rep=warmup|stderr={err.strip()!r}")
     for rep in range(1, args.repeats + 1):
-        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 5, batch_files)
+        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 5, batch_files, driver=args.driver)
         comp_str = ",".join(f"{c:.3f}" for c in completions)
         lines.append(f"bench|concurrency=5|rep={rep}|wall_ms={wall_ms:.3f}|completions_ms={comp_str}")
         if rc != 0:
@@ -161,14 +206,14 @@ def main():
     if args.baseline_mode == "per-file":
         # One shared warmup (first file), discarded, then REPEATS timed
         # single-file decodes for EACH of the 5 files, pooled into one list.
-        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, [batch_files[0]])
+        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, [batch_files[0]], driver=args.driver)
         lines.append(f"bench|concurrency=1|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
         if rc != 0:
             any_failure = True
             lines.append(f"bench|concurrency=1|rep=warmup|stderr={err.strip()!r}")
         for f in batch_files:
             for rep in range(1, args.repeats + 1):
-                wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, [f])
+                wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, [f], driver=args.driver)
                 lines.append(
                     f"bench|concurrency=1|file={f}|rep={rep}|wall_ms={wall_ms:.3f}|"
                     f"completions_ms={','.join(f'{c:.3f}' for c in completions)}")
@@ -182,13 +227,13 @@ def main():
     else:
         baseline_files = batch_files if args.baseline_mode == "matched" else [args.corpus[0]]
         lines.append(f"bench|baseline_files={','.join(baseline_files)}")
-        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, baseline_files)
+        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, baseline_files, driver=args.driver)
         lines.append(f"bench|concurrency=1|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
         if rc != 0:
             any_failure = True
             lines.append(f"bench|concurrency=1|rep=warmup|stderr={err.strip()!r}")
         for rep in range(1, args.repeats + 1):
-            wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, baseline_files)
+            wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, baseline_files, driver=args.driver)
             comp_str = ",".join(f"{c:.3f}" for c in completions)
             lines.append(f"bench|concurrency=1|rep={rep}|wall_ms={wall_ms:.3f}|completions_ms={comp_str}")
             if rc != 0:

@@ -257,3 +257,70 @@ so there is no cross-decode cache warming in the denominator at all.
   from the 2 distinct underlying files, each decoded fresh per sample).
 - Thresholds: UNCHANGED, frozen — `ratio >= 4.0` ⇒ STAIRCASE, `< 2.5` ⇒
   OVERLAPPED, otherwise INCONCLUSIVE. Not re-derived from this experiment.
+
+---
+
+## Experiment 4 — ARW, production entry point (`raw_decode_and_process`), pre-registered before any number exists
+
+Unblocked per lead-opus 2026-09-05: `native/tests/probe_concurrent_raw`
+already exists, unmodified, and calls `raw_decode_and_process` directly
+(`probe_concurrent_raw.cpp:48`) — the same production ARW entry point
+t3-opus's audit traced Dart-side (`raw_route.dart` →
+`dng_decoder_service.dart` → `dng_bindings.dart:222`). No dual-route
+change to `test_concurrent_decode.cpp` was needed after all; that plan was
+cancelled.
+
+### Driver provenance (material difference from experiments 1-3)
+
+Experiments 1-3 drive `native/build/test_concurrent_decode` (DNG-only,
+`dng_pipeline_decode_to_rgb_sized`). Experiment 4 drives a DIFFERENT
+binary, `native/build/probe_concurrent_raw` (RAW/ARW-only,
+`raw_decode_and_process`, "ALREADY LOCK-FREE" per its own file header —
+no ceyx DNG single-flight mutex on this path, only whatever Halide/Metal
+serialization the campaign targets). `run_parallel_bench.py` gained
+`--driver {test_concurrent_decode,probe_concurrent_raw}` to support both
+binaries' different CLI shapes and output formats without touching either
+binary's source.
+
+- `dwarfdump --uuid native/build/probe_concurrent_raw` =
+  `F730B58F-7B30-362B-A05C-B053BA1CA123 (arm64)`
+- `native/tests/probe_concurrent_raw.cpp` sha256 =
+  `a75c9b44e0e5c1b612fcdd14ec82ecfe68fc4517714219d00db9a788ab89fb76`
+  (unmodified from before this campaign — verified by reading the file;
+  no edits made to it in this ticket)
+- Built from source HEAD `a62b16c9fa7b3081c81881c399e1e4ba50260c51`
+
+### Known instrument limitation, accepted rather than engineered around
+
+`probe_concurrent_raw` prints only its own aggregate
+`PROBE threads=N files=M wall_ms=W` line — no per-decode dump mechanism,
+so **`completions_ms` is always `[]` for this driver.** The ratio
+(what AC1 is stated in) is unaffected; the staircase SHAPE is not
+observable from this driver. Per lead-opus's instruction, not building a
+new driver to recover it now.
+
+### Corpus
+
+The 4 ARWs already staged and hashed in the corpus table above
+(`tmp/corpus/arw_01.ARW` .. `arw_04.ARW`). Only 4 distinct ARW files exist
+on this machine (ruling 3's allotment); to fill the 5-way batch,
+`arw_01.ARW` is repeated once: batch argument list =
+`arw_01, arw_02, arw_03, arw_04, arw_01`. All 4 individually verified
+decodable via `probe_concurrent_raw` today (`RC=0` each,
+`tmp/verify/r1-arw-probe-check.txt`).
+
+### Method
+
+`run_parallel_bench.py --driver probe_concurrent_raw --baseline-mode per-file`
+— identical construction to experiment 3: N=5 arm is one process,
+`threads=5`, the 5-argument batch above; N=1 arm decodes each of the 4
+distinct ARWs individually (`threads=1`, one file per process), pools all
+`(file x repeat)` wall_ms samples, and takes the median as the
+single-decode denominator — commensurable with experiments 3A/3B by
+construction (same denominator-building method), which is the point of
+running ARW at all.
+
+### Thresholds
+
+UNCHANGED, frozen — `ratio >= 4.0` ⇒ STAIRCASE, `< 2.5` ⇒ OVERLAPPED,
+otherwise INCONCLUSIVE. Not re-derived for this experiment.
