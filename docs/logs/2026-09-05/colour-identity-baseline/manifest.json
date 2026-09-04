@@ -55,6 +55,38 @@
       "route": "lossy",
       "stage3_workspace_registered": false,
       "reaches_halide_metal": true
+    },
+    {
+      "index": 5,
+      "file": "arw_01.ARW",
+      "sha256_input": "29590ffd29477cb969077056b0c749c37a1bc8195c2c42526635bbc99e590142",
+      "width": 6024,
+      "height": 4024,
+      "sha256_output": "7946175f8c9b5db43f186974f2d35e04d205506c6bf6cfe10829917c6ffa7059"
+    },
+    {
+      "index": 6,
+      "file": "arw_02.ARW",
+      "sha256_input": "7995bb1a4ece5055c024c1d14650c382ffbdc9a51ea90ad760368c427719f97b",
+      "width": 6024,
+      "height": 4024,
+      "sha256_output": "0c61edee855df36a62a28fa13c8c55672a945e11e721b9156f85ca112e7ce5fd"
+    },
+    {
+      "index": 7,
+      "file": "arw_03.ARW",
+      "sha256_input": "04fa707b87bb6c1de11479804fda9ecbc43d8947357073b2728a7d4f32b1ad5b",
+      "width": 6024,
+      "height": 4024,
+      "sha256_output": "2639aa726863071d2ed56ebfae8c3631b76d72cf7fb97348e4edad44d789954c"
+    },
+    {
+      "index": 8,
+      "file": "arw_04.ARW",
+      "sha256_input": "540a3bd9fd58b0282f73baf514723ca555661443fe6a713c184ae06117413ff8",
+      "width": 6024,
+      "height": 4024,
+      "sha256_output": "ef2087b2b55880bedb038d6b23134404bb30084a5bbc90075a4b9539a4d3a3f7"
     }
   ]
 }
