@@ -1,0 +1,2 @@
+TEST_START=2026-09-04T18:48:18Z
+selftest|binary=missing|rc=127|stderr="[Errno 2] No such file or directory: '/nonexistent/test_concurrent_decode'"

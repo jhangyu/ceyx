@@ -1,0 +1,85 @@
+TEST_START=2026-09-04T18:46:12Z
+HEAD=f75be0bc96d62b4403f5108de07d965f9c210cc5
+PORCELAIN_START:
+?? ceyx
+?? native/build-cap/
+?? native/build-metal-verify/
+?? native/build-moltenvk/
+?? native/build-noheif/
+?? native/build-nojxl/
+?? native/build-r5carrier/
+?? native/build-tsan-concurrent/
+?? native/tests/probe_queue_affinity.cpp
+?? native/tests/run_colour_identity.py
+?? plugin/macos/Libraries/
+?? plugin/tmp/
+--- ARW files through DNG-only test_concurrent_decode (expected to fail: wrong entry point) ---
+== tmp/corpus/arw_01.ARW ==
+[Pipeline] GPU backend: metal (available=yes)
+[concurrent] decode failed tmp/corpus/arw_01.ARW err=-2
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=1
+RC=1
+== tmp/corpus/arw_02.ARW ==
+[Pipeline] GPU backend: metal (available=yes)
+[concurrent] decode failed tmp/corpus/arw_02.ARW err=-2
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=1
+RC=1
+== tmp/corpus/arw_03.ARW ==
+[Pipeline] GPU backend: metal (available=yes)
+[concurrent] decode failed tmp/corpus/arw_03.ARW err=-2
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=1
+RC=1
+== tmp/corpus/arw_04.ARW ==
+[Pipeline] GPU backend: metal (available=yes)
+[concurrent] decode failed tmp/corpus/arw_04.ARW err=-2
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=1
+RC=1
+--- DNG corpus through same binary (expected to succeed) ---
+== tmp/corpus/dng_01.dng ==
+[Pipeline] GPU backend: metal (available=yes)
+STAGE3_WORKSPACE alias_events=0 registrations=1
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=75497472 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=0
+RC=0
+== tmp/corpus/dng_02.dng ==
+[Pipeline] GPU backend: metal (available=yes)
+STAGE3_WORKSPACE alias_events=0 registrations=1
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=75497472 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=0
+RC=0
+== tmp/corpus/dng_03.dng ==
+[Pipeline] GPU backend: metal (available=yes)
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=0
+RC=0
+== tmp/corpus/dng_04.dng ==
+[Pipeline] GPU backend: metal (available=yes)
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=0
+RC=0
+== tmp/corpus/dng_05.dng ==
+[Pipeline] GPU backend: metal (available=yes)
+STAGE3_WORKSPACE alias_events=0 registrations=0
+STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled (DNG_STAGE4_SPLIT_KERNEL undefined)
+SLOTS slots=4 max_in_flight_body=1 context_alias_events=0 max_in_flight_pool=1 max_in_flight_sampled=0 arena_high_water_bytes=0 stage4_free_high_water=18446744073709551615 stage4_free_cap=4
+CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=0
+RC=0
+TEST_END=2026-09-04T18:46:13Z

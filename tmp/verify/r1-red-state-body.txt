@@ -1,0 +1,15 @@
+TEST_START=2026-09-04T18:49:15Z
+bench|concurrency=1|rep=warmup|wall_ms=103.983|rc=0
+bench|concurrency=1|rep=1|wall_ms=106.379|completions_ms=98.889
+bench|concurrency=1|rep=2|wall_ms=105.741|completions_ms=98.311
+bench|concurrency=1|rep=3|wall_ms=107.401|completions_ms=100.072
+bench|concurrency=1|rep=4|wall_ms=107.204|completions_ms=99.826
+bench|concurrency=1|rep=5|wall_ms=109.338|completions_ms=104.740
+bench|concurrency=5|rep=warmup|wall_ms=364.276|rc=0
+bench|concurrency=5|rep=1|wall_ms=379.346|completions_ms=203.915,284.928,303.421,305.764,347.189
+bench|concurrency=5|rep=2|wall_ms=398.058|completions_ms=169.556,248.351,311.564,344.609,364.457
+bench|concurrency=5|rep=3|wall_ms=416.584|completions_ms=191.030,196.872,309.689,358.907,382.934
+bench|concurrency=5|rep=4|wall_ms=407.909|completions_ms=172.878,322.837,340.755,360.934,374.007
+bench|concurrency=5|rep=5|wall_ms=410.988|completions_ms=192.373,239.228,308.128,357.966,380.512
+bench|verdict=INCONCLUSIVE|ratio=3.8050
+TEST_END=2026-09-04T18:49:18Z
