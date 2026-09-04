@@ -205,3 +205,55 @@ lead-opus's explicit instruction. If either lands under 4.0, that is the
 finding — the fix documented here is a structural correction (route
 coverage, baseline matching), not a search for a passing number, and it
 would have been required even if it made the ratio worse.
+
+---
+
+## Correction — experiments 2A/2B verdicts are INVALID-BY-CONSTRUCTION (lead-opus, 2026-09-05)
+
+`--baseline-mode matched` (used for 2A/2B) sets the N=1 denominator to
+`threads=1` over the SAME 5-file batch in ONE process — i.e. the
+**aggregate serial time for 5 decodes**, not a single-decode time. Under
+that denominator, `ratio = wall5/wall1` is bounded near 1.0 by
+construction (perfect overlap → ~0.2, zero overlap → ~1.0) and can never
+reach the frozen STAIRCASE threshold of 4.0. Applying thresholds
+calibrated for a single-decode denominator to an aggregate-serial-work
+denominator produces a verdict label that was decided before the binary
+ran — an assertion that cannot fail. **The `OVERLAPPED` verdict lines
+recorded for 2A (ratio=0.8264) and 2B (ratio=0.8510) are retracted as
+verdicts.** The raw wall-time measurements themselves are NOT retracted
+and remain useful — read correctly, they show near-total serialization:
+
+- Speedup vs. serial = `1/ratio`: 2A = 1.21x, 2B = 1.18x.
+- Overlap efficiency = speedup ÷ 5 (ideal 5-way): 2A ≈ 24%, 2B ≈ 24%.
+- i.e. the 5-way batch is only ~18-21% faster than doing the 5 decodes one
+  after another — consistent with heavy serialization and a small amount
+  of overlap, not with "the batch beats serial" as originally (mis)read.
+
+This correction does not change the corpus, the frozen thresholds, or the
+raw artifacts (`tmp/verify/r1-exp2a-body.txt`, `r1-exp2b-body.txt`,
+commit 0a760de) — it changes only which reading of those numbers is valid.
+
+## Experiment 3 — per-file baseline (AC1-correct methodology), pre-registered before any number exists
+
+Fixes the flaw above properly: the N=1 denominator must be an actual
+single-decode time. `--baseline-mode per-file` (new default) decodes
+each of the 5 batch files INDIVIDUALLY — `threads=1`, one file per
+process invocation, one shared warmup (first file, discarded) — and pools
+all `(file x repeat)` wall_ms samples (5 files x `--repeats` each) into
+one list; the **median** of that pooled list (not mean — stated
+explicitly per lead-opus's instruction) is the single-decode denominator.
+`ratio = median(wall_ms @ N=5 batch) / median(pooled per-file single-decode wall_ms)`.
+
+This also answers reading (b) from the earlier report (whether the serial
+arm was itself warmed/pipelined by adjacent decodes in the same process):
+per-file mode runs every single-decode sample in its own fresh process,
+so there is no cross-decode cache warming in the denominator at all.
+
+- **Experiment 3A** — same 5-file mixed-route DNG corpus as experiments 1
+  and 2A (`dng_01.dng` .. `dng_05.dng`, unchanged sha256s).
+- **Experiment 3B** — Bayer-only, same corpus as 2B
+  (`dng_01, dng_02, dng_01, dng_02, dng_01` — the only 2 Stage-3-registering
+  files, repeated to fill the 5-way batch; N=1 per-file samples are drawn
+  from the 2 distinct underlying files, each decoded fresh per sample).
+- Thresholds: UNCHANGED, frozen — `ratio >= 4.0` ⇒ STAIRCASE, `< 2.5` ⇒
+  OVERLAPPED, otherwise INCONCLUSIVE. Not re-derived from this experiment.

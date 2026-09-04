@@ -87,17 +87,25 @@ def main():
     ap.add_argument("--corpus", nargs="+", required=True,
                      help="corpus files; the full list (first 5) is the N=5 "
                           "batch. N=1 baseline depends on --baseline-mode.")
-    ap.add_argument("--baseline-mode", choices=("matched", "single"),
-                     default="matched",
-                     help="matched (default, corrected methodology): N=1 "
-                          "sample is `threads=1` over the SAME 5-file batch "
-                          "(one process, serial) — eliminates the file-size-"
-                          "mix confound found in experiment 1, since the "
-                          "concurrent and serial arms decode literally the "
-                          "same files. single (experiment-1 methodology, kept "
-                          "for reference only): N=1 sample is one file "
-                          "(corpus[0]) alone — do not use for new baselines, "
-                          "known confounded when corpus files differ in size.")
+    ap.add_argument("--baseline-mode", choices=("matched", "single", "per-file"),
+                     default="per-file",
+                     help="per-file (default, AC1-correct methodology, lead-"
+                          "opus correction 2026-09-05): decode each of the 5 "
+                          "batch files INDIVIDUALLY (threads=1, one process "
+                          "per file) and pool all (file x repeat) wall_ms "
+                          "samples into ONE list; the median of that pooled "
+                          "list is the single-decode denominator. This is "
+                          "what AC1 ('5-way batch wall time < 2.5x SINGLE-"
+                          "decode time') actually means. matched (INVALID for "
+                          "verdict purposes, see expectations.md experiments "
+                          "2A/2B): N=1 sample is threads=1 over the SAME "
+                          "5-file batch in ONE process (aggregate serial "
+                          "work, not a single-decode time) — the frozen "
+                          "thresholds cannot be applied to this denominator, "
+                          "kept only for the raw wall-time record. single "
+                          "(experiment-1 methodology, kept for reference "
+                          "only): N=1 sample is one file (corpus[0]) alone — "
+                          "confounded when corpus files differ in size.")
     ap.add_argument("--repeats", type=int, default=REPEATS_DEFAULT)
     ap.add_argument("--out", required=True)
     ap.add_argument("--self-test-missing-binary", action="store_true",
@@ -127,36 +135,67 @@ def main():
     batch_files = args.corpus[:5]
     if len(batch_files) < 5:
         sys.exit(f"need >=5 corpus files for the N=5 sample, got {len(batch_files)}")
-    baseline_files = batch_files if args.baseline_mode == "matched" else [args.corpus[0]]
-    lines.append(f"bench|baseline_mode={args.baseline_mode}|baseline_files={','.join(baseline_files)}")
+    lines.append(f"bench|baseline_mode={args.baseline_mode}")
 
     any_failure = False
     results = {1: [], 5: []}
-
     out_dir = args.workdir
-    for concurrency, files in ((1, baseline_files), (5, batch_files)):
-        # Warmup: one discarded run, absorbs the per-process Metal
-        # library compile cost (metal_v21.cpp:667) so it does not land
-        # inside a timed sample.
-        wall_ms, completions, rc, out, err = run_one(
-            args.binary, out_dir, concurrency, files)
-        lines.append(f"bench|concurrency={concurrency}|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
+
+    # N=5 concurrent batch arm — unchanged across all baseline modes.
+    wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 5, batch_files)
+    lines.append(f"bench|concurrency=5|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
+    if rc != 0:
+        any_failure = True
+        lines.append(f"bench|concurrency=5|rep=warmup|stderr={err.strip()!r}")
+    for rep in range(1, args.repeats + 1):
+        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 5, batch_files)
+        comp_str = ",".join(f"{c:.3f}" for c in completions)
+        lines.append(f"bench|concurrency=5|rep={rep}|wall_ms={wall_ms:.3f}|completions_ms={comp_str}")
         if rc != 0:
             any_failure = True
-            lines.append(f"bench|concurrency={concurrency}|rep=warmup|stderr={err.strip()!r}")
+            lines.append(f"bench|concurrency=5|rep={rep}|rc={rc}|stderr={err.strip()!r}")
+        else:
+            results[5].append(wall_ms)
 
+    # N=1 baseline arm — shape depends on --baseline-mode.
+    if args.baseline_mode == "per-file":
+        # One shared warmup (first file), discarded, then REPEATS timed
+        # single-file decodes for EACH of the 5 files, pooled into one list.
+        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, [batch_files[0]])
+        lines.append(f"bench|concurrency=1|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
+        if rc != 0:
+            any_failure = True
+            lines.append(f"bench|concurrency=1|rep=warmup|stderr={err.strip()!r}")
+        for f in batch_files:
+            for rep in range(1, args.repeats + 1):
+                wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, [f])
+                lines.append(
+                    f"bench|concurrency=1|file={f}|rep={rep}|wall_ms={wall_ms:.3f}|"
+                    f"completions_ms={','.join(f'{c:.3f}' for c in completions)}")
+                if rc != 0:
+                    any_failure = True
+                    lines.append(f"bench|concurrency=1|file={f}|rep={rep}|rc={rc}|stderr={err.strip()!r}")
+                else:
+                    results[1].append(wall_ms)
+        lines.append(f"bench|concurrency=1|pooled_samples={len(results[1])}|"
+                     f"denominator=median_of_pooled_per_file_samples")
+    else:
+        baseline_files = batch_files if args.baseline_mode == "matched" else [args.corpus[0]]
+        lines.append(f"bench|baseline_files={','.join(baseline_files)}")
+        wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, baseline_files)
+        lines.append(f"bench|concurrency=1|rep=warmup|wall_ms={wall_ms:.3f}|rc={rc}")
+        if rc != 0:
+            any_failure = True
+            lines.append(f"bench|concurrency=1|rep=warmup|stderr={err.strip()!r}")
         for rep in range(1, args.repeats + 1):
-            wall_ms, completions, rc, out, err = run_one(
-                args.binary, out_dir, concurrency, files)
+            wall_ms, completions, rc, out, err = run_one(args.binary, out_dir, 1, baseline_files)
             comp_str = ",".join(f"{c:.3f}" for c in completions)
-            lines.append(
-                f"bench|concurrency={concurrency}|rep={rep}|wall_ms={wall_ms:.3f}|"
-                f"completions_ms={comp_str}")
+            lines.append(f"bench|concurrency=1|rep={rep}|wall_ms={wall_ms:.3f}|completions_ms={comp_str}")
             if rc != 0:
                 any_failure = True
-                lines.append(f"bench|concurrency={concurrency}|rep={rep}|rc={rc}|stderr={err.strip()!r}")
+                lines.append(f"bench|concurrency=1|rep={rep}|rc={rc}|stderr={err.strip()!r}")
             else:
-                results[concurrency].append(wall_ms)
+                results[1].append(wall_ms)
 
     wall1 = median_or_none(results[1])
     wall5 = median_or_none(results[5])
@@ -174,6 +213,12 @@ def main():
 
     lines.append(f"bench|verdict={verdict}|ratio={ratio:.4f}" if ratio == ratio
                  else f"bench|verdict={verdict}|ratio=nan")
+    if args.baseline_mode == "matched":
+        lines.append("bench|WARNING=matched baseline denominator is aggregate "
+                     "serial work for N files, not a single-decode time; the "
+                     "frozen STAIRCASE/OVERLAPPED thresholds (calibrated for a "
+                     "single-decode denominator) do NOT apply to this ratio — "
+                     "see expectations.md experiments 2A/2B annotation.")
     lines.append(f"TEST_END={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
 
     with open(args.out, "w") as fh:
