@@ -1,0 +1,74 @@
+TEST_START=2026-09-04T18:59:58Z
+HEAD=99cc02def5539888cf50a838a322aaa08aeaf881
+PORCELAIN_START:
+ M native/cmake/tests.cmake
+ M native/tests/test_concurrent_decode.cpp
+?? ceyx
+?? native/build-cap/
+?? native/build-metal-verify/
+?? native/build-moltenvk/
+?? native/build-noheif/
+?? native/build-nojxl/
+?? native/build-r5carrier/
+?? native/build-t3noprobe/
+?? native/build-t3probe/
+?? native/build-tsan-concurrent/
+?? plugin/macos/Libraries/
+?? plugin/tmp/
+--- Experiment 4: ARW, probe_concurrent_raw driver, per-file baseline ---
+VERDICT: OVERLAPPED ratio=2.4582494969818915
+EXP4_SCRIPT_RC=1
+TEST_START=2026-09-04T18:59:58Z
+bench|baseline_mode=per-file
+bench|concurrency=5|rep=warmup|wall_ms=263.200|rc=0
+bench|concurrency=5|rep=1|wall_ms=248.000|completions_ms=
+bench|concurrency=5|rep=2|wall_ms=243.400|completions_ms=
+bench|concurrency=5|rep=3|wall_ms=137.300|completions_ms=
+bench|concurrency=5|rep=3|rc=1|stderr='[RawPipeline] contract FAIL (kRawErrMetadataInvalid: black level is not below white level)\n[RawPipeline] contract FAIL (kRawErrMetadataInvalid: black level is not below white level)\n[RawPipeline] contract FAIL (kRawErrMetadataInvalid: black level is not below white level)'
+bench|concurrency=5|rep=4|wall_ms=227.200|completions_ms=
+bench|concurrency=5|rep=5|wall_ms=245.300|completions_ms=
+bench|concurrency=1|rep=warmup|wall_ms=94.200|rc=0
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=1|wall_ms=93.700|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=2|wall_ms=96.400|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=3|wall_ms=93.800|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=4|wall_ms=94.600|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=5|wall_ms=95.500|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_02.ARW|rep=1|wall_ms=99.500|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_02.ARW|rep=2|wall_ms=97.800|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_02.ARW|rep=3|wall_ms=95.400|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_02.ARW|rep=4|wall_ms=96.500|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_02.ARW|rep=5|wall_ms=100.300|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_03.ARW|rep=1|wall_ms=99.400|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_03.ARW|rep=2|wall_ms=103.300|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_03.ARW|rep=3|wall_ms=107.500|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_03.ARW|rep=4|wall_ms=105.300|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_03.ARW|rep=5|wall_ms=101.200|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_04.ARW|rep=1|wall_ms=106.700|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_04.ARW|rep=2|wall_ms=120.400|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_04.ARW|rep=3|wall_ms=106.600|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_04.ARW|rep=4|wall_ms=105.300|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_04.ARW|rep=5|wall_ms=104.500|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=1|wall_ms=97.900|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=2|wall_ms=100.600|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=3|wall_ms=95.000|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=4|wall_ms=96.900|completions_ms=
+bench|concurrency=1|file=tmp/corpus/arw_01.ARW|rep=5|wall_ms=96.300|completions_ms=
+bench|concurrency=1|pooled_samples=25|denominator=median_of_pooled_per_file_samples
+bench|verdict=OVERLAPPED|ratio=2.4582
+TEST_END=2026-09-04T19:00:02Z
+PORCELAIN_END:
+ M native/cmake/tests.cmake
+ M native/tests/test_concurrent_decode.cpp
+?? ceyx
+?? native/build-cap/
+?? native/build-metal-verify/
+?? native/build-moltenvk/
+?? native/build-noheif/
+?? native/build-nojxl/
+?? native/build-r5carrier/
+?? native/build-t3noprobe/
+?? native/build-t3probe/
+?? native/build-tsan-concurrent/
+?? plugin/macos/Libraries/
+?? plugin/tmp/
+TEST_END=2026-09-04T19:00:02Z

@@ -1,0 +1,19 @@
+TEST_START=2026-09-04T18:59:52Z
+HEAD=99cc02def5539888cf50a838a322aaa08aeaf881
+== tmp/corpus/arw_01.ARW ==
+[Contract] RawGpuPipeline layout=bayer2x2 size=6048x4024 planes=1 comps=1 sample=u16 stride=12096 crop=0,0,6024x4024 orient=1 cfa=2x2 backend=libraw_native -> PASS
+PROBE threads=1 files=1 wall_ms=99.9
+RC=0
+== tmp/corpus/arw_02.ARW ==
+[Contract] RawGpuPipeline layout=bayer2x2 size=6048x4024 planes=1 comps=1 sample=u16 stride=12096 crop=0,0,6024x4024 orient=1 cfa=2x2 backend=libraw_native -> PASS
+PROBE threads=1 files=1 wall_ms=102.4
+RC=0
+== tmp/corpus/arw_03.ARW ==
+[Contract] RawGpuPipeline layout=bayer2x2 size=6048x4024 planes=1 comps=1 sample=u16 stride=12096 crop=0,0,6024x4024 orient=1 cfa=2x2 backend=libraw_native -> PASS
+PROBE threads=1 files=1 wall_ms=96.8
+RC=0
+== tmp/corpus/arw_04.ARW ==
+[Contract] RawGpuPipeline layout=bayer2x2 size=6048x4024 planes=1 comps=1 sample=u16 stride=12096 crop=0,0,6024x4024 orient=1 cfa=2x2 backend=libraw_native -> PASS
+PROBE threads=1 files=1 wall_ms=103.2
+RC=0
+TEST_END=2026-09-04T18:59:53Z
