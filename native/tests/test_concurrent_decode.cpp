@@ -26,6 +26,10 @@
 #include "dng_pipeline.h"
 #include "dng_pipeline_config.h"
 #include "pipeline/concurrent_dng_host.h"
+#if DNG_CONCURRENT_TEST_GENERIC_RAW
+#include "raw_file_router.h"
+#include "raw_gpu_pipeline.h"
+#endif
 
 namespace {
 
@@ -118,6 +122,63 @@ void releaseResult(DngPipelineResult &r) {
   r.rgb_ptr = nullptr;
 }
 
+// R1-T3 dual-route. ARW is the workload that motivated the parallel-decode
+// campaign, but it is a structurally separate C++ path: dng_pipeline.cpp never
+// calls raw_file_router/raw_gpu_pipeline, so this harness previously failed
+// every non-DNG input with kDngErrParseFailed (-2).
+//
+// ROUTING DISCRIMINATOR: raw_probe_file (raw_file_router.h:35) — the magic-byte
+// content probe, which is what production itself uses (raw_gpu_pipeline.cpp:620
+// calls it inside the generic route). Deliberately NOT an extension switch: a
+// harness whose routing can drift from production's would eventually measure a
+// path the app never takes, invisibly.
+//
+// One documented difference for anyone reading a bench number produced here:
+// the APP picks between the two C entry points by extension, in Dart
+// (plugin/lib/src/raw_route.dart:3-8 describes that as the app-level
+// pre-filter, with "the authoritative route decision stays native"). This
+// harness content-probes instead, which is STRICTER than the app rather than
+// divergent from it — it defers to the same native probe the generic route
+// applies anyway.
+//
+// The RAW result is normalised into DngPipelineResult so writeRgb/writeDims/
+// releaseResult are shared verbatim: both routes hand back a pool-owned RGBA8
+// buffer released by dng_rgba_output_release, so no ownership rule differs.
+//
+// The DNG branch is bit-for-bit the previous call and must stay so — R1-T4's
+// frozen DNG colour baseline is validated against this binary.
+bool decodeRouted(const char *path, DngPipelineResult &r) {
+#if DNG_CONCURRENT_TEST_GENERIC_RAW
+  RawRoute route = kRawRouteUnknown;
+  const RawErrorCode probe_rc = raw_probe_file(path, &route);
+  if (probe_rc == kRawSuccess && route == kRawRouteGeneric) {
+    // Mirrors the production develop-parameter construction in
+    // raw_ffi_api.cpp:48-52 exactly; max_dim 0 == full resolution.
+    RawDevelopParams develop{};
+    develop.exposure_ev = 0.0f;
+    develop.tone_curve_strength = 1.0f;
+    develop.output_space = kRawOutputColorSpaceSrgb;
+    develop.max_output_long_edge = 0u;
+
+    RawPipelineResult raw{};
+    const RawErrorCode rc = raw_pipeline_decode_file(path, develop, raw);
+    if (rc != kRawSuccess || !raw.rgba_ptr) {
+      r.error_code = static_cast<int32_t>(rc);
+      return false;
+    }
+    r.rgba_ptr = raw.rgba_ptr;  // pool-owned, released by releaseResult
+    r.rgba_size = raw.rgba_size;
+    r.width = raw.width;
+    r.height = raw.height;
+    r.error_code = 0;
+    return true;
+  }
+  // Probe failure falls through to the DNG path on purpose: the DNG decoder
+  // produces the specific error, rather than this harness inventing one.
+#endif
+  return dng_pipeline_decode_to_rgb_sized(path, 0, r);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -194,7 +255,7 @@ int main(int argc, char **argv) {
     DngPipelineResult r{};
     std::fprintf(stderr, "[prime %d/%d] %s\n", p + 1, primeCount, f.c_str());
     std::fflush(stderr);
-    if (!dng_pipeline_decode_to_rgb_sized(f.c_str(), 0, r)) {
+    if (!decodeRouted(f.c_str(), r)) {
       std::fprintf(stderr, "[concurrent] prime decode failed %s err=%d\n",
                    f.c_str(), r.error_code);
       releaseResult(r);
@@ -249,7 +310,7 @@ int main(int argc, char **argv) {
         if (slot >= total) return;
         const size_t i = slot % files.size();
         DngPipelineResult r{};
-        if (!dng_pipeline_decode_to_rgb_sized(files[i].c_str(), 0, r)) {
+        if (!decodeRouted(files[i].c_str(), r)) {
           std::fprintf(stderr, "[concurrent] decode failed %s err=%d\n",
                        files[i].c_str(), r.error_code);
           failures.fetch_add(1);

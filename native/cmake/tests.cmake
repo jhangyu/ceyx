@@ -1580,6 +1580,43 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_concurrent_decode ${DNG_LINUX_TEST_LIBS})
 endif()
 
+# R1-T3 (parallel-decode campaign): generic-RAW link closure for the dual-route.
+# The harness above compiles the DNG pipeline sources directly and does NOT link
+# dng_decoder_native, so reaching raw_pipeline_decode_file requires the generic
+# RAW sources here too. Without this, every non-DNG input fails -2
+# (kDngErrParseFailed) because dng_pipeline.cpp never calls the RAW router —
+# which made ARW, the workload that motivated the campaign, unmeasurable.
+# Scoped strictly to this target; DNG behaviour is unchanged (the DNG branch of
+# decodeRouted is the identical call it always made).
+if(DNG_ENABLE_GENERIC_RAW)
+    target_sources(test_concurrent_decode PRIVATE
+        src/pipeline/raw_file_router.cpp
+        src/pipeline/raw_gpu_pipeline.cpp
+        src/pipeline/raw_contract_validate.cpp
+        src/pipeline/raw_auto_exposure.cpp
+        src/pipeline/raw_render_eval.cpp
+        src/pipeline/raw_render_params_builder.cpp
+        src/pipeline/libraw_frontend.cpp
+        src/pipeline/libraw_gpu_input_adapter.cpp
+        # raw_gpu_pipeline.cpp's decodeFileImpl delegates DNG-probed inputs back
+        # to the DNG FFI (dng_decode_and_process_sized / dng_free_result), so
+        # the generic route does not link without it. The harness never reaches
+        # that delegation — it routes DNG itself, before calling the RAW path —
+        # but the symbol must resolve.
+        src/ffi/dng_ffi_api.cpp)
+    target_compile_definitions(test_concurrent_decode PRIVATE
+        DNG_CONCURRENT_TEST_GENERIC_RAW=1)
+    target_link_libraries(test_concurrent_decode
+        libraw_vendored
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
+    add_dependencies(test_concurrent_decode
+        raw_bayer_demosaic_aot_target
+        raw_xtrans_demosaic_aot_target
+        raw_linear_rgb_normalize_aot_target)
+endif()
+
 # Task 1 (mutex rework): concurrency probe over the already-lock-free RAW path.
 # Measures Halide's own GPU serialisation with the DNG single-flight mutex out
 # of the picture. Not a correctness test; produces timings only.
