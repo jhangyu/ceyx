@@ -1,0 +1,109 @@
+TEST_START=2026-09-04T18:56:52Z
+HEAD=2cb281b07e699fb5c332064b219e06de7e1a4bc9
+PORCELAIN_START:
+?? ceyx
+?? native/build-cap/
+?? native/build-metal-verify/
+?? native/build-moltenvk/
+?? native/build-noheif/
+?? native/build-nojxl/
+?? native/build-r5carrier/
+?? native/build-t3noprobe/
+?? native/build-t3probe/
+?? native/build-tsan-concurrent/
+?? plugin/macos/Libraries/
+?? plugin/tmp/
+--- Experiment 3A: per-file baseline, same 5-file mixed-route DNG corpus ---
+VERDICT: OVERLAPPED ratio=2.092078248354693
+EXP3A_SCRIPT_RC=0
+TEST_START=2026-09-04T18:56:52Z
+bench|baseline_mode=per-file
+bench|concurrency=5|rep=warmup|wall_ms=369.300|rc=0
+bench|concurrency=5|rep=1|wall_ms=378.991|completions_ms=161.817,178.200,301.912,333.077,346.374
+bench|concurrency=5|rep=2|wall_ms=385.998|completions_ms=172.841,178.477,279.618,295.834,353.351
+bench|concurrency=5|rep=3|wall_ms=369.896|completions_ms=183.623,197.292,278.081,319.892,339.198
+bench|concurrency=5|rep=4|wall_ms=368.019|completions_ms=156.354,160.731,262.599,308.327,331.639
+bench|concurrency=5|rep=5|wall_ms=393.988|completions_ms=169.545,182.609,288.900,330.345,361.080
+bench|concurrency=1|rep=warmup|wall_ms=103.306|rc=0
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=1|wall_ms=124.063|completions_ms=116.319
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=2|wall_ms=99.761|completions_ms=94.333
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=3|wall_ms=98.103|completions_ms=92.458
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=4|wall_ms=108.890|completions_ms=102.186
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=5|wall_ms=112.256|completions_ms=104.971
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=1|wall_ms=101.091|completions_ms=96.902
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=2|wall_ms=106.862|completions_ms=99.322
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=3|wall_ms=107.632|completions_ms=101.766
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=4|wall_ms=112.757|completions_ms=105.614
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=5|wall_ms=95.935|completions_ms=91.713
+bench|concurrency=1|file=tmp/corpus/dng_03.dng|rep=1|wall_ms=181.155|completions_ms=167.105
+bench|concurrency=1|file=tmp/corpus/dng_03.dng|rep=2|wall_ms=187.875|completions_ms=172.940
+bench|concurrency=1|file=tmp/corpus/dng_03.dng|rep=3|wall_ms=187.343|completions_ms=175.689
+bench|concurrency=1|file=tmp/corpus/dng_03.dng|rep=4|wall_ms=184.872|completions_ms=170.631
+bench|concurrency=1|file=tmp/corpus/dng_03.dng|rep=5|wall_ms=182.482|completions_ms=171.371
+bench|concurrency=1|file=tmp/corpus/dng_04.dng|rep=1|wall_ms=181.980|completions_ms=167.993
+bench|concurrency=1|file=tmp/corpus/dng_04.dng|rep=2|wall_ms=177.234|completions_ms=166.122
+bench|concurrency=1|file=tmp/corpus/dng_04.dng|rep=3|wall_ms=184.885|completions_ms=172.550
+bench|concurrency=1|file=tmp/corpus/dng_04.dng|rep=4|wall_ms=187.874|completions_ms=176.419
+bench|concurrency=1|file=tmp/corpus/dng_04.dng|rep=5|wall_ms=186.690|completions_ms=175.358
+bench|concurrency=1|file=tmp/corpus/dng_05.dng|rep=1|wall_ms=178.960|completions_ms=164.845
+bench|concurrency=1|file=tmp/corpus/dng_05.dng|rep=2|wall_ms=196.964|completions_ms=183.267
+bench|concurrency=1|file=tmp/corpus/dng_05.dng|rep=3|wall_ms=187.833|completions_ms=176.766
+bench|concurrency=1|file=tmp/corpus/dng_05.dng|rep=4|wall_ms=193.229|completions_ms=178.224
+bench|concurrency=1|file=tmp/corpus/dng_05.dng|rep=5|wall_ms=187.446|completions_ms=174.428
+bench|concurrency=1|pooled_samples=25|denominator=median_of_pooled_per_file_samples
+bench|verdict=OVERLAPPED|ratio=2.0921
+TEST_END=2026-09-04T18:56:58Z
+--- Experiment 3B: per-file baseline, Bayer-only ---
+VERDICT: OVERLAPPED ratio=2.188635380073858
+EXP3B_SCRIPT_RC=0
+TEST_START=2026-09-04T18:56:58Z
+bench|baseline_mode=per-file
+bench|concurrency=5|rep=warmup|wall_ms=241.778|rc=0
+bench|concurrency=5|rep=1|wall_ms=233.940|completions_ms=165.192,179.053,191.857,192.379,219.867
+bench|concurrency=5|rep=2|wall_ms=241.162|completions_ms=173.287,193.577,199.025,200.168,226.415
+bench|concurrency=5|rep=3|wall_ms=221.666|completions_ms=145.494,178.976,184.433,186.413,206.334
+bench|concurrency=5|rep=4|wall_ms=233.266|completions_ms=150.763,186.605,191.706,192.820,216.425
+bench|concurrency=5|rep=5|wall_ms=256.317|completions_ms=174.896,209.489,214.466,215.478,240.489
+bench|concurrency=1|rep=warmup|wall_ms=121.924|rc=0
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=1|wall_ms=105.725|completions_ms=98.409
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=2|wall_ms=110.052|completions_ms=102.882
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=3|wall_ms=108.616|completions_ms=101.470
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=4|wall_ms=102.956|completions_ms=95.724
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=5|wall_ms=110.891|completions_ms=103.683
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=1|wall_ms=120.435|completions_ms=113.080
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=2|wall_ms=107.386|completions_ms=100.451
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=3|wall_ms=99.602|completions_ms=92.037
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=4|wall_ms=106.889|completions_ms=101.423
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=5|wall_ms=104.868|completions_ms=97.421
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=1|wall_ms=105.325|completions_ms=98.228
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=2|wall_ms=108.138|completions_ms=100.689
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=3|wall_ms=101.567|completions_ms=94.295
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=4|wall_ms=100.935|completions_ms=93.559
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=5|wall_ms=110.038|completions_ms=105.081
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=1|wall_ms=108.373|completions_ms=100.949
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=2|wall_ms=113.726|completions_ms=106.298
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=3|wall_ms=104.322|completions_ms=97.444
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=4|wall_ms=114.990|completions_ms=108.327
+bench|concurrency=1|file=tmp/corpus/dng_02.dng|rep=5|wall_ms=106.057|completions_ms=99.060
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=1|wall_ms=102.028|completions_ms=94.837
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=2|wall_ms=98.003|completions_ms=90.908
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=3|wall_ms=100.560|completions_ms=93.303
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=4|wall_ms=108.495|completions_ms=101.367
+bench|concurrency=1|file=tmp/corpus/dng_01.dng|rep=5|wall_ms=120.544|completions_ms=112.972
+bench|concurrency=1|pooled_samples=25|denominator=median_of_pooled_per_file_samples
+bench|verdict=OVERLAPPED|ratio=2.1886
+TEST_END=2026-09-04T18:57:02Z
+PORCELAIN_END:
+?? ceyx
+?? native/build-cap/
+?? native/build-metal-verify/
+?? native/build-moltenvk/
+?? native/build-noheif/
+?? native/build-nojxl/
+?? native/build-r5carrier/
+?? native/build-t3noprobe/
+?? native/build-t3probe/
+?? native/build-tsan-concurrent/
+?? plugin/macos/Libraries/
+?? plugin/tmp/
+TEST_END=2026-09-04T18:57:02Z
