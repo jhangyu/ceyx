@@ -1,0 +1,162 @@
+Task #7 -- -206 mechanism check (raw_sample.arw deterministic vs intermittent
+concurrent-ARW -206). Read-only investigation, no code changes.
+
+HEAD=19fe00f2 (ceyx, tree state used throughout this investigation; same
+commit R1-T4's ARW addendum (10a6a38) was built against)
+
+=== Step 1: locate every -206 (kRawErrMetadataInvalid) call site ===
+grep -rn "kRawErrMetadataInvalid" native/src/ native/include/ found sites in:
+  - native/src/pipeline/raw_contract_validate.cpp (many: black/white level,
+    orientation, camera_to_pcs matrix presence, layout checks, ~18 distinct
+    failWith() call sites, each with its own reason string)
+  - native/src/pipeline/libraw_gpu_input_adapter.cpp (4 sites: null out
+    pointers, white_level==0 from LibRaw)
+  - native/src/pipeline/raw_gpu_pipeline.cpp (multiple: zero width/height,
+    stride not even, etc -- plane/buffer sanity, not metadata semantics)
+
+The observed intermittent-failure signature reported this round
+(t1-sonnet, t3-opus) is "black level is not below white level"
+(raw_contract_validate.cpp:346), one of raw_contract_validate.cpp's
+metadata-semantic checks: black_max (max over input->black.values[0..bw*bh))
+compared against input->white_level[c] for each of 4 channels.
+
+=== Step 2: attempt to reproduce the claimed DETERMINISTIC -206 on
+    image_samples/raw_sample.arw ===
+
+File identity check (must be the exact file the plan/ruling refer to):
+  $ shasum -a 256 image_samples/raw_sample.arw
+  644b98aa9ea5355c1794c7b6a0d407514ec576a784120f0a5316592a20029e0d
+  RC=0
+  -- matches native/tests/raw_corpus_manifest.json's registered sha256 for
+     id "local_sony_bayer" exactly. This IS the file the plan/ruling 3 are
+     talking about, not a substitute.
+
+raw_corpus_manifest.json's own entry for this file (native/tests/raw_corpus_manifest.json:186-196)
+already declares:
+    "expect_error": "kRawSuccess"
+  with a P17 T6 note explaining this file is the checkout's only real RAW
+  sample, uncompressed ILCE-7C ARW, decoded via libraw_native
+  (unpacked_load_raw, decoder_flags=LIBRAW_DECODER_FLATDATA only -- LibRaw
+  never offers it to RawSpeed3 regardless of rawparams.use_rawspeed).
+  This manifest entry long predates this campaign and expects SUCCESS, not
+  -206.
+
+Empirical decode attempts (rebuilt test_concurrent_decode, HEAD 19fe00f,
+same binary used for the R1-T4 ARW addendum; raw_pipeline_decode_file via
+the production route, default RawDevelopParams, single-threaded serial):
+
+  Run 1: native/build/test_concurrent_decode tmp/verify/206-check-1 1 image_samples/raw_sample.arw
+    [Contract] RawGpuPipeline layout=bayer2x2 size=6048x4024 planes=1 comps=1
+      sample=u16 stride=12096 crop=0,0,6024x4024 orient=1 cfa=2x2
+      backend=libraw_native -> PASS
+    CONCURRENT threads=1 files=1 repeat=1 warmup=0 failures=0
+    RC=0
+
+  Run 2: identical command, RC=0, failures=0, [Contract] ... -> PASS
+  Run 3: identical command, RC=0, failures=0, [Contract] ... -> PASS
+
+  sha256 of decode_0.raw across all 3 runs:
+    1f64ab6711abece3413d4b73760de4e55486b8e753606526e423d2d7056d3b35
+    (identical all 3 runs -- deterministic SUCCESS, not deterministic
+    failure)
+
+=== Step 3: cross-check against every other harness that references this
+    file, to rule out "only test_concurrent_decode's call path avoids it" ===
+
+  - native/tests/test_raw_render_params.cpp:498 -- lists raw_sample.arw
+    under the "bayer" category of its render-params matrix (used as a
+    known-good Bayer fixture, not an expected-failure fixture).
+  - native/tests/test_raw_render_params.cpp:911 -- open_and_unpack() ==
+    kRawSuccess is asserted directly against this file.
+  - native/tests/test_libraw_adapter.cpp:945-947 -- explicitly documents
+    (round-3 finding t6_finding_rawspeed3_eligibility.md) that this file
+    is well-behaved and uncompressed; it is EXCLUDED from a backend-
+    invariance comparison specifically because forcing kRawSpeed3 on it
+    would "compare libraw_native against itself and pass vacuously" -- i.e.
+    even under a forced (non-default) backend selection this file does not
+    produce a metadata failure in the test author's own account.
+
+  No test file, fixture list, or manifest entry anywhere in the tree
+  expects or documents a -206 failure for this specific sha256. The
+  "quarantined, -206" characterization in this campaign's plan (§6 risk
+  #10) and ruling 3 conflicts with every piece of standing evidence in the
+  repository about this exact file.
+
+=== Step 4: git history sanity (did something fix this file recently,
+    explaining the discrepancy?) ===
+
+  $ git log --oneline -10 -- native/src/pipeline/raw_contract_validate.cpp native/src/pipeline/libraw_gpu_input_adapter.cpp
+  fa402d1 feat(raw): thread color diagnostics through RawPipelineResult (plan 2.6)
+  b5e90a2 fix(raw): output-domain auto-exposure solve (plan 1.7)
+  78ca872 feat(raw): per-format auto-exposure (X-Trans, Foveon)
+  198e3b3 refactor(raw): pattern-descriptor estimator API (X-Trans/linear-RGB ready)
+  0740e04 feat(raw): apply automatic exposure baseline (explore §6 H1)
+  de84360 fix(native): hash-gate missing-baseline hard fail, patch-10 calloc guard, P19 A1-A3
+  79a306f fix(native): Stage 2 metadata guards -- WB sentinel chain + colors==4 unsupported branch
+  18a0efc fix(native): white-preserving camera matrix + input-side WB fold for the LibRaw path
+  07596ef refactor(layout): promote native/ to root; dng_processor -> app, dng_processor_ffi -> plugin
+
+  No commit message references raw_sample.arw or a -206/black-level fix
+  specific to this file. Nothing in this history explains "used to fail,
+  now fixed" for THIS file -- the manifest's kRawSuccess expectation for it
+  is old (P17 T6), predating this campaign by a wide margin, and is
+  consistent with what I observe today.
+
+=== Step 5: static-mechanism read (metadata source, per-decode or shared?) ===
+
+The failing check at raw_contract_validate.cpp:346 reads input->black
+(RawBlackPattern, per-call struct) and input->white_level[4] (per-call
+struct), both populated once per decode by
+libraw_gpu_input_adapter.cpp:450-478 from a local LibRaw "v" view of THAT
+decode's own libraw_data_t (v.black_scalar, v.black_channel,
+v.black_pattern, v.white_level -- all fields read off the per-call LibRaw
+instance, not any static/global). No static or thread-shared mutable
+state is visible in raw_contract_validate.cpp itself (pure function over
+its RawGpuInput* argument) or in the black/white population path in
+libraw_gpu_input_adapter.cpp. This is consistent with the campaign's
+already-refuted "LibRaw instance sharing" route (plan §3): each decode
+gets its own LibRaw instance and its own extracted v.black_scalar/
+v.white_level, so a torn read between two concurrent decodes' metadata
+would require them to be reading from the SAME LibRaw instance, which the
+existing per-decode ownership model rules out by construction. I did not
+find a plausible shared-state site that would produce this specific
+failure under concurrency from a static read of these two files alone;
+confirming it fully would require tracing LibRaw's own internal state
+(third_party/libraw) for anything process-global (e.g. lazily-initialised
+static tables consulted by unpacked_load_raw()/white balance defaults),
+which is out of this ticket's scope (LibRaw internals, not ceyx code) and
+I did not do it.
+
+=== VERDICT ===
+
+INCONCLUSIVE -- but not for the reason the ticket anticipated ("cannot
+tell from static reading"). The premise itself does not hold: I cannot
+reproduce ANY -206 failure, deterministic or otherwise, on
+image_samples/raw_sample.arw (sha256-verified to be the exact file in
+question) with the current tree. 3/3 runs succeeded with byte-identical
+output, matching the file's own long-standing manifest expectation
+(expect_error=kRawSuccess, P17 T6) and every other test fixture's
+treatment of it as a known-good Bayer sample.
+
+I therefore cannot compare "the deterministic failure's mechanism" against
+the intermittent concurrent failure's mechanism, because there is no
+currently-reproducible deterministic failure on this file to compare
+against. Two possibilities, not adjudicated here (read-only scope):
+  (a) the plan's risk #10 / ruling 3's "-206, quarantined" characterization
+      of this file was incorrect from the start (possibly conflating it
+      with a different, absent sample -- e.g. raw_corpus_manifest.json's
+      other entries with sha256:"" that are not actually present on disk,
+      such as image_samples/raw_corpus/sony_a7r4.arw), or
+  (b) something upstream of this investigation's reach (build
+      configuration, LibRaw version, a fix landed but not connected back
+      to the plan doc) resolved it, but I found no commit evidence for (b)
+      in this repo's own history.
+
+Recommendation to lead-opus: re-check where the original "-206,
+deterministic, quarantined" claim about raw_sample.arw came from before
+relying on it elsewhere in the campaign dossier -- it does not match
+current, reproducible, or historical evidence for this file.
+
+Not evidenced either way: whether the INTERMITTENT concurrent-ARW -206
+(black level is not below white level) shares a mechanism with anything,
+since there is no deterministic reproducer on this file to compare it to.
