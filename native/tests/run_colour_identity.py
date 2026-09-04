@@ -96,6 +96,24 @@ def corrupt_one_byte(path):
         fh.write(bytes([b[0] ^ 0xFF]))
 
 
+def non_degenerate_check(path, width, height):
+    """Cheap sanity check that a dump is not a zero-filled or otherwise
+    degenerate buffer that would hash stably while meaning nothing (e.g. a
+    new decode route that "succeeds" but writes garbage/zeros). Not a
+    colour judgement -- just: does this look like real pixel data at the
+    size it claims to be?"""
+    size = os.path.getsize(path)
+    expected = width * height * 3
+    if size != expected:
+        return False, f"size={size} expected={expected}"
+    with open(path, "rb") as fh:
+        sample = fh.read(min(size, 1 << 20))
+    distinct = len(set(sample))
+    if distinct < 8:
+        return False, f"distinct_byte_values={distinct} (looks zero-filled/degenerate)"
+    return True, f"distinct_byte_values={distinct} sample_bytes={len(sample)}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", required=True)
@@ -105,6 +123,12 @@ def main():
     ap.add_argument("--record", action="store_true",
                      help="record the serial-run hashes as the new baseline "
                           "(pre-change tree only; use exactly once)")
+    ap.add_argument("--append", action="store_true",
+                     help="append new corpus files to an EXISTING baseline "
+                          "without touching already-recorded rows (used for "
+                          "the ARW addendum after R1-T3's dual-route lands, "
+                          "still on the pre-R1-T2 tree). Mutually exclusive "
+                          "with --record.")
     ap.add_argument("--out", required=True)
     ap.add_argument("--corrupt-dump-index", type=int, default=None,
                      help="self-test only: flip one byte of decode_<N>.raw "
@@ -124,22 +148,39 @@ def main():
         if not os.path.exists(f):
             sys.exit(f"FATAL: corpus file does not exist: {f}")
 
+    if args.record and args.append:
+        sys.exit("FATAL: --record and --append are mutually exclusive")
+
     lines = []
     lines.append(f"BINARY={args.binary}")
     lines.append(f"CORPUS={' '.join(files)}")
     lines.append(f"RECORD={args.record}")
+    lines.append(f"APPEND={args.append}")
     lines.append("")
 
     overall_ok = True
     baseline = {}
-    if os.path.exists(args.baseline) and not args.record:
+    existing_entries = []
+    index_offset = 0
+    if args.append:
+        if not os.path.exists(args.baseline):
+            sys.exit(f"FATAL: --append requires an existing baseline at "
+                      f"{args.baseline}")
+        with open(args.baseline) as fh:
+            manifest = json.load(fh)
+        existing_entries = manifest.get("corpus", [])
+        index_offset = (max((e["index"] for e in existing_entries), default=-1)
+                         + 1)
+        lines.append(f"[append] existing baseline has {len(existing_entries)} "
+                      f"frozen row(s), new rows start at index {index_offset}")
+    elif os.path.exists(args.baseline) and not args.record:
         with open(args.baseline) as fh:
             manifest = json.load(fh)
         for entry in manifest.get("corpus", []):
             baseline[entry["index"]] = entry["sha256_output"]
     elif not args.record:
         sys.exit(f"FATAL: baseline {args.baseline} does not exist and "
-                  f"--record was not given")
+                  f"neither --record nor --append was given")
 
     tmp_root = tempfile.mkdtemp(prefix="colour_identity_")
     serial_dir = os.path.join(tmp_root, "serial")
@@ -187,34 +228,44 @@ def main():
     lines.append("")
     lines.append("[comparison]")
 
+    recording = args.record or args.append
     manifest_entries = []
     for i, f in enumerate(files):
+        idx = index_offset + i if args.append else i
         name = os.path.basename(f)
         s_sha, s_w, s_h, s_path = serial_hashes[i]
-        c_sha, _c_w, _c_h, c_path = concurrent_hashes[i]
+        c_sha, c_w, c_h, c_path = concurrent_hashes[i]
 
-        if args.record:
+        if recording:
             match_s = "RECORDED"
-            baseline[i] = s_sha
+            baseline[idx] = s_sha
             manifest_entries.append({
-                "index": i,
+                "index": idx,
                 "file": name,
                 "sha256_input": sha256_file(f),
                 "width": s_w,
                 "height": s_h,
                 "sha256_output": s_sha,
             })
+            ok_nd, detail_nd = non_degenerate_check(s_path, s_w, s_h)
+            lines.append(f"[non-degenerate-check {name}] {'OK' if ok_nd else 'FAIL'} {detail_nd}")
+            if not ok_nd:
+                overall_ok = False
         else:
-            match_s = "YES" if s_sha == baseline.get(i) else "NO"
+            match_s = "YES" if s_sha == baseline.get(idx) else "NO"
             if match_s == "NO":
                 overall_ok = False
 
-        match_c = "YES" if c_sha == baseline.get(i, s_sha if args.record else None) else "NO"
-        if args.record:
-            # On the recording run, concurrent5 must match what was just
-            # recorded from serial (this is the "stable before trusted"
+        match_c = "YES" if c_sha == baseline.get(idx, s_sha if recording else None) else "NO"
+        if recording:
+            # On the recording/append run, concurrent5 must match what was
+            # just recorded from serial (the "stable before trusted"
             # self-check from R1-T4 AC3), not RECORDED itself.
             match_c = "YES" if c_sha == s_sha else "NO"
+            ok_nd_c, detail_nd_c = non_degenerate_check(c_path, c_w, c_h)
+            lines.append(f"[non-degenerate-check {name} concurrent5] {'OK' if ok_nd_c else 'FAIL'} {detail_nd_c}")
+            if not ok_nd_c:
+                overall_ok = False
         if match_c == "NO":
             overall_ok = False
 
@@ -224,7 +275,7 @@ def main():
         if match_s == "NO" or match_c == "NO":
             if args.baseline_dumps_dir:
                 baseline_dump = os.path.join(args.baseline_dumps_dir,
-                                              f"decode_{i}.raw")
+                                              f"decode_{idx}.raw")
                 if os.path.exists(baseline_dump):
                     offending = c_path if match_c == "NO" else s_path
                     cmp_proc = subprocess.run(
@@ -234,23 +285,30 @@ def main():
                     lines.append(f"[stage4-compare {name}] {cmp_proc.stdout.strip()}")
                     lines.append(f"[stage4-compare {name}] rc={cmp_proc.returncode}")
 
-    if args.record:
+    if recording:
         if not args.baseline_dumps_dir:
             sys.exit(_flush(args.out, lines + [
-                "FATAL: --record requires --baseline-dumps-dir"], ok=False))
+                "FATAL: --record/--append requires --baseline-dumps-dir"],
+                ok=False))
         os.makedirs(args.baseline_dumps_dir, exist_ok=True)
         for i, f in enumerate(files):
+            idx = index_offset + i if args.append else i
             shutil.copyfile(serial_hashes[i][3],
                              os.path.join(args.baseline_dumps_dir,
-                                          f"decode_{i}.raw"))
+                                          f"decode_{idx}.raw"))
+        all_entries = existing_entries + manifest_entries if args.append \
+            else manifest_entries
+        all_entries = sorted(all_entries, key=lambda e: e["index"])
         with open(args.baseline, "w") as fh:
             json.dump({
                 "schema_version": 1,
-                "corpus": manifest_entries,
+                "corpus": all_entries,
             }, fh, indent=2)
             fh.write("\n")
-        lines.append(f"[record] wrote {args.baseline} and baseline dumps to "
-                      f"{args.baseline_dumps_dir}")
+        mode = "append" if args.append else "record"
+        lines.append(f"[{mode}] wrote {args.baseline} ({len(all_entries)} total "
+                      f"row(s), {len(manifest_entries)} new) and baseline "
+                      f"dumps to {args.baseline_dumps_dir}")
 
     verdict = "IDENTICAL" if overall_ok else "DIFFERENT"
     lines.append("")
