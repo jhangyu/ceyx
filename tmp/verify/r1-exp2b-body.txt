@@ -1,0 +1,16 @@
+TEST_START=2026-09-04T18:52:59Z
+bench|baseline_mode=matched|baseline_files=tmp/corpus/dng_01.dng,tmp/corpus/dng_02.dng,tmp/corpus/dng_01.dng,tmp/corpus/dng_02.dng,tmp/corpus/dng_01.dng
+bench|concurrency=1|rep=warmup|wall_ms=306.940|rc=0
+bench|concurrency=1|rep=1|wall_ms=336.209|completions_ms=112.662,166.131,219.250,272.614,329.921
+bench|concurrency=1|rep=2|wall_ms=339.622|completions_ms=100.888,157.739,214.066,270.666,330.766
+bench|concurrency=1|rep=3|wall_ms=359.774|completions_ms=141.898,196.445,246.280,298.984,351.644
+bench|concurrency=1|rep=4|wall_ms=342.961|completions_ms=107.961,164.410,222.136,280.047,335.262
+bench|concurrency=1|rep=5|wall_ms=329.326|completions_ms=112.350,162.282,212.854,266.297,322.668
+bench|concurrency=5|rep=warmup|wall_ms=329.128|rc=0
+bench|concurrency=5|rep=1|wall_ms=312.099|completions_ms=232.817,254.566,267.837,272.024,296.763
+bench|concurrency=5|rep=2|wall_ms=289.010|completions_ms=200.291,227.666,231.685,244.512,274.261
+bench|concurrency=5|rep=3|wall_ms=276.464|completions_ms=198.283,221.936,237.181,238.205,260.841
+bench|concurrency=5|rep=4|wall_ms=289.546|completions_ms=218.123,222.171,243.894,244.416,274.700
+bench|concurrency=5|rep=5|wall_ms=278.613|completions_ms=195.802,229.580,234.905,237.129,263.207
+bench|verdict=OVERLAPPED|ratio=0.8510
+TEST_END=2026-09-04T18:53:03Z

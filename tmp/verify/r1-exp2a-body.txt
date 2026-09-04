@@ -1,0 +1,16 @@
+TEST_START=2026-09-04T18:52:53Z
+bench|baseline_mode=matched|baseline_files=tmp/corpus/dng_01.dng,tmp/corpus/dng_02.dng,tmp/corpus/dng_03.dng,tmp/corpus/dng_04.dng,tmp/corpus/dng_05.dng
+bench|concurrency=1|rep=warmup|wall_ms=460.161|rc=0
+bench|concurrency=1|rep=1|wall_ms=459.642|completions_ms=95.755,147.012,283.349,364.625,444.542
+bench|concurrency=1|rep=2|wall_ms=466.936|completions_ms=99.390,151.838,291.042,371.784,451.096
+bench|concurrency=1|rep=3|wall_ms=489.631|completions_ms=94.394,146.800,290.768,383.570,474.111
+bench|concurrency=1|rep=4|wall_ms=513.610|completions_ms=152.095,203.084,338.636,417.988,497.792
+bench|concurrency=1|rep=5|wall_ms=471.204|completions_ms=96.254,150.426,287.855,372.702,455.206
+bench|concurrency=5|rep=warmup|wall_ms=366.071|rc=0
+bench|concurrency=5|rep=1|wall_ms=389.405|completions_ms=168.035,236.029,279.741,325.470,352.263
+bench|concurrency=5|rep=2|wall_ms=375.093|completions_ms=181.973,186.472,286.658,328.174,345.103
+bench|concurrency=5|rep=3|wall_ms=364.639|completions_ms=162.397,218.208,265.121,310.868,333.094
+bench|concurrency=5|rep=4|wall_ms=391.159|completions_ms=197.088,257.887,295.443,337.785,360.281
+bench|concurrency=5|rep=5|wall_ms=446.062|completions_ms=162.399,182.145,332.261,390.159,408.608
+bench|verdict=OVERLAPPED|ratio=0.8264
+TEST_END=2026-09-04T18:52:59Z
