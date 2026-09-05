@@ -79,6 +79,45 @@ size_t dng_debug_pool_checked_out(void);
 /// Non-zero on the DNG_FUSE_RGBA=0 path indicates a checkout leak.
 size_t dng_debug_rgb_pool_checked_out(void);
 
+/// R4 item 1 (rulings r-1, r-5, r-6). Sets the number of concurrent full-frame
+/// decode slots. The HOST'S USER SETTING IS THE SINGLE SOURCE OF TRUTH, and
+/// this is how it reaches the native layer.
+///
+/// Ruling r-6 governs the clamping: `requested` is bounded ONLY by
+/// [1, PipelineConfig::kAbsoluteMaxDecodeSlots (16)], which is an
+/// allocation-sanity bound, not a policy. There is deliberately NO memory- or
+/// CPU-derived clamp — a machine's recommended width (see
+/// dng_decode_recommended_slots_for_pixels below) is advisory and is displayed
+/// by the host, never enforced here. A user who selects 8 gets 8.
+///
+/// Applies immediately (ruling r-5): the pool grows at once, and a narrowing
+/// tightens admission at once while running decodes finish undisturbed —
+/// native decodes are uncancellable and are never pre-empted.
+///
+/// Safe to call from any thread, at any time, before or after the first decode
+/// (the first call constructs the pool at the requested size). Idempotent.
+/// Returns the effective slot count, always >= 1.
+int32_t dng_decode_configure_slots(int32_t requested);
+
+/// The currently configured slot count — the value the last
+/// dng_decode_configure_slots() returned, or the pre-configuration default.
+int32_t dng_decode_configured_slots(void);
+
+/// ADVISORY ONLY (ruling r-6). The number of concurrent slots this machine is
+/// RECOMMENDED to run for a frame of `pixels`, so the host's settings UI can
+/// show the user what their hardware suits. NOTHING IN THIS PROCESS CLAMPS
+/// AGAINST THIS VALUE.
+///
+/// Pass 0 for the default 61 MP sizing frame. The host displays three classes;
+/// the pixel counts are exported below so it need not hardcode them.
+/// Derivation: docs/logs/2026-09-05/slot-memory-rederivation.md.
+int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels);
+
+/// The three resolution classes the settings UI displays, in pixels.
+/// 0 = 24 MP (6000x4000), 1 = 61 MP (9504x6336, the default), 2 = 108 MP
+/// (12000x9000). Returns 0 for an unknown index.
+int64_t dng_decode_recommendation_class_pixels(int32_t index);
+
 /// R3-3: Set the VkPipelineCache persistence file path (Android/Vulkan only).
 /// Call BEFORE the first warmup/decode with a writable per-app path (e.g.
 /// <cacheDir>/dng_vk_pipeline.cache). Pass NULL or "" to disable.

@@ -13,7 +13,8 @@
 // Usage: test_metal_queue_pool <dng_file>
 // Exit 0 iff: every decode succeeded, AND max observed count > 1 (pool is
 // actually multi-queue, not degenerated to 1), AND max observed count <= cap
-// (never exceeds kMaxDecodeSlots).
+// (never exceeds the configured decode slot count — R4 item 1 made that cap
+// configurable; it was previously a hardcoded 4).
 
 #include <atomic>
 #include <cerrno>

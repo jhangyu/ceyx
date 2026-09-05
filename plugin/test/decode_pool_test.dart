@@ -12,18 +12,36 @@ import 'package:flutter_test/flutter_test.dart';
 ///   `crash:*`     -> throws, killing the worker (errorsAreFatal).
 ///   `slow:<ms>:*` -> answers after <ms> milliseconds.
 ///   `nolib`       -> the worker reports `unavailable` at boot and exits.
+///
+/// R4 item 1: the bootstrap is now 4 elements
+/// (`[SendPort, libraryPath, index, nativeSlotTarget]`) and the pool may send
+/// [kMsgConfigSlots]. This fake echoes the requested value back as the
+/// effective one, standing in for a dylib that honours the request exactly —
+/// which is what ruling r-6 requires of the real one.
 void fakePoolWorker(List<Object?> bootstrap) {
   final poolPort = bootstrap[0] as SendPort;
   final libraryPath = bootstrap[1] as String?;
+  final nativeSlotTarget = bootstrap.length > 3 ? bootstrap[3] as int : 0;
   if (libraryPath == 'nolib') {
     poolPort.send(<Object?>[kMsgUnavailable, 'fake: no dylib']);
     return;
+  }
+  if (nativeSlotTarget > 0) {
+    poolPort.send(<Object?>[kMsgSlotsAck, nativeSlotTarget]);
   }
   final jobs = ReceivePort();
   jobs.listen((Object? message) {
     final msg = message as List<Object?>;
     if (msg[0] == kMsgShutdown) {
       jobs.close();
+      return;
+    }
+    // MUST precede the requestId read below. A config message carries an int
+    // at index 1 but nothing at index 2, so falling through would throw a
+    // RangeError inside the worker isolate and kill it (errorsAreFatal) — the
+    // pool would then report a respawn instead of a slot ack.
+    if (msg[0] == kMsgConfigSlots) {
+      poolPort.send(<Object?>[kMsgSlotsAck, msg[1] as int]);
       return;
     }
     final requestId = msg[1] as int;
@@ -60,6 +78,49 @@ void fakePoolWorker(List<Object?> bootstrap) {
       answer();
     } else {
       Timer(Duration(milliseconds: delayMs), answer);
+    }
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// R4 item 1: stands in for a dylib that predates the configurable slot cap,
+/// where `DngDecoderService.configureNativeSlots` returns -1. Proves the pool
+/// logs the divergence and keeps the worker alive.
+void unsupportedSlotsWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final nativeSlotTarget = bootstrap.length > 3 ? bootstrap[3] as int : 0;
+  if (nativeSlotTarget > 0) {
+    poolPort.send(<Object?>[kMsgSlotsAck, -1]);
+  }
+  final jobs = ReceivePort();
+  jobs.listen((Object? message) {
+    final msg = message as List<Object?>;
+    if (msg[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (msg[0] == kMsgConfigSlots) {
+      poolPort.send(<Object?>[kMsgSlotsAck, -1]);
+      return;
+    }
+    final requestId = msg[1] as int;
+    final type = CeyxPoolJobType.values[msg[2] as int];
+    if (type == CeyxPoolJobType.probe) {
+      poolPort.send(<Object?>[
+        kMsgResult,
+        requestId,
+        TransferableTypedData.fromList([Uint8List.fromList([1, 2, 3])]),
+      ]);
+    } else {
+      poolPort.send(<Object?>[
+        kMsgResult,
+        requestId,
+        TransferableTypedData.fromList([Uint8List(2 * 2 * 4)]),
+        2,
+        2,
+        1.0,
+        2.0,
+      ]);
     }
   });
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
@@ -316,5 +377,112 @@ void main() {
       pool.decode('slow:15:g2'),
     ]);
     expect(pool.workerCount, equals(2));
+  });
+
+  // --- R4 item 1: three-layer parallelism sync ----------------------------
+  //
+  // These assert the DART half of AC-1a: that a width change reaches every
+  // live worker as a native-slot configuration, and that a worker spawned
+  // afterwards starts already configured. The NATIVE half (the pool really
+  // running at N != 4) is proven by test_slot_config / test_concurrent_decode.
+  //
+  // Observation happens on the POOL side (logger capture + public getters),
+  // never via a top-level list written inside the worker: the worker runs in a
+  // different isolate, so such a list is a DIFFERENT list on the pool side and
+  // would read empty — a silently always-green assertion.
+
+  test('TC-955: setting width pushes the same value to the native slot target',
+      () async {
+    pool = CeyxDecodePool(width: 2, entryPoint: fakePoolWorker);
+    pool.width = 5;
+    expect(pool.nativeSlotTarget, equals(5));
+    expect(
+      pool.nativeSlotTarget,
+      equals(pool.width),
+      reason: 'width and native slot target are one setting, not two',
+    );
+  });
+
+  test('TC-956: a width change broadcasts a slot ack from every live worker',
+      () async {
+    pool = CeyxDecodePool(width: 2, entryPoint: fakePoolWorker);
+    // Two workers become live by serving two concurrent jobs.
+    await Future.wait([
+      pool.decode('slow:15:a'),
+      pool.decode('slow:15:b'),
+    ]);
+    expect(pool.workerCount, equals(2));
+
+    logLines.clear();
+    pool.width = 5;
+    // Let the acks land.
+    await pool.decode('c.dng');
+
+    expect(pool.lastNativeSlotEffective, equals(5));
+    expect(
+      logLines.where((l) => l.contains('|slots|requested=5|effective=5')).length,
+      equals(2),
+      reason: 'one ack per live worker, all carrying the configured value',
+    );
+  });
+
+  test('TC-957: a worker spawned after a width change is configured at boot',
+      () async {
+    pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
+    await pool.decode('a.dng');
+    pool.width = 6;
+    logLines.clear();
+    // Widening spawns lazily: these submits are what create the new workers,
+    // which must configure themselves from the bootstrap, not from a
+    // broadcast they were never present to receive.
+    await Future.wait([
+      pool.decode('slow:15:b'),
+      pool.decode('slow:15:c'),
+    ]);
+    expect(pool.lastNativeSlotEffective, equals(6));
+    expect(
+      logLines.any((l) => l.contains('|slots|requested=6|effective=6')),
+      isTrue,
+    );
+  });
+
+  test('TC-958: a width ABOVE the recommendation propagates unclamped (r-6)',
+      () async {
+    // Ruling r-6: the user setting wins end-to-end. 8 is the host slider
+    // maximum and is deliberately higher than a small machine's recommended
+    // width; the pool must carry it through untouched, with no clamping of
+    // any kind on the propagation path.
+    pool = CeyxDecodePool(width: 2, entryPoint: fakePoolWorker);
+    await pool.decode('a.dng');
+    logLines.clear();
+    pool.width = 8;
+    await pool.decode('b.dng');
+
+    expect(pool.width, equals(8));
+    expect(pool.nativeSlotTarget, equals(8));
+    expect(pool.lastNativeSlotEffective, equals(8));
+    expect(
+      logLines.any((l) => l.contains('SLOT_TARGET_NOT_HONOURED')),
+      isFalse,
+      reason: 'nothing on the Dart path may narrow the user request',
+    );
+  });
+
+  test('TC-959: an unsupported library is logged loudly, not silently', () async {
+    // The pinned dylib predates the configurable cap, so -1 is the EXPECTED
+    // answer until the pin bump. It must be visible rather than absorbed.
+    pool = CeyxDecodePool(width: 2, entryPoint: unsupportedSlotsWorker);
+    await pool.decode('a.dng');
+    pool.width = 4;
+    await pool.decode('b.dng');
+
+    expect(pool.lastNativeSlotEffective, equals(-1));
+    expect(
+      logLines.any((l) => l.contains('SLOT_CONFIG_UNSUPPORTED')),
+      isTrue,
+    );
+    // The worker must survive the ack; an unhandled message would have killed
+    // it through the `default:` arm of the pool's message switch.
+    expect(pool.workerCount, greaterThan(0));
   });
 }

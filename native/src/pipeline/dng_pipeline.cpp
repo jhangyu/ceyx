@@ -392,12 +392,16 @@ RgbaOutputPool &rgbaOutputPool() {
 
 }  // namespace (reopened below)
 
-// Mutex rework (plan Task 6, R7). N contexts, constructed once at first use.
-// N = min(hardware_concurrency, ceiling / per-slot), clamped to [1, 4] — see
-// PipelineConfig::decodeSlotCount() for the arithmetic and
-// docs/logs/2026-09-03/task6-memory.md for the measured figures. Capped at 4
-// deliberately: beyond that the GPU is the constraint and each extra slot
-// costs a full arena reserve plus ~192MB of non-arena scratch.
+// Mutex rework (plan Task 6, R7), re-derived for R4 item 1 (rulings r-1/r-5/
+// r-6). N contexts, constructed at first use and RESIZABLE thereafter: the
+// host's configured lane width arrives through dng_decode_configure_slots()
+// and is applied immediately (grow at once, shrink as in-flight decodes
+// finish). The old policy clamp at 4 is gone, and there is no memory-derived
+// clamp in its place — PipelineConfig::decodeRecommendedSlots() is ADVISORY
+// and is displayed by the host, never enforced here.
+//
+// PipelineConfig::decodeSlotCount() supplies only the pre-configuration
+// default. See docs/logs/2026-09-05/slot-memory-rederivation.md.
 DecodeSlotPool &decodeSlotPool() {
   // Round 5 review F5: DELIBERATELY LEAKED. A by-value function-local static
   // would run N Metal device_free calls (stage2_device_dst survives
@@ -572,7 +576,49 @@ size_t dng_stage3_workspace_registrations() {
   return stage3WorkspaceRegistry().registrations();
 }
 
-size_t dng_decode_slot_count() { return decodeSlotPool().slot_count(); }
+// R4 item 1. Published copy of the configured slot count, readable WITHOUT
+// taking the pool mutex and without constructing the pool.
+//
+// This exists because two consumers read the slot count from inside their own
+// locks on a per-decode path: the Metal queue pool (dng_metal_context.cpp,
+// inside pool_lock()) and Stage4ScratchPool's release (dng_render_halide.cpp,
+// inside its mutex_). Calling the pool accessor from there would nest a second
+// mutex under theirs AND could construct the whole slot pool as a side effect
+// of asking a bookkeeping question. An atomic gives the same liveness with
+// neither hazard.
+//
+// Seeded to 0 = "no pool yet"; readers fall back to the configured default.
+static std::atomic<size_t> g_configured_slots{0};
+
+size_t dng_decode_slot_count_relaxed() {
+  const size_t published = g_configured_slots.load(std::memory_order_relaxed);
+  return published > 0 ? published : PipelineConfig::decodeSlotCount();
+}
+
+// R4 item 1 (ruling r-5): live reconfiguration of the slot pool. Clamping is
+// the CALLER's job (dng_ffi_api.cpp bounds it only by the allocation-sanity
+// constant, per ruling r-6 — there is deliberately no memory-derived clamp);
+// this entry applies whatever it is given, floored at 1.
+void dng_decode_resize_slots(size_t n) {
+  if (n < 1) n = 1;
+  decodeSlotPool().resize(n);
+  g_configured_slots.store(n, std::memory_order_relaxed);
+}
+
+// Reports the CONFIGURED count (target_), not the container size. This is the
+// load-bearing choice for the existing gate: test_concurrent_decode asserts
+// bodyHighWater <= dng_decode_slot_count(). Reporting contexts_.size() would
+// keep that gate green through a narrowing purely because surplus contexts had
+// not been reclaimed yet; reporting target_ asserts against what the user
+// actually asked for.
+size_t dng_decode_slot_count() {
+  const size_t n = decodeSlotPool().configured_slots();
+  g_configured_slots.store(n, std::memory_order_relaxed);
+  return n;
+}
+size_t dng_decode_physical_slot_count() {
+  return decodeSlotPool().physical_slots();
+}
 size_t dng_decode_in_flight_count() { return decodeSlotPool().in_flight(); }
 size_t dng_decode_max_in_flight_observed() {
   return decodeSlotPool().high_water_in_flight();

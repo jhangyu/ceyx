@@ -116,11 +116,38 @@ const String kMsgJob = 'job';
 /// `[kMsgShutdown]` — worker should close its port and exit.
 const String kMsgShutdown = 'shutdown';
 
+/// `[kMsgConfigSlots, int requested]` — the pool asks the worker to configure
+/// the PROCESS-global native slot cap. Broadcast to every ready worker on a
+/// width change; a worker that boots later receives the value in its bootstrap
+/// instead, so there is no window in which a fresh worker runs at the old cap.
+const String kMsgConfigSlots = 'config_slots';
+
+/// `[kMsgSlotsAck, int effective, int? rec24, int? rec61, int? rec108]`
+///
+/// `effective` is the value the native layer actually adopted, or -1 when the
+/// loaded dylib predates the configurable cap. The pool logs any difference
+/// from the request, because a silently narrowed cap is the exact defect class
+/// R4 item 1 exists to remove.
+///
+/// The three trailing values are this machine's ADVISORY recommended widths
+/// for the 24 MP / 61 MP / 108 MP resolution classes (ruling r-6), so the
+/// host's settings UI can display them. They ride along on the ack rather than
+/// having their own request because the UI isolate deliberately never opens
+/// the dylib — only pool workers do — and these figures are constant for the
+/// life of the process. Absent (short message) when unsupported.
+const String kMsgSlotsAck = 'slots_ack';
+
 const String _kMsgExit = 'exit';
 
 /// Signature of a worker entry point. Must be a top-level or static function.
 ///
-/// The argument is `[SendPort poolPort, String? libraryPath, int workerIndex]`.
+/// The argument is
+/// `[SendPort poolPort, String? libraryPath, int workerIndex,
+///   int nativeSlotTarget]`.
+///
+/// R4 item 1 widened this from 3 to 4 elements. Consumers MUST read index 3
+/// with a length guard so a worker entry can still be driven by an older host
+/// that sends the 3-element form.
 typedef CeyxPoolWorkerEntry = void Function(List<Object?> bootstrap);
 
 /// A pool of persistent decode workers.
@@ -185,6 +212,19 @@ class CeyxDecodePool {
   final int maxRespawns;
 
   int _width;
+
+  // R4 item 1: the value most recently pushed to the PROCESS-global native
+  // slot cap, and the last effective value a worker reported back. Seeded to 0
+  // ("nothing pushed yet") rather than to a width, so the first `width`
+  // assignment always broadcasts even when it assigns the current default.
+  int _nativeSlotTarget = 0;
+  int? _lastNativeSlotEffective;
+
+  // ADVISORY recommended widths for the 24/61/108 MP classes (ruling r-6),
+  // reported by a worker on its slot ack. Null until a worker with a
+  // supporting dylib has answered. Display only — never a clamp.
+  List<int>? _nativeRecommendations;
+
   int _generation = 0;
   int _nextRequestId = 1;
   bool _disposed = false;
@@ -216,10 +256,48 @@ class CeyxDecodePool {
   /// no native decode is cancellable, so surplus workers are asked to shut
   /// down and leave after their current job — the same rule `DecodeLane.width`
   /// already follows.
+  ///
+  /// R4 item 1: the SAME number is pushed to the native slot cap. The two are
+  /// assigned together and are deliberately NOT exposed as independent knobs,
+  /// so the host's setting cannot reach one layer and miss the other — which
+  /// is precisely the defect this item fixes (N Dart workers contending for a
+  /// hardcoded 4 native slots).
   set width(int value) {
     _width = value < 1 ? 1 : value;
+    _setNativeSlotTarget(_width);
     _retireSurplus();
     _pump();
+  }
+
+  /// The value most recently pushed to the native slot cap. Always equal to
+  /// [width] once a width has been assigned; exposed for assertions and logs.
+  int get nativeSlotTarget => _nativeSlotTarget;
+
+  /// The effective cap the native layer reported, or null before the first ack
+  /// (no worker has loaded the library yet). `-1` means the loaded dylib
+  /// predates the configurable cap. A positive value below [nativeSlotTarget]
+  /// means the dylib bounded the request, which is logged loudly.
+  int? get lastNativeSlotEffective => _lastNativeSlotEffective;
+
+  /// This machine's ADVISORY recommended decode widths for the 24 MP / 61 MP /
+  /// 108 MP resolution classes, in that order. Null until a worker running a
+  /// dylib that supports the query has reported them.
+  ///
+  /// Ruling r-6: for DISPLAY ONLY. No code path may clamp the user's setting
+  /// against these values.
+  List<int>? get nativeRecommendations =>
+      _nativeRecommendations == null
+          ? null
+          : List<int>.unmodifiable(_nativeRecommendations!);
+
+  void _setNativeSlotTarget(int value) {
+    if (value == _nativeSlotTarget) return;
+    _nativeSlotTarget = value;
+    for (final w in _workers) {
+      if (w.ready && !w.dead) {
+        w.sendPort?.send(<Object?>[kMsgConfigSlots, _nativeSlotTarget]);
+      }
+    }
   }
 
   /// Bumps the generation; every job submitted before this call is discarded
@@ -384,7 +462,15 @@ class CeyxDecodePool {
     debugIsolateSpawnCount++;
     Isolate.spawn(
           _entryPoint,
-          <Object?>[worker.responses.sendPort, _libraryPath, index],
+          // R4 item 1: the native slot target travels in the bootstrap so a
+          // worker spawned AFTER a width change applies it before serving any
+          // job, rather than waiting for the next broadcast.
+          <Object?>[
+            worker.responses.sendPort,
+            _libraryPath,
+            index,
+            _nativeSlotTarget,
+          ],
           onExit: worker.responses.sendPort,
           onError: worker.responses.sendPort,
           errorsAreFatal: true,
@@ -464,6 +550,38 @@ class CeyxDecodePool {
         return;
       case kMsgError:
         _completeJob(worker, raw[1] as int, null, raw.length > 2 ? raw[2] : null);
+        return;
+      // R4 item 1. This case MUST stay ahead of `default:` — that arm calls
+      // _onWorkerLost, so an unhandled ack would kill the very worker that
+      // just successfully configured the native cap. It also deliberately does
+      // NOT require worker.ready: the bootstrap ack is sent before kMsgReady.
+      case kMsgSlotsAck:
+        final effective = raw.length > 1 ? raw[1] as int : -1;
+        _lastNativeSlotEffective = effective;
+        if (raw.length > 4) {
+          _nativeRecommendations = <int>[
+            raw[2] as int,
+            raw[3] as int,
+            raw[4] as int,
+          ];
+        }
+        logger(
+          'pool|worker=${worker.index}|slots|requested=$_nativeSlotTarget'
+          '|effective=$effective',
+        );
+        if (effective < 0) {
+          logger(
+            'pool|SLOT_CONFIG_UNSUPPORTED|library predates the configurable '
+            'native slot cap',
+          );
+        } else if (effective != _nativeSlotTarget) {
+          // Under ruling r-6 nothing should narrow the user's request, so this
+          // line means the dylib disagreed and we want it loud, not absorbed.
+          logger(
+            'pool|SLOT_TARGET_NOT_HONOURED|requested=$_nativeSlotTarget'
+            '|effective=$effective',
+          );
+        }
         return;
       case _kMsgExit:
         _onWorkerLost(worker, 'worker signalled exit');
@@ -678,6 +796,9 @@ class _PoolWorker {
 void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
   final poolPort = bootstrap[0] as SendPort;
   final libraryPath = bootstrap[1] as String?;
+  // R4 item 1. Length-guarded so a 3-element bootstrap from an older host
+  // still works; 0 means "nothing configured yet, leave the native default".
+  final nativeSlotTarget = bootstrap.length > 3 ? bootstrap[3] as int : 0;
 
   final DngDecoderService service;
   try {
@@ -690,11 +811,45 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
     return;
   }
 
+  // Configure the PROCESS-global native slot cap from the host's setting
+  // BEFORE serving any job, so this worker never runs a decode at a stale cap.
+  // The ack is sent before kMsgReady; Dart guarantees per-port message order,
+  // and the pool's kMsgSlotsAck case does not require worker.ready, so it is
+  // not dropped.
+  // Builds the ack, appending this machine's advisory recommendations when the
+  // dylib supports the query. Kept in one place so the bootstrap ack and the
+  // live-reconfigure ack cannot drift into different shapes.
+  List<Object?> slotsAck(int effective) {
+    final r24 = service.nativeRecommendedSlots(
+      pixels: service.nativeRecommendationClassPixels(0),
+    );
+    final r61 = service.nativeRecommendedSlots(
+      pixels: service.nativeRecommendationClassPixels(1),
+    );
+    final r108 = service.nativeRecommendedSlots(
+      pixels: service.nativeRecommendationClassPixels(2),
+    );
+    if (r24 < 0 || r61 < 0 || r108 < 0) {
+      return <Object?>[kMsgSlotsAck, effective];
+    }
+    return <Object?>[kMsgSlotsAck, effective, r24, r61, r108];
+  }
+
+  if (nativeSlotTarget > 0) {
+    poolPort.send(slotsAck(service.configureNativeSlots(nativeSlotTarget)));
+  }
+
   final jobs = ReceivePort('ceyx-decode-worker');
   jobs.listen((Object? message) {
     if (message is! List || message.isEmpty) return;
     if (message[0] == kMsgShutdown) {
       jobs.close();
+      return;
+    }
+    // R4 item 1: live width change. Applies to the PROCESS-global native pool,
+    // so whichever worker handles it configures the cap for all of them.
+    if (message[0] == kMsgConfigSlots) {
+      poolPort.send(slotsAck(service.configureNativeSlots(message[1] as int)));
       return;
     }
     if (message[0] != kMsgJob) return;

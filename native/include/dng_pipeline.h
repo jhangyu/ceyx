@@ -58,12 +58,43 @@ size_t dng_rgb_output_checked_out_count();
 //                                reached; the RESIDENT figure the memory
 //                                disclosure needs, as opposed to the reserve.
 //
-// These are internal instrumentation, not the C ABI: dng_ffi_api.h is
-// unchanged.
+// These are internal instrumentation. (R4 item 1 note: dng_ffi_api.h is no
+// longer "unchanged" — it now carries the C ABI the host uses to CONFIGURE the
+// slot count. These remain the internal, C++-linkage half.)
 size_t dng_decode_slot_count();
 size_t dng_decode_in_flight_count();
 size_t dng_decode_max_in_flight_observed();
 size_t dng_decode_arena_high_water_bytes();
+
+// --- R4 item 1: configurable slot pool -----------------------------------
+
+// Live reconfiguration of the slot pool (ruling r-5: grow at once, shrink by
+// tightening admission and reclaiming slots as decodes finish, never
+// pre-empting).
+//
+// Clamping is the CALLER's job. dng_ffi_api.cpp bounds the request only by the
+// allocation-sanity constant, per ruling r-6 — there is deliberately no
+// memory- or CPU-derived clamp anywhere on the propagation path. This applies
+// whatever it is given, floored at 1.
+//
+// Exists as a C++-linkage bridge so the FFI translation unit never has to
+// include decode_context.h, which pulls the DNG SDK.
+void dng_decode_resize_slots(size_t n);
+
+// Contexts physically allocated right now. Equals dng_decode_slot_count()
+// except inside a narrowing window, where surplus contexts are still checked
+// out and therefore not yet destroyable. Exposed so a gate can prove the pool
+// actually shed contexts rather than only tightening its admission predicate.
+size_t dng_decode_physical_slot_count();
+
+// Lock-free, side-effect-free read of the configured slot count.
+//
+// For callers already holding their own mutex on a per-decode path — the Metal
+// queue pool (dng_metal_context.cpp, inside pool_lock()) and
+// Stage4ScratchPool::release (dng_render_halide.cpp, inside its mutex_). The
+// locking accessor above would nest the slot-pool mutex underneath theirs AND
+// could construct the entire pool as a side effect of a bookkeeping question.
+size_t dng_decode_slot_count_relaxed();
 
 // Round 5 review F2: the same bound observed from OUTSIDE the pool's
 // bookkeeping. dng_decode_max_in_flight_observed() reads a counter the pool
@@ -80,6 +111,12 @@ size_t dng_decode_body_alias_events();
 // Task 7: high-water occupancy of Stage4ScratchPool's free list, so the gate
 // can assert the cap actually holds under N-way concurrency.
 size_t dng_stage4_scratch_free_high_water();
+
+// R4 item 1: that cap is no longer a compile-time 4 — it follows the
+// configured decode slot count — so a gate asserting "the cap held" must ASK
+// for it instead of hardcoding a literal. SIZE_MAX means the split kernel is
+// not compiled on this platform: a DECLARED skip, not a comfortable zero.
+size_t dng_stage4_scratch_free_cap();
 
 // Round 7 task #2: Stage-3 workspace exclusivity, and the coverage counter that
 // makes its absence loud.

@@ -163,6 +163,53 @@ class DngDecoderService {
     return _bindings.rawDecodeAvailable;
   }
 
+  /// Pushes the host's configured decode-lane width onto the native slot pool.
+  ///
+  /// The native pool is PROCESS-global — every worker isolate opens the same
+  /// dylib in the same process — so calling this from any one worker
+  /// configures it for all of them. Repeated identical calls are a no-op
+  /// inside the pool.
+  ///
+  /// Ruling r-6: the request is honoured, not negotiated. The only bound is
+  /// the native allocation-sanity constant (16), which sits above the host's
+  /// slider maximum (8) and therefore cannot bite. A returned value differing
+  /// from [requested] means the dylib bounded it, and the pool logs that
+  /// loudly rather than absorbing it.
+  ///
+  /// Returns the effective slot count, or `-1` when the loaded library
+  /// predates the configurable cap.
+  int configureNativeSlots(int requested) {
+    if (!_initialized) initialize();
+    final fn = _bindings.dngDecodeConfigureSlots;
+    if (fn == null) return -1;
+    return fn(requested < 1 ? 1 : requested);
+  }
+
+  /// The slot count the native layer is currently configured for, or `-1` when
+  /// the loaded library predates the entry.
+  int get nativeConfiguredSlots {
+    if (!_initialized) initialize();
+    return _bindings.configuredSlots() ?? -1;
+  }
+
+  /// ADVISORY ONLY (ruling r-6). Slots this machine is recommended to run for
+  /// a frame of [pixels]; pass 0 for the default 61 MP sizing frame. Returns
+  /// `-1` when unsupported.
+  ///
+  /// This exists so the host can DISPLAY guidance next to its lane-width
+  /// slider. No code path clamps a user's setting against it.
+  int nativeRecommendedSlots({int pixels = 0}) {
+    if (!_initialized) initialize();
+    return _bindings.recommendedSlotsForPixels(pixels) ?? -1;
+  }
+
+  /// Pixel count of recommendation class [index] (0 = 24 MP, 1 = 61 MP,
+  /// 2 = 108 MP), or `-1` when unsupported.
+  int nativeRecommendationClassPixels(int index) {
+    if (!_initialized) initialize();
+    return _bindings.recommendationClassPixels(index) ?? -1;
+  }
+
   /// Diagnostics for the most recent generic-RAW decode observed on the
   /// current OS thread.
   ///

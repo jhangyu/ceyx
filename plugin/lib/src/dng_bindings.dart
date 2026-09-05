@@ -108,6 +108,23 @@ typedef DngExtractPreviewJpegDart =
 typedef DngFreeBufferNative = ffi.Void Function(ffi.Pointer<ffi.Uint8> buffer);
 typedef DngFreeBufferDart = void Function(ffi.Pointer<ffi.Uint8> buffer);
 
+// R4 item 1: native decode-slot configuration. ADDITIVE — absent from every
+// dylib built before 2026-09-05, so these lookups MUST be guarded (Halcyon
+// pins a ceyx release whose decoder predates them; an unguarded lookup would
+// throw in the constructor and kill ALL decoding, not just slot config).
+typedef DngDecodeConfigureSlotsNative = ffi.Int32 Function(ffi.Int32 requested);
+typedef DngDecodeConfigureSlotsDart = int Function(int requested);
+
+typedef DngDecodeConfiguredSlotsNative = ffi.Int32 Function();
+typedef DngDecodeConfiguredSlotsDart = int Function();
+
+typedef DngDecodeRecommendedSlotsNative = ffi.Int32 Function(ffi.Int64 pixels);
+typedef DngDecodeRecommendedSlotsDart = int Function(int pixels);
+
+typedef DngDecodeRecommendationClassPixelsNative =
+    ffi.Int64 Function(ffi.Int32 index);
+typedef DngDecodeRecommendationClassPixelsDart = int Function(int index);
+
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
@@ -125,6 +142,15 @@ class DngNativeBindings {
   RawDecodeAndProcessDart? _rawDecodeAndProcess;
   RawLastDiagnosticsDart? _rawLastDiagnostics;
   DngDebugPoolCheckedOutDart? _dngDebugPoolCheckedOut;
+
+  // R4 item 1: guarded slot-configuration entries. Null together — they ship
+  // as one group, so a dylib exposing some but not all is a corrupt build and
+  // degrades to "unsupported" rather than half-working.
+  DngDecodeConfigureSlotsDart? _dngDecodeConfigureSlots;
+  DngDecodeConfiguredSlotsDart? _dngDecodeConfiguredSlots;
+  DngDecodeRecommendedSlotsDart? _dngDecodeRecommendedSlots;
+  DngDecodeRecommendationClassPixelsDart? _dngDecodeRecommendationClassPixels;
+
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
   late final DngDecoderSetPipelineCachePathDart dngDecoderSetPipelineCachePath;
@@ -164,6 +190,30 @@ class DngNativeBindings {
 
   /// Whether the loaded dylib exports `dng_debug_pool_checked_out`.
   bool get poolStatsAvailable => _dngDebugPoolCheckedOut != null;
+
+  /// Guarded access to the R4 item 1 slot-configuration entry. Null when the
+  /// loaded dylib predates the configurable native slot cap.
+  DngDecodeConfigureSlotsDart? get dngDecodeConfigureSlots =>
+      _dngDecodeConfigureSlots;
+
+  /// Whether this library exposes the configurable native slot cap.
+  bool get slotConfigAvailable => _dngDecodeConfigureSlots != null;
+
+  /// The slot count the native layer is currently configured for, or null when
+  /// the dylib predates the entry.
+  int? configuredSlots() => _dngDecodeConfiguredSlots?.call();
+
+  /// ADVISORY (ruling r-6): slots this machine is recommended to run for a
+  /// frame of [pixels]; pass 0 for the default 61 MP sizing frame. Null when
+  /// unsupported. Nothing clamps against this — it is for display only.
+  int? recommendedSlotsForPixels(int pixels) =>
+      _dngDecodeRecommendedSlots?.call(pixels);
+
+  /// Pixel count of recommendation class [index] (0 = 24 MP, 1 = 61 MP,
+  /// 2 = 108 MP), so the host need not hardcode the frame sizes. Null when
+  /// unsupported.
+  int? recommendationClassPixels(int index) =>
+      _dngDecodeRecommendationClassPixels?.call(index);
 
   /// Diagnostics for the most recent `raw_decode_and_process` call observed
   /// on the current OS thread.
@@ -244,6 +294,38 @@ class DngNativeBindings {
           >('dng_debug_pool_checked_out');
     } catch (_) {
       _dngDebugPoolCheckedOut = null;
+    }
+
+    // R4 item 1. One try block for all four on purpose: they are added by the
+    // same commit and ship together, so partial availability means a corrupt
+    // build. Degrading the whole group to "unsupported" is safer than letting
+    // a caller configure the cap but be unable to read it back.
+    try {
+      _dngDecodeConfigureSlots = _lib
+          .lookupFunction<
+            DngDecodeConfigureSlotsNative,
+            DngDecodeConfigureSlotsDart
+          >('dng_decode_configure_slots');
+      _dngDecodeConfiguredSlots = _lib
+          .lookupFunction<
+            DngDecodeConfiguredSlotsNative,
+            DngDecodeConfiguredSlotsDart
+          >('dng_decode_configured_slots');
+      _dngDecodeRecommendedSlots = _lib
+          .lookupFunction<
+            DngDecodeRecommendedSlotsNative,
+            DngDecodeRecommendedSlotsDart
+          >('dng_decode_recommended_slots_for_pixels');
+      _dngDecodeRecommendationClassPixels = _lib
+          .lookupFunction<
+            DngDecodeRecommendationClassPixelsNative,
+            DngDecodeRecommendationClassPixelsDart
+          >('dng_decode_recommendation_class_pixels');
+    } catch (_) {
+      _dngDecodeConfigureSlots = null;
+      _dngDecodeConfiguredSlots = null;
+      _dngDecodeRecommendedSlots = null;
+      _dngDecodeRecommendationClassPixels = null;
     }
 
     dngDecoderWarmupForSize = _lib

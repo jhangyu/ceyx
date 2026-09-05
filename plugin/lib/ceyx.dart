@@ -31,7 +31,10 @@ export 'src/decode_pool.dart'
         kMsgResult,
         kMsgError,
         kMsgJob,
-        kMsgShutdown;
+        kMsgShutdown,
+        // R4 item 1: native decode-slot configuration wire protocol.
+        kMsgConfigSlots,
+        kMsgSlotsAck;
 
 export 'src/raw_route.dart'
     show

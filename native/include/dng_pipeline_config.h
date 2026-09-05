@@ -4,6 +4,15 @@
 #include <cstdlib>
 #include <thread>
 
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#else
+#include <unistd.h>
+#endif
+
 // ---------------------------------------------------------------------------
 // PipelineConfig — single source of truth for runtime env switches.
 //
@@ -136,43 +145,163 @@ struct PipelineConfig {
   static constexpr size_t kDecodePerSlotNonArenaBytes =
       static_cast<size_t>(192) * 1024 * 1024;
 
-  // Budget the slot count divides against. Not a hard allocator limit — it is
-  // the figure the §6.3 memory disclosure is written against, recorded in
-  // docs/logs/2026-09-03/task6-memory.md.
+  // --- Slot-count derivation (R4 item 1, rulings r-1 and r-6) --------------
   //
-  // Windows is deliberately lower (parking-lot F3): VirtualAlloc is called with
-  // MEM_RESERVE|MEM_COMMIT, so each slot's 1.5 GiB is charged against the
-  // system commit limit whether or not the pages are ever touched. On POSIX the
-  // same reserve is MAP_ANON address space and costs nothing until first touch.
+  // THE USER SETTING IS THE ONLY AUTHORITY. Ruling r-6 is explicit: no code
+  // path may impose a memory- or CPU-derived limit on the configured decode
+  // lane width. Everything in this section is therefore ADVISORY — a
+  // RECOMMENDATION the host may display, never a clamp anything applies.
+  //
+  // WHAT WAS HERE BEFORE, AND WHY IT WENT. The old arithmetic was
+  //   N = min(hardware_concurrency(), kDecodeMemoryCeilingBytes / perSlot)
+  //       clamped to [1, <a hardcoded policy maximum of 4>]
+  // with a flat 8 GiB (POSIX) / 4 GiB (Windows) budget and a per-slot cost of
+  // `kDecodeArenaReserveBytes (1.5 GiB) + kDecodePerSlotNonArenaBytes
+  // (192 MiB)` = 1,761,607,680 B. That yields exactly 4 on POSIX and 2 on
+  // Windows, so that policy clamp was not even the binding
+  // constraint — the ceiling was. Both are gone. Note the category error in the
+  // old figure: the 1.5 GiB arena is RESERVED address space (MAP_ANON /
+  // MEM_RESERVE), not resident memory, so charging it against a RAM budget
+  // over-counted a slot's true residency by roughly 3x.
+  //
+  // Full write-up: docs/logs/2026-09-05/slot-memory-rederivation.md.
+
+  // Allocation-sanity bound, NOT a parallelism policy and NOT a memory policy.
+  // Its only job is to stop a typo'd or hostile request (10^9) from attempting
+  // 10^9 DecodeContext constructions. Ruling r-6 requires this to be >= the
+  // host slider's maximum so it can never bite inside the range the user can
+  // actually select: Halcyon's kMaxDecodeLaneWidth is 8, this is 16.
+  static constexpr size_t kAbsoluteMaxDecodeSlots = 16;
+
+  // ---- Advisory recommendation inputs -------------------------------------
+
+  // Bytes of RESIDENT arena a single decode touches, per pixel of the frame:
+  //   Stage-3 workspace  W*H*3 uint16 = 6 B/px
+  //   Stage-4 RGBA strip W*H*4 uint8  = 4 B/px
+  static constexpr size_t kDecodeArenaResidentBytesPerPixel = 10;
+
+  // Recommendation granularity. Per-slot budgets are rounded UP to a multiple
+  // of this so the three published resolution classes land on round figures
+  // (256 / 640 / 1152 MiB) rather than on arbitrary byte counts.
+  static constexpr size_t kDecodeResidentRoundingBytes =
+      static_cast<size_t>(128) * 1024 * 1024;
+
+  // The three resolution classes the host settings UI displays, in pixels.
+  // 24 MP  =  6000 x 4000  (full-frame 24MP: A7 III, R6, Z6)
+  // 61 MP  =  9504 x 6336  (A7R V / A7R IV) — the DEFAULT sizing frame (r-6)
+  // 108 MP = 12000 x 9000  (100MP medium format with margin; the frame
+  //                         kDecodeArenaReserveBytes was originally sized for)
+  static constexpr size_t kDecodePixels24MP = static_cast<size_t>(6000) * 4000;
+  static constexpr size_t kDecodePixels61MP = static_cast<size_t>(9504) * 6336;
+  static constexpr size_t kDecodePixels108MP =
+      static_cast<size_t>(12000) * 9000;
+
+  // Ruling r-6: the default sizing frame for the headline recommendation is
+  // 61 MP, not the 108 MP worst case the arena reserve is built for. A 108 MP
+  // frame is a medium-format outlier; sizing every recommendation against it
+  // understated the honest answer for the cameras people actually shoot.
+  static constexpr size_t kDecodeDefaultSizingPixels = kDecodePixels61MP;
+
+  // Resident bytes one slot occupies while decoding a frame of `pixels`:
+  // the rounded-up arena working set plus the non-arena state (Metal device
+  // dst, poly3 scratch) that is resident the moment it is sized.
+  //   24 MP  ->  256 MiB + 192 MiB =  448 MiB
+  //   61 MP  ->  640 MiB + 192 MiB =  832 MiB   (the default)
+  //  108 MP  -> 1152 MiB + 192 MiB = 1344 MiB
+  static constexpr size_t residentBytesPerSlotForPixels(size_t pixels) {
+    return (((pixels * kDecodeArenaResidentBytesPerPixel +
+              kDecodeResidentRoundingBytes - 1) /
+             kDecodeResidentRoundingBytes) *
+            kDecodeResidentRoundingBytes) +
+           kDecodePerSlotNonArenaBytes;
+  }
+
+  // Total physical RAM in bytes, or 0 when it cannot be read.
+  static size_t physicalMemoryBytes() {
 #if defined(_WIN32)
-  static constexpr size_t kDecodeMemoryCeilingBytes =
-      static_cast<size_t>(4) * 1024 * 1024 * 1024;
+    MEMORYSTATUSEX st;
+    st.dwLength = sizeof(st);
+    if (!GlobalMemoryStatusEx(&st)) return 0;
+    return static_cast<size_t>(st.ullTotalPhys);
+#elif defined(__APPLE__)
+    int mib[2] = {CTL_HW, HW_MEMSIZE};
+    uint64_t bytes = 0;
+    size_t len = sizeof(bytes);
+    if (sysctl(mib, 2, &bytes, &len, nullptr, 0) != 0) return 0;
+    return static_cast<size_t>(bytes);
 #else
-  static constexpr size_t kDecodeMemoryCeilingBytes =
-      static_cast<size_t>(8) * 1024 * 1024 * 1024;
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long page_size = sysconf(_SC_PAGE_SIZE);
+    if (pages <= 0 || page_size <= 0) return 0;
+    return static_cast<size_t>(pages) * static_cast<size_t>(page_size);
 #endif
+  }
 
-  // Hard cap on concurrent full-frame decodes regardless of what the ceiling
-  // arithmetic permits: past this the GPU is the constraint, and every extra
-  // slot costs a full arena reserve plus kDecodePerSlotNonArenaBytes.
-  static constexpr size_t kMaxDecodeSlots = 4;
+  // RAM left for the OS, the Flutter engine and the payload cache before the
+  // decoder's recommendation starts counting.
+  static constexpr size_t kDecodeSystemReserveBytes =
+      static_cast<size_t>(4) * 1024 * 1024 * 1024;
 
-  // N = min(hardware_concurrency(), ceiling / per-slot), clamped to
-  // [1, kMaxDecodeSlots]. Computed rather than constexpr because
-  // hardware_concurrency() is a runtime property; the pool reads it once, at
-  // first use. The arithmetic on the measuring machine is recorded in
-  // docs/logs/2026-09-03/task6-memory.md.
-  static size_t decodeSlotCount() {
-    const unsigned hwRaw = std::thread::hardware_concurrency();
-    const size_t hw = hwRaw > 0 ? static_cast<size_t>(hwRaw) : 1;
-    const size_t perSlot =
-        kDecodeArenaReserveBytes + kDecodePerSlotNonArenaBytes;
-    size_t n = kDecodeMemoryCeilingBytes / perSlot;
-    if (n > hw) n = hw;
-    if (n > kMaxDecodeSlots) n = kMaxDecodeSlots;
+  // Floor so a machine that reports no memory at all still recommends >= 1.
+  static constexpr size_t kDecodeRecommendationFloorBytes =
+      static_cast<size_t>(2) * 1024 * 1024 * 1024;
+
+  // Resident budget the recommendation divides against: physical RAM minus the
+  // system reserve, floored at 2 GiB. ADVISORY ONLY — nothing clamps to it.
+  static size_t decodeRecommendationBudgetBytes() {
+    const size_t phys = physicalMemoryBytes();
+    if (phys <= kDecodeSystemReserveBytes) {
+      return kDecodeRecommendationFloorBytes;
+    }
+    const size_t budget = phys - kDecodeSystemReserveBytes;
+    return budget < kDecodeRecommendationFloorBytes
+               ? kDecodeRecommendationFloorBytes
+               : budget;
+  }
+
+  // How many concurrent slots this machine is RECOMMENDED to run for a frame
+  // of `pixels`. Reported to the host for display next to the lane-width
+  // slider. Bounded to [1, kAbsoluteMaxDecodeSlots] only so the displayed
+  // number stays inside the range the slider can express.
+  //
+  // NOTHING IN THIS PROCESS CLAMPS AGAINST THIS VALUE (ruling r-6). If a user
+  // selects a width above it, that width is what the pool runs at.
+  static size_t decodeRecommendedSlotsForPixels(size_t pixels) {
+    const size_t perSlot = residentBytesPerSlotForPixels(pixels);
+    if (perSlot == 0) return 1;
+    size_t n = decodeRecommendationBudgetBytes() / perSlot;
+    if (n > kAbsoluteMaxDecodeSlots) n = kAbsoluteMaxDecodeSlots;
     if (n < 1) n = 1;
     return n;
   }
+
+  // The headline recommendation, at the 61 MP default sizing frame (r-6).
+  static size_t decodeRecommendedSlots() {
+    return decodeRecommendedSlotsForPixels(kDecodeDefaultSizingPixels);
+  }
+
+  // Ruling r-8 (user, 2026-09-05). The parallelism used when NO consumer has
+  // configured one. Four, flat — not derived from cores, not derived from
+  // memory.
+  //
+  // THIS IS A DEFAULT, NOT A CAP. It is the starting value only. The moment
+  // any consumer calls dng_decode_configure_slots(), that value is followed
+  // exactly, end to end, and this constant plays no further part — it is never
+  // a min(), never a ceiling, and never consulted again. The only bound on a
+  // configured value is the [1, kAbsoluteMaxDecodeSlots] allocation-sanity
+  // range, which sits above the host slider maximum and cannot bite.
+  //
+  // Do not rename this to anything resembling "max"/"limit"/"cap", and do not
+  // move it next to kAbsoluteMaxDecodeSlots: the constant it replaces
+  // (kMaxDecodeSlots = 4) WAS a cap, it had the same value, and a future
+  // reader who conflates the two would silently reinstate the defect this
+  // item removed.
+  static constexpr size_t kDefaultDecodeSlots = 4;
+
+  // The N the pool constructs at before any host configures one. See
+  // kDefaultDecodeSlots immediately above for why this is deliberately a flat
+  // constant rather than a derivation.
+  static size_t decodeSlotCount() { return kDefaultDecodeSlots; }
 
   static PipelineConfig loadFromEnv() {
     PipelineConfig config;

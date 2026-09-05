@@ -149,6 +149,9 @@ functions:
 #include "dng_matrix.h"
 #include "dng_pixel_buffer.h"
 #include "dng_pipeline_config.h"
+// R4 item 1: dng_decode_slot_count_relaxed() — Stage4ScratchPool's free-list
+// cap follows the configured decode slot count.
+#include "dng_pipeline.h"
 #include "dng_render_params.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
@@ -276,11 +279,20 @@ private:
         // Mutex rework (plan Task 7): was uncapped. Under serialised decodes
         // the list never held more than one entry, so this was invisible;
         // under concurrency it grows to the high-water simultaneous-decode
-        // count and never shrinks. Cap tracks the decode slot count
-        // (PipelineConfig::kMaxDecodeSlots via decode_context.h's pool), which
-        // is the real bound on how many buffers can be outstanding at once —
-        // if that changes, this changes with it.
-        if (free_.size() >= kMaxFreeSlots) {
+        // count and never shrinks. Cap tracks the decode slot count (the
+        // configured lane width, via decode_context.h's pool), which is the
+        // real bound on how many buffers can be outstanding at once.
+        //
+        // R4 item 1: this used to be a hardcoded 4 that had to be kept in sync
+        // by hand with the (then also hardcoded) decode slot cap — the comment
+        // here said "if that changes, this changes with it", which is exactly
+        // the coupling that silently re-serialised an 8-lane pool down to 4
+        // buffers. It now READS the configured count instead. The relaxed
+        // reader is mandatory: we hold mutex_ right now, and the locking
+        // accessor would nest the pool mutex under it and could construct the
+        // slot pool as a side effect.
+        const size_t cap_now = free_cap();
+        if (free_.size() >= cap_now) {
             size_t largest = 0;
             for (size_t i = 1; i < free_.size(); ++i) {
                 if (free_[i].cap > free_[largest].cap) largest = i;
@@ -291,7 +303,6 @@ private:
         free_.push_back({std::move(buf), cap});
         if (free_.size() > freeHighWater_) freeHighWater_ = free_.size();
     }
-    static constexpr size_t kMaxFreeSlots = 4;
     mutable std::mutex mutex_;
     std::vector<Slot> free_;
     size_t freeHighWater_ = 0;
@@ -304,7 +315,19 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         return freeHighWater_;
     }
-    static constexpr size_t free_cap() { return kMaxFreeSlots; }
+    // R4 item 1: was `static constexpr size_t free_cap() { return 4; }`. It is
+    // now a runtime read of the configured decode slot count, so it can no
+    // longer be static or constexpr — callers that stored it as a compile-time
+    // constant must re-read it per use (there were none outside this class;
+    // the gate in test_concurrent_decode.cpp reads it through
+    // dng_stage4_scratch_free_cap()).
+    //
+    // Floored at 1: a zero cap would make release() drop every buffer and
+    // defeat the pool entirely.
+    size_t free_cap() const {
+        const size_t n = dng_decode_slot_count_relaxed();
+        return n < 1 ? 1 : n;
+    }
 };
 
 using Stage4DstScratch = Stage4ScratchPool<uint8_t>;   // RGBA8 kernel output for legacy RGB8 callers
@@ -323,6 +346,13 @@ Stage4DstScratch& stage4DstScratch() {
 // a comfortable zero.
 size_t dng_stage4_scratch_free_high_water() {
     return stage4DstScratch().free_high_water();
+}
+
+// R4 item 1 gate accessor. The Stage-4 free-list cap is no longer a compile
+// time 4, so a gate that wants to assert "the cap held" must ASK for the cap
+// rather than hardcode it (test_concurrent_decode.cpp did the latter).
+size_t dng_stage4_scratch_free_cap() {
+    return stage4DstScratch().free_cap();
 }
 
 namespace {
@@ -391,6 +421,12 @@ void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
 }  // namespace (reopened below)
 
 size_t dng_stage4_scratch_free_high_water() {
+    return static_cast<size_t>(-1);
+}
+
+// Matching "not compiled on this platform" answer, so the gate DECLARES the
+// skip instead of silently reporting a comfortable number (2026-08-25 defect).
+size_t dng_stage4_scratch_free_cap() {
     return static_cast<size_t>(-1);
 }
 

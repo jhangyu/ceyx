@@ -241,8 +241,10 @@ class DecodeSlotPool {
     DecodeContext *ctx_;
   };
 
-  DecodeSlotPool(size_t slots, size_t arena_reserve_bytes) {
+  DecodeSlotPool(size_t slots, size_t arena_reserve_bytes)
+      : arena_reserve_bytes_(arena_reserve_bytes) {
     if (slots < 1) slots = 1;
+    target_ = slots;
     contexts_.reserve(slots);
     free_.reserve(slots);
     for (size_t i = 0; i < slots; ++i) {
@@ -254,10 +256,19 @@ class DecodeSlotPool {
   DecodeSlotPool(const DecodeSlotPool &) = delete;
   DecodeSlotPool &operator=(const DecodeSlotPool &) = delete;
 
-  // Blocks while all N slots are in use. This is the admission control.
+  // Blocks while the CONFIGURED number of slots is in use. This is the
+  // admission control.
+  //
+  // R4 item 1: the predicate reads target_ as well as the free list, so a
+  // NARROWING takes effect for admission immediately even while surplus
+  // contexts are still physically present. Without the in_flight_ < target_
+  // term a narrowed pool would keep admitting from not-yet-reclaimed surplus
+  // contexts, and the bound the gate asserts would be the OLD N for an
+  // unbounded window. Running decodes are never pre-empted — they are
+  // uncancellable — so narrowing only ever restricts NEW admissions.
   Slot acquire() {
     std::unique_lock<std::mutex> lock(mu_);
-    cv_.wait(lock, [this] { return !free_.empty(); });
+    cv_.wait(lock, [this] { return !free_.empty() && in_flight_ < target_; });
     DecodeContext *ctx = free_.back();
     free_.pop_back();
     ++in_flight_;
@@ -274,7 +285,6 @@ class DecodeSlotPool {
     std::lock_guard<std::mutex> lock(mu_);
     return high_water_in_flight_;
   }
-  size_t slot_count() const { return contexts_.size(); }
   size_t high_water_bytes() const {
     std::lock_guard<std::mutex> lock(mu_);
     size_t hw = 0;
@@ -282,7 +292,73 @@ class DecodeSlotPool {
     return hw;
   }
 
+  // R4 item 1. The configured N — what the host asked for. This is the number
+  // every consumer should report and assert against, because it is what the
+  // user actually selected.
+  //
+  // NOTE: this REPLACES the former `slot_count()`, which returned
+  // `contexts_.size()` with no lock while every sibling accessor took one.
+  // That was benign only while the pool was immutable; resize() mutates
+  // contexts_, so leaving an unlocked reader would have been a data race
+  // introduced by this very change. It was deleted rather than locked so no
+  // caller can accidentally keep asking the container-size question.
+  size_t configured_slots() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return target_;
+  }
+
+  // Contexts that physically exist right now. Differs from configured_slots()
+  // only inside a narrowing window, while surplus contexts are still checked
+  // out and therefore not yet destroyable.
+  size_t physical_slots() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return contexts_.size();
+  }
+
+  // Live reconfiguration (ruling r-5: grow immediately, shrink lazily).
+  //
+  // GROW appends contexts at once and wakes EVERY waiter — notify_one would
+  // widen the pool by N and release exactly one blocked caller, stranding the
+  // rest behind a bound that no longer applies to them.
+  //
+  // SHRINK sets the admission bound at once (acquire()'s predicate reads
+  // target_) and destroys surplus contexts only as they come back free. A
+  // checked-out DecodeContext* is held raw by a live Slot and must never be
+  // destroyed under it; contexts_ is a vector<unique_ptr>, so appending may
+  // reallocate the smart pointers but never moves the pointees a Slot holds.
+  void resize(size_t n) {
+    if (n < 1) n = 1;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (n == target_) return;
+      target_ = n;
+      while (contexts_.size() < n) {
+        contexts_.push_back(
+            std::make_unique<DecodeContext>(arena_reserve_bytes_));
+        free_.push_back(contexts_.back().get());
+      }
+      trim_free_surplus_locked();
+    }
+    cv_.notify_all();
+  }
+
  private:
+  // Destroys free contexts while there are more contexts than the target.
+  // Caller holds mu_. Only contexts sitting in free_ are eligible, which is
+  // precisely the set provably not checked out.
+  void trim_free_surplus_locked() {
+    while (contexts_.size() > target_ && !free_.empty()) {
+      DecodeContext *victim = free_.back();
+      free_.pop_back();
+      for (auto it = contexts_.begin(); it != contexts_.end(); ++it) {
+        if (it->get() == victim) {
+          contexts_.erase(it);
+          break;
+        }
+      }
+    }
+  }
+
   void release(DecodeContext *ctx) {
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -291,8 +367,14 @@ class DecodeSlotPool {
       ctx->reset_for_reuse();
       free_.push_back(ctx);
       --in_flight_;
+      // A narrowing that could not reclaim this context earlier reclaims it
+      // now, at the only moment it is provably not in use.
+      trim_free_surplus_locked();
     }
-    cv_.notify_one();
+    // notify_all, not notify_one: with target_ in the wait predicate a waiter
+    // can be woken for a condition it does not satisfy, and notify_one could
+    // hand that single wakeup to exactly such a waiter and stall the rest.
+    cv_.notify_all();
   }
 
   mutable std::mutex mu_;
@@ -301,6 +383,8 @@ class DecodeSlotPool {
   std::vector<DecodeContext *> free_;
   size_t in_flight_ = 0;
   size_t high_water_in_flight_ = 0;
+  size_t target_ = 1;
+  const size_t arena_reserve_bytes_;
 };
 
 // Defined in dng_pipeline.cpp (function-local static, thread-safe init).

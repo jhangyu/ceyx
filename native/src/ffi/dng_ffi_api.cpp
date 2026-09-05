@@ -10,6 +10,8 @@
 #include <iostream>
 
 #include "dng_pipeline.h"
+// R4 item 1: kAbsoluteMaxDecodeSlots + the advisory recommendation helpers.
+#include "dng_pipeline_config.h"
 
 #if defined(_WIN32)
 #define FFI_EXPORT __declspec(dllexport)
@@ -249,6 +251,55 @@ FFI_EXPORT size_t dng_debug_pool_checked_out(void) {
 
 FFI_EXPORT size_t dng_debug_rgb_pool_checked_out(void) {
   return dng_rgb_output_checked_out_count();
+}
+
+// ---------------------------------------------------------------------------
+// R4 item 1 — three-layer parallelism sync (rulings r-1, r-5, r-6).
+//
+// The host's user setting is the single source of truth for decode
+// parallelism; these entries are how it reaches the native layer.
+//
+// NOTE THE CLAMP, AND ESPECIALLY WHAT IS ABSENT FROM IT. The request is
+// bounded by [1, kAbsoluteMaxDecodeSlots] and by NOTHING ELSE. Ruling r-6
+// forbids any memory- or CPU-derived limit on the user's value, so there is
+// deliberately no min() against the machine's recommended width here — and
+// the recommendation entries below are consulted by nothing in this file.
+// They exist so the host can DISPLAY guidance. If a future change
+// reintroduces such a clamp, test_slot_config group (e) is what fails.
+// ---------------------------------------------------------------------------
+
+FFI_EXPORT int32_t dng_decode_configure_slots(int32_t requested) {
+  const size_t kMax = PipelineConfig::kAbsoluteMaxDecodeSlots;
+  size_t want = requested < 1 ? size_t{1} : static_cast<size_t>(requested);
+  if (want > kMax) want = kMax;
+  dng_decode_resize_slots(want);
+  return static_cast<int32_t>(want);
+}
+
+FFI_EXPORT int32_t dng_decode_configured_slots(void) {
+  return static_cast<int32_t>(dng_decode_slot_count());
+}
+
+// ADVISORY ONLY. pixels <= 0 means "use the 61 MP default sizing frame".
+FFI_EXPORT int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels) {
+  const size_t px = pixels <= 0
+                        ? PipelineConfig::kDecodeDefaultSizingPixels
+                        : static_cast<size_t>(pixels);
+  return static_cast<int32_t>(
+      PipelineConfig::decodeRecommendedSlotsForPixels(px));
+}
+
+FFI_EXPORT int64_t dng_decode_recommendation_class_pixels(int32_t index) {
+  switch (index) {
+  case 0:
+    return static_cast<int64_t>(PipelineConfig::kDecodePixels24MP);
+  case 1:
+    return static_cast<int64_t>(PipelineConfig::kDecodePixels61MP);
+  case 2:
+    return static_cast<int64_t>(PipelineConfig::kDecodePixels108MP);
+  default:
+    return 0;
+  }
 }
 
 } // extern "C"

@@ -191,6 +191,45 @@ int main(int argc, char **argv) {
   if (argc >= 2 && std::string(argv[1]) == "--threads-test") {
     return runThreadsDivisorTest();
   }
+  // R4 item 1: configure the native slot count BEFORE any decode, so the
+  // existing `bodyHighWater <= slots` assertion below is exercised at N != 4.
+  //
+  // Consumed as argv rather than an env var so the artifact records the exact
+  // command that produced the number.
+  //
+  // Ruling r-6: the effective count MUST equal the requested one for any value
+  // in [1, kAbsoluteMaxDecodeSlots]. If it does not, that is a FAILURE —
+  // nothing is permitted to narrow the user's request. Do NOT re-run at a
+  // lower value to obtain a pass; fix the clamp that was reintroduced.
+  //
+  // This calls the C++-linkage bridge dng_decode_resize_slots() rather than
+  // the C ABI dng_decode_configure_slots(). Deliberate: this target's source
+  // list (cmake/tests.cmake) contains the pipeline TUs but NOT
+  // src/ffi/dng_ffi_api.cpp, so the C ABI symbol would be undefined at link.
+  // The C ABI is covered by test_slot_config, which links the real dylib.
+  // The bridge is the same code path minus the clamp, and the clamp is
+  // precisely what must not narrow anything here.
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--configure-slots") {
+      const int requested = std::atoi(argv[i + 1]);
+      dng_decode_resize_slots(static_cast<size_t>(requested < 1 ? 1
+                                                                : requested));
+      const size_t effective = dng_decode_slot_count();
+      std::printf("[concurrent] configured slots requested=%d effective=%zu\n",
+                  requested, effective);
+      if (effective != static_cast<size_t>(requested)) {
+        std::fprintf(stderr,
+                     "[concurrent] SLOT_REQUEST_NOT_HONOURED requested=%d "
+                     "effective=%zu (ruling r-6 forbids any clamp)\n",
+                     requested, effective);
+        return 1;
+      }
+      // Drop the consumed pair so the positional parsing below is unchanged.
+      for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+      argc -= 2;
+      break;
+    }
+  }
   if (argc < 4) {
     std::fprintf(stderr,
                  "usage: %s <out_dir> <threads> [--warmup] [--repeat R] "
@@ -462,7 +501,11 @@ int main(int argc, char **argv) {
   // (DNG_STAGE4_SPLIT_KERNEL undefined — i.e. the macOS Metal layout). Declare
   // the skip rather than let an unobservable configuration read as a pass.
   const size_t stage4FreeHighWater = dng_stage4_scratch_free_high_water();
-  constexpr size_t kStage4FreeCap = 4;  // Stage4ScratchPool::kMaxFreeSlots
+  // R4 item 1: was `constexpr size_t kStage4FreeCap = 4;` mirroring the then
+  // hardcoded Stage4ScratchPool::kMaxFreeSlots. That constant is gone and the
+  // cap now follows the configured decode slot count, so the gate must ASK for
+  // it — a hardcoded 4 would mis-assert at every other configured N.
+  const size_t kStage4FreeCap = dng_stage4_scratch_free_cap();
   const bool stage4PoolCompiled = (stage4FreeHighWater != static_cast<size_t>(-1));
   if (!stage4PoolCompiled) {
     std::printf("STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled "
@@ -473,6 +516,12 @@ int main(int argc, char **argv) {
                  stage4FreeHighWater, kStage4FreeCap);
     failures.fetch_add(1);
   }
+
+  // R4 item 1: state the bound explicitly rather than leaving it to be
+  // inferred. `slot_count` at a value that is not 4 is the AC-1a proof line.
+  std::printf("[concurrent] slot_count=%zu physical_slots=%zu "
+              "bodyHighWater=%zu\n",
+              slots, dng_decode_physical_slot_count(), bodyHighWater);
 
   std::printf("SLOTS slots=%zu max_in_flight_body=%zu context_alias_events=%zu "
               "max_in_flight_pool=%zu max_in_flight_sampled=%zu "

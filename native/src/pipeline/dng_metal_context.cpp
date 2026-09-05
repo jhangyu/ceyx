@@ -11,8 +11,11 @@
 // DESIGN (queue assignment is STICKY per thread — read this before changing it)
 //   * One shared MTLDevice, created once, retained for process lifetime.
 //   * Up to `cap` MTLCommandQueues, created lazily, retained for process
-//     lifetime. Default cap 4 (the DecodeSlotPool ceiling this campaign may not
-//     change); DNG_METAL_QUEUE_CAP clamps to [1,8].
+//     lifetime. R4 item 1: the cap now FOLLOWS the configured decode slot count
+//     (the user's lane-width setting) instead of a hardcoded 4, and is re-read
+//     per call rather than cached, so a mid-session width change reaches the
+//     queue pool. DNG_METAL_QUEUE_CAP still overrides, clamped to
+//     [1, PipelineConfig::kAbsoluteMaxDecodeSlots].
 //   * A thread's queue is chosen on its FIRST acquire and never changes
 //     afterwards. This is the correctness crux: Halide takes and releases the
 //     context once PER ENTRY POINT (R1-T3 logs: 46 acquires / 46 releases for
@@ -32,7 +35,10 @@
 //     are busy": with release-at-depth-0 impossible (see above), a binding is
 //     only ever released at thread exit, so a blocking design would deadlock
 //     the 5th lane behind four permanently-bound queues. Degrading to sharing
-//     is never less safe than stock behaviour and keeps cap at 4 per ruling 4.
+//     is never less safe than stock behaviour. (Pre-R4 this sentence ended
+//     "and keeps cap at 4 per ruling 4"; the cap is now the configured lane
+//     width, but the sharing argument is unchanged — it depends only on there
+//     being MORE threads than queues, not on any particular cap value.)
 //   * NO LOCK IS HELD ACROSS ANY GPU WAIT. The pool mutex covers only map
 //     lookup, queue creation and bookkeeping, and is unlocked before this
 //     function returns — the caller does all Metal work (encode / commit /
@@ -47,7 +53,13 @@
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 
 #include "dng_metal_context.h"
+#include "dng_pipeline_config.h"
+// R4 item 1: dng_decode_slot_count_relaxed() — the queue cap follows the
+// configured decode slot count. See queue_cap() for why the RELAXED accessor
+// is mandatory here rather than the locking one.
+#include "dng_pipeline.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -99,24 +111,36 @@ void *g_device = nullptr;      // pool_lock()
 uint64_t g_round_robin = 0;    // pool_lock()
 
 int queue_cap() {
-  // Default 4: the DecodeSlotPool ceiling (kMaxDecodeSlots). This campaign does
-  // not change that cap; it makes the queue count follow it.
-  static const int cap = []() -> int {
-    int v = 4;
-    const char *env = std::getenv("DNG_METAL_QUEUE_CAP");
-    if (env && env[0]) {
-      const long parsed = std::strtol(env, nullptr, 10);
-      if (parsed >= 1 && parsed <= 8) {
-        v = static_cast<int>(parsed);
-      } else if (parsed > 8) {
-        v = 8;
-      } else if (parsed < 1) {
-        v = 1;
-      }
-    }
-    return v;
-  }();
-  return cap;
+  // R4 item 1: the queue count FOLLOWS the configured decode slot count.
+  //
+  // This used to cache a literal 4 in a `static const`. Two things were wrong
+  // with that once the slot count became configurable: the literal kept the
+  // old clamp alive in a second place (an 8-slot pool round-robining over 4
+  // queues, i.e. the parallelism the user asked for silently halved), and the
+  // CACHE froze whatever value was current at first use, so a mid-session
+  // lane-width change could never reach the queue pool — which ruling r-5
+  // requires it to. The value is therefore re-read on every call.
+  //
+  // It MUST be read through the relaxed (atomic) accessor rather than
+  // dng_decode_slot_count(): this function is called from inside pool_lock(),
+  // and the locking accessor would both nest the slot-pool mutex underneath
+  // the queue-pool mutex and construct the entire slot pool as a side effect
+  // of what is only a bookkeeping question.
+  //
+  // The env override is retained for diagnostics, with its upper bound raised
+  // from a bare 8 to the allocation-sanity constant so it can still express
+  // any value the slot pool can actually be configured to.
+  const char *env = std::getenv("DNG_METAL_QUEUE_CAP");
+  if (env && env[0]) {
+    const long kEnvMax =
+        static_cast<long>(PipelineConfig::kAbsoluteMaxDecodeSlots);
+    const long parsed = std::strtol(env, nullptr, 10);
+    if (parsed < 1) return 1;
+    if (parsed > kEnvMax) return static_cast<int>(kEnvMax);
+    return static_cast<int>(parsed);
+  }
+  const size_t slots = dng_decode_slot_count_relaxed();
+  return slots < 1 ? 1 : static_cast<int>(slots);
 }
 
 bool logging_enabled() {
