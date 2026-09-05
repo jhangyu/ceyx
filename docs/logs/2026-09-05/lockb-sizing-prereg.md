@@ -39,6 +39,9 @@ How is the residual gap split between:
   * `lockb_ms` = median over decodes of (total `device_copy_mutex` **wait** time per decode
     at N=5) − (same at N=1). Measured by the probe of §2.
   * `queue_ms = T5(cap=4) − T5(cap=8)`, same session, interleaved.
+  * `omp_ms = T5(cap=8, OMP_NUM_THREADS default) − T5(cap=8, OMP_NUM_THREADS=1)`,
+    the CPU-oversubscription component of the (O) term (X6). Reported as
+    `omp_share = omp_ms / gap_ms`; it is part of (O), never of (B) or (Q).
   * `lockb_share = lockb_ms / gap_ms`, `queue_share = queue_ms / gap_ms`,
     `other_share = 1 − lockb_share − queue_share` (may be negative; reported as-is, not
     clamped).
@@ -80,6 +83,7 @@ dumped at exit to `$DNG_COPY_LOCK_PROBE_OUT` as
 | X3 | **Instrument positive control**: `DNG_COPY_LOCK_PROBE_SPIN_US=2000` (extra hold inside the lock). Measured N=5 `wait_us` must rise by ≥ 5× versus X2's N=5 `wait_us`, and N=1 `wait_us` must stay near zero | instrumented build |
 | X4 | **Inertness**: `run_colour_identity.py` on the instrumented build with the probe **off**, ARW+DNG, serial and concurrent5 | instrumented build |
 | X5 | DNG cross-check of X1 at cap ∈ {4, 8} | none |
+| X6 | **(O)-term probe, env-only**: ARW `ratio` at `OMP_NUM_THREADS` ∈ {1, default} × cap ∈ {4, 8}. Rationale registered in advance: `build-r1t2` has `ENABLE_OPENMP:BOOL=ON`, so each LibRaw unpack may itself fan out across all cores; five concurrent decodes would then oversubscribe the CPU, which would inflate the residual with a term that is neither the mutex nor queue sharing | none |
 
 Attempt accounting: a **FAILED** ARW decode is the known LIBRAW_NOTHREADS race (~30 %/run,
 `tmp/verify/race-206-root-cause.md`) — re-run and record the attempt count in the artifact;
