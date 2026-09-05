@@ -82,7 +82,10 @@ def clone_at(url: str, rev: str, directory: Path) -> None:
     backup_text = provenance.read_text(encoding="utf-8") if provenance.is_file() else None
 
     if directory.exists():
-        shutil.rmtree(directory)
+        try:
+            shutil.rmtree(directory, onexc=_rmtree_force_writable)
+        except TypeError:
+            shutil.rmtree(directory, onerror=_rmtree_force_writable)
     directory.mkdir(parents=True, exist_ok=True)
     run(["git", "-C", str(directory), "init", "-q"])
     run(["git", "-C", str(directory), "remote", "add", "origin", url])
@@ -93,12 +96,42 @@ def clone_at(url: str, rev: str, directory: Path) -> None:
         provenance.write_text(backup_text, encoding="utf-8")
 
 
+def _rmtree_force_writable(func, path, exc_info) -> None:  # noqa: ANN001
+    """``shutil.rmtree`` onexc/onerror handler: git marks objects/packs
+    read-only, which raises PermissionError on Windows (POSIX permission
+    bits are usually still user-writable there, so this reproduces reliably
+    on Windows runners and rarely elsewhere). chmod the offending path
+    writable and retry the failing operation once; a second failure is a
+    real error and is left to propagate."""
+    import os
+    import stat
+
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
 def strip_git(directory: Path) -> None:
     """Remove ``directory/.git`` and record the resolved HEAD into
-    ``directory/.vendor-rev``."""
+    ``directory/.vendor-rev``.
+
+    Fails loudly (does not swallow errors) if ``.git`` survives the removal:
+    a silent partial failure here previously let a nested ``.git`` reach a
+    release build undetected (Windows CI, 2026-09-05) -- ``ignore_errors``
+    hid exactly the read-only-file failure this function must now recover
+    from and verify, not paper over.
+    """
     directory = Path(directory)
     rev = run(["git", "-C", str(directory), "rev-parse", "HEAD"]).stdout.strip()
-    shutil.rmtree(directory / ".git", ignore_errors=True)
+    git_dir = directory / ".git"
+    if git_dir.exists():
+        try:
+            shutil.rmtree(git_dir, onexc=_rmtree_force_writable)
+        except TypeError:
+            # Python < 3.12: shutil.rmtree has no onexc parameter, only the
+            # older onerror callback (called with the same 3 positional args).
+            shutil.rmtree(git_dir, onerror=_rmtree_force_writable)
+    if git_dir.exists():
+        raise _fail(f"{git_dir} still exists after strip_git() removal")
     (directory / ".vendor-rev").write_text(rev + "\n", encoding="utf-8")
 
 
