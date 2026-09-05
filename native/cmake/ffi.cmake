@@ -74,6 +74,18 @@ if(DNG_STAGE4_SPLIT_KERNEL)
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()
 if(APPLE)
+    # R1-T2 (2026-09-05, parallel-decode campaign): the Metal context override
+    # (src/pipeline/dng_metal_context.cpp) is listed explicitly here, Apple-only,
+    # so the queue pool's platform scope is visible in the build system and not
+    # only in that TU's #if guard. pipeline.cmake's GLOB_RECURSE already picks the
+    # file up on every platform and CMake de-duplicates identical absolute source
+    # paths within a target, so this line documents scope and guarantees the TU is
+    # present on Apple; it never causes a second compile. On non-Apple (and on
+    # Apple with DNG_FORCE_VULKAN) the TU's guard makes it an empty object file,
+    # so Vulkan platforms are bit-for-bit untouched.
+    target_sources(dng_decoder_native PRIVATE
+        ${SRC_DIR}/pipeline/dng_metal_context.cpp)
+
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
     find_library(CORESERVICES_LIBRARY CoreServices)
     find_library(METAL_LIBRARY Metal)

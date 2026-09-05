@@ -11,6 +11,7 @@
 // MoltenVK. OFF keeps the committed Apple=Metal binding unchanged.
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 #include "HalideRuntimeMetal.h"
+#include "dng_metal_context.h"  // R1-T2: ceyx strong override of the weak Halide Metal context hooks
 #elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
 #include "HalideRuntimeVulkan.h"
 #endif
