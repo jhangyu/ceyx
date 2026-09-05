@@ -173,7 +173,21 @@ if(APPLE)
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_jit_inert.py
                     $<TARGET_FILE:dng_decoder_native>
             COMMENT "Checking Halide JIT module hooks are still inert")
+    else()
+        message(STATUS "JITGUARD: SKIPPED -- DNG_FORCE_VULKAN is set, so "
+                       "dng_copy_lock.cpp is not compiled and the deviation it "
+                       "guards does not exist in this image.")
     endif()
+else()
+    # Declared skip, not a silent one. The guard is Mach-O/otool-based, and the
+    # deviation it protects lives in dng_copy_lock.cpp, which compiles only under
+    # __APPLE__ && !DNG_FORCE_VULKAN. On Linux/Windows/Android there is nothing
+    # to guard, so the POST_BUILD step is never registered and CANNOT fail those
+    # legs. Announced anyway: a check that is absent without saying so is
+    # indistinguishable from a check that was never written.
+    message(STATUS "JITGUARD: NOT APPLICABLE on this platform -- the guarded "
+                   "deviation (dng_copy_lock.cpp) is Apple-only, so no JIT "
+                   "inertness check is registered for this build.")
 endif()
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
