@@ -9,6 +9,13 @@
 # block that ffi.cmake had to close at its end; see the note there.
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
+# Threads is needed by host test targets on every platform (e.g.
+# test_normalize_model_race below), not just Linux. The Linux-only
+# find_package inside the `if(UNIX AND NOT APPLE AND NOT ANDROID)` block meant
+# the imported target Threads::Threads did not exist on Windows/macOS, so the
+# Windows CMake configure failed. Resolve it once here, at file scope.
+find_package(Threads REQUIRED)
+
 # Phase 14 W0 acceptance smoke: Android cross-build test binary for ADB.
 # Full host test targets stay under the NOT DNG_CROSS_BUILD block below.
 if(ANDROID AND DNG_CROSS_BUILD)
