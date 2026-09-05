@@ -1409,6 +1409,18 @@ if(DNG_ENABLE_GENERIC_RAW)
     target_include_directories(test_libraw_frontend PRIVATE ${INC_DIR})
     target_link_libraries(test_libraw_frontend PRIVATE libraw_vendored)
 
+    # R4 item 2 (2026-09-05): multi-threaded repro for the shared-static race at
+    # third_party/libraw/src/metadata/normalize_model.cpp:406
+    # (`static const char *orig;` inside LibRaw::GetNormalizedModel()). Deliberately
+    # links ONLY libraw_vendored -- no DNG SDK, no Halide AOT, no sample files -- so
+    # it is outside the five pre-existing link-failure targets and can be built and
+    # run on its own in seconds. Per user ruling r-2 a direct multi-threaded call of
+    # the function is sufficient race acceptance evidence; no camera RAW is needed.
+    add_executable(test_normalize_model_race tests/test_normalize_model_race.cpp)
+    target_include_directories(test_normalize_model_race PRIVATE ${INC_DIR})
+    target_link_libraries(test_normalize_model_race PRIVATE libraw_vendored)
+    target_link_libraries(test_normalize_model_race PRIVATE Threads::Threads)
+
     # P17 T7: the single LibRaw -> RawGpuInput adapter and its test.
     # (F-R4-05: the round-4 EXISTS guard is gone — the sources are committed,
     # and a guarded target drops silently with no red signal.)
@@ -1606,6 +1618,27 @@ endif()
 if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_concurrent_decode ${DNG_LINUX_TEST_LIBS})
 endif()
+
+# R4 item 1: slot-configuration bookkeeping.
+#
+# Links the real dng_decoder_native dylib rather than recompiling the pipeline
+# sources: recompiling dng_pipeline.cpp would drag the whole Halide AOT chain
+# in for a bookkeeping test, and linking the dylib means the C ABI groups
+# exercise the symbol AS EXPORTED FROM THE SHIPPING ARTIFACT. That is the
+# lesson recorded at the test_concurrent_decode block above (a test binary
+# missing the campaign's TUs silently contains none of the changed code).
+#
+# DecodeSlotPool is header-only (src/pipeline/decode_context.h) and needs only
+# HalideBuffer.h plus the C++ stdlib — verified, no DNG SDK dependency — so the
+# local-pool groups compile without any of the heavy include dirs.
+# (Block authored by impl-sync-opus; applied by lead-r1-opus, tests.cmake being
+# a lead-serialised shared file this round.)
+add_executable(test_slot_config tests/test_slot_config.cpp)
+target_include_directories(test_slot_config PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}/pipeline
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_slot_config dng_decoder_native)
 
 # R1-T3 (parallel-decode campaign): generic-RAW link closure for the dual-route.
 # The harness above compiles the DNG pipeline sources directly and does NOT link
@@ -1825,7 +1858,7 @@ endif()
 # Color accuracy / visual regression test
 add_executable(test_color_accuracy tests/test_color_accuracy.cpp)
 target_include_directories(test_color_accuracy PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_color_accuracy dng_sdk)
+target_link_libraries(test_color_accuracy dng_decoder_native)
 if(APPLE)
     target_link_libraries(test_color_accuracy ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
@@ -1835,7 +1868,7 @@ endif()
 
 add_executable(test_dng_layout tests/test_dng_layout.cpp)
 target_include_directories(test_dng_layout PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_dng_layout dng_sdk)
+target_link_libraries(test_dng_layout dng_decoder_native)
 if(APPLE)
     target_link_libraries(test_dng_layout ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
@@ -1846,7 +1879,7 @@ endif()
 # Tile testing tool
 add_executable(test_dng_tiles tests/test_dng_tiles.cpp)
 target_include_directories(test_dng_tiles PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_dng_tiles dng_sdk)
+target_link_libraries(test_dng_tiles dng_decoder_native)
 if(APPLE)
     target_link_libraries(test_dng_tiles ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
@@ -1857,7 +1890,7 @@ endif()
 
 add_executable(test_dng_preview tests/test_dng_preview.cpp)
 target_include_directories(test_dng_preview PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_dng_preview dng_sdk)
+target_link_libraries(test_dng_preview dng_decoder_native)
 if(APPLE)
     target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
 endif()
@@ -1916,29 +1949,21 @@ if(DNG_LINUX_TEST_LIBS)
 endif()
 
 # Phase 5.3: Halide Demosaic PSNR Test
-# 2026-08-16: dng_opcodelist2_halide.cpp / dng_halide_device.cpp added to the
-# source list. libdng_sdk's dng_opcode_list::Apply references the Stage2
-# OpcodeList2 Halide bridge symbols unconditionally, so this target had been
-# failing to link since that bridge landed (no test_demosaic_halide binary was
-# ever produced). Linking the bridge in restores the target; the polynomial
-# AOT archives below satisfy the bridge's own kernel references.
-add_executable(test_demosaic_halide tests/test_demosaic_halide.cpp
-    src/pipeline/dng_mosaic_halide.cpp
-    src/pipeline/dng_opcodelist2_halide.cpp
-    src/pipeline/dng_halide_device.cpp)
+# 2026-09-05 (R4 item 5): the 2026-08-16 fix below compiled the bridge sources
+# in directly but never actually linked (dng_opcode_list::Apply's bridge calls
+# dng_decode_context_for(), whose only definition lives in dng_pipeline.cpp,
+# which this target never compiled) -- confirmed by an as-is build that still
+# failed with that exact undefined symbol. Switching to linking the shipping
+# dng_decoder_native library (same pattern as test_slot_config) resolves it:
+# that library already contains the bridge, dng_pipeline.cpp, and the AOT
+# kernels, so compiling the bridge sources here again would risk duplicate
+# symbols and would exercise a separately-compiled copy instead of the
+# shipping artifact.
+add_executable(test_demosaic_halide tests/test_demosaic_halide.cpp)
 target_include_directories(test_demosaic_halide PRIVATE
     ${INC_DIR}
-    ${SRC_DIR}
-    ${DNG_SDK_DIR}
-    ${HALIDE_OUTPUT_DIR}
-    ${HALIDE_DIR}/include)
-# W6 M-4: halide_runtime.a provides Metal/Vulkan runtime symbols for all -no_runtime AOT kernels.
-target_link_libraries(test_demosaic_halide dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
-add_dependencies(test_demosaic_halide halide_runtime_target)
-add_dependencies(test_demosaic_halide dng_warp_aot_target)
-add_dependencies(test_demosaic_halide dng_demosaic_aot_target)
-add_dependencies(test_demosaic_halide dng_opcode_polynomial_aot_target)
-add_dependencies(test_demosaic_halide dng_opcode_polynomial3_aot_target)
+    ${DNG_SDK_DIR})
+target_link_libraries(test_demosaic_halide dng_decoder_native)
 if(APPLE)
     target_link_libraries(test_demosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
