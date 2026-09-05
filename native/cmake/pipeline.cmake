@@ -157,6 +157,23 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos_dylib_deps.py
                 $<TARGET_FILE:dng_decoder_native>
         COMMENT "Vendoring Homebrew deps into dng_decoder_native")
+
+    # Standing guard (R4 #16): fail the build if Halide's JIT module hooks stop
+    # being inert. dng_copy_lock.cpp:240-253 declares one deviation from upstream
+    # -- UseModule is not replicated -- and that deviation is safe ONLY while
+    # halide_use_jit_module / halide_release_jit_module are empty AOT stubs.
+    # R4 item 6 proved they are (docs/logs/2026-09-05/r2-jit-closure.md); this
+    # makes that a standing fact instead of a point-in-time one. The check runs a
+    # positive control on EVERY invocation and exits non-zero -- never 0 -- if it
+    # finds no subject, an absent symbol, or a control that did not fire.
+    # Runs AFTER the vendoring step above so the image checked is the image that
+    # ships, not an intermediate.
+    if(NOT DNG_FORCE_VULKAN)
+        add_custom_command(TARGET dng_decoder_native POST_BUILD
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_jit_inert.py
+                    $<TARGET_FILE:dng_decoder_native>
+            COMMENT "Checking Halide JIT module hooks are still inert")
+    endif()
 endif()
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
