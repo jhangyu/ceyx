@@ -1,0 +1,24 @@
+--- a/src/metadata/normalize_model.cpp
++++ b/src/metadata/normalize_model.cpp
+@@ -403,7 +403,20 @@
+       { SonyID_ILCE_7M5,       "ILCE-7M5"},
+ };
+ 
+-  static const char *orig;
++  /* R4 item 2 (2026-09-05, project patch 12): this used to be a
++     function-local static pointer, i.e. one process-global slot shared by
++     EVERY thread calling GetNormalizedModel(), for every non-Sony brand
++     (Fujifilm/Kodak/Leaf/Konica-Minolta/Nikon/Olympus/Panasonic/PhaseOne/
++     Samsung-Pentax/Samsung). Concurrent decodes of different camera models
++     interleaved the write/read of that shared pointer, corrupting
++     imgdata.idata.normalized_model. Every alias table's first element is a
++     '@'-prefixed canonical entry (verified:
++     native/scripts/check_alias_table_convention.py), so `orig` is always
++     written before it is read within a single call; cross-call persistence
++     was never needed. An automatic (per-call) local removes the shared
++     storage entirely -- nothing is left to race on. See
++     docs/logs/2026-09-05/race2/. */
++  const char *orig = "";
+ 
+   static const char fujialias[][16] = {
+     "@DBP for GX680", "DX-2000",

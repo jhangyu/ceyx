@@ -142,6 +142,27 @@ gate patch exists.
 | 08.x3f-parallel-lut.patch | fbd10c6d5a4a1eba519d9ed7ea9e398067989ef96b434828427adcc08213a5d9 |
 | 09.fuji-stdthread-parallel.patch | 204118881f11640dd35a82acd56fe87acdfb37d584091b905c08746a5320e8b7 |
 | 10.fuji-qtable-cache.patch | d2230b5810b1595482cd337ecf98809ab181c11ad5d8cd0044dd81aeaafac568 |
+| 12.normalize-model-orig-race.patch | 9197b31fc32b090ab73635d3c69a3554348ab1b458c0c2f04b5e60fd7a4962ff |
+
+R4 item 2 (2026-09-05): `src/metadata/normalize_model.cpp:406` declared a
+function-local `static const char *orig;` inside `LibRaw::GetNormalizedModel()`
+-- one process-global pointer shared by every thread, written/read across 12
+non-Sony brand alias tables (Fujifilm/Kodak/Leaf/Konica-Minolta/Nikon/Olympus/
+Panasonic/PhaseOne/Samsung-Pentax/Samsung; Sony does not use it). Concurrent
+decodes of different camera models interleaved the write/read, corrupting
+`imgdata.idata.normalized_model` for one of the two threads -- a silent
+wrong-colour/wrong-metadata result, not a crash. Root cause and every
+write/read site: `docs/logs/2026-09-05/race2/`. Every alias table's first
+element is a `'@'`-prefixed canonical entry (mechanically verified,
+`native/scripts/check_alias_table_convention.py`), so the pointer is always
+written before it is read within a single call and never needs to persist
+across calls. Patch 12 changes it to a per-call automatic local
+(`const char *orig = "";`), removing the shared storage entirely -- there is
+nothing left to race on. Note 11 (Sony's `LIBRAW_NOTHREADS`/`LibRaw_TLS` fix,
+below) is a **different** bug in the same family: that fix does not touch
+this hand-written static, and this patch does not touch `LIBRAW_NOTHREADS`.
+Red→green multi-threaded evidence: see `docs/logs/2026-09-05/race2/T3-red.txt`
+and `T5-green.txt`.
 
 ## Project-authored LibRaw-cmake patches
 

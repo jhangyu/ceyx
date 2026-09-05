@@ -18,6 +18,7 @@
 | `test_color_accuracy` | 色彩準確度測試 |
 | `test_cfa_phase` | CFA 相位四相（RGGB/BGGR/GRBG/GBRG）合成圖檢查；同時覆蓋 Halide AOT kernel 與 CPU 參考 demosaic。由 `run_decode_matrix.py` 自動執行 |
 | `test_cfa_color` | 對真實 DNG 解碼後做像素顏色斷言（藍天必須 B ≫ R）；BGGR 樣本為外部路徑，缺檔時 matrix 印 SKIP |
+| `test_normalize_model_race` | LibRaw `GetNormalizedModel()` 的多執行緒競態閘：直接以合成 idata 併發呼叫該函式，斷言每個非 Sony 品牌（Nikon/Fujifilm/Olympus/Panasonic）的 alias→canonical 正規化結果不被其他執行緒污染。`--selfcheck` 為正控制模式（斷言必須紅）。不需任何 RAW 樣本檔 |
 
 ## Halide AOT 產出（halide_generated/ 目錄）
 
