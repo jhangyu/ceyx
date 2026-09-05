@@ -126,6 +126,79 @@ void unsupportedSlotsWorker(List<Object?> bootstrap) {
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
 
+/// Boots immediately for workers 0 and 1 but stalls worker 2's boot ack by
+/// [_staggeredBootDelay] — models a worker spawned right before a width
+/// change that is still booting when the change happens, so it carries the
+/// OLD value in its bootstrap (R4 round-2 should-fix, decode_pool.dart
+/// kMsgSlotsAck / kMsgReady).
+const _staggeredBootDelay = Duration(milliseconds: 150);
+
+void staggeredBootWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final index = bootstrap[2] as int;
+  final nativeSlotTarget = bootstrap.length > 3 ? bootstrap[3] as int : 0;
+
+  void boot() {
+    if (nativeSlotTarget > 0) {
+      poolPort.send(<Object?>[kMsgSlotsAck, nativeSlotTarget]);
+    }
+    final jobs = ReceivePort();
+    jobs.listen((Object? message) {
+      final msg = message as List<Object?>;
+      if (msg[0] == kMsgShutdown) {
+        jobs.close();
+        return;
+      }
+      if (msg[0] == kMsgConfigSlots) {
+        poolPort.send(<Object?>[kMsgSlotsAck, msg[1] as int]);
+        return;
+      }
+      final requestId = msg[1] as int;
+      final type = CeyxPoolJobType.values[msg[2] as int];
+      final path = msg[3] as String;
+      void answer() {
+        if (type == CeyxPoolJobType.probe) {
+          poolPort.send(<Object?>[
+            kMsgResult,
+            requestId,
+            TransferableTypedData.fromList([Uint8List.fromList([1, 2, 3])]),
+          ]);
+        } else {
+          poolPort.send(<Object?>[
+            kMsgResult,
+            requestId,
+            TransferableTypedData.fromList([Uint8List(2 * 2 * 4)]),
+            2,
+            2,
+            1.0,
+            2.0,
+          ]);
+        }
+      }
+
+      // Honour the same `slow:<ms>:*` convention as [fakePoolWorker] so a
+      // dispatched job keeps this worker busy instead of freeing up
+      // instantly and stealing a job meant to prove worker 2's late boot.
+      var delayMs = 0;
+      if (path.startsWith('slow:')) {
+        delayMs = int.parse(path.split(':')[1]);
+      }
+      if (delayMs == 0) {
+        answer();
+      } else {
+        Timer(Duration(milliseconds: delayMs), answer);
+      }
+    });
+    poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+  }
+
+  if (index >= 2) {
+    Timer(_staggeredBootDelay, boot);
+  } else {
+    boot();
+  }
+}
+
 void main() {
   late CeyxDecodePool pool;
   final logLines = <String>[];
@@ -485,4 +558,68 @@ void main() {
     // it through the `default:` arm of the pool's message switch.
     expect(pool.workerCount, greaterThan(0));
   });
+
+  test(
+    'TC-960: a worker that lands with a stale bootstrap slot value is '
+    'corrected to the CURRENT target instead of overwriting the '
+    'process-global pool with a stale one',
+    () async {
+      pool = CeyxDecodePool(width: 1, entryPoint: staggeredBootWorker);
+      // Target=3 with no workers yet: no broadcast, just records the value
+      // every subsequent spawn's bootstrap will carry.
+      pool.width = 3;
+
+      // Spawning is serialised (one boot in flight at a time — see
+      // `_maybeSpawn`), so submitting three concurrent jobs spawns worker 0,
+      // then (once it is ready) worker 1, then (once THAT is ready) worker 2.
+      // Worker 2's boot is artificially slow, so it is still booting — and
+      // therefore still carrying bootstrap target 3 — when the width change
+      // below fires.
+      final futures = [
+        pool.decode('slow:400:a'),
+        pool.decode('slow:400:b'),
+        pool.decode('slow:400:c'),
+      ];
+
+      // Long enough for workers 0 and 1 to spawn AND become ready (their boot
+      // is immediate), short enough to land well inside worker 2's 150ms
+      // artificial boot delay.
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        pool.workerCount,
+        equals(3),
+        reason: 'all three must have spawned even though worker 2 is still '
+            'booting',
+      );
+
+      logLines.clear();
+      // Broadcasts only to READY workers (0 and 1). Worker 2 is not ready
+      // yet, so it misses this entirely and will land with its stale
+      // bootstrap value of 3.
+      pool.width = 5;
+
+      await Future.wait(futures);
+
+      final worker2Slots = logLines
+          .where((l) => l.contains('worker=2') && l.contains('|slots|'))
+          .toList();
+      expect(
+        worker2Slots.any((l) => l.contains('effective=3')),
+        isTrue,
+        reason: 'worker 2 must land carrying the stale bootstrap value first',
+      );
+      expect(
+        worker2Slots.any((l) => l.contains('effective=5')),
+        isTrue,
+        reason: 'the pool must re-send the CURRENT target once worker 2\'s '
+            'stale ack reveals the divergence',
+      );
+      expect(
+        pool.lastNativeSlotEffective,
+        equals(5),
+        reason: 'the process-global pool must end up at the current target, '
+            'never left on the stale value a late-booting worker applied',
+      );
+    },
+  );
 }

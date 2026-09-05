@@ -526,6 +526,20 @@ class CeyxDecodePool {
         if (worker.retiring) {
           _shutdown(worker);
         } else {
+          // R4 round-2 should-fix: this worker's slot ack (sent before this
+          // very kMsgReady, per the wire protocol) may have arrived with a
+          // stale bootstrap value that couldn't be corrected yet because
+          // sendPort was still null. Correct it now that the port exists.
+          if (worker.pendingSlotResync) {
+            worker.pendingSlotResync = false;
+            if (_nativeSlotTarget > 0) {
+              worker.lastSlotResendTarget = _nativeSlotTarget;
+              worker.sendPort!.send(<Object?>[
+                kMsgConfigSlots,
+                _nativeSlotTarget,
+              ]);
+            }
+          }
           _pump();
         }
         return;
@@ -581,6 +595,38 @@ class CeyxDecodePool {
             'pool|SLOT_TARGET_NOT_HONOURED|requested=$_nativeSlotTarget'
             '|effective=$effective',
           );
+          // R4 round-2 (parked should-fix): a worker spawned just before a
+          // width change carries the OLD value in its bootstrap and applies it
+          // when it finally lands, which can be after `_setNativeSlotTarget`'s
+          // broadcast already moved every READY worker on to the new value —
+          // the broadcast in `_setNativeSlotTarget` only reaches ready
+          // workers, so a still-booting one is invisible to it and would
+          // otherwise leave the PROCESS-global native pool stuck on its stale
+          // bootstrap value. The ack is the moment the pool learns what a
+          // worker actually applied, so converge here instead.
+          if (worker.sendPort != null) {
+            if (worker.lastSlotResendTarget != _nativeSlotTarget) {
+              // Ask this worker to try the CURRENT target. Guarded so a dylib
+              // that genuinely cannot honour the value (or predates the
+              // feature, though that case returns -1 above) is asked at most
+              // once per target instead of retried forever.
+              worker.lastSlotResendTarget = _nativeSlotTarget;
+              worker.sendPort!.send(<Object?>[
+                kMsgConfigSlots,
+                _nativeSlotTarget,
+              ]);
+            }
+          } else {
+            // Still booting: this ack arrived ahead of kMsgReady by design
+            // (see ceyxDecodeWorkerMain) so there is no send port yet. Defer
+            // the correction to the ready handler below.
+            worker.pendingSlotResync = true;
+          }
+        } else {
+          // Matches the current target: forget any earlier mismatch so a
+          // future divergence from THIS same target is not suppressed by the
+          // dedup guard above.
+          worker.lastSlotResendTarget = null;
         }
         return;
       case _kMsgExit:
@@ -780,6 +826,13 @@ class _PoolWorker {
   bool retiring = false;
   bool dead = false;
   _PoolJob? currentJob;
+
+  // R4 round-2: slot-resync bookkeeping (see kMsgSlotsAck / kMsgReady in
+  // CeyxDecodePool._onWorkerMessage). `pendingSlotResync` covers an ack that
+  // arrived before sendPort existed; `lastSlotResendTarget` dedups a resend so
+  // a dylib that genuinely cannot honour a target is asked once, not forever.
+  bool pendingSlotResync = false;
+  int? lastSlotResendTarget;
 }
 
 /// Production worker entry point.
