@@ -1536,9 +1536,20 @@ endif()
 # compiles the pipeline sources directly, so it needs the identical AOT
 # archives and dependency chain (including both DNG_STAGE4_SPLIT_KERNEL
 # branches and the platform link libs).
+# R2-T2 (2026-09-05, parallel-decode campaign): this target is STATICALLY linked
+# and lists its pipeline sources by hand, so — unlike the dylib, where
+# pipeline.cmake's GLOB_RECURSE sweeps src/pipeline/*.cpp in automatically — the
+# two campaign override TUs must be named here or the binary silently contains
+# NEITHER (R2-T1 FINDING 3: every colour-identity run before this line was driven
+# by a binary with zero queue-pool symbols, so AC5 had never been checked against
+# the changed code path). dng_metal_context.cpp = R1-T2's per-thread
+# MTLCommandQueue pool; dng_copy_lock.cpp = R2-T2's striped device-copy locks.
+# Both are Apple-only via their own #if guards; elsewhere they are empty objects.
 add_executable(test_concurrent_decode tests/test_concurrent_decode.cpp
     src/pipeline/dng_pipeline.cpp
     src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_metal_context.cpp
+    src/pipeline/dng_copy_lock.cpp
     src/pipeline/dng_opcodelist2_halide.cpp
     src/pipeline/dng_mosaic_halide.cpp
     src/pipeline/dng_warp_halide.cpp
