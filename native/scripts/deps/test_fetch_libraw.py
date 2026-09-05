@@ -167,17 +167,60 @@ class TestFetchOrdering(unittest.TestCase):
         calls = []
         with mock.patch.object(fetch_libraw, "clone_at", side_effect=lambda *a, **k: calls.append(("clone", a[2]))), \
              mock.patch.object(fetch_libraw, "overlay_rawspeed_patches", side_effect=lambda *a, **k: calls.append("overlay")), \
-             mock.patch.object(fetch_libraw, "apply_patches", side_effect=lambda *a, **k: calls.append(("apply", k.get("label")))), \
+             mock.patch.object(fetch_libraw, "apply_patches", side_effect=lambda *a, **k: calls.append(("apply", a[0] if a else None))), \
              mock.patch.object(fetch_libraw, "strip_git", side_effect=lambda d: calls.append(("strip", d))):
             with TemporaryDirectory() as tmp:
-                fetch_libraw.fetch(Path(tmp))
+                dest = fetch_libraw.fetch(Path(tmp))
         kinds = [c[0] if isinstance(c, tuple) else c for c in calls]
         self.assertEqual(kinds.count("clone"), 3)
         self.assertIn("overlay", kinds)
-        self.assertEqual(kinds.count("apply"), 2)
+        # Task #12: a third apply_patches() call was added for the
+        # libraw-cmake clone (the LIBRAW_NOTHREADS fix), alongside the
+        # pre-existing RawSpeed3 and project-LibRaw calls.
+        self.assertEqual(kinds.count("apply"), 3)
+        apply_targets = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "apply"]
+        libraw_cmake_dest = dest.parent / "libraw-cmake"
+        self.assertIn(libraw_cmake_dest, apply_targets)
         # strip_git only runs for dirs whose .git actually exists; none do
         # here since clone_at is mocked out, so 0 is correct.
         self.assertEqual(kinds.count("strip"), 0)
+
+    def test_apply_patches_precedes_strip_git_for_libraw_cmake(self) -> None:
+        """Regression guard for the "KNOWN GAP" identified in commit
+        007e72e's message and closed by task #12: apply_patches() requires
+        `.git` (fetch_libraw.py:151), so the libraw-cmake apply_patches()
+        call must run before strip_git() removes libraw-cmake's `.git`, not
+        after. Uses real clone_at/strip_git against a throwaway local repo
+        (no network) so the ordering is proven against the actual
+        `.git`-presence precondition, not just call order."""
+        with TemporaryDirectory() as tmp:
+            native_dir = Path(tmp)
+            libraw_cmake_dest = native_dir / "third_party" / "libraw-cmake"
+            patch_dir = native_dir / "patches" / "libraw-cmake"
+            patch_dir.mkdir(parents=True)
+
+            # A minimal local bare-ish repo standing in for the real
+            # LibRaw-cmake clone, with one file a trivial patch can target.
+            upstream = native_dir / "_upstream"
+            upstream.mkdir()
+            (upstream / "CMakeLists.txt").write_text("target_compile_definitions(raw PRIVATE LIBRAW_NOTHREADS)\n", encoding="utf-8")
+            from deps.run import run
+            run(["git", "init", "-q", str(upstream)])
+            run(["git", "-C", str(upstream), "add", "-A"])
+            run(["git", "-C", str(upstream), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"])
+
+            fake_patch = patch_dir / "11.no-libraw-nothreads.patch"
+            fake_patch.write_text(
+                "--- a/CMakeLists.txt\n+++ b/CMakeLists.txt\n"
+                "@@ -1 +1 @@\n-target_compile_definitions(raw PRIVATE LIBRAW_NOTHREADS)\n+# removed\n",
+                encoding="utf-8",
+            )
+
+            run(["git", "clone", "-q", str(upstream), str(libraw_cmake_dest)])
+            fetch_libraw.apply_patches(libraw_cmake_dest, patch_dir, label="project ")
+            self.assertNotIn("LIBRAW_NOTHREADS", (libraw_cmake_dest / "CMakeLists.txt").read_text(encoding="utf-8"))
+            fetch_libraw.strip_git(libraw_cmake_dest)
+            self.assertFalse((libraw_cmake_dest / ".git").exists())
 
 
 if __name__ == "__main__":

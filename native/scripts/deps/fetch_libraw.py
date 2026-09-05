@@ -165,6 +165,7 @@ def fetch(native_dir: Optional[Path] = None) -> Path:
     rs_dest = dest / "RawSpeed3" / "rawspeed"
     libraw_cmake_dest = native_dir / "third_party" / "libraw-cmake"
     project_patch_dir = native_dir / "patches" / "libraw"
+    libraw_cmake_patch_dir = native_dir / "patches" / "libraw-cmake"
 
     clone_at(LIBRAW_URL, LIBRAW_REV, dest)
     clone_at(RAWSPEED_URL, RAWSPEED_REV, rs_dest)
@@ -176,6 +177,11 @@ def fetch(native_dir: Optional[Path] = None) -> Path:
 
     apply_patches(rs_dest, patch_dir, label="")
     apply_patches(dest, project_patch_dir, label="project ")
+    # KNOWN GAP closed (see commit 007e72e / task #12): libraw-cmake's own
+    # CMakeLists.txt carries a project fix (dropping LIBRAW_NOTHREADS) that a
+    # re-fetch would otherwise silently clobber -- apply_patches() requires
+    # `.git` (line ~151), so this call MUST run before strip_git() below.
+    apply_patches(libraw_cmake_dest, libraw_cmake_patch_dir, label="project ")
 
     for directory in (dest, rs_dest, libraw_cmake_dest):
         if (directory / ".git").is_dir():

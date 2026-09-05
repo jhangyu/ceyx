@@ -1,0 +1,23 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d3faf24..fc25ca1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -475,7 +475,17 @@ endif()
+
+ add_library(raw ${libraw_LIB_SRCS})
+ add_library(libraw::libraw ALIAS raw)
+-target_compile_definitions(raw PRIVATE LIBRAW_NOTHREADS)
++# LIBRAW_NOTHREADS deliberately NOT defined: it redirects LibRaw's per-instance
++# scratch state (LibRaw_TLS, libraw/libraw.h:418 -- allocated unconditionally in
++# src/utils/init_close_utils.cpp:103-110) to function-local `static` storage,
++# making it process-global and racy across concurrent decodes. Concretely it
++# turns sony_decrypt()'s pad[128]/p (src/metadata/sony.cpp:98-124) and
++# getbithuff()'s bitbuf/vbits/reset (src/decoders/decoders_dcraw.cpp:24-31) into
++# shared state. The former corrupted Sony ARW black levels and surfaced as an
++# intermittent kRawErrMetadataInvalid (-206) in ~30% of 5-way concurrent runs;
++# the latter is the same hazard on compressed pixel data. Each decode owns its
++# own LibRaw instance, so the per-instance path is correct here. Defining this
++# again would reintroduce both races.
+
+ # Flag to export library symbols
+ if (WIN32)

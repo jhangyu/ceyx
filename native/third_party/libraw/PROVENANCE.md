@@ -143,6 +143,38 @@ gate patch exists.
 | 09.fuji-stdthread-parallel.patch | 204118881f11640dd35a82acd56fe87acdfb37d584091b905c08746a5320e8b7 |
 | 10.fuji-qtable-cache.patch | d2230b5810b1595482cd337ecf98809ab181c11ad5d8cd0044dd81aeaafac568 |
 
+## Project-authored LibRaw-cmake patches
+
+Rooted at the LibRaw-cmake overlay tree (`third_party/libraw-cmake/`), applied
+by `native/scripts/deps/fetch_libraw.py` (`apply_patches(libraw_cmake_dest,
+...)`, run after the LibRaw-cmake clone and before its `.git` is stripped).
+Patch files live in `native/patches/libraw-cmake/`.
+
+Task #12 (2026-09-05, closing the "KNOWN GAP" recorded against commit
+`007e72e`): LibRaw-cmake hardcodes `target_compile_definitions(raw PRIVATE
+LIBRAW_NOTHREADS)`, which redirects LibRaw's per-instance scratch state
+(`LibRaw_TLS`) to function-local `static` storage, making it process-global
+and racy across concurrent decodes -- concretely `sony_decrypt()`'s
+`pad[128]/p` and `getbithuff()`'s `bitbuf/vbits/reset`. Two threads
+decrypting Sony makernotes concurrently interleaved the shared keystream,
+producing the intermittent `kRawErrMetadataInvalid` (-206) root-caused in
+`ceyx/tmp/verify/race-206-root-cause.md`. Measured, 5-way concurrent ARW, 40
+runs per arm: unfixed 12/40 (later 7/40 post R1-T2) failed, fixed 0/40
+failed, colour identity unchanged (see `007e72e`'s full commit message for
+the complete measurement record).
+
+The fix was originally landed as a force-added tracked file
+(`third_party/libraw-cmake/CMakeLists.txt`, commit `007e72e`) because
+`fetch_libraw.py` had no `apply_patches()` call for the LibRaw-cmake clone --
+a re-fetch would have silently clobbered it. That gap is now closed: the fix
+is delivered as the patch below and the file is untracked again (a fetched
+artifact, per this project's normal vendoring policy), so the fix survives
+every future re-fetch instead of relying on a force-added exception.
+
+| Patch | SHA-256 |
+|---|---|
+| 11.no-libraw-nothreads.patch | 5aa7e7add7f5e38da0d19ae7a86167ba360aebcdf94494993a7d4c3e251527d3 |
+
 ## RawSpeed3 re-pin (Phase 19 W1)
 
 The Phase 17 pin `de70ef5fbc62cde91009c8cff7a206272abe631e` (2021-09-10)
