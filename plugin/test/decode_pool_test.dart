@@ -377,6 +377,19 @@ void main() {
         throwsA(isA<CeyxPoolUnavailableException>()),
       );
 
+      // The discriminating assertion (R4 round-2 L-1 evidence): not "how deep
+      // did it recurse" (bounded at 2 by construction here regardless of the
+      // guard — see the item-4 mutation dossier) but whether the reentrant
+      // `_pump()` body ran AT ALL while an outer `_pump()` was still on the
+      // stack. The guard's job is to suppress reentrancy outright, not merely
+      // bound it.
+      expect(
+        pool.debugNestedPumpEntries,
+        equals(0),
+        reason: 'the re-entrancy guard must suppress the reentrant _pump() '
+            'call outright, not just bound how far it recurses',
+      );
+
       // ... and the survivor's in-flight work still completes normally.
       final image = await busy;
       expect(image.width, equals(2));

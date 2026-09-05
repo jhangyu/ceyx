@@ -205,6 +205,15 @@ class CeyxDecodePool {
   @visibleForTesting
   int debugCoalescedCount = 0;
 
+  /// Test-only (R4 item 4 / BLOCKER-1 evidence): how many times `_pump()` was
+  /// called while an OUTER `_pump()` call was already on the stack (derived
+  /// from the same `_pumping` flag the re-entrancy guard reads, not a second
+  /// independent signal). Must stay 0 — the guard's whole job is to make sure
+  /// the reentrant body never runs, not merely to bound how deep it goes if
+  /// it did.
+  @visibleForTesting
+  int debugNestedPumpEntries = 0;
+
   final String? _libraryPath;
   final CeyxPoolWorkerEntry _entryPoint;
 
@@ -406,7 +415,13 @@ class CeyxDecodePool {
     // cycles impossible rather than just the one instance that was found:
     // the outer loop is still running and will observe whatever the inner
     // call changed.
-    if (_pumping) return;
+    //
+    // `reentered` reads the SAME `_pumping` flag the guard itself uses (one
+    // piece of state, two readers) so the test-only counter below can never
+    // disagree with what the guard actually saw.
+    final reentered = _pumping;
+    if (reentered) debugNestedPumpEntries++;
+    if (reentered) return;
     _pumping = true;
     try {
       while (_queue.isNotEmpty) {
