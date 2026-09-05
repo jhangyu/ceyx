@@ -153,6 +153,17 @@ def main():
                           "expectations.md experiment 4).")
     ap.add_argument("--repeats", type=int, default=REPEATS_DEFAULT)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--append-out", action="store_true",
+                     help="R2-T3 (d): open --out in append mode instead of "
+                          "write/truncate mode. Without this, opening --out "
+                          "in 'w' mode silently wipes any pre-existing "
+                          "content the caller wrote first (e.g. gate-haiku's "
+                          "prepended TEST_START/HEAD/PORCELAIN attestation "
+                          "header) -- exactly what happened in both R1 gate "
+                          "runs, whose steps 5/6 artifacts are now "
+                          "permanently missing that header and cannot be "
+                          "regenerated. Does not change any measurement "
+                          "semantics or line formats; only the open mode.")
     ap.add_argument("--self-test-missing-binary", action="store_true",
                      help="instrument-validation mode: run against a "
                           "nonexistent binary and exit non-zero.")
@@ -169,7 +180,7 @@ def main():
         wall_ms, completions, rc, out, err = run_one(
             "/nonexistent/test_concurrent_decode", args.workdir, 1, [args.corpus[0]], driver=args.driver)
         lines.append(f"selftest|binary=missing|rc={rc}|stderr={err.strip()!r}")
-        with open(args.out, "w") as fh:
+        with open(args.out, "a" if args.append_out else "w") as fh:
             fh.write("\n".join(lines) + "\n")
         if rc == 0:
             sys.exit("FAIL: nonexistent binary unexpectedly returned rc=0")
@@ -266,7 +277,7 @@ def main():
                      "see expectations.md experiments 2A/2B annotation.")
     lines.append(f"TEST_END={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
 
-    with open(args.out, "w") as fh:
+    with open(args.out, "a" if args.append_out else "w") as fh:
         fh.write("\n".join(lines) + "\n")
 
     print(f"VERDICT: {verdict} ratio={ratio}")

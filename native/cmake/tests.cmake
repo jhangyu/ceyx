@@ -1036,12 +1036,28 @@ set(JPEG_VERSION_STRING \"62\")
     # already sweeps src/x3f/*.cpp into the `raw` target either way, so this is
     # purely the define.
     #
-    # Plain non-cache set() on purpose (PROVENANCE.md "R2 F4 fix note"):
-    # a CACHE FORCE here would be replayed on every later configure BEFORE
-    # find_package(Halide), which is the exact ordering that corrupted the
-    # Halide/zlib link. CMP0077 (NEW since cmake_minimum_required 3.14) makes
-    # the subproject's option() honour this directory-scoped value.
-    set(ENABLE_X3FTOOLS ON)
+    # R2-T3 X3FTOOLS FIX: the plain non-cache set() this used to be (see git
+    # blame) is silently discarded on a VIRGIN configure. libraw-cmake's own
+    # cmake_minimum_required() predates CMake 3.13, so CMP0077 defaults OLD
+    # in that subdirectory scope; OLD behavior for option() REMOVES any
+    # existing normal variable of the same name and (re)creates the cache
+    # entry from the option()'s own default (OFF). On a virgin configure no
+    # cache entry exists yet, so this always fires and our ON is lost. On a
+    # reconfigure the cache entry already exists and option() leaves
+    # existing cache entries alone, which is why the plain set() looked like
+    # it worked once a workaround (-DENABLE_X3FTOOLS=ON on the command line,
+    # which seeds the cache directly) had already been used once.
+    #
+    # Fix: CACHE FORCE it here instead, same precedent as the LIBRAW_PATH
+    # exception above (:1009) -- our forced cache entry exists before
+    # libraw-cmake's option() call runs, so that call's "only create if
+    # absent" rule leaves it alone regardless of CMP0077 policy. This is
+    # unrelated to the F4 Halide/zlib ordering hazard: that hazard is about
+    # variables Halide/zlib's own find_package() reads, and ENABLE_X3FTOOLS
+    # is LibRaw-only. -DENABLE_X3FTOOLS=ON should still be passed on every
+    # configure command as belt-and-braces until this fix is independently
+    # re-verified across a full campaign.
+    set(ENABLE_X3FTOOLS ON CACHE BOOL "" FORCE)
 
     # --- LCMS2 arch guard (LCMS2-X86_64, 2026-09-01) ------------------------
     # libraw-cmake ships ITS OWN cmake/modules/FindLCMS2.cmake (not CMake's
@@ -1640,6 +1656,26 @@ target_include_directories(probe_concurrent_raw PRIVATE
     ${HALIDE_DIR}/include)
 target_link_libraries(probe_concurrent_raw dng_decoder_native)
 add_dependencies(probe_concurrent_raw dng_decoder_native)
+
+# R2-T3 (b): asserts the R1-T2 Metal queue pool actually pools (count > 1,
+# never exceeding cap) during a real concurrent decode. Deliberately linked
+# against the dng_decoder_native SHARED library -- same pattern as
+# probe_concurrent_raw immediately above -- and NOT compiled from pipeline
+# .cpp sources directly, unlike test_concurrent_decode: r2t1-opus FINDING 3
+# (ceyx/tmp/verify/r2t1-instrument-validation.txt) established that the
+# latter pattern links ZERO queue-pool code, so a colour-identity/behavior
+# green from it is not evidence about the actual shipping artifact. This
+# target's own binary is what R2-T3's nm marker check (AC4/AC5) must be run
+# against, alongside the dylib itself.
+add_executable(test_metal_queue_pool tests/test_metal_queue_pool.cpp)
+target_include_directories(test_metal_queue_pool PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_metal_queue_pool dng_decoder_native)
+add_dependencies(test_metal_queue_pool dng_decoder_native)
 
 
 # Sized decode (targetWidth) R1: standalone gate for the box-filter-scaled

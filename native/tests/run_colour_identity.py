@@ -130,6 +130,17 @@ def main():
                           "still on the pre-R1-T2 tree). Mutually exclusive "
                           "with --record.")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--append-out", action="store_true",
+                     help="R2-T3 (d): open --out in append mode instead of "
+                          "write/truncate mode. Distinct from --append above "
+                          "(which controls baseline MANIFEST rows) -- this "
+                          "flag only changes how the --out ARTIFACT file is "
+                          "opened. Without it, 'w' mode silently wipes any "
+                          "pre-existing content the caller wrote first (e.g. "
+                          "gate-haiku's prepended TEST_START/HEAD/PORCELAIN "
+                          "attestation header) -- exactly what happened in "
+                          "both R1 gate runs. Does not change any "
+                          "measurement semantics or line formats.")
     ap.add_argument("--corrupt-dump-index", type=int, default=None,
                      help="self-test only: flip one byte of decode_<N>.raw "
                           "after the serial run, before comparing")
@@ -197,7 +208,7 @@ def main():
     rc = proc.returncode
     lines.append(f"RC={rc}")
     if rc != 0:
-        sys.exit(_flush(args.out, lines, ok=False))
+        sys.exit(_flush(args.out, lines, ok=False, append=args.append_out))
 
     serial_hashes = hash_dumps(serial_dir, files)
 
@@ -221,7 +232,7 @@ def main():
     rc = proc.returncode
     lines.append(f"RC={rc}")
     if rc != 0:
-        sys.exit(_flush(args.out, lines, ok=False))
+        sys.exit(_flush(args.out, lines, ok=False, append=args.append_out))
 
     concurrent_hashes = hash_dumps(concurrent_dir, files)
 
@@ -289,7 +300,7 @@ def main():
         if not args.baseline_dumps_dir:
             sys.exit(_flush(args.out, lines + [
                 "FATAL: --record/--append requires --baseline-dumps-dir"],
-                ok=False))
+                ok=False, append=args.append_out))
         os.makedirs(args.baseline_dumps_dir, exist_ok=True)
         for i, f in enumerate(files):
             idx = index_offset + i if args.append else i
@@ -315,11 +326,11 @@ def main():
     lines.append(f"colour|verdict={verdict}")
 
     shutil.rmtree(tmp_root, ignore_errors=True)
-    return _flush(args.out, lines, ok=overall_ok)
+    return _flush(args.out, lines, ok=overall_ok, append=args.append_out)
 
 
-def _flush(out_path, lines, ok):
-    with open(out_path, "w") as fh:
+def _flush(out_path, lines, ok, append=False):
+    with open(out_path, "a" if append else "w") as fh:
         fh.write("\n".join(lines) + "\n")
     for ln in lines:
         print(ln)
