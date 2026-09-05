@@ -72,6 +72,11 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
+// R4 item 3: cold-start gate for Halide's unsynchronised
+// metal_api_supports_set_bytes / metal_api_checked_device memo cache.
+// (Block authored by impl-copylock-opus; applied by lead-r1-opus.)
+#include "dng_metal_api_gate.h"
+
 struct halide_metal_device;
 struct halide_metal_command_queue;
 
@@ -260,11 +265,24 @@ extern "C" int halide_metal_acquire_context(void *user_context,
 
   if (device_ret) *device_ret = reinterpret_cast<struct halide_metal_device *>(device);
   if (queue_ret) *queue_ret = reinterpret_cast<struct halide_metal_command_queue *>(queue);
+
+  // R4 item 3, B1. Placed AFTER the pool mutex is released, so the gate mutex
+  // and the pool mutex are never held at once and cannot invert; AFTER the
+  // early `return -1` paths, so a failed acquire never takes the gate (a
+  // release with no matching enter finds thread depth 0 and does nothing); and
+  // on the success path only — exactly the calls that can go on to execute
+  // Halide's unsynchronised memo block. The gate is depth-counted per thread
+  // and touches its mutex only at depth 0, because both context functions are
+  // re-entered by the same thread at depth; without that it would self-deadlock
+  // on the nested acquire.
+  ceyx::metal_api_gate_enter();
   return 0;
 }
 
 extern "C" int halide_metal_release_context(void *user_context) {
   (void)user_context;
+  // R4 item 3, B2. Before the pool lock, for the same non-inversion reason.
+  ceyx::metal_api_gate_exit();
   const uintptr_t key = reinterpret_cast<uintptr_t>(pthread_self());
   std::lock_guard<std::mutex> g(pool_lock());
   auto &map = bindings();

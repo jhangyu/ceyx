@@ -1640,6 +1640,46 @@ target_include_directories(test_slot_config PRIVATE
     ${HALIDE_DIR}/include)
 target_link_libraries(test_slot_config dng_decoder_native)
 
+# R4 item 3: cold-start gate for Halide's unsynchronised
+# metal_api_supports_set_bytes / metal_api_checked_device memo cache.
+# EVIDENCE TRACK B: ThreadSanitizer cannot see this race — halide_runtime.a is
+# emitted by the Halide AOT generator and is never compiled by our toolchain, so
+# no flag can instrument the only object containing both racing accesses
+# (docs/logs/2026-09-05/item3-P0-result.md). The harness instead observes the
+# race's precondition directly: how many threads are inside the bracket that
+# contains the racy block.
+#
+# Compiles dng_metal_context.cpp and dng_copy_lock.cpp DIRECTLY, per the lesson
+# recorded at the test_concurrent_decode block above: a test binary that omits
+# the campaign's override TUs silently contains none of the changed code and
+# every green it produces is about the wrong binary.
+# No RAW sample data and no decode machinery: the memo branch only needs a Metal
+# kernel launch with a non-empty argument block, which dng_demosaic_bilinear's
+# two scalar arguments provide.
+# (Block authored by impl-copylock-opus; applied by lead-r1-opus, tests.cmake
+# being a lead-serialised shared file this round.)
+if(APPLE AND NOT DNG_FORCE_VULKAN)
+    add_executable(test_metal_api_gate tests/test_metal_api_gate.cpp
+        src/pipeline/dng_metal_context.cpp
+        src/pipeline/dng_copy_lock.cpp)
+    target_include_directories(test_metal_api_gate PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${SRC_DIR}/pipeline
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(test_metal_api_gate
+        Halide::Halide
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${COREFOUNDATION_LIBRARY}
+        ${CORESERVICES_LIBRARY}
+        ${METAL_LIBRARY}
+        ${FOUNDATION_LIBRARY})
+    add_dependencies(test_metal_api_gate halide_runtime_target)
+    add_dependencies(test_metal_api_gate dng_demosaic_aot_target)
+endif()
+
 # R1-T3 (parallel-decode campaign): generic-RAW link closure for the dual-route.
 # The harness above compiles the DNG pipeline sources directly and does NOT link
 # dng_decoder_native, so reaching raw_pipeline_decode_file requires the generic
