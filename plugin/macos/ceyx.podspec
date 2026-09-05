@@ -44,21 +44,21 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   # on any machine without Homebrew's libomp, which is precisely the
   # prerequisite-free bundle this directory exists to produce.
   #
-  # Phase 13: the native RGBA->JPEG/WebP re-encoder linked libwebp for its
-  # WebP path. libwebp.7 depends on libsharpyuv.0; libwebpmux.3 and
-  # libwebpdemux.2 both depend on libwebp.7 and libsharpyuv.0. All four are
-  # staged next to the decoder the same way as the other vendored libraries
-  # and must be embedded here for the same reason: without them dyld fails to
-  # load the decoder at all on a host with no Homebrew webp installed
-  # (R3-T1b, 2026-09-05 -- this app shipped without them once already).
-  s.vendored_libraries = 'Libraries/libdng_decoder_native.dylib',
-                         'Libraries/liblcms2.2.dylib',
-                         'Libraries/libjpeg.8.dylib',
-                         'Libraries/libheif.1.dylib',
-                         'Libraries/libde265.0.dylib',
-                         'Libraries/libomp.dylib',
-                         'Libraries/libwebpmux.3.dylib',
-                         'Libraries/libwebpdemux.2.dylib',
-                         'Libraries/libwebp.7.dylib',
-                         'Libraries/libsharpyuv.0.dylib'
+  # Phase 13: the native RGBA->JPEG/WebP re-encoder can link libwebp for its
+  # WebP path. Whether that produces a *dynamic* dependency depends on how
+  # the decoder in Libraries/ was built: a local dev build against Homebrew's
+  # webp is dynamically linked and needs libwebp.7/libwebpmux.3/
+  # libwebpdemux.2/libsharpyuv.0 embedded alongside it (R3-T1b, 2026-09-05 --
+  # this app shipped without them once already when the list below was a
+  # fixed, hand-maintained enumeration that did not name them); the
+  # release/CI build links libwebp STATICALLY (native/cmake/encode.cmake),
+  # so those four files never exist next to the decoder at all in that
+  # layout. A fixed list can only ever be right for one of these two cases -
+  # this bit it twice, once in each direction, which is why 'Libraries/*'
+  # (a glob, resolved by CocoaPods against whatever is actually staged in
+  # this directory at pod-install time, exactly like source_files above)
+  # replaces the enumeration: it embeds all six files in the release/CI
+  # layout and all ten in a local dynamic-webp dev layout, with no edit
+  # required when either set changes.
+  s.vendored_libraries = 'Libraries/*'
 end
