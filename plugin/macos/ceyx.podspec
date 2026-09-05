@@ -43,10 +43,22 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   # command, so libomp must be embedded too -- otherwise dyld fails at launch
   # on any machine without Homebrew's libomp, which is precisely the
   # prerequisite-free bundle this directory exists to produce.
+  #
+  # Phase 13: the native RGBA->JPEG/WebP re-encoder linked libwebp for its
+  # WebP path. libwebp.7 depends on libsharpyuv.0; libwebpmux.3 and
+  # libwebpdemux.2 both depend on libwebp.7 and libsharpyuv.0. All four are
+  # staged next to the decoder the same way as the other vendored libraries
+  # and must be embedded here for the same reason: without them dyld fails to
+  # load the decoder at all on a host with no Homebrew webp installed
+  # (R3-T1b, 2026-09-05 -- this app shipped without them once already).
   s.vendored_libraries = 'Libraries/libdng_decoder_native.dylib',
                          'Libraries/liblcms2.2.dylib',
                          'Libraries/libjpeg.8.dylib',
                          'Libraries/libheif.1.dylib',
                          'Libraries/libde265.0.dylib',
-                         'Libraries/libomp.dylib'
+                         'Libraries/libomp.dylib',
+                         'Libraries/libwebpmux.3.dylib',
+                         'Libraries/libwebpdemux.2.dylib',
+                         'Libraries/libwebp.7.dylib',
+                         'Libraries/libsharpyuv.0.dylib'
 end
