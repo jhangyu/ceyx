@@ -23,26 +23,35 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 /// AC-3.4 (dart analyze 0 issues) is verified out-of-band by the test runner,
 /// not inside this file.
 ///
-/// Fixture for AC-3.1: `plugin/macos/Libraries/libdng_decoder_native.dylib`
-/// (the vendored, in-tree copy consumed by the macOS app bundle) exports
-/// `ceyx_decode_into_buffer` (Task WP10, already landed) but — as of this
-/// writing — NOT `ceyx_decode_into_buffer_oriented` (this campaign's Task 2
-/// lands via a fresh local `native/build` output, not by updating the
-/// vendored copy), which is exactly the "symbol pair present, oriented
-/// sibling absent" shape this test exists to prove never nulls the whole
-/// group. Unlike a local `native/build` output, this vendored copy is
-/// in-tree and not rebuilt by running the native build locally, so the test
-/// runs by default without requiring an env var. `DNG_PRE_ORIENT_DYLIB`
-/// remains a manual override — for example if the vendored copy is ever
-/// updated to include the oriented symbol, or to test a specific dylib. If
-/// that happens the test self-skips with a clear reason rather than
-/// (incorrectly) failing red or (incorrectly) passing on a fixture that no
-/// longer demonstrates the absent-symbol case.
+/// Fixture for AC-3.1: the vendored `plugin/macos/Libraries/` copy is NO
+/// LONGER usable — the v0.1.17 pin bump replaced it with a release asset that
+/// DOES export `ceyx_decode_into_buffer_oriented`, so it can no longer
+/// demonstrate the absent-symbol case (this is the maintenance action the
+/// hard failure below demands, taken; it mirrors the WP10 precedent in
+/// `wp10_decode_into_buffer_symbol_absent_test.dart`).
+///
+/// The default is now the preserved pre-orientation copy at
+/// `../tmp/old-dylib-pre-orient/`, overridable via `DNG_PRE_ORIENT_DYLIB`.
+/// That path is gitignored (`/tmp/`), so the test executes locally and skips
+/// in CI; the trade-off is deliberate, because the fixture is RECOVERABLE by
+/// digest — it is byte-identical to the macos-arm64 decoder published in ceyx
+/// release v0.1.16, sha256
+/// 989196b9c63f5694226c30d9ce73eefe987083a8cefee6a7b4c19d1523c33523 (recover
+/// by extracting the WHOLE `dng_decoder_native-macos-arm64.tar.gz` of that
+/// release, archive sha256
+/// ad6d0b73d3aa311de584d763846dfb2d5479b3a2d2490d7be4eb46c84636030d — the
+/// sibling dylibs must be alongside it or `dlopen` fails on `@rpath`). It
+/// exports `ceyx_decode_into_buffer` + `ceyx_probe_output_size` (Task WP10)
+/// but not the oriented sibling, which is exactly the "symbol pair present,
+/// oriented sibling absent" shape this test exists to prove never nulls the
+/// whole group. Both the skip reason and the hard-failure reason below name
+/// that recovery so a future reader can rebuild the fixture from the pinned
+/// release.
 void main() {
   group('AC-3.1: decodeIntoBufferOrientedAvailable per-symbol guard', () {
     final dylibPath = File(
       Platform.environment['DNG_PRE_ORIENT_DYLIB'] ??
-          '../plugin/macos/Libraries/libdng_decoder_native.dylib',
+          '../tmp/old-dylib-pre-orient/libdng_decoder_native.dylib',
     ).absolute.path;
 
     test(
@@ -52,10 +61,14 @@ void main() {
         if (!File(dylibPath).existsSync()) {
           markTestSkipped(
             'reason: no dylib found at $dylibPath to exercise the '
-            'oriented-symbol-absent contract. RECOVERY: build the native '
-            'target (produces native/build/libdng_decoder_native.dylib) or '
-            'point DNG_PRE_ORIENT_DYLIB at any dylib that exports '
-            'ceyx_decode_into_buffer but not ceyx_decode_into_buffer_oriented.',
+            'oriented-symbol-absent contract. RECOVERY: populate '
+            'tmp/old-dylib-pre-orient/ by extracting the whole '
+            'dng_decoder_native-macos-arm64.tar.gz of ceyx release v0.1.16 '
+            '(decoder sha256 989196b9c63f5694226c30d9ce73eefe987083a8cefee6a'
+            '7b4c19d1523c33523; the sibling dylibs must be alongside it), or '
+            'point DNG_PRE_ORIENT_DYLIB at '
+            'any dylib that exports ceyx_decode_into_buffer but not '
+            'ceyx_decode_into_buffer_oriented.',
           );
           return;
         }
@@ -72,9 +85,12 @@ void main() {
           fail(
             'dylib at $dylibPath already exports '
             'ceyx_decode_into_buffer_oriented — it is no longer a valid '
-            'absent-symbol fixture for AC-3.1 (the vendored copy was '
-            'likely updated to a build that includes the oriented symbol). '
-            'RECOVERY: point DNG_PRE_ORIENT_DYLIB at a dylib that exports '
+            'absent-symbol fixture for AC-3.1 (the preserved copy was '
+            'likely overwritten by a build that includes the oriented '
+            'symbol). RECOVERY: restore tmp/old-dylib-pre-orient/ from ceyx '
+            'release v0.1.16 macos-arm64 (sha256 989196b9c63f5694226c30d9ce7'
+            '3eefe987083a8cefee6a7b4c19d1523c33523), or point '
+            'DNG_PRE_ORIENT_DYLIB at a dylib that exports '
             'ceyx_decode_into_buffer but NOT ceyx_decode_into_buffer_oriented '
             '(e.g. a pre-Task-2 native/build output), or update this test\'s '
             'default fixture path to a dylib that still lacks the symbol.',
@@ -105,6 +121,46 @@ void main() {
         expect(bindings.dngDecodeAndProcess, isNotNull);
       },
     );
+  });
+
+  group('AC-3.1b: oriented symbol ACTIVATION on the shipped dylib', () {
+    // Positive counterpart to AC-3.1 above: the absent-symbol fixture proves
+    // the guard doesn't over-null, this proves the guard doesn't under-report
+    // on the library actually shipped to the app bundle. Without it, a pin
+    // bump that silently dropped the oriented symbol would leave the whole
+    // suite green (the FFI lookup is guarded, so a missing symbol degrades
+    // quietly to the unoriented path rather than crashing).
+    // flutter test runs with cwd == package root (plugin/).
+    final shippedPath = File(
+      'macos/Libraries/libdng_decoder_native.dylib',
+    ).absolute.path;
+
+    test('vendored macos/Libraries dylib exports the oriented entry', () {
+      if (!File(shippedPath).existsSync()) {
+        markTestSkipped(
+          'reason: no vendored dylib at $shippedPath. RECOVERY: run '
+          '`python3 scripts/build_apps.py --fetch-native` from the Halcyon '
+          'checkout to place the pinned ceyx release libraries (the path is '
+          'gitignored, so it is absent in a fresh clone and in CI).',
+        );
+        return;
+      }
+
+      final bindings = DngNativeBindings.fromPath(shippedPath);
+      expect(
+        bindings.decodeIntoBufferOrientedAvailable,
+        isTrue,
+        reason:
+            'the shipped dylib at $shippedPath does NOT export '
+            'ceyx_decode_into_buffer_oriented — the pinned ceyx release '
+            'predates native-rotation Task 2, or the fetch placed a stale '
+            'library. Native orientation would silently degrade to the '
+            'unoriented path.',
+      );
+      expect(bindings.ceyxDecodeIntoBufferOriented, isNotNull);
+      // The unoriented group must remain available alongside it.
+      expect(bindings.decodeIntoBufferAvailable, isTrue);
+    });
   });
 
   group('AC-3.2: DngImage.appliedOrientation default', () {
