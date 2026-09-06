@@ -3,10 +3,13 @@ import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart' show calloc;
 import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
 import 'dng_decoder_service.dart';
+import 'encode_bindings.dart';
+import 'encode_service.dart';
 
 /*
 ---
@@ -34,6 +37,11 @@ enum CeyxPoolJobType {
 
   /// Full RAW/DNG decode (returns [DngImage]).
   decode,
+
+  /// WP3a: encode an RGBA8 frame that already lives in native memory
+  /// (returns `Uint8List`, the JPEG bytes). APPENDED — never renumbered, same
+  /// rule the error codes carry (`encode_bindings.dart:51`).
+  encode,
 }
 
 /// Result of a pool submission.
@@ -113,6 +121,13 @@ const String kMsgResult = 'result';
 const String kMsgError = 'error';
 
 /// `[kMsgJob, int requestId, int jobTypeIndex, String path, int? maxDim]`
+///
+/// WP3a: gains an optional trailing 6th element,
+/// `List<Object?> encodeArgs = [rgbaAddress, width, height, quality]`, present
+/// only for [CeyxPoolJobType.encode] jobs. Read with a length guard
+/// (`message.length > 5 ? message[5] as List<Object?> : null`) mirroring the
+/// R4 bootstrap-widening rule (`:150-153` below), so an older host driving a
+/// newer worker (or vice versa) still works.
 const String kMsgJob = 'job';
 
 /// `[kMsgShutdown]` — worker should close its port and exit.
@@ -443,6 +458,56 @@ class CeyxDecodePool {
     return outcome.value as Uint8List?;
   }
 
+  /// WP3a: encodes an RGBA8 frame that already lives in native memory at
+  /// [rgbaAddress] as a baseline JPEG, dispatched to an ALREADY-RUNNING pool
+  /// worker (no per-call isolate spawn, no `malloc`+copy of the pixels — the
+  /// worker calls the jpeg binding on `Pointer.fromAddress(rgbaAddress)`
+  /// directly).
+  ///
+  /// Unlike [submit], encode jobs are NOT subject to generation-based soft
+  /// cancellation: [CeyxPoolJobType.decode]'s generation gate exists to drop
+  /// superseded navigation results, which has no meaning for an encode a
+  /// caller is actively awaiting. An encode job therefore always delivers its
+  /// value or its error, never a [CeyxPoolOutcome.discarded]. It is also never
+  /// coalesced with another submission (each call encodes a distinct buffer).
+  ///
+  /// Throws [CeyxEncodeUnavailableException] when the loaded dylib lacks the
+  /// encode symbols, or a `CeyxEncodeException`/`ArgumentError` mirroring the
+  /// worker's own validation — identical to [CeyxEncodeService]'s existing
+  /// throw contract, so a caller's existing fallback policy applies unchanged.
+  Future<Uint8List> submitEncode({
+    required int rgbaAddress,
+    required int width,
+    required int height,
+    required int quality,
+  }) {
+    if (_disposed) {
+      return Future.error(
+        CeyxPoolUnavailableException('pool disposed'),
+        StackTrace.current,
+      );
+    }
+    final job = _PoolJob(
+      key: (CeyxPoolJobType.encode, 'encode:${_nextEncodeKey++}', null),
+      type: CeyxPoolJobType.encode,
+      path: '',
+      maxDim: null,
+      generation: _generation,
+      encodeArgs: <Object?>[rgbaAddress, width, height, quality],
+    );
+    _byKey[job.key] = job;
+    _queue.add(job);
+    _pump();
+    return job.completer.future.then(
+      (outcome) => outcome.value! as Uint8List,
+    );
+  }
+
+  // Synthetic per-call discriminator so every encode submission gets its own
+  // `_byKey` entry — encode jobs must never coalesce (each call targets a
+  // distinct native buffer, unlike a decode's `(type, path, maxDim)` key).
+  int _nextEncodeKey = 0;
+
   /// Stops every worker. In-flight jobs fail rather than hang.
   Future<void> dispose() async {
     _disposed = true;
@@ -561,12 +626,14 @@ class CeyxDecodePool {
     job.requestId = id;
     worker.currentJob = job;
     _byRequestId[id] = job;
+    final encodeArgs = job.encodeArgs;
     worker.sendPort!.send(<Object?>[
       kMsgJob,
       id,
       job.type.index,
       job.path,
       job.maxDim,
+      if (encodeArgs != null) encodeArgs,
     ]);
   }
 
@@ -721,7 +788,8 @@ class CeyxDecodePool {
       _byKey.remove(job.key);
       if (error != null) {
         job.completeError(error);
-      } else if (job.generation < _generation) {
+      } else if (job.type != CeyxPoolJobType.encode &&
+          job.generation < _generation) {
         // Soft cancellation: drop the payload WITHOUT materialising it.
         //
         // H2-A: a decode payload carries a raw native address whose ownership
@@ -761,17 +829,19 @@ class CeyxDecodePool {
         // H2-A: payload[0] is a native address, not a TransferableTypedData.
         final width = payload[1] as int;
         final height = payload[2] as int;
+        final address = payload[0] as int;
         return DngImage(
-          rgbaData: _wrapNativeRgba(
-            payload[0] as int,
-            width * height * 4,
-            type,
-          ),
+          rgbaData: _wrapNativeRgba(address, width * height * 4, type),
           width: width,
           height: height,
           decodeMs: payload[3] as double,
           processMs: payload[4] as double,
+          nativeAddress: address,
         );
+      case CeyxPoolJobType.encode:
+        // WP3a: the worker returns the encoded JPEG as TransferableTypedData
+        // (a ~2MB copy, kept: the result must become Dart-owned).
+        return _materializeBytes(payload[0] as TransferableTypedData, type);
     }
   }
 
@@ -983,6 +1053,7 @@ class _PoolJob {
     required this.path,
     required this.maxDim,
     required this.generation,
+    this.encodeArgs,
   });
 
   final _JobKey key;
@@ -990,6 +1061,9 @@ class _PoolJob {
   final String path;
   final int? maxDim;
   int generation;
+  // WP3a: [rgbaAddress, width, height, quality] for CeyxPoolJobType.encode
+  // jobs; null for every other job type.
+  final List<Object?>? encodeArgs;
   int? requestId;
   final Completer<CeyxPoolOutcome<Object?>> completer = Completer();
 
@@ -1055,6 +1129,15 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
     return;
   }
 
+  // WP3a: resolved once, at worker boot, exactly like `service` above — not
+  // per encode call. `dlopen` is refcounted by the OS loader, so this hands
+  // back the SAME image `service`'s bindings already mapped rather than
+  // loading a second copy; it merely gives this worker its own
+  // `DynamicLibrary` handle to look the encode symbols up from.
+  final DynamicLibrary lib = libraryPath == null
+      ? DngNativeBindings.load().library
+      : DngNativeBindings.fromPath(libraryPath).library;
+
   // Configure the PROCESS-global native slot cap from the host's setting
   // BEFORE serving any job, so this worker never runs a decode at a stale cap.
   // The ack is sent before kMsgReady; Dart guarantees per-port message order,
@@ -1101,6 +1184,11 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
     final type = CeyxPoolJobType.values[message[2] as int];
     final path = message[3] as String;
     final maxDim = message[4] as int?;
+    // WP3a: optional trailing element, present only for encode jobs. Length
+    // guard mirrors the R4 bootstrap-widening rule above.
+    final encodeArgs = message.length > 5
+        ? message[5] as List<Object?>
+        : null;
     try {
       switch (type) {
         case CeyxPoolJobType.probe:
@@ -1113,6 +1201,9 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
         case CeyxPoolJobType.decode:
           final image = service.decodeForPointerTransfer(path, maxDim: maxDim);
           poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
+        case CeyxPoolJobType.encode:
+          final result = _encodeOnPoolWorker(lib, encodeArgs!);
+          poolPort.send(<Object?>[kMsgResult, requestId, result]);
       }
     } catch (e) {
       Object payload = e;
@@ -1128,4 +1219,66 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
   });
 
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// WP3a: the encode job's worker-side implementation. `args` is
+/// `[rgbaAddress, width, height, quality]`. Called on an ALREADY-RUNNING pool
+/// worker (`lib` was resolved once at boot, see [ceyxDecodeWorkerMain]).
+///
+/// Deliberately mirrors `CeyxEncodeService._encodeOnWorker`
+/// (`encode_service.dart:193-252`) EXCEPT for what is ABSENT: no `malloc` of
+/// the input and no `setAll` copy, because the pixels already live in native
+/// memory at `args[0]` — that copy (~97MB per encode) is the whole point of
+/// this work package.
+TransferableTypedData _encodeOnPoolWorker(
+  DynamicLibrary lib,
+  List<Object?> args,
+) {
+  final bindings = CeyxEncodeBindings.fromLibrary(lib);
+  if (!bindings.available) {
+    throw CeyxEncodeUnavailableException();
+  }
+
+  final rgbaPtr = Pointer<Uint8>.fromAddress(args[0] as int);
+  final width = args[1] as int;
+  final height = args[2] as int;
+  final quality = args[3] as int;
+
+  final outPtr = calloc<Pointer<Uint8>>();
+  final outLenPtr = calloc<Size>();
+  try {
+    final result = bindings.jpeg(
+      rgbaPtr,
+      width,
+      height,
+      quality,
+      outPtr,
+      outLenPtr,
+    );
+
+    if (result != CeyxEncodeErrorCode.success) {
+      // Contract: *out is NULL and *out_len is 0 on failure, so nothing to
+      // free here.
+      throw CeyxEncodeException(result, bindings.errorName(result));
+    }
+
+    final buffer = outPtr.value;
+    final len = outLenPtr.value;
+    if (buffer == nullptr || len == 0) {
+      throw CeyxEncodeException(
+        CeyxEncodeErrorCode.encodeFailed,
+        bindings.errorName(CeyxEncodeErrorCode.encodeFailed),
+      );
+    }
+
+    try {
+      final encoded = Uint8List.fromList(buffer.asTypedList(len));
+      return TransferableTypedData.fromList([encoded]);
+    } finally {
+      bindings.free(buffer);
+    }
+  } finally {
+    calloc.free(outPtr);
+    calloc.free(outLenPtr);
+  }
 }

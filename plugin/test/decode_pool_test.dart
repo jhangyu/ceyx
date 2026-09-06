@@ -299,6 +299,51 @@ void fakePointerPoolWorker(List<Object?> bootstrap) {
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
 
+/// WP3a fake worker: handles [CeyxPoolJobType.encode] without loading any
+/// dylib. `quality` (the 4th `encodeArgs` element) doubles as an artificial
+/// answer-delay in milliseconds, so tests can land a generation bump while an
+/// encode is in flight. The "encoded" payload is a fixed byte sequence
+/// (`[0xFF, 0xD8, 1, 2, 0xFF, 0xD9]`, SOI/EOI-bracketed) rather than a real
+/// JPEG — this fake proves the POOL's dispatch/ownership contract, not the
+/// native codec, which encode_service_test.dart covers against the real
+/// dylib. Non-encode jobs fall back to [fakePointerPoolWorker]'s behaviour.
+void fakeEncodeCapablePoolWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort();
+  jobs.listen((Object? message) {
+    final msg = message as List<Object?>;
+    if (msg[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    final requestId = msg[1] as int;
+    final type = CeyxPoolJobType.values[msg[2] as int];
+    if (type != CeyxPoolJobType.encode) {
+      // Not exercised by the encode-specific tests in this file; keep the
+      // worker alive rather than crashing on an unexpected job type.
+      return;
+    }
+    final args = msg[5] as List<Object?>;
+    final delayMs = args[3] as int;
+    void answer() {
+      poolPort.send(<Object?>[
+        kMsgResult,
+        requestId,
+        TransferableTypedData.fromList([
+          Uint8List.fromList([0xFF, 0xD8, 1, 2, 0xFF, 0xD9]),
+        ]),
+      ]);
+    }
+
+    if (delayMs == 0) {
+      answer();
+    } else {
+      Timer(Duration(milliseconds: delayMs), answer);
+    }
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
 void main() {
   late CeyxDecodePool pool;
   final logLines = <String>[];
@@ -882,4 +927,97 @@ void main() {
       }
     },
   );
+
+  // ---------------------------------------------------------------------
+  // WP3a: CeyxPoolJobType.encode plumbing. `fakeEncodeCapablePoolWorker`
+  // handles the encode job type without loading any dylib, so the POOL's
+  // scheduling/ownership contract for encode jobs is testable on any host —
+  // the real jpeg-bytes-out-the-other-end path is covered separately in
+  // encode_service_test.dart against the shipped dylib.
+  //
+  // R3.1 (the highest-severity WP3 risk, a segfault rather than a red test):
+  // an encode job must never be dropped by [CeyxDecodePool]'s decode-oriented
+  // generation gate, and the pool's native-free path must never be invoked
+  // for an encode job — an encode never owns the buffer it is asked to read,
+  // so there is nothing for the pool to free either way. The two tests below
+  // pin both halves mechanically.
+  // ---------------------------------------------------------------------
+
+  group('CeyxPoolJobType.encode', () {
+    test(
+      'an in-flight encode job is NOT discarded by a decode-triggered '
+      'generation bump',
+      () async {
+        pool = CeyxDecodePool(width: 1, entryPoint: fakeEncodeCapablePoolWorker);
+        // The fake worker treats `quality` as an artificial answer-delay in
+        // milliseconds, so the bump below lands while the job is in flight.
+        final pending = pool.submitEncode(
+          rgbaAddress: 0x1000,
+          width: 2,
+          height: 2,
+          quality: 40,
+        );
+        await Future<void>.delayed(Duration.zero); // let the job dispatch
+        pool.bumpGeneration();
+        final bytes = await pending;
+        expect(
+          bytes,
+          equals(Uint8List.fromList([0xFF, 0xD8, 1, 2, 0xFF, 0xD9])),
+          reason:
+              'a generation bump must never turn an in-flight encode into '
+              'a discarded (null-value) outcome; a decode-navigation '
+              'cancellation has no meaning for an encode the caller is '
+              'actively awaiting',
+        );
+      },
+    );
+
+    test(
+      'an encode job never routes through the native-free path (it never '
+      'owns the caller\'s buffer)',
+      () async {
+        final freeCalls = <int>[];
+        CeyxDecodePool.debugNativeFree = freeCalls.add;
+        pool = CeyxDecodePool(width: 1, entryPoint: fakeEncodeCapablePoolWorker);
+        final bytes = await pool.submitEncode(
+          rgbaAddress: 0x2000,
+          width: 2,
+          height: 2,
+          quality: 0,
+        );
+        expect(bytes, isNotEmpty);
+        expect(
+          freeCalls,
+          isEmpty,
+          reason:
+              'submitEncode must never call CeyxDecodePool.debugNativeFree '
+              '(nor, in production, dng_free_rgba_buffer) — the pool never '
+              'takes ownership of an encode job\'s buffer, only the caller '
+              '(via `keepAlive`) does',
+        );
+      },
+    );
+
+    test(
+      'two distinct encode submissions never coalesce, even with identical '
+      'arguments',
+      () async {
+        pool = CeyxDecodePool(width: 2, entryPoint: fakeEncodeCapablePoolWorker);
+        final a = pool.submitEncode(
+          rgbaAddress: 0x3000,
+          width: 2,
+          height: 2,
+          quality: 0,
+        );
+        final b = pool.submitEncode(
+          rgbaAddress: 0x3000,
+          width: 2,
+          height: 2,
+          quality: 0,
+        );
+        await Future.wait([a, b]);
+        expect(pool.debugCoalescedCount, equals(0));
+      },
+    );
+  });
 }

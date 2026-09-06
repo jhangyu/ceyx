@@ -6,6 +6,7 @@ import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
 import 'codec_format.dart';
+import 'decode_pool.dart';
 import 'dng_bindings.dart';
 import 'encode_bindings.dart';
 import 'encode_bindings_v2.dart';
@@ -149,6 +150,68 @@ class CeyxEncodeService {
       isWebp: true,
     );
   }
+
+  /// Encodes an RGBA8 frame that ALREADY lives in native memory, without the
+  /// `TransferableTypedData.fromList` copy [encodeJpegNative] pays.
+  ///
+  /// Dispatched to an ALREADY-RUNNING [CeyxDecodePool] worker — this does NOT
+  /// spawn a fresh [Isolate] (contrast [encodeJpegNative]/[encodeNative],
+  /// which both spawn one per call). [debugIsolateSpawnCount] on THIS class
+  /// therefore does not grow for this entry; [CeyxDecodePool.shared]'s own
+  /// `debugIsolateSpawnCount` is the one that can grow, and only on the pool's
+  /// warmup / respawn schedule, never per encode.
+  ///
+  /// [rgbaAddress] must be the address of a `width * height * 4` byte buffer
+  /// that stays alive for the duration of the returned future — pass
+  /// [keepAlive] (the `DngImage` or any [Finalizable] owning it) so the VM
+  /// cannot collect the owner mid-encode.
+  ///
+  /// Throws [CeyxEncodeUnavailableException] when the dylib lacks the encode
+  /// symbols — identical to [encodeJpegNative], so the caller's existing
+  /// fallback policy applies unchanged. Throws [ArgumentError] when
+  /// [rgbaAddress] is 0: that means the buffer is not native-backed, and the
+  /// caller mis-wired [encodeJpegNative] instead of segfaulting on a bogus
+  /// pointer.
+  Future<Uint8List> encodeJpegFromNativeRgba({
+    required int rgbaAddress,
+    required int width,
+    required int height,
+    required int quality,
+    ffi.Finalizable? keepAlive,
+  }) async {
+    if (rgbaAddress == 0) {
+      throw ArgumentError.value(
+        rgbaAddress,
+        'rgbaAddress',
+        'must be a live native buffer; use encodeJpegNative for Dart-heap '
+            'bytes',
+      );
+    }
+    final libraryPath = _libraryPath;
+    final memoized = _unavailableCache[libraryPath];
+    if (memoized != null) {
+      throw memoized;
+    }
+    try {
+      final bytes = await CeyxDecodePool.shared.submitEncode(
+        rgbaAddress: rgbaAddress,
+        width: width,
+        height: height,
+        quality: quality,
+      );
+      // `keepAlive` is read here so the VM cannot treat the owner as
+      // unreachable before the native encode above has finished reading its
+      // buffer.
+      _keepAlive(keepAlive);
+      return bytes;
+    } on CeyxEncodeUnavailableException catch (e) {
+      _unavailableCache[libraryPath] = e;
+      rethrow;
+    }
+  }
+
+  @pragma('vm:never-inline')
+  static void _keepAlive(Object? o) {}
 
   Future<Uint8List> _encode(
     Uint8List rgba, {

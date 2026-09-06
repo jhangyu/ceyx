@@ -44,12 +44,21 @@ class DngImage implements Finalizable {
   /// Halide pipeline processing time in milliseconds
   final double processMs;
 
+  /// Address of the native RGBA buffer [rgbaData] views, or 0 when the bytes
+  /// are Dart-heap-owned (the legacy TransferableTypedData arm). Non-zero
+  /// ONLY on the H2-A pointer-transfer path
+  /// ([CeyxDecodePool]'s `_materialize`). The buffer's lifetime is still
+  /// [rgbaData]'s lifetime (NativeFinalizer); an address holder MUST keep
+  /// [rgbaData] reachable for as long as it uses the address.
+  final int nativeAddress;
+
   DngImage({
     required this.rgbaData,
     required this.width,
     required this.height,
     required this.decodeMs,
     required this.processMs,
+    this.nativeAddress = 0,
   });
 
   /// Total processing time
