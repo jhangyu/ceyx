@@ -178,7 +178,7 @@ jobs:
   # able to block publication of bytes they did not build.
   # --------------------------------------------------------------------------
   verify-dart:
-    name: dart analyze + flutter test
+    name: dart analyze (compile-only)
     runs-on: macos-14
     timeout-minutes: 30
     steps:
@@ -201,59 +201,18 @@ jobs:
         working-directory: ${{ github.workspace }}/app
         run: dart analyze
 
-      # Compile/analyze + unit tests only (supersedes the earlier FFI-smoke
-      # design): no step decodes an image. The FFI smoke that read a gitignored
-      # sample DNG (never present on CI) was removed; that decode check stays a
-      # LOCAL-ONLY developer step. See
-      # docs/logs/2026-08-28/Task_ci_repair_contract.md.
-      - name: flutter test (if present)
-        working-directory: ${{ github.workspace }}/app
-        run: |
-          test_count=0
-          if [ -d test ]; then
-            test_count=$(find test -name "*_test.dart" -type f | wc -l | tr -d ' ')
-          fi
-          if [ "$test_count" -gt 0 ]; then
-            flutter test
-          else
-            echo "::notice::No Flutter test files (test/**/*_test.dart) present; skipping 'flutter test'."
-          fi
-
-      # plugin/ (the ceyx package itself) was not previously exercised by any
-      # CI job — this job only ran app/'s two test files. The symbol-absent
-      # contract tests below (WP10 probe/decode-into-buffer pair, R4 item 1
-      # slot-configuration group) need an OLDER dylib lacking specific
-      # symbols to exercise their degrade-to-unsupported path; that fixture
-      # previously lived only under gitignored tmp/ and so these two tests
-      # skipped on every CI run with no red signal. Fetching pinned, digest-
-      # verified older release assets makes them execute here instead.
-      - name: Fetch symbol-absent fixture dylibs (pinned releases, digest-verified)
-        run: bash native/scripts/ci/fetch_symbol_absent_fixtures.sh
-
-      - name: Plugin pub get
-        working-directory: ${{ github.workspace }}/plugin
-        run: flutter pub get
-
-      - name: Plugin symbol-absent contract tests (fixture-backed, must execute not skip)
-        working-directory: ${{ github.workspace }}/plugin
-        # GitHub Actions runs `run:` blocks as `bash -eo pipefail {0}` by
-        # default (non-Windows), so a failing `flutter test` inside the pipe
-        # below already aborts this step before the grep guard runs — no
-        # separate PIPESTATUS capture needed (PIPESTATUS has been an unreliable
-        # instrument across shells; avoided here rather than relied on).
-        run: |
-          flutter test --reporter expanded \
-            test/wp10_decode_into_buffer_symbol_absent_test.dart \
-            test/slot_config_symbol_absent_test.dart \
-            2>&1 | tee /tmp/plugin_symbol_absent_test.log
-          # Guard against the fixture silently going missing again: a SKIPPED
-          # marker in the output means the fixture wasn't found and the test
-          # degraded back to a no-op (exit 0), which must fail this step
-          # rather than pass silently.
-          if grep -q "All tests skipped" /tmp/plugin_symbol_absent_test.log; then
-            echo "::error::Symbol-absent fixture tests skipped instead of executing — fixture fetch did not populate the expected tmp/ dirs."
-            exit 1
-          fi
+      # R7 user decree (2026-09-07): ceyx CI is COMPILE-ONLY, mirroring
+      # Halcyon's own rule. `flutter test` (app/), the symbol-absent fixture
+      # fetch, and the plugin's symbol-absent `flutter test` invocation were
+      # all REMOVED from this job — every one of them EXECUTES test code,
+      # which is the thing compile-only forbids. `dart analyze` above stays
+      # (static analysis, not execution). The fixture fetch script itself
+      # (native/scripts/ci/fetch_symbol_absent_fixtures.sh) and the plugin
+      # test files it fed stay in the repo for LOCAL developer use; only the
+      # CI invocation is gone. Guarded mechanically by
+      # native/scripts/ci/check_no_test_execution_in_ci.py, wired as an early
+      # step on verify-native-tests (see below) so a reintroduced execution
+      # line fails loudly instead of silently creeping back.
 
   verify-native-tests:
     # Compile-only gate (2026-08-28, supersedes the earlier PSNR-gate design).
@@ -302,6 +261,16 @@ jobs:
       # needs no new `needs:` wiring across the other three platform legs.
       - name: Guard cmake source references against untracked files
         run: python3 native/scripts/ci/check_cmake_sources_tracked.py
+
+      # R7 user decree (2026-09-07): ceyx CI is compile-only. This scans every
+      # .github/workflows/*.yml for a test-execution command (flutter test /
+      # dart test / ctest / a direct test_*/probe_* binary invocation) and
+      # fails loudly naming the line -- mechanical backstop so a removed
+      # execution step (see verify-dart above) cannot silently creep back.
+      # Same cheap-first-step placement rationale as the guard above: pure
+      # Python, no toolchain provisioning needed.
+      - name: Guard CI workflows against test execution (compile-only policy)
+        run: python3 native/scripts/ci/check_no_test_execution_in_ci.py
 
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here
