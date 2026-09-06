@@ -338,6 +338,46 @@ class DngDecoderService {
     ];
   }
 
+  /// Pool worker entry: decode [filePath] and hand the NATIVE RGBA buffer to
+  /// the pool by ADDRESS, returning
+  /// `[int rgbaAddress, int width, int height, double decodeMs,
+  /// double processMs]` — five sendable primitives, no 97MB copy.
+  ///
+  /// Difference from [decodeForTransfer]: that path copies the native buffer
+  /// into Dart-owned bytes and ships a [TransferableTypedData] (the copy at
+  /// `_finishTransferable`), which lands on the receiving isolate as a fresh
+  /// ~97MB Dart-heap object. This path ships ownership instead: the buffer is
+  /// NOT copied, NOT freed here, and NO finalizer is attached in the worker
+  /// (worker-path callers never use [_rgbaFinalizer], see the comments at
+  /// :126/:148). `DngResult.rgbaData` is cleared before the route's `finally`
+  /// runs so `dng_free_result` frees only the struct — the same anti
+  /// double-free move as the zero-copy path (`_finishZeroCopy`).
+  ///
+  /// OWNERSHIP: from the moment this returns, the buffer is owned by NOBODY
+  /// until the pool wraps it with a `NativeFinalizer`
+  /// (`CeyxDecodePool._materialize`) or explicitly frees it (the pool's
+  /// soft-cancel discard arm). If the message never reaches the pool (worker
+  /// death, pool shutdown with queued results) exactly ONE buffer leaks; that
+  /// bounded-leak inventory is documented on [CeyxDecodePool].
+  ///
+  /// Must only be called on a worker isolate.
+  List<Object?> decodeForPointerTransfer(String filePath, {int? maxDim}) {
+    if (!_initialized) {
+      initialize();
+    }
+    switch (decodeRouteForPath(filePath)) {
+      case DecodeRoute.dng:
+        return _decodeDngToPointer(filePath, maxDim);
+      case DecodeRoute.raw:
+        return _decodeRawToPointer(filePath, maxDim);
+      case DecodeRoute.unsupported:
+        throw DngDecodeException(
+          DngErrorCode.parseFailed,
+          _unsupportedMessage(filePath),
+        );
+    }
+  }
+
   /// Extracts the embedded JPEG preview from the DNG file.
   /// Returns null if extraction fails.
   Uint8List? getPreviewJpeg(String filePath) {
@@ -718,6 +758,108 @@ class DngDecoderService {
       decodeMs: result.decodeMs,
       processMs: result.processMs,
     );
+  }
+
+  // --- pointer-transfer route (H2-A) --------------------------------------
+  // Deliberately parallel to _decodeDngToTransferable / _decodeRawToTransferable
+  // rather than a shared generic: those two are the A/B control for this one
+  // (`decodeOnWorker` still uses them byte-for-byte) and must not change shape.
+  // Only the finish step differs.
+
+  List<Object?> _decodeDngToPointer(String filePath, int? maxDim) {
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+
+    try {
+      resultPtr =
+          (maxDim != null && maxDim > 0 && _bindings.sizedDecodeAvailable)
+          ? _bindings.dngDecodeAndProcessSized!(pathPtr.cast(), maxDim)
+          : _bindings.dngDecodeAndProcess(pathPtr.cast());
+      return _finishPointerTransfer(resultPtr, isRaw: false);
+    } finally {
+      // On SUCCESS rgbaData has been cleared by _finishPointerTransfer, so
+      // this frees the struct only and the buffer travels on. On ANY throw
+      // rgbaData is still set, so this frees the buffer too — no pointer
+      // escapes an error path.
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  List<Object?> _decodeRawToPointer(String filePath, int? maxDim) {
+    final rawDecode = _bindings.rawDecodeAndProcess;
+    if (rawDecode == null) {
+      throw RawUnavailableException(filePath);
+    }
+
+    final requested = (maxDim != null && maxDim > 0) ? maxDim : 0;
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+
+    try {
+      resultPtr = rawDecode(pathPtr.cast(), requested);
+      return _finishPointerTransfer(resultPtr, isRaw: true);
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// Success/failure handling for the pointer-transfer route. Same validation
+  /// ladder as [_finishTransferable]; the only difference is the finish step,
+  /// which hands the raw address over instead of copying the bytes.
+  List<Object?> _finishPointerTransfer(
+    Pointer<DngResult> resultPtr, {
+    required bool isRaw,
+  }) {
+    if (resultPtr == nullptr) {
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.allocationFailed,
+          RawErrorCode.name(RawErrorCode.allocationFailed),
+          'Native raw_decode_and_process returned null',
+        );
+      }
+      throw DngDecodeException(-1, 'Native function returned null');
+    }
+
+    final result = resultPtr.ref;
+
+    if (result.errorCode != 0) {
+      _throwDecodeError(result.errorCode, isRaw: isRaw);
+    }
+
+    if (result.rgbaData == nullptr) {
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.allocationFailed,
+          RawErrorCode.name(RawErrorCode.allocationFailed),
+          'RGBA buffer is null despite kRawSuccess',
+        );
+      }
+      throw DngDecodeException(-1, 'RGBA buffer is null despite success code');
+    }
+
+    final address = result.rgbaData.address;
+    final width = result.width;
+    final height = result.height;
+
+    // Ownership shipped raw: clear the struct field LAST, after every throw
+    // site above, so a failure still lets dng_free_result reclaim the buffer.
+    result.rgbaData = nullptr;
+
+    return <Object?>[
+      address,
+      width,
+      height,
+      result.decodeMs,
+      result.processMs,
+    ];
   }
 
   // W5 (M-6): messages aligned with unified DngErrorCode enum.

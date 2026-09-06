@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 
+import 'dng_bindings.dart';
 import 'dng_decoder_service.dart';
 
 /*
@@ -165,6 +167,40 @@ typedef CeyxPoolWorkerEntry = void Function(List<Object?> bootstrap);
 /// * a worker that dies is respawned (up to [maxRespawns] times per session)
 ///   and its lost jobs fail with [CeyxPoolWorkerDiedException] — never a hung
 ///   future.
+///
+/// ## Decode-payload ownership (H2-A)
+///
+/// A [CeyxPoolJobType.decode] result crosses the port as a bare native ADDRESS
+/// plus dimensions ([DngDecoderService.decodeForPointerTransfer]); the ~97MB
+/// RGBA buffer is never copied into the Dart heap. Between the worker's send
+/// and the pool's handling of that message, NO Dart object owns the buffer.
+/// The pool then takes ownership on exactly one of two mutually exclusive
+/// branches of [_completeJob]:
+/// * fresh generation → [_materialize] wraps it with
+///   `asTypedList(len, finalizer: dng_free_rgba_buffer)`; the buffer's lifetime
+///   becomes the typed list's lifetime and the engine frees it on GC;
+/// * stale generation (soft cancel) → the address is freed EXPLICITLY and no
+///   finalizer is ever attached.
+/// Because the discard arm never materialises and the materialise arm never
+/// frees, a double free is impossible by construction rather than by
+/// bookkeeping.
+///
+/// BOUNDED NATIVE LEAKS (documented on purpose; there is deliberately no
+/// reaper — a reaper would need a registry of in-flight addresses, which is
+/// the bookkeeping the two-branch design exists to avoid):
+/// 1. `kMsgError`: payload is null, nothing crossed — the worker's own
+///    `finally` already freed via `dng_free_result`. No leak.
+/// 2. Worker death with a natively-completed but never-processed result: ONE
+///    buffer, on the PROCESS-global native heap (isolates share it), leaks per
+///    worker-death event. Worker deaths are already logged loudly via
+///    [logger].
+/// 3. [dispose] / shutdown with completed messages still queued: same class,
+///    same bound (one buffer per queued completed decode).
+///
+/// RSS ATTRIBUTION NOTE (risk R-1): for identity-orientation photos the host
+/// aliases this native-backed buffer into its payload objects, so bytes that
+/// used to show up as Dart heap now show up as native allocation. That is
+/// correct behaviour, not a leak — read future memory captures accordingly.
 class CeyxDecodePool {
   CeyxDecodePool({
     int width = 2,
@@ -189,7 +225,8 @@ class CeyxDecodePool {
   }
 
   /// H2 discriminator gate: when this returns true, the pool times the
-  /// main-isolate `TransferableTypedData.materialize()` step and emits a
+  /// main-isolate payload-landing step — `TransferableTypedData.materialize()`
+  /// for a probe, the zero-copy native wrap for a decode — and emits a
   /// `pool.materialize|dur_us=..|bytes=..|type=..` line through [logger].
   /// A callback (not a bool) so hosts can bind it to their own perf-logging
   /// switch (e.g. Halcyon's `PerfLog.enabled`), which may flip after pool
@@ -198,6 +235,14 @@ class CeyxDecodePool {
   static bool Function() materializeTimingEnabled = _timingOff;
 
   static bool _timingOff() => false;
+
+  /// Test-only seam for native ownership handling. When set, EVERY free the
+  /// pool would perform routes here instead of into the dylib, and
+  /// [_materialize] attaches no `NativeFinalizer` — so unit tests can drive
+  /// the decode path with a fake (e.g. `calloc`-backed) address and no native
+  /// library present.
+  @visibleForTesting
+  static void Function(int address)? debugNativeFree;
 
   /// Test-only: how many isolates this pool has spawned, ever. After warmup
   /// this must NOT grow per decode — that is the whole point of the pool.
@@ -678,7 +723,18 @@ class CeyxDecodePool {
         job.completeError(error);
       } else if (job.generation < _generation) {
         // Soft cancellation: drop the payload WITHOUT materialising it.
+        //
+        // H2-A: a decode payload carries a raw native address whose ownership
+        // was shipped over the port, so "dropping" it here would leak ~97MB
+        // per superseded decode. This arm frees it EXACTLY ONCE and never
+        // reaches _materialize, which is the only place a finalizer is ever
+        // attached — hence no double free is possible.
         debugDiscardCount++;
+        if (job.type == CeyxPoolJobType.decode &&
+            payload != null &&
+            payload.isNotEmpty) {
+          _freeNativeRgba(payload[0] as int);
+        }
         job.complete(CeyxPoolOutcome<Object?>.discarded(job.generation));
       } else {
         job.complete(
@@ -702,11 +758,17 @@ class CeyxDecodePool {
         final transfer = payload[0] as TransferableTypedData?;
         return transfer == null ? null : _materializeBytes(transfer, type);
       case CeyxPoolJobType.decode:
-        final transfer = payload[0] as TransferableTypedData;
+        // H2-A: payload[0] is a native address, not a TransferableTypedData.
+        final width = payload[1] as int;
+        final height = payload[2] as int;
         return DngImage(
-          rgbaData: _materializeBytes(transfer, type),
-          width: payload[1] as int,
-          height: payload[2] as int,
+          rgbaData: _wrapNativeRgba(
+            payload[0] as int,
+            width * height * 4,
+            type,
+          ),
+          width: width,
+          height: height,
           decodeMs: payload[3] as double,
           processMs: payload[4] as double,
         );
@@ -731,6 +793,86 @@ class CeyxDecodePool {
     );
     return bytes;
   }
+
+  /// Zero-copy view over the worker's native RGBA buffer, taking ownership via
+  /// a `NativeFinalizer` bound to `dng_free_rgba_buffer`. Attached exactly
+  /// once, by the only code path that ever touches this address.
+  ///
+  /// The `pool.materialize` event is retained here (FROZEN format) so the perf
+  /// recapture can still attribute payload landings; under pointer transfer it
+  /// measures the wrap, which is sub-µs by construction — that near-zero value
+  /// IS the evidence the copy is gone.
+  Uint8List _wrapNativeRgba(int address, int length, CeyxPoolJobType type) {
+    if (!materializeTimingEnabled()) {
+      return _viewNativeRgba(address, length);
+    }
+    final sw = Stopwatch()..start();
+    final bytes = _viewNativeRgba(address, length);
+    sw.stop();
+    logger(
+      'pool.materialize|dur_us=${sw.elapsedMicroseconds}'
+      '|bytes=${bytes.length}|type=${type.name}',
+    );
+    return bytes;
+  }
+
+  Uint8List _viewNativeRgba(int address, int length) {
+    final ptr = Pointer<Uint8>.fromAddress(address);
+    if (debugNativeFree != null) {
+      // Test seam: no dylib is loaded, so no finalizer may be attached. The
+      // test owns the fake allocation and frees it through the seam.
+      return ptr.asTypedList(length);
+    }
+    return ptr.asTypedList(length, finalizer: _nativeFreePtr);
+  }
+
+  /// Explicit free for the ONE arm that never materialises (soft cancel).
+  void _freeNativeRgba(int address) {
+    final seam = debugNativeFree;
+    if (seam != null) {
+      seam(address);
+      return;
+    }
+    if (address == 0) return;
+    _freeBindings.dngFreeRgbaBuffer(Pointer<Void>.fromAddress(address));
+  }
+
+  Pointer<NativeFinalizerFunction> get _nativeFreePtr =>
+      _freeBindings.dngFreeRgbaBufferPtr.cast();
+
+  /// Symbol-table access to `dng_free_rgba_buffer` on the POOL's isolate (the
+  /// host's UI isolate in production).
+  ///
+  /// This opens the native library on the main isolate — previously only
+  /// workers did — but it never calls a decode entry point: the constructor
+  /// performs `dlsym`-class lookups only. `dlopen` is refcounted, so the OS
+  /// loader hands back the image the worker isolates already mapped rather
+  /// than loading a second copy.
+  ///
+  /// The path is resolved EXACTLY as the workers resolve it: with the pool's
+  /// [_libraryPath] when the host supplied one (the same value that travels in
+  /// `bootstrap[1]`), and otherwise through the identical
+  /// [DngNativeBindings.load] candidate search the worker runs — which is the
+  /// production case, since hosts construct [shared] without a path.
+  ///
+  /// A failure to resolve is rethrown, not swallowed: silently skipping the
+  /// finalizer would turn every decode into a permanent 97MB native leak.
+  DngNativeBindings get _freeBindings {
+    final cached = _freeBindingsCache;
+    if (cached != null) return cached;
+    try {
+      final bindings = _libraryPath == null
+          ? DngNativeBindings.load()
+          : DngNativeBindings.fromPath(_libraryPath);
+      _freeBindingsCache = bindings;
+      return bindings;
+    } catch (e) {
+      logger('pool|NATIVE_FREE_UNAVAILABLE|$e');
+      rethrow;
+    }
+  }
+
+  DngNativeBindings? _freeBindingsCache;
 
   void _onWorkerLost(_PoolWorker worker, String detail) {
     if (worker.dead) return;
@@ -886,11 +1028,15 @@ class _PoolWorker {
 /// told to shut down. This is the whole reason the pool exists: the previous
 /// `Isolate.run`-per-operation path re-opened the dylib on every decode.
 ///
-/// Results cross the boundary as [TransferableTypedData], exactly as
-/// [DngDecoderService.decodeOnWorker] already did — the copy-semantics
-/// statement in `encode_service.dart` still holds (the bytes are copied into
-/// Dart-owned memory inside the worker before transfer, and materialise
-/// zero-copy on the pool side).
+/// Probe results cross the boundary as [TransferableTypedData] (small preview
+/// JPEGs — the copy is negligible and the wire type is unchanged).
+///
+/// H2-A: DECODE results do not. They cross as a bare native address plus
+/// dimensions ([DngDecoderService.decodeForPointerTransfer]); the worker
+/// neither copies nor frees the RGBA buffer, and the pool takes ownership on
+/// arrival. See the ownership section on [CeyxDecodePool] for the two arms and
+/// the bounded-leak inventory. `DngDecoderService.decodeOnWorker` (the
+/// `Isolate.run` A/B control) still uses the copy path unchanged.
 void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
   final poolPort = bootstrap[0] as SendPort;
   final libraryPath = bootstrap[1] as String?;
@@ -965,7 +1111,7 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
             bytes == null ? null : TransferableTypedData.fromList([bytes]),
           ]);
         case CeyxPoolJobType.decode:
-          final image = service.decodeForTransfer(path, maxDim: maxDim);
+          final image = service.decodeForPointerTransfer(path, maxDim: maxDim);
           poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
       }
     } catch (e) {
