@@ -2202,6 +2202,24 @@ target_include_directories(test_ceyx_decode_into PRIVATE
 target_link_libraries(test_ceyx_decode_into dng_decoder_native)
 add_dependencies(test_ceyx_decode_into dng_decoder_native)
 
+# --- r5 remediation (Task #3, 2026-09-06): -213/-301 error-map regression ---
+# See test_errmap_dst_too_small.cpp header comment for exactly what this does
+# and does not cover (the ceyx_decode_into_ffi.cpp:154 RAW-arm branch is
+# structurally unreachable via the public API with the current sample corpus;
+# this target covers the internal code's reality and the boundary's
+# never-leaks-213 contract instead). Same linkage rationale as
+# test_ceyx_decode_into above: shared dylib, not pipeline sources compiled in.
+add_executable(test_errmap_dst_too_small tests/test_errmap_dst_too_small.cpp)
+target_include_directories(test_errmap_dst_too_small PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_errmap_dst_too_small dng_decoder_native)
+add_dependencies(test_errmap_dst_too_small dng_decoder_native)
+# --- end r5 remediation Task #3 ---
+
 endif() # NOT DNG_CROSS_BUILD (test targets)
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)
