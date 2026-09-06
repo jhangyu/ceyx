@@ -289,6 +289,20 @@ jobs:
         with:
           submodules: recursive
 
+      # R7 fix (2026-09-06/07 incident): a cmake source-file reference can
+      # exist on the AUTHOR's disk (local configure green) while being
+      # untracked by git (CI checkout doesn't have it, configure dies with
+      # "Cannot find source file") -- exactly what ddb45b2's `git add` of a
+      # shared, concurrently-edited tests.cmake produced. Placed as the FIRST
+      # step, cheaper than any toolchain provisioning below it: pure git +
+      # stdlib Python, no Homebrew/vcpkg/Halide fetch needed, so a violation
+      # fails in seconds instead of after ~10+ minutes of setup. Kept inside
+      # THIS job rather than a new standalone job because this is the one
+      # job whose configure the incident actually broke, and a same-job step
+      # needs no new `needs:` wiring across the other three platform legs.
+      - name: Guard cmake source references against untracked files
+        run: python3 native/scripts/ci/check_cmake_sources_tracked.py
+
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here
       # instead of hardcoding its own copy that can drift.
