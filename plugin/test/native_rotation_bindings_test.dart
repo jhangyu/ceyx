@@ -23,21 +23,26 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 /// AC-3.4 (dart analyze 0 issues) is verified out-of-band by the test runner,
 /// not inside this file.
 ///
-/// Fixture for AC-3.1: `native/build/libdng_decoder_native.dylib` exports
+/// Fixture for AC-3.1: `plugin/macos/Libraries/libdng_decoder_native.dylib`
+/// (the vendored, in-tree copy consumed by the macOS app bundle) exports
 /// `ceyx_decode_into_buffer` (Task WP10, already landed) but — as of this
-/// writing — NOT `ceyx_decode_into_buffer_oriented` (Task 2 of this campaign
-/// has not landed yet), which is exactly the "symbol pair present, oriented
+/// writing — NOT `ceyx_decode_into_buffer_oriented` (this campaign's Task 2
+/// lands via a fresh local `native/build` output, not by updating the
+/// vendored copy), which is exactly the "symbol pair present, oriented
 /// sibling absent" shape this test exists to prove never nulls the whole
-/// group. If Task 2 lands and this local build directory is rebuilt with the
-/// new symbol before this test next runs, the fixture stops being valid for
-/// AC-3.1 and the test self-skips with a clear reason rather than
+/// group. Unlike a local `native/build` output, this vendored copy is
+/// in-tree and not rebuilt by running the native build locally, so the test
+/// runs by default without requiring an env var. `DNG_PRE_ORIENT_DYLIB`
+/// remains a manual override — for example if the vendored copy is ever
+/// updated to include the oriented symbol, or to test a specific dylib. If
+/// that happens the test self-skips with a clear reason rather than
 /// (incorrectly) failing red or (incorrectly) passing on a fixture that no
 /// longer demonstrates the absent-symbol case.
 void main() {
   group('AC-3.1: decodeIntoBufferOrientedAvailable per-symbol guard', () {
     final dylibPath = File(
       Platform.environment['DNG_PRE_ORIENT_DYLIB'] ??
-          '../native/build/libdng_decoder_native.dylib',
+          '../plugin/macos/Libraries/libdng_decoder_native.dylib',
     ).absolute.path;
 
     test(
@@ -120,45 +125,15 @@ void main() {
   });
 
   group('AC-3.3: extent-consistency self-verification', () {
-    // The rule under test (dng_decoder_service.dart,
-    // DngDecoderService.decodeIntoPointerOriented): for a TRANSPOSING
-    // orientation (5/6/7/8), appliedOrientation is reported as the requested
-    // exifOrientation ONLY when the returned extent is swapped relative to
-    // the unoriented probe. This exercises the pure decision logic directly
-    // (the same boolean expression the production method evaluates) rather
-    // than the full FFI round trip, since driving the real native call from
-    // a unit test would require a fixture dylib and a real RAW/DNG file.
-    //
-    // The logic lives inline in decodeIntoPointerOriented and is not a
-    // separately-exported helper, so this test re-derives the same
-    // consistency predicate the method's doc comment specifies and asserts
-    // it against representative (requested, returnedW, returnedH, probeW,
-    // probeH) tuples covering: consistent swap, degraded/unswapped, and
-    // probe-unavailable.
-    int selfVerifiedAppliedOrientation({
-      required int exifOrientation,
-      required int returnedWidth,
-      required int returnedHeight,
-      required int? probedWidth,
-      required int? probedHeight,
-    }) {
-      const transposing = {5, 6, 7, 8};
-      if (exifOrientation == 1) return 1;
-      if (!transposing.contains(exifOrientation)) return exifOrientation;
-      if (probedWidth != null &&
-          probedHeight != null &&
-          returnedWidth == probedHeight &&
-          returnedHeight == probedWidth) {
-        return exifOrientation;
-      }
-      return 1;
-    }
-
+    // Calls DngDecoderService.selfVerifiedAppliedOrientation DIRECTLY — the
+    // exact @visibleForTesting static decodeIntoPointerOriented uses in
+    // production — rather than a re-derived copy of its logic, so this test
+    // cannot go green while production logic drifts (round-2 review finding).
     test('transposing orientation with swapped extent reports the request', () {
-      final applied = selfVerifiedAppliedOrientation(
-        exifOrientation: 6,
-        returnedWidth: 480, // probe was 640x480 -> swapped to 480x640
-        returnedHeight: 640,
+      final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+        requested: 6,
+        width: 480, // probe was 640x480 -> swapped to 480x640
+        height: 640,
         probedWidth: 640,
         probedHeight: 480,
       );
@@ -169,10 +144,10 @@ void main() {
       'transposing orientation that came back UNSWAPPED (native degraded) '
       'reports 1, not the request',
       () {
-        final applied = selfVerifiedAppliedOrientation(
-          exifOrientation: 6,
-          returnedWidth: 640, // NOT swapped vs. the probe -> degraded
-          returnedHeight: 480,
+        final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+          requested: 6,
+          width: 640, // NOT swapped vs. the probe -> degraded
+          height: 480,
           probedWidth: 640,
           probedHeight: 480,
         );
@@ -184,10 +159,10 @@ void main() {
       'transposing orientation with an unavailable probe cannot be '
       'verified and reports 1',
       () {
-        final applied = selfVerifiedAppliedOrientation(
-          exifOrientation: 7,
-          returnedWidth: 480,
-          returnedHeight: 640,
+        final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+          requested: 7,
+          width: 480,
+          height: 640,
           probedWidth: null,
           probedHeight: null,
         );
@@ -195,11 +170,27 @@ void main() {
       },
     );
 
+    test(
+      'transposing orientation on a SQUARE probed frame cannot verify the '
+      'swap (a genuine swap and a silent degrade look identical) and '
+      'reports 1',
+      () {
+        final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+          requested: 6,
+          width: 512,
+          height: 512,
+          probedWidth: 512,
+          probedHeight: 512,
+        );
+        expect(applied, 1);
+      },
+    );
+
     test('non-transposing orientation reports the request unconditionally', () {
-      final applied = selfVerifiedAppliedOrientation(
-        exifOrientation: 3,
-        returnedWidth: 640,
-        returnedHeight: 480,
+      final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+        requested: 3,
+        width: 640,
+        height: 480,
         probedWidth: 640,
         probedHeight: 480,
       );
@@ -207,10 +198,10 @@ void main() {
     });
 
     test('identity orientation always reports 1', () {
-      final applied = selfVerifiedAppliedOrientation(
-        exifOrientation: 1,
-        returnedWidth: 640,
-        returnedHeight: 480,
+      final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+        requested: 1,
+        width: 640,
+        height: 480,
         probedWidth: 640,
         probedHeight: 480,
       );

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
+import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
 import 'raw_bindings.dart';
@@ -609,6 +610,45 @@ class DngDecoderService {
       exifOrientation == 7 ||
       exifOrientation == 8;
 
+  /// The self-verifying extent-consistency rule used by
+  /// [decodeIntoPointerOriented] to decide what to report as
+  /// `appliedOrientation`. Hoisted to a standalone, directly-testable static
+  /// so the production decision and the unit tests cannot drift apart (they
+  /// call this exact function, not a re-derived copy).
+  ///
+  /// Reports [requested] ONLY when the returned extent is verifiably
+  /// consistent with that orientation having been applied:
+  /// - identity (`requested == 1`) always reports 1.
+  /// - a non-transposing orientation (2/3/4) always reports [requested] —
+  ///   Task 2's scratch-unavailable degrade path is exclusive to the
+  ///   transposing cases, so a successful decode here means it applied.
+  /// - a transposing orientation (5/6/7/8) reports [requested] only when the
+  ///   returned extent is swapped relative to the unoriented probe AND that
+  ///   swap is actually detectable — i.e. [probedWidth] != [probedHeight].
+  ///   When the probe is unavailable, or the probed frame is exactly square
+  ///   (so a genuine swap and a silent degrade produce the SAME extent and
+  ///   the check would be trivially true either way), the swap cannot be
+  ///   verified and this reports `1`.
+  @visibleForTesting
+  static int selfVerifiedAppliedOrientation({
+    required int requested,
+    required int width,
+    required int height,
+    required int? probedWidth,
+    required int? probedHeight,
+  }) {
+    if (requested == 1) return 1;
+    if (!_orientationTransposes(requested)) return requested;
+    if (probedWidth != null &&
+        probedHeight != null &&
+        probedWidth != probedHeight &&
+        width == probedHeight &&
+        height == probedWidth) {
+      return requested;
+    }
+    return 1;
+  }
+
   /// Native-rotation spec Task 3: orientation-aware sibling of
   /// [decodeIntoPointer]. Same contract, same buffer-too-small translation,
   /// same [_finishPointerTransfer] reuse (isRaw: false) — the ONLY difference
@@ -688,29 +728,18 @@ class DngDecoderService {
       final width = transfer[1] as int;
       final height = transfer[2] as int;
 
-      int appliedOrientation = 1;
-      if (exifOrientation == 1) {
-        appliedOrientation = 1;
-      } else if (!needsConsistencyCheck) {
-        // Non-transposing orientations degrade only via total decode
-        // failure (which already threw above), never via a silent
-        // scratch-unavailable fallback — that arm is exclusive to the
-        // transposing cases (spec §1.3/Task 2 Phase 3). So a successful
-        // return here means the orientation was applied.
-        appliedOrientation = exifOrientation;
-      } else if (probedWidth != null &&
-          probedHeight != null &&
-          width == probedHeight &&
-          height == probedWidth) {
-        // Extent swapped relative to the unoriented probe -> consistent
-        // with the requested transposing orientation having been applied.
-        appliedOrientation = exifOrientation;
-      } else {
-        // Either the probe was unavailable (can't verify) or the extent
-        // came back unswapped (native degraded to the unoriented fallback).
-        // Report 1 either way: this method never claims an orientation was
-        // applied that it cannot verify.
-        appliedOrientation = 1;
+      final appliedOrientation = selfVerifiedAppliedOrientation(
+        requested: exifOrientation,
+        width: width,
+        height: height,
+        probedWidth: probedWidth,
+        probedHeight: probedHeight,
+      );
+      if (needsConsistencyCheck && appliedOrientation == 1) {
+        // Either the probe was unavailable, the probed frame was square
+        // (swap undetectable), or the extent came back unswapped (native
+        // degraded to the unoriented fallback). This method never claims an
+        // orientation was applied that it cannot verify (spec §7 R-2).
         stderr.writeln(
           'orient.degraded|path=$filePath|exif=$exifOrientation'
           '|width=$width|height=$height',
