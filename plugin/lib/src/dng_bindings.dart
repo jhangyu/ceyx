@@ -171,6 +171,32 @@ typedef CeyxDecodeIntoBufferDart =
       int dstCapacity,
     );
 
+// Native-rotation spec Task 3: orientation-aware sibling of
+// ceyx_decode_into_buffer (spec §1.3, native-rotation-spec.md). ADDITIVE and
+// resolved with its OWN guarded lookup, per-symbol — NOT folded into the
+// `decodeIntoBufferAvailable` group above. This mirrors the pattern that
+// group's own doc comment warns about: a dylib may ship
+// `ceyx_decode_into_buffer` without yet shipping the oriented sibling (Task 2
+// lands after Task 3 in this campaign's sequencing), and Halcyon's own
+// lessons-learned records a guarded-lookup family that nulled an entire group
+// when one symbol was missing, silently shipping an absent feature.
+typedef CeyxDecodeIntoBufferOrientedNative =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      ffi.Size dstCapacity,
+      ffi.Int32 exifOrientation,
+    );
+typedef CeyxDecodeIntoBufferOrientedDart =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      int maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      int dstCapacity,
+      int exifOrientation,
+    );
+
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
@@ -204,6 +230,10 @@ class DngNativeBindings {
   // slot by guesswork).
   CeyxProbeOutputSizeDart? _ceyxProbeOutputSize;
   CeyxDecodeIntoBufferDart? _ceyxDecodeIntoBuffer;
+
+  // Native-rotation spec Task 3: guarded PER-SYMBOL, independent of the pair
+  // above — see the typedef comment for why this must not be folded in.
+  CeyxDecodeIntoBufferOrientedDart? _ceyxDecodeIntoBufferOriented;
 
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
@@ -273,6 +303,19 @@ class DngNativeBindings {
   /// a second availability flag.
   bool get decodeIntoBufferAvailable =>
       _ceyxProbeOutputSize != null && _ceyxDecodeIntoBuffer != null;
+
+  /// Guarded access to the native-rotation `ceyx_decode_into_buffer_oriented`
+  /// entry. Null when the loaded dylib predates it. Resolved independently of
+  /// [decodeIntoBufferAvailable] on purpose (see the typedef comment above) —
+  /// a missing oriented symbol must never null out the unoriented group.
+  CeyxDecodeIntoBufferOrientedDart? get ceyxDecodeIntoBufferOriented =>
+      _ceyxDecodeIntoBufferOriented;
+
+  /// Whether the loaded dylib exports `ceyx_decode_into_buffer_oriented`.
+  /// Independent of [decodeIntoBufferAvailable]: a build may have the
+  /// unoriented entry without (yet) having the oriented sibling.
+  bool get decodeIntoBufferOrientedAvailable =>
+      _ceyxDecodeIntoBufferOriented != null;
 
   /// The slot count the native layer is currently configured for, or null when
   /// the dylib predates the entry.
@@ -424,6 +467,19 @@ class DngNativeBindings {
     } catch (_) {
       _ceyxProbeOutputSize = null;
       _ceyxDecodeIntoBuffer = null;
+    }
+
+    // Native-rotation spec Task 3: its OWN try block, deliberately separate
+    // from the pair above. A missing oriented symbol must not null out the
+    // unoriented `ceyx_decode_into_buffer` group.
+    try {
+      _ceyxDecodeIntoBufferOriented = _lib
+          .lookupFunction<
+            CeyxDecodeIntoBufferOrientedNative,
+            CeyxDecodeIntoBufferOrientedDart
+          >('ceyx_decode_into_buffer_oriented');
+    } catch (_) {
+      _ceyxDecodeIntoBufferOriented = null;
     }
 
     dngDecoderWarmupForSize = _lib

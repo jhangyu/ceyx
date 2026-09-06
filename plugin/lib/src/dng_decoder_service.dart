@@ -1,4 +1,5 @@
 import 'dart:ffi';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
@@ -60,6 +61,12 @@ class DngImage implements Finalizable {
 
   bool _releasedToPool = false;
 
+  /// Native-rotation spec Task 3: the EXIF orientation the native decoder
+  /// has already applied to [rgbaData], or 1 (identity) when it applied
+  /// none. Defaults to 1 so every pre-existing construction site keeps
+  /// compiling unchanged (spec §1.3, AC-3.2).
+  final int appliedOrientation;
+
   DngImage({
     required this.rgbaData,
     required this.width,
@@ -68,6 +75,7 @@ class DngImage implements Finalizable {
     required this.processMs,
     this.nativeAddress = 0,
     this.onReleaseToPool,
+    this.appliedOrientation = 1,
   });
 
   /// Returns this frame's native buffer to the pool. Call at
@@ -572,6 +580,144 @@ class DngDecoderService {
       // DngDecodeException is raised instead of the RAW-flavoured one; both
       // are decode failures and callers treat any throw identically.
       return _finishPointerTransfer(resultPtr, isRaw: false);
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// Native-rotation spec Task 3: whether the loaded dylib exports
+  /// `ceyx_decode_into_buffer_oriented`. Independent of
+  /// [decodeIntoBufferAvailable] — see the binding's own doc comment.
+  bool get decodeIntoBufferOrientedAvailable {
+    if (!_initialized) {
+      initialize();
+    }
+    return _bindings.decodeIntoBufferOrientedAvailable;
+  }
+
+  /// True for the four EXIF orientations that swap width and height (5, 6,
+  /// 7, 8). Mirrors `exif_orientation.dart`'s table (native-rotation spec
+  /// §1.2/§1.3) and the native `ceyx_orientation_transposes` predicate, kept
+  /// as a small local copy so this file's self-verifying consistency check
+  /// (below) does not need an extra FFI round trip.
+  static bool _orientationTransposes(int exifOrientation) =>
+      exifOrientation == 5 ||
+      exifOrientation == 6 ||
+      exifOrientation == 7 ||
+      exifOrientation == 8;
+
+  /// Native-rotation spec Task 3: orientation-aware sibling of
+  /// [decodeIntoPointer]. Same contract, same buffer-too-small translation,
+  /// same [_finishPointerTransfer] reuse (isRaw: false) — the ONLY difference
+  /// is the native call carries [exifOrientation] and the wire shape gains a
+  /// trailing `appliedOrientation` element:
+  /// `[address, width, height, decodeMs, processMs, appliedOrientation]`.
+  ///
+  /// SELF-VERIFYING, not trusting: `appliedOrientation` is reported as
+  /// [exifOrientation] ONLY when the returned extent is consistent with that
+  /// orientation actually having been applied. For a transposing orientation
+  /// (5/6/7/8) that means the returned width/height must be swapped relative
+  /// to the file's UNORIENTED extent (probed via [probeOutputSize]); if the
+  /// extent came back unswapped, the native side degraded (Task 2's
+  /// scratch-checkout-failure fallback, spec §1.3/AC-2.6) and this reports
+  /// `1` instead, so the caller never assumes an orientation was applied that
+  /// wasn't. A single `orient.degraded|` diagnostic line is written to
+  /// stderr when the check fires (spec §7 R-2), so a run of degradations is
+  /// observable without gating correctness on it.
+  ///
+  /// [decodeIntoPointer] (unoriented) is untouched by this method and stays
+  /// byte-identical — it is this method's A/B control.
+  ///
+  /// Must only be called on a worker isolate.
+  List<Object?> decodeIntoPointerOriented(
+    String filePath,
+    int dstAddress,
+    int dstCapacity, {
+    int? maxDim,
+    required int exifOrientation,
+  }) {
+    if (!_initialized) {
+      initialize();
+    }
+    final decodeIntoOriented = _bindings.ceyxDecodeIntoBufferOriented;
+    if (decodeIntoOriented == null) {
+      // Never reached from a caller that checks
+      // decodeIntoBufferOrientedAvailable first (same discipline as
+      // decodeIntoPointer above). Loud rather than silent: a caller that
+      // reached here believes it handed over a slot for an oriented decode.
+      throw StateError(
+        'ceyx_decode_into_buffer_oriented unavailable in this dylib',
+      );
+    }
+
+    // Unoriented extent, for the post-decode consistency check below.
+    // Non-transposing orientations (including identity) never need this: the
+    // native side never transposes for them, so there is nothing to verify
+    // beyond "did the decode succeed", which _finishPointerTransfer already
+    // checks.
+    final needsConsistencyCheck = _orientationTransposes(exifOrientation);
+    int? probedWidth;
+    int? probedHeight;
+    if (needsConsistencyCheck) {
+      final probe = probeOutputSize(filePath, maxDim: maxDim);
+      probedWidth = probe?.width;
+      probedHeight = probe?.height;
+    }
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+    try {
+      resultPtr = decodeIntoOriented(
+        pathPtr.cast(),
+        maxDim ?? 0,
+        Pointer<Uint8>.fromAddress(dstAddress),
+        dstCapacity,
+        exifOrientation,
+      );
+      if (resultPtr != nullptr &&
+          resultPtr.ref.errorCode == CeyxDecodeIntoError.dstTooSmall) {
+        throw DngBufferTooSmallException(
+          resultPtr.ref.width,
+          resultPtr.ref.height,
+        );
+      }
+      final transfer = _finishPointerTransfer(resultPtr, isRaw: false);
+      final width = transfer[1] as int;
+      final height = transfer[2] as int;
+
+      int appliedOrientation = 1;
+      if (exifOrientation == 1) {
+        appliedOrientation = 1;
+      } else if (!needsConsistencyCheck) {
+        // Non-transposing orientations degrade only via total decode
+        // failure (which already threw above), never via a silent
+        // scratch-unavailable fallback — that arm is exclusive to the
+        // transposing cases (spec §1.3/Task 2 Phase 3). So a successful
+        // return here means the orientation was applied.
+        appliedOrientation = exifOrientation;
+      } else if (probedWidth != null &&
+          probedHeight != null &&
+          width == probedHeight &&
+          height == probedWidth) {
+        // Extent swapped relative to the unoriented probe -> consistent
+        // with the requested transposing orientation having been applied.
+        appliedOrientation = exifOrientation;
+      } else {
+        // Either the probe was unavailable (can't verify) or the extent
+        // came back unswapped (native degraded to the unoriented fallback).
+        // Report 1 either way: this method never claims an orientation was
+        // applied that it cannot verify.
+        appliedOrientation = 1;
+        stderr.writeln(
+          'orient.degraded|path=$filePath|exif=$exifOrientation'
+          '|width=$width|height=$height',
+        );
+      }
+
+      return <Object?>[...transfer, appliedOrientation];
     } finally {
       if (resultPtr != nullptr) {
         _bindings.dngFreeResult(resultPtr);
