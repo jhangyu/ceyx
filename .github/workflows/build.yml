@@ -219,6 +219,42 @@ jobs:
             echo "::notice::No Flutter test files (test/**/*_test.dart) present; skipping 'flutter test'."
           fi
 
+      # plugin/ (the ceyx package itself) was not previously exercised by any
+      # CI job — this job only ran app/'s two test files. The symbol-absent
+      # contract tests below (WP10 probe/decode-into-buffer pair, R4 item 1
+      # slot-configuration group) need an OLDER dylib lacking specific
+      # symbols to exercise their degrade-to-unsupported path; that fixture
+      # previously lived only under gitignored tmp/ and so these two tests
+      # skipped on every CI run with no red signal. Fetching pinned, digest-
+      # verified older release assets makes them execute here instead.
+      - name: Fetch symbol-absent fixture dylibs (pinned releases, digest-verified)
+        run: bash native/scripts/ci/fetch_symbol_absent_fixtures.sh
+
+      - name: Plugin pub get
+        working-directory: ${{ github.workspace }}/plugin
+        run: flutter pub get
+
+      - name: Plugin symbol-absent contract tests (fixture-backed, must execute not skip)
+        working-directory: ${{ github.workspace }}/plugin
+        # GitHub Actions runs `run:` blocks as `bash -eo pipefail {0}` by
+        # default (non-Windows), so a failing `flutter test` inside the pipe
+        # below already aborts this step before the grep guard runs — no
+        # separate PIPESTATUS capture needed (PIPESTATUS has been an unreliable
+        # instrument across shells; avoided here rather than relied on).
+        run: |
+          flutter test --reporter expanded \
+            test/wp10_decode_into_buffer_symbol_absent_test.dart \
+            test/slot_config_symbol_absent_test.dart \
+            2>&1 | tee /tmp/plugin_symbol_absent_test.log
+          # Guard against the fixture silently going missing again: a SKIPPED
+          # marker in the output means the fixture wasn't found and the test
+          # degraded back to a no-op (exit 0), which must fail this step
+          # rather than pass silently.
+          if grep -q "All tests skipped" /tmp/plugin_symbol_absent_test.log; then
+            echo "::error::Symbol-absent fixture tests skipped instead of executing — fixture fetch did not populate the expected tmp/ dirs."
+            exit 1
+          fi
+
   verify-native-tests:
     # Compile-only gate (2026-08-28, supersedes the earlier PSNR-gate design).
     # This job ONLY builds the native test targets (test_decode,

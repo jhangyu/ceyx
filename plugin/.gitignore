@@ -3,14 +3,22 @@
 build/
 .flutter-plugins-dependencies
 
-# The vendored native library IS the deliverable of this package, but the
-# repo-root .gitignore excludes *.dylib (line 31). Without this negation the
-# dylib is silently left out of commits and a fresh clone builds a host app
-# with no RAW decoding — the exact failure this package exists to prevent.
-!macos/Libraries/*.dylib
-
-# NOTE: android/src/main/jniLibs/**/*.so is deliberately NOT re-included here.
-# A-T12 (ruling 2026-08-31, option a) moved the Android .so to a
-# placed-at-build/fetch policy (root .gitignore:187) -- unlike the macOS
-# dylib above, it must stay untracked. A prior negation here used to defeat
-# that root exclusion; removed 2026-09-01 (Task #9).
+# NOTE: neither macos/Libraries/*.dylib nor android/src/main/jniLibs/**/*.so
+# is re-included here. Both used to carry a `!`-negation against the
+# repo-root .gitignore's *.dylib/*.so excludes, back when the vendored
+# binaries were committed deliverables of this package.
+#
+# The Android negation was removed 2026-09-01 (A-T12 ruling, Task #9) when
+# jniLibs moved to a placed-at-build/fetch policy (root .gitignore:187).
+# The macOS negation should have been removed the same day: commit cccf778
+# ("Delete committed macOS decoder dylibs, superseded by release-fetch
+# (HALCYON-MIGRATION)", same date) deleted the six committed dylibs and left
+# plugin/macos/Libraries/ in place ONLY for Halcyon's build-time fetch
+# (build_apps.py's CEYX_FETCH_SPECS) to populate — but the negation itself
+# was left behind, an oversight relative to the jniLibs precedent right
+# above. A dylib placed there by that fetch is meant to stay untracked, same
+# as jniLibs; the negation was the one thing standing between an accidental
+# `git add plugin/macos/Libraries/` and a silent ~9.6MB binary commit.
+# Removed here (r6 round, 2026-09-06) to close that gap — `git add` on a
+# path under either directory is now refused loudly by git itself, matching
+# jniLibs' existing behavior, no CI step required to catch it.
