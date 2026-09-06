@@ -98,6 +98,15 @@ abstract final class DngErrorCode {
   static const int gpuUnavailable = -6;
   static const int rgbaAllocFailed = -7; // FFI layer only
   static const int ol2DispatchFailed = -8;
+
+  /// R4 WP10: the caller-provided destination buffer was null, zero-capacity,
+  /// or shorter than width*height*4. Reported BEFORE any pixel work, with
+  /// width/height filled in so the caller can re-acquire at the exact extent.
+  static const int dstTooSmall = -9;
+
+  /// R4 WP10: the output-extent probe reported success but produced a zero
+  /// extent.
+  static const int probeFailed = -10;
   static const int stdException = -100;
   static const int unknownException = -101;
 }
@@ -111,6 +120,51 @@ class DngDecodeException implements Exception {
 
   @override
   String toString() => 'DngDecodeException($errorCode): $message';
+}
+
+/// R4 WP10: Dart mirror of `enum CeyxDecodeIntoError`
+/// (`native/include/ceyx_decode_into.h`), the format-agnostic decode-into
+/// layer's own error scale.
+///
+/// Deliberately DISJOINT from both the DNG scale (0..-101,
+/// `dng_error_codes.h`) and the RAW scale (-201..-212,
+/// `raw_pipeline_contract.h:112-125`), so a Dart caller can tell WHICH layer
+/// spoke without knowing which route the native side took. Any value change in
+/// the C header MUST be reflected here, same rule [DngErrorCode] carries.
+abstract final class CeyxDecodeIntoError {
+  /// Caller buffer null, zero-capacity, or shorter than width*height*4.
+  /// Reported before any pixel work, with the extent filled in.
+  static const int dstTooSmall = -301;
+
+  /// This build has no decoder for that format — the generic-RAW arm was
+  /// compiled out (`DNG_ENABLE_GENERIC_RAW=OFF`). The SYMBOL still exists;
+  /// only the format is unsupported, which is why availability is one flag and
+  /// this is an ordinary error return rather than a missing lookup.
+  static const int formatUnsupportedInBuild = -302;
+
+  /// The probe reported success but produced a zero extent.
+  static const int probeFailed = -303;
+}
+
+/// R4 WP10: the destination buffer handed to [DngDecoderService
+/// .decodeIntoPointer] was too small. Carries the extent the NATIVE layer
+/// reported, so the caller's retry is exact rather than a guess.
+///
+/// This is a cheap, self-healing miss: the native entry refuses before any
+/// pixel work, so a stale size prediction costs one metadata parse.
+class DngBufferTooSmallException implements Exception {
+  DngBufferTooSmallException(this.width, this.height);
+
+  final int width;
+  final int height;
+
+  /// Bytes the matching decode needs.
+  int get requiredBytes => width * height * 4;
+
+  @override
+  String toString() =>
+      'DngBufferTooSmallException(${width}x$height, '
+      'requires $requiredBytes bytes)';
 }
 
 class _DecodeWorkerResult {
@@ -402,6 +456,127 @@ class DngDecoderService {
           DngErrorCode.parseFailed,
           _unsupportedMessage(filePath),
         );
+    }
+  }
+
+  /// Whether the loaded dylib can decode a DNG into a caller-owned buffer.
+  bool get decodeIntoBufferAvailable {
+    if (!_initialized) {
+      initialize();
+    }
+    return _bindings.decodeIntoBufferAvailable;
+  }
+
+  /// R4 WP10: metadata-only output-extent probe.
+  ///
+  /// FORMAT-AGNOSTIC BY CONSTRUCTION — there is deliberately no route switch
+  /// here (AC16.1). The native entry routes on `raw_probe_file`: a DNG takes
+  /// the DNG metadata probe, a generic-RAW file takes the LibRaw one, and both
+  /// skip their pipeline's expensive step.
+  ///
+  /// Returns null when the dylib predates the entry, when this build has no
+  /// decoder for the format (`kCeyxErrFormatUnsupportedInBuild`), or when the
+  /// probe fails — callers then fall back to the allocating route rather than
+  /// guessing a size. A guess would be sized wrong on the non-Bayer downgrade
+  /// (G4) or on a format whose geometry moves during unpack (R11.1).
+  ///
+  /// Must only be called on a worker isolate.
+  ({int width, int height})? probeOutputSize(String filePath, {int? maxDim}) {
+    if (!_initialized) {
+      initialize();
+    }
+    final probe = _bindings.ceyxProbeOutputSize;
+    if (probe == null) return null;
+
+    final pathPtr = filePath.toNativeUtf8();
+    final wPtr = calloc<Int32>();
+    final hPtr = calloc<Int32>();
+    try {
+      final rc = probe(pathPtr.cast(), maxDim ?? 0, wPtr, hPtr);
+      if (rc != 0 || wPtr.value <= 0 || hPtr.value <= 0) return null;
+      return (width: wPtr.value, height: hPtr.value);
+    } finally {
+      calloc.free(wPtr);
+      calloc.free(hPtr);
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// R4 WP10: pointer-transfer decode INTO the caller's buffer at
+  /// [dstAddress] ([dstCapacity] bytes).
+  ///
+  /// FORMAT-AGNOSTIC BY CONSTRUCTION — no route switch here either (AC16.1);
+  /// the native entry routes internally, which is why one binding serves both
+  /// a `.dng` and an `.arw`.
+  ///
+  /// Returns the SAME 5-element wire shape as [decodeForPointerTransfer],
+  /// where `address == dstAddress` — pointer identity is part of the native
+  /// contract, so the pool's slot and the payload are the same memory and no
+  /// copy happens anywhere.
+  ///
+  /// Throws [DngBufferTooSmallException] when the native layer refuses the
+  /// buffer, carrying the extent IT reported so the caller's re-acquire is
+  /// exact. That refusal happens before any pixel work on the DNG route; on
+  /// the RAW route it costs an unpack (AMENDMENT 2b A2.11 Q1), which is why
+  /// the probe — not the refusal — is the primary sizing mechanism.
+  ///
+  /// Must only be called on a worker isolate.
+  List<Object?> decodeIntoPointer(
+    String filePath,
+    int dstAddress,
+    int dstCapacity, {
+    int? maxDim,
+  }) {
+    if (!_initialized) {
+      initialize();
+    }
+    final decodeInto = _bindings.ceyxDecodeIntoBuffer;
+    if (decodeInto == null) {
+      // Never reached from the pool, which checks decodeIntoBufferAvailable
+      // first. Loud rather than a silent fallback: a caller that reached here
+      // believes it handed over a slot, and quietly ignoring the address would
+      // leak that slot while every test stayed green.
+      throw StateError('ceyx_decode_into_buffer unavailable in this dylib');
+    }
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+    try {
+      resultPtr = decodeInto(
+        pathPtr.cast(),
+        maxDim ?? 0,
+        Pointer<Uint8>.fromAddress(dstAddress),
+        dstCapacity,
+      );
+      if (resultPtr != nullptr &&
+          resultPtr.ref.errorCode == CeyxDecodeIntoError.dstTooSmall) {
+        // ONE "too small" code for ONE entry pair, so the retry stays
+        // route-agnostic — which is what lets the pool's kMsgResize handler
+        // stay route-agnostic too.
+        throw DngBufferTooSmallException(
+          resultPtr.ref.width,
+          resultPtr.ref.height,
+        );
+      }
+      // Reused UNCHANGED. It clears result.rgbaData before returning, which is
+      // what stops dng_free_result in the finally below from handing the
+      // CALLER's buffer to dng_rgba_output_release.
+      //
+      // `isRaw: false` is NOT a claim that the file is a DNG — this entry is
+      // format-agnostic and Dart deliberately does not know the route
+      // (AC16.1). It is safe because `_throwDecodeError` discriminates on the
+      // CODE as well: `if (isRaw || RawErrorCode.isRawError(code))`, and the
+      // two scales are disjoint by contract, so a RAW failure still raises a
+      // RawDecodeException. The only behavioural difference is for a null
+      // result or a null buffer WITH a success code, where the generic
+      // DngDecodeException is raised instead of the RAW-flavoured one; both
+      // are decode failures and callers treat any throw identically.
+      return _finishPointerTransfer(resultPtr, isRaw: false);
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
     }
   }
 

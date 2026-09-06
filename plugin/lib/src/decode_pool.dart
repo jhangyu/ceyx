@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -43,6 +44,14 @@ enum CeyxPoolJobType {
   /// (returns `Uint8List`, the JPEG bytes). APPENDED — never renumbered, same
   /// rule the error codes carry (`encode_bindings.dart:51`).
   encode,
+
+  /// WP10: metadata-only output-extent probe for one `(path, maxDim)`
+  /// (returns `[int width, int height]`, both 0 when unsupported).
+  ///
+  /// Dispatched by the pool ITSELF, never by a host: it is how the main
+  /// isolate learns how large a slot to acquire before a pooled decode. Also
+  /// APPENDED — the index is the wire value, so this must stay last.
+  probeSize,
 }
 
 /// Result of a pool submission.
@@ -129,7 +138,23 @@ const String kMsgError = 'error';
 /// (`message.length > 5 ? message[5] as List<Object?> : null`) mirroring the
 /// R4 bootstrap-widening rule (`:150-153` below), so an older host driving a
 /// newer worker (or vice versa) still works.
+/// WP10: gains two more optional trailing elements, `dstAddress` and
+/// `dstCapacity`, present only when the MAIN isolate pre-acquired a slot for
+/// this job. They sit AFTER `encodeArgs` so the existing `message.length > 5`
+/// read is unaffected, and their ABSENCE is the degraded route — a worker that
+/// sees no address and a pool that took no slot agree by construction.
 const String kMsgJob = 'job';
+
+/// `[kMsgResize, int requestId, int width, int height]` — WP10.
+///
+/// The worker's decode-into was refused because the pre-acquired slot was too
+/// small (the native `kDngErrDstTooSmall` / `kRawErrDstTooSmall` return), and
+/// these are the dimensions the NATIVE layer reported. The pool releases the
+/// undersized slot, re-acquires `width*height*4`, and re-dispatches the same
+/// request id EXACTLY once; a second refusal for one job fails the job rather
+/// than looping, because a self-healing retry that can loop is not
+/// self-healing.
+const String kMsgResize = 'resize';
 
 /// `[kMsgShutdown]` — worker should close its port and exit.
 const String kMsgShutdown = 'shutdown';
@@ -289,6 +314,53 @@ class CeyxDecodePool {
   @visibleForTesting
   int debugCoalescedCount = 0;
 
+  // --- WP10: pooled decode-into wiring ------------------------------------
+
+  /// `'$path|$maxDim' -> required bytes`. Ints only, so a long session cannot
+  /// grow this into a memory problem of its own; LRU-evicted at
+  /// [_kSizeCacheLimit] entries.
+  ///
+  /// A value of [_kNoPooledRoute] means "this key has no pooled route" (the
+  /// probe was unsupported or failed), which is cached exactly like a size so
+  /// a permanently-unprobeable path costs one probe, not one per decode.
+  final LinkedHashMap<String, int> _sizeCache = LinkedHashMap<String, int>();
+  static const int _kSizeCacheLimit = 512;
+  static const int _kNoPooledRoute = -1;
+
+  /// Dispatches per path, including retries. Keyed by path rather than request
+  /// id because a retry deliberately REUSES its request id (that is what makes
+  /// "exactly once" checkable at all).
+  final Map<String, int> _dispatchCounts = <String, int>{};
+
+  /// Test-only: how many `probeSize` jobs this pool has dispatched. The size
+  /// cache's whole purpose is to keep this at one per `(path, maxDim)`.
+  @visibleForTesting
+  int debugProbeSizeCount = 0;
+
+  /// Test-only override for "the dylib exports the decode-into pair".
+  /// Null means "ask the library". Exists because a plugin unit test has no
+  /// dylib to ask, and because forcing it FALSE is the only way to test the
+  /// degraded route that every currently pinned Halcyon build is actually in.
+  ///
+  /// ONE override, matching the one real flag: the entries are format-agnostic
+  /// and live in an always-compiled TU, so there is no build in which they are
+  /// available for one format and absent for another. A format this build
+  /// cannot decode is signalled by the PROBE returning no extent, which this
+  /// pool already caches as "no pooled route".
+  @visibleForTesting
+  static bool? debugDecodeIntoAvailable;
+
+  @visibleForTesting
+  void debugSeedSizeCache(String path, int? maxDim, int bytes) =>
+      _sizeCache['$path|$maxDim'] = bytes;
+
+  @visibleForTesting
+  int? debugSizeCacheFor(String path, int? maxDim) =>
+      _sizeCache['$path|$maxDim'];
+
+  @visibleForTesting
+  int debugDispatchCountFor(String path) => _dispatchCounts[path] ?? 0;
+
   /// Test-only (R4 item 4 / BLOCKER-1 evidence): how many times `_pump()` was
   /// called while an OUTER `_pump()` call was already on the stack (derived
   /// from the same `_pumping` flag the re-entrancy guard reads, not a second
@@ -436,9 +508,151 @@ class CeyxDecodePool {
       generation: gen,
     );
     _byKey[key] = job;
+    if (type == CeyxPoolJobType.decode && _pooledRouteEnabled) {
+      // WP10: the slot is acquired HERE, on the pool's own isolate, because
+      // that is where CeyxNativeBufferPool's free list lives. Preparation is
+      // asynchronous (a probe may have to run first), so the job is registered
+      // in `_byKey` above BEFORE the await — a concurrent submit for the same
+      // key must coalesce onto it rather than start a second probe.
+      unawaited(_prepareAndEnqueue(job));
+    } else {
+      _queue.add(job);
+      _pump();
+    }
+    return job.completer.future;
+  }
+
+  /// Whether a decode may take the pooled decode-into route: a pool must exist
+  /// to take a slot from, and the dylib must export the entry pair.
+  ///
+  /// Deliberately NOT per-path. The entries are format-agnostic, so there is
+  /// nothing to ask about a path here; a format this build cannot decode is
+  /// discovered by the PROBE (which answers no extent) and cached as "no
+  /// pooled route", so the slot is never acquired in the first place.
+  bool get _pooledRouteEnabled {
+    if (nativeBufferPool == null) return false;
+    return debugDecodeIntoAvailable ?? _libraryDecodeInto();
+  }
+
+  /// The availability flag read off the loaded library, resolved once.
+  ///
+  /// A failure to open the library is NOT rethrown here (unlike
+  /// [_freeBindings], where a missing free symbol would mean a permanent
+  /// leak): "cannot ask" and "not present" both mean the pooled route stays
+  /// unreachable, which is exactly today's behaviour.
+  bool _libraryDecodeInto() {
+    final cached = _decodeIntoCache;
+    if (cached != null) return cached;
+    bool resolved;
+    try {
+      resolved = _freeBindings.decodeIntoBufferAvailable;
+    } catch (e) {
+      logger('pool|DECODE_INTO_UNAVAILABLE|$e');
+      resolved = false;
+    }
+    _decodeIntoCache = resolved;
+    return resolved;
+  }
+
+  bool? _decodeIntoCache;
+
+  /// WP10 preparation: learn the output extent (probing once per
+  /// `(path, maxDim)`), acquire a slot of that size, then enqueue the job.
+  ///
+  /// Any failure degrades to the ordinary allocating route rather than failing
+  /// the decode: this whole path is an optimisation, and a photo that will not
+  /// probe must still open.
+  Future<void> _prepareAndEnqueue(_PoolJob job) async {
+    try {
+      var bytes = _sizeCache[_sizeKey(job.path, job.maxDim)];
+      if (bytes == null) {
+        bytes = await _probeSizeFor(job.path, job.maxDim);
+        if (_disposed || job.completer.isCompleted) return;
+      }
+      if (bytes != null && bytes > 0) {
+        job.slot = await nativeBufferPool?.acquire(bytes);
+        if (_disposed || job.completer.isCompleted) {
+          // Raced with dispose/cancel while awaiting: return the slot rather
+          // than stranding it checked out forever.
+          _releaseSlot(job);
+          return;
+        }
+      }
+    } catch (e) {
+      // Probe or acquire blew up. Drop the slot idea and take the old route.
+      logger('pool|POOLED_PREPARE_FAILED|${job.path}|$e');
+      _releaseSlot(job);
+    }
+    if (_disposed || job.completer.isCompleted) {
+      _releaseSlot(job);
+      return;
+    }
     _queue.add(job);
     _pump();
-    return job.completer.future;
+  }
+
+  /// Dispatches ONE `probeSize` job and caches its answer. Returns null when
+  /// the extent is not knowable, which is itself cached (as [_kNoPooledRoute])
+  /// so an unprobeable path costs one probe for the session, not one per
+  /// decode.
+  Future<int?> _probeSizeFor(String path, int? maxDim) async {
+    final key = _sizeKey(path, maxDim);
+    debugProbeSizeCount++;
+    final probe = _PoolJob(
+      key: (CeyxPoolJobType.probeSize, path, maxDim),
+      type: CeyxPoolJobType.probeSize,
+      path: path,
+      maxDim: maxDim,
+      generation: _generation,
+    );
+    _byKey[probe.key] = probe;
+    _queue.add(probe);
+    _pump();
+
+    final CeyxPoolOutcome<Object?> outcome;
+    try {
+      outcome = await probe.completer.future;
+    } catch (e) {
+      logger('pool|PROBE_SIZE_FAILED|$path|$e');
+      _putSizeCache(key, _kNoPooledRoute);
+      return null;
+    }
+    final size = outcome.value;
+    if (size is! List<Object?> || size.length < 2) {
+      _putSizeCache(key, _kNoPooledRoute);
+      return null;
+    }
+    final width = size[0] as int;
+    final height = size[1] as int;
+    if (width <= 0 || height <= 0) {
+      // The dylib predates the entry for this route, or the probe failed.
+      _putSizeCache(key, _kNoPooledRoute);
+      return null;
+    }
+    final bytes = width * height * 4;
+    _putSizeCache(key, bytes);
+    return bytes;
+  }
+
+  static String _sizeKey(String path, int? maxDim) => '$path|$maxDim';
+
+  void _putSizeCache(String key, int bytes) {
+    _sizeCache.remove(key);
+    _sizeCache[key] = bytes;
+    while (_sizeCache.length > _kSizeCacheLimit) {
+      // LinkedHashMap iterates in insertion order, and the re-insert above
+      // makes "first" the least recently written — LRU without a second
+      // structure to keep in sync.
+      _sizeCache.remove(_sizeCache.keys.first);
+    }
+  }
+
+  /// Returns [job]'s slot to the buffer pool, if it still holds one.
+  void _releaseSlot(_PoolJob job) {
+    final slot = job.slot;
+    if (slot == null) return;
+    job.slot = null;
+    nativeBufferPool?.release(slot);
   }
 
   /// Convenience wrapper: full decode, throwing on discard so the result type
@@ -533,6 +747,10 @@ class CeyxDecodePool {
     _byRequestId.clear();
     for (final job in lost) {
       _byKey.remove(job.key);
+      // WP10: a job dying with a slot still checked out would strand that slot
+      // for the pool's lifetime. Its payload never landed, so nothing is
+      // reading the memory and returning it here is safe.
+      _releaseSlot(job);
       job.completeError(CeyxPoolUnavailableException('pool disposed'));
     }
   }
@@ -635,19 +853,125 @@ class CeyxDecodePool {
   }
 
   void _dispatch(_PoolWorker worker, _PoolJob job) {
-    final id = _nextRequestId++;
+    // WP10: a resize retry REUSES its request id on purpose. The retry is the
+    // same job, and reusing the id is what makes "dispatched exactly twice"
+    // observable instead of being two unrelated ids that have to be correlated
+    // after the fact.
+    final id = job.awaitingRetry ? job.requestId! : _nextRequestId++;
+    job.awaitingRetry = false;
     job.requestId = id;
     worker.currentJob = job;
     _byRequestId[id] = job;
+    _dispatchCounts[job.path] = (_dispatchCounts[job.path] ?? 0) + 1;
     final encodeArgs = job.encodeArgs;
+    final slot = job.slot;
     worker.sendPort!.send(<Object?>[
       kMsgJob,
       id,
       job.type.index,
       job.path,
       job.maxDim,
-      if (encodeArgs != null) encodeArgs,
+      // WP10: additive, and present ONLY when a slot was pre-acquired on this
+      // isolate. Absent entirely on the degraded route, so a worker that
+      // ignores them and a pool that never took a slot agree by construction.
+      //
+      // The two fields sit at FIXED indices 6 and 7, which means index 5 must
+      // be occupied even for a decode job that has no encodeArgs — otherwise a
+      // collection-if would collapse the list and slide the address into the
+      // encodeArgs slot, where the encode reader would find an int. A pooled
+      // decode therefore sends an explicit null placeholder.
+      if (slot != null) ...<Object?>[encodeArgs, slot.address, slot.capacity]
+      // No slot: byte-for-byte the pre-WP10 shape (length 5, or 6 for encode).
+      else if (encodeArgs != null)
+        encodeArgs,
     ]);
+  }
+
+  /// WP10: the worker refused the pre-acquired slot as too small and reported
+  /// the extent the native layer actually needs.
+  void _onResize(_PoolWorker worker, int requestId, int width, int height) {
+    final job = _byRequestId[requestId];
+    if (job == null) return;
+    final bytes = width * height * 4;
+
+    if (job.pooledAbandoned) {
+      // A refusal on the UNPOOLED fallback, where this job was handed no
+      // buffer at all. Nothing was refused because nothing was given, so the
+      // worker is broken rather than the file being awkward. Fail: an
+      // unbounded resize loop hangs a decode forever, which is worse than
+      // either honest outcome.
+      _byRequestId.remove(requestId);
+      _byKey.remove(job.key);
+      worker.currentJob = null;
+      _releaseSlot(job);
+      job.completeError(
+        StateError(
+          'decode-into refused for ${job.path} after the pool had already '
+          'withdrawn the buffer: the worker asked for $bytes bytes for a job '
+          'carrying no dstAddress',
+        ),
+      );
+      _pump();
+      return;
+    }
+
+    if (job.resized) {
+      // SECOND refusal (erratum E-WP10-1072). This is NOT necessarily a lying
+      // probe: a -301 has two sources, and the RAW post-unpack capacity
+      // backstop can legitimately refuse a retry that was sized from the FIRST
+      // refusal's extent, for formats whose geometry shifts during unpack
+      // (R11.1, X3F/Foveon).
+      //
+      // Failing here would mean a photo that opened fine BEFORE WP10 stops
+      // opening because of WP10. So withdraw the buffer and dispatch once more
+      // on the ordinary allocating route: the photo still opens, degraded.
+      //
+      // The POOLED retry is still bounded at exactly one, which is the
+      // property AC12.3 exists to protect. This cannot loop: with no
+      // dstAddress in the message the worker takes the allocating route and
+      // has nothing to refuse — and if it refuses anyway, the guard above
+      // fails the job.
+      logger(
+        'pool|DECODE_INTO_REFUSED_TWICE|${job.path}|supplied='
+        '${job.slot?.capacity}|requested=$bytes|falling back to the '
+        'allocating route',
+      );
+      job.pooledAbandoned = true;
+      _byRequestId.remove(requestId);
+      worker.currentJob = null;
+      _releaseSlot(job);
+      job.awaitingRetry = true;
+      _queue.add(job);
+      _pump();
+      return;
+    }
+    job.resized = true;
+    _putSizeCache(_sizeKey(job.path, job.maxDim), bytes);
+    _byRequestId.remove(requestId);
+    worker.currentJob = null;
+    _releaseSlot(job);
+    unawaited(_reacquireAndRedispatch(job, bytes));
+    _pump();
+  }
+
+  /// Re-acquires a slot at the extent native reported and re-queues the SAME
+  /// job for one more dispatch.
+  Future<void> _reacquireAndRedispatch(_PoolJob job, int bytes) async {
+    try {
+      job.slot = await nativeBufferPool?.acquire(bytes);
+    } catch (e) {
+      logger('pool|RESIZE_REACQUIRE_FAILED|${job.path}|$e');
+      // Fall through with no slot: the retry takes the ordinary allocating
+      // route, which still produces a correct image.
+      job.slot = null;
+    }
+    if (_disposed || job.completer.isCompleted) {
+      _releaseSlot(job);
+      return;
+    }
+    job.awaitingRetry = true;
+    _queue.add(job);
+    _pump();
   }
 
   void _onWorkerMessage(_PoolWorker worker, Object? raw) {
@@ -715,6 +1039,12 @@ class CeyxDecodePool {
         return;
       case kMsgError:
         _completeJob(worker, raw[1] as int, null, raw.length > 2 ? raw[2] : null);
+        return;
+      // WP10. MUST stay ahead of `default:`, which calls _onWorkerLost — an
+      // unhandled resize would kill the worker that just correctly refused an
+      // undersized buffer.
+      case kMsgResize:
+        _onResize(worker, raw[1] as int, raw[2] as int, raw[3] as int);
         return;
       // R4 item 1. This case MUST stay ahead of `default:` — that arm calls
       // _onWorkerLost, so an unhandled ack would kill the very worker that
@@ -800,8 +1130,15 @@ class CeyxDecodePool {
     if (job != null) {
       _byKey.remove(job.key);
       if (error != null) {
+        // WP10: the decode failed, so nothing wrapped the slot and nothing is
+        // reading it. Returning it here is what keeps a run of failing files
+        // from draining the fixed slot set. (On SUCCESS the slot is
+        // deliberately NOT released: ownership passes to the DngImage, whose
+        // releaseToPool() returns it at end of consumption.)
+        _releaseSlot(job);
         job.completeError(error);
       } else if (job.type != CeyxPoolJobType.encode &&
+          job.type != CeyxPoolJobType.probeSize &&
           job.generation < _generation) {
         // Soft cancellation: drop the payload WITHOUT materialising it.
         //
@@ -859,6 +1196,11 @@ class CeyxDecodePool {
         // WP3a: the worker returns the encoded JPEG as TransferableTypedData
         // (a ~2MB copy, kept: the result must become Dart-owned).
         return _materializeBytes(payload[0] as TransferableTypedData, type);
+      case CeyxPoolJobType.probeSize:
+        // WP10: two ints, no payload to own. Handed back as the raw list so
+        // the caller (_probeSizeFor, on this isolate) reads width/height
+        // without a type that exists only to carry them one frame.
+        return payload;
     }
   }
 
@@ -1009,6 +1351,9 @@ class CeyxDecodePool {
     if (lost != null) {
       _byRequestId.remove(lost.requestId);
       _byKey.remove(lost.key);
+      // WP10: same reasoning as in dispose() — the payload never landed, so
+      // the slot is unreferenced and must go back rather than leak.
+      _releaseSlot(lost);
       lost.completeError(CeyxPoolWorkerDiedException(worker.index, detail));
     }
 
@@ -1054,6 +1399,8 @@ class CeyxDecodePool {
     _queue.clear();
     for (final job in stranded) {
       _byKey.remove(job.key);
+      // WP10: a queued job may already hold a pre-acquired slot.
+      _releaseSlot(job);
       job.completeError(CeyxPoolUnavailableException(detail));
     }
   }
@@ -1114,6 +1461,26 @@ class _PoolJob {
   // jobs; null for every other job type.
   final List<Object?>? encodeArgs;
   int? requestId;
+
+  // WP10: the slot pre-acquired on the pool's isolate for this job, or null on
+  // the degraded route. Whoever clears this field owns returning it.
+  CeyxNativeBuffer? slot;
+
+  /// True once this job has been refused with [kMsgResize] one time. A second
+  /// refusal fails the job instead of re-dispatching, which is the bound on
+  /// the retry.
+  bool resized = false;
+
+  /// Set between a resize and the retry dispatch, so [_dispatch] reuses the
+  /// existing request id rather than minting a new one.
+  bool awaitingRetry = false;
+
+  /// True once the pool has given up on the pooled route for THIS job and
+  /// re-dispatched it with no slot (erratum E-WP10-1072). A further refusal
+  /// after this point is a broken worker, not an awkward file, and fails the
+  /// job — which is what makes the resize path terminate.
+  bool pooledAbandoned = false;
+
   final Completer<CeyxPoolOutcome<Object?>> completer = Completer();
 
   void complete(CeyxPoolOutcome<Object?> outcome) {
@@ -1235,8 +1602,13 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
     final maxDim = message[4] as int?;
     // WP3a: optional trailing element, present only for encode jobs. Length
     // guard mirrors the R4 bootstrap-widening rule above.
+    //
+    // WP10 made this position NULLABLE as well as optional: a pooled decode
+    // occupies index 5 with an explicit null so its dstAddress/dstCapacity keep
+    // fixed indices 6/7 (see _dispatch). Hence the `?` — an unconditional cast
+    // would throw on every pooled decode.
     final encodeArgs = message.length > 5
-        ? message[5] as List<Object?>
+        ? message[5] as List<Object?>?
         : null;
     try {
       switch (type) {
@@ -1247,9 +1619,41 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
             requestId,
             bytes == null ? null : TransferableTypedData.fromList([bytes]),
           ]);
+        case CeyxPoolJobType.probeSize:
+          // WP10: metadata only. Zero/zero means "not knowable here" (the
+          // dylib predates this route's entry, or the probe failed) and the
+          // pool caches that as "no pooled route" rather than re-asking.
+          final size = service.probeOutputSize(path, maxDim: maxDim);
+          poolPort.send(<Object?>[
+            kMsgResult,
+            requestId,
+            size?.width ?? 0,
+            size?.height ?? 0,
+          ]);
         case CeyxPoolJobType.decode:
-          final image = service.decodeForPointerTransfer(path, maxDim: maxDim);
-          poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
+          // WP10: the address arrives in the message ONLY when the main
+          // isolate pre-acquired a slot AND the dylib exports the entry for
+          // this file's route. Both absent => byte-for-byte the pre-WP10 path.
+          final dstAddress = message.length > 6 ? message[6] as int : 0;
+          final dstCapacity = message.length > 7 ? message[7] as int : 0;
+          if (dstAddress != 0 && service.decodeIntoBufferAvailable) {
+            try {
+              final image = service.decodeIntoPointer(
+                path,
+                dstAddress,
+                dstCapacity,
+                maxDim: maxDim,
+              );
+              poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
+            } on DngBufferTooSmallException catch (e) {
+              // The prediction was stale. Report the extent native gave us so
+              // the pool re-acquires exactly, rather than guessing again.
+              poolPort.send(<Object?>[kMsgResize, requestId, e.width, e.height]);
+            }
+          } else {
+            final image = service.decodeForPointerTransfer(path, maxDim: maxDim);
+            poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
+          }
         case CeyxPoolJobType.encode:
           final result = _encodeOnPoolWorker(lib, encodeArgs!);
           poolPort.send(<Object?>[kMsgResult, requestId, result]);

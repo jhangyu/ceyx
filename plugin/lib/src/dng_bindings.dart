@@ -125,6 +125,52 @@ typedef DngDecodeRecommendationClassPixelsNative =
     ffi.Int64 Function(ffi.Int32 index);
 typedef DngDecodeRecommendationClassPixelsDart = int Function(int index);
 
+// R4 WP10 (AMENDMENT 3): ONE format-agnostic probe/decode-into pair.
+//
+// ADDITIVE — absent from every dylib built before 2026-09-06 (including the
+// release Halcyon currently pins), so the lookup MUST be guarded like the slot
+// group above. Signatures are FROZEN by plan A3.3; the native half is written
+// against the same text.
+//
+// One pair, not two: the entries live in an ALWAYS-COMPILED translation unit
+// (`native/src/ffi/ceyx_decode_into_ffi.cpp`, which no cmake EXCLUDE filter
+// names), and the generic-RAW arm inside them is guarded in-source. So both
+// symbols exist in every build configuration — including
+// DNG_ENABLE_GENERIC_RAW=OFF, where a RAW input gets a clean
+// kCeyxErrFormatUnsupportedInBuild instead of a missing symbol. That is what
+// makes ONE availability flag correct here: the probe and the decode fail
+// TOGETHER for a format this build cannot handle, so there is no state in
+// which the pool believes a slot will be used and the worker ignores it.
+typedef CeyxProbeOutputSizeNative =
+    ffi.Int32 Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+      ffi.Pointer<ffi.Int32> outWidth,
+      ffi.Pointer<ffi.Int32> outHeight,
+    );
+typedef CeyxProbeOutputSizeDart =
+    int Function(
+      ffi.Pointer<Utf8> filePath,
+      int maxDim,
+      ffi.Pointer<ffi.Int32> outWidth,
+      ffi.Pointer<ffi.Int32> outHeight,
+    );
+
+typedef CeyxDecodeIntoBufferNative =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      ffi.Size dstCapacity,
+    );
+typedef CeyxDecodeIntoBufferDart =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      int maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      int dstCapacity,
+    );
+
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
@@ -150,6 +196,14 @@ class DngNativeBindings {
   DngDecodeConfiguredSlotsDart? _dngDecodeConfiguredSlots;
   DngDecodeRecommendedSlotsDart? _dngDecodeRecommendedSlots;
   DngDecodeRecommendationClassPixelsDart? _dngDecodeRecommendationClassPixels;
+
+  // R4 WP10: the guarded format-agnostic probe + decode-into pair. Null
+  // TOGETHER — they ship in one commit, so a dylib exposing one but not the
+  // other is a corrupt build and degrades to "unsupported" rather than
+  // half-working (a resolved decode-into with an absent probe would size every
+  // slot by guesswork).
+  CeyxProbeOutputSizeDart? _ceyxProbeOutputSize;
+  CeyxDecodeIntoBufferDart? _ceyxDecodeIntoBuffer;
 
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
@@ -198,6 +252,27 @@ class DngNativeBindings {
 
   /// Whether this library exposes the configurable native slot cap.
   bool get slotConfigAvailable => _dngDecodeConfigureSlots != null;
+
+  /// Guarded access to the R4 WP10 metadata-only output-extent probe. Null
+  /// when the loaded dylib predates the entry. Format-agnostic: the native
+  /// side routes DNG vs generic-RAW internally.
+  CeyxProbeOutputSizeDart? get ceyxProbeOutputSize => _ceyxProbeOutputSize;
+
+  /// Guarded access to the R4 WP10 decode-into-caller-buffer entry. Null when
+  /// the loaded dylib predates the entry. Format-agnostic, as above.
+  CeyxDecodeIntoBufferDart? get ceyxDecodeIntoBuffer => _ceyxDecodeIntoBuffer;
+
+  /// True only when BOTH WP10 symbols resolved. Partial availability is a
+  /// corrupt build and reports as unsupported, so the host falls back to the
+  /// allocating decode route as a whole rather than half-way through it.
+  ///
+  /// ONE flag for every format, because there is one symbol pair for every
+  /// format. A build that cannot decode generic RAW still EXPORTS both symbols
+  /// and answers a RAW input with `kCeyxErrFormatUnsupportedInBuild` from the
+  /// PROBE — so that case is handled by the probe returning no extent, not by
+  /// a second availability flag.
+  bool get decodeIntoBufferAvailable =>
+      _ceyxProbeOutputSize != null && _ceyxDecodeIntoBuffer != null;
 
   /// The slot count the native layer is currently configured for, or null when
   /// the dylib predates the entry.
@@ -326,6 +401,29 @@ class DngNativeBindings {
       _dngDecodeConfiguredSlots = null;
       _dngDecodeRecommendedSlots = null;
       _dngDecodeRecommendationClassPixels = null;
+    }
+
+    // R4 WP10. One try block for both on purpose, same rule as the slot group
+    // above: they are added by the same commit, so partial availability means
+    // a corrupt build. Degrading the pair to "unsupported" keeps the pooled
+    // decode route unreachable rather than half-wired — a slot marked in use
+    // while the worker ignores its address is a leak that tests green.
+    //
+    // ONE group for every format (plan A3.1): these two live in an
+    // always-compiled TU, so there is no build in which one format's entry is
+    // present and another's is absent.
+    try {
+      _ceyxProbeOutputSize = _lib
+          .lookupFunction<CeyxProbeOutputSizeNative, CeyxProbeOutputSizeDart>(
+            'ceyx_probe_output_size',
+          );
+      _ceyxDecodeIntoBuffer = _lib
+          .lookupFunction<CeyxDecodeIntoBufferNative, CeyxDecodeIntoBufferDart>(
+            'ceyx_decode_into_buffer',
+          );
+    } catch (_) {
+      _ceyxProbeOutputSize = null;
+      _ceyxDecodeIntoBuffer = null;
     }
 
     dngDecoderWarmupForSize = _lib

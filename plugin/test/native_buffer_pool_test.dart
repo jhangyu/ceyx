@@ -4,6 +4,11 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ceyx/ceyx.dart';
+// WP10 wire tag. Imported from src with an explicit `show` rather than added
+// to the package barrel: `plugin/lib/ceyx.dart` is outside this task's file
+// ownership (plan A2.13), and the `show` keeps the import unambiguous against
+// the barrel above. Precedent: encode_service_test.dart:8.
+import 'package:ceyx/src/decode_pool.dart' show kMsgResize;
 import 'package:ffi/ffi.dart' show calloc;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -254,6 +259,435 @@ void main() {
     },
   );
 
+  // -------------------------------------------------------------------
+  // WP10 (plan AMENDMENT 2 Task 12 + AMENDMENT 2b addendum): the pooled
+  // decode-into route. The slot is acquired on the MAIN isolate and its
+  // ADDRESS travels in the job message; the worker writes into it and never
+  // touches CeyxNativeBufferPool.
+  //
+  // Every one of these asserts `debugFinalizerReleases == 0` (AC12.6): the
+  // safety net firing means something escaped the explicit release path.
+  // -------------------------------------------------------------------
+
+  // AC12.1 — TC-1070
+  test(
+    'TC-1070: the pre-acquired address travels in the job message and the slot '
+    'stays checked out until consumption ends',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
+
+      final pool = CeyxDecodePool(width: 1, entryPoint: _dstAddressWorker);
+      addTearDown(pool.dispose);
+      pool.debugSeedSizeCache('a.dng', null, 2 * 2 * 4);
+
+      final outcome = await pool.submit(
+        CeyxPoolJobType.decode,
+        'a.dng',
+        generation: pool.generation,
+      );
+      final image = outcome.value! as DngImage;
+
+      expect(
+        image.nativeAddress,
+        isNot(0),
+        reason: 'the worker must have been given an address',
+      );
+      expect(buffers.debugCheckedOut, 1, reason: 'still being consumed');
+
+      final second = await buffers.acquire(2 * 2 * 4);
+      expect(
+        second.address,
+        isNot(image.nativeAddress),
+        reason: 'a live slot must not be handed out twice',
+      );
+      buffers.release(second);
+
+      image.releaseToPool();
+      expect(buffers.debugExplicitReleases, 2);
+      expect(
+        buffers.debugFinalizerReleases,
+        0,
+        reason: 'safety net must not fire',
+      );
+    },
+  );
+
+  // AC12.2 — TC-1071
+  test(
+    'TC-1071: a resize response releases the undersized slot, re-acquires the '
+    'exact size, and re-dispatches exactly once',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
+
+      final pool = CeyxDecodePool(width: 1, entryPoint: _resizeOnceWorker);
+      addTearDown(pool.dispose);
+      pool.debugSeedSizeCache('b.dng', null, 2 * 2 * 4); // deliberately stale
+
+      final outcome = await pool.submit(
+        CeyxPoolJobType.decode,
+        'b.dng',
+        generation: pool.generation,
+      );
+      final image = outcome.value! as DngImage;
+
+      expect(
+        image.rgbaData.length,
+        4 * 4 * 4,
+        reason: 'the retry used the real size',
+      );
+      expect(
+        pool.debugDispatchCountFor('b.dng'),
+        2,
+        reason: 'exactly one retry',
+      );
+      expect(
+        buffers.debugCheckedOut,
+        1,
+        reason: 'only the retry slot is live',
+      );
+      expect(
+        pool.debugSizeCacheFor('b.dng', null),
+        4 * 4 * 4,
+        reason: 'the cache learned the real size',
+      );
+
+      image.releaseToPool();
+      expect(buffers.debugFinalizerReleases, 0);
+    },
+  );
+
+  // AC12.3 / R10.5 — TC-1072, REWRITTEN under erratum E-WP10-1072.
+  //
+  // The original version asserted that a second refusal throws. That was
+  // written when the only source of a "too small" refusal was the cheap
+  // pre-check, so a double refusal implied a lying probe. Under AMENDMENT 3
+  // there is a SECOND source — the RAW post-unpack capacity backstop, for
+  // formats whose geometry shifts during unpack (R11.1, X3F/Foveon) — so a
+  // double refusal is a legitimate outcome on a real file.
+  //
+  // Failing the job there would mean a photo that opened fine BEFORE WP10
+  // stops opening because of WP10. The bound that matters is "the pooled
+  // retry happens at most once", not "the decode dies"; so the second refusal
+  // now falls back to the ordinary allocating route and the photo still opens.
+  //
+  // The double refusal here is modelled realistically: this worker refuses
+  // only when it was actually GIVEN a buffer, and decodes normally when it was
+  // not — which is exactly how the native entry behaves.
+  test(
+    'TC-1072: a second resize falls back to the unpooled route so the decode '
+    'still succeeds, with the pooled retry still bounded at one',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      CeyxDecodePool.debugNativeFree =
+          (address) => calloc.free(Pointer<Uint8>.fromAddress(address));
+      addTearDown(() {
+        CeyxDecodePool.debugDecodeIntoAvailable = null;
+        CeyxDecodePool.debugNativeFree = null;
+      });
+
+      final pool = CeyxDecodePool(
+        width: 1,
+        entryPoint: _twoSourceRefusalWorker,
+      );
+      addTearDown(pool.dispose);
+      pool.debugSeedSizeCache('c.dng', null, 2 * 2 * 4);
+
+      final outcome = await pool.submit(
+        CeyxPoolJobType.decode,
+        'c.dng',
+        generation: pool.generation,
+      );
+      final image = outcome.value! as DngImage;
+
+      expect(
+        image.decodeMs,
+        5,
+        reason: 'the final dispatch carried NO dstAddress: the fallback took '
+            'the ordinary allocating route',
+      );
+      expect(
+        image.rgbaData.length,
+        2 * 2 * 4,
+        reason: 'the photo still opens — this is the regression this erratum '
+            'exists to prevent',
+      );
+      expect(
+        pool.debugDispatchCountFor('c.dng'),
+        3,
+        reason: 'initial + ONE pooled retry + the unpooled fallback',
+      );
+      expect(
+        buffers.debugCheckedOut,
+        0,
+        reason: 'both slots were returned; the fallback holds none',
+      );
+      expect(buffers.debugFinalizerReleases, 0);
+    },
+  );
+
+  // R10.5 retained — TC-1078.
+  //
+  // TC-1072 no longer proves termination, because its worker stops refusing
+  // once the buffer is withdrawn. This one keeps that guarantee against a
+  // PATHOLOGICAL worker that refuses unconditionally — including on the
+  // unpooled fallback, where it was given no buffer to refuse. That is a
+  // broken worker rather than a real file, and it must still terminate: an
+  // unbounded resize loop hangs a decode forever.
+  test(
+    'TC-1078: a worker that refuses even the unpooled fallback fails the job '
+    'rather than looping forever',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
+
+      final pool = CeyxDecodePool(width: 1, entryPoint: _alwaysResizeWorker);
+      addTearDown(pool.dispose);
+      pool.debugSeedSizeCache('p.dng', null, 2 * 2 * 4);
+
+      await expectLater(
+        pool.submit(
+          CeyxPoolJobType.decode,
+          'p.dng',
+          generation: pool.generation,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        pool.debugDispatchCountFor('p.dng'),
+        3,
+        reason: 'initial + pooled retry + unpooled fallback, then it stops',
+      );
+      expect(
+        buffers.debugCheckedOut,
+        0,
+        reason: 'every slot was returned on the failure path',
+      );
+      expect(buffers.debugFinalizerReleases, 0);
+    },
+  );
+
+  // AC12.4 / A2.6 — TC-1073
+  test(
+    'TC-1073: with the native entry absent, no address is sent and no slot is '
+    'taken',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = false;
+      addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
+      // The degraded route makes the WORKER own its allocation, exactly as in
+      // production; the seam frees it so this test leaks nothing.
+      CeyxDecodePool.debugNativeFree =
+          (address) => calloc.free(Pointer<Uint8>.fromAddress(address));
+      addTearDown(() => CeyxDecodePool.debugNativeFree = null);
+
+      final pool = CeyxDecodePool(width: 1, entryPoint: _dstAddressWorker);
+      addTearDown(pool.dispose);
+
+      final outcome = await pool.submit(
+        CeyxPoolJobType.decode,
+        'd.dng',
+        generation: pool.generation,
+      );
+      final image = outcome.value! as DngImage;
+
+      expect(
+        image.decodeMs,
+        5,
+        reason: 'the job message had exactly 5 elements: no dstAddress, no '
+            'dstCapacity (see _dstAddressWorker second signal)',
+      );
+      expect(buffers.debugCheckedOut, 0, reason: 'no slot may be taken');
+      expect(buffers.debugAllocations, 0);
+      expect(
+        pool.debugProbeSizeCount,
+        0,
+        reason: 'no probe on the degraded route',
+      );
+      expect(buffers.debugFinalizerReleases, 0);
+    },
+  );
+
+  // AC12.5 — TC-1074
+  test(
+    'TC-1074: the size cache is populated by one probe and reused by later '
+    'decodes',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
+
+      final pool = CeyxDecodePool(
+        width: 1,
+        entryPoint: _probeSizeThenDecodeWorker,
+      );
+      addTearDown(pool.dispose);
+
+      for (var i = 0; i < 2; i++) {
+        final outcome = await pool.submit(
+          CeyxPoolJobType.decode,
+          'e.dng',
+          generation: pool.generation,
+        );
+        (outcome.value! as DngImage).releaseToPool();
+      }
+      expect(
+        pool.debugProbeSizeCount,
+        1,
+        reason: 'the second decode must reuse the cached extent',
+      );
+      expect(buffers.debugFinalizerReleases, 0);
+    },
+  );
+
+  // AMENDMENT 3 AC16.2 — TC-1076.
+  //
+  // Replaces the 2b mixed-availability test that held this number. Under one
+  // format-agnostic entry pair the mixed state is unreachable by construction,
+  // so the property worth pinning inverted: BOTH formats must reach the pooled
+  // route through the SAME binding. A regression that reintroduced per-format
+  // routing in Dart shows up here as one of the two decodes silently
+  // degrading.
+  test(
+    'TC-1076: a .dng and a .arw both take the pooled route through the one '
+    'format-agnostic binding',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
+
+      final pool = CeyxDecodePool(width: 1, entryPoint: _dstAddressWorker);
+      addTearDown(pool.dispose);
+      pool.debugSeedSizeCache('f.dng', null, 2 * 2 * 4);
+      pool.debugSeedSizeCache('f.arw', null, 2 * 2 * 4);
+
+      for (final path in const <String>['f.dng', 'f.arw']) {
+        final outcome = await pool.submit(
+          CeyxPoolJobType.decode,
+          path,
+          generation: pool.generation,
+        );
+        final image = outcome.value! as DngImage;
+        expect(
+          image.decodeMs,
+          8,
+          reason: '$path must be pooled: 5 base fields + the encodeArgs '
+              'placeholder + dstAddress + dstCapacity',
+        );
+        expect(
+          buffers.ownsAddress(image.nativeAddress),
+          isTrue,
+          reason: '$path payload must sit in a pool slot',
+        );
+        expect(buffers.debugCheckedOut, 1, reason: '$path is being consumed');
+        image.releaseToPool();
+      }
+
+      expect(buffers.debugCheckedOut, 0);
+      expect(
+        buffers.debugFinalizerReleases,
+        0,
+        reason: 'AC16.2: the safety net must not fire on either route',
+      );
+    },
+  );
+
+  // AMENDMENT 3 — TC-1077, the DNG_ENABLE_GENERIC_RAW=OFF build.
+  //
+  // In that configuration BOTH symbols still exist (they live in an
+  // always-compiled TU), so availability is legitimately TRUE — but a generic
+  // RAW input has no decoder, and the native probe says so with
+  // kCeyxErrFormatUnsupportedInBuild. This case is what REPLACES 2b's second
+  // availability flag: probe and decode fail TOGETHER, so no slot is ever
+  // acquired and there is no window in which the pool believes a buffer is in
+  // use while the worker ignores its address.
+  //
+  // The sentinel is what makes it cheap: a path this build cannot probe costs
+  // ONE probe for the session, not one per decode.
+  test(
+    'TC-1077: on a build with no generic-RAW decoder, an .arw probe reports no '
+    'extent, no slot is taken, the decode falls back, and the miss is cached',
+    () async {
+      final buffers = CeyxNativeBufferPool(maxBuffers: 2);
+      addTearDown(buffers.debugDisposeIdle);
+      CeyxDecodePool.nativeBufferPool = buffers;
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      // Availability is TRUE: an OFF build still EXPORTS both symbols.
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+      CeyxDecodePool.debugNativeFree =
+          (address) => calloc.free(Pointer<Uint8>.fromAddress(address));
+      addTearDown(() {
+        CeyxDecodePool.debugDecodeIntoAvailable = null;
+        CeyxDecodePool.debugNativeFree = null;
+      });
+
+      final pool = CeyxDecodePool(
+        width: 1,
+        entryPoint: _formatUnsupportedProbeWorker,
+      );
+      addTearDown(pool.dispose);
+
+      for (var i = 0; i < 2; i++) {
+        final outcome = await pool.submit(
+          CeyxPoolJobType.decode,
+          'g.arw',
+          generation: pool.generation,
+        );
+        final image = outcome.value! as DngImage;
+        expect(
+          image.decodeMs,
+          5,
+          reason: 'decode ${i + 1} must fall back to the allocating route: no '
+              'dstAddress and no dstCapacity in the message',
+        );
+      }
+
+      expect(
+        buffers.debugCheckedOut,
+        0,
+        reason: 'a format this build cannot decode must never take a slot',
+      );
+      expect(
+        buffers.debugAllocations,
+        0,
+        reason: 'and must never cause a pool allocation',
+      );
+      expect(
+        pool.debugProbeSizeCount,
+        1,
+        reason: 'the negative result is cached: ONE probe across two decodes, '
+            'not one per decode',
+      );
+      expect(buffers.debugFinalizerReleases, 0);
+    },
+  );
+
   test(
     'TC-1068: releaseToPool on a Dart-heap-backed DngImage is a safe no-op',
     () async {
@@ -292,6 +726,207 @@ void _addressWorker(List<Object?> bootstrap) {
     final path = message[3] as String;
     final address = int.parse(path.split(':')[1].split('.')[0]);
     poolPort.send(<Object?>[kMsgResult, requestId, address, 2, 2, 1.0, 2.0]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+// --- WP10 test doubles ---------------------------------------------------
+// These differ from [_addressWorker] in one deliberate way: they read the
+// address out of the JOB MESSAGE rather than out of the path string, because
+// "the address travels in the job message" is precisely the wiring under test.
+//
+// Job wire shape (additive):
+//   [kMsgJob, id, typeIndex, path, maxDim, encodeArgs?, dstAddress, dstCapacity]
+// The two WP10 fields are present only when the main isolate pre-acquired a
+// slot, so `message.length > 6` IS the degradation check.
+
+/// Echoes the pre-acquired address back as the result address.
+///
+/// When no address was sent it does what the REAL worker does on the degraded
+/// route (`decodeForPointerTransfer`): allocates its own buffer. Answering 0
+/// instead would make the pool materialise a view over a null pointer, so
+/// "no address" has to be observed some other way — hence the second signal
+/// below.
+///
+/// SECOND SIGNAL: the received message LENGTH is reported back in the
+/// `decodeMs` field. No other assertion in this file reads `decodeMs`, and it
+/// lets a test assert the wire shape MECHANICALLY (`length == 5` means the two
+/// WP10 fields are genuinely absent) instead of inferring absence from a
+/// sentinel address. Absence is what TC-1073/TC-1076 are actually about.
+void _dstAddressWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort('dst-address-worker');
+  jobs.listen((Object? message) {
+    if (message is! List || message.isEmpty) return;
+    if (message[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (message[0] != kMsgJob) return;
+    final requestId = message[1] as int;
+    final observedLength = message.length.toDouble();
+    final dstAddress = message.length > 6
+        ? message[6] as int
+        : calloc<Uint8>(2 * 2 * 4).address;
+    poolPort.send(<Object?>[
+      kMsgResult,
+      requestId,
+      dstAddress,
+      2,
+      2,
+      observedLength,
+      2.0,
+    ]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// Refuses the FIRST decode with `kMsgResize(4x4)` — the stale-prediction case
+/// the native `kDngErrDstTooSmall` / `kRawErrDstTooSmall` refusal produces —
+/// and accepts the retry.
+void _resizeOnceWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  var refused = false;
+  final jobs = ReceivePort('resize-once-worker');
+  jobs.listen((Object? message) {
+    if (message is! List || message.isEmpty) return;
+    if (message[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (message[0] != kMsgJob) return;
+    final requestId = message[1] as int;
+    if (!refused) {
+      refused = true;
+      poolPort.send(<Object?>[kMsgResize, requestId, 4, 4]);
+      return;
+    }
+    final dstAddress = message.length > 6 ? message[6] as int : 0;
+    poolPort.send(<Object?>[kMsgResult, requestId, dstAddress, 4, 4, 1.0, 2.0]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// Models the TWO-SOURCE refusal the A3 native entry can produce: refuses
+/// whenever it was handed a buffer (standing in for the pre-check refusal on
+/// the first attempt and the RAW post-unpack backstop on the second), and
+/// decodes normally when it was handed none.
+///
+/// That second refusal is the realistic case E-WP10-1072 addresses: the retry
+/// was sized from the extent the FIRST refusal reported, and the geometry
+/// moved again during unpack.
+void _twoSourceRefusalWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort('two-source-refusal-worker');
+  jobs.listen((Object? message) {
+    if (message is! List || message.isEmpty) return;
+    if (message[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (message[0] != kMsgJob) return;
+    final requestId = message[1] as int;
+    final dstAddress = message.length > 6 ? message[6] as int : 0;
+    if (dstAddress != 0) {
+      // Given a buffer -> refuse it, reporting a larger extent each time.
+      poolPort.send(<Object?>[kMsgResize, requestId, 4, 4]);
+      return;
+    }
+    // Given no buffer -> the ordinary allocating route, which always works.
+    poolPort.send(<Object?>[
+      kMsgResult,
+      requestId,
+      calloc<Uint8>(2 * 2 * 4).address,
+      2,
+      2,
+      message.length.toDouble(),
+      2.0,
+    ]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// A PATHOLOGICAL worker: refuses unconditionally, including on the unpooled
+/// fallback where it was handed no buffer at all. Not a real file — a broken
+/// worker. Proves the resize path terminates rather than looping forever
+/// (R10.5), which TC-1072 no longer proves now that it falls back.
+void _alwaysResizeWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort('always-resize-worker');
+  jobs.listen((Object? message) {
+    if (message is! List || message.isEmpty) return;
+    if (message[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (message[0] != kMsgJob) return;
+    poolPort.send(<Object?>[kMsgResize, message[1] as int, 4, 4]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// Answers a `probeSize` job with a 2x2 extent and a decode job like
+/// [_dstAddressWorker]. Used by TC-1074 to prove the size cache absorbs the
+/// second decode's probe.
+void _probeSizeThenDecodeWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort('probe-size-worker');
+  jobs.listen((Object? message) {
+    if (message is! List || message.isEmpty) return;
+    if (message[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (message[0] != kMsgJob) return;
+    final requestId = message[1] as int;
+    final type = CeyxPoolJobType.values[message[2] as int];
+    if (type == CeyxPoolJobType.probeSize) {
+      poolPort.send(<Object?>[kMsgResult, requestId, 2, 2]);
+      return;
+    }
+    final dstAddress = message.length > 6 ? message[6] as int : 0;
+    poolPort.send(<Object?>[kMsgResult, requestId, dstAddress, 2, 2, 1.0, 2.0]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// Stands in for a `DNG_ENABLE_GENERIC_RAW=OFF` dylib: the format-agnostic
+/// symbols ARE present, but the probe reports no extent for a format this
+/// build has no decoder for (native `kCeyxErrFormatUnsupportedInBuild`, which
+/// `probeOutputSize` surfaces as null and the worker sends as 0x0).
+///
+/// Decodes are answered like [_dstAddressWorker], so the fallback still
+/// produces a real image — which is the point: absence degrades, it does not
+/// break.
+void _formatUnsupportedProbeWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort('format-unsupported-probe-worker');
+  jobs.listen((Object? message) {
+    if (message is! List || message.isEmpty) return;
+    if (message[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (message[0] != kMsgJob) return;
+    final requestId = message[1] as int;
+    final type = CeyxPoolJobType.values[message[2] as int];
+    if (type == CeyxPoolJobType.probeSize) {
+      poolPort.send(<Object?>[kMsgResult, requestId, 0, 0]);
+      return;
+    }
+    final observedLength = message.length.toDouble();
+    final dstAddress = message.length > 6
+        ? message[6] as int
+        : calloc<Uint8>(2 * 2 * 4).address;
+    poolPort.send(<Object?>[
+      kMsgResult,
+      requestId,
+      dstAddress,
+      2,
+      2,
+      observedLength,
+      2.0,
+    ]);
   });
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
