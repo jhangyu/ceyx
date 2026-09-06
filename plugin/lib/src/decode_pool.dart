@@ -188,6 +188,17 @@ class CeyxDecodePool {
     print(line);
   }
 
+  /// H2 discriminator gate: when this returns true, the pool times the
+  /// main-isolate `TransferableTypedData.materialize()` step and emits a
+  /// `pool.materialize|dur_us=..|bytes=..|type=..` line through [logger].
+  /// A callback (not a bool) so hosts can bind it to their own perf-logging
+  /// switch (e.g. Halcyon's `PerfLog.enabled`), which may flip after pool
+  /// construction. Defaults to off: one function call of overhead per job,
+  /// no Stopwatch, no string built.
+  static bool Function() materializeTimingEnabled = _timingOff;
+
+  static bool _timingOff() => false;
+
   /// Test-only: how many isolates this pool has spawned, ever. After warmup
   /// this must NOT grow per decode — that is the whole point of the pool.
   @visibleForTesting
@@ -689,17 +700,36 @@ class CeyxDecodePool {
     switch (type) {
       case CeyxPoolJobType.probe:
         final transfer = payload[0] as TransferableTypedData?;
-        return transfer?.materialize().asUint8List();
+        return transfer == null ? null : _materializeBytes(transfer, type);
       case CeyxPoolJobType.decode:
         final transfer = payload[0] as TransferableTypedData;
         return DngImage(
-          rgbaData: transfer.materialize().asUint8List(),
+          rgbaData: _materializeBytes(transfer, type),
           width: payload[1] as int,
           height: payload[2] as int,
           decodeMs: payload[3] as double,
           processMs: payload[4] as double,
         );
     }
+  }
+
+  /// The materialize step, optionally timed (H2 discriminator). Instrumentation
+  /// only — the returned bytes are identical either way.
+  Uint8List _materializeBytes(
+    TransferableTypedData transfer,
+    CeyxPoolJobType type,
+  ) {
+    if (!materializeTimingEnabled()) {
+      return transfer.materialize().asUint8List();
+    }
+    final sw = Stopwatch()..start();
+    final bytes = transfer.materialize().asUint8List();
+    sw.stop();
+    logger(
+      'pool.materialize|dur_us=${sw.elapsedMicroseconds}'
+      '|bytes=${bytes.length}|type=${type.name}',
+    );
+    return bytes;
   }
 
   void _onWorkerLost(_PoolWorker worker, String detail) {
