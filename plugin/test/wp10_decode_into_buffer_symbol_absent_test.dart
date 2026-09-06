@@ -26,22 +26,30 @@ import 'package:ceyx/src/dng_bindings.dart';
 /// shipped constructs bindings without throwing and degrades the WHOLE group
 /// to unsupported rather than half-working.
 ///
-/// Fixture: the vendored copy at macos/Libraries is pre-WP10 as of this
-/// writing (the R5 production swap to a WP10-bearing build was reverted and
-/// re-scoped to WP9's digest-verified release asset), so it is used
-/// directly as the default fixture here — it's tracked and CI-reachable,
-/// unlike a path under the gitignored tmp/ tree. WP9 swaps the vendored
-/// copy to a WP10-enabled asset; at that moment this default MUST move to
-/// a tracked pre-WP10 fixture or the env var — see Task #6. A local
-/// pre-WP10 copy for that post-WP9 handoff is kept on disk (not tracked)
-/// at ../tmp/old-dylib-wp10/; override via DNG_OLD_WP10_DYLIB.
+/// Fixture: WP9 HAS NOW LANDED, so the vendored copy at macos/Libraries is the
+/// v0.1.16 release asset and DOES export the WP10 pair — it is no longer a
+/// valid fixture for this test, and the default has moved off it accordingly.
+/// The default is now the preserved pre-WP10 copy at ../tmp/old-dylib-wp10/,
+/// overridable via DNG_OLD_WP10_DYLIB.
+///
+/// That path is under the gitignored tmp/ tree, so this test EXECUTES locally
+/// and SKIPS in CI. That trade-off is deliberate and was ruled on: the only way
+/// to make it CI-live is to commit a ~9.6 MB frozen copy of a superseded
+/// release asset, which costs more than the erosion it prevents — because the
+/// fixture is RECOVERABLE by digest. It is byte-identical to the macos-arm64
+/// decoder published in ceyx release v0.1.15, sha256
+/// 4e6ae55f5472a6c0a7e1cf806c063284dbeb6f0018ad5f44b926400a6af8a10b, so anyone
+/// (CI included) can rebuild it from the pinned release without archaeology.
+/// The skip reasons below name that recovery explicitly. The principled fix —
+/// having ceyx CI fetch that asset by digest and run this test against it — is
+/// parked, see the WP9 evidence file's parking lot (PL-2).
 ///
 /// flutter test runs with cwd == package root (plugin/), so all paths below
 /// are resolved relative to Directory.current.
 void main() {
   final dylibPath = File(
     Platform.environment['DNG_OLD_WP10_DYLIB'] ??
-        'macos/Libraries/libdng_decoder_native.dylib',
+        '../tmp/old-dylib-wp10/libdng_decoder_native.dylib',
   ).absolute.path;
 
   test(
@@ -52,7 +60,11 @@ void main() {
       if (!File(dylibPath).existsSync()) {
         markTestSkipped(
           'reason: no dylib found at $dylibPath to exercise the WP10 '
-          'symbol-absent-group contract; set DNG_OLD_WP10_DYLIB or build one',
+          'symbol-absent-group contract. RECOVERY: populate '
+          'tmp/old-dylib-wp10/ with the macos-arm64 decoder from ceyx release '
+          'v0.1.15 (libdng_decoder_native.dylib, sha256 4e6ae55f5472a6c0a7e1cf'
+          '806c063284dbeb6f0018ad5f44b926400a6af8a10b), or point '
+          'DNG_OLD_WP10_DYLIB at any dylib predating the WP10 pair',
         );
         return;
       }
@@ -61,8 +73,11 @@ void main() {
       if (bindings.decodeIntoBufferAvailable) {
         markTestSkipped(
           'reason: dylib at $dylibPath already exports the WP10 pair — it is '
-          'not a pre-WP10 binary; point DNG_OLD_WP10_DYLIB at a genuinely '
-          'older dylib to exercise the absent-group contract',
+          'not a pre-WP10 binary. RECOVERY: populate tmp/old-dylib-wp10/ with '
+          'the macos-arm64 decoder from ceyx release v0.1.15 '
+          '(libdng_decoder_native.dylib, sha256 4e6ae55f5472a6c0a7e1cf806c0632'
+          '84dbeb6f0018ad5f44b926400a6af8a10b), or point DNG_OLD_WP10_DYLIB at '
+          'a genuinely older dylib, to exercise the absent-group contract',
         );
         return;
       }
