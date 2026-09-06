@@ -55,6 +55,33 @@ int32_t ceyx_probe_output_size(const char *file_path, int32_t max_dim,
 DngResult *ceyx_decode_into_buffer(const char *file_path, int32_t max_dim,
                                    uint8_t *dst, size_t dst_capacity);
 
+/// Orientation-aware sibling of ceyx_decode_into_buffer. Identical contract
+/// EXCEPT: the pixels written to dst have EXIF `exif_orientation` already
+/// applied, and result->width/height are the ORIENTED extent.
+/// exif_orientation outside 1..8 is treated as 1 (identity), matching the
+/// host's own table; it is never an error.
+/// ADDITIVE: older binaries lack this symbol. Callers MUST resolve it
+/// defensively and fall back to ceyx_decode_into_buffer + host-side rotation.
+///
+/// DEGRADATION (contractual, not a bug): the transposing orientations (5..8)
+/// need one scratch frame, taken from the SAME RGBA pool the decoders use. If
+/// that checkout fails, this entry decodes UNORIENTED into dst and reports
+/// SUCCESS with the UNSWAPPED extent. Memory pressure must never turn into
+/// "the photo will not open"; the caller detects the degradation by comparing
+/// the returned extent against the orientation it asked for (that is exactly
+/// what the Dart side's appliedOrientation consistency check does).
+DngResult *ceyx_decode_into_buffer_oriented(const char *file_path,
+                                            int32_t max_dim, uint8_t *dst,
+                                            size_t dst_capacity,
+                                            int32_t exif_orientation);
+
+/// TEST HOOK — not part of the shipping contract, and deliberately named so.
+/// When set non-zero, the scratch checkout inside
+/// ceyx_decode_into_buffer_oriented is forced to fail, which is the only way
+/// to exercise the degradation arm above without exhausting real memory
+/// (AC-2.6). Returns the previous value. Always 0 unless a test set it.
+int32_t ceyx_debug_force_scratch_failure(int32_t enable);
+
 #ifdef __cplusplus
 }
 #endif

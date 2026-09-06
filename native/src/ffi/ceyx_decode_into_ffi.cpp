@@ -8,8 +8,10 @@
 // silently missing.
 #include "ceyx_decode_into.h"
 
+#include <atomic>
 #include <cstdlib>
 
+#include "ceyx_orient.h"
 #include "dng_error_codes.h"
 #include "dng_ffi_api.h"
 #include "dng_pipeline.h"
@@ -64,19 +66,27 @@ CEYX_FFI_EXPORT int32_t ceyx_probe_output_size(const char *file_path,
 #endif
 }
 
-CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
-                                                   int32_t max_dim,
-                                                   uint8_t *dst,
-                                                   size_t dst_capacity) {
-  DngResult *result =
-      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
-  if (!result) return nullptr;
+}  // extern "C"
 
-  RawRoute route = kRawRouteUnknown;
-  const RawErrorCode prc = raw_probe_file(file_path, &route);
+// ---------------------------------------------------------------------------
+// Phases 1-2 and phase 3, EXTRACTED (not copied) so that
+// ceyx_decode_into_buffer and ceyx_decode_into_buffer_oriented cannot drift.
+// Task 2 constraint, spec §4 Task 2 "Behavior": the route probe, extent probe
+// and capacity refusal are shared verbatim; only the phase-3 DESTINATION and
+// the post-decode orientation differ between the two entries.
+// ---------------------------------------------------------------------------
+
+// Phases 1 and 2. Returns true when the caller may proceed to phase 3; on
+// false, `result` already carries the error (and, on a capacity refusal, the
+// extent) and is ready to be returned to the caller as-is.
+static bool ceyxDecodeIntoPrepare(const char *file_path, int32_t max_dim,
+                                  const uint8_t *dst, size_t dst_capacity,
+                                  RawRoute *route, DngResult *result) {
+  *route = kRawRouteUnknown;
+  const RawErrorCode prc = raw_probe_file(file_path, route);
   if (prc != kRawSuccess) {
     result->error_code = static_cast<int32_t>(prc);
-    return result;
+    return false;
   }
 
   // Phase 1: metadata-only extent, on whichever route owns this file. Neither
@@ -86,7 +96,7 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
   const int32_t probe_rc = ceyx_probe_output_size(file_path, max_dim, &w, &h);
   if (probe_rc != 0) {
     result->error_code = probe_rc;
-    return result;
+    return false;
   }
   result->width = w;
   result->height = h;
@@ -94,14 +104,26 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
   // Phase 2: the capacity decision, before any pixel work on either route.
   // The extent stays filled in on refusal: that is what lets the caller
   // re-acquire an EXACT slot and retry once, rather than guessing again.
+  // NOTE for the oriented entry: w*h*4 is invariant under transposition, so
+  // this same refusal is correct for every orientation and the caller's
+  // pre-acquired slot size never has to know which one was requested
+  // (spec §1.3, asserted by AC-2.4).
   const size_t need = static_cast<size_t>(w) * h * 4;
   if (!dst || dst_capacity < need) {
     result->error_code = kCeyxErrDstTooSmall;
-    return result;
+    return false;
   }
+  return true;
+}
 
-  // Phase 3: decode through the route's caller-buffer sibling, each of which
-  // binds dst AFTER its own internal result reset (A3.2).
+// Phase 3: decode through the route's caller-buffer sibling, each of which
+// binds dst AFTER its own internal result reset (A3.2). `dst` is whatever
+// buffer the caller wants the raw (unoriented) pixels in — the caller's own
+// buffer for the plain entry, or a pooled scratch for a transposing oriented
+// decode.
+static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
+                                 RawRoute route, uint8_t *dst,
+                                 size_t dst_capacity, DngResult *result) {
   if (route == kRawRouteDng) {
     DngPipelineResult pipeline;
     if (!dng_pipeline_decode_to_rgb_into(file_path, max_dim, dst, dst_capacity,
@@ -109,21 +131,21 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
       result->error_code = pipeline.error_code;
       result->decode_ms = pipeline.decode_ms;
       result->process_ms = pipeline.process_ms;
-      return result;
+      return;
     }
     if (!pipeline.rgba_ptr) {
       // fuse_rgba_output=false leaves RGB8 in the buffer, which is not the
       // layout this entry advertises. Refuse loudly rather than hand back
       // pixels in a shape the caller will misread.
       result->error_code = kDngErrRgbaAllocFailed;
-      return result;
+      return;
     }
     result->rgba_data = pipeline.rgba_ptr;    // == dst, by construction
     result->width = static_cast<int32_t>(pipeline.width);
     result->height = static_cast<int32_t>(pipeline.height);
     result->decode_ms = pipeline.decode_ms;
     result->process_ms = pipeline.process_ms;
-    return result;
+    return;
   }
 
 #if defined(DNG_ENABLE_GENERIC_RAW)
@@ -178,16 +200,130 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
         result->height = static_cast<int32_t>(out.height);
       }
     }
-    return result;
+    return;
   }
   result->rgba_data = out.rgba_ptr;           // == dst, by construction
   result->width = static_cast<int32_t>(out.width);
   result->height = static_cast<int32_t>(out.height);
-  return result;
+  return;
 #else
   result->error_code = kCeyxErrFormatUnsupportedInBuild;
-  return result;
+  return;
 #endif
+}
+
+// AC-2.6 hook. The degradation arm is reachable in production only under real
+// memory pressure, which a test cannot induce reliably or cheaply; without a
+// hook the one branch whose whole purpose is "never fail the decode" would be
+// the one branch never executed. Process-global and relaxed: it is flipped by
+// a single-threaded test around a single call.
+static std::atomic<int32_t> g_force_scratch_failure{0};
+
+extern "C" {
+
+CEYX_FFI_EXPORT int32_t ceyx_debug_force_scratch_failure(int32_t enable) {
+  return g_force_scratch_failure.exchange(enable, std::memory_order_relaxed);
+}
+
+CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
+                                                   int32_t max_dim,
+                                                   uint8_t *dst,
+                                                   size_t dst_capacity) {
+  DngResult *result =
+      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
+  if (!result) return nullptr;
+
+  RawRoute route = kRawRouteUnknown;
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
+                             result)) {
+    return result;
+  }
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity, result);
+  return result;
+}
+
+CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
+    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
+    int32_t exif_orientation) {
+  DngResult *result =
+      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
+  if (!result) return nullptr;
+
+  RawRoute route = kRawRouteUnknown;
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
+                             result)) {
+    return result;
+  }
+
+  const bool transposes = ceyx_orientation_transposes(exif_orientation) != 0;
+
+  // Non-transposing (1,2,3,4 and every out-of-range value, which the host's
+  // table treats as 1): decode straight into the caller's buffer and orient it
+  // in place. Zero extra memory — the common non-identity case, orientation 3,
+  // lands here.
+  if (!transposes) {
+    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity, result);
+    if (result->error_code != 0) return result;
+    int32_t ow = 0, oh = 0;
+    const int32_t orc =
+        ceyx_orient_rgba(dst, dst, dst_capacity, result->width, result->height,
+                         exif_orientation, &ow, &oh);
+    if (orc != 0) {
+      // Structurally unreachable: capacity was proven in phase 2 and in-place
+      // is legal for every non-transposing case. Reported rather than ignored,
+      // because silently handing back half-oriented pixels is worse than an
+      // error the caller can see.
+      result->rgba_data = nullptr;
+      result->error_code = orc;
+      return result;
+    }
+    result->width = ow;
+    result->height = oh;
+    return result;
+  }
+
+  // Transposing (5,6,7,8): the decode cannot write its own source in place, so
+  // it goes to a scratch frame from the SAME pool the decoders use — bounded
+  // by the configured slot count, not by the number of photos.
+  const size_t need =
+      static_cast<size_t>(result->width) * result->height * 4;
+  uint8_t *scratch = g_force_scratch_failure.load(std::memory_order_relaxed)
+                         ? nullptr
+                         : dng_rgba_output_acquire(need);
+  if (!scratch) {
+    // MANDATED DEGRADATION (spec §4 Task 2). A scratch shortage is a
+    // memory-pressure blip; refusing the decode would turn it into "the photo
+    // will not open". Decode unoriented into dst and return SUCCESS with the
+    // UNSWAPPED extent — the caller's extent-consistency check sees that the
+    // extent did not swap, reports appliedOrientation = 1, and rotates on the
+    // host exactly as it does for every non-ceyx decoder arm.
+    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity, result);
+    return result;
+  }
+
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, scratch, need, result);
+  if (result->error_code != 0) {
+    dng_rgba_output_release(scratch);
+    return result;
+  }
+
+  int32_t ow = 0, oh = 0;
+  const int32_t orc =
+      ceyx_orient_rgba(scratch, dst, dst_capacity, result->width,
+                       result->height, exif_orientation, &ow, &oh);
+  dng_rgba_output_release(scratch);
+  if (orc != 0) {
+    result->rgba_data = nullptr;
+    result->error_code = orc;
+    return result;
+  }
+  // Pointer identity contract, preserved: phase 3 set rgba_data to the SCRATCH
+  // (its own dst), which must never escape to the caller. The oriented pixels
+  // are in the caller's buffer, so that is what is reported.
+  result->rgba_data = dst;
+  result->width = ow;
+  result->height = oh;
+  return result;
 }
 
 }  // extern "C"
@@ -200,3 +336,14 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
 // pool would hand a Dart-owned address to the next decode — the exact
 // corruption the borrowing guards exist to prevent, and one the pool would
 // absorb silently (RgbaOutputPool::release logs unknown pointers as a no-op).
+//
+// SIBLING NOTE (Task 2), because the paragraph above now has exactly one
+// exception and an unqualified "this file never releases" would be false:
+// ceyx_decode_into_buffer_oriented's transposing arm checks a SCRATCH frame out
+// of that same pool, and the scratch IS pool-owned, so this file DOES release
+// it — on every exit without exception: the decode-failure return, the
+// orientation-error return, and the success path. `dst` remains untouched by
+// the rule above; the two buffers are never confused because the scratch never
+// leaves this function and result->rgba_data is re-pointed at `dst` before the
+// oriented entry returns. The one arm that takes no scratch at all is the
+// checkout-failure degradation, which has nothing to release.

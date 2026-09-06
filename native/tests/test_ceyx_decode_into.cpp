@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "ceyx_decode_into.h"
@@ -139,6 +140,192 @@ static void caseAgreement(const char *path, int32_t maxDim, const char *label) {
   dng_free_result(r);
 }
 
+// ---------------------------------------------------------------------------
+// Task 2 — ceyx_decode_into_buffer_oriented. AC-2.1 .. AC-2.6.
+// (AC-2.7, symbol export, is a dump-to-file-then-grep step outside this binary:
+// a `nm ... | grep -q` reports FAILURE when the symbol IS found, because grep's
+// early exit SIGPIPEs nm under `set -euo pipefail`.)
+// ---------------------------------------------------------------------------
+
+// The oriented decode uses a reduced max_dim so the 50+50 accounting loop below
+// stays a test rather than a benchmark. Every assertion here is about extents,
+// pointers and pool bookkeeping, none of which depend on the decode size.
+static const int32_t kOrientMaxDim = 512;
+
+// AC-2.1 — orientation 1 through the oriented entry is byte-identical to the
+// unoriented entry on the same fixture. This is the one case where the two
+// entries must agree on PIXELS, and it is what proves the extracted phases 1-2
+// helper did not change the plain entry's behaviour either.
+static void caseOrientedIdentity(const char *path, const char *label) {
+  int32_t w = 0, h = 0;
+  if (!probe(path, kOrientMaxDim, &w, &h)) return;
+  const size_t need = static_cast<size_t>(w) * h * 4;
+  std::vector<uint8_t> plain(need, 0x11), oriented(need, 0x22);
+
+  DngResult *a = ceyx_decode_into_buffer(path, kOrientMaxDim, plain.data(), need);
+  DngResult *b = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
+                                                  oriented.data(), need, 1);
+  CHECK(a && b, "[%s] null result", label);
+  if (!a || !b) { if (a) dng_free_result(a); if (b) dng_free_result(b); return; }
+  CHECK(a->error_code == 0 && b->error_code == 0,
+        "[%s] AC-2.1 errors plain=%d oriented=%d", label, a->error_code,
+        b->error_code);
+  CHECK(a->width == b->width && a->height == b->height,
+        "[%s] AC-2.1 extent %dx%d vs %dx%d", label, a->width, a->height,
+        b->width, b->height);
+  if (a->error_code == 0 && b->error_code == 0) {
+    const size_t bytes = static_cast<size_t>(a->width) * a->height * 4;
+    CHECK(std::memcmp(plain.data(), oriented.data(), bytes) == 0,
+          "[%s] AC-2.1 orientation 1 is not byte-identical to the unoriented "
+          "entry", label);
+  }
+  a->rgba_data = nullptr; b->rgba_data = nullptr;
+  dng_free_result(a);
+  dng_free_result(b);
+}
+
+// AC-2.2 (extent swap at 6), AC-2.3 (pointer identity on all 8) and AC-2.4
+// (byte-count invariance on all 8) in one pass over the eight orientations,
+// because they assert three properties of the same eight calls.
+static void caseOrientedExtents(const char *path, const char *label) {
+  int32_t pw = 0, ph = 0;
+  if (!probe(path, kOrientMaxDim, &pw, &ph)) return;
+  const size_t need = static_cast<size_t>(pw) * ph * 4;
+  std::vector<uint8_t> buf(need);
+
+  // Reference extent from the UNORIENTED entry: the probe's extent and the
+  // decoded extent can legitimately differ (post-unpack correction), and it is
+  // the DECODED one the swap must be measured against.
+  int32_t uw = 0, uh = 0;
+  {
+    DngResult *u = ceyx_decode_into_buffer(path, kOrientMaxDim, buf.data(), need);
+    CHECK(u && u->error_code == 0, "[%s] AC-2.2 baseline decode failed", label);
+    if (!u || u->error_code != 0) { if (u) dng_free_result(u); return; }
+    uw = u->width; uh = u->height;
+    u->rgba_data = nullptr;
+    dng_free_result(u);
+  }
+
+  for (int32_t o = 1; o <= 8; ++o) {
+    DngResult *r = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
+                                                    buf.data(), need, o);
+    CHECK(r != nullptr, "[%s] o=%d null result", label, o);
+    if (!r) continue;
+    CHECK(r->error_code == 0, "[%s] o=%d error=%d", label, o, r->error_code);
+    if (r->error_code == 0) {
+      // AC-2.3 — pointer identity on EVERY success path, all 8 orientations.
+      // This is the assertion that catches the scratch escaping to the caller.
+      CHECK(r->rgba_data == buf.data(),
+            "[%s] AC-2.3 o=%d rgba_data %p != dst %p (scratch escaped?)", label,
+            o, static_cast<void *>(r->rgba_data),
+            static_cast<void *>(buf.data()));
+      // AC-2.4 — the byte count the pool pre-acquired stays correct for every
+      // orientation. Load-bearing: ceyx_probe_output_size takes no orientation.
+      CHECK(static_cast<size_t>(r->width) * r->height * 4 ==
+                static_cast<size_t>(uw) * uh * 4,
+            "[%s] AC-2.4 o=%d byte count %zu != %zu", label, o,
+            static_cast<size_t>(r->width) * r->height * 4,
+            static_cast<size_t>(uw) * uh * 4);
+      // AC-2.2 — transposing orientations swap the extent, the others do not.
+      const bool transposes = (o >= 5 && o <= 8);
+      const bool swapped = (r->width == uh && r->height == uw);
+      const bool same = (r->width == uw && r->height == uh);
+      if (transposes) {
+        CHECK(swapped, "[%s] AC-2.2 o=%d expected %dx%d, got %dx%d", label, o,
+              uh, uw, r->width, r->height);
+      } else {
+        CHECK(same, "[%s] AC-2.2 o=%d expected %dx%d, got %dx%d", label, o, uw,
+              uh, r->width, r->height);
+      }
+    }
+    r->rgba_data = nullptr;
+    dng_free_result(r);
+  }
+}
+
+// AC-2.5 — the scratch is released on EVERY exit. 50 successes mixing
+// transposing and non-transposing orientations, then 50 forced failures
+// (nonexistent path, undersized dst), each measured as a delta against a
+// sampled baseline rather than against absolute zero (same reasoning as
+// caseRefusals above: the counter is process-global).
+static void caseOrientedScratchAccounting(const char *path, const char *label) {
+  int32_t w = 0, h = 0;
+  if (!probe(path, kOrientMaxDim, &w, &h)) return;
+  const size_t need = static_cast<size_t>(w) * h * 4;
+  std::vector<uint8_t> buf(need);
+
+  const size_t before = dng_debug_pool_checked_out();
+  // Orientations chosen so the loop alternates transposing (6, 8, 5, 7) with
+  // non-transposing (1, 3, 2, 4): a leak on either arm shows up.
+  const int32_t cycle[] = {1, 6, 3, 8, 2, 5, 4, 7, 6, 1};
+  for (int i = 0; i < 50; ++i) {
+    DngResult *r = ceyx_decode_into_buffer_oriented(
+        path, kOrientMaxDim, buf.data(), need, cycle[i % 10]);
+    if (r) { r->rgba_data = nullptr; dng_free_result(r); }
+  }
+  CHECK(dng_debug_pool_checked_out() == before,
+        "[%s] AC-2.5 50 oriented successes leaked scratch (%zu -> %zu)", label,
+        before, dng_debug_pool_checked_out());
+
+  for (int i = 0; i < 25; ++i) {
+    // Failure class 1: the file does not exist (fails in phase 1, before any
+    // scratch is taken).
+    DngResult *a = ceyx_decode_into_buffer_oriented(
+        "/nonexistent/broken.raw", kOrientMaxDim, buf.data(), need, 6);
+    if (a) dng_free_result(a);
+    // Failure class 2: dst is one byte too small (fails in phase 2).
+    DngResult *b = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
+                                                    buf.data(), need - 1, 6);
+    CHECK(b && b->error_code == kCeyxErrDstTooSmall,
+          "[%s] AC-2.5 undersized dst not refused", label);
+    if (b) dng_free_result(b);
+  }
+  CHECK(dng_debug_pool_checked_out() == before,
+        "[%s] AC-2.5 50 oriented failures leaked scratch (%zu -> %zu)", label,
+        before, dng_debug_pool_checked_out());
+}
+
+// AC-2.6 — a scratch-checkout failure DEGRADES to an unoriented success. This
+// is the arm whose entire purpose is that memory pressure must never become
+// "the photo will not open", so it must be exercised, not reasoned about.
+static void caseOrientedDegradation(const char *path, const char *label) {
+  int32_t w = 0, h = 0;
+  if (!probe(path, kOrientMaxDim, &w, &h)) return;
+  const size_t need = static_cast<size_t>(w) * h * 4;
+  std::vector<uint8_t> control(need), degraded(need);
+
+  // Control: orientation 6 with the scratch available, so the comparison below
+  // is against THIS build's real oriented output, not an assumption.
+  DngResult *c = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
+                                                  control.data(), need, 6);
+  CHECK(c && c->error_code == 0, "[%s] AC-2.6 control decode failed", label);
+  const int32_t cw = c ? c->width : 0, ch = c ? c->height : 0;
+  if (c) { c->rgba_data = nullptr; dng_free_result(c); }
+
+  const size_t before = dng_debug_pool_checked_out();
+  const int32_t prev = ceyx_debug_force_scratch_failure(1);
+  DngResult *r = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
+                                                  degraded.data(), need, 6);
+  ceyx_debug_force_scratch_failure(prev);
+
+  CHECK(r != nullptr, "[%s] AC-2.6 null result", label);
+  if (!r) return;
+  CHECK(r->error_code == 0,
+        "[%s] AC-2.6 scratch pressure FAILED the decode (error=%d) — it must "
+        "degrade to an unoriented success", label, r->error_code);
+  CHECK(r->rgba_data == degraded.data(),
+        "[%s] AC-2.6 degraded path broke pointer identity", label);
+  // The extent must NOT be swapped: that unswapped extent is precisely how the
+  // Dart side detects the degradation and reports appliedOrientation = 1.
+  CHECK(r->width == ch && r->height == cw,
+        "[%s] AC-2.6 degraded extent %dx%d should be the UNORIENTED %dx%d",
+        label, r->width, r->height, ch, cw);
+  r->rgba_data = nullptr;
+  dng_free_result(r);
+  CHECK(dng_debug_pool_checked_out() == before,
+        "[%s] AC-2.6 degraded path disturbed the pool", label);
+}
+
 int main(int argc, char **argv) {
   struct Sample { const char *path; const char *label; };
   const Sample samples[] = {
@@ -174,6 +361,10 @@ int main(int argc, char **argv) {
     caseFailureLeavesBufferAlone(s.path, s.label);
     caseAgreement(s.path, 0, s.label);
     caseAgreement(s.path, 2800, s.label);
+    caseOrientedIdentity(s.path, s.label);
+    caseOrientedExtents(s.path, s.label);
+    caseOrientedScratchAccounting(s.path, s.label);
+    caseOrientedDegradation(s.path, s.label);
   }
   std::fprintf(stderr, "%s: %d failure(s)\n", argv[0], g_failures);
   return g_failures == 0 ? 0 : 1;
