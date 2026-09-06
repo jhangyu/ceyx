@@ -26,14 +26,15 @@ import 'package:ceyx/src/dng_bindings.dart';
 /// shipped constructs bindings without throwing and degrades the WHOLE group
 /// to unsupported rather than half-working.
 ///
-/// Fixture: the currently-pinned/shipped dylib predates the entry pair by
-/// construction (WP10 has not shipped a release yet), so the "old" dylib is
-/// just the vendored one at macos/Libraries — no separate old-dylib fixture
-/// is needed, unlike the slot-config test (which needed a synthetic fixture
-/// because the slot group HAD already shipped by the time that test was
-/// written). If a later WP10-bearing dylib gets vendored into that path
-/// before this test is retired, point DNG_OLD_WP10_DYLIB at a pre-WP10 copy
-/// instead — same override convention as the slot-config sibling.
+/// Fixture: the vendored copy at macos/Libraries is pre-WP10 as of this
+/// writing (the R5 production swap to a WP10-bearing build was reverted and
+/// re-scoped to WP9's digest-verified release asset), so it is used
+/// directly as the default fixture here — it's tracked and CI-reachable,
+/// unlike a path under the gitignored tmp/ tree. WP9 swaps the vendored
+/// copy to a WP10-enabled asset; at that moment this default MUST move to
+/// a tracked pre-WP10 fixture or the env var — see Task #6. A local
+/// pre-WP10 copy for that post-WP9 handoff is kept on disk (not tracked)
+/// at ../tmp/old-dylib-wp10/; override via DNG_OLD_WP10_DYLIB.
 ///
 /// flutter test runs with cwd == package root (plugin/), so all paths below
 /// are resolved relative to Directory.current.
