@@ -492,7 +492,11 @@ class CeyxDecodePool {
       );
     }
     final gen = generation ?? _generation;
-    final key = (type, path, maxDim);
+    // exifOrientation is part of the identity: an unoriented submit must not
+    // coalesce onto an in-flight oriented job (it would receive already
+    // rotated pixels while its DecodedRgba defaults appliedOrientation to 1,
+    // and the host would rotate a second time).
+    final key = (type, path, maxDim, exifOrientation);
     final existing = _byKey[key];
     if (existing != null) {
       debugCoalescedCount++;
@@ -601,7 +605,7 @@ class CeyxDecodePool {
     final key = _sizeKey(path, maxDim);
     debugProbeSizeCount++;
     final probe = _PoolJob(
-      key: (CeyxPoolJobType.probeSize, path, maxDim),
+      key: (CeyxPoolJobType.probeSize, path, maxDim, 1),
       type: CeyxPoolJobType.probeSize,
       path: path,
       maxDim: maxDim,
@@ -723,7 +727,7 @@ class CeyxDecodePool {
       );
     }
     final job = _PoolJob(
-      key: (CeyxPoolJobType.encode, 'encode:${_nextEncodeKey++}', null),
+      key: (CeyxPoolJobType.encode, 'encode:${_nextEncodeKey++}', null, 1),
       type: CeyxPoolJobType.encode,
       path: '',
       maxDim: null,
@@ -1470,7 +1474,7 @@ class CeyxDecodePool {
   }
 }
 
-typedef _JobKey = (CeyxPoolJobType, String, int?);
+typedef _JobKey = (CeyxPoolJobType, String, int?, int);
 
 class _PoolJob {
   _PoolJob({
