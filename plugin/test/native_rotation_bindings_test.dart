@@ -63,14 +63,22 @@ void main() {
         final bindings = DngNativeBindings.fromPath(dylibPath);
 
         if (bindings.decodeIntoBufferOrientedAvailable) {
-          markTestSkipped(
-            'reason: dylib at $dylibPath already exports '
-            'ceyx_decode_into_buffer_oriented (Task 2 has landed and this '
-            'local build directory was rebuilt) — it is no longer a valid '
-            'absent-symbol fixture. RECOVERY: point DNG_PRE_ORIENT_DYLIB at '
-            'a dylib built before Task 2 landed.',
+          // HARD FAILURE, not a skip (round-2 fix cycle 2, reviewer item 7):
+          // the vendored fixture no longer demonstrating the absent-symbol
+          // case is a maintenance action (repoint the fixture / set
+          // DNG_PRE_ORIENT_DYLIB), not something this test should silently
+          // pass over — a skip here would let AC-3.1 quietly stop being
+          // exercised at the next pin bump without anyone noticing.
+          fail(
+            'dylib at $dylibPath already exports '
+            'ceyx_decode_into_buffer_oriented — it is no longer a valid '
+            'absent-symbol fixture for AC-3.1 (the vendored copy was '
+            'likely updated to a build that includes the oriented symbol). '
+            'RECOVERY: point DNG_PRE_ORIENT_DYLIB at a dylib that exports '
+            'ceyx_decode_into_buffer but NOT ceyx_decode_into_buffer_oriented '
+            '(e.g. a pre-Task-2 native/build output), or update this test\'s '
+            'default fixture path to a dylib that still lacks the symbol.',
           );
-          return;
         }
 
         // The symbol under test is absent...
@@ -171,9 +179,18 @@ void main() {
     );
 
     test(
-      'transposing orientation on a SQUARE probed frame cannot verify the '
-      'swap (a genuine swap and a silent degrade look identical) and '
-      'reports 1',
+      'KNOWN LIMITATION: a SQUARE probed frame reports the request even '
+      'though a genuine swap and a silent scratch-exhaustion degrade '
+      '(spec Task 2 AC-2.6) produce an IDENTICAL extent and are therefore '
+      'indistinguishable here. This is spec-exact and deliberate: treating '
+      'a square probe as "unverifiable -> report 1" was tried and reverted '
+      '(round-2 fix cycle 2) because it double-rotates every ORDINARY '
+      '(non-degraded) square-frame transposing decode, which is a '
+      'deterministic wrong answer on the common path — worse than the '
+      'rare misreport on an actually-degraded square frame this documents. '
+      'PARKED fix: an explicit native degradation signal (Task 2 does not '
+      'currently expose one); a process-global flag is racy under '
+      'concurrent pool workers and needs a per-call design.',
       () {
         final applied = DngDecoderService.selfVerifiedAppliedOrientation(
           requested: 6,
@@ -182,7 +199,7 @@ void main() {
           probedWidth: 512,
           probedHeight: 512,
         );
-        expect(applied, 1);
+        expect(applied, 6);
       },
     );
 

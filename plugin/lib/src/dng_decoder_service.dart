@@ -623,12 +623,29 @@ class DngDecoderService {
   ///   Task 2's scratch-unavailable degrade path is exclusive to the
   ///   transposing cases, so a successful decode here means it applied.
   /// - a transposing orientation (5/6/7/8) reports [requested] only when the
-  ///   returned extent is swapped relative to the unoriented probe AND that
-  ///   swap is actually detectable — i.e. [probedWidth] != [probedHeight].
-  ///   When the probe is unavailable, or the probed frame is exactly square
-  ///   (so a genuine swap and a silent degrade produce the SAME extent and
-  ///   the check would be trivially true either way), the swap cannot be
-  ///   verified and this reports `1`.
+  ///   returned extent is swapped relative to the unoriented probe. When the
+  ///   probe is unavailable, there is nothing to compare against, so this
+  ///   reports `1` (cannot verify, conservative). An extent that came back
+  ///   UNSWAPPED relative to an available probe is evidence of the native
+  ///   degrade path and also reports `1`.
+  ///
+  /// KNOWN LIMITATION (spec-exact, not a bug to fix here): when the
+  /// unoriented frame is exactly SQUARE, a genuine transpose and a silent
+  /// scratch-exhaustion degrade (spec §1.3/Task 2 AC-2.6) produce the
+  /// IDENTICAL extent, so this cannot distinguish them and — because the
+  /// swap check below is trivially satisfied for a square extent — reports
+  /// [requested] either way, trusting the (overwhelmingly common) case that
+  /// it really did apply. An earlier revision of this method special-cased
+  /// a square probe as always-unverifiable and reported `1` instead, but
+  /// that silently DOUBLE-ROTATES every ordinary (non-degraded)
+  /// square-frame transposing decode, which is a deterministic wrong answer
+  /// on the common path — worse than the rare misreport on a
+  /// scratch-exhaustion square frame this was trying to catch. Reverted
+  /// (round-2 fix cycle 2). The principled fix is an explicit native
+  /// degradation signal (a dedicated result field or error code Task 2
+  /// doesn't currently expose); a process-global "last decode degraded"
+  /// flag would be racy under concurrent pool workers and needs a per-call
+  /// design — parked, out of this round's scope.
   @visibleForTesting
   static int selfVerifiedAppliedOrientation({
     required int requested,
@@ -641,7 +658,6 @@ class DngDecoderService {
     if (!_orientationTransposes(requested)) return requested;
     if (probedWidth != null &&
         probedHeight != null &&
-        probedWidth != probedHeight &&
         width == probedHeight &&
         height == probedWidth) {
       return requested;
