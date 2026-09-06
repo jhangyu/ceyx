@@ -27,6 +27,13 @@ enum DngErrorCode {
   kDngErrGpuUnavailable              =   -6,  // Metal/Vulkan not available
   kDngErrRgbaAllocFailed             =   -7,  // FFI layer: RGBA pool acquire failed
   kDngErrOl2DispatchFailed           =   -8,  // OpcodeList2 Halide GPU dispatch failed
+  // WP10: caller-owned destination buffer is null, zero-capacity, or smaller
+  // than width*height*4. Returned BEFORE any pixel work, with width/height
+  // filled in from the metadata probe so the caller can re-acquire exactly.
+  kDngErrDstTooSmall                 =   -9,  // caller buffer too small / null
+  // WP10: the metadata-only output-extent probe could not produce an extent
+  // (pipeline reported success but the extent was zero).
+  kDngErrProbeFailed                 =  -10,  // output-extent probe failed
   kDngErrStdException                = -100,  // caught std::exception
   kDngErrUnknownException            = -101,  // caught (...)
 };

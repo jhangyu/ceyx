@@ -679,6 +679,28 @@ class ScopedRgbCheckout {
 // maxDim <= 0, or a maxDim at least as large as the input, yields exactly the
 // previous expression (max of input extents) — so the full-resolution path is
 // unchanged by construction rather than by inspection.
+// WP10: the single definition of "what max_dim actually applies".
+//
+// Only the Bayer/CFA route builds a Stage3 image and can reach the scaled
+// Stage4 kernel. Non-Bayer (lossy) input has no Stage3 image at all, so a sized
+// request degrades to full resolution here — once, at the routing point, rather
+// than at each downstream SetMaximumSize. Loud by design: a silently cropped or
+// silently full-size result is the failure mode this whole path exists to
+// avoid.
+//
+// dng_pipeline_probe_output_size and decodeStages MUST both call this. A second
+// copy of this rule is how a lossy DNG gets an under-sized caller buffer: the
+// probe would predict a scaled extent, the decode would produce a full-size
+// one, and the mismatch would surface as a refused decode at best.
+int32_t effectiveMaxDimFor(bool isBayer, int32_t maxDim) {
+  if (maxDim > 0 && !isBayer) {
+    std::cerr << "[Pipeline] sized decode unsupported for this path; "
+                 "falling back to full resolution\n";
+    return 0;
+  }
+  return maxDim;
+}
+
 uint32_t stage4MaximumSize(uint32_t inputWidth, uint32_t inputHeight,
                            int32_t maxDim) {
   const uint32_t full = std::max(inputWidth, inputHeight);
@@ -1508,12 +1530,7 @@ bool decodeStages(ConcurrentDngHost &host,
   // routing point, rather than at each downstream SetMaximumSize. Loud by
   // design: a silently cropped or silently full-size result is the failure mode
   // this whole path exists to avoid.
-  int32_t effectiveMaxDim = maxDim;
-  if (effectiveMaxDim > 0 && !isBayer) {
-    std::cerr << "[Pipeline] sized decode unsupported for this path; "
-                 "falling back to full resolution\n";
-    effectiveMaxDim = 0;
-  }
+  const int32_t effectiveMaxDim = effectiveMaxDimFor(isBayer, maxDim);
 
   // Lazy actual-size prewarm: fire the batched polynomial3 kernel at the
   // real image dimensions now that they are known.  This ensures Metal has
@@ -1575,8 +1592,16 @@ bool decodeStages(ConcurrentDngHost &host,
   // checked-out buffer from leaking permanently. Disarmed on success.
   // Exactly one guard is active per decode: RGBA when fuse_rgba_output is
   // true (production FFI path), RGB when false (test harness / rollback).
-  ScopedRgbaCheckout checkoutGuard(result.rgb_ptr, config.fuse_rgba_output);
-  ScopedRgbCheckout rgbCheckoutGuard(result.rgb_ptr, !config.fuse_rgba_output);
+  // WP10: a CALLER-OWNED buffer must never be released into the pool on a
+  // failure path — the pool would then hand a Dart-owned address to the next
+  // decode, and RgbaOutputPool::release absorbs unknown pointers silently
+  // (:337-347), so the corruption would be undetectable at the release site.
+  // The guards are constructed INACTIVE in that case; the caller keeps
+  // ownership on every exit path, success or failure.
+  ScopedRgbaCheckout checkoutGuard(
+      result.rgb_ptr, config.fuse_rgba_output && !result.rgba_caller_owned);
+  ScopedRgbCheckout rgbCheckoutGuard(
+      result.rgb_ptr, !config.fuse_rgba_output && !result.rgba_caller_owned);
 
   // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
   bool allDone = false;
@@ -1853,6 +1878,91 @@ bool dng_pipeline_run_stage3(dng_host &host,
                              timing, stage3_workspace);
 }
 
+// WP10: metadata-only output-extent probe.
+//
+// This is a deliberate PARTIAL duplicate of parseDngFile (:1466-1492): it runs
+// the same Parse/PostParse pair and stops one line short of
+// negative->ReadStage1Image. That omission is the entire point — Stage 1 is the
+// expensive step and the output extent does not depend on it, because
+// computeOutputSize (dng_render_halide.cpp:481-503) reads only
+// DefaultFinalWidth/Height, AspectRatio and the renderer's MaximumSize, all of
+// which are populated by PostParse.
+//
+// The renderer setup below mirrors decodeStages (:1238-1241, :1248-1250) and
+// reuses the SAME two sizing functions rather than re-deriving the rule. If a
+// future change makes the extent depend on Stage-1 pixels, the probe and the
+// decode will disagree and AC11.6 goes red — which is what it is for.
+bool dng_pipeline_probe_output_size(const char *file_path, int32_t max_dim,
+                                    DngPipelineResult &result) {
+  result = DngPipelineResult{};
+  if (!file_path || !file_path[0]) {
+    result.error_code = kDngErrNullPath;
+    return false;
+  }
+  // Shared lock, matching the decode: this reads process-scoped host/slot state
+  // and must not run concurrently with warmup's exclusive section. Taken and
+  // released here, NOT held across the decode that may follow — dng_decode_into_buffer
+  // calls probe and decode in sequence, never nested, so a shared_lock waiting
+  // on a queued writer can never deadlock against its own outer lock.
+  std::shared_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
+  try {
+    DecodeSlotPool::Slot decodeSlot = decodeSlotPool().acquire();
+    DecodeContext &decodeCtx = decodeSlot.context();
+    // One thread: this parses a header. There is no area-task fan-out to feed.
+    ConcurrentDngHost host(1);
+    host.setDecodeContext(&decodeCtx);
+    dng_file_stream stream(file_path);
+
+    dng_info info;
+    info.Parse(host, stream);
+    info.PostParse(host);
+    if (!info.IsValidDNG() || info.fMainIndex >= info.fIFDCount) {
+      result.error_code = kDngErrParseFailed;
+      return false;
+    }
+
+    AutoPtr<dng_negative> negative;
+    negative.Reset(host.Make_dng_negative());
+    negative->Parse(host, stream, info);
+    negative->PostParse(host, stream, info);
+    // NOTE: ReadStage1Image is deliberately NOT called. See the header comment.
+
+    const dng_ifd &rawIFD = *info.fIFD[info.fMainIndex];
+    const bool isBayer = rawIFD.fPhotometricInterpretation == piCFA;
+    const int32_t effectiveMaxDim = effectiveMaxDimFor(isBayer, max_dim);
+
+    dng_render renderer(host, *negative);
+    renderer.SetMaximumSize(stage4MaximumSize(
+        rawIFD.fImageWidth, rawIFD.fImageLength, effectiveMaxDim));
+    renderer.SetFinalPixelType(ttByte);
+    renderer.SetFinalSpace(dng_space_sRGB::Get());
+
+    uint32_t w = rawIFD.fImageWidth;
+    uint32_t h = rawIFD.fImageLength;
+    dng_render_stage4_output_size(*negative, renderer, w, h);
+    if (w == 0 || h == 0) {
+      result.error_code = kDngErrProbeFailed;
+      return false;
+    }
+    result.width = w;
+    result.height = h;
+    result.error_code = kDngSuccess;
+    return true;
+  } catch (const dng_exception &e) {
+    result.error_code = e.ErrorCode();
+    std::cerr << "[Probe] DNG exception: " << result.error_code << "\n";
+    return false;
+  } catch (const std::exception &e) {
+    result.error_code = kDngErrStdException;
+    std::cerr << "[Probe] Exception: " << e.what() << "\n";
+    return false;
+  } catch (...) {
+    result.error_code = kDngErrUnknownException;
+    std::cerr << "[Probe] Unknown exception\n";
+    return false;
+  }
+}
+
 bool dng_pipeline_decode_to_rgb(const char *file_path,
                                    DngPipelineResult &result) {
   // R2 sized decode: the old entry is a thin forward. max_dim 0 makes every
@@ -1861,9 +1971,21 @@ bool dng_pipeline_decode_to_rgb(const char *file_path,
   return dng_pipeline_decode_to_rgb_sized(file_path, 0, result);
 }
 
-bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
-                                         int32_t max_dim,
-                                         DngPipelineResult &result) {
+namespace {
+// WP10 (AMENDMENT 3, A3.2): the shared decode body. `dst` is a PARAMETER, bound
+// AFTER the reset below — that is the whole reason it is not a pre-set field on
+// `result`.
+//
+// The reset a few lines down (formerly the first statement of
+// dng_pipeline_decode_to_rgb_sized) would wipe any caller pointer that had been
+// pre-set on the struct, SILENTLY, and the decode would then allocate from the
+// RGBA pool while Dart believed it owned the buffer. Correct pixels, wrong
+// owner — a failure mode no assertion catches except pointer identity. Passing
+// the buffer as a parameter is immune to this reset and to any future reset
+// either this function or decodeStages grows.
+bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
+                          uint8_t *dst, size_t dst_capacity,
+                          DngPipelineResult &result) {
   // L-4: signal pending decode so warmup yields between sub-steps.  Counter
   // is incremented before the mutex lock so warmup (which checks the counter
   // after releasing the mutex between steps) detects this decode immediately.
@@ -1882,7 +2004,17 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
   // docs/logs/2026-09-03/mutex-rework-spec.md §2 for the audit and
   // docs/logs/2026-09-03/gate-results.md for the evidence.
   std::shared_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
-  result = DngPipelineResult{};
+  result = DngPipelineResult{};          // unchanged reset, still first
+  // ...and the caller-buffer binding happens AFTER it, every time, by
+  // construction. Moving this above the reset, or reintroducing a pre-set
+  // field, silently disables the whole caller-owned-buffer path — the
+  // pre-registered mutation M-5 deletes these four lines and AC15.4's
+  // pointer-identity check on the DNG route must go red.
+  if (dst) {
+    result.rgb_ptr = dst;
+    result.rgb_size = dst_capacity;
+    result.rgba_caller_owned = true;
+  }
   if (!file_path || !file_path[0]) {
     result.error_code = kDngErrNullPath;
     return false;
@@ -1986,4 +2118,23 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
     std::cerr << "[Pipeline] Unknown exception\n";
     return false;
   }
+}
+}  // namespace
+
+// The pre-existing public entry forwards with nullptr, so its behaviour is
+// unchanged BY CONSTRUCTION rather than by inspection — the same argument this
+// codebase already makes for dng_decode_and_process forwarding to
+// decodeAndProcessImpl with max_dim = 0 (dng_ffi_api.cpp:153-155), and for
+// dng_pipeline_decode_to_rgb forwarding here with max_dim = 0.
+bool dng_pipeline_decode_to_rgb_sized(const char *file_path, int32_t max_dim,
+                                      DngPipelineResult &result) {
+  return decodeToRgbSizedImpl(file_path, max_dim, nullptr, 0, result);
+}
+
+// WP10: the caller-owned-buffer sibling. Additive; the two entries share one
+// body, so the caller-buffer path can never drift from the ordinary decode.
+bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
+                                     uint8_t *dst, size_t dst_capacity,
+                                     DngPipelineResult &result) {
+  return decodeToRgbSizedImpl(file_path, max_dim, dst, dst_capacity, result);
 }

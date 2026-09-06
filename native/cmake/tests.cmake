@@ -2170,6 +2170,38 @@ foreach(_codec_test test_codec_roundtrip test_codec_heif test_codec_jxl)
     endif()
 endforeach()
 
+# ---------------------------------------------------------------------------
+# WP10 (AMENDMENT 3): ONE format-agnostic caller-owned-buffer gate.
+#
+# This replaces the two per-format targets AMENDMENT 2b needed
+# (test_decode_into_buffer + test_raw_decode_into_buffer). A3 routes both
+# formats through a single entry pair, so there is one target, owned by one
+# member — the shared-file contention 2b required is designed out.
+#
+# NO if(DNG_ENABLE_GENERIC_RAW) guard, deliberately: ceyx_decode_into_ffi.cpp is
+# always compiled and both ceyx_* symbols exist in every configuration. In an
+# OFF build a RAW input returns kCeyxErrFormatUnsupportedInBuild, which is the
+# behaviour AC15.8 asserts — so this target must BUILD there in order to test it.
+# The test prints [GAP] for any sample class it was not given.
+#
+# Placed INSIDE the NOT DNG_CROSS_BUILD guard: a target after that endif() would
+# be emitted for cross builds, which have no host runner.
+#
+# Linked against the SHARED library on purpose — rationale at tests.cmake
+# :1741-1749: compiling the pipeline sources into a test links none of the
+# shipping code, so a green from that shape says nothing about the artifact,
+# and WP10's whole risk is "the symbol is not in the shipped binary".
+# ---------------------------------------------------------------------------
+add_executable(test_ceyx_decode_into tests/test_ceyx_decode_into.cpp)
+target_include_directories(test_ceyx_decode_into PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_ceyx_decode_into dng_decoder_native)
+add_dependencies(test_ceyx_decode_into dng_decoder_native)
+
 endif() # NOT DNG_CROSS_BUILD (test targets)
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)

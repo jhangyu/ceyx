@@ -19,6 +19,18 @@ struct DngPipelineResult {
   // layer skips its own rgb_to_rgba pass.
   uint8_t* rgba_ptr = nullptr;
   size_t   rgba_size = 0;
+  // WP10: when true, rgba_ptr/rgb_ptr point at a CALLER-OWNED buffer. It must
+  // never be released to RgbaOutputPool and never deleted. Set only by
+  // dng_decode_into_buffer.
+  //
+  // This field is an INPUT to dng_pipeline_decode_to_rgb_sized, unlike every
+  // other field on this struct, which is an output. That is why that function
+  // carries it (and the rgb_ptr/rgb_size it describes) across its own result
+  // reset instead of clearing it with the rest.
+  //
+  // This struct is INTERNAL: it carries no FFI static_assert and crosses no ABI
+  // boundary, unlike DngResult.
+  bool     rgba_caller_owned = false;
   uint32_t width = 0;
   uint32_t height = 0;
   double decode_ms = 0.0;
@@ -174,6 +186,28 @@ bool dng_pipeline_decode_to_rgb(const char *file_path,
 bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
                                          int32_t max_dim,
                                          DngPipelineResult &result);
+
+// WP10 (A3.2): as dng_pipeline_decode_to_rgb_sized, but the RGBA output is
+// written into the CALLER's buffer. Binds dst AFTER the internal result reset,
+// which is precisely why it is a parameter and not a pre-set field on `result`:
+// the reset would wipe a pre-set pointer and the decode would quietly fall back
+// to the pool while the caller believed it owned the buffer.
+//
+// Ownership: dst is never released to RgbaOutputPool and never freed by the
+// library, on ANY exit path — the checkout guards are constructed inactive when
+// result.rgba_caller_owned is set.
+bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
+                                     uint8_t *dst, size_t dst_capacity,
+                                     DngPipelineResult &result);
+
+// WP10: metadata-only output-extent probe. Same sizing rules as
+// dng_pipeline_decode_to_rgb_sized (the same stage4MaximumSize() +
+// dng_render_stage4_output_size() pair, and the same non-Bayer downgrade of
+// max_dim), without decoding: no ReadStage1Image, no Stage3, no Stage4, no
+// pool acquire. Returns false on parse failure, with result.error_code set.
+// On success result.width/height carry the extent and nothing else is touched.
+bool dng_pipeline_probe_output_size(const char *file_path, int32_t max_dim,
+                                    DngPipelineResult &result);
 
 bool dng_pipeline_warmup_for_size(int32_t width, int32_t height);
 
