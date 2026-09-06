@@ -291,6 +291,15 @@ add_executable(test_raw_layout_contract
     src/pipeline/raw_contract_validate.cpp)
 target_include_directories(test_raw_layout_contract PRIVATE ${INC_DIR})
 
+# native-rotation spec Task 1: pure 8-case EXIF orientation pass. No
+# Halide/DNG-SDK/LibRaw dependency (deliberately standalone, spec §1.1/Task 1
+# constraint), so this links directly against the one source file rather than
+# the whole decoder library, same pattern as test_raw_layout_contract above.
+add_executable(test_ceyx_orient
+    tests/test_ceyx_orient.cpp
+    src/ffi/ceyx_orient.cpp)
+target_include_directories(test_ceyx_orient PRIVATE ${INC_DIR})
+
 # Round 1 Task 1.2: histogram-based auto-exposure estimator, plain math over a
 # caller-supplied buffer view -- no LibRaw/Halide/DNG SDK dependency, so this
 # links directly against the two sources rather than the whole decoder
