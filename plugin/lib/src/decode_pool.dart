@@ -10,6 +10,7 @@ import 'dng_bindings.dart';
 import 'dng_decoder_service.dart';
 import 'encode_bindings.dart';
 import 'encode_service.dart';
+import 'native_buffer_pool.dart';
 
 /*
 ---
@@ -258,6 +259,18 @@ class CeyxDecodePool {
   /// library present.
   @visibleForTesting
   static void Function(int address)? debugNativeFree;
+
+  /// WP6: the native buffer pool a decode payload's RGBA buffer came from,
+  /// when it came from one.
+  ///
+  /// The free list lives on THIS isolate (the pool's own), because that is
+  /// where returns land; a native address is process-global but a Dart pool
+  /// object is not. Null means "no pooled allocation on this route", which is
+  /// the state whenever the worker's buffer is allocated by the dylib's own
+  /// decode entry (it owns the allocation and `dng_free_rgba_buffer` owns the
+  /// free) — the pool then owns nothing and every code path below degrades to
+  /// the pre-WP6 behaviour, unchanged.
+  static CeyxNativeBufferPool? nativeBufferPool;
 
   /// Test-only: how many isolates this pool has spawned, ever. After warmup
   /// this must NOT grow per decode — that is the whole point of the pool.
@@ -837,6 +850,10 @@ class CeyxDecodePool {
           decodeMs: payload[3] as double,
           processMs: payload[4] as double,
           nativeAddress: address,
+          // WP6 explicit release entry. Null when no pool owns this address,
+          // so `releaseToPool()` stays a safe no-op on every non-pooled route
+          // rather than pretending to reclaim something.
+          onReleaseToPool: _releaseToPoolCallbackFor(address),
         );
       case CeyxPoolJobType.encode:
         // WP3a: the worker returns the encoded JPEG as TransferableTypedData
@@ -886,8 +903,35 @@ class CeyxDecodePool {
     return bytes;
   }
 
+  /// WP6: the explicit end-of-consumption entry for [address], or null when no
+  /// pool owns it.
+  void Function()? _releaseToPoolCallbackFor(int address) {
+    final buffers = nativeBufferPool;
+    if (buffers == null || !buffers.ownsAddress(address)) return null;
+    return () => buffers.tryReleaseByAddress(address);
+  }
+
+  /// WP6 safety net. A pooled buffer is meant to come back through
+  /// `DngImage.releaseToPool()`; this Dart [Finalizer] catches the paths that
+  /// forget, and its reclaim is counted separately
+  /// (`CeyxNativeBufferPool.debugFinalizerReleases`) precisely so a test can
+  /// assert it never fired. It is attached ONLY for pool-owned addresses — a
+  /// dylib-owned buffer keeps its existing `NativeFinalizer`, which frees, and
+  /// no address is ever owned by both.
+  static final Finalizer<int> _poolSafetyNet = Finalizer<int>((address) {
+    CeyxDecodePool.nativeBufferPool?.releaseByAddressFromFinalizer(address);
+  });
+
   Uint8List _viewNativeRgba(int address, int length) {
     final ptr = Pointer<Uint8>.fromAddress(address);
+    final buffers = nativeBufferPool;
+    if (buffers != null && buffers.ownsAddress(address)) {
+      // Pool-owned: NO NativeFinalizer (freeing it would take the buffer away
+      // from the pool). The safety net returns it instead.
+      final bytes = ptr.asTypedList(length);
+      _poolSafetyNet.attach(bytes, address, detach: bytes);
+      return bytes;
+    }
     if (debugNativeFree != null) {
       // Test seam: no dylib is loaded, so no finalizer may be attached. The
       // test owns the fake allocation and frees it through the seam.
@@ -898,6 +942,11 @@ class CeyxDecodePool {
 
   /// Explicit free for the ONE arm that never materialises (soft cancel).
   void _freeNativeRgba(int address) {
+    // WP6: a pool-owned buffer is RETURNED, not freed — "release" on the
+    // discard arm keeps its meaning (this address is done) while the memory
+    // stays in the fixed slot set. Still exactly one reclaim per address: the
+    // discard arm never materialises, so no safety net was ever attached.
+    if (nativeBufferPool?.tryReleaseByAddress(address) ?? false) return;
     final seam = debugNativeFree;
     if (seam != null) {
       seam(address);

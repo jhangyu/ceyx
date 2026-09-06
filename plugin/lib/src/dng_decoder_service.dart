@@ -52,6 +52,14 @@ class DngImage implements Finalizable {
   /// [rgbaData] reachable for as long as it uses the address.
   final int nativeAddress;
 
+  /// WP6: how this frame's native buffer goes back to `CeyxNativeBufferPool`.
+  /// Set by the pool path that allocated it; null for every Dart-heap-backed
+  /// decode and for every buffer whose sole owner is a `NativeFinalizer`, where
+  /// null means "nothing to release", never "leak".
+  final void Function()? onReleaseToPool;
+
+  bool _releasedToPool = false;
+
   DngImage({
     required this.rgbaData,
     required this.width,
@@ -59,7 +67,17 @@ class DngImage implements Finalizable {
     required this.decodeMs,
     required this.processMs,
     this.nativeAddress = 0,
+    this.onReleaseToPool,
   });
+
+  /// Returns this frame's native buffer to the pool. Call at
+  /// end-of-consumption. Idempotent, and a safe no-op when no pooled buffer
+  /// backs this image. After this the [rgbaData] view MUST NOT be read.
+  void releaseToPool() {
+    if (_releasedToPool) return;
+    _releasedToPool = true;
+    onReleaseToPool?.call();
+  }
 
   /// Total processing time
   double get totalMs => decodeMs + processMs;
