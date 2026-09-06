@@ -84,6 +84,27 @@ typedef struct RawColorDiagnostics {
  * `struct_size` is always valid on a successful (0) return. */
 int32_t raw_last_color_diagnostics(RawColorDiagnostics *out);
 
+/* R6 fix: wires the decode-INTO entry point (ceyx_decode_into_buffer's
+ * generic-RAW arm, native/src/ffi/ceyx_decode_into_ffi.cpp) into the SAME
+ * thread-local diagnostics state raw_decode_and_process writes, so
+ * raw_last_diagnostics()/raw_last_color_diagnostics() reflect the most recent
+ * decode regardless of which entry point produced it. Before this, a
+ * decode-into call left both queries describing whatever earlier
+ * raw_decode_and_process call last ran on this thread (or "no decode has run"
+ * if none had) -- stale-by-construction, not merely stale-by-timing.
+ *
+ * Internal call, same binary, never looked up via dlsym/FFI -- deliberately
+ * NOT RAW_FFI_EXPORT'd and not part of the Dart-visible surface. `diag` is
+ * required; `color_diag` may be null (a route with no colour pipeline, e.g. a
+ * failure before the adapter ran, simply leaves the colour channel
+ * unrecorded, exactly as raw_decode_and_process already treats a failed
+ * build()). RawColorPipelineDiagnostics is forward-declared only: this header
+ * never needs its layout, only a pointer to it. */
+struct RawColorPipelineDiagnostics;
+void raw_record_decode_into_diagnostics(
+    const RawDecodeDiagnostics *diag,
+    const struct RawColorPipelineDiagnostics *color_diag);
+
 #ifdef __cplusplus
 }
 #endif

@@ -15,6 +15,7 @@
 #include "dng_pipeline.h"
 #include "raw_file_router.h"
 #if defined(DNG_ENABLE_GENERIC_RAW)
+#include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #endif
 
@@ -136,6 +137,17 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
   RawPipelineResult out;
   const RawErrorCode rc =
       raw_pipeline_decode_file_into(file_path, develop, dst, dst_capacity, out);
+  // R6 fix: raw_decode_and_process (raw_ffi_api.cpp) records out.diag/
+  // out.color_diag into thread-local state on every call, success or
+  // failure, so raw_last_diagnostics()/raw_last_color_diagnostics() always
+  // describe the most recent decode on this thread. This decode-INTO entry
+  // point used to skip that recording entirely — a caller who decoded via
+  // ceyx_decode_into_buffer and then queried raw_last_diagnostics() got
+  // whatever an earlier raw_decode_and_process call had left behind (or "no
+  // decode has run" if none had), never THIS call's diagnostics. Record
+  // unconditionally, matching raw_decode_and_process's unconditional
+  // g_last_diagnostics = out.diag (raw_ffi_api.cpp) before its success check.
+  raw_record_decode_into_diagnostics(&out.diag, &out.color_diag);
   result->decode_ms = out.diag.raw_unpack_ms;
   result->process_ms = out.diag.gpu_process_ms;
   if (rc != kRawSuccess) {

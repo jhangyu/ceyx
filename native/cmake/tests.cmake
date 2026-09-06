@@ -2220,6 +2220,90 @@ target_link_libraries(test_errmap_dst_too_small dng_decoder_native)
 add_dependencies(test_errmap_dst_too_small dng_decoder_native)
 # --- end r5 remediation Task #3 ---
 
+# --- R6 fix: decode-into path must populate legacy RAW diagnostics ---------
+# Guarded by DNG_ENABLE_GENERIC_RAW: it calls raw_last_diagnostics(), which is
+# declared alongside raw_ffi_api.cpp's other symbols and (per pipeline.cmake's
+# NOT DNG_ENABLE_GENERIC_RAW filter above) does not exist in an OFF build's
+# dylib at all -- unlike test_ceyx_decode_into/test_errmap_dst_too_small,
+# whose ceyx_* entries are always compiled. Same shared-dylib linkage
+# rationale as those two targets.
+if(DNG_ENABLE_GENERIC_RAW)
+    add_executable(test_raw_diagnostics_freshness
+        tests/test_raw_diagnostics_freshness.cpp)
+    target_include_directories(test_raw_diagnostics_freshness PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    target_link_libraries(test_raw_diagnostics_freshness dng_decoder_native)
+    add_dependencies(test_raw_diagnostics_freshness dng_decoder_native)
+endif()
+# --- end R6 fix ---
+
+# ---------------------------------------------------------------------------
+# Task 0 — GPU strided-output feasibility probe (native-rotation spec §9).
+#
+# Decides Design G (Halide writes the oriented frame, zero scratch) vs Design C
+# (CPU transpose into pooled scratch) by measurement, not by argument. Developer
+# / gate binary only: deliberately NOT added to any Halcyon CI leg, because
+# Halcyon CI is compile-only by user decree.
+#
+# The probe calls the generated Stage4 AOT entry DIRECTLY with a caller-built
+# destination layout, so which kernel branch it exercises is decided by the
+# build directory, exactly as it is for the pipeline:
+#   build/           -> non-split, dng_render_stage4       (Metal-shaped)
+#   build-moltenvk/  -> split,     dng_render_stage4_split (Vulkan-shaped)
+# Both branches must be exercised: the destination is constructed at a different
+# source line in each (dng_render_halide.cpp:1171 vs :1187) and a probe that ran
+# only one would prove nothing about the other (spec §7 OQ-4).
+#
+# No pipeline sources are compiled into this target — it needs only the DNG SDK
+# headers (for the RenderParams struct), the Halide runtime and the Stage4 AOT
+# archive for whichever branch this build produced.
+add_executable(probe_strided_output tests/probe_strided_output.cpp)
+target_include_directories(probe_strided_output PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(probe_strided_output
+    dng_sdk
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT})
+add_dependencies(probe_strided_output halide_runtime_target)
+if(DNG_STAGE4_SPLIT_KERNEL)
+    # The define must be passed EXPLICITLY. Without it the probe source takes
+    # its non-split branch, calls dng_render_stage4(), and fails to link against
+    # the split archive this build produced — which is exactly what happened on
+    # the first MoltenVK build attempt. A probe that silently compiled the wrong
+    # branch here would have reported a Metal result while claiming to be the
+    # Vulkan leg, and both legs must be genuinely distinct for the §9 rule to
+    # mean anything.
+    target_compile_definitions(probe_strided_output PRIVATE DNG_STAGE4_SPLIT_KERNEL=1)
+    target_link_libraries(probe_strided_output
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+    if(TARGET dng_render_android_aot_target)
+        add_dependencies(probe_strided_output dng_render_android_aot_target)
+    endif()
+else()
+    target_link_libraries(probe_strided_output
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
+    add_dependencies(probe_strided_output dng_render_aot_target)
+endif()
+if(APPLE)
+    target_link_libraries(probe_strided_output
+        ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY}
+        ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(VULKAN_LIBRARY)
+    target_link_libraries(probe_strided_output ${VULKAN_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(probe_strided_output ${DNG_LINUX_TEST_LIBS})
+endif()
+# --- end Task 0 probe ---
+
 endif() # NOT DNG_CROSS_BUILD (test targets)
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)

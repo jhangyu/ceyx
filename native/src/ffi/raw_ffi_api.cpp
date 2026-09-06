@@ -102,4 +102,28 @@ RAW_FFI_EXPORT int32_t raw_last_color_diagnostics(RawColorDiagnostics* out) {
     return 0;
 }
 
+// R6 fix: same conversion raw_decode_and_process performs above, factored out
+// so the decode-into entry point (ceyx_decode_into_ffi.cpp) can feed the SAME
+// thread-local state without duplicating the field-by-field mapping. Not
+// RAW_FFI_EXPORT'd -- internal, same-binary call only (see raw_ffi_api.h).
+void raw_record_decode_into_diagnostics(
+    const RawDecodeDiagnostics* diag,
+    const RawColorPipelineDiagnostics* color_diag) {
+    if (!diag) return;
+    g_last_diagnostics = *diag;
+    if (color_diag) {
+        RawColorDiagnostics converted{};
+        converted.struct_size = static_cast<uint32_t>(sizeof(RawColorDiagnostics));
+        converted.auto_exposure_ev = color_diag->auto_exposure_ev;
+        converted.auto_exposure_status = color_diag->auto_exposure_status;
+        converted.vendor_curve_applied = color_diag->vendor_curve_applied;
+        converted.matrix_route = color_diag->matrix_route;
+        converted.clamped_mask = 0;
+        std::snprintf(converted.reason, sizeof(converted.reason), "%s",
+                      color_diag->auto_exposure_reason);
+        g_last_color_diagnostics = converted;
+        g_have_color_diagnostics = true;
+    }
+}
+
 }  // extern "C"

@@ -344,6 +344,35 @@ void fakeEncodeCapablePoolWorker(List<Object?> bootstrap) {
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
 
+/// Polls [condition] until it is true, instead of sleeping a fixed duration
+/// and hoping.
+///
+/// Root cause this exists to remove (TC-942/TC-956 deflake, R6): both tests
+/// used a FIXED real-time proxy (`Future<void>.delayed(40ms)`, or "await an
+/// unrelated decode round trip") to stand in for "an async isolate event has
+/// definitely happened by now" (a respawned worker reporting ready; a width
+/// broadcast's ack landing on every worker). `Isolate.spawn` and cross-isolate
+/// port round trips have no upper bound on a loaded host, so any fixed-time or
+/// same-timing-but-unrelated proxy is a race that happens to usually win on an
+/// idle machine. Polling the pool's OWN mechanical signal (its log lines / its
+/// public counters) instead removes the race outright: the wait ends exactly
+/// when the awaited event truly happened, never earlier, and — bounded by
+/// [timeout] — never hangs forever if it doesn't.
+Future<void> waitUntilTrue(
+  bool Function() condition, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 5),
+  Duration pollEvery = const Duration(milliseconds: 5),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out after $timeout waiting for: $reason');
+    }
+    await Future<void>.delayed(pollEvery);
+  }
+}
+
 void main() {
   late CeyxDecodePool pool;
   final logLines = <String>[];
@@ -504,6 +533,8 @@ void main() {
       pool = CeyxDecodePool(width: 2, entryPoint: fakePoolWorker, maxRespawns: 1);
       await Future.wait([pool.decode('a.dng'), pool.decode('b.dng')]);
       expect(pool.workerCount, equals(2));
+      final readyBeforeCrashes =
+          logLines.where((l) => l.contains('|ready|')).length;
 
       await expectLater(
         pool.decode('crash:1.dng'),
@@ -521,9 +552,31 @@ void main() {
             'narrower, it does not die',
       );
 
+      // DEFLAKE (was `await Future<void>.delayed(40ms)`): the survivor here is
+      // a worker RESPAWNED by the crash:1 failure — `_spawn` issues a real
+      // `Isolate.spawn`, whose boot time is not bounded by any fixed delay. On
+      // an idle machine 40ms is enough; on a loaded host it sometimes was not,
+      // so the pool still saw the respawned worker as `!ready` when the busy
+      // job below was submitted. `_maybeSpawn` then found no idle worker AND
+      // `_respawnCapped` already latched (by crash:2), and failed the busy job
+      // itself with `CeyxPoolUnavailableException` instead of dispatching it —
+      // which collapsed the `inFlightCount == 1` assertion that used to follow
+      // (the exact form the flake took: an unhandled-rejection warning on
+      // `busy`, then a failed assertion). Wait for the pool's own "ready" log
+      // line instead of guessing a duration.
+      await waitUntilTrue(
+        () =>
+            logLines.where((l) => l.contains('|ready|')).length >
+            readyBeforeCrashes,
+        reason: 'the respawned survivor worker to report ready',
+      );
+
       // Occupy the survivor, then queue one more job behind it.
       final busy = pool.decode('slow:300:busy.dng');
-      await Future<void>.delayed(const Duration(milliseconds: 40));
+      await waitUntilTrue(
+        () => pool.inFlightCount == 1,
+        reason: 'the busy job to be dispatched to the survivor',
+      );
       expect(pool.inFlightCount, equals(1));
 
       // Must not recurse, must not hang: a clean failure.
@@ -656,8 +709,24 @@ void main() {
 
     logLines.clear();
     pool.width = 5;
-    // Let the acks land.
-    await pool.decode('c.dng');
+    // DEFLAKE (was `await pool.decode('c.dng')` as a "let the acks land"
+    // proxy): `_setNativeSlotTarget` broadcasts `kMsgConfigSlots` to BOTH
+    // workers, but each worker's `kMsgSlotsAck` travels its OWN isolate's
+    // SendPort round trip, independent of the other worker's. There is no
+    // ordering guarantee between "the worker that happens to serve c.dng
+    // answered" and "the OTHER worker's slot ack landed on the pool" — on a
+    // loaded host the c.dng round trip could complete first, so the exact-2
+    // assertion below would sometimes see only 1 ack. Wait for the mechanical
+    // signal itself (both ack log lines) rather than a same-timing but
+    // logically unrelated proxy call.
+    await waitUntilTrue(
+      () =>
+          logLines
+              .where((l) => l.contains('|slots|requested=5|effective=5'))
+              .length >=
+          2,
+      reason: 'both live workers to ack the width-5 slot config',
+    );
 
     expect(pool.lastNativeSlotEffective, equals(5));
     expect(
