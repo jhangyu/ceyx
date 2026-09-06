@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ceyx/ceyx.dart';
+import 'package:ffi/ffi.dart' show calloc;
 import 'package:flutter_test/flutter_test.dart';
 
 /// Fake worker entry point: same wire protocol as [ceyxDecodeWorkerMain] but
@@ -62,10 +64,16 @@ void fakePoolWorker(List<Object?> bootstrap) {
           TransferableTypedData.fromList([Uint8List.fromList([1, 2, 3])]),
         ]);
       } else {
+        // H2-A wire shape: a bare native address + dims, not
+        // TransferableTypedData (h1h2-spec.md §2.1). Allocated via `calloc`
+        // so the address is a real allocation the pool's free path (routed
+        // through `CeyxDecodePool.debugNativeFree` in tests, see setUp) can
+        // legitimately act on.
+        final buf = calloc<Uint8>(2 * 2 * 4);
         poolPort.send(<Object?>[
           kMsgResult,
           requestId,
-          TransferableTypedData.fromList([Uint8List(2 * 2 * 4)]),
+          buf.address,
           2,
           2,
           1.0,
@@ -112,10 +120,11 @@ void unsupportedSlotsWorker(List<Object?> bootstrap) {
         TransferableTypedData.fromList([Uint8List.fromList([1, 2, 3])]),
       ]);
     } else {
+      final buf = calloc<Uint8>(2 * 2 * 4);
       poolPort.send(<Object?>[
         kMsgResult,
         requestId,
-        TransferableTypedData.fromList([Uint8List(2 * 2 * 4)]),
+        buf.address,
         2,
         2,
         1.0,
@@ -164,10 +173,11 @@ void staggeredBootWorker(List<Object?> bootstrap) {
             TransferableTypedData.fromList([Uint8List.fromList([1, 2, 3])]),
           ]);
         } else {
+          final buf = calloc<Uint8>(2 * 2 * 4);
           poolPort.send(<Object?>[
             kMsgResult,
             requestId,
-            TransferableTypedData.fromList([Uint8List(2 * 2 * 4)]),
+            buf.address,
             2,
             2,
             1.0,
@@ -199,6 +209,96 @@ void staggeredBootWorker(List<Object?> bootstrap) {
   }
 }
 
+/// Fake worker for the H2-A pointer-transfer wire shape (T4 ownership
+/// tests, written against the spec's declared post-T3 wire shape —
+/// h1h2-spec.md §2.1: `decode` results become `[address, width, height,
+/// decodeMs, processMs]`, a bare native address instead of
+/// [TransferableTypedData]). The probe arm is untouched by H2-A and keeps
+/// using [TransferableTypedData] here too, mirroring the production worker.
+///
+/// Path conventions (extends [fakePoolWorker]'s):
+///   `crash:*` -> throws, killing the worker (errorsAreFatal).
+///   `error:*` -> answers with `kMsgError` (nothing crosses the wire).
+///   `slow:<ms>:*` -> answers after <ms> milliseconds.
+///   `fixed:<address>:<w>:<h>` -> reuses a caller-owned buffer rather than
+///     allocating one, so the test can independently verify the returned
+///     [DngImage] is a VIEW over that exact address (TC-964). Isolate entry
+///     points must be top-level/static functions and cannot close over a
+///     `Pointer`, so the address travels as a decimal string embedded in the
+///     path — a plain, sendable `String`.
+/// Every other successful decode allocates a fresh native 2x2 RGBA buffer via
+/// `calloc` so the returned address is a REAL allocation the free path can
+/// legitimately be exercised against.
+void fakePointerPoolWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort();
+  jobs.listen((Object? message) {
+    final msg = message as List<Object?>;
+    if (msg[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    final requestId = msg[1] as int;
+    final type = CeyxPoolJobType.values[msg[2] as int];
+    final path = msg[3] as String;
+    if (path.startsWith('crash:')) {
+      throw StateError('fake worker crash for $path');
+    }
+    if (path.startsWith('error:')) {
+      poolPort.send(<Object?>[
+        kMsgError,
+        requestId,
+        StateError('fake decode error for $path'),
+      ]);
+      return;
+    }
+    void answer() {
+      if (type == CeyxPoolJobType.probe) {
+        poolPort.send(<Object?>[
+          kMsgResult,
+          requestId,
+          TransferableTypedData.fromList([Uint8List.fromList([1, 2, 3])]),
+        ]);
+        return;
+      }
+      if (path.startsWith('fixed:')) {
+        final parts = path.split(':');
+        poolPort.send(<Object?>[
+          kMsgResult,
+          requestId,
+          int.parse(parts[1]),
+          int.parse(parts[2]),
+          int.parse(parts[3]),
+          1.0,
+          2.0,
+        ]);
+        return;
+      }
+      final buf = calloc<Uint8>(2 * 2 * 4);
+      poolPort.send(<Object?>[
+        kMsgResult,
+        requestId,
+        buf.address,
+        2,
+        2,
+        1.0,
+        2.0,
+      ]);
+    }
+
+    var delayMs = 0;
+    if (path.startsWith('slow:')) {
+      delayMs = int.parse(path.split(':')[1]);
+    }
+    if (delayMs == 0) {
+      answer();
+    } else {
+      Timer(Duration(milliseconds: delayMs), answer);
+    }
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
 void main() {
   late CeyxDecodePool pool;
   final logLines = <String>[];
@@ -206,6 +306,16 @@ void main() {
   setUp(() {
     logLines.clear();
     CeyxDecodePool.logger = logLines.add;
+    // H2-A wire shape: decode results are now bare native addresses
+    // (h1h2-spec.md §2.1-§2.2), so every fake worker in this file allocates
+    // real `calloc` buffers for its decode payloads. Without a seam, landing
+    // one would try to attach a real `NativeFinalizer` bound to
+    // `dng_free_rgba_buffer` via `DynamicLibrary.open`, which has no dylib to
+    // find in a plugin unit test. The default seam here frees those fake
+    // allocations directly; individual TC-961..964 tests install their own
+    // spy (and restore this default via `addTearDown`) to observe frees.
+    CeyxDecodePool.debugNativeFree =
+        (address) => calloc.free(Pointer<Uint8>.fromAddress(address));
   });
 
   tearDown(() async {
@@ -633,6 +743,143 @@ void main() {
         reason: 'the process-global pool must end up at the current target, '
             'never left on the stale value a late-booting worker applied',
       );
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // T4 (h1h2-plan.md): H2-A ownership tests, written against the spec's
+  // (h1h2-spec.md §2.1-§2.6) declared post-T3 API. `CeyxDecodePool
+  // .debugNativeFree` and the pointer-transfer wire shape
+  // (`[address, width, height, decodeMs, processMs]`) do not exist on this
+  // tree yet (T3 lands them) — these tests are expected to fail to COMPILE
+  // until T3 lands. That compile failure is the RED evidence per h1h2-plan.md
+  // T4-AC1: predicted failure mode is a missing-member analyzer/compile
+  // error referencing `CeyxDecodePool.debugNativeFree`, not a runtime
+  // assertion failure. Once T3 lands these are expected to compile and run;
+  // T6 (round 2) is responsible for driving them green and re-proving the
+  // discard-free assertion can fail via mutation.
+  // ---------------------------------------------------------------------
+
+  test(
+    'TC-961: H2-A discard arm frees the native buffer exactly once and '
+    'never materializes it (extends TC-931 for pointer-transfer ownership)',
+    () async {
+      final freed = <int>[];
+      CeyxDecodePool.debugNativeFree = freed.add;
+      addTearDown(() => CeyxDecodePool.debugNativeFree = null);
+      pool = CeyxDecodePool(width: 2, entryPoint: fakePointerPoolWorker);
+      final gen = pool.generation;
+      final pending = pool.submit(
+        CeyxPoolJobType.decode,
+        'slow:60:stale-ptr.dng',
+        generation: gen,
+      );
+      pool.bumpGeneration();
+      final outcome = await pending;
+      expect(outcome.discarded, isTrue);
+      expect(
+        outcome.value,
+        isNull,
+        reason: 'a discarded job must never reach _materialize',
+      );
+      expect(pool.debugDiscardCount, equals(1));
+      expect(
+        freed.length,
+        equals(1),
+        reason: 'the discarded native buffer must be freed exactly once',
+      );
+
+      // A job submitted at the CURRENT generation still delivers and is not
+      // freed via the discard path (mirrors TC-931's second half).
+      final fresh = await pool.submit(
+        CeyxPoolJobType.decode,
+        'fresh-ptr.dng',
+      );
+      expect(fresh.discarded, isFalse);
+      expect(fresh.value, isA<DngImage>());
+      expect(pool.debugDiscardCount, equals(1));
+      expect(
+        freed.length,
+        equals(1),
+        reason: 'landing a fresh-generation job must not go through the '
+            'discard-free path',
+      );
+    },
+  );
+
+  test(
+    'TC-962: H2-A finalizer path — a fresh-generation decode is NOT freed '
+    'explicitly (ownership belongs to the finalizer, not an eager free)',
+    () async {
+      final freed = <int>[];
+      CeyxDecodePool.debugNativeFree = freed.add;
+      addTearDown(() => CeyxDecodePool.debugNativeFree = null);
+      pool = CeyxDecodePool(width: 1, entryPoint: fakePointerPoolWorker);
+      final image = await pool.decode('fresh-ptr-2.dng');
+      expect(image.rgbaData.length, equals(2 * 2 * 4));
+      expect(
+        freed,
+        isEmpty,
+        reason: 'the landed buffer\'s ownership belongs to the '
+            'NativeFinalizer attached inside _materialize, not an explicit '
+            'free call made during this test body',
+      );
+    },
+  );
+
+  test(
+    'TC-963: H2-A error path — a worker kMsgError completion frees nothing '
+    '(no pointer ever crossed the wire)',
+    () async {
+      final freed = <int>[];
+      CeyxDecodePool.debugNativeFree = freed.add;
+      addTearDown(() => CeyxDecodePool.debugNativeFree = null);
+      pool = CeyxDecodePool(width: 1, entryPoint: fakePointerPoolWorker);
+      await expectLater(
+        pool.decode('error:boom.dng'),
+        throwsA(isA<StateError>()),
+      );
+      expect(freed, isEmpty);
+    },
+  );
+
+  test(
+    'TC-964: H2-A wire shape — decode result is [int, int, int, double, '
+    'double] and _materialize produces a DngImage view of the given address',
+    () async {
+      final freed = <int>[];
+      CeyxDecodePool.debugNativeFree = freed.add;
+      addTearDown(() => CeyxDecodePool.debugNativeFree = null);
+      const w = 3, h = 2;
+      final buf = calloc<Uint8>(w * h * 4);
+      for (var i = 0; i < w * h * 4; i++) {
+        buf[i] = i & 0xff;
+      }
+      try {
+        // Isolate entry points must be top-level/static and cannot close
+        // over a `Pointer`, so this reuses [fakePointerPoolWorker]'s
+        // `fixed:<address>:<w>:<h>` convention: the address travels as a
+        // plain sendable string. The wire shape under test is exercised by
+        // that worker's `fixed:` branch — a flat 5-element list of
+        // primitives, no TransferableTypedData.
+        pool = CeyxDecodePool(width: 1, entryPoint: fakePointerPoolWorker);
+        final image = await pool.decode('fixed:${buf.address}:$w:$h');
+        expect(image.width, equals(w));
+        expect(image.height, equals(h));
+        expect(image.decodeMs, equals(1.0));
+        expect(image.processMs, equals(2.0));
+        expect(image.rgbaData.length, equals(w * h * 4));
+        for (var i = 0; i < w * h * 4; i++) {
+          expect(image.rgbaData[i], equals(i & 0xff));
+        }
+      } finally {
+        // This test allocates and frees `buf` itself regardless of whether
+        // the debugNativeFree seam routes anything to it — the real-dylib
+        // finalizer-fire proof is explicitly PARKED (spec §2.6 "should-have,
+        // not a unit gate"; h1h2-plan.md T4 red lines), so this test does
+        // not assert on eventual finalizer-driven frees.
+        calloc.free(buf);
+      }
     },
   );
 }
