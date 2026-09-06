@@ -483,6 +483,7 @@ class CeyxDecodePool {
     String path, {
     int? maxDim,
     int? generation,
+    int exifOrientation = 1,
   }) {
     if (_disposed) {
       return Future.error(
@@ -506,6 +507,7 @@ class CeyxDecodePool {
       path: path,
       maxDim: maxDim,
       generation: gen,
+      exifOrientation: exifOrientation,
     );
     _byKey[key] = job;
     if (type == CeyxPoolJobType.decode && _pooledRouteEnabled) {
@@ -657,12 +659,18 @@ class CeyxDecodePool {
 
   /// Convenience wrapper: full decode, throwing on discard so the result type
   /// matches [DngDecoderService.decodeOnWorker] exactly.
-  Future<DngImage> decode(String path, {int? maxDim, int? generation}) async {
+  Future<DngImage> decode(
+    String path, {
+    int? maxDim,
+    int? generation,
+    int exifOrientation = 1,
+  }) async {
     final outcome = await submit(
       CeyxPoolJobType.decode,
       path,
       maxDim: maxDim,
       generation: generation,
+      exifOrientation: exifOrientation,
     );
     if (outcome.discarded) {
       throw CeyxPoolDiscardedException(outcome.generation, _generation);
@@ -880,7 +888,22 @@ class CeyxDecodePool {
       // collection-if would collapse the list and slide the address into the
       // encodeArgs slot, where the encode reader would find an int. A pooled
       // decode therefore sends an explicit null placeholder.
-      if (slot != null) ...<Object?>[encodeArgs, slot.address, slot.capacity]
+      // Native-rotation spec Task 4: orientation rides at a NEW trailing
+      // index 8, appended only when BOTH a slot was pre-acquired (an
+      // oriented decode is meaningless without a caller-owned dst) AND the
+      // orientation is non-identity — an identity request keeps the exact
+      // pre-Task-4 length-8 pooled shape, so a pre-existing wire-shape
+      // assertion sized on "5 base fields + placeholder + address + capacity"
+      // is untouched by a caller that never asks for rotation.
+      if (slot != null && job.exifOrientation != 1)
+        ...<Object?>[
+          encodeArgs,
+          slot.address,
+          slot.capacity,
+          job.exifOrientation,
+        ]
+      else if (slot != null)
+        ...<Object?>[encodeArgs, slot.address, slot.capacity]
       // No slot: byte-for-byte the pre-WP10 shape (length 5, or 6 for encode).
       else if (encodeArgs != null)
         encodeArgs,
@@ -1180,6 +1203,12 @@ class CeyxDecodePool {
         final width = payload[1] as int;
         final height = payload[2] as int;
         final address = payload[0] as int;
+        // Native-rotation spec Task 4: appliedOrientation rides at result
+        // index 5, behind the same widening guard idiom; a pre-Task-4 (or
+        // 5-element) payload from an older worker defaults to identity.
+        final appliedOrientation = payload.length > 5
+            ? payload[5] as int
+            : 1;
         return DngImage(
           rgbaData: _wrapNativeRgba(address, width * height * 4, type),
           width: width,
@@ -1191,6 +1220,7 @@ class CeyxDecodePool {
           // so `releaseToPool()` stays a safe no-op on every non-pooled route
           // rather than pretending to reclaim something.
           onReleaseToPool: _releaseToPoolCallbackFor(address),
+          appliedOrientation: appliedOrientation,
         );
       case CeyxPoolJobType.encode:
         // WP3a: the worker returns the encoded JPEG as TransferableTypedData
@@ -1450,6 +1480,7 @@ class _PoolJob {
     required this.maxDim,
     required this.generation,
     this.encodeArgs,
+    this.exifOrientation = 1,
   });
 
   final _JobKey key;
@@ -1457,6 +1488,11 @@ class _PoolJob {
   final String path;
   final int? maxDim;
   int generation;
+  // Native-rotation spec Task 4: requested EXIF orientation for a decode job.
+  // 1 (identity) for every non-decode job type and for a decode that wants no
+  // native rotation. Threaded onto the job message at a fixed trailing index
+  // (see _dispatch) so _probeSizeFor's cache key stays untouched.
+  final int exifOrientation;
   // WP3a: [rgbaAddress, width, height, quality] for CeyxPoolJobType.encode
   // jobs; null for every other job type.
   final List<Object?>? encodeArgs;
@@ -1636,7 +1672,27 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
           // this file's route. Both absent => byte-for-byte the pre-WP10 path.
           final dstAddress = message.length > 6 ? message[6] as int : 0;
           final dstCapacity = message.length > 7 ? message[7] as int : 0;
-          if (dstAddress != 0 && service.decodeIntoBufferAvailable) {
+          // Native-rotation spec Task 4: read behind the same widening guard
+          // idiom, defaulting to identity for any pre-Task-4 message shape.
+          final exifOrientation = message.length > 8 ? message[8] as int : 1;
+          if (dstAddress != 0 &&
+              exifOrientation != 1 &&
+              service.decodeIntoBufferOrientedAvailable) {
+            try {
+              final image = service.decodeIntoPointerOriented(
+                path,
+                dstAddress,
+                dstCapacity,
+                maxDim: maxDim,
+                exifOrientation: exifOrientation,
+              );
+              poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
+            } on DngBufferTooSmallException catch (e) {
+              // The prediction was stale. Report the extent native gave us so
+              // the pool re-acquires exactly, rather than guessing again.
+              poolPort.send(<Object?>[kMsgResize, requestId, e.width, e.height]);
+            }
+          } else if (dstAddress != 0 && service.decodeIntoBufferAvailable) {
             try {
               final image = service.decodeIntoPointer(
                 path,

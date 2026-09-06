@@ -299,6 +299,49 @@ void fakePointerPoolWorker(List<Object?> bootstrap) {
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
 
+/// Native-rotation spec Task 4 fake worker: stands in for a real dylib on the
+/// POOLED (slot-carrying) route so the job message's trailing orientation
+/// index can be observed. Answers `probeSize` with a fixed 4x4 extent (so the
+/// pool always acquires a slot), and for `decode` echoes the wire shape it
+/// received back through the two double fields of a normal decode result —
+/// `decodeMs` carries `message.length`, `processMs` carries `message[8]` (or
+/// -1 if absent) — rather than touching `address`/`width`/`height`, so the
+/// returned [DngImage] still wraps a real `calloc` buffer and stays safe to
+/// read in the test body.
+void orientationWirePoolWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort();
+  jobs.listen((Object? message) {
+    final msg = message as List<Object?>;
+    if (msg[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (msg[0] == kMsgConfigSlots) {
+      poolPort.send(<Object?>[kMsgSlotsAck, msg[1] as int]);
+      return;
+    }
+    final requestId = msg[1] as int;
+    final type = CeyxPoolJobType.values[msg[2] as int];
+    if (type == CeyxPoolJobType.probeSize) {
+      poolPort.send(<Object?>[kMsgResult, requestId, 4, 4]);
+      return;
+    }
+    final buf = calloc<Uint8>(4 * 4 * 4);
+    final orientationAtIndex8 = msg.length > 8 ? msg[8] as int : -1;
+    poolPort.send(<Object?>[
+      kMsgResult,
+      requestId,
+      buf.address,
+      4,
+      4,
+      msg.length.toDouble(),
+      orientationAtIndex8.toDouble(),
+    ]);
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
 /// WP3a fake worker: handles [CeyxPoolJobType.encode] without loading any
 /// dylib. `quality` (the 4th `encodeArgs` element) doubles as an artificial
 /// answer-delay in milliseconds, so tests can land a generation bump while an
@@ -1089,4 +1132,135 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------
+  // Native-rotation spec Task 4: orientation threading on the job/result
+  // wire (AC-4.1..AC-4.5). `orientationWirePoolWorker` puts the pool on the
+  // POOLED route (via the static `nativeBufferPool`/`debugDecodeIntoAvailable`
+  // seams already used by pool_route_activation_test.dart) so the job
+  // message actually carries a slot and reaches the widened index-8 branch
+  // in `_dispatch`.
+  // ---------------------------------------------------------------------
+  group('native-rotation Task 4: orientation wire threading', () {
+    setUp(() {
+      CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool(maxBuffers: 4);
+      CeyxDecodePool.debugDecodeIntoAvailable = true;
+    });
+
+    tearDown(() {
+      CeyxDecodePool.nativeBufferPool?.debugDisposeIdle();
+      CeyxDecodePool.nativeBufferPool = null;
+      CeyxDecodePool.debugDecodeIntoAvailable = null;
+    });
+
+    test(
+      'TC-1091 (AC-4.1): orientation rides at job-message index 8, present '
+      'ONLY for a non-identity request — an orientation-1 pooled decode keeps '
+      'the pre-Task-4 length-8 shape (untouched indices 0..7), while '
+      'orientation 6 widens by exactly one element carrying that value',
+      () async {
+        pool = CeyxDecodePool(width: 1, entryPoint: orientationWirePoolWorker);
+        final identity = await pool.decode(
+          'orient_wire_identity.dng',
+          exifOrientation: 1,
+        );
+        final oriented = await pool.decode(
+          'orient_wire_oriented.dng',
+          exifOrientation: 6,
+        );
+        // decodeMs smuggles the dispatched message's length.
+        expect(
+          identity.decodeMs,
+          equals(8),
+          reason: 'identity orientation must not widen the pooled message '
+              'past its pre-Task-4 shape (5 base fields + placeholder + '
+              'address + capacity)',
+        );
+        expect(oriented.decodeMs, equals(9));
+        // processMs smuggles message[8] (-1 when absent, per the fake
+        // worker's convention).
+        expect(identity.processMs, equals(-1));
+        expect(oriented.processMs, equals(6));
+      },
+    );
+
+    test(
+      'TC-1092 (AC-4.2): a 5-element (old-worker) decode result materializes '
+      'appliedOrientation 1 without throwing',
+      () async {
+        // fakePointerPoolWorker's `fixed:` route replies with the pre-Task-4
+        // 5-element shape ([address, width, height, decodeMs, processMs]) and
+        // does not require the pooled statics set up by this group's setUp —
+        // it exercises the UNPOOLED route deliberately, since an "old worker"
+        // is exactly the fallback that must keep working.
+        CeyxDecodePool.nativeBufferPool?.debugDisposeIdle();
+        CeyxDecodePool.nativeBufferPool = null;
+        CeyxDecodePool.debugDecodeIntoAvailable = null;
+        pool = CeyxDecodePool(width: 1, entryPoint: fakePointerPoolWorker);
+        final buf = calloc<Uint8>(2 * 2 * 4);
+        try {
+          final image = await pool.decode(
+            'fixed:${buf.address}:2:2',
+            exifOrientation: 6,
+          );
+          expect(image.appliedOrientation, equals(1));
+        } finally {
+          calloc.free(buf);
+        }
+      },
+    );
+
+    test(
+      'TC-1094 (AC-4.4): _probeSizeFor dispatch count is unchanged between '
+      'orientation 1 and orientation 6 requests for the same path (the size '
+      'cache key stays (path, maxDim))',
+      () async {
+        pool = CeyxDecodePool(width: 1, entryPoint: orientationWirePoolWorker);
+        await pool.decode('orient_cache_same_path.dng', exifOrientation: 1);
+        final afterFirst = pool.debugProbeSizeCount;
+        await pool.decode('orient_cache_same_path.dng', exifOrientation: 6);
+        expect(
+          pool.debugProbeSizeCount,
+          equals(afterFirst),
+          reason:
+              'a second decode of the same path at a different orientation '
+              'must hit the existing size cache entry, not re-probe — '
+              'proving the cache key was NOT widened to include orientation',
+        );
+      },
+    );
+  });
+
+  test(
+    'TC-1093 (AC-4.3): TC-931\'s stale-generation free-exactly-once behaviour '
+    'still holds for an orientation-carrying job',
+    () async {
+      final freed = <int>[];
+      CeyxDecodePool.debugNativeFree = freed.add;
+      addTearDown(() => CeyxDecodePool.debugNativeFree = null);
+      pool = CeyxDecodePool(width: 2, entryPoint: fakePointerPoolWorker);
+      final gen = pool.generation;
+      final pending = pool.submit(
+        CeyxPoolJobType.decode,
+        'slow:60:stale-oriented.dng',
+        generation: gen,
+        exifOrientation: 6,
+      );
+      pool.bumpGeneration();
+      final outcome = await pending;
+      expect(outcome.discarded, isTrue);
+      expect(
+        outcome.value,
+        isNull,
+        reason: 'a discarded job must never reach _materialize',
+      );
+      expect(pool.debugDiscardCount, equals(1));
+      expect(
+        freed.length,
+        equals(1),
+        reason: 'the discarded native buffer must be freed exactly once, '
+            'unaffected by the job carrying a non-identity orientation',
+      );
+    },
+  );
 }
