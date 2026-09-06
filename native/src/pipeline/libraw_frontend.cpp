@@ -91,6 +91,33 @@ struct LibRawFrontendContext::Impl {
     bool cancelled() const {
         return cancel_poll && cancel_poll(cancel_user) != 0;
     }
+
+    // WP10 (risk R11.5): the ONE place the open-time LibRaw options are set.
+    // open_and_unpack and open_metadata_only both call it, so the probe and the
+    // decode cannot open the same file with different decoder selection or a
+    // different memory ceiling and then read different geometry from it. Also
+    // records the flags into diag, which is where observability reads them.
+    // Step 1 of the normative sequence in spec section 6.2.
+    void applyOpenTimeParams() {
+        auto& params = processor.imgdata.rawparams;
+        unsigned flags = 0;
+        switch (forced) {
+            case RawForcedBackend::kAuto:
+                flags = LIBRAW_RAWSPEEDV3_USE;
+                break;
+            case RawForcedBackend::kRawSpeed3:
+                flags = LIBRAW_RAWSPEEDV3_USE | LIBRAW_RAWSPEEDV3_FAILONUNKNOWN;
+                break;
+            case RawForcedBackend::kLibRawNative:
+                flags = 0;
+                break;
+        }
+        params.use_rawspeed = static_cast<int>(flags);
+        diag.rawspeed_flags = flags;
+
+        // Resource ceiling before any allocation (spec section 10.2).
+        params.max_raw_memory_mb = kRawMaxRawMemoryMb;
+    }
 };
 
 LibRawFrontendContext::LibRawFrontendContext() : impl_(new Impl()) {}
@@ -134,6 +161,48 @@ void LibRawFrontendContext::recycle() {
     }
 }
 
+// WP10: steps 1-2 of the normative sequence and nothing else. See the contract
+// on the declaration in libraw_frontend.h for why this is not a split of the
+// single unpack() call spec section 6.2 protects.
+RawErrorCode LibRawFrontendContext::open_metadata_only(const char* file_path) {
+    if (!file_path || file_path[0] == '\0') return kRawErrNullPath;
+
+    recycle();
+    // recycle() above only reaches the processor when impl_->open is true, and
+    // open is set ONLY at the end of open_and_unpack — a previous
+    // open_metadata_only therefore leaves it false. Recycle unconditionally so
+    // a second probe on the same context cannot call open_file on a processor
+    // that still holds the first file. (Deviation from the plan's Step 14.4
+    // sketch, which called recycle() alone; recorded in the WP10r evidence.)
+    impl_->processor.recycle();
+    impl_->view = LibRawRawView{};
+    impl_->diag = RawDecodeDiagnostics{};
+    impl_->diag.frontend = kRawFrontendLibRaw;
+    impl_->diag.unpack_backend = kRawDecoderBackendUnknown;
+
+    // Step 1, through the shared helper: identical options to the decode path.
+    impl_->applyOpenTimeParams();
+
+    // Step 2. open_file populates imgdata.sizes, which is the whole point:
+    // sizes.width/height are readable here, before any pixel is decoded.
+    if (impl_->processor.open_file(file_path) != LIBRAW_SUCCESS) {
+        impl_->processor.recycle();
+        return kRawErrParseFailed;
+    }
+
+    // Deliberately NO unpack(): the pixels are exactly what this entry exists
+    // not to pay for. impl_->open stays false, so raw_view() remains invalid
+    // and nothing is borrowed from the processor. The caller reads the extent
+    // through visible_extent() and lets this context destruct.
+    return kRawSuccess;
+}
+
+LibRawFrontendContext::Extent LibRawFrontendContext::visible_extent() const {
+    const auto& sizes = impl_->processor.imgdata.sizes;
+    return Extent{static_cast<uint32_t>(sizes.width),
+                  static_cast<uint32_t>(sizes.height)};
+}
+
 RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     if (!file_path || file_path[0] == '\0') return kRawErrNullPath;
 
@@ -143,25 +212,10 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     impl_->diag.frontend = kRawFrontendLibRaw;
     impl_->diag.unpack_backend = kRawDecoderBackendUnknown;
 
-    // Step 1: raw decode options, recorded for observability.
-    auto& params = impl_->processor.imgdata.rawparams;
-    unsigned flags = 0;
-    switch (impl_->forced) {
-        case RawForcedBackend::kAuto:
-            flags = LIBRAW_RAWSPEEDV3_USE;
-            break;
-        case RawForcedBackend::kRawSpeed3:
-            flags = LIBRAW_RAWSPEEDV3_USE | LIBRAW_RAWSPEEDV3_FAILONUNKNOWN;
-            break;
-        case RawForcedBackend::kLibRawNative:
-            flags = 0;
-            break;
-    }
-    params.use_rawspeed = static_cast<int>(flags);
-    impl_->diag.rawspeed_flags = flags;
-
-    // Resource ceiling before any allocation (spec section 10.2).
-    params.max_raw_memory_mb = kRawMaxRawMemoryMb;
+    // Step 1: raw decode options, recorded for observability. Extracted into
+    // Impl::applyOpenTimeParams so open_metadata_only opens files with exactly
+    // these options (WP10 / risk R11.5); the behaviour here is unchanged.
+    impl_->applyOpenTimeParams();
 
     const auto t0 = std::chrono::high_resolution_clock::now();
 

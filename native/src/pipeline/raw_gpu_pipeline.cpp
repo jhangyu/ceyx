@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 
 #include "HalideBuffer.h"
+#include "ceyx_decode_into.h"   // WP10 A3: caller-buffer forwarding on the DNG route
 #include "dng_ffi_api.h"
 #include "dng_halide_device.h"
 #include "dng_pipeline.h"
@@ -33,19 +35,41 @@ double nowMs() {
 
 // Returns the pool buffer on every path, including the error paths, so no
 // checkout can leak (spec section 5.2.4).
+//
+// WP10: the guard has TWO modes and owns the distinction, so ownership stays
+// in one place rather than being re-decided at each branch.
+//   owning   (RgbaCheckoutGuard(bytes))         — acquires from the RGBA pool,
+//                                                 releases on destruction.
+//   borrowing(RgbaCheckoutGuard(ptr, bytes))    — a CALLER-OWNED buffer:
+//                                                 never acquires, never
+//                                                 releases.
+// A borrowing guard must never release: handing a caller's (Dart-owned) address
+// back to the pool would let the next decode write into memory the app still
+// believes it owns (risk R11.2).
 class RgbaCheckoutGuard {
  public:
     explicit RgbaCheckoutGuard(size_t bytes)
-        : ptr_(dng_rgba_output_acquire(bytes)), bytes_(bytes) {}
-    ~RgbaCheckoutGuard() { if (ptr_) dng_rgba_output_release(ptr_); }
+        : ptr_(dng_rgba_output_acquire(bytes)), bytes_(bytes), owned_(true) {}
+    // WP10: borrow a caller-owned buffer.
+    RgbaCheckoutGuard(uint8_t* borrowed, size_t bytes)
+        : ptr_(borrowed), bytes_(bytes), owned_(false) {}
+    ~RgbaCheckoutGuard() {
+        if (owned_ && ptr_) dng_rgba_output_release(ptr_);
+        ptr_ = nullptr;
+    }
     RgbaCheckoutGuard(const RgbaCheckoutGuard&) = delete;
     RgbaCheckoutGuard& operator=(const RgbaCheckoutGuard&) = delete;
     uint8_t* get() const { return ptr_; }
     size_t bytes() const { return bytes_; }
+    // Disarms an owning guard and hands the pointer to the caller. On a
+    // borrowing guard there is nothing to disarm — it returns the caller's own
+    // pointer, which is exactly the behaviour the three branches already want
+    // at their `out.rgba_ptr = rgba.release()` line.
     uint8_t* release() { uint8_t* p = ptr_; ptr_ = nullptr; return p; }
  private:
     uint8_t* ptr_;
     size_t bytes_;
+    bool owned_;
 };
 
 // Trust-boundary extent check (spec section 10.1). Every product is formed in
@@ -68,6 +92,57 @@ bool extentWithinCeiling(uint64_t width, uint64_t height, const char* what) {
         return false;
     }
     return true;
+}
+
+// WP10: the ONE place that decides pool-vs-caller for the RGBA output. All
+// three GPU branches call this instead of constructing a guard directly, so
+// they cannot drift apart — "only the Bayer branch got converted" (risk R11.3)
+// is not expressible here.
+//
+// Returns kRawErrDstTooSmall when a caller buffer is present but too small
+// (the in-decode backstop for a stale probe: a refused decode with the correct
+// extent, never a write past the end), and kRawErrAllocationFailed when a pool
+// acquire fails, which is what the three branches used to report themselves.
+//
+// WP10 extent propagation: `out` is non-const because the TRUE post-unpack
+// extent is published HERE, before any early return. That is what makes the
+// refusal actionable rather than merely safe.
+RawErrorCode makeRgbaCheckout(RawPipelineResult& out, size_t bytes,
+                              std::optional<RgbaCheckoutGuard>* guard,
+                              uint32_t out_w, uint32_t out_h) {
+    // Publish the real extent FIRST, so every exit carries it — including the
+    // kRawErrDstTooSmall early return below.
+    //
+    // Why here and not at the three call sites: on the refusal path the
+    // branches' own `out.width = out_w` lines are never reached, so the result
+    // kept its post-reset zeros, the FFI layer fell back to the PROBE's stale
+    // extent, and a caller that resized to what it was told re-acquired
+    // exactly the same insufficient buffer — the retry could never advance.
+    // Assigning at the three call sites would fix it too, but it would
+    // recreate the drift surface this factory exists to remove (risk R11.3):
+    // a fourth branch, or an edit to one of the three, silently restores the
+    // bug on one route only. The function that owns the pool-vs-caller
+    // decision also owns publishing the extent that decision was made against.
+    //
+    // Idempotent on the success path: the branches assign the same out_w/out_h
+    // again later, so no existing behaviour changes.
+    out.width = out_w;
+    out.height = out_h;
+
+    if (out.caller_dst) {
+        if (out.caller_dst_capacity < bytes) {
+            std::fprintf(stderr,
+                         "[RawPipeline] caller buffer %zu < needed %zu for "
+                         "%ux%u\n",
+                         out.caller_dst_capacity, bytes, out_w, out_h);
+            return kRawErrDstTooSmall;
+        }
+        guard->emplace(out.caller_dst, bytes);
+        return kRawSuccess;
+    }
+    guard->emplace(bytes);
+    if (!(*guard)->get()) return kRawErrAllocationFailed;
+    return kRawSuccess;
 }
 
 bool cancelRequested(const RawCancelToken& cancel) {
@@ -209,8 +284,14 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
     const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
 
-    RgbaCheckoutGuard rgba(rgba_bytes);
-    if (!rgba.get()) return kRawErrAllocationFailed;
+    // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
+    // all three branches stay structurally identical to one another.
+    std::optional<RgbaCheckoutGuard> rgba;
+    if (const RawErrorCode grc =
+            makeRgbaCheckout(out, rgba_bytes, &rgba, out_w, out_h);
+        grc != kRawSuccess) {
+        return grc;
+    }
 
     // src extent (crop) vs dst extent (scaled): equal on the full-res path, so
     // the shared Stage4 takes the crop branch at
@@ -225,7 +306,7 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             static_cast<int>(src_h),
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
-                                            params, rgba.get(),
+                                            params, rgba->get(),
                                             /*fuse_rgba=*/true)) {
         return kRawErrKernelFailed;
     }
@@ -234,7 +315,7 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     out.width = out_w;
     out.height = out_h;
     out.rgba_size = rgba_bytes;
-    out.rgba_ptr = rgba.release();   // ownership moves to the caller
+    out.rgba_ptr = rgba->release();   // ownership moves to the caller
     return kRawSuccess;
 }
 
@@ -341,8 +422,14 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
     const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
 
-    RgbaCheckoutGuard rgba(rgba_bytes);
-    if (!rgba.get()) return kRawErrAllocationFailed;
+    // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
+    // all three branches stay structurally identical to one another.
+    std::optional<RgbaCheckoutGuard> rgba;
+    if (const RawErrorCode grc =
+            makeRgbaCheckout(out, rgba_bytes, &rgba, out_w, out_h);
+        grc != kRawSuccess) {
+        return grc;
+    }
 
     // Same shared Stage4 call as the Bayer branch: no second render path.
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
@@ -352,7 +439,7 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             static_cast<int>(src_h),
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
-                                            params, rgba.get(),
+                                            params, rgba->get(),
                                             /*fuse_rgba=*/true)) {
         return kRawErrKernelFailed;
     }
@@ -361,7 +448,7 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     out.width = out_w;
     out.height = out_h;
     out.rgba_size = rgba_bytes;
-    out.rgba_ptr = rgba.release();   // ownership moves to the caller
+    out.rgba_ptr = rgba->release();   // ownership moves to the caller
     return kRawSuccess;
 }
 
@@ -467,8 +554,14 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
     const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
 
-    RgbaCheckoutGuard rgba(rgba_bytes);
-    if (!rgba.get()) return kRawErrAllocationFailed;
+    // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
+    // all three branches stay structurally identical to one another.
+    std::optional<RgbaCheckoutGuard> rgba;
+    if (const RawErrorCode grc =
+            makeRgbaCheckout(out, rgba_bytes, &rgba, out_w, out_h);
+        grc != kRawSuccess) {
+        return grc;
+    }
 
     // Same shared Stage4 call as the other two branches: no second render path.
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
@@ -478,7 +571,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             static_cast<int>(src_h),
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
-                                            params, rgba.get(),
+                                            params, rgba->get(),
                                             /*fuse_rgba=*/true)) {
         return kRawErrKernelFailed;
     }
@@ -487,7 +580,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     out.width = out_w;
     out.height = out_h;
     out.rgba_size = rgba_bytes;
-    out.rgba_ptr = rgba.release();   // ownership moves to the caller
+    out.rgba_ptr = rgba->release();   // ownership moves to the caller
     return kRawSuccess;
 }
 
@@ -607,8 +700,17 @@ RawErrorCode decodeFileImpl(const char* file_path,
                             const RawDevelopParams& develop,
                             RawForcedBackend forced,
                             const RawCancelToken& cancel,
+                            uint8_t* dst, size_t dst_capacity,
                             RawPipelineResult& out) {
-    out = RawPipelineResult{};
+    out = RawPipelineResult{};          // unchanged reset, still first
+    // WP10 (AMENDMENT 3 / A3.2): the caller's buffer arrives as a PARAMETER and
+    // is bound to the result AFTER the reset above. It is deliberately not
+    // communicated through pre-set struct fields: this function and its DNG
+    // counterpart both reset their result at entry, so a pre-set field is wiped
+    // by construction on both pipelines. Binding post-reset is immune to this
+    // reset and to any future reset either function grows.
+    out.caller_dst = dst;
+    out.caller_dst_capacity = dst_capacity;
     const double t0 = nowMs();
 
     if (!file_path || file_path[0] == '\0') {
@@ -628,9 +730,32 @@ RawErrorCode decodeFileImpl(const char* file_path,
     }
 
     if (route == kRawRouteDng) {
-        // The DNG route is untouched: delegate to the existing public entry.
-        DngResult* dng = dng_decode_and_process_sized(
-            file_path, static_cast<int32_t>(develop.max_output_long_edge));
+        // WP10 (A3 Step 15.3): with a caller buffer, forward to the
+        // format-agnostic entry, which takes the DNG arm and honours the
+        // caller's buffer. Without one, the DNG route is untouched and takes
+        // exactly the call it always took.
+        //
+        // In production this branch is not reached with a caller buffer at all:
+        // ceyx_decode_into_buffer routes DNG paths to the DNG arm BEFORE
+        // entering this function (A3.1 fact 3 — the delegation edge is designed
+        // out, which is what AC15.7 asserts). It is implemented properly rather
+        // than refused so that a direct native caller of
+        // raw_pipeline_decode_file_into with a DNG path gets a correct decode
+        // into its own buffer instead of an error or, worse, correct pixels
+        // under pool ownership.
+        //
+        // The ownership-move block below is unchanged and is already right for
+        // this case: it clears dng->rgba_data before dng_free_result, which is
+        // exactly what a caller-owned buffer needs.
+        DngResult* dng =
+            out.caller_dst
+                ? ceyx_decode_into_buffer(
+                      file_path,
+                      static_cast<int32_t>(develop.max_output_long_edge),
+                      out.caller_dst, out.caller_dst_capacity)
+                : dng_decode_and_process_sized(
+                      file_path,
+                      static_cast<int32_t>(develop.max_output_long_edge));
         if (!dng) {
             out.error = kRawErrAllocationFailed;
             return out.error;
@@ -733,11 +858,57 @@ RawErrorCode decodeFileImpl(const char* file_path,
 
 }  // namespace
 
+// WP10: metadata-only output-extent probe. Contract on the declaration in
+// raw_gpu_pipeline.h. Deliberately reuses the decode's OWN sizing function
+// (scaledOutputExtent, the same call the three GPU branches make at :209/:341/
+// :467) rather than re-deriving the rule, so probe/decode drift is structural
+// rather than test-dependent. No new sizing arithmetic is written here.
+RawErrorCode raw_pipeline_probe_output_size(const char* file_path,
+                                            uint32_t max_long_edge,
+                                            uint32_t* out_width,
+                                            uint32_t* out_height) {
+    if (out_width) *out_width = 0;
+    if (out_height) *out_height = 0;
+    if (!out_width || !out_height) return kRawErrNullPath;
+
+    LibRawFrontendContext ctx;
+    const RawErrorCode rc = ctx.open_metadata_only(file_path);
+    if (rc != kRawSuccess) return rc;
+
+    const LibRawFrontendContext::Extent extent = ctx.visible_extent();
+    if (extent.visible_width == 0 || extent.visible_height == 0) {
+        return kRawErrMetadataInvalid;
+    }
+    // The caller-buffer path must be subject to the SAME trust-boundary ceiling
+    // as the pool path: a caller-supplied capacity is not a licence to skip it.
+    if (!extentWithinCeiling(extent.visible_width, extent.visible_height,
+                             "probe")) {
+        return kRawErrSizeOverflow;
+    }
+    scaledOutputExtent(extent.visible_width, extent.visible_height,
+                       max_long_edge, out_width, out_height);
+    return kRawSuccess;
+}
+
 RawErrorCode raw_pipeline_decode_file(const char* file_path,
                                       const RawDevelopParams& develop,
                                       RawPipelineResult& out) {
     const RawCancelToken none;
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none, out);
+    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none,
+                          /*dst=*/nullptr, /*dst_capacity=*/0, out);
+}
+
+// WP10 (A3.2): the caller-buffer sibling. Identical to the entry above in every
+// respect except that the caller's buffer is passed down as a parameter and
+// bound after decodeFileImpl's internal reset. The three pre-existing public
+// entries keep their exact signatures and behaviour; this is purely additive.
+RawErrorCode raw_pipeline_decode_file_into(const char* file_path,
+                                           const RawDevelopParams& develop,
+                                           uint8_t* dst, size_t dst_capacity,
+                                           RawPipelineResult& out) {
+    const RawCancelToken none;
+    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none,
+                          dst, dst_capacity, out);
 }
 
 RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
@@ -745,7 +916,8 @@ RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
                                              RawForcedBackend forced,
                                              RawPipelineResult& out) {
     const RawCancelToken none;
-    return decodeFileImpl(file_path, develop, forced, none, out);
+    return decodeFileImpl(file_path, develop, forced, none,
+                          /*dst=*/nullptr, /*dst_capacity=*/0, out);
 }
 
 int raw_pipeline_gpu_available() {
@@ -765,5 +937,6 @@ RawErrorCode raw_pipeline_decode_file_cancellable(const char* file_path,
                                                   const RawDevelopParams& develop,
                                                   const RawCancelToken& cancel,
                                                   RawPipelineResult& out) {
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel, out);
+    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel,
+                          /*dst=*/nullptr, /*dst_capacity=*/0, out);
 }

@@ -121,7 +121,15 @@ typedef enum RawErrorCode {
     /* Sized/scaled decode requested on a build with no scaled AOT (split
      * Vulkan/Android/Linux). Matches the DNG path's documented rejection
      * (AC-D1); macOS/Metal never returns this. */
-    kRawErrSizedUnsupported = -212
+    kRawErrSizedUnsupported = -212,
+    /* WP10: raw_decode_into_buffer was handed a caller buffer that is null,
+     * zero-length, or smaller than width*height*4 for the extent the decode
+     * will actually produce. Returned with width/height FILLED IN and
+     * rgba_data NULL, so a stale size prediction is a cheap, self-healing miss
+     * (the caller re-acquires at the reported extent and retries) rather than
+     * an overflow. Value is `lowest existing - 1`, re-read off this enum
+     * immediately before it was written. */
+    kRawErrDstTooSmall = -213
 } RawErrorCode;
 
 /* Read-only borrowed view. Never owns the buffer (spec section 5.1.2). */

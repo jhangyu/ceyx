@@ -45,13 +45,30 @@ struct RawColorPipelineDiagnostics {
 RawColorPipelineDiagnostics raw_adapter_last_color_diagnostics();
 
 struct RawPipelineResult {
-    uint8_t* rgba_ptr = nullptr;   // pool-owned; release with dng_rgba_output_release
+    uint8_t* rgba_ptr = nullptr;   // pool-owned UNLESS caller_dst was set; see below
     size_t   rgba_size = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     RawDecodeDiagnostics diag{};
     RawColorPipelineDiagnostics color_diag{};
     RawErrorCode error = kRawSuccess;
+
+    // WP10 (AMENDMENT 3 / A3.2): set by raw_pipeline_decode_file_into AFTER the
+    // internal result reset — never pre-set by a caller. Communicating the
+    // caller's buffer through pre-set struct fields is rejected by A3.2,
+    // because this pipeline (and the DNG one) resets its result at entry, so a
+    // pre-set field is wiped by construction.
+    //
+    // When caller_dst is non-null the pipeline writes RGBA into it and must
+    // NEVER release it to the RGBA pool — returning a caller's buffer to the
+    // pool would hand a Dart-owned address to the next decode. rgba_ptr is set
+    // to caller_dst on success, so `rgba_ptr == caller_dst` is the caller's
+    // proof that its buffer was used rather than an assumption. Null means the
+    // ordinary pool-backed behaviour, and nothing about the existing paths
+    // changes. A caller-supplied capacity is NOT a licence to skip the
+    // trust-boundary ceiling: extentWithinCeiling still runs first.
+    uint8_t* caller_dst = nullptr;
+    size_t   caller_dst_capacity = 0;
 };
 
 // Dispatches on the VALIDATED layout descriptor only - never on vendor or
@@ -66,6 +83,41 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
 RawErrorCode raw_pipeline_decode_file(const char* file_path,
                                       const RawDevelopParams& develop,
                                       RawPipelineResult& out);
+
+// WP10 (AMENDMENT 3 / A3.2): as raw_pipeline_decode_file, with the RGBA output
+// written into the CALLER's buffer instead of a pool buffer. `dst` is passed as
+// a PARAMETER and bound to the result AFTER the internal reset, which is what
+// makes it immune to that reset rather than patched around it.
+//
+// On success out.rgba_ptr == dst. `dst` is never freed and never released to
+// the RGBA pool on any path, including every failure path. A capacity shortfall
+// discovered after unpack (the extent can move for a few exotic formats — the
+// X3F/Foveon raw_pitch adjustment in libraw_frontend.cpp is the in-tree case)
+// is refused rather than overrun, so a stale prediction costs a slow retry and
+// never corruption.
+//
+// Additive sibling: raw_pipeline_decode_file/_forced/_cancellable keep their
+// exact signatures and behaviour.
+RawErrorCode raw_pipeline_decode_file_into(const char* file_path,
+                                           const RawDevelopParams& develop,
+                                           uint8_t* dst, size_t dst_capacity,
+                                           RawPipelineResult& out);
+
+// WP10: metadata-only output-extent probe. Opens the file through the
+// frontend's open-only entry (open_file, NEVER unpack), reads the visible
+// extent LibRaw fills into imgdata.sizes at open time, and applies the SAME
+// scaledOutputExtent rule the three GPU branches apply. Never allocates an
+// output buffer, never touches the RGBA pool, never dispatches to the GPU.
+//
+// Performs no route detection: a DNG path handed to this function is opened as
+// a generic RAW. Routing stays in the FFI entry, so this layer keeps its shape.
+//
+// The byte requirement for the matching decode is (*out_width)*(*out_height)*4.
+// Returns kRawSuccess, or an error code with both out-params set to 0.
+RawErrorCode raw_pipeline_probe_output_size(const char* file_path,
+                                            uint32_t max_long_edge,
+                                            uint32_t* out_width,
+                                            uint32_t* out_height);
 
 // Test-only: same as above with the unpack backend forced.
 RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,

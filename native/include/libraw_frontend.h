@@ -159,6 +159,29 @@ class LibRawFrontendContext {
     // Steps 1-6 of the normative sequence in spec section 6.2.
     RawErrorCode open_and_unpack(const char* file_path);
 
+    // WP10: steps 1-2 of that same normative sequence ONLY — the raw-decode
+    // options and open_file, plus the metadata open_file fills into
+    // imgdata.sizes. unpack() is NOT called, so raw_view() stays invalid,
+    // is_open() stays false, and NOTHING is borrowed: no lifetime rule applies
+    // to the result of this call. Exists so the output extent can be known
+    // without paying for the pixels.
+    //
+    // This does NOT split the single unpack() call the spec protects (section
+    // 6.2): it never reaches it. That rule forbids splitting the unpack ATTEMPT
+    // into tryRawSpeed()/tryLibRaw(); it says nothing about an open-only path.
+    //
+    // Shares its open-time parameter setup with open_and_unpack through one
+    // private helper, so the two cannot drift into opening the same file with
+    // different LibRaw options and reading different geometry (risk R11.5).
+    RawErrorCode open_metadata_only(const char* file_path);
+
+    // The visible (post-margin) extent LibRaw reports, i.e. imgdata.sizes.width
+    // and .height — the SAME two fields open_and_unpack copies into
+    // LibRawRawView::visible_width/visible_height. Valid after EITHER
+    // open_metadata_only or open_and_unpack; zero when neither has run.
+    struct Extent { uint32_t visible_width; uint32_t visible_height; };
+    Extent visible_extent() const;
+
     bool is_open() const;
 
     // Valid only while is_open(). The owning context must outlive every GPU
