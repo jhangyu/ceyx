@@ -109,6 +109,25 @@ class CeyxNativeBufferPool {
   /// Checks out a buffer of at least [bytes]. Completes immediately when a slot
   /// is free; otherwise waits for a return — never allocates past [maxBuffers].
   Future<CeyxNativeBuffer> acquire(int bytes) {
+    final immediate = acquireOrNull(bytes);
+    if (immediate != null) return Future<CeyxNativeBuffer>.value(immediate);
+
+    debugWaitsForCapacity++;
+    final waiter = _Waiter(bytes);
+    _waiting.add(waiter);
+    return waiter.completer.future;
+  }
+
+  /// The synchronous half of [acquire]: everything servable WITHOUT waiting.
+  /// Null means "at the cap with nothing idle to re-size" — the one case that
+  /// needs a future.
+  ///
+  /// WP2: exists because `DngDecoderService.decode` is synchronous by public
+  /// contract (R-C keeps every public signature) and a synchronous caller
+  /// cannot await a slot. Its null answer is served there by malloc +
+  /// [adoptUnpooled], so the bound still counts slots and the address is still
+  /// pool-owned.
+  CeyxNativeBuffer? acquireOrNull(int bytes) {
     assert(bytes > 0);
     if (bytes > maxBufferBytes) {
       // Outside the pool entirely: takes no slot, is freed on release.
@@ -126,17 +145,17 @@ class CeyxNativeBufferPool {
       // `_disposeBuffer`, and `_disposeBuffer` removes the entry, so this is
       // the only line that was missing.
       _byAddress[buffer.address] = buffer;
-      return Future<CeyxNativeBuffer>.value(buffer);
+      return buffer;
     }
 
     final reused = _takeIdleFitting(bytes);
     if (reused != null) {
       debugCheckedOut++;
-      return Future<CeyxNativeBuffer>.value(reused);
+      return reused;
     }
 
     if (_live < maxBuffers) {
-      return Future<CeyxNativeBuffer>.value(_allocatePooled(bytes));
+      return _allocatePooled(bytes);
     }
 
     // At the cap with nothing that fits. An idle-but-too-small buffer can be
@@ -147,13 +166,10 @@ class CeyxNativeBufferPool {
       _disposeBuffer(victim);
       _live--;
       _byAddress.remove(victim.address);
-      return Future<CeyxNativeBuffer>.value(_allocatePooled(bytes));
+      return _allocatePooled(bytes);
     }
 
-    debugWaitsForCapacity++;
-    final waiter = _Waiter(bytes);
-    _waiting.add(waiter);
-    return waiter.completer.future;
+    return null;
   }
 
   /// Takes ownership of an address this pool did NOT allocate, as an UNPOOLED

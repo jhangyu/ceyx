@@ -5,6 +5,7 @@ import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
+import 'native_buffer_pool.dart';
 import 'raw_bindings.dart';
 import 'raw_error_codes.dart';
 import 'raw_route.dart';
@@ -247,14 +248,11 @@ class _DecodeWorkerResult {
 class DngDecoderService {
   late final DngNativeBindings _bindings;
   // Service-owned finalizer, lazily created on the first _decodeZeroCopy call.
-  // Kept as a field (not a local) so its lifetime matches the service — if it
-  // were per-call the GC could collect it before the attached DngImage, silently
-  // leaking the native buffer (Gotcha #45, memory.md).
-  // Worker-path callers (_decodeToTransferable) never attach to this finalizer;
-  // they rely on dng_free_result() in their finally block to free rgba_data,
-  // so we do NOT create the finalizer eagerly in initialize() — that would waste
-  // a handle in every worker isolate that never uses zero-copy.
-  NativeFinalizer? _rgbaFinalizer;
+  // WP2: the service-owned `NativeFinalizer` that used to free a
+  // dylib-allocated RGBA buffer is GONE. No decode route allocates through the
+  // dylib any more, so that class of buffer does not exist; reclaim is the
+  // pool's, via DngImage.releaseToPool() with `_poolSafetyNet` as the backstop
+  // (and `debugFinalizerReleases`, asserted zero, as its defect gauge).
   bool _initialized = false;
 
   /// Optional explicit dylib path, bypassing the platform candidate search
@@ -270,9 +268,6 @@ class DngDecoderService {
     _bindings = _libraryPath == null
         ? DngNativeBindings.load()
         : DngNativeBindings.fromPath(_libraryPath);
-    // _rgbaFinalizer is intentionally NOT created here; it is lazily created in
-    // _decodeZeroCopy so that worker-isolate services (which only call
-    // _decodeToTransferable) do not allocate a finalizer they will never use.
     _initialized = true;
   }
 
@@ -918,119 +913,116 @@ class DngDecoderService {
     return service._decodeToTransferable(filePath, maxDim: maxDim);
   }
 
-  DngImage _decodeZeroCopy(String filePath) {
+  /// WP2: this isolate's pool. A Dart `static final` initialises once PER
+  /// ISOLATE, so an in-isolate decode gets its own free list while the native
+  /// addresses stay process-global — which is exactly the ownership model this
+  /// campaign wants: every live address belongs to the pool of the isolate
+  /// that acquired it.
+  CeyxNativeBufferPool get _buffers => CeyxNativeBufferPool.shared;
+
+  /// WP2 safety net for a service-decoded frame, mirroring the decode pool's
+  /// (`decode_pool.dart`). A pooled buffer is meant to come back through
+  /// `DngImage.releaseToPool()`; this catches the callers that forget, and its
+  /// reclaim is counted separately so a test can assert it never fired.
+  static final Finalizer<int> _poolSafetyNet = Finalizer<int>((address) {
+    CeyxNativeBufferPool.shared.releaseByAddressFromFinalizer(address);
+  });
+
+  /// Probes the output extent and checks out a buffer for it, SYNCHRONOUSLY.
+  ///
+  /// WP2 decision, recorded because it is the one place the synchronous public
+  /// API forces a shape the async path does not need: [decode] cannot await, so
+  /// it uses [CeyxNativeBufferPool.acquireOrNull] and, when the pool is at its
+  /// cap, allocates and hands the address straight to [adoptUnpooled]. The
+  /// buffer is then unpooled-but-pool-owned: it takes no slot (the bound stays
+  /// a bound), and every reclaim route still works on it.
+  CeyxNativeBuffer _acquireForSync(
+    String filePath,
+    int? maxDim, {
+    required bool isRaw,
+  }) {
+    final extent = probeOutputSize(filePath, maxDim: maxDim);
+    if (extent == null) {
+      // The probe now fails where the allocating decode entry used to, so it
+      // must raise that route's exception TYPE — the RAW route's callers (and
+      // this repo's own raw_decode_service_test) match on RawDecodeException,
+      // and a probe failure is exactly kRawErrProbeFailed.
+      if (isRaw) {
+        throw RawDecodeException(
+          RawErrorCode.probeFailed,
+          RawErrorCode.name(RawErrorCode.probeFailed),
+          'Container probe failed (not a recognised RAW/TIFF header)',
+        );
+      }
+      throw DngDecodeException(
+        DngErrorCode.parseFailed,
+        'output extent probe failed for $filePath',
+      );
+    }
+    final bytes = extent.width * extent.height * 4;
+    final pooled = _buffers.acquireOrNull(bytes);
+    if (pooled != null) return pooled;
+    return _buffers.adoptUnpooled(malloc<Uint8>(bytes).address, bytes);
+  }
+
+  /// WP2: probe -> pool acquire -> decode-into, replacing the dylib's
+  /// allocating `dng_decode_and_process`. The public signature of [decode] is
+  /// unchanged (R-C), only what allocates underneath it.
+  DngImage _decodeZeroCopy(String filePath, {bool isRaw = false}) {
     if (!_initialized) {
       initialize();
     }
-
-    final pathPtr = filePath.toNativeUtf8();
-    Pointer<DngResult> resultPtr = nullptr;
-
+    final buffer = _acquireForSync(filePath, null, isRaw: isRaw);
     try {
-      resultPtr = _bindings.dngDecodeAndProcess(pathPtr.cast());
-      return _finishZeroCopy(resultPtr, isRaw: false);
-    } finally {
-      // Always free the native result struct (which no longer owns the
-      // rgbaData on success).
-      if (resultPtr != nullptr) {
-        _bindings.dngFreeResult(resultPtr);
-      }
-      malloc.free(pathPtr);
+      final wire = decodeIntoPointer(filePath, buffer.address, buffer.capacity);
+      return _imageFromPooledWire(wire);
+    } catch (_) {
+      _buffers.release(buffer);
+      rethrow;
     }
   }
 
-  /// Generic-RAW twin of [_decodeZeroCopy]. Same pool, same free function,
-  /// same finalizer — only the entry point and the error scale differ.
+  /// Generic-RAW twin of [_decodeZeroCopy].
+  ///
+  /// WP2: `ceyx_decode_into_buffer` is format-agnostic (it routes on the
+  /// container, exactly as the probe does), so this is the identical body. It
+  /// stays a separate named method so [decode]'s route switch is unchanged.
+  /// [RawUnavailableException] survives with its type intact — Halcyon may
+  /// match on it — but its condition moves from "the dylib has no
+  /// raw_decode_and_process" to "the dylib has no decode-into pair", which is
+  /// the entry this route now depends on.
   DngImage _decodeRawZeroCopy(String filePath) {
     if (!_initialized) {
       initialize();
     }
-
-    final rawDecode = _bindings.rawDecodeAndProcess;
-    if (rawDecode == null) {
+    if (!decodeIntoBufferAvailable) {
       // Spec §4: typed exception, never a crash and never a silent fallback
       // to the DNG parser.
       throw RawUnavailableException(filePath);
     }
-
-    final pathPtr = filePath.toNativeUtf8();
-    Pointer<DngResult> resultPtr = nullptr;
-
-    try {
-      // max_dim == 0 means full resolution (dng_ffi_api.h:114).
-      resultPtr = rawDecode(pathPtr.cast(), 0);
-      return _finishZeroCopy(resultPtr, isRaw: true);
-    } finally {
-      if (resultPtr != nullptr) {
-        _bindings.dngFreeResult(resultPtr);
-      }
-      malloc.free(pathPtr);
-    }
+    return _decodeZeroCopy(filePath, isRaw: true);
   }
 
-  /// Shared success/failure handling for both zero-copy routes.
-  ///
-  /// On success the native RGBA buffer is wrapped without a memcpy, ownership
-  /// is transferred to the service-owned NativeFinalizer, and
-  /// `result.rgbaData` is cleared so the caller's `dng_free_result` cannot
-  /// double-free it.
-  DngImage _finishZeroCopy(
-    Pointer<DngResult> resultPtr, {
-    required bool isRaw,
-  }) {
-    if (resultPtr == nullptr) {
-      if (isRaw) {
-        throw RawDecodeException(
-          RawErrorCode.allocationFailed,
-          RawErrorCode.name(RawErrorCode.allocationFailed),
-          'Native raw_decode_and_process returned null',
-        );
-      }
-      throw DngDecodeException(-1, 'Native function returned null');
-    }
-
-    final result = resultPtr.ref;
-
-    if (result.errorCode != 0) {
-      _throwDecodeError(result.errorCode, isRaw: isRaw);
-    }
-
-    if (result.rgbaData == nullptr) {
-      if (isRaw) {
-        throw RawDecodeException(
-          RawErrorCode.allocationFailed,
-          RawErrorCode.name(RawErrorCode.allocationFailed),
-          'RGBA buffer is null despite kRawSuccess',
-        );
-      }
-      throw DngDecodeException(-1, 'RGBA buffer is null despite success code');
-    }
-
-    final width = result.width;
-    final height = result.height;
-    final bufferSize = width * height * 4;
-
-    // Zero-copy: view the native memory directly instead of copying.
-    final rgbaData = result.rgbaData.asTypedList(bufferSize);
-
-    final image = DngImage(
-      rgbaData: rgbaData,
+  /// Builds the [DngImage] over a pool-owned address: a zero-copy view plus the
+  /// pool safety net. NEVER a `NativeFinalizer` — the buffer belongs to the
+  /// pool, and handing it to the dylib's free would take it away from the pool.
+  DngImage _imageFromPooledWire(List<Object?> wire) {
+    final address = wire[0] as int;
+    final width = wire[1] as int;
+    final height = wire[2] as int;
+    final bytes = Pointer<Uint8>.fromAddress(
+      address,
+    ).asTypedList(width * height * 4);
+    _poolSafetyNet.attach(bytes, address, detach: bytes);
+    return DngImage(
+      rgbaData: bytes,
       width: width,
       height: height,
-      decodeMs: result.decodeMs,
-      processMs: result.processMs,
+      decodeMs: wire[3] as double,
+      processMs: wire[4] as double,
+      nativeAddress: address,
+      onReleaseToPool: () => _buffers.tryReleaseByAddress(address),
     );
-
-    // Lazily create the service-owned finalizer (Gotcha #45: a per-call
-    // finalizer risks being collected before the DngImage it guards).
-    _rgbaFinalizer ??= NativeFinalizer(_bindings.dngFreeRgbaBufferPtr.cast());
-    _rgbaFinalizer!.attach(image, result.rgbaData.cast(), detach: image);
-
-    // Ownership handed to the finalizer — clear the struct field so
-    // dng_free_result does not free the same pointer again.
-    result.rgbaData = nullptr;
-
-    return image;
   }
 
   /// Map a native `DngResult.error_code` onto the right exception type.
@@ -1096,97 +1088,55 @@ class DngDecoderService {
     }
   }
 
-  _DecodeWorkerResult _decodeDngToTransferable(String filePath, int? maxDim) {
-    final pathPtr = filePath.toNativeUtf8();
-    Pointer<DngResult> resultPtr = nullptr;
-
+  /// WP2: probe -> pool acquire -> decode-into -> COPY into Dart-owned bytes,
+  /// then return the pool buffer. The copy is the point of this route (the
+  /// bytes must cross an isolate boundary), so the native buffer's job ends
+  /// with the call and the slot goes straight back — in a `finally`, so a
+  /// throw cannot strand it.
+  _DecodeWorkerResult _decodeDngToTransferable(
+    String filePath,
+    int? maxDim, {
+    bool isRaw = false,
+  }) {
+    final buffer = _acquireForSync(filePath, maxDim, isRaw: isRaw);
     try {
-      resultPtr =
-          (maxDim != null && maxDim > 0 && _bindings.sizedDecodeAvailable)
-          ? _bindings.dngDecodeAndProcessSized!(pathPtr.cast(), maxDim)
-          : _bindings.dngDecodeAndProcess(pathPtr.cast());
-      return _finishTransferable(resultPtr, isRaw: false);
+      final wire = decodeIntoPointer(
+        filePath,
+        buffer.address,
+        buffer.capacity,
+        maxDim: maxDim,
+      );
+      return _transferableFromPooledWire(wire);
     } finally {
-      // dng_free_result frees BOTH the struct and its rgba_data (rgba_data
-      // was NOT cleared, unlike the zero-copy path). No leak, no extra call.
-      if (resultPtr != nullptr) {
-        _bindings.dngFreeResult(resultPtr);
-      }
-      malloc.free(pathPtr);
+      _buffers.release(buffer);
     }
   }
 
+  /// RAW twin of [_decodeDngToTransferable]; see [_decodeRawZeroCopy] for why
+  /// the bodies are identical and why [RawUnavailableException] survives.
   _DecodeWorkerResult _decodeRawToTransferable(String filePath, int? maxDim) {
-    final rawDecode = _bindings.rawDecodeAndProcess;
-    if (rawDecode == null) {
+    if (!decodeIntoBufferAvailable) {
       throw RawUnavailableException(filePath);
     }
-
-    // 0 and negatives mean "no request" -> full resolution, matching the DNG
-    // sized-decode contract.
-    final requested = (maxDim != null && maxDim > 0) ? maxDim : 0;
-
-    final pathPtr = filePath.toNativeUtf8();
-    Pointer<DngResult> resultPtr = nullptr;
-
-    try {
-      resultPtr = rawDecode(pathPtr.cast(), requested);
-      return _finishTransferable(resultPtr, isRaw: true);
-    } finally {
-      if (resultPtr != nullptr) {
-        _bindings.dngFreeResult(resultPtr);
-      }
-      malloc.free(pathPtr);
-    }
+    return _decodeDngToTransferable(filePath, maxDim, isRaw: true);
   }
 
-  _DecodeWorkerResult _finishTransferable(
-    Pointer<DngResult> resultPtr, {
-    required bool isRaw,
-  }) {
-    if (resultPtr == nullptr) {
-      if (isRaw) {
-        throw RawDecodeException(
-          RawErrorCode.allocationFailed,
-          RawErrorCode.name(RawErrorCode.allocationFailed),
-          'Native raw_decode_and_process returned null',
-        );
-      }
-      throw DngDecodeException(-1, 'Native function returned null');
-    }
-
-    final result = resultPtr.ref;
-
-    if (result.errorCode != 0) {
-      _throwDecodeError(result.errorCode, isRaw: isRaw);
-    }
-
-    if (result.rgbaData == nullptr) {
-      if (isRaw) {
-        throw RawDecodeException(
-          RawErrorCode.allocationFailed,
-          RawErrorCode.name(RawErrorCode.allocationFailed),
-          'RGBA buffer is null despite kRawSuccess',
-        );
-      }
-      throw DngDecodeException(-1, 'RGBA buffer is null despite success code');
-    }
-
-    final width = result.width;
-    final height = result.height;
-    final bufferSize = width * height * 4;
-    // Copy into Dart-owned bytes: TransferableTypedData cannot carry a
-    // native-backed typed list across isolate boundaries safely.
+  /// Copies a pool-owned decode result into Dart-owned bytes.
+  /// [TransferableTypedData] cannot carry a native-backed typed list across
+  /// isolate boundaries safely, so the copy here is load-bearing, not waste.
+  _DecodeWorkerResult _transferableFromPooledWire(List<Object?> wire) {
+    final address = wire[0] as int;
+    final width = wire[1] as int;
+    final height = wire[2] as int;
     final rgbaCopy = Uint8List.fromList(
-      result.rgbaData.asTypedList(bufferSize),
+      Pointer<Uint8>.fromAddress(address).asTypedList(width * height * 4),
     );
-
     return _DecodeWorkerResult(
       rgbaData: TransferableTypedData.fromList([rgbaCopy]),
       width: width,
       height: height,
-      decodeMs: result.decodeMs,
-      processMs: result.processMs,
+      decodeMs: wire[3] as double,
+      processMs: wire[4] as double,
     );
   }
 
@@ -1196,48 +1146,38 @@ class DngDecoderService {
   // (`decodeOnWorker` still uses them byte-for-byte) and must not change shape.
   // Only the finish step differs.
 
-  List<Object?> _decodeDngToPointer(String filePath, int? maxDim) {
-    final pathPtr = filePath.toNativeUtf8();
-    Pointer<DngResult> resultPtr = nullptr;
-
+  /// WP2: probe -> pool acquire -> decode-into, shipping the ADDRESS onward.
+  /// Unlike the transferable arms this must NOT release: ownership travels with
+  /// the payload, exactly as it did when the dylib allocated it. The receiver
+  /// owns the reclaim — for an address acquired on this isolate that means
+  /// `CeyxNativeBufferPool.shared.tryReleaseByAddress`, and for one shipped to
+  /// another isolate, that isolate's adoption (see `decode_pool.dart`). On a
+  /// throw the buffer is returned here, so no address escapes an error path.
+  List<Object?> _decodeDngToPointer(
+    String filePath,
+    int? maxDim, {
+    bool isRaw = false,
+  }) {
+    final buffer = _acquireForSync(filePath, maxDim, isRaw: isRaw);
     try {
-      resultPtr =
-          (maxDim != null && maxDim > 0 && _bindings.sizedDecodeAvailable)
-          ? _bindings.dngDecodeAndProcessSized!(pathPtr.cast(), maxDim)
-          : _bindings.dngDecodeAndProcess(pathPtr.cast());
-      return _finishPointerTransfer(resultPtr, isRaw: false);
-    } finally {
-      // On SUCCESS rgbaData has been cleared by _finishPointerTransfer, so
-      // this frees the struct only and the buffer travels on. On ANY throw
-      // rgbaData is still set, so this frees the buffer too — no pointer
-      // escapes an error path.
-      if (resultPtr != nullptr) {
-        _bindings.dngFreeResult(resultPtr);
-      }
-      malloc.free(pathPtr);
+      return decodeIntoPointer(
+        filePath,
+        buffer.address,
+        buffer.capacity,
+        maxDim: maxDim,
+      );
+    } catch (_) {
+      _buffers.release(buffer);
+      rethrow;
     }
   }
 
+  /// RAW twin of [_decodeDngToPointer]; see [_decodeRawZeroCopy].
   List<Object?> _decodeRawToPointer(String filePath, int? maxDim) {
-    final rawDecode = _bindings.rawDecodeAndProcess;
-    if (rawDecode == null) {
+    if (!decodeIntoBufferAvailable) {
       throw RawUnavailableException(filePath);
     }
-
-    final requested = (maxDim != null && maxDim > 0) ? maxDim : 0;
-
-    final pathPtr = filePath.toNativeUtf8();
-    Pointer<DngResult> resultPtr = nullptr;
-
-    try {
-      resultPtr = rawDecode(pathPtr.cast(), requested);
-      return _finishPointerTransfer(resultPtr, isRaw: true);
-    } finally {
-      if (resultPtr != nullptr) {
-        _bindings.dngFreeResult(resultPtr);
-      }
-      malloc.free(pathPtr);
-    }
+    return _decodeDngToPointer(filePath, maxDim, isRaw: true);
   }
 
   /// Success/failure handling for the pointer-transfer route. Same validation
