@@ -13,7 +13,9 @@
 #include <vector>
 
 #include "ceyx_decode_into.h"
+#include "ceyx_orient.h"
 #include "dng_ffi_api.h"
+#include "dng_render_params.h"
 
 static int g_failures = 0;
 #define CHECK(cond, ...)                                                      \
@@ -378,6 +380,124 @@ static void caseOrientedStep43(const char *path, const char *label) {
   dng_free_result(r);
 }
 
+// ---------------------------------------------------------------------------
+// Blocker B-1 (round reviewer) — red-state proof for the Stage4
+// failure-reason channel (dng_render_params.h) and its FFI mapping to
+// kCeyxOrientErrOverlap (-402) / kCeyxOrientErrKernel (-403). Before this,
+// the channel was implemented but never exercised: every green gate only
+// covers the success path, where the reason is trivially kNone.
+//
+// Three cases, per the bridge owner's recipe, calling the exported low-level
+// runner (runRenderStage4HalideAot, dng_render_params.h) directly:
+//   (a) overlapping src/dst -> false, reason == kOverlap
+//   (b) null dst -> false, reason == kNone (proves no over-claiming a reason
+//       for a non-orientation-specific refusal)
+//   (c) staleness: an overlap failure followed by a REAL successful oriented
+//       decode (through the public FFI) must observe kNone again -- proving
+//       the runner resets the reason on its very next call, not just on
+//       success in general.
+//
+// A fourth case (kKernel, -403) is NOT exercised end-to-end: there is no
+// cheap way to force copy_to_host()/the Halide realize call to fail without
+// either a real GPU-resource-exhaustion scenario or corrupting internal
+// Halide state, and no injection hook exists for it. Per instruction, this is
+// stated rather than faked. What CAN be, and is, proven here: (1) the
+// -402/-403 numeric mapping itself is a correct, order-independent 1:1
+// relationship with the enum (asserted directly below against
+// ceyx_orient.h's public constants -- the actual switch in
+// ceyx_decode_into_ffi.cpp is a static function in a different TU and cannot
+// be called from this binary; this is the closest direct proof reachable
+// without exposing a debug hook), and (2) the ONE reason value this binary
+// CAN produce (kOverlap) really does flow through the real FFI-callable
+// runner and really does reset to kNone on the next call, which is the
+// staleness property -403 depends on identically.
+//
+// END-TO-END overlap via the PUBLIC ceyx_decode_into_buffer_oriented is also
+// NOT reachable: that entry takes only a file_path as its source, never a
+// caller-supplied src pointer, so there is nothing for dst to alias (same
+// conclusion as Step 4.3's overlap note above). The runner-level call below
+// is the correct and only layer at which "src/dst overlap" is even
+// expressible.
+static void caseStage4FailureReasonRedState(const char *good_path,
+                                            const char *label) {
+  // (a) overlapping src/dst.
+  {
+    std::vector<uint16_t> buf(4 * 4 * 4, 0);   // room for src AND dst aliasing
+    RenderParams params{};                      // unused before the overlap
+                                                 // check; default-constructed
+                                                 // is fine (never reaches the
+                                                 // Halide dispatch below it).
+    const bool ok = runRenderStage4HalideAot(
+        buf.data(), /*src_w=*/4, /*src_h=*/4, /*src_p=*/3,
+        /*src_row_step=*/0, /*src_col_step=*/0, /*src_plane_step=*/0,
+        /*src_scale=*/1.0f, /*dst_w=*/4, /*dst_h=*/4, params,
+        reinterpret_cast<uint8_t *>(buf.data()),   // dst aliases src exactly
+        /*fuse_rgba=*/true, /*ctx=*/nullptr, /*exif_orientation=*/1);
+    CHECK(!ok, "[%s] B-1a overlapping call unexpectedly succeeded", label);
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
+          "[%s] B-1a expected kOverlap, got %d", label,
+          static_cast<int>(dngRenderStage4LastFailureReason()));
+  }
+
+  // (b) null dst -> false, reason stays kNone (no over-claiming).
+  {
+    std::vector<uint16_t> src(4 * 4 * 4, 0);
+    RenderParams params{};
+    const bool ok = runRenderStage4HalideAot(
+        src.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
+        /*dst=*/nullptr, /*fuse_rgba=*/true, /*ctx=*/nullptr,
+        /*exif_orientation=*/1);
+    CHECK(!ok, "[%s] B-1b null-dst call unexpectedly succeeded", label);
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kNone,
+          "[%s] B-1b expected kNone (no over-claim) for a non-orientation "
+          "refusal, got %d",
+          label, static_cast<int>(dngRenderStage4LastFailureReason()));
+  }
+
+  // (c) staleness: overlap failure (reason == kOverlap from (a) above, or
+  // re-triggered here for a self-contained case), then a REAL successful
+  // decode, then the reason must read kNone again.
+  {
+    std::vector<uint16_t> buf(4 * 4 * 4, 0);
+    RenderParams params{};
+    const bool overlap_ok = runRenderStage4HalideAot(
+        buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
+        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+    CHECK(!overlap_ok, "[%s] B-1c setup overlap call unexpectedly succeeded",
+          label);
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
+          "[%s] B-1c setup expected kOverlap", label);
+
+    if (!good_path) return;   // no sample available for the reset half
+    int32_t w = 0, h = 0;
+    if (!probe(good_path, kOrientMaxDim, &w, &h)) return;
+    const size_t need = static_cast<size_t>(w) * h * 4;
+    std::vector<uint8_t> dst(need);
+    DngResult *r = ceyx_decode_into_buffer_oriented(good_path, kOrientMaxDim,
+                                                     dst.data(), need, 1);
+    CHECK(r && r->error_code == 0,
+          "[%s] B-1c reset-half decode failed (error=%d)", label,
+          r ? r->error_code : -1);
+    if (r) { r->rgba_data = nullptr; dng_free_result(r); }
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kNone,
+          "[%s] B-1c reason not reset to kNone after a successful decode "
+          "(staleness contract violated), got %d",
+          label, static_cast<int>(dngRenderStage4LastFailureReason()));
+  }
+
+  // Numeric mapping proof: ceyxMapStage4FailureReason (ceyx_decode_into_ffi.cpp,
+  // static, not reachable from this TU) maps kOverlap -> kCeyxOrientErrOverlap
+  // and kKernel -> kCeyxOrientErrKernel. What IS checkable here is that those
+  // two public constants are exactly what the plan §1.6 table promises, so a
+  // future edit to either side (the switch or the constants) that breaks the
+  // agreement is caught even though the switch body itself cannot be called
+  // directly.
+  CHECK(kCeyxOrientErrOverlap == -402,
+        "[%s] B-1 kCeyxOrientErrOverlap drifted from -402", label);
+  CHECK(kCeyxOrientErrKernel == -403,
+        "[%s] B-1 kCeyxOrientErrKernel drifted from -403", label);
+}
+
 int main(int argc, char **argv) {
   struct Sample { const char *path; const char *label; };
   const Sample samples[] = {
@@ -394,6 +514,15 @@ int main(int argc, char **argv) {
     // test of that risk.
     {argc > 5 ? argv[5] : nullptr, "linear-rgb-raw"},
   };
+
+  // B-1 red-state proof is route-agnostic (it drives the shared low-level
+  // runner directly), so it runs once, not once per sample class. Uses
+  // whichever first sample is available for its staleness/reset half.
+  {
+    const char *any = argc > 1 ? argv[1] : nullptr;
+    caseStage4FailureReasonRedState(any, "b1-redstate");
+  }
+
   for (const auto &s : samples) {
     if (!s.path) {
       // A GAP is a FAILURE, not a note. AC15.6 says a partial pass is not

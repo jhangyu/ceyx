@@ -15,6 +15,7 @@
 #include "dng_error_codes.h"
 #include "dng_ffi_api.h"
 #include "dng_pipeline.h"
+#include "dng_render_params.h"
 #include "raw_file_router.h"
 #if defined(DNG_ENABLE_GENERIC_RAW)
 #include "raw_ffi_api.h"
@@ -221,6 +222,33 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
 #endif
 }
 
+// Blocker B-1 fix (round reviewer): §1.6 promises -402/-403 out of the fused
+// oriented path, but every runner refusal site returns a lossy `bool`, so the
+// caller only ever sees the generic code the pipeline layer already reports
+// (e.g. kDngErrStage4Failed / kRawErrKernelFailed). dngRenderStage4LastFailureReason()
+// (dng_render_params.h) is the per-call-thread-local channel the bridge owner
+// added to recover the reason: valid to read ONLY directly after a runner/
+// pipeline call returned failure, and always kNone after a success.
+//
+// CRITICAL: kNone on failure is LEGITIMATE (bad args, scratch allocation, a
+// non-orientation SDK refusal) — the existing generic error_code must be kept
+// as-is in that case. Mapping kNone to -402/-403 would re-introduce exactly
+// the over-claiming bug this channel exists to prevent.
+static void ceyxMapStage4FailureReason(DngResult *result) {
+  if (result->error_code == 0) return;   // success: nothing to override
+  switch (dngRenderStage4LastFailureReason()) {
+    case Stage4FailureReason::kOverlap:
+      result->error_code = kCeyxOrientErrOverlap;   // -402
+      return;
+    case Stage4FailureReason::kKernel:
+      result->error_code = kCeyxOrientErrKernel;    // -403
+      return;
+    case Stage4FailureReason::kNone:
+    default:
+      return;   // keep the existing generic code
+  }
+}
+
 // AC-2.6 hook. The degradation arm is reachable in production only under real
 // memory pressure, which a test cannot induce reliably or cheaply; without a
 // hook the one branch whose whole purpose is "never fail the decode" would be
@@ -370,7 +398,14 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   // consequence of D1, not an oversight.
   ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
                        exif_orientation, result);
-  if (result->error_code != 0) return result;
+  if (result->error_code != 0) {
+    // B-1: dngRenderStage4LastFailureReason() is meaningful directly after
+    // this failure return, on EITHER route — both funnel through the shared
+    // Stage4 runner, whether via dng_pipeline_decode_to_rgb_into_oriented
+    // (DNG) or raw_pipeline_decode_file_into (RAW).
+    ceyxMapStage4FailureReason(result);
+    return result;
+  }
   result->rgba_data = dst;   // pipeline already reported the ORIENTED extent
   return result;
 #endif
