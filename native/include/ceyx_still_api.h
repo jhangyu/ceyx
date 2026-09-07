@@ -61,6 +61,15 @@ int32_t ceyx_still_decode_supports(int32_t format);
 /// without an ABI break. Stated limitation: a file carrying ONLY an EXIF
 /// Orientation tag and no container transform displays unrotated.
 ///
+///   orientation == 1 means one of TWO things, distinguished per format:
+///     - HEIC/AVIF, JPEG XL: the CODEC ALREADY APPLIED the orientation and the
+///       returned pixels are display-ready (libheif applies irot/imir; libjxl
+///       auto-orients from the codestream by default).
+///     - WebP: orientation was NOT INSPECTED. libwebp's decoder does not parse
+///       the container's EXIF chunk, so "1" here asserts nothing about the
+///       file -- it means we did not look. (User ruling 2026-09-07: documented
+///       as a known gap; no EXIF parser is added.)
+///
 /// Returns 0 on success or a negative CeyxStillErrorCode. On any failure the
 /// out-parameters are left UNTOUCHED.
 int32_t ceyx_still_probe(const char *path, int32_t format_hint,
