@@ -66,7 +66,7 @@ functions:
     description: "從 `dng_negative`/`dng_render` 與 centralized config 萃取 Stage4 所需矩陣、tone/gamma/table 與 profile map。"
     lines: "452-589"
   - name: "runRenderStage4HalideAot"
-    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。G2（Round 2）：Android kernel 直接輸出 interleaved RGBA8（Probe-A 驗證構造），退役 planar D2H + repackPlanarToRGBAMT/repackPlanarToInterleavedMT + RepackThreadPool；legacy RGB8 caller 走 stripRgbaToRgbMT 去 alpha。"
+    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。G2（Round 2）：Android kernel 直接輸出 interleaved RGBA8（Probe-A 驗證構造），退役 planar D2H + repackPlanarToRGBAMT/repackPlanarToInterleavedMT + RepackThreadPool；legacy RGB8 output format retired entirely (WP1 phase 3)。"
     lines: "1286-1588"
   - name: "runRenderStage4HalideAotFromDevice"
     description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。G1（Round 2）：Android 改為 zero-copy device alias——用 shallow halide_buffer_t 把 producer 的 Vulkan device allocation 以 offset-0 flat-1D view 直餵 kernel（crop 由 crop_l/crop_t scalar 吸收），刪除 W4-4 時代的全幀 copy_to_host + device_deallocate + 重上傳；成功後經原始 struct halide_device_free（owner destructor 因 device==0 不會 double-free），失敗路徑保留 device data 供 fallback。其他平台保留原 Metal device handoff。G2（Round 2）：Android dst 改 kernel 直出 interleaved RGBA8，fused 路徑 D2H 直落 caller RGBA buffer（零 host repack）。"
@@ -198,7 +198,7 @@ bool pipelineVerbose() {
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
 // G2: the split Stage4 generator emits interleaved RGBA8 directly (macOS
 // layout; Probe-A verified). The only remaining host pass is the alpha-strip
-// for legacy RGB8 callers below (stripRgbaToRgbMT); the fused production path
+// RGB8 output no longer exists (WP1 phase 3); the fused production path
 // D2Hs straight into the caller's RGBA buffer.
 
 // W4-1: persistent, non-zero-initialised scratch for the Stage4 strip path. The
@@ -331,84 +331,18 @@ private:
     }
 };
 
-using Stage4DstScratch = Stage4ScratchPool<uint8_t>;   // RGBA8 kernel output for legacy RGB8 callers
-
-Stage4DstScratch& stage4DstScratch() {
-    static Stage4DstScratch instance;
-    return instance;
-}
+// WP1 phase 3: the RGBA8-scratch alias and its two Task 7 gate accessors
+// are deleted — the class above (Stage4ScratchPool) has no remaining
+// instantiation and is now dead code, left in place since it is unnamed
+// by this task's removal list.
 
 }  // namespace (reopened below)
 
-// Task 7 gate accessor (declared in dng_pipeline.h). Defined here, inside the
-// split-kernel guard, because Stage4ScratchPool only exists on those
-// platforms; the non-split build gets the SIZE_MAX "not compiled" answer
-// further down so the gate can DECLARE the skip instead of silently reporting
-// a comfortable zero.
-size_t dng_stage4_scratch_free_high_water() {
-    return stage4DstScratch().free_high_water();
-}
-
-// R4 item 1 gate accessor. The Stage-4 free-list cap is no longer a compile
-// time 4, so a gate that wants to assert "the cap held" must ASK for the cap
-// rather than hardcode it (test_concurrent_decode.cpp did the latter).
-size_t dng_stage4_scratch_free_cap() {
-    return stage4DstScratch().free_cap();
-}
-
 namespace {
 
-// G2: RGBA8 -> RGB8 alpha-strip for legacy RGB8 callers (vector overloads /
-// matrix test path). The production fused path (fuse_rgba=true) needs no host
-// pass at all — the kernel's D2H lands directly in the caller's RGBA buffer.
-// On Android: NEON vld4q_u8 + vst3q_u8 (16 px/iter). W7b: other split-kernel
-// platforms (Windows) take the plain scalar loop — deliberately boring, no SSE
-// intrinsics. Range-split across a few short-lived
-// std::threads. Ad-hoc spawn is deliberate: this runs at most once per legacy
-// decode (~0.5 ms spawn cost vs a ~168 MB memory pass). The former persistent
-// RepackThreadPool (Q3b) existed for the retired per-decode planar repacks
-// (repackPlanarToRGBAMT / repackPlanarToInterleavedMT) and was removed with
-// them — which also removes the Q3b exit-teardown hazard it had to work
-// around (bionic FORTIFY abort on destroyed cv/mutex with parked workers).
-void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
-    auto strip_range = [rgba, rgb](int i_begin, int i_end) {
-        int i = i_begin;
-#if defined(__ANDROID__)
-        for (; i + 16 <= i_end; i += 16) {
-            uint8x16x4_t v = vld4q_u8(rgba + static_cast<size_t>(i) * 4);
-            uint8x16x3_t o = {v.val[0], v.val[1], v.val[2]};
-            vst3q_u8(rgb + static_cast<size_t>(i) * 3, o);
-        }
-#endif
-        for (; i < i_end; ++i) {
-            rgb[static_cast<size_t>(i) * 3 + 0] = rgba[static_cast<size_t>(i) * 4 + 0];
-            rgb[static_cast<size_t>(i) * 3 + 1] = rgba[static_cast<size_t>(i) * 4 + 1];
-            rgb[static_cast<size_t>(i) * 3 + 2] = rgba[static_cast<size_t>(i) * 4 + 2];
-        }
-    };
+// WP1 phase 3: the alpha-strip helper for legacy RGB8 callers is deleted —
+// RGB8 output no longer exists on any platform.
 
-    const unsigned hw = std::thread::hardware_concurrency();
-    const int workers = static_cast<int>(hw == 0 ? 4u : std::min(hw, 8u));
-    // Chunks 16-aligned so every worker keeps the NEON fast path and writes
-    // disjoint dst regions. Small frames: single-threaded.
-    const int base = workers > 1 ? (total_px / workers) & ~15 : 0;
-    if (workers <= 1 || base < 16) {
-        strip_range(0, total_px);
-        return;
-    }
-    std::vector<std::thread> threads;
-    threads.reserve(static_cast<size_t>(workers));
-    int start = 0;
-    for (int w = 0; w < workers && start < total_px; ++w) {
-        const int end = (w == workers - 1) ? total_px
-                                           : std::min(total_px, start + base);
-        threads.emplace_back(strip_range, start, end);
-        start = end;
-    }
-    for (auto& t : threads) {
-        t.join();
-    }
-}
 #endif
 
 #if !defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -421,58 +355,11 @@ void stripRgbaToRgbMT(const uint8_t* rgba, uint8_t* rgb, int total_px) {
 // unobservable configuration.
 }  // namespace (reopened below)
 
-size_t dng_stage4_scratch_free_high_water() {
-    return static_cast<size_t>(-1);
-}
-
-// Matching "not compiled on this platform" answer, so the gate DECLARES the
-// skip instead of silently reporting a comfortable number (2026-08-25 defect).
-size_t dng_stage4_scratch_free_cap() {
-    return static_cast<size_t>(-1);
-}
-
 namespace {
 
-// Mutex rework (plan Task 4): the two process-wide grow-only RGBA-strip
-// scratch statics and their acquire helper were DELETED here, not amended.
-// They handed the same buffer to every decode, which was only ever safe while
-// pipelineSingleFlightMutex serialized all decodes in dng_pipeline.cpp.
-//
-// The replacement is the per-decode bump arena on DecodeContext
-// (src/pipeline/decode_context.h), threaded into the two Stage-4 entry points
-// below as `ctx`. When `ctx` is null — the plain-dng_host harness paths, which
-// have no decode frame and are outside this task's owned files — we fall back
-// to a per-call local allocation owned by the returned struct at the call site.
-// That is still unshareable by construction, which is the property this task
-// exists to establish; it only costs the harness a fresh W*H*4 allocation per
-// call instead of reusing one grow-only buffer.
-struct RgbaStripScratch {
-    uint8_t* ptr = nullptr;
-    std::unique_ptr<uint8_t[]> owned;  // engaged only on the ctx==nullptr path
-};
+// WP1 phase 3: the per-decode strip scratch for legacy RGB8 callers is
+// deleted — RGB8 output no longer exists on any platform.
 
-static RgbaStripScratch acquireRgbaStripScratchFor(DecodeContext* ctx,
-                                                   size_t bytes) {
-    RgbaStripScratch s;
-    if (ctx) {
-        s.ptr = static_cast<uint8_t*>(ctx->arena.allocate(bytes));
-        return s;
-    }
-    // INVARIANT — DO NOT "OPTIMISE" THIS BACK INTO A STATIC OR A POOL.
-    // ctx == nullptr means there is no decode frame (a plain dng_host, e.g. the
-    // test_decode harness). The allocation is then a PER-CALL local, owned by
-    // the returned struct and freed when the caller's scope ends: unshareable
-    // by construction, which is the whole point of the mutex rework. A static
-    // or a process-wide pool here would hand the same buffer to two concurrent
-    // decodes again and silently reintroduce the exact bug class Task 4 exists
-    // to remove. The production FFI path always has a ctx and never lands here,
-    // so the extra per-call allocation costs the harness only.
-    // (Lead ruling 2026-09-03, recorded in
-    //  docs/logs/2026-09-03/task4-implementation-notes.md.)
-    s.owned.reset(new (std::nothrow) uint8_t[bytes]);
-    s.ptr = s.owned.get();
-    return s;
-}
 #endif
 
 // W6-2 / TD-20: shared output size computation used by all four
@@ -908,9 +795,7 @@ void copyHueSatMap(const dng_hue_sat_map& map,
 // T8 extract-only: buildRenderParams, runRenderStage4HalideAot and
 // runRenderStage4HalideAotFromDevice are one contiguous block moved out of the
 // anonymous namespace so the LibRaw frontend can reach THE shared Stage4 core.
-// Bodies unchanged; the `fuse_rgba` default arguments now live on the
-// declarations in include/dng_render_params.h (a default may be given only once
-// per TU). The namespace reopens after the last of the three.
+// Bodies unchanged. The namespace reopens after the last of the three.
 
 bool buildRenderParams(dng_host& host,
                        dng_negative& negative,
@@ -1104,7 +989,6 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int dst_h,
                               const RenderParams& params,
                               uint8_t* dst,
-                              bool fuse_rgba,
                               DecodeContext* ctx,
                               int32_t exif_orientation) {
     // Plan section 1.6: reset before any validation or early return, so a
@@ -1140,21 +1024,6 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     int32_t orient_coeffs[6];
     ceyx_orient_affine_coeffs(exif_orientation, dst_w, dst_h, orient_coeffs);
 
-    // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
-    // indexes with dst_w/dst_h and would silently mis-stride under a swapped
-    // output. No production caller combines them (the oriented FFI entry refuses
-    // a non-RGBA phase-3 result outright), so this is a guard, not a feature.
-    // S-1 (review): deliberately NOT an assert. fuse_rgba is env-driven
-    // (DNG_FUSE_RGBA=0), so an oriented request on a fuse-disabled build is a
-    // reachable configuration rather than a programming error, and aborting a
-    // debug build over it would be wrong. The early return IS the enforcement.
-    if (!fuse_rgba && exif_orientation != 1) {
-        fprintf(stderr,
-                "[Stage4] refusing orientation %d on the RGB8 (!fuse_rgba) path\n",
-                exif_orientation);
-        return false;
-    }
-
     // G-8: the GPU entry refuses src==dst and any overlap for EVERY orientation,
     // stricter than the CPU pass (which allowed in-place for 1..4). The kernel
     // reads permuted source coordinates, so an in-place run reads bytes it has
@@ -1183,7 +1052,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         }
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-    // Split-kernel (Vulkan) builds use Stage4DstScratch leases, not the arena.
+    // Split-kernel (Vulkan) builds write the caller's RGBA buffer directly, not the arena.
     (void)ctx;
 #endif
 
@@ -1247,33 +1116,17 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                   static_cast<int>(params.look_decode.size()));
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: the kernel writes interleaved RGBA8 directly (macOS layout; Probe-A
-    // verified). fuse_rgba callers hand in an RGBA8 (W*H*4) buffer — the D2H
-    // lands there with zero host repack. Legacy RGB8 callers render into
-    // persistent RGBA scratch, then stripRgbaToRgbMT drops alpha below.
+    // verified). The caller's buffer is already RGBA8 (W*H*4) — the D2H lands
+    // there with zero host repack.
+    (void)ctx;
     uint8_t* dst_rgba = dst;
-    std::optional<Stage4DstScratch::Lease> dst_lease;
-    if (!fuse_rgba) {
-        dst_lease.emplace(stage4DstScratch().acquire(
-            static_cast<size_t>(dst_w) * dst_h * 4));
-        dst_rgba = dst_lease->data();
-    }
     Buffer<uint8_t> dst_rgba_buf =
         Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented, out_h_oriented, 4);
 #else
     // W7 (M-11): macOS generator outputs RGBA8 (4 channels, alpha=255 in-kernel).
-    // When fuse_rgba, the caller's buffer is already RGBA8 (W*H*4) — write directly.
-    // When !fuse_rgba (legacy vector callers), use per-decode arena scratch for the
-    // 4-channel kernel output, then strip alpha to RGB8 in the caller's buffer.
-    // Mutex rework (plan Task 4): per-decode arena, or a per-call local when
-    // there is no decode frame. `strip_scratch` must outlive dst_buf.
-    RgbaStripScratch strip_scratch;
+    // The caller's buffer is already RGBA8 (W*H*4) — write directly.
+    (void)ctx;
     uint8_t* dst_rgba = dst;
-    if (!fuse_rgba) {
-        strip_scratch = acquireRgbaStripScratchFor(
-            ctx, static_cast<size_t>(dst_w) * dst_h * 4);
-        dst_rgba = strip_scratch.ptr;
-        if (!dst_rgba) return false;
-    }
     Buffer<uint8_t> dst_buf =
         Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented, out_h_oriented, 4);
 #endif
@@ -1402,21 +1255,12 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     }
     auto t3 = verbose_timing ? std::chrono::high_resolution_clock::now()
                              : std::chrono::high_resolution_clock::time_point{};
-
-    // Legacy RGB8 callers: strip alpha from the RGBA scratch (mirrors the
-    // macOS strip path, NEON + short-lived threads).
-    if (!fuse_rgba) {
-        stripRgbaToRgbMT(dst_rgba, dst, dst_w * dst_h);
-    }
-    auto t4 = verbose_timing ? std::chrono::high_resolution_clock::now()
-                             : std::chrono::high_resolution_clock::time_point{};
     if (verbose_timing) {
-        fprintf(stderr, "[Stage4-Perf] repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
+        fprintf(stderr, "[Stage4-Perf] repack_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms total=%.1f ms\n",
             std::chrono::duration<double, std::milli>(t1 - t0).count(),
             std::chrono::duration<double, std::milli>(t2 - t1).count(),
             std::chrono::duration<double, std::milli>(t3 - t2).count(),
-            std::chrono::duration<double, std::milli>(t4 - t3).count(),
-            std::chrono::duration<double, std::milli>(t4 - t0).count());
+            std::chrono::duration<double, std::milli>(t3 - t0).count());
     }
 #else
     // G-7: capture and check copy_to_host()'s return code.
@@ -1428,17 +1272,6 @@ bool runRenderStage4HalideAot(const uint16_t* src,
             // reads this to report -403.
             g_stage4_failure_reason = Stage4FailureReason::kKernel;
             return false;
-        }
-    }
-    // W7 (M-11): strip alpha when legacy caller expects RGB8. Guarded above:
-    // this !fuse_rgba path runs at exif_orientation == 1 only, so dst_w/dst_h
-    // are already the oriented extent and the stride below cannot be swapped.
-    if (!fuse_rgba) {
-        const size_t total_px = static_cast<size_t>(dst_w) * dst_h;
-        for (size_t i = 0; i < total_px; ++i) {
-            dst[i * 3 + 0] = dst_rgba[i * 4 + 0];
-            dst[i * 3 + 1] = dst_rgba[i * 4 + 1];
-            dst[i * 3 + 2] = dst_rgba[i * 4 + 2];
         }
     }
 #endif
@@ -1467,7 +1300,6 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int dst_h,
                                          const RenderParams& params,
                                          uint8_t* dst,
-                                         bool fuse_rgba,
                                          DecodeContext* ctx,
                                          int32_t exif_orientation) {
     // Plan section 1.6: reset before any validation or early return, so a
@@ -1499,20 +1331,6 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     int32_t orient_coeffs[6];
     ceyx_orient_affine_coeffs(exif_orientation, dst_w, dst_h, orient_coeffs);
 
-    // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
-    // indexes with dst_w/dst_h and would silently mis-stride under a swapped
-    // output. Guard, not a feature — no production caller combines them.
-    // S-1 (review): deliberately NOT an assert. fuse_rgba is env-driven
-    // (DNG_FUSE_RGBA=0), so an oriented request on a fuse-disabled build is a
-    // reachable configuration rather than a programming error, and aborting a
-    // debug build over it would be wrong. The early return IS the enforcement.
-    if (!fuse_rgba && exif_orientation != 1) {
-        fprintf(stderr,
-                "[Stage4] refusing orientation %d on the RGB8 (!fuse_rgba) path\n",
-                exif_orientation);
-        return false;
-    }
-
     // G-8: refuse src==dst and any overlap for EVERY orientation. The source
     // here is a device buffer, but it may also carry a host mirror; when it
     // does, the caller's dst must not alias it.
@@ -1538,7 +1356,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         }
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-    // Split-kernel (Vulkan) builds use Stage4DstScratch leases, not the arena.
+    // Split-kernel (Vulkan) builds write the caller's RGBA buffer directly, not the arena.
     (void)ctx;
 #endif
 
@@ -1680,30 +1498,17 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-    // G2: interleaved RGBA8 dst (macOS layout; Probe-A verified). Fused path
-    // writes the caller's RGBA buffer directly; legacy RGB8 callers go through
-    // RGBA scratch + alpha strip.
+    // G2: interleaved RGBA8 dst (macOS layout; Probe-A verified). The caller's
+    // RGBA buffer is written directly.
+    (void)ctx;
     uint8_t* dst_rgba_and = dst;
-    std::optional<Stage4DstScratch::Lease> dst_lease;
-    if (!fuse_rgba) {
-        dst_lease.emplace(stage4DstScratch().acquire(
-            static_cast<size_t>(dst_w) * dst_h * 4));
-        dst_rgba_and = dst_lease->data();
-    }
     Buffer<uint8_t> dst_rgba_buf =
         Buffer<uint8_t>::make_interleaved(dst_rgba_and, out_w_oriented, out_h_oriented, 4);
 #else
-    // W7 (M-11): macOS generator outputs RGBA8. Persistent scratch for strip path.
-    // Mutex rework (plan Task 4): identical change to the runRenderStage4HalideAot
-    // site. `strip_scratch` must outlive dst_buf.
-    RgbaStripScratch strip_scratch;
+    // W7 (M-11): macOS generator outputs RGBA8. The caller's buffer is written
+    // directly.
+    (void)ctx;
     uint8_t* dst_rgba_fd = dst;
-    if (!fuse_rgba) {
-        strip_scratch = acquireRgbaStripScratchFor(
-            ctx, static_cast<size_t>(dst_w) * dst_h * 4);
-        dst_rgba_fd = strip_scratch.ptr;
-        if (!dst_rgba_fd) return false;
-    }
     Buffer<uint8_t> dst_buf =
         Buffer<uint8_t>::make_interleaved(dst_rgba_fd, out_w_oriented, out_h_oriented, 4);
 #endif
@@ -1879,27 +1684,17 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
     auto t3_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
-
-    // Legacy RGB8 callers: strip alpha from the RGBA scratch. Fused path:
-    // nothing left to do on the host.
-    if (!fuse_rgba) {
-        stripRgbaToRgbMT(dst_rgba_and, dst, dst_w * dst_h);
-    }
-    auto t4_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
-                                   : std::chrono::high_resolution_clock::time_point{};
     // G1: both repack_src and d2h_src are ~0 (O(1) device-alias reshape, no
-    // host round trip). G2: repack_dst is the legacy alpha-strip time and ~0
-    // on the fused production path. The keys are kept so the [Stage4-Perf]
-    // parser and baseline comparisons keep resolving; they directly show the
-    // eliminated transfers vs the pre-G1/pre-G2 baselines.
+    // host round trip). The keys are kept so the [Stage4-Perf] parser and
+    // baseline comparisons keep resolving; they directly show the eliminated
+    // transfers vs the pre-G1 baselines.
     if (verbose_timing_fd) {
-        fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms repack_dst=%.1f ms total=%.1f ms\n",
+        fprintf(stderr, "[Stage4-Perf] FromDevice: repack_src=%.1f ms d2h_src=%.1f ms dispatch=%.1f ms copy_host=%.1f ms total=%.1f ms\n",
             std::chrono::duration<double, std::milli>(t1_fd - tcopy_fd).count(),
             std::chrono::duration<double, std::milli>(tcopy_fd - t0_fd).count(),
             std::chrono::duration<double, std::milli>(t2_fd - t1_fd).count(),
             std::chrono::duration<double, std::milli>(t3_fd - t2_fd).count(),
-            std::chrono::duration<double, std::milli>(t4_fd - t3_fd).count(),
-            std::chrono::duration<double, std::milli>(t4_fd - t0_fd).count());
+            std::chrono::duration<double, std::milli>(t3_fd - t0_fd).count());
     }
 #else
     // G-7: capture and check copy_to_host()'s return code.
@@ -1913,16 +1708,6 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
             return false;
         }
     }
-    // W7 (M-11): strip alpha when legacy caller expects RGB8. Guarded above:
-    // this !fuse_rgba path runs at exif_orientation == 1 only.
-    if (!fuse_rgba) {
-        const size_t total_px = static_cast<size_t>(dst_w) * dst_h;
-        for (size_t i = 0; i < total_px; ++i) {
-            dst[i * 3 + 0] = dst_rgba_fd[i * 4 + 0];
-            dst[i * 3 + 1] = dst_rgba_fd[i * 4 + 1];
-            dst[i * 3 + 2] = dst_rgba_fd[i * 4 + 2];
-        }
-    }
 #endif
 
     return true;
@@ -1930,132 +1715,12 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 
 namespace {  // T8: reopen the file-local namespace after the extracted core.
 
-bool runHalideFullOrSdkFallback(dng_host& host,
-                                dng_negative& negative,
-                                dng_image* stage3,
-                                const dng_render& renderer,
-                                const PipelineConfig& config,
-                                std::vector<uint8_t>& out_rgb,
-                                uint32_t& out_w,
-                                uint32_t& out_h) {
-    const dng_point dst_size = computeOutputSize(negative, renderer);
-    out_w = static_cast<uint32_t>(dst_size.h);
-    out_h = static_cast<uint32_t>(dst_size.v);
-
-    // Use resize instead of assign(N, 0): the Halide kernel overwrites every byte,
-    // so the zero-fill is wasted work. resize() is a no-op when out_rgb is already sized
-    // by the caller (which avoids the 250ms first-touch page-fault cost on a 72MB buffer).
-    // W7 (M-11): macOS generator outputs RGBA8 but the caller's vector stays RGB (W*H*3).
-    // The kernel writes into the per-decode RGBA scratch (via runRenderStage4HalideAot's
-    // fuse_rgba=false path), which strips to RGB in the caller's vector — no 4-channel
-    // resize of the caller's vector (that realloc + page-fault was costing ~150ms).
-    const size_t needed_out_size = static_cast<size_t>(out_w) * out_h * 3;
-    if (out_rgb.size() != needed_out_size) {
-        out_rgb.resize(needed_out_size);
-    }
-
-    dng_rect src_area = negative.DefaultCropArea();
-
-    dng_image* source_image = stage3;
-    dng_rect source_area = src_area;
-    AutoPtr<dng_image> resized_stage3;
-    const bool need_resample = src_area.Size() != dst_size;
-    if (need_resample) {
-        resized_stage3.Reset(host.Make_dng_image(dst_size, stage3->Planes(), stage3->PixelType()));
-        if (!resized_stage3.Get()) {
-            return false;
-        }
-        ResampleImage(host,
-                      *stage3,
-                      *resized_stage3.Get(),
-                      src_area,
-                      resized_stage3->Bounds(),
-                      dng_resample_bicubic::Get());
-        source_image = resized_stage3.Get();
-        source_area = resized_stage3->Bounds();
-    }
-
-    uint32_t src_w = source_area.W();
-    uint32_t src_h = source_area.H();
-    uint32_t src_p = source_image->Planes();
-    std::vector<uint16_t> stage3_data16;
-    RenderParams params;
-    if (!buildRenderParams(host, negative, renderer, config, params)) {
-        return false;
-    }
-
-    const bool can_use_u16_stage3 = source_image->PixelType() == ttShort &&
-                                    source_image->PixelRange() != 0;
-    if (can_use_u16_stage3) {
-        const uint16_t* stage3_u16_ptr = nullptr;
-        std::unique_ptr<dng_const_tile_buffer> stage3_borrowed_tile;
-        int32_t stage3_row_step = static_cast<int32_t>(src_w * src_p);
-        int32_t stage3_col_step = static_cast<int32_t>(src_p);
-        int32_t stage3_plane_step = 1;
-        if (borrowStage3Interleaved16(source_image,
-                                      source_area,
-                                      stage3_borrowed_tile,
-                                      stage3_u16_ptr,
-                                      src_w,
-                                      src_h,
-                                      src_p,
-                                      stage3_row_step,
-                                      stage3_col_step,
-                                      stage3_plane_step)) {
-            // Borrowed path keeps source strides and avoids O(WxH) repack.
-        } else {
-            extractStage3Interleaved16(source_image, source_area, stage3_data16, src_w, src_h, src_p);
-            stage3_u16_ptr = stage3_data16.data();
-        }
-        const float src_scale = 1.0f / static_cast<float>(source_image->PixelRange());
-        const bool render_ok = runRenderStage4HalideAot(stage3_u16_ptr,
-                                                         static_cast<int>(src_w),
-                                                         static_cast<int>(src_h),
-                                                         static_cast<int>(src_p),
-                                                         stage3_row_step,
-                                                         stage3_col_step,
-                                                         stage3_plane_step,
-                                                         src_scale,
-                                                         static_cast<int>(out_w),
-                                                         static_cast<int>(out_h),
-                                                         params,
-                                                         out_rgb.data(),
-                                                         /*fuse_rgba=*/false,
-                                                         dng_decode_context_for(host));
-        if (render_ok) {
-            // W7 (M-11): on macOS, runRenderStage4HalideAot already stripped
-            // RGBA→RGB via the per-decode scratch (fuse_rgba=false). The caller's
-            // vector is W*H*3 throughout — no resize needed.
-            return true;
-        }
-    }
-
-    AutoPtr<dng_image> final_image(const_cast<dng_render&>(renderer).Render());
-    if (!final_image.Get()) {
-        return false;
-    }
-    out_w = final_image->Width();
-    out_h = final_image->Height();
-    out_rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
-    dng_pixel_buffer buffer;
-    buffer.fArea = final_image->Bounds();
-    buffer.fPlane = 0;
-    buffer.fPlanes = 3;
-    buffer.fPixelType = ttByte;
-    buffer.fPixelSize = 1;
-    buffer.fData = out_rgb.data();
-    buffer.fRowStep = static_cast<int32>(out_w * 3);
-    buffer.fColStep = 3;
-    buffer.fPlaneStep = 1;
-    final_image->Get(buffer);
-    return true;
-}
-
-// Pool-backed overload: out_rgb_ptr/out_rgb_size supplied by RgbOutputPool.
-// No resize, no page-fault cost.  SDK fallback path (renderer.Render()) is
-// not available here since we cannot safely write into an arbitrary pointer
-// whose capacity may not match the resized output; return false in that case
-// so the caller falls back to the vector overload.
+// WP1 phase 3: the vector-taking overload this pool-backed one used to fall
+// back from is deleted (it was the RGB8 legacy path). This is now the only
+// runHalideFullOrSdkFallback. No resize, no page-fault cost.  SDK
+// fallback path (renderer.Render()) is not available here since we cannot
+// safely write into an arbitrary pointer whose capacity may not match the
+// resized output; return false in that case.
 bool runHalideFullOrSdkFallback(dng_host& host,
                                 dng_negative& negative,
                                 dng_image* stage3,
@@ -2075,7 +1740,7 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     // (w*h*C), so the capacity check below is correct for every orientation and
     // is deliberately made against the UNORIENTED extent.
     const size_t needed_out_size =
-        static_cast<size_t>(out_w) * out_h * (config.fuse_rgba_output ? 4 : 3);
+        static_cast<size_t>(out_w) * out_h * 4;  // WP1 phase 3: always RGBA8
     if (out_rgb_size < needed_out_size || !out_rgb_ptr) {
         return false;
     }
@@ -2146,7 +1811,6 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          static_cast<int>(out_h),
                                                          params,
                                                          out_rgb_ptr,
-                                                         config.fuse_rgba_output,
                                                          dng_decode_context_for(host),
                                                          exif_orientation);
         if (render_ok) {
@@ -2169,12 +1833,11 @@ bool runHalideFullOrSdkFallback(dng_host& host,
         return false;
     }
 
-    // W7-B: the SDK fallback below writes interleaved RGB8; it cannot satisfy an
-    // RGBA8 fused buffer. On the fused path the GPU render is mandatory (callers
-    // already refuse SDK CPU fallback), so fail rather than emit RGB-in-RGBA.
-    if (config.fuse_rgba_output) {
-        return false;
-    }
+    // WP1 phase 3: the SDK CPU fallback below writes interleaved RGB8; RGB8
+    // output no longer exists (the caller's buffer is always RGBA8 now), so
+    // this path is permanently refused rather than emitting RGB-in-RGBA. The
+    // GPU render is mandatory; callers already refuse SDK CPU fallback.
+    return false;
 
     // SDK fallback with pool pointer: use fData directly.
     AutoPtr<dng_image> final_image(const_cast<dng_render&>(renderer).Render());
@@ -2322,10 +1985,9 @@ static void prewarm_stage4_impl(int width, int height,
                         params.look_has_table);
 
     // Dense interleaved RGB16 dummy src + RGBA8 dst at actual size.
-    // G2: fuse_rgba=true — the kernel now renders interleaved RGBA8 directly,
-    // so the prewarm writes the buffer without the legacy alpha-strip pass
-    // (same AOT entry + pipeline specialization production uses; fuse_rgba only
-    // changes host-side buffer wiring).
+    // G2: the kernel renders interleaved RGBA8 directly, so the prewarm
+    // writes the buffer without any legacy alpha-strip pass (same AOT entry +
+    // pipeline specialization production uses).
     // G3: when a pool RGBA buffer is provided and large enough, the kernel
     // writes there instead of a dummy. This warms the GPU DMA → host-page
     // mapping so copy_to_host during production doesn't pay a first-touch
@@ -2357,7 +2019,6 @@ static void prewarm_stage4_impl(int width, int height,
                                        /*src_scale=*/1.0f / 65535.0f,
                                        /*dst_w=*/width, /*dst_h=*/height,
                                        params, dst_ptr,
-                                       /*fuse_rgba=*/true,
                                        /*ctx=*/nullptr,
                                        // Reconciliation 2/3 caveat (b): the
                                        // prewarm drives the same kernel and must
@@ -2391,90 +2052,6 @@ void dng_render_stage4_prewarm_for_size(int width, int height,
                                          uint8_t* dst_rgba_ptr,
                                          size_t dst_rgba_size) {
     prewarm_stage4_impl(width, height, dst_rgba_ptr, dst_rgba_size);
-}
-
-bool render_stage4_halide(dng_host& host,
-                          dng_negative& negative,
-                          const dng_render& renderer,
-                          RenderHalideMode mode,
-                          const PipelineConfig& config,
-                          std::vector<uint8_t>& out_rgb,
-                          uint32_t& out_w,
-                          uint32_t& out_h,
-                          int32_t exif_orientation) {
-    if (mode == RenderHalideMode::SDK) {
-        return false;
-    }
-    // The vector overload is the RGB8 (!fuse_rgba) legacy/test path; the runner
-    // guard refuses a swapped output there, so refuse up front and explicitly.
-    if (exif_orientation != 1) {
-        return false;
-    }
-
-    dng_image* stage3 = const_cast<dng_image*>(negative.Stage3Image());
-    if (!stage3 || stage3->Planes() < 3) {
-        return false;
-    }
-
-    return runHalideFullOrSdkFallback(host,
-                                      negative,
-                                      stage3,
-                                      renderer,
-                                      config,
-                                      out_rgb,
-                                      out_w,
-                                      out_h);
-}
-
-bool render_stage4_halide_from_device_buffer(dng_host& host,
-                                              dng_negative& negative,
-                                              const dng_render& renderer,
-                                              halide_buffer_t* stage3_device_buf,
-                                              float src_scale,
-                                              const PipelineConfig& config,
-                                              std::vector<uint8_t>& out_rgb,
-                                              uint32_t& out_w,
-                                              uint32_t& out_h,
-                                              int32_t exif_orientation) {
-    if (!stage3_device_buf) {
-        return false;
-    }
-    // Vector overload = RGB8 (!fuse_rgba) legacy/test path; see the note on
-    // render_stage4_halide's vector overload above.
-    if (exif_orientation != 1) {
-        return false;
-    }
-
-    // W6-2 / TD-20: shared dst_size helper (mirrors runHalideFullOrSdkFallback).
-    const dng_point dst_size = computeOutputSize(negative, renderer);
-    out_w = static_cast<uint32_t>(dst_size.h);
-    out_h = static_cast<uint32_t>(dst_size.v);
-
-    // R2 sized decode: a size mismatch no longer bails out — the source extent
-    // is passed through and the scaled kernel handles the downscale. The split
-    // (Android) branch still refuses inside the runner and falls back to host.
-    const dng_rect src_area = negative.DefaultCropArea();
-
-    // W7 (M-11): caller's vector stays RGB (W*H*3). macOS kernel writes RGBA into
-    // per-decode arena scratch; runRenderStage4HalideAotFromDevice strips to the caller's
-    // buffer (fuse_rgba=false default).
-    const size_t needed = static_cast<size_t>(out_w) * out_h * 3;
-    if (out_rgb.size() != needed) {
-        out_rgb.resize(needed);
-    }
-
-    RenderParams params;
-    if (!buildRenderParams(host, negative, renderer, config, params)) {
-        return false;
-    }
-
-    return runRenderStage4HalideAotFromDevice(
-        stage3_device_buf, src_scale,
-        static_cast<int>(src_area.l), static_cast<int>(src_area.t),
-        static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
-        static_cast<int>(out_w), static_cast<int>(out_h),
-        params, out_rgb.data(), /*fuse_rgba=*/false,
-        dng_decode_context_for(host));
 }
 
 // ---------------------------------------------------------------------------
@@ -2594,7 +2171,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
     // Pool path: buffer is already committed — no resize, no page fault.
     // W7-B: fused path outputs RGBA8.
     const size_t needed =
-        static_cast<size_t>(out_w) * out_h * (config.fuse_rgba_output ? 4 : 3);
+        static_cast<size_t>(out_w) * out_h * 4;  // WP1 phase 3: always RGBA8
     if (out_rgb_size < needed || !out_rgb_ptr) {
         return false;
     }
@@ -2609,7 +2186,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
-        params, out_rgb_ptr, config.fuse_rgba_output,
+        params, out_rgb_ptr,
         dng_decode_context_for(host), exif_orientation);
     if (ok && ceyx_orientation_transposes_inline(exif_orientation)) {
         // Plan section 1.3: report the ORIENTED extent back to the caller.

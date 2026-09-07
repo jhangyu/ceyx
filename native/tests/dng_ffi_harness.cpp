@@ -288,15 +288,14 @@ int main(int argc, char **argv) {
     }
     dng_free_result(result);
 
-    // W5-#15 + 7.1: leak assertion — after freeing the result, BOTH the RGBA
-    // and RGB output pools must have zero checked-out buffers. A non-zero
-    // count means a checkout leaked (RAII guard or free path failed to return
-    // the buffer). The RGB pool is exercised when DNG_FUSE_RGBA=0.
+    // W5-#15 + 7.1: leak assertion — after freeing the result, the RGBA
+    // output pool must have zero checked-out buffers. A non-zero count means
+    // a checkout leaked (RAII guard or free path failed to return the
+    // buffer). WP1 phase 3: the RGB8 output pool this used to also check is
+    // deleted in production.
     const size_t rgbaLeaked = dng_debug_pool_checked_out();
-    const size_t rgbLeaked = dng_debug_rgb_pool_checked_out();
-    if (rgbaLeaked != 0 || rgbLeaked != 0) {
+    if (rgbaLeaked != 0) {
       std::cout << "[Pool] FAIL rgba_checked_out=" << rgbaLeaked
-                << " rgb_checked_out=" << rgbLeaked
                 << " (expected 0 after free)\n";
       return 1;
     }

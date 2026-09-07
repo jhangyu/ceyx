@@ -139,10 +139,9 @@ Stage4FailureReason dngRenderStage4LastFailureReason();
 // THE shared Stage4 core. Plain buffers + RenderParams, no decoder state.
 // Signature transcribed from dng_render_halide.cpp:932-944.
 //
-// ctx (mutex rework Task 4): supplies the per-decode bump arena used for the
-// RGBA strip scratch on the !fuse_rgba path. Null is legal — the callers that
-// pass fuse_rgba=true never need it, and the harness paths fall back to a
-// per-call local allocation.
+// WP1 phase 3: the fuse-mode parameter (and the RGB8 strip path it gated)
+// is deleted — every caller hard-passed the fused arm; RGB8 output no
+// longer exists.
 bool runRenderStage4HalideAot(const uint16_t* src,
                               int src_w,
                               int src_h,
@@ -155,7 +154,6 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               int dst_h,
                               const RenderParams& params,
                               uint8_t* dst,
-                              bool fuse_rgba = false,
                               DecodeContext* ctx = nullptr,
                               // Productionization plan section 1.3 (Task 2).
                               // EXIF 1..8; anything else is treated as 1. dst_w/dst_h
@@ -175,7 +173,6 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         int dst_h,
                                         const RenderParams& params,
                                         uint8_t* dst,
-                                        bool fuse_rgba = false,
                                         DecodeContext* ctx = nullptr,
                                         // Productionization plan section 1.3 (Task 2).
                                         // See runRenderStage4HalideAot above.

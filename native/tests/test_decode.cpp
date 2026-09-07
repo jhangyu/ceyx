@@ -1150,13 +1150,10 @@ StagePSNR testDNG(dng_host& host,
         const size_t preallocSize = static_cast<size_t>(width) * height * 3;
         vector<uint8_t> rgbData(preallocSize, 0);
 
-        // WP1 phase 1: render 4-channel and strip locally. fuse_rgba_output
-        // defaults to false (dng_pipeline_config.h:101) and loadFromEnv() never
-        // sets it -- only the production decode entry does (dng_pipeline.cpp:2045)
-        // -- so the harness must set it explicitly rather than relying on the
-        // default.
+        // WP1 phase 1: render 4-channel and strip locally.
+        // WP1 phase 3: fuse_rgba_output no longer exists -- RGBA8 output is
+        // unconditional now, so no config toggle is needed here any more.
         PipelineConfig harnessConfig = PipelineConfig::loadFromEnv();
-        harnessConfig.fuse_rgba_output = true;
         const size_t rgbaScratchSize = static_cast<size_t>(width) * height * 4;
         vector<uint8_t> rgbaScratch(rgbaScratchSize, 0);
 

@@ -150,16 +150,11 @@ static size_t countOccurrences(const string& haystack, const char* needle) {
 static DecodeOutput runDecode(const char* path) {
     DngPipelineResult result;
     bool success = dng_pipeline_decode_to_rgb(path, result);
-    // W7 (M-11): fuse_rgba_output is now true on all platforms, so the pipeline
-    // sets rgba_ptr (not rgb_ptr). Accept either and extract RGB for comparison.
-    const uint8_t* src = result.rgb_ptr;
-    size_t src_size = result.rgb_size;
-    bool is_rgba = false;
-    if (!src && result.rgba_ptr) {
-        src = result.rgba_ptr;
-        src_size = result.rgba_size;
-        is_rgba = true;
-    }
+    // WP1 phase 3: rgb_ptr is gone — RGB8 output no longer exists. The
+    // pipeline always sets rgba_ptr now.
+    const uint8_t* src = result.rgba_ptr;
+    size_t src_size = result.rgba_size;
+    const bool is_rgba = true;
     if (!success || result.error_code != 0 || !src) {
         cerr << "  [decode FAIL] error_code=" << result.error_code << "\n";
         return {};

@@ -324,7 +324,6 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
-                                            /*fuse_rgba=*/true,
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation)) {
         return kRawErrKernelFailed;
@@ -475,7 +474,6 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
-                                            /*fuse_rgba=*/true,
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation)) {
         return kRawErrKernelFailed;
@@ -625,7 +623,6 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
-                                            /*fuse_rgba=*/true,
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation)) {
         return kRawErrKernelFailed;

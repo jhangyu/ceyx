@@ -96,8 +96,6 @@ bool writeRgb(const std::string &path, const DngPipelineResult &r) {
       rgb[p * 3 + 1] = r.rgba_ptr[p * 4 + 1];
       rgb[p * 3 + 2] = r.rgba_ptr[p * 4 + 2];
     }
-  } else if (r.rgb_ptr) {
-    std::memcpy(rgb.data(), r.rgb_ptr, rgb.size());
   } else {
     return false;
   }
@@ -115,11 +113,21 @@ void writeDims(const std::string &path, const DngPipelineResult &r) {
   std::fclose(fh);
 }
 
-void releaseResult(DngPipelineResult &r) {
+// callerOwnedRawBuf: non-null iff decodeRouted took the RAW generic route via
+// raw_pipeline_decode_file_into with a test-owned malloc'd buffer (WP3 lead
+// deconfliction, 2026-09-07: the null-destination raw_pipeline_decode_file
+// call reaches the RGBA pool's OWNING checkout, which WP3 (N2, Task 3.3) is
+// proving unreachable; this is the last such test-side caller). That buffer
+// was never handed to any pool, so it must be freed directly, never released
+// through dng_rgba_output_release/dng_rgb_output_release.
+void releaseResult(DngPipelineResult &r, uint8_t *callerOwnedRawBuf = nullptr) {
+  if (callerOwnedRawBuf) {
+    std::free(callerOwnedRawBuf);
+    r.rgba_ptr = nullptr;
+    return;
+  }
   if (r.rgba_ptr) dng_rgba_output_release(r.rgba_ptr);
-  if (r.rgb_ptr) dng_rgb_output_release(r.rgb_ptr);
   r.rgba_ptr = nullptr;
-  r.rgb_ptr = nullptr;
 }
 
 // R1-T3 dual-route. ARW is the workload that motivated the parallel-decode
@@ -142,12 +150,24 @@ void releaseResult(DngPipelineResult &r) {
 // applies anyway.
 //
 // The RAW result is normalised into DngPipelineResult so writeRgb/writeDims/
-// releaseResult are shared verbatim: both routes hand back a pool-owned RGBA8
-// buffer released by dng_rgba_output_release, so no ownership rule differs.
+// releaseResult are shared verbatim. Ownership now DIFFERS by route: the DNG
+// branch hands back a pool-owned RGBA8 buffer released by
+// dng_rgba_output_release; the RAW branch (below) hands back a test-owned
+// malloc'd buffer via raw_pipeline_decode_file_into (WP3 lead deconfliction,
+// 2026-09-07) that releaseResult must free() directly, never release to any
+// pool — callers thread outCallerBuf through to releaseResult to keep that
+// distinction correct at every call site.
 //
 // The DNG branch is bit-for-bit the previous call and must stay so — R1-T4's
 // frozen DNG colour baseline is validated against this binary.
-bool decodeRouted(const char *path, DngPipelineResult &r) {
+// outCallerBuf: set to the malloc'd buffer address when the RAW generic route
+// is taken, nullptr otherwise (including every failure path and the DNG
+// branch). Callers MUST pass the returned value through to releaseResult
+// (never dng_rgba_output_release it directly) and MUST NOT free it themselves
+// on the success path — releaseResult owns that.
+bool decodeRouted(const char *path, DngPipelineResult &r,
+                   uint8_t **outCallerBuf) {
+  *outCallerBuf = nullptr;
 #if DNG_CONCURRENT_TEST_GENERIC_RAW
   RawRoute route = kRawRouteUnknown;
   const RawErrorCode probe_rc = raw_probe_file(path, &route);
@@ -160,17 +180,40 @@ bool decodeRouted(const char *path, DngPipelineResult &r) {
     develop.output_space = kRawOutputColorSpaceSrgb;
     develop.max_output_long_edge = 0u;
 
+    // WP3 lead deconfliction (2026-09-07): migrated off the null-destination
+    // raw_pipeline_decode_file, which reaches the RGBA pool's OWNING
+    // checkout — the mode WP3 (N2, Task 3.3) is proving unreachable. This is
+    // the last test-side caller of that route. Probe the extent, malloc a
+    // test-owned buffer, decode into it via the caller-buffer sibling
+    // (raw_gpu_pipeline.h) added in commit 20b041d.
+    uint32_t probeW = 0, probeH = 0;
+    const RawErrorCode probeRc =
+        raw_pipeline_probe_output_size(path, 0, &probeW, &probeH);
+    if (probeRc != kRawSuccess || probeW == 0 || probeH == 0) {
+      r.error_code = static_cast<int32_t>(probeRc);
+      return false;
+    }
+    const size_t capacity = static_cast<size_t>(probeW) * probeH * 4;
+    uint8_t *buf = static_cast<uint8_t *>(std::malloc(capacity));
+    if (!buf) {
+      r.error_code = static_cast<int32_t>(kRawErrAllocationFailed);
+      return false;
+    }
+
     RawPipelineResult raw{};
-    const RawErrorCode rc = raw_pipeline_decode_file(path, develop, raw);
+    const RawErrorCode rc =
+        raw_pipeline_decode_file_into(path, develop, buf, capacity, raw);
     if (rc != kRawSuccess || !raw.rgba_ptr) {
+      std::free(buf);
       r.error_code = static_cast<int32_t>(rc);
       return false;
     }
-    r.rgba_ptr = raw.rgba_ptr;  // pool-owned, released by releaseResult
+    r.rgba_ptr = raw.rgba_ptr;  // == buf; test-owned, freed via releaseResult
     r.rgba_size = raw.rgba_size;
     r.width = raw.width;
     r.height = raw.height;
     r.error_code = 0;
+    *outCallerBuf = buf;
     return true;
   }
   // Probe failure falls through to the DNG path on purpose: the DNG decoder
@@ -292,15 +335,16 @@ int main(int argc, char **argv) {
   for (int p = 0; p < primeCount; ++p) {
     const std::string &f = files[static_cast<size_t>(p) % files.size()];
     DngPipelineResult r{};
+    uint8_t *callerBuf = nullptr;
     std::fprintf(stderr, "[prime %d/%d] %s\n", p + 1, primeCount, f.c_str());
     std::fflush(stderr);
-    if (!decodeRouted(f.c_str(), r)) {
+    if (!decodeRouted(f.c_str(), r, &callerBuf)) {
       std::fprintf(stderr, "[concurrent] prime decode failed %s err=%d\n",
                    f.c_str(), r.error_code);
-      releaseResult(r);
+      releaseResult(r, callerBuf);
       return 1;
     }
-    releaseResult(r);
+    releaseResult(r, callerBuf);
   }
   if (primeCount > 0) {
     std::fprintf(stderr, "[prime] done, burst starts now\n");
@@ -349,11 +393,12 @@ int main(int argc, char **argv) {
         if (slot >= total) return;
         const size_t i = slot % files.size();
         DngPipelineResult r{};
-        if (!decodeRouted(files[i].c_str(), r)) {
+        uint8_t *callerBuf = nullptr;
+        if (!decodeRouted(files[i].c_str(), r, &callerBuf)) {
           std::fprintf(stderr, "[concurrent] decode failed %s err=%d\n",
                        files[i].c_str(), r.error_code);
           failures.fetch_add(1);
-          releaseResult(r);
+          releaseResult(r, callerBuf);
           continue;
         }
         {
@@ -386,7 +431,7 @@ int main(int argc, char **argv) {
           std::snprintf(name, sizeof(name), "/decode_%zu.dims", i);
           writeDims(outDir + name, r);
         }
-        releaseResult(r);
+        releaseResult(r, callerBuf);
       }
     });
   }
@@ -397,11 +442,12 @@ int main(int argc, char **argv) {
   // Pool leak check: every checkout must have been returned. A non-zero count
   // here means a guard is missing on some exit path, which under concurrency
   // is how the "two decodes share one buffer" bug also manifests.
+  // WP1 phase 3: narrowed to the RGBA gauge alone — the RGB8 checkout pool
+  // this used to also check is deleted in production; coverage of "no leaked
+  // checkout" is unchanged for the surviving RGBA pool.
   const size_t rgbaOut = dng_rgba_output_checked_out_count();
-  const size_t rgbOut = dng_rgb_output_checked_out_count();
-  if (rgbaOut != 0 || rgbOut != 0) {
-    std::fprintf(stderr, "[concurrent] pool leak rgba=%zu rgb=%zu\n", rgbaOut,
-                 rgbOut);
+  if (rgbaOut != 0) {
+    std::fprintf(stderr, "[concurrent] pool leak rgba=%zu\n", rgbaOut);
     failures.fetch_add(1);
   }
 
@@ -496,26 +542,11 @@ int main(int argc, char **argv) {
     failures.fetch_add(1);
   }
 
-  // Plan Task 7 AC: the Stage4 scratch free list must never exceed its cap.
-  // SIZE_MAX means Stage4ScratchPool was not compiled into this build
-  // (DNG_STAGE4_SPLIT_KERNEL undefined — i.e. the macOS Metal layout). Declare
-  // the skip rather than let an unobservable configuration read as a pass.
-  const size_t stage4FreeHighWater = dng_stage4_scratch_free_high_water();
-  // R4 item 1: was `constexpr size_t kStage4FreeCap = 4;` mirroring the then
-  // hardcoded Stage4ScratchPool::kMaxFreeSlots. That constant is gone and the
-  // cap now follows the configured decode slot count, so the gate must ASK for
-  // it — a hardcoded 4 would mis-assert at every other configured N.
-  const size_t kStage4FreeCap = dng_stage4_scratch_free_cap();
-  const bool stage4PoolCompiled = (stage4FreeHighWater != static_cast<size_t>(-1));
-  if (!stage4PoolCompiled) {
-    std::printf("STAGE4_SCRATCH_CAP skipped=1 reason=pool_not_compiled "
-                "(DNG_STAGE4_SPLIT_KERNEL undefined)\n");
-  } else if (stage4FreeHighWater > kStage4FreeCap) {
-    std::fprintf(stderr,
-                 "[concurrent] stage4 scratch free-list cap violated: %zu > %zu\n",
-                 stage4FreeHighWater, kStage4FreeCap);
-    failures.fetch_add(1);
-  }
+  // WP1 phase 3: the "Stage4 scratch free list never exceeds its cap" check
+  // (Plan Task 7 AC) is deleted, not migrated — it covered Stage4ScratchPool,
+  // the RGB8-legacy scratch pool, which no longer exists on any platform
+  // (it was already a declared SIZE_MAX skip on macOS/Metal). There is no
+  // replacement coverage because there is no replacement feature.
 
   // R4 item 1: state the bound explicitly rather than leaving it to be
   // inferred. `slot_count` at a value that is not 4 is the AC-1a proof line.
@@ -525,12 +556,10 @@ int main(int argc, char **argv) {
 
   std::printf("SLOTS slots=%zu max_in_flight_body=%zu context_alias_events=%zu "
               "max_in_flight_pool=%zu max_in_flight_sampled=%zu "
-              "arena_high_water_bytes=%zu stage4_free_high_water=%zu "
-              "stage4_free_cap=%zu\n",
+              "arena_high_water_bytes=%zu\n",
               slots, bodyHighWater, bodyAliases, poolHighWater,
               maxObservedInFlight.load(),
-              dng_decode_arena_high_water_bytes(), stage4FreeHighWater,
-              kStage4FreeCap);
+              dng_decode_arena_high_water_bytes());
 
   std::printf("CONCURRENT threads=%d files=%zu repeat=%d warmup=%d "
               "failures=%d\n",

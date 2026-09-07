@@ -370,7 +370,7 @@ void checkNeutralRoundTrip(const char* id, const RenderParams& p) {
     const bool ok = runRenderStage4HalideAot(
         src.data(), w, h, /*src_p=*/3, /*src_row_step=*/w * 3,
         /*src_col_step=*/3, /*src_plane_step=*/1, 1.0f / 65535.0f, w, h, p,
-        dst.data(), /*fuse_rgba=*/true);
+        dst.data());
 
     const size_t at = (static_cast<size_t>(h / 2) * w + w / 2) * 4;
     const int r = dst[at], g = dst[at + 1], b = dst[at + 2];

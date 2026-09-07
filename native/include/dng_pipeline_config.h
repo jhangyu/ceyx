@@ -25,11 +25,7 @@
 //              DNG_STAGE3_STAGE4_DEVICE_HANDOFF,
 //              DNG_STAGE2_STAGE4_DEVICE_HANDOFF,
 //              DNG_STAGE2_OL2_HALIDE (source-of-truth lives here; see
-//              stage2Opcodelist2HalideEnabled() and dng_opcodelist2_halide.cpp),
-//              DNG_FUSE_RGBA (7.1 testing/rollback override for the fused
-//              RGBA8 output feature; =0 forces the legacy RGB8 path. Consulted
-//              by dng_pipeline_decode_to_rgb to set the internal
-//              fuse_rgba_output toggle; see route.fuse_rgba below).
+//              stage2Opcodelist2HalideEnabled() and dng_opcodelist2_halide.cpp).
 //   2. DiagnosticConfig:
 //        Observability / timing flags. Default OFF; flip ON to log timings.
 //        These are read lazily at their call sites (cached via static const)
@@ -82,23 +78,9 @@ struct PipelineConfig {
     // PipelineConfig::stage2Opcodelist2HalideEnabled() for the canonical value
     // (see source-of-truth: dng_pipeline_config.h comment there).
     bool stage2_opcodelist2_halide = true;
-    // 7.1: testing/rollback override for the fused RGBA8 output feature.
-    // DNG_FUSE_RGBA=0 forces the legacy RGB8 path; default true. Consulted by
-    // dng_pipeline_decode_to_rgb, which funnels this into fuse_rgba_output.
-    bool fuse_rgba = true;
   };
 
   RouteConfig route;
-
-  // W7-B (P15): when true, the Stage4 bridge writes a fused interleaved RGBA8
-  // output (alpha=255) directly into the caller buffer instead of interleaved
-  // RGB8, eliminating the separate FFI rgb_to_rgba pass and one ~72MB
-  // read/write of the RGB intermediate. Set only by
-  // dng_pipeline_decode_to_rgb on Android (Vulkan host-side repack path);
-  // test_decode and macOS leave it false so RGB output is preserved. This is an
-  // internal output-format toggle, NOT an env-driven route kill-switch, so it
-  // lives outside RouteConfig and is not read by loadFromEnv().
-  bool fuse_rgba_output = false;
 
   struct Threads {
     uint32_t area_threads = 0;
@@ -312,7 +294,6 @@ struct PipelineConfig {
     config.route.stage2_stage4_device_handoff =
         !envExplicitZero("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
     config.route.stage2_opcodelist2_halide = stage2Opcodelist2HalideEnabled();
-    config.route.fuse_rgba = !envExplicitZero("DNG_FUSE_RGBA");
 
     config.threads.area_threads = envPositiveU32("DNG_AREA_THREADS");
     return config;

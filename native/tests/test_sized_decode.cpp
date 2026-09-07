@@ -104,12 +104,7 @@ SizedResult decodeSized(const char *path, int32_t maxDim) {
 
     const uint8_t *src = result.rgba_ptr;
     size_t srcBytes = result.rgba_size;
-    bool isRgba = true;
-    if (!src && result.rgb_ptr) {
-        src = result.rgb_ptr;
-        srcBytes = result.rgb_size;
-        isRgba = false;
-    }
+    const bool isRgba = true;
     if (!success || result.error_code != 0 || !src || result.width == 0 ||
         result.height == 0) {
         printf("  decode FAILED: error_code=%d\n", result.error_code);
@@ -128,8 +123,6 @@ SizedResult decodeSized(const char *path, int32_t maxDim) {
     }
     if (result.rgba_ptr) {
         dng_rgba_output_release(result.rgba_ptr);
-    } else if (result.rgb_ptr) {
-        dng_rgb_output_release(result.rgb_ptr);
     }
     out.ok = true;
     return out;
@@ -434,8 +427,7 @@ int main(int argc, char **argv) {
                                       /*src_row_step=*/rw * 3,
                                       /*src_col_step=*/3,
                                       /*src_plane_step=*/1, 1.0f / 65535.0f, rw,
-                                      rh, params, refDst.data(),
-                                      /*fuse_rgba=*/true)) {
+                                      rh, params, refDst.data())) {
             printf("  FAIL: reference render failed\n\n");
             allPass = false;
             continue;

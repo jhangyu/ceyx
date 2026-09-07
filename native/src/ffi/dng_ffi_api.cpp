@@ -20,9 +20,9 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// W7 (M-11): rgb_to_rgba_neon RETIRED. The pipeline now sets fuse_rgba_output
-// on all platforms, so pipeline.rgba_ptr is always set and the FFI layer takes
-// the RGBA buffer as-is. G2 (Round 2): BOTH platforms now write RGBA8
+// W7 (M-11): rgb_to_rgba_neon RETIRED. WP1 phase 3: pipeline.rgba_ptr is
+// unconditionally set now, so the FFI layer takes the RGBA buffer as-is.
+// G2 (Round 2): BOTH platforms now write RGBA8
 // in-kernel (alpha=255) — the Android planar→RGBA host repack is retired.
 // The ~96 MB RGBA buffer is pool-backed (checkout-style pool in
 // dng_pipeline.cpp) to avoid page-faults on warm decodes.
@@ -105,28 +105,10 @@ static DngResult *decodeAndProcessImpl(const char *file_path, int32_t max_dim) {
     return result;
   }
 
-  // W7 (M-11): production path sets fuse_rgba_output=true so pipeline.rgba_ptr
-  // is the RGBA8 buffer. When DNG_FUSE_RGBA=0 overrides this (rollback/testing),
-  // pipeline.rgb_ptr is set instead; repack to RGBA8 for the FFI contract
-  // (DngResult only carries rgba_data).
+  // WP1 phase 3: the RGB8 repack fallback is deleted — RGB8 output no
+  // longer exists anywhere in the pipeline. The terminal behaviour when
+  // rgba_ptr is unset is this existing error path.
   uint8_t *rgba = pipeline.rgba_ptr;
-  if (!rgba && pipeline.rgb_ptr && pipeline.width > 0 && pipeline.height > 0) {
-    const size_t pixels =
-        static_cast<size_t>(pipeline.width) * pipeline.height;
-    const size_t rgbaBytes = pixels * 4;
-    rgba = dng_rgba_output_acquire(rgbaBytes);
-    if (rgba) {
-      for (size_t i = 0; i < pixels; ++i) {
-        rgba[i * 4 + 0] = pipeline.rgb_ptr[i * 3 + 0];
-        rgba[i * 4 + 1] = pipeline.rgb_ptr[i * 3 + 1];
-        rgba[i * 4 + 2] = pipeline.rgb_ptr[i * 3 + 2];
-        rgba[i * 4 + 3] = 255;
-      }
-    }
-    // Release RGB buffer regardless of repack success to prevent pool leak.
-    dng_rgb_output_release(pipeline.rgb_ptr);
-    pipeline.rgb_ptr = nullptr;
-  }
   if (!rgba) {
     result->error_code = kDngErrRgbaAllocFailed;
     return result;
@@ -247,10 +229,6 @@ FFI_EXPORT void dng_free_rgba_buffer(void *ptr) {
 
 FFI_EXPORT size_t dng_debug_pool_checked_out(void) {
   return dng_rgba_output_checked_out_count();
-}
-
-FFI_EXPORT size_t dng_debug_rgb_pool_checked_out(void) {
-  return dng_rgb_output_checked_out_count();
 }
 
 // ---------------------------------------------------------------------------

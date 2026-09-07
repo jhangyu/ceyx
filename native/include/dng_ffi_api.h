@@ -74,11 +74,6 @@ void dng_free_rgba_buffer(void *ptr);
 /// Used by dng_ffi_harness to machine-check the H-1 leak guarantee.
 size_t dng_debug_pool_checked_out(void);
 
-/// 7.1: Debug/stats — number of RGB pool buffers currently checked out.
-/// Returns 0 when all RGB buffers have been properly released.
-/// Non-zero on the DNG_FUSE_RGBA=0 path indicates a checkout leak.
-size_t dng_debug_rgb_pool_checked_out(void);
-
 /// R4 item 1 (rulings r-1, r-5, r-6). Sets the number of concurrent full-frame
 /// decode slots. The HOST'S USER SETTING IS THE SINGLE SOURCE OF TRUTH, and
 /// this is how it reaches the native layer.

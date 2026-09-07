@@ -7,25 +7,20 @@ class dng_host;
 class dng_negative;
 
 struct DngPipelineResult {
-  // Pool-backed RGB buffer from the checkout-style RgbOutputPool. Populated
-  // on the fuse_rgba_output=false path (test harness / rollback); null when
-  // rgba_ptr is set. Must be returned via dng_rgb_output_release when freed.
-  uint8_t* rgb_ptr = nullptr;
-  size_t   rgb_size = 0;
-  // W7-B (P15): fused interleaved RGBA8 output (alpha=255). Populated only on
-  // the Android Vulkan fused path; the buffer comes from the checkout-style
-  // RGBA output pool (dng_rgba_output_acquire) and MUST be returned via
-  // dng_rgba_output_release when freed. When set, rgb_ptr is null and the FFI
-  // layer skips its own rgb_to_rgba pass.
+  // W7-B (P15): fused interleaved RGBA8 output (alpha=255). WP1 phase 3: this
+  // is now the only Stage4 output field — RGB8 output no longer exists. The
+  // buffer comes from the checkout-style RGBA output pool
+  // (dng_rgba_output_acquire) and MUST be returned via
+  // dng_rgba_output_release when freed.
   uint8_t* rgba_ptr = nullptr;
   size_t   rgba_size = 0;
-  // WP10: when true, rgba_ptr/rgb_ptr point at a CALLER-OWNED buffer. It must
+  // WP10: when true, rgba_ptr points at a CALLER-OWNED buffer. It must
   // never be released to RgbaOutputPool and never deleted. Set only by
   // dng_decode_into_buffer.
   //
   // This field is an INPUT to dng_pipeline_decode_to_rgb_sized, unlike every
   // other field on this struct, which is an output. That is why that function
-  // carries it (and the rgb_ptr/rgb_size it describes) across its own result
+  // carries it (and the rgba_ptr/rgba_size it describes) across its own result
   // reset instead of clearing it with the rest.
   //
   // This struct is INTERNAL: it carries no FFI static_assert and crosses no ABI
@@ -50,13 +45,6 @@ bool dng_rgba_output_release(uint8_t* ptr);
 // W5-#15: debug accessor — number of RGBA buffers currently checked out.
 // Zero after every dng_free_result cycle on a correct run.
 size_t dng_rgba_output_checked_out_count();
-
-// 7.1: checkout-model RGB output pool accessors (mirrors RGBA pool above).
-// Used by the fuse_rgba_output=false fallback path. release() returns true if
-// the pointer was pool-owned (reclaimed); unknown pointers are absorbed with a
-// diagnostic log to prevent double-free.
-bool dng_rgb_output_release(uint8_t* ptr);
-size_t dng_rgb_output_checked_out_count();
 
 // Mutex rework (plan Task 6, spec R7/R8). Admission control accessors.
 //
@@ -119,16 +107,6 @@ size_t dng_decode_slot_count_relaxed();
 //                                     one context to two callers. Must be 0.
 size_t dng_decode_body_max_in_flight();
 size_t dng_decode_body_alias_events();
-
-// Task 7: high-water occupancy of Stage4ScratchPool's free list, so the gate
-// can assert the cap actually holds under N-way concurrency.
-size_t dng_stage4_scratch_free_high_water();
-
-// R4 item 1: that cap is no longer a compile-time 4 — it follows the
-// configured decode slot count — so a gate asserting "the cap held" must ASK
-// for it instead of hardcoding a literal. SIZE_MAX means the split kernel is
-// not compiled on this platform: a DECLARED skip, not a comfortable zero.
-size_t dng_stage4_scratch_free_cap();
 
 // Round 7 task #2: Stage-3 workspace exclusivity, and the coverage counter that
 // makes its absence loud.

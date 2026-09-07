@@ -1810,11 +1810,20 @@ if(DNG_ENABLE_GENERIC_RAW)
         src/pipeline/libraw_frontend.cpp
         src/pipeline/libraw_gpu_input_adapter.cpp
         # raw_gpu_pipeline.cpp's decodeFileImpl delegates DNG-probed inputs back
-        # to the DNG FFI (dng_decode_and_process_sized / dng_free_result), so
-        # the generic route does not link without it. The harness never reaches
-        # that delegation — it routes DNG itself, before calling the RAW path —
-        # but the symbol must resolve.
-        src/ffi/dng_ffi_api.cpp)
+        # to the DNG FFI. WP1 (2026-09-08): the gpu-orient campaign's T9 rewired
+        # this delegation onto ceyx_decode_into_buffer (ceyx_decode_into_ffi.cpp)
+        # — this comment previously named the old dng_decode_and_process_sized /
+        # dng_free_result symbols, and the actual symbol this target now needs
+        # was never added; nothing rebuilt this target since T9 to surface the
+        # gap. The harness never reaches that delegation — it routes DNG itself,
+        # before calling the RAW path — but the symbol must resolve.
+        # ceyx_decode_into_ffi.cpp itself calls raw_record_decode_into_diagnostics
+        # (raw_ffi_api.cpp:109 / raw_ffi_api.h:104), so that file joins the link
+        # too. NOTE for WP5: raw_ffi_api.cpp also hosts raw_decode_and_process,
+        # which WP5 deletes — re-check this block when that lands.
+        src/ffi/dng_ffi_api.cpp
+        src/ffi/ceyx_decode_into_ffi.cpp
+        src/ffi/raw_ffi_api.cpp)
     target_compile_definitions(test_concurrent_decode PRIVATE
         DNG_CONCURRENT_TEST_GENERIC_RAW=1)
     target_link_libraries(test_concurrent_decode

@@ -435,7 +435,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
         /*src_row_step=*/0, /*src_col_step=*/0, /*src_plane_step=*/0,
         /*src_scale=*/1.0f, /*dst_w=*/4, /*dst_h=*/4, params,
         reinterpret_cast<uint8_t *>(buf.data()),   // dst aliases src exactly
-        /*fuse_rgba=*/true, /*ctx=*/nullptr, /*exif_orientation=*/1);
+        /*ctx=*/nullptr, /*exif_orientation=*/1);
     CHECK(!ok, "[%s] B-1a overlapping call unexpectedly succeeded", label);
     CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
           "[%s] B-1a expected kOverlap, got %d", label,
@@ -449,7 +449,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     RenderParams params{};
     const bool ok = runRenderStage4HalideAot(
         src.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
-        /*dst=*/nullptr, /*fuse_rgba=*/true, /*ctx=*/nullptr,
+        /*dst=*/nullptr, /*ctx=*/nullptr,
         /*exif_orientation=*/1);
     CHECK(!ok, "[%s] B-1b null-dst call unexpectedly succeeded", label);
     CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kNone,
@@ -467,7 +467,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
         buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
-        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+        reinterpret_cast<uint8_t *>(buf.data()), nullptr, 1);
     CHECK(!overlap_ok, "[%s] B-1c setup overlap call unexpectedly succeeded",
           label);
     CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
@@ -501,7 +501,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
         buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
-        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+        reinterpret_cast<uint8_t *>(buf.data()), nullptr, 1);
     CHECK(!overlap_ok, "[%s] B-1e RAW setup overlap call unexpectedly succeeded",
           label);
     CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
@@ -545,7 +545,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
         buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
-        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+        reinterpret_cast<uint8_t *>(buf.data()), nullptr, 1);
     CHECK(!overlap_ok, "[%s] B-1f setup overlap call unexpectedly succeeded",
           label);
     CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
@@ -582,7 +582,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
         buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
-        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+        reinterpret_cast<uint8_t *>(buf.data()), nullptr, 1);
     CHECK(!overlap_ok, "[%s] B-1d setup overlap call unexpectedly succeeded",
           label);
     CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
