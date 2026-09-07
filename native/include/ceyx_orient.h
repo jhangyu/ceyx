@@ -88,17 +88,4 @@ CEYX_FFI_EXPORT int32_t ceyx_orientation_transposes(int32_t exif_orientation);
 static inline bool ceyx_orientation_transposes_inline(int32_t exif_orientation) {
   return exif_orientation >= 5 && exif_orientation <= 8;
 }
-
-// Swaps (w, h) into the oriented extent when exif_orientation transposes.
-// Mirrors the `transposes ? swap : identity` pattern hand-inlined at each of
-// the 7 call sites this header replaces.
-template <typename T>
-static inline void ceyx_orient_swap_extent_if_transposes(int32_t exif_orientation,
-                                                           T *w, T *h) {
-  if (ceyx_orientation_transposes_inline(exif_orientation)) {
-    T tmp = *w;
-    *w = *h;
-    *h = tmp;
-  }
-}
 #endif
