@@ -118,16 +118,22 @@ static bool ceyxDecodeIntoPrepare(const char *file_path, int32_t max_dim,
 
 // Phase 3: decode through the route's caller-buffer sibling, each of which
 // binds dst AFTER its own internal result reset (A3.2). `dst` is whatever
-// buffer the caller wants the raw (unoriented) pixels in — the caller's own
-// buffer for the plain entry, or a pooled scratch for a transposing oriented
-// decode.
+// buffer the caller wants the pixels in — the caller's own buffer for both
+// entries now that the GPU kernel writes ORIENTED pixels directly (plan §1.4,
+// §1.5 Task 4). exif_orientation is forwarded to the `_oriented` pipeline
+// entry / `RawDevelopParams::exif_orientation` on both routes; the plain
+// entry (`ceyx_decode_into_buffer`) calls this with 1, so the two entries
+// share one body and can never drift.
 static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
                                  RawRoute route, uint8_t *dst,
-                                 size_t dst_capacity, DngResult *result) {
+                                 size_t dst_capacity,
+                                 int32_t exif_orientation,
+                                 DngResult *result) {
   if (route == kRawRouteDng) {
     DngPipelineResult pipeline;
-    if (!dng_pipeline_decode_to_rgb_into(file_path, max_dim, dst, dst_capacity,
-                                         pipeline)) {
+    if (!dng_pipeline_decode_to_rgb_into_oriented(
+            file_path, max_dim, dst, dst_capacity, exif_orientation,
+            pipeline)) {
       result->error_code = pipeline.error_code;
       result->decode_ms = pipeline.decode_ms;
       result->process_ms = pipeline.process_ms;
@@ -155,6 +161,9 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
   develop.output_space = kRawOutputColorSpaceSrgb;
   develop.max_output_long_edge =
       max_dim > 0 ? static_cast<uint32_t>(max_dim) : 0u;
+  // Plan §1.4 (RAW side): a field on RawDevelopParams, not a new FFI entry —
+  // develop is already constructed locally here on every call.
+  develop.exif_orientation = exif_orientation;
 
   RawPipelineResult out;
   const RawErrorCode rc =
@@ -238,23 +247,21 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
                              result)) {
     return result;
   }
-  ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity, result);
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
+                       /*exif_orientation=*/1, result);
   return result;
 }
 
-CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+// TEMP-VULKAN-ORIENT (deleted in Task 9): the Vulkan split kernel does not
+// carry the fused orientation until Task 7/Phase 3 lands. Until then this
+// build decodes unoriented and orients on the CPU, exactly as before the
+// productionization plan — this is the CURRENT (pre-plan) body of
+// ceyx_decode_into_buffer_oriented, moved verbatim into a static function
+// under this guard (plan §3 Task 4 Step 4.2).
+static DngResult *ceyxDecodeIntoBufferOrientedCpuLegacy(
     const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
-    int32_t exif_orientation) {
-  DngResult *result =
-      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
-  if (!result) return nullptr;
-
-  RawRoute route = kRawRouteUnknown;
-  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
-                             result)) {
-    return result;
-  }
-
+    int32_t exif_orientation, RawRoute route, DngResult *result) {
   const bool transposes = ceyx_orientation_transposes(exif_orientation) != 0;
 
   // Non-transposing (1,2,3,4 and every out-of-range value, which the host's
@@ -262,7 +269,8 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   // in place. Zero extra memory — the common non-identity case, orientation 3,
   // lands here.
   if (!transposes) {
-    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity, result);
+    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
+                         /*exif_orientation=*/1, result);
     if (result->error_code != 0) return result;
     int32_t ow = 0, oh = 0;
     const int32_t orc =
@@ -297,11 +305,13 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
     // UNSWAPPED extent — the caller's extent-consistency check sees that the
     // extent did not swap, reports appliedOrientation = 1, and rotates on the
     // host exactly as it does for every non-ceyx decoder arm.
-    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity, result);
+    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
+                         /*exif_orientation=*/1, result);
     return result;
   }
 
-  ceyxDecodeIntoPhase3(file_path, max_dim, route, scratch, need, result);
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, scratch, need,
+                       /*exif_orientation=*/1, result);
   if (result->error_code != 0) {
     dng_rgba_output_release(scratch);
     return result;
@@ -324,6 +334,46 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   result->width = ow;
   result->height = oh;
   return result;
+}
+#endif  // DNG_STAGE4_SPLIT_KERNEL
+
+CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
+    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
+    int32_t exif_orientation) {
+  DngResult *result =
+      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
+  if (!result) return nullptr;
+
+  RawRoute route = kRawRouteUnknown;
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
+                             result)) {
+    return result;
+  }
+
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+  // Vulkan split-kernel build: dispatch to the CPU-legacy path above (see its
+  // marker comment for why it still exists and when it goes away).
+  return ceyxDecodeIntoBufferOrientedCpuLegacy(file_path, max_dim, dst,
+                                               dst_capacity, exif_orientation,
+                                               route, result);
+#else
+  // Fused path: the kernel writes oriented pixels straight into the caller's
+  // buffer. No scratch, no second pass, no degradation arm — the transposing
+  // in-place impossibility that motivated them no longer exists.
+  //
+  // R-19 (named behaviour change, plan §3 Task 4): post-fusion there is no
+  // successful-but-unoriented return value any more. Previously a scratch
+  // shortage under memory pressure still produced a viewable photo
+  // (unoriented, with the host rotating). Now an orientation failure IS a
+  // decode failure — whatever the Stage4 kernel failure is (result->error_code
+  // set by the pipeline, rgba_data left null). This is the accepted
+  // consequence of D1, not an oversight.
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
+                       exif_orientation, result);
+  if (result->error_code != 0) return result;
+  result->rgba_data = dst;   // pipeline already reported the ORIENTED extent
+  return result;
+#endif
 }
 
 }  // extern "C"

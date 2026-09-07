@@ -285,45 +285,97 @@ static void caseOrientedScratchAccounting(const char *path, const char *label) {
         before, dng_debug_pool_checked_out());
 }
 
-// AC-2.6 — a scratch-checkout failure DEGRADES to an unoriented success. This
-// is the arm whose entire purpose is that memory pressure must never become
-// "the photo will not open", so it must be exercised, not reasoned about.
-static void caseOrientedDegradation(const char *path, const char *label) {
+// AC-2.6, RETIRED BY R-19 (productionization plan §3 Task 4 "NAMED BEHAVIOUR
+// CHANGE"): the fused GPU path never checks out scratch for an oriented
+// decode — the kernel writes the oriented pixels straight into the caller's
+// buffer, transposing included — so `ceyx_debug_force_scratch_failure` has
+// nothing left to degrade. This case now asserts exactly that: forcing the
+// (now-vestigial) flag does NOT change the outcome, i.e. the decode still
+// succeeds with the correctly ORIENTED (swapped) extent, not a silent
+// fallback to unoriented. A regression back to the old degradation behaviour
+// would fail this on the extent-swap assertion.
+static void caseOrientedDegradationRetired(const char *path,
+                                           const char *label) {
   int32_t w = 0, h = 0;
   if (!probe(path, kOrientMaxDim, &w, &h)) return;
   const size_t need = static_cast<size_t>(w) * h * 4;
-  std::vector<uint8_t> control(need), degraded(need);
+  std::vector<uint8_t> control(need), forced(need);
 
-  // Control: orientation 6 with the scratch available, so the comparison below
-  // is against THIS build's real oriented output, not an assumption.
+  // Control: orientation 6, flag untouched.
   DngResult *c = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
                                                   control.data(), need, 6);
-  CHECK(c && c->error_code == 0, "[%s] AC-2.6 control decode failed", label);
+  CHECK(c && c->error_code == 0, "[%s] R-19 control decode failed", label);
   const int32_t cw = c ? c->width : 0, ch = c ? c->height : 0;
   if (c) { c->rgba_data = nullptr; dng_free_result(c); }
 
   const size_t before = dng_debug_pool_checked_out();
   const int32_t prev = ceyx_debug_force_scratch_failure(1);
   DngResult *r = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
-                                                  degraded.data(), need, 6);
+                                                  forced.data(), need, 6);
   ceyx_debug_force_scratch_failure(prev);
 
-  CHECK(r != nullptr, "[%s] AC-2.6 null result", label);
+  CHECK(r != nullptr, "[%s] R-19 null result", label);
   if (!r) return;
   CHECK(r->error_code == 0,
-        "[%s] AC-2.6 scratch pressure FAILED the decode (error=%d) — it must "
-        "degrade to an unoriented success", label, r->error_code);
-  CHECK(r->rgba_data == degraded.data(),
-        "[%s] AC-2.6 degraded path broke pointer identity", label);
-  // The extent must NOT be swapped: that unswapped extent is precisely how the
-  // Dart side detects the degradation and reports appliedOrientation = 1.
-  CHECK(r->width == ch && r->height == cw,
-        "[%s] AC-2.6 degraded extent %dx%d should be the UNORIENTED %dx%d",
-        label, r->width, r->height, ch, cw);
+        "[%s] R-19 forcing the retired scratch-failure flag must not fail "
+        "the fused decode (error=%d)", label, r->error_code);
+  CHECK(r->rgba_data == forced.data(),
+        "[%s] R-19 pointer identity broken", label);
+  // The extent MUST be swapped (H, W): the flag has no mechanism left to act
+  // on, so the outcome must be identical to the control's oriented decode,
+  // not the old unswapped degradation extent.
+  CHECK(r->width == cw && r->height == ch,
+        "[%s] R-19 extent %dx%d should match the oriented control %dx%d",
+        label, r->width, r->height, cw, ch);
   r->rgba_data = nullptr;
   dng_free_result(r);
   CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] AC-2.6 degraded path disturbed the pool", label);
+        "[%s] R-19 case disturbed the pool", label);
+}
+
+// Step 4.3 — dedicated regression for the acceptance criterion as literally
+// stated in the plan: orientation 6 returns extent (H, W) of the DECODED
+// (unoriented) extent and rgba_data == dst. Reference is the actual decoded
+// extent, not the probe's — probe and post-unpack decode extent can
+// legitimately disagree on the RAW routes (documented above in
+// caseAgreement/WP10 stale-extent; a probe-based reference flakes exactly on
+// the linear-rgb-raw class). (The overlap sub-case, "an overlapping src/dst
+// request returns -402", does not apply at this FFI layer: this entry takes
+// no raw source-buffer pointer to overlap dst with — file_path is the only
+// source and the overlap refusal G-8 is a Stage4-bridge/kernel-level
+// contract, gated directly by test_stage4_oriented.cpp (Task 5). Flagged for
+// team-lead rather than fabricating an inapplicable scenario.)
+static void caseOrientedStep43(const char *path, const char *label) {
+  int32_t pw = 0, ph = 0;
+  if (!probe(path, kOrientMaxDim, &pw, &ph)) return;
+  const size_t need = static_cast<size_t>(pw) * ph * 4;
+  std::vector<uint8_t> buf(need);
+
+  int32_t uw = 0, uh = 0;
+  {
+    DngResult *u =
+        ceyx_decode_into_buffer(path, kOrientMaxDim, buf.data(), need);
+    CHECK(u && u->error_code == 0, "[%s] Step4.3 baseline decode failed",
+          label);
+    if (!u || u->error_code != 0) { if (u) dng_free_result(u); return; }
+    uw = u->width; uh = u->height;
+    u->rgba_data = nullptr;
+    dng_free_result(u);
+  }
+
+  DngResult *r =
+      ceyx_decode_into_buffer_oriented(path, kOrientMaxDim, buf.data(), need, 6);
+  CHECK(r != nullptr, "[%s] Step4.3 null result", label);
+  if (!r) return;
+  CHECK(r->error_code == 0, "[%s] Step4.3 o=6 error=%d", label,
+        r->error_code);
+  CHECK(r->rgba_data == buf.data(),
+        "[%s] Step4.3 rgba_data must be dst", label);
+  CHECK(r->width == uh && r->height == uw,
+        "[%s] Step4.3 o=6 expected (H,W)=(%d,%d), got %dx%d", label, uh, uw,
+        r->width, r->height);
+  r->rgba_data = nullptr;
+  dng_free_result(r);
 }
 
 int main(int argc, char **argv) {
@@ -364,7 +416,8 @@ int main(int argc, char **argv) {
     caseOrientedIdentity(s.path, s.label);
     caseOrientedExtents(s.path, s.label);
     caseOrientedScratchAccounting(s.path, s.label);
-    caseOrientedDegradation(s.path, s.label);
+    caseOrientedDegradationRetired(s.path, s.label);
+    caseOrientedStep43(s.path, s.label);
   }
   std::fprintf(stderr, "%s: %d failure(s)\n", argv[0], g_failures);
   return g_failures == 0 ? 0 : 1;
