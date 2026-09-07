@@ -34,43 +34,29 @@ double nowMs() {
         .count();
 }
 
-// Returns the pool buffer on every path, including the error paths, so no
-// checkout can leak (spec section 5.2.4).
+// Borrow-only. There is no owning mode and no pool to acquire from: every entry
+// that reaches here supplies a caller-owned buffer (WP3 Task 3.2 proved the
+// owning mode unreachable — docs/logs/2026-09-07/pool-retire-v2-t32-verdict.txt).
 //
-// WP10: the guard has TWO modes and owns the distinction, so ownership stays
-// in one place rather than being re-decided at each branch.
-//   owning   (RgbaCheckoutGuard(bytes))         — acquires from the RGBA pool,
-//                                                 releases on destruction.
-//   borrowing(RgbaCheckoutGuard(ptr, bytes))    — a CALLER-OWNED buffer:
-//                                                 never acquires, never
-//                                                 releases.
-// A borrowing guard must never release: handing a caller's (Dart-owned) address
-// back to the pool would let the next decode write into memory the app still
-// believes it owns (risk R11.2).
+// This is what makes invariant I1 STRUCTURAL rather than reviewed: there is no
+// code path from a RgbaCheckoutGuard to any pool release, so a caller-owned
+// (Dart-owned) address cannot be handed back to the pool — not because every
+// branch remembers not to, but because nothing here releases to a pool at all.
 class RgbaCheckoutGuard {
  public:
-    explicit RgbaCheckoutGuard(size_t bytes)
-        : ptr_(dng_rgba_output_acquire(bytes)), bytes_(bytes), owned_(true) {}
-    // WP10: borrow a caller-owned buffer.
     RgbaCheckoutGuard(uint8_t* borrowed, size_t bytes)
-        : ptr_(borrowed), bytes_(bytes), owned_(false) {}
-    ~RgbaCheckoutGuard() {
-        if (owned_ && ptr_) dng_rgba_output_release(ptr_);
-        ptr_ = nullptr;
-    }
+        : ptr_(borrowed), bytes_(bytes) {}
+    ~RgbaCheckoutGuard() { ptr_ = nullptr; }
     RgbaCheckoutGuard(const RgbaCheckoutGuard&) = delete;
     RgbaCheckoutGuard& operator=(const RgbaCheckoutGuard&) = delete;
     uint8_t* get() const { return ptr_; }
     size_t bytes() const { return bytes_; }
-    // Disarms an owning guard and hands the pointer to the caller. On a
-    // borrowing guard there is nothing to disarm — it returns the caller's own
-    // pointer, which is exactly the behaviour the three branches already want
-    // at their `out.rgba_ptr = rgba.release()` line.
+    // Hands the caller's own pointer back to the branch, which is exactly the
+    // behaviour the three `out.rgba_ptr = rgba.release()` lines already want.
     uint8_t* release() { uint8_t* p = ptr_; ptr_ = nullptr; return p; }
  private:
     uint8_t* ptr_;
     size_t bytes_;
-    bool owned_;
 };
 
 // Trust-boundary extent check (spec section 10.1). Every product is formed in
@@ -141,9 +127,12 @@ RawErrorCode makeRgbaCheckout(RawPipelineResult& out, size_t bytes,
         guard->emplace(out.caller_dst, bytes);
         return kRawSuccess;
     }
-    guard->emplace(bytes);
-    if (!(*guard)->get()) return kRawErrAllocationFailed;
-    return kRawSuccess;
+    // WP3: there is no pool to fall back to. Every surviving entry supplies
+    // a caller buffer (Task 3.2's reachability proof), so a null here means
+    // a programming error in a NEW caller. Reported, not served.
+    std::fprintf(stderr,
+                 "[RawPipeline] makeRgbaCheckout called with no caller_dst\n");
+    return kRawErrAllocationFailed;
 }
 
 bool cancelRequested(const RawCancelToken& cancel) {
