@@ -77,5 +77,28 @@ CEYX_FFI_EXPORT int32_t ceyx_orient_rgba(const uint8_t *src, uint8_t *dst,
 CEYX_FFI_EXPORT int32_t ceyx_orientation_transposes(int32_t exif_orientation);
 
 #ifdef __cplusplus
+} // extern "C"
+
+// R-1 consolidation (Round 2 parking-lot): header-only helper mirroring the
+// same 8-way EXIF transpose predicate as ceyx_orientation_transposes() above.
+// Deliberately NOT a call to that function: ceyx_orientation_transposes is
+// defined in ceyx_orient.cpp, which Phase 4 deletes; this header outlives it,
+// so pipeline call sites route through this inline instead of the doomed TU.
+// Behavior must stay identical to `o >= 5 && o <= 8`.
+static inline bool ceyx_orientation_transposes_inline(int32_t exif_orientation) {
+  return exif_orientation >= 5 && exif_orientation <= 8;
+}
+
+// Swaps (w, h) into the oriented extent when exif_orientation transposes.
+// Mirrors the `transposes ? swap : identity` pattern hand-inlined at each of
+// the 7 call sites this header replaces.
+template <typename T>
+static inline void ceyx_orient_swap_extent_if_transposes(int32_t exif_orientation,
+                                                           T *w, T *h) {
+  if (ceyx_orientation_transposes_inline(exif_orientation)) {
+    T tmp = *w;
+    *w = *h;
+    *h = tmp;
+  }
 }
 #endif

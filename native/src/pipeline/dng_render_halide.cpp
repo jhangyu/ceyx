@@ -138,6 +138,7 @@ functions:
 #endif
 
 #include "HalideBuffer.h"
+#include "ceyx_orient.h"
 #include "concurrent_dng_host.h"
 #include "decode_context.h"
 #include "dng_1d_function.h"
@@ -1125,7 +1126,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     // extent as computed by dng_render_stage4_output_size; the kernel writes into
     // an oriented dst, so exactly one place converts and no call site can disagree.
     const bool orient_transposes =
-        (exif_orientation >= 5 && exif_orientation <= 8);
+        ceyx_orientation_transposes_inline(exif_orientation);
     const int out_w_oriented = orient_transposes ? dst_h : dst_w;
     const int out_h_oriented = orient_transposes ? dst_w : dst_h;
 
@@ -1480,7 +1481,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // runRenderStage4HalideAot. dst_w/dst_h stay UNORIENTED; the kernel writes
     // an oriented dst and this is the only place the conversion happens.
     const bool orient_transposes =
-        (exif_orientation >= 5 && exif_orientation <= 8);
+        ceyx_orientation_transposes_inline(exif_orientation);
     const int out_w_oriented = orient_transposes ? dst_h : dst_w;
     const int out_h_oriented = orient_transposes ? dst_w : dst_h;
 
@@ -2138,7 +2139,7 @@ bool runHalideFullOrSdkFallback(dng_host& host,
         if (render_ok) {
             // Plan section 1.3: report the ORIENTED extent. The runner shaped the
             // dst as (H, W) for 5..8; every caller above reads out_w/out_h.
-            if (exif_orientation >= 5 && exif_orientation <= 8) {
+            if (ceyx_orientation_transposes_inline(exif_orientation)) {
                 std::swap(out_w, out_h);
             }
             return true;
@@ -2597,7 +2598,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb_ptr, config.fuse_rgba_output,
         dng_decode_context_for(host), exif_orientation);
-    if (ok && exif_orientation >= 5 && exif_orientation <= 8) {
+    if (ok && ceyx_orientation_transposes_inline(exif_orientation)) {
         // Plan section 1.3: report the ORIENTED extent back to the caller.
         std::swap(out_w, out_h);
     }

@@ -10,6 +10,7 @@
 
 #include "HalideBuffer.h"
 #include "ceyx_decode_into.h"   // WP10 A3: caller-buffer forwarding on the DNG route
+#include "ceyx_orient.h"
 #include "dng_ffi_api.h"
 #include "dng_halide_device.h"
 #include "dng_pipeline.h"
@@ -292,7 +293,7 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // transposing orientation (5-8) reports/allocates the wrong (unswapped)
     // dimensions. Mirrors §1.3's derivation exactly.
     const bool transposes =
-        develop.exif_orientation >= 5 && develop.exif_orientation <= 8;
+        ceyx_orientation_transposes_inline(develop.exif_orientation);
     const uint32_t oriented_w = transposes ? out_h : out_w;
     const uint32_t oriented_h = transposes ? out_w : out_h;
     const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
@@ -448,7 +449,7 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     // transposing orientation (5-8) reports/allocates the wrong (unswapped)
     // dimensions. Mirrors §1.3's derivation exactly.
     const bool transposes =
-        develop.exif_orientation >= 5 && develop.exif_orientation <= 8;
+        ceyx_orientation_transposes_inline(develop.exif_orientation);
     const uint32_t oriented_w = transposes ? out_h : out_w;
     const uint32_t oriented_h = transposes ? out_w : out_h;
     const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
@@ -598,7 +599,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     // transposing orientation (5-8) reports/allocates the wrong (unswapped)
     // dimensions. Mirrors §1.3's derivation exactly.
     const bool transposes =
-        develop.exif_orientation >= 5 && develop.exif_orientation <= 8;
+        ceyx_orientation_transposes_inline(develop.exif_orientation);
     const uint32_t oriented_w = transposes ? out_h : out_w;
     const uint32_t oriented_h = transposes ? out_w : out_h;
     const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
