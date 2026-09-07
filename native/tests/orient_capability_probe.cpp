@@ -10,13 +10,14 @@
 // the introspection struct Halide's codegen emits for every AOT filter
 // (`<kernel>_metadata()`, declared in HalideRuntime.h as
 // `halide_filter_metadata_t`). A pre-fusion build exports the SAME function
-// NAMES (dng_render_stage4, dng_render_stage4_scaled_preavg -- the generator
-// names never changed), so symbol presence alone cannot distinguish a fused
-// library from a stale one; the metadata argument list is the actual
-// capability signal this probe checks. This is exactly the failure mode
-// R-14 describes: the FFI symbol lookup that consumes these kernels is
-// guarded, so one silently-stale/mismatched kernel nulls the whole feature
-// group with no crash and no red functional test.
+// NAMES (dng_render_stage4, and either dng_render_stage4_scaled_preavg on
+// Metal or dng_render_stage4_split on Vulkan -- the generator names never
+// changed), so symbol presence alone cannot distinguish a fused library from
+// a stale one; the metadata argument list is the actual capability signal
+// this probe checks. This is exactly the failure mode R-14 describes: the
+// FFI symbol lookup that consumes these kernels is guarded, so one
+// silently-stale/mismatched kernel nulls the whole feature group with no
+// crash and no red functional test.
 //
 // LOCKSTEP NOTE: this argument-name list is coupled to the fused kernels'
 // signature by construction (that coupling IS the capability signal — see
@@ -105,11 +106,38 @@ struct KernelCheck {
 // demosaic-warp is orientation-agnostic; see native/include/dng_pipeline.md
 // and Task 1 of the productionization plan). Extend this list if a future
 // task adds another fused kernel entry point.
+//
+// PLATFORM-AWARE SECOND ENTRY (fix, Round 3): dng_render_stage4 itself is
+// linked into dng_decoder_native on every platform (native/cmake/ffi.cmake),
+// but the SECOND Stage4 AOT kernel differs by platform, gated by CMake's
+// DNG_STAGE4_SPLIT_KERNEL (native/cmake/halide_aot.cmake, native/cmake/ffi.cmake):
+//   - Metal (macOS, DNG_STAGE4_SPLIT_KERNEL=OFF): dng_render_stage4_scaled_preavg
+//     is linked; dng_render_stage4_split is never built at all on this branch.
+//   - Vulkan (Linux/Windows/Android, DNG_STAGE4_SPLIT_KERNEL=ON):
+//     dng_render_stage4_split is linked instead; scaled_preavg is never built
+//     on this branch (sized/"scaled" decode requests fall back to CPU resample
+//     by design on the split branch -- productionization plan R1d). Both
+//     kernels declare the same six orient_* affine-coefficient Input<>
+//     scalars (see DngRenderStage4ScaledPreAvg / DngRenderStage4Android in
+//     native/generators/DngRenderGenerator.cpp), so the required-args check
+//     below is identical either way -- only WHICH kernel's metadata symbol
+//     gets checked changes. ORIENT_PROBE_SPLIT_KERNEL is defined by
+//     native/cmake/tests.cmake from the SAME DNG_STAGE4_SPLIT_KERNEL variable
+//     CMake used to decide which kernel got linked, so this cannot drift out
+//     of lockstep with the actual build the way a hand-maintained duplicate
+//     flag could.
+#if defined(ORIENT_PROBE_SPLIT_KERNEL)
+const KernelCheck kChecks[] = {
+    {"dng_render_stage4_metadata", "dng_render_stage4"},
+    {"dng_render_stage4_split_metadata", "dng_render_stage4_split"},
+};
+#else
 const KernelCheck kChecks[] = {
     {"dng_render_stage4_metadata", "dng_render_stage4"},
     {"dng_render_stage4_scaled_preavg_metadata",
      "dng_render_stage4_scaled_preavg"},
 };
+#endif
 
 // T7b (bac3cbe): the fused kernels take six host-computed affine
 // coefficients instead of a single orientation code + unoriented extent.

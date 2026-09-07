@@ -356,7 +356,12 @@ jobs:
             exit 1
           fi
           missing=""
-          for sym in dng_render_stage4 dng_render_stage4_scaled_preavg; do
+          # Android/Linux/Windows link the Vulkan split Stage4 kernel
+          # (dng_render_stage4_split), NOT the Metal-only scaled_preavg one
+          # -- ffi.cmake links exactly one of the two per DNG_STAGE4_SPLIT_KERNEL,
+          # never both (CI-red root cause, Round 3: this literal was still
+          # scaled_preavg from before the split kernel existed).
+          for sym in dng_render_stage4 dng_render_stage4_split; do
             set +e
             grep -q "${sym}" android_so_dynsyms_orient.txt
             rc=$?

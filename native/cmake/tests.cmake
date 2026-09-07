@@ -2357,6 +2357,17 @@ add_executable(orient_capability_probe tests/orient_capability_probe.cpp)
 if(UNIX AND NOT APPLE AND NOT ANDROID)
     target_link_libraries(orient_capability_probe PRIVATE ${CMAKE_DL_LIBS})
 endif()
+# CI FIX (Round 3, was CI-red): the probe's second Stage4 kernel check must
+# match whichever second kernel THIS platform actually built and linked into
+# dng_decoder_native (ffi.cmake links dng_render_stage4_scaled_preavg when
+# DNG_STAGE4_SPLIT_KERNEL is OFF, dng_render_stage4_split when it is ON --
+# never both). Deriving ORIENT_PROBE_SPLIT_KERNEL from that SAME variable
+# (set earlier in native/cmake/halide_aot.cmake) keeps the probe's kernel
+# list in lockstep with the link wiring by construction, instead of a
+# second hand-maintained platform check that could silently drift.
+if(DNG_STAGE4_SPLIT_KERNEL)
+    target_compile_definitions(orient_capability_probe PRIVATE ORIENT_PROBE_SPLIT_KERNEL=1)
+endif()
 # --- end Task 11 ---
 
 endif() # NOT DNG_CROSS_BUILD (test targets)
