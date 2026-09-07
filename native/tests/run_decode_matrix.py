@@ -348,6 +348,8 @@ _CFA_PHASE_PASS_RE = re.compile(r"^\[CFA PHASE\] ALL PASS\s*$")
 _CFA_COLOR_RE = re.compile(r"^\[CFA COLOR\]\s+(.*)\[(PASS|FAIL)\]\s*$")
 # R2 sized decode gate (AC5 output extent / AC5-D crop-vs-scale / AC6 memory).
 _DEFAULT_SIZED_DECODE_BIN = "native/build/test_sized_decode"
+# ceyx-gpu-orient productionization plan Task 5 / gate G-A.
+_DEFAULT_STAGE4_ORIENTED_BIN = "native/build/test_stage4_oriented"
 _SIZED_OVERALL_RE = re.compile(r"^OVERALL=(PASS|FAIL)\s*$")
 _SIZED_HANDOFF_FAILED_MARKER = "8.2.2 device handoff Stage4 failed"
 
@@ -1271,6 +1273,54 @@ def _run_sized_decode_case(cwd: Path, binary: Path, dng_path: str) -> CfaCheckRe
             "maxDim 200/1024/2560: output extent exact, PSNR >= 55 dB vs the "
             "same-ordering CPU reference (proves scale, not crop), device "
             "handoff never fell back to host"
+        ),
+    )
+
+
+def _run_stage4_oriented_case(cwd: Path, binary: Path, dng_path: str, repeat: int) -> CfaCheckResult:
+    """ceyx-gpu-orient productionization plan Task 5 / gate G-A: production
+    Metal fused Stage4 EXIF-orientation gate (native/tests/test_stage4_oriented.cpp).
+
+    Requires exit 0 AND the 'STAGE4_ORIENTED_RESULT: PASS' marker AND that
+    every SUMMARY line reports fail=0 — exit code alone is not enough of a
+    contract for a tool asserting pixels (same rationale as the sized-decode
+    and CFA-phase gates above).
+    """
+    proc = subprocess.run(
+        [str(binary), dng_path, "--repeat", str(repeat)],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = proc.stdout
+    lines = output.splitlines()
+    result_pass = any(line.strip() == "STAGE4_ORIENTED_RESULT: PASS" for line in lines)
+    summary_lines = [line for line in lines if line.startswith("SUMMARY ")]
+    all_summaries_clean = bool(summary_lines) and all(
+        "fail=0" in line for line in summary_lines
+    )
+    if proc.returncode != 0 or not result_pass or not all_summaries_clean:
+        print(output, end="" if output.endswith("\n") else "\n")
+        return CfaCheckResult(
+            name="Stage4 oriented (G-A)",
+            status="FAIL",
+            detail=(
+                f"exit={proc.returncode} result_pass={result_pass} "
+                f"summaries_clean={all_summaries_clean} "
+                f"({len(summary_lines)} SUMMARY lines)"
+            ),
+        )
+    for line in summary_lines:
+        print(f"[STAGE4 ORIENTED GATE] {line.strip()}")
+    return CfaCheckResult(
+        name="Stage4 oriented (G-A)",
+        status="PASS",
+        detail=(
+            f"{len(summary_lines)} identical repeat(s), all orientations 1..8 "
+            "byte-exact vs the CPU oracle across full/sub-tile/non-aligned/"
+            "scaled cases"
         ),
     )
 
@@ -2535,6 +2585,24 @@ def main() -> int:
         help="Disable the sized-decode gate even if the default binary exists.",
     )
     ap.add_argument(
+        "--stage4-oriented-harness",
+        default="",
+        help=(
+            "ceyx-gpu-orient plan Task 5 / gate G-A binary (relative to "
+            "repo-root). Auto-enabled when the default build output exists "
+            f"({_DEFAULT_STAGE4_ORIENTED_BIN}); pass --no-stage4-oriented-harness "
+            "to skip explicitly. Gates the fused Metal Stage4 EXIF-orientation "
+            "kernels (full-res, sub-tile, non-tile-aligned, scaled) byte-exact "
+            "against the CPU oracle, 3 identical repeats via --repeat."
+        ),
+    )
+    ap.add_argument(
+        "--no-stage4-oriented-harness",
+        action="store_true",
+        default=False,
+        help="Disable the Stage4 oriented gate even if the default binary exists.",
+    )
+    ap.add_argument(
         "--bggr-sample",
         default="",
         help=(
@@ -3258,6 +3326,30 @@ def main() -> int:
             else:
                 cfa_results.append(
                     _run_sized_decode_case(root, sized_bin, lossless)
+                )
+
+        # Stage4 oriented gate (G-A). Same auto-enable/SKIP contract as the
+        # harnesses above: a gate nobody knows to invoke is a gate that
+        # silently stops being run, so it is registered here rather than
+        # left standalone (plan Task 5 acceptance criterion: "auto-enables
+        # the new case (no flag)").
+        requested_stage4_oriented = bool(args.stage4_oriented_harness)
+        if not args.no_stage4_oriented_harness:
+            stage4_oriented_bin = (
+                root / (args.stage4_oriented_harness or _DEFAULT_STAGE4_ORIENTED_BIN)
+            ).resolve()
+            if not stage4_oriented_bin.exists():
+                if requested_stage4_oriented:
+                    ap.error(f"Stage4 oriented harness not found: {stage4_oriented_bin}")
+                print(f"[SKIP] Stage4 oriented harness not built; skipping: {stage4_oriented_bin}")
+                cfa_results.append(CfaCheckResult(
+                    name="Stage4 oriented (G-A)",
+                    status="SKIP",
+                    detail=f"binary not built: {stage4_oriented_bin}",
+                ))
+            else:
+                cfa_results.append(
+                    _run_stage4_oriented_case(root, stage4_oriented_bin, lossless, args.repeat)
                 )
 
     if any(c.status == "FAIL" for c in cfa_results):
