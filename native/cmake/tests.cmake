@@ -300,25 +300,6 @@ add_executable(test_ceyx_orient
     src/ffi/ceyx_orient.cpp)
 target_include_directories(test_ceyx_orient PRIVATE ${INC_DIR})
 
-# ceyx-gpu-orient Task #2: standalone GPU-vs-CPU EXIF-orientation comparison
-# harness (docs/logs/2026-09-07/gpu_orient_round_contract.md, AC-2/AC-3).
-# Experimental, not CI. Guarded on `if(TARGET ceyx_orient_gpu)` rather than
-# header existence: the header (native/include/ceyx_orient_gpu.h) exists
-# unconditionally, but the `ceyx_orient_gpu` static-lib target (Task #1,
-# native/src/ffi/ceyx_orient_gpu.cpp -- standalone, NOT embedded in
-# dng_decoder_native) is only declared under NOT DNG_CROSS_BUILD AND NOT
-# DNG_HOST_GENERATORS_ONLY, so a header-existence guard could turn this
-# harness on in a configuration where the lib doesn't exist (2026-09-07 relay).
-# The lib already carries the AOT kernel archive, halide runtime, and
-# Metal/Foundation frameworks + include dirs as PUBLIC deps.
-if(TARGET ceyx_orient_gpu)
-    add_executable(test_orient_gpu
-        tests/test_orient_gpu.cpp
-        src/ffi/ceyx_orient.cpp)
-    target_include_directories(test_orient_gpu PRIVATE ${INC_DIR})
-    target_link_libraries(test_orient_gpu PRIVATE dng_decoder_native ceyx_orient_gpu)
-endif()
-
 # Round 1 Task 1.2: histogram-based auto-exposure estimator, plain math over a
 # caller-supplied buffer view -- no LibRaw/Halide/DNG SDK dependency, so this
 # links directly against the two sources rather than the whole decoder
