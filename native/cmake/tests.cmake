@@ -691,10 +691,29 @@ if(DNG_ENABLE_GENERIC_RAW)
         endif()
     endif()
 
+    # F-T8b-2-STYLE FIX (2026-09-08, task #14 Part B): RawSpeed3 declares
+    # `option(WITH_OPENMP "Enable OpenMP support." ON)`
+    # (native/third_party/libraw/RawSpeed3/rawspeed/CMakeLists.txt:58) — the
+    # IDENTICAL mechanism that made libraw-cmake's ENABLE_OPENMP a no-op
+    # (fixed at ~line 1067 above, commit 68dd3a5): a plain set() of the same
+    # name is a normal variable, and CMP0077=NEW is not guaranteed to be in
+    # effect in a FetchContent/add_subdirectory child scope, so option()
+    # here would clear it and RawSpeed3's own default (ON) would win on
+    # mobile in violation of the P17 policy (OpenMP ON for desktop, OFF for
+    # iOS/Android) recorded at the top of this file. Using the FORCEd-CACHE
+    # pattern proven at the ENABLE_LCMS fix (~line 1313) and the
+    # ENABLE_OPENMP fix (~line 1067) so both branches are forced and
+    # intentional rather than relying on find_package(OpenMP) failing by
+    # accident. RawSpeed3 (ENABLE_RAWSPEED) is not built as of this fix, so
+    # this path is unverified beyond a clean reconfigure of the existing
+    # build tree — the RawSpeed3-enabled path remains untested until that
+    # engine is ever enabled.
     if(CEYX_ENABLE_DESKTOP_OPENMP)
-        set(WITH_OPENMP ON)
+        set(WITH_OPENMP ON CACHE BOOL
+            "RawSpeed3 OpenMP: ON for desktop per the P17 policy" FORCE)
     else()
-        set(WITH_OPENMP OFF)
+        set(WITH_OPENMP OFF CACHE BOOL
+            "RawSpeed3 OpenMP: OFF for mobile (Android/iOS) per the P17 policy" FORCE)
     endif()
     set(RAWSPEED_ENABLE_WERROR OFF)
     set(BUILD_TOOLS OFF)
