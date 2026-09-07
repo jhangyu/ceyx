@@ -16,10 +16,20 @@ static bool uses_vulkan_planar_layout(const Target &t) {
 
 class DngRenderStage4 : public Halide::Generator<DngRenderStage4> {
 public:
+    // Sub-tile tail safety. ON by default: with -no_asserts-no_bounds_query the
+    // default (ShiftInwards) tail writes a full tile into a smaller buffer.
+    // Compiles on Metal AND on the Android Vulkan target (finding F-V3-9).
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
+
     // Android Vulkan workaround: Android AOT uses dense planar RGB src.
     // Other targets keep the original interleaved RGB layout for performance.
     Input<Buffer<uint16_t>> src{"src", 3};          // x, y, c
     Input<float> src_scale{"src_scale"};            // usually 1 / 65535
+    // Fused EXIF orientation (productionization plan §1.1). RUNTIME scalars, not
+    // GeneratorParams: one archive serves all 8 cases.
+    Input<int32_t> orientation{"orientation"};
+    Input<int32_t> unoriented_width{"unoriented_width"};
+    Input<int32_t> unoriented_height{"unoriented_height"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};   // 4098
     Input<Buffer<float>> tone_curve{"tone_curve", 1}; // 4098
     Input<Buffer<float>> encode_gamma{"encode_gamma", 1}; // 4098
@@ -78,8 +88,30 @@ public:
 
         Func src_f("src_f");
         src_f(x, y, c) = src(x, y, c);
-        Expr sx = clamp(x, 0, src.dim(0).extent() - 1);
-        Expr sy = clamp(y, 0, src.dim(1).extent() - 1);
+        // Fused EXIF orientation: permute the OUTPUT coordinate back to the
+        // unoriented coordinate before any pixel math runs. Every arithmetic
+        // expression below is untouched, so the fused result is a pure index
+        // permutation of the unfused one -> byte-exact by construction.
+        // Table mirrors native/tests/oracle/ceyx_orient_oracle.cpp exactly.
+        //   1: (x, y)              5: (y, x)
+        //   2: (W-1-x, y)          6: (y, H-1-x)
+        //   3: (W-1-x, H-1-y)      7: (W-1-y, H-1-x)
+        //   4: (x, H-1-y)          8: (W-1-y, x)
+        // Cases 5-8 transpose, so the caller sizes dst as (H, W).
+        Expr o = orientation;
+        Expr uw = unoriented_width;
+        Expr uh = unoriented_height;
+        Expr ux = select(o == 2 || o == 3, uw - 1 - x,
+                         o == 5 || o == 6, y,
+                         o == 7 || o == 8, uw - 1 - y,
+                                           x);
+        Expr uy = select(o == 3 || o == 4, uh - 1 - y,
+                         o == 5 || o == 8, x,
+                         o == 6 || o == 7, uh - 1 - x,
+                                           y);
+        // ---- end fused orientation permutation ----
+        Expr sx = clamp(ux, 0, src.dim(0).extent() - 1);
+        Expr sy = clamp(uy, 0, src.dim(1).extent() - 1);
         Expr s_r = cast<float>(src_f(sx, sy, 0)) * src_scale;
         Expr s_g = cast<float>(src_f(sx, sy, 1)) * src_scale;
         Expr s_b = cast<float>(src_f(sx, sy, 2)) * src_scale;
@@ -440,9 +472,14 @@ public:
             // the ~145.8 MB intermediate GPU global-memory roundtrip and collapse
             // two Metal kernel dispatches into one. dst now drives the 16x16 tile.
             dst.bound(c, 0, 4)
-               .reorder(c, x, y)
-               .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
-               .unroll(c);
+               .reorder(c, x, y);
+            if (guard_tail) {
+                dst.gpu_tile(x, y, xo, yo, xi, yi, 16, 16,
+                             TailStrategy::GuardWithIf);
+            } else {
+                dst.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+            }
+            dst.unroll(c);
             rendered_rgb.compute_at(dst, xo)
                         .gpu_threads(x, y);
         } else {
@@ -1521,11 +1558,21 @@ public:
 // =============================================================================
 class DngRenderStage4ScaledPreAvg : public Halide::Generator<DngRenderStage4ScaledPreAvg> {
 public:
+    // Sub-tile tail safety. ON by default: with -no_asserts-no_bounds_query the
+    // default (ShiftInwards) tail writes a full tile into a smaller buffer.
+    // Compiles on Metal AND on the Android Vulkan target (finding F-V3-9).
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
+
     Input<Buffer<uint16_t>> src{"src", 3};          // x, y, c (Stage3 output)
     Input<float> src_scale{"src_scale"};            // usually 1 / 65535
-    // Requested output size. Must match the extents of `dst`; passed
-    // explicitly so the box geometry never depends on output bounds
-    // inference.
+    // Fused EXIF orientation (productionization plan §1.1). RUNTIME scalars, not
+    // GeneratorParams: one archive serves all 8 cases.
+    Input<int32_t> orientation{"orientation"};
+    Input<int32_t> unoriented_width{"unoriented_width"};
+    Input<int32_t> unoriented_height{"unoriented_height"};
+    // Requested output size, in UNORIENTED geometry (i.e. equal to
+    // unoriented_width/unoriented_height). The box cells tile the source, so
+    // this must NOT be the swapped `dst` extent for a transposing orientation.
     Input<int32_t> out_w{"out_w"};
     Input<int32_t> out_h{"out_h"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};   // 4098
@@ -1581,13 +1628,39 @@ public:
         Func src_f("src_f");
         src_f(x, y, c) = src(x, y, c);
 
+        // Fused EXIF orientation: permute the OUTPUT coordinate back to the
+        // unoriented coordinate before any pixel math runs. Every arithmetic
+        // expression below is untouched, so the fused result is a pure index
+        // permutation of the unfused one -> byte-exact by construction.
+        // Table mirrors native/tests/oracle/ceyx_orient_oracle.cpp exactly.
+        //   1: (x, y)              5: (y, x)
+        //   2: (W-1-x, y)          6: (y, H-1-x)
+        //   3: (W-1-x, H-1-y)      7: (W-1-y, H-1-x)
+        //   4: (x, H-1-y)          8: (W-1-y, x)
+        // Cases 5-8 transpose, so the caller sizes dst as (H, W).
+        Expr o = orientation;
+        Expr uw = unoriented_width;
+        Expr uh = unoriented_height;
+        Expr ux = select(o == 2 || o == 3, uw - 1 - x,
+                         o == 5 || o == 6, y,
+                         o == 7 || o == 8, uw - 1 - y,
+                                           x);
+        Expr uy = select(o == 3 || o == 4, uh - 1 - y,
+                         o == 5 || o == 8, x,
+                         o == 6 || o == 7, uh - 1 - x,
+                                           y);
+        // ---- end fused orientation permutation ----
+
         // ---- box-filter downscale of the Stage3 source -----------------
+        // The permuted (unoriented) output coordinate drives the box geometry,
+        // so a transposing orientation averages exactly the same source cell it
+        // does today and only the destination index is permuted.
         Expr src_w = src.dim(0).extent();
         Expr src_h = src.dim(1).extent();
         Expr ow = max(out_w, 1);
         Expr oh = max(out_h, 1);
-        Expr xx = clamp(x, 0, ow - 1);
-        Expr yy = clamp(y, 0, oh - 1);
+        Expr xx = clamp(ux, 0, ow - 1);
+        Expr yy = clamp(uy, 0, oh - 1);
 
         // Exact integer-ratio cell. When out >= src this degenerates to a
         // single tap per output pixel (count clamped to >= 1), i.e. the kernel
@@ -1965,9 +2038,14 @@ public:
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
             dst.bound(c, 0, 4)
-               .reorder(c, x, y)
-               .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
-               .unroll(c);
+               .reorder(c, x, y);
+            if (guard_tail) {
+                dst.gpu_tile(x, y, xo, yo, xi, yi, 16, 16,
+                             TailStrategy::GuardWithIf);
+            } else {
+                dst.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+            }
+            dst.unroll(c);
             rendered_rgb.compute_at(dst, xo)
                         .gpu_threads(x, y);
         } else {
