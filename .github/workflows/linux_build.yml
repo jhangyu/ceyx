@@ -385,8 +385,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           SO="native/build-linux/libdng_decoder_native.so"
-          cmake --build build-linux --target orient_capability_probe -j"$(nproc)"
-          PROBE="${{ github.workspace }}/build-linux/orient_capability_probe"
+          cmake --build native/build-linux --target orient_capability_probe -j"$(nproc)"
+          PROBE="${{ github.workspace }}/native/build-linux/orient_capability_probe"
           set +e
           "$PROBE" "$SO" > orient_capability_probe_output.txt 2>&1
           rc=$?

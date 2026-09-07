@@ -650,37 +650,96 @@ jobs:
       # transcription of the ledger; render_expectations.py --check
       # mechanically proves they have not drifted from it.
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
-      # G-E) — user-ordered CI build-integrity probe: does the just-built
-      # DLL export the fused-orientation Halide kernels? Not a functional
-      # test (G-14): the probe never decodes a file or dispatches over real
-      # pixels, it inspects the compiled kernel's Halide-emitted argument
-      # metadata (see native/tests/orient_capability_probe.cpp header) —
-      # symbol NAME presence alone (what dumpbin/llvm-nm above can see)
-      # cannot detect a stale pre-fusion kernel, since the generator names
-      # never changed, and neither tool can see an argument NAME inside the
-      # metadata struct's static data. The probe uses LoadLibraryA/
-      # GetProcAddress directly (see the #ifdef _WIN32 branch in the probe
-      # source) instead of dumpbin/llvm-nm for exactly this reason.
+      # G-E) — user-ordered CI build-integrity probe, Windows variant.
       #
-      # RC is read directly from the probe's own process exit code, never
-      # through a pipe — the G-9/R-16 pipefail-inversion trap that the
-      # dumpbin/llvm-nm step above works around does not apply here at all:
-      # this step never pipes anything into grep for the pass/fail decision.
-      - name: Build + run orientation capability probe (Task 11 / G-E)
+      # native/tests/orient_capability_probe.cpp's runtime-load approach
+      # (LoadLibraryA/GetProcAddress, calling the Halide-emitted `*_metadata()`
+      # introspection functions) is STRUCTURALLY invalid on this platform: a
+      # Windows DLL exports nothing by default (no default-export the way
+      # macOS/Linux .dylib/.so do), and this project's CMake build attaches no
+      # __declspec(dllexport)/.def file to Halide's AOT-generated
+      # `<kernel>_metadata()` entry points — only the hand-written FFI surface
+      # in native/src/ffi/ gets FFI_EXPORT. GetProcAddress on
+      # dng_render_stage4_metadata therefore fails on every build, fused or
+      # not, making the probe binary unable to answer the question it exists
+      # to ask. Do NOT add exports for these metadata symbols to make the
+      # probe work — that would widen the shipped ABI surface for a test's
+      # convenience, not fix a build defect.
+      #
+      # Same fallback android_build.yml already uses for the identical
+      # cross-arch constraint (there: no emulator to execute the .so on;
+      # here: no dllexport to call into): a static-data literal scan via
+      # `strings`, byte-scan with no PE/COFF awareness needed. The six
+      # orient_a_x/b_x/c_x/a_y/b_y/c_y coefficient names are Halide-generated
+      # const string data inside the Stage4 kernels' metadata structs (see
+      # orient_capability_probe.cpp's header), plus the kernel-name literal
+      # itself. Windows links the Vulkan split Stage4 kernel
+      # (DNG_STAGE4_SPLIT_KERNEL=ON, same as Linux/Android — only macOS/Metal
+      # links dng_render_stage4_scaled_preavg instead), so the checked kernel
+      # literal is dng_render_stage4_split, matching android_build.yml's
+      # LOCKSTEP NOTE convention: this literal set is coupled to
+      # orient_capability_probe.cpp's kRequiredArgs / kChecks by construction;
+      # any future kernel-signature change must update both together.
+      #
+      # llvm-strings ships beside the mandatory clang-cl toolchain (same LLVM
+      # install the "Locate clang-cl" step above already verified is on
+      # PATH); `strings` is not guaranteed present on windows-latest, so
+      # llvm-strings is preferred and `strings` is the fallback only if it is
+      # somehow unavailable.
+      #
+      # Output to a FILE, then grepped — never `strings | grep -q` (G-9/R-16:
+      # pipefail would turn a SIGPIPE on a successful match into a false
+      # failure).
+      - name: Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           DLL="native/build-windows/dng_decoder_native.dll"
-          cmake --build "native/build-windows" --target orient_capability_probe -- -v -k 0
-          PROBE="native/build-windows/orient_capability_probe.exe"
+          if command -v llvm-strings >/dev/null 2>&1; then
+            STRINGS_TOOL="llvm-strings"
+          elif command -v strings >/dev/null 2>&1; then
+            STRINGS_TOOL="strings"
+          else
+            echo "::error::neither llvm-strings nor strings is on PATH; capability is UNVERIFIED, refusing to publish." >&2
+            exit 1
+          fi
           set +e
-          "$PROBE" "$DLL" > orient_capability_probe_output.txt 2>&1
+          "${STRINGS_TOOL}" "$DLL" > dll_strings.txt 2>&1
           rc=$?
           set -e
-          cat orient_capability_probe_output.txt
-          echo "ORIENT_CAPABILITY_PROBE_RC=${rc}"
+          echo "STRINGS_TOOL=${STRINGS_TOOL} STRINGS_RC=${rc}"
           if [ "${rc}" -ne 0 ]; then
-            echo "::error::orient_capability_probe reported the shipped DLL does not export the fused-orientation kernel(s); see output above for which symbol/capability is missing." >&2
+            echo "::error::${STRINGS_TOOL} failed reading ${DLL}; capability is UNVERIFIED, refusing to publish." >&2
+            exit 1
+          fi
+          missing=""
+          # Only the split kernel's name literal is checked (not the plain
+          # dng_render_stage4 literal) per the CI-fix instruction: Windows is
+          # a Vulkan/split platform (DNG_STAGE4_SPLIT_KERNEL=ON, same as
+          # Linux/Android), so dng_render_stage4_split is the second-kernel
+          # signal that actually distinguishes a fused build here.
+          for sym in dng_render_stage4_split; do
+            set +e
+            grep -qx "${sym}" dll_strings.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (symbol literal: ${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} symbol:${sym}"
+            fi
+          done
+          for coeff in orient_a_x orient_b_x orient_c_x orient_a_y orient_b_y orient_c_y; do
+            set +e
+            grep -qx "${coeff}" dll_strings.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (string: ${coeff})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} string:${coeff}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing fused-orientation signal(s) in ${DLL}:${missing} — this DLL may be a stale pre-fusion build (the generator names never changed, so symbol presence alone does not prove the kernel was rebuilt with orientation fused in)." >&2
             exit 1
           fi
 
