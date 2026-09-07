@@ -521,6 +521,40 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     }
   }
 
+  // (f) B-2 sharpest case (bridge owner's addendum): a decode that fails
+  // pre-runner — specifically at ceyxDecodeIntoPrepare's dst-too-small
+  // refusal, which is BEFORE the reset line even runs (prepare happens
+  // before the fused branch's ceyxMapStage4FailureReason path is reachable
+  // at all) — immediately AFTER a stale same-thread kOverlap. Unlike (d),
+  // this does not depend on finding a fixture that passes the probe but
+  // fails before Stage4: dst-too-small is deterministically reachable on
+  // ANY valid file. The generic kCeyxErrDstTooSmall must survive exactly,
+  // proving the mapping function is never even invoked on a path that never
+  // touches phase 3.
+  if (good_path) {
+    std::vector<uint16_t> buf(4 * 4 * 4, 0);
+    RenderParams params{};
+    const bool overlap_ok = runRenderStage4HalideAot(
+        buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
+        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+    CHECK(!overlap_ok, "[%s] B-1f setup overlap call unexpectedly succeeded",
+          label);
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
+          "[%s] B-1f setup expected kOverlap", label);
+
+    uint8_t tiny_dst[1] = {0xAB};
+    DngResult *r = ceyx_decode_into_buffer_oriented(good_path, kOrientMaxDim,
+                                                     tiny_dst, 1, 6);
+    CHECK(r != nullptr, "[%s] B-1f null result", label);
+    if (r) {
+      CHECK(r->error_code == kCeyxErrDstTooSmall,
+            "[%s] B-1f expected kCeyxErrDstTooSmall (%d), got %d — the "
+            "stale kOverlap CLOBBERED a pre-decode refusal (B-2 regression)",
+            label, kCeyxErrDstTooSmall, r->error_code);
+      dng_free_result(r);
+    }
+  }
+
   // (d) B-2: a decode that fails UPSTREAM of Stage4 — after
   // ceyxDecodeIntoPrepare succeeds (so the new reset-before-phase3 line
   // actually runs) but before the runner is ever reached — must NOT have its
