@@ -67,13 +67,18 @@ void gate_error_handler(void * /*user_context*/, const char *msg) {
     printf("HALIDE_ERROR: %s\n", msg ? msg : "(null)");
 }
 
-// Production prefix: src_rgb, src_width, src_height, src_row_stride_px,
-// crop_l, crop_t, src_scale, orientation, unoriented_width, unoriented_height.
-// The V3 prefix was ...stride, orientation, uw, uh, crop_l, crop_t, src_scale --
-// same arity, different order, so only this typedef makes the mismatch a
-// compile error instead of a silent scalar shift.
+// T8b PRODUCTION prefix (affine form, commit bac3cbe):
+//   src_rgb, src_width, src_height, src_row_stride_px,
+//   crop_l, crop_t, src_scale,
+//   orient_a_x, orient_b_x, orient_c_x, orient_a_y, orient_b_y, orient_c_y, ...
+// The T8 (flag) prefix had THREE int32 there (orientation, unoriented_width,
+// unoriented_height); the V3 experimental prefix had the same three but BEFORE
+// crop_l/crop_t. Both differ from this one, and the arity differs from T8's, so
+// this typedef turns any stale copy-paste into a compile error rather than a
+// silent scalar shift (Task_t8_android_device_gate.md "Harness note").
 using KernelFn = int (*)(halide_buffer_t *, int32_t, int32_t, int32_t, int32_t,
-                         int32_t, float, int32_t, int32_t, int32_t,
+                         int32_t, float,
+                         int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
                          halide_buffer_t *, halide_buffer_t *, halide_buffer_t *,
                          halide_buffer_t *, halide_buffer_t *, halide_buffer_t *,
                          halide_buffer_t *, halide_buffer_t *, halide_buffer_t *,
@@ -82,18 +87,23 @@ using KernelFn = int (*)(halide_buffer_t *, int32_t, int32_t, int32_t, int32_t,
                          int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
                          halide_buffer_t *);
 
-// PRODUCTION argument order (DngRenderStage4Android):
+// PRODUCTION argument order (DngRenderStage4Android, T8b affine form):
 //   src_rgb, src_width, src_height, src_row_stride_px,
 //   crop_l, crop_t, src_scale,
-//   orientation, unoriented_width, unoriented_height, ...
-// The V3 experimental class put orientation/unoriented_* immediately after
-// src_row_stride_px and crop_l/crop_t after them. Same arity, different order:
-// a copy-paste from the Task 6 harness would compile and silently mis-assign.
+//   orient_a_x, orient_b_x, orient_c_x, orient_a_y, orient_b_y, orient_c_y, ...
+// The kernel no longer receives an orientation value or the unoriented extents:
+// the whole decision is the host-side ceyx_orient_affine_coeffs() call below,
+// and the extents are folded into the c terms. Every call site in this harness
+// still passes the EXIF orientation `o`; the conversion happens exactly here, so
+// the harness continues to test "ask for o, get oracle(o)".
 int invoke(KernelFn fn, Buffer<uint16_t> &src, int w, int h, int stride, int o,
            Params &p, Buffer<uint8_t> &dst) {
+    int32_t k[6];
+    ceyx_orient_affine_coeffs(o, /*uw=*/w, /*uh=*/h, k);
     return fn(src, w, h, stride, /*crop_l=*/0, /*crop_t=*/0,
               /*src_scale=*/1.0f / 65535.0f,
-              /*orientation=*/o, /*unoriented_width=*/w, /*unoriented_height=*/h,
+              /*orient_a_x=*/k[0], /*orient_b_x=*/k[1], /*orient_c_x=*/k[2],
+              /*orient_a_y=*/k[3], /*orient_b_y=*/k[4], /*orient_c_y=*/k[5],
               p.exp_ramp, p.tone_curve,
               p.encode_gamma, p.camera_white, p.camera_to_rgb, p.rgb_to_final,
               p.huesat_table, p.huesat_encode, p.huesat_decode,
@@ -642,10 +652,28 @@ void identify_actual_permutation(Params &p) {
 
 }  // namespace
 
+// Host-side dump of the six affine coefficients the kernel will receive, for
+// every orientation at the 32x32 IDENTIFY size. This is the ENTIRE orientation
+// decision under the T7b design, so recording it makes any future red result
+// separable into "host table wrong" vs "kernel mis-lowered the multiply-add"
+// without re-running anything.
+static void dump_affine_coeffs(int uw, int uh) {
+    for (int o = 1; o <= 8; ++o) {
+        int32_t k[6];
+        ceyx_orient_affine_coeffs(o, uw, uh, k);
+        printf("AFFINE_COEFFS uw=%d uh=%d o=%d a_x=%d b_x=%d c_x=%d "
+               "a_y=%d b_y=%d c_y=%d\n",
+               uw, uh, o, k[0], k[1], k[2], k[3], k[4], k[5]);
+    }
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     halide_set_error_handler(gate_error_handler);
-    printf("GATE=G-C TASK=8 KERNEL=dng_render_stage4_split(production)\n");
+    printf("GATE=G-C TASK=8b FORMULATION=affine_host_coeffs "
+           "KERNEL=dng_render_stage4_split(production)\n");
+    dump_affine_coeffs(32, 32);
+    dump_affine_coeffs(12, 7);
 
     const halide_device_interface_t *vk = halide_vulkan_device_interface();
     printf("VULKAN_DEVICE_INTERFACE=%p\n", (const void *)vk);
