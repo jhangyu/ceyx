@@ -103,7 +103,6 @@ functions:
 #include "dng_render_halide.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1076,6 +1075,18 @@ bool buildRenderParams(dng_host& host,
     return true;
 }
 
+// Productionization plan section 1.6 — Stage4 failure-reason channel (Task 2
+// fix cycle 1, review blocker B-1). Thread-local so overlapping decodes (which
+// take a shared_lock and run concurrently as of Task 8) cannot clobber each
+// other's reason. Both runners reset this to kNone on entry; see the staleness
+// contract on the declaration in dng_render_params.h.
+static thread_local Stage4FailureReason g_stage4_failure_reason =
+    Stage4FailureReason::kNone;
+
+Stage4FailureReason dngRenderStage4LastFailureReason() {
+    return g_stage4_failure_reason;
+}
+
 bool runRenderStage4HalideAot(const uint16_t* src,
                               int src_w,
                               int src_h,
@@ -1091,6 +1102,11 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               bool fuse_rgba,
                               DecodeContext* ctx,
                               int32_t exif_orientation) {
+    // Plan section 1.6: reset the reason FIRST, before any validation or early
+    // return, so a reason left by an earlier call on this thread can never be
+    // mistaken for this call's.
+    g_stage4_failure_reason = Stage4FailureReason::kNone;
+
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
         return false;
     }
@@ -1107,7 +1123,10 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     // indexes with dst_w/dst_h and would silently mis-stride under a swapped
     // output. No production caller combines them (the oriented FFI entry refuses
     // a non-RGBA phase-3 result outright), so this is a guard, not a feature.
-    assert(fuse_rgba || exif_orientation == 1);
+    // S-1 (review): deliberately NOT an assert. fuse_rgba is env-driven
+    // (DNG_FUSE_RGBA=0), so an oriented request on a fuse-disabled build is a
+    // reachable configuration rather than a programming error, and aborting a
+    // debug build over it would be wrong. The early return IS the enforcement.
     if (!fuse_rgba && exif_orientation != 1) {
         fprintf(stderr,
                 "[Stage4] refusing orientation %d on the RGB8 (!fuse_rgba) path\n",
@@ -1135,7 +1154,11 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         if (s < dst + dst_bytes && dst < s + src_bytes) {
             fprintf(stderr, "[Stage4] refusing overlapping src/dst (orientation %d)\n",
                     exif_orientation);
-            return false;  // surfaced as -402 by the FFI layer
+            // Plan section 1.6: publish WHY. The bool return alone cannot tell
+            // an overlap refusal apart from a kernel failure, and the FFI layer
+            // needs that to report -402 rather than -403.
+            g_stage4_failure_reason = Stage4FailureReason::kOverlap;
+            return false;
         }
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1338,6 +1361,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAot)\n", result);
     }
     if (result != 0) {
+        // Plan section 1.6: the FFI layer reads this to report -403.
+        g_stage4_failure_reason = Stage4FailureReason::kKernel;
         return false;
     }
 
@@ -1349,7 +1374,10 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         const int cth = dst_rgba_buf.copy_to_host();
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
-            return false;  // surfaced as -403 by the FFI layer
+            // Plan section 1.6: same class as a kernel failure — the FFI layer
+            // reads this to report -403.
+            g_stage4_failure_reason = Stage4FailureReason::kKernel;
+            return false;
         }
     }
     auto t3 = verbose_timing ? std::chrono::high_resolution_clock::now()
@@ -1376,7 +1404,10 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         const int cth = dst_buf.copy_to_host();
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
-            return false;  // surfaced as -403 by the FFI layer
+            // Plan section 1.6: same class as a kernel failure — the FFI layer
+            // reads this to report -403.
+            g_stage4_failure_reason = Stage4FailureReason::kKernel;
+            return false;
         }
     }
     // W7 (M-11): strip alpha when legacy caller expects RGB8. Guarded above:
@@ -1419,6 +1450,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          bool fuse_rgba,
                                          DecodeContext* ctx,
                                          int32_t exif_orientation) {
+    // Plan section 1.6: reset the reason FIRST, before any validation or early
+    // return, so a reason left by an earlier call on this thread can never be
+    // mistaken for this call's.
+    g_stage4_failure_reason = Stage4FailureReason::kNone;
+
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
         return false;
@@ -1435,7 +1471,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
     // indexes with dst_w/dst_h and would silently mis-stride under a swapped
     // output. Guard, not a feature — no production caller combines them.
-    assert(fuse_rgba || exif_orientation == 1);
+    // S-1 (review): deliberately NOT an assert. fuse_rgba is env-driven
+    // (DNG_FUSE_RGBA=0), so an oriented request on a fuse-disabled build is a
+    // reachable configuration rather than a programming error, and aborting a
+    // debug build over it would be wrong. The early return IS the enforcement.
     if (!fuse_rgba && exif_orientation != 1) {
         fprintf(stderr,
                 "[Stage4] refusing orientation %d on the RGB8 (!fuse_rgba) path\n",
@@ -1446,6 +1485,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // G-8: refuse src==dst and any overlap for EVERY orientation. The source
     // here is a device buffer, but it may also carry a host mirror; when it
     // does, the caller's dst must not alias it.
+    //
+    // S-2 (review): on a DEVICE-RESIDENT source the host pointer is null and
+    // this check is UNREACHABLE BY CONSTRUCTION — and that is correct, not a
+    // hole: with no host mirror there is no host memory for dst to alias, so
+    // there is nothing to refuse. The consequence for verification is that a
+    // G-8 red-state / overlap proof CANNOT be staged through this entry on the
+    // device-handoff path; it must target runRenderStage4HalideAot, whose
+    // source is always caller host memory and whose check therefore always runs.
     if (stage3_device_buf->host != nullptr) {
         const uint8_t* s = stage3_device_buf->host;
         const size_t src_bytes = stage3_device_buf->size_in_bytes();
@@ -1454,7 +1501,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         if (s < dst + dst_bytes && dst < s + src_bytes) {
             fprintf(stderr, "[Stage4] refusing overlapping src/dst (orientation %d)\n",
                     exif_orientation);
-            return false;  // surfaced as -402 by the FFI layer
+            // Plan section 1.6: publish WHY, so the FFI layer reports -402.
+            g_stage4_failure_reason = Stage4FailureReason::kOverlap;
+            return false;
         }
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1768,6 +1817,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAotFromDevice)\n", result);
     }
     if (result != 0) {
+        // Plan section 1.6: the FFI layer reads this to report -403.
+        g_stage4_failure_reason = Stage4FailureReason::kKernel;
         return false;
     }
 
@@ -1779,7 +1830,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         const int cth = dst_rgba_buf.copy_to_host();
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
-            return false;  // surfaced as -403 by the FFI layer
+            // Plan section 1.6: same class as a kernel failure — the FFI layer
+            // reads this to report -403.
+            g_stage4_failure_reason = Stage4FailureReason::kKernel;
+            return false;
         }
     }
     // G1: src device allocation fully consumed — free it through the ORIGINAL
@@ -1823,7 +1877,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         const int cth = dst_buf.copy_to_host();
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
-            return false;  // surfaced as -403 by the FFI layer
+            // Plan section 1.6: same class as a kernel failure — the FFI layer
+            // reads this to report -403.
+            g_stage4_failure_reason = Stage4FailureReason::kKernel;
+            return false;
         }
     }
     // W7 (M-11): strip alpha when legacy caller expects RGB8. Guarded above:
@@ -2074,7 +2131,10 @@ bool runHalideFullOrSdkFallback(dng_host& host,
 
     // The SDK CPU fallback below cannot orient. An oriented request that reaches
     // it would silently return unoriented pixels with an oriented extent, so
-    // refuse instead (plan section 1.6: surfaced as -403 by the FFI layer).
+    // refuse instead. This one deliberately leaves the reason at kNone: no
+    // kernel ran and nothing overlapped, so it is an ordinary render failure and
+    // the FFI layer must keep its existing generic error rather than claiming
+    // -402 or -403 (plan section 1.6).
     if (exif_orientation != 1) {
         return false;
     }

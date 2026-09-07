@@ -79,6 +79,40 @@ bool buildRenderParams(dng_host& host,
 // dng_host harness paths); see the two Stage-4 entry points below.
 struct DecodeContext;
 
+// Productionization plan section 1.6 — Stage4 failure-reason channel
+// (Task 2 fix cycle 1, review blocker B-1).
+//
+// The two Stage4 runners below return bool, which cannot distinguish an
+// overlap refusal from a kernel/copy failure. The FFI layer needs exactly that
+// distinction to report -402 (kCeyxOrientErrOverlap) versus -403
+// (kCeyxOrientErrKernel), so the runners publish the reason here instead of
+// the caller having to guess from a bare false.
+//
+// STALENESS CONTRACT: the value is thread-local and PER CALL. Both runners
+// reset it to kNone as their first statement, before any validation or early
+// return, so a reason left behind by an earlier call on the same thread can
+// never be observed. Read it only immediately after a runner has returned
+// false; after a true return it is always kNone.
+//
+// kNone on a false return is legitimate and means "failed for a reason that is
+// not orientation-specific" (bad arguments, scratch allocation, SDK fallback
+// refusal). The FFI layer must keep its existing generic error for that case
+// and must not translate kNone into -402 or -403.
+//
+// Deliberately declared HERE and not in ceyx_orient.h: Phase 4 (Task 9)
+// removes ceyx_orient.cpp from the shipping dylib, and this channel has to
+// outlive that deletion. It also carries no PipelineConfig dependency —
+// PipelineConfig is env/route settings and this is per-call data.
+enum class Stage4FailureReason : int32_t {
+    kNone    = 0,
+    kOverlap = 1,  // src/dst alias — FFI maps to kCeyxOrientErrOverlap (-402)
+    kKernel  = 2,  // kernel or copy_to_host returned non-zero — maps to -403
+};
+
+// Reads the current thread's most recent Stage4 failure reason. See the
+// staleness contract above: meaningful only directly after a false return.
+Stage4FailureReason dngRenderStage4LastFailureReason();
+
 // THE shared Stage4 core. Plain buffers + RenderParams, no decoder state.
 // Signature transcribed from dng_render_halide.cpp:932-944.
 //
