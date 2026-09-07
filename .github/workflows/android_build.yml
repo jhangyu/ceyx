@@ -297,6 +297,80 @@ jobs:
             exit 1
           fi
 
+      # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
+      # G-E) — user-ordered CI build-integrity probe, Android variant.
+      #
+      # native/tests/orient_capability_probe.cpp cannot run here: it dlopen's
+      # a library into its OWN process to call the Halide-emitted
+      # `*_metadata()` introspection functions, which requires a
+      # same-architecture host process. This .so is target-arm64,
+      # cross-compiled on an x86_64 host (same constraint the G6 fix above
+      # already documents for llvm-nm) — there is no emulator/device in this
+      # job to execute it on, and running one would cross into the
+      # functional-test territory this CI explicitly excludes (project
+      # CLAUDE.md: "CI is compile-only... functional tests... are NOT run in
+      # CI").
+      #
+      # Achievable proof at this leg: symbol presence (same llvm-nm the G6
+      # fix already uses, architecture-agnostic ELF symbol-table read) PLUS
+      # a static-data check that plain `strings` (byte-scan, no ELF/arch
+      # awareness needed) can perform on ANY architecture's binary — the
+      # literal argument name "orientation" is Halide-generated const string
+      # data inside `dng_render_stage4_metadata()`'s static
+      # halide_filter_metadata_t (see orient_capability_probe.cpp's header
+      # for the full rationale). Weaker than the native legs' real function
+      # call (a string could theoretically appear coincidentally elsewhere
+      # in the binary), but it is what a cross-arch, no-execution leg can
+      # honestly prove, exactly as the JXL cross-leg note in
+      # macos_build.yml documents for that platform's equivalent limitation.
+      # Confirmed locally (tmp/verify/orient_prod_t11_*): the pre-fusion
+      # commit's generator source has ZERO occurrences of "orientation" at
+      # all, so this string's presence is a real, not coincidental, signal.
+      #
+      # Output to a FILE, then grepped — never `nm`/`strings | grep -q`
+      # (G-9/R-16: pipefail would turn a SIGPIPE on a successful match into
+      # a false failure).
+      - name: Assert fused-orientation kernel signals present in Android .so (Task 11 / G-E)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
+          LLVM_NM="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          set +e
+          "${LLVM_NM}" -D "${SO}" > android_so_dynsyms_orient.txt 2>&1
+          nm_rc=$?
+          strings "${SO}" > android_so_strings.txt 2>&1
+          strings_rc=$?
+          set -e
+          echo "NM_RC=${nm_rc} STRINGS_RC=${strings_rc}"
+          if [ "${nm_rc}" -ne 0 ] || [ "${strings_rc}" -ne 0 ]; then
+            echo "::error::llvm-nm or strings failed reading ${SO}; capability is UNVERIFIED, refusing to publish." >&2
+            exit 1
+          fi
+          missing=""
+          for sym in dng_render_stage4 dng_render_stage4_scaled_preavg; do
+            set +e
+            grep -q "${sym}" android_so_dynsyms_orient.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (symbol: ${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} symbol:${sym}"
+            fi
+          done
+          set +e
+          grep -qx "orientation" android_so_strings.txt
+          rc=$?
+          set -e
+          echo "RC=${rc} (string: orientation)"
+          if [ "${rc}" -ne 0 ]; then
+            missing="${missing} string:orientation"
+          fi
+          if [ -n "${missing}" ]; then
+            echo "::error::missing fused-orientation signal(s) in ${SO}:${missing} — this .so may be a stale pre-fusion build (the generator names never changed, so symbol presence alone does not prove the kernel was rebuilt with orientation fused in)." >&2
+            exit 1
+          fi
+
       # A-T8-FIX, CORRECTED 2026-09-01: prove the decoder's libc++_shared.so
       # DT_NEEDED state actually MATCHES what cmake/heif.cmake's STATUS line
       # claims -- BIDIRECTIONAL, not a one-way "must be present" check.

@@ -300,6 +300,25 @@ add_executable(test_ceyx_orient
     src/ffi/ceyx_orient.cpp)
 target_include_directories(test_ceyx_orient PRIVATE ${INC_DIR})
 
+# ceyx-gpu-orient Task #2: standalone GPU-vs-CPU EXIF-orientation comparison
+# harness (docs/logs/2026-09-07/gpu_orient_round_contract.md, AC-2/AC-3).
+# Experimental, not CI. Guarded on `if(TARGET ceyx_orient_gpu)` rather than
+# header existence: the header (native/include/ceyx_orient_gpu.h) exists
+# unconditionally, but the `ceyx_orient_gpu` static-lib target (Task #1,
+# native/src/ffi/ceyx_orient_gpu.cpp -- standalone, NOT embedded in
+# dng_decoder_native) is only declared under NOT DNG_CROSS_BUILD AND NOT
+# DNG_HOST_GENERATORS_ONLY, so a header-existence guard could turn this
+# harness on in a configuration where the lib doesn't exist (2026-09-07 relay).
+# The lib already carries the AOT kernel archive, halide runtime, and
+# Metal/Foundation frameworks + include dirs as PUBLIC deps.
+if(TARGET ceyx_orient_gpu)
+    add_executable(test_orient_gpu
+        tests/test_orient_gpu.cpp
+        src/ffi/ceyx_orient.cpp)
+    target_include_directories(test_orient_gpu PRIVATE ${INC_DIR})
+    target_link_libraries(test_orient_gpu PRIVATE dng_decoder_native ceyx_orient_gpu)
+endif()
+
 # Round 1 Task 1.2: histogram-based auto-exposure estimator, plain math over a
 # caller-supplied buffer view -- no LibRaw/Halide/DNG SDK dependency, so this
 # links directly against the two sources rather than the whole decoder
@@ -1575,6 +1594,53 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_device_handoff ${DNG_LINUX_TEST_LIBS})
 endif()
 
+# ceyx-gpu-orient productionization plan Task 5 / gate G-A: PRODUCTION Metal
+# fused Stage4 EXIF-orientation gate (docs/logs/2026-09-07/
+# gpu_orient_productionization_plan.md). Dispatches dng_render_stage4 and
+# dng_render_stage4_scaled_preavg directly (not through the host bridge, so
+# device_interface/device can be inspected before copy_to_host()), and uses
+# native/src/ffi/ceyx_orient.cpp as the CPU oracle (plan ruling on spec
+# D1(d): ceyx_orient.cpp/.h survive Task 9 as a TEST-ONLY oracle). Source set
+# and link list mirror test_device_handoff above; this is macOS/Metal only
+# (G-14: not added to CI, not gated on Vulkan/Android).
+add_executable(test_stage4_oriented tests/test_stage4_oriented.cpp
+    src/ffi/ceyx_orient.cpp
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/dng_render_halide.cpp)
+target_include_directories(test_stage4_oriented PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include)
+if(DNG_USE_LIBJPEG)
+    target_link_libraries(test_stage4_oriented dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
+else()
+    target_link_libraries(test_stage4_oriented dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+endif()
+if(NOT DNG_STAGE4_SPLIT_KERNEL)
+    target_link_libraries(test_stage4_oriented
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+    add_dependencies(test_stage4_oriented dng_render_scaled_preavg_aot_target)
+endif()
+add_dependencies(test_stage4_oriented halide_runtime_target)
+add_dependencies(test_stage4_oriented dng_demosaic_aot_target)
+add_dependencies(test_stage4_oriented dng_demosaic_warp_aot_target)
+add_dependencies(test_stage4_oriented dng_warp_aot_target)
+add_dependencies(test_stage4_oriented dng_render_aot_target)
+add_dependencies(test_stage4_oriented dng_opcode_polynomial_aot_target)
+add_dependencies(test_stage4_oriented dng_opcode_polynomial3_aot_target)
+if(APPLE)
+    target_link_libraries(test_stage4_oriented ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+endif()
+if(DNG_LINUX_TEST_LIBS)
+    target_link_libraries(test_stage4_oriented ${DNG_LINUX_TEST_LIBS})
+endif()
+
 # Task 2 (mutex rework): concurrent-vs-serial byte-for-byte correctness gate.
 # Source set and link list mirror test_device_handoff above — this target also
 # compiles the pipeline sources directly, so it needs the identical AOT
@@ -2249,6 +2315,21 @@ if(DNG_ENABLE_GENERIC_RAW)
     add_dependencies(test_raw_diagnostics_freshness dng_decoder_native)
 endif()
 # --- end R6 fix ---
+
+# --- Task 11: CI capability probe (orientation fusion) ---------------------
+# Deliberately NOT linked against dng_decoder_native: it dlopen's (LoadLibrary
+# on Windows) a library PATH given on argv at runtime instead, so the same
+# binary can probe either the just-built dylib or, locally, a fixture from an
+# older commit (negative control) -- linking it directly would defeat that.
+# CMAKE_DL_LIBS is libdl on Linux and empty on macOS/Windows; that variable
+# is already collected into DNG_LINUX_TEST_LIBS above for the `if(UNIX AND
+# NOT APPLE AND NOT ANDROID)` case, but this target sits outside that block
+# so it links CMAKE_DL_LIBS explicitly here instead.
+add_executable(orient_capability_probe tests/orient_capability_probe.cpp)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    target_link_libraries(orient_capability_probe PRIVATE ${CMAKE_DL_LIBS})
+endif()
+# --- end Task 11 ---
 
 endif() # NOT DNG_CROSS_BUILD (test targets)
 

@@ -363,6 +363,41 @@ jobs:
             exit 1
           fi
 
+      # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
+      # G-E) — user-ordered CI build-integrity probe: does the just-built
+      # .so export the fused-orientation Halide kernels? Not a functional
+      # test (G-14): the probe never decodes a file or dispatches over real
+      # pixels, it inspects the compiled kernel's Halide-emitted argument
+      # metadata (see native/tests/orient_capability_probe.cpp header) —
+      # symbol NAME presence alone (what AC-L5 above checks) cannot detect a
+      # stale pre-fusion kernel, since the generator names never changed.
+      #
+      # Same-arch host build (no cross-compile on this Linux leg), so dlopen
+      # of the just-built .so from a host process is always valid here.
+      #
+      # RC is read directly from the probe's own process exit code, never
+      # through a pipe — the G-9/R-16 `nm | grep -q` pipefail-inversion trap
+      # (a PRESENT symbol reads as failure because grep exits before the
+      # producer finishes writing, SIGPIPE-killing it) does not apply: this
+      # step never pipes the probe's stdout into grep for the pass/fail
+      # decision, it reads `$?` immediately after the direct invocation.
+      - name: Build + run orientation capability probe (Task 11 / G-E)
+        working-directory: ${{ github.workspace }}
+        run: |
+          SO="native/build-linux/libdng_decoder_native.so"
+          cmake --build build-linux --target orient_capability_probe -j"$(nproc)"
+          PROBE="${{ github.workspace }}/build-linux/orient_capability_probe"
+          set +e
+          "$PROBE" "$SO" > orient_capability_probe_output.txt 2>&1
+          rc=$?
+          set -e
+          cat orient_capability_probe_output.txt
+          echo "ORIENT_CAPABILITY_PROBE_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::orient_capability_probe reported the shipped .so does not export the fused-orientation kernel(s); see output above for which symbol/capability is missing." >&2
+            exit 1
+          fi
+
       # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
       # an earlier nm-grep for JxlEncoderInitBasicInfo tested an unsatisfiable
       # claim on every platform (the vendored static libjxl.a compiles that
