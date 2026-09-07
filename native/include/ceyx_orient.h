@@ -43,6 +43,10 @@ extern "C" {
 enum CeyxOrientError {
   kCeyxOrientErrBadArgs  = -401,
   kCeyxOrientErrOverlap  = -402,
+  // Productionization plan section 1.6 (Task 2). The GPU Stage4 kernel returned
+  // non-zero, or copy_to_host() returned non-zero, on an oriented dispatch.
+  // Outlives ceyx_orient_rgba: the enum stays after the CPU pass is deleted.
+  kCeyxOrientErrKernel   = -403,
 };
 
 /// Applies EXIF orientation 1..8 to an RGBA8 frame of width x height pixels.

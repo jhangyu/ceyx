@@ -27,7 +27,12 @@ bool render_stage4_halide(dng_host& host,
                           const PipelineConfig& config,
                           std::vector<uint8_t>& out_rgb,
                           uint32_t& out_w,
-                          uint32_t& out_h);
+                          uint32_t& out_h,
+                          // Productionization plan section 1.3 (Task 2). EXIF 1..8;
+                          // anything else is treated as 1. On success out_w/out_h
+                          // receive the ORIENTED extent (swapped for 5..8). The RGB8
+                          // (!fuse_rgba) paths accept 1 only.
+                          int32_t exif_orientation = 1);
 
 // Pool-backed overload: out_rgb_ptr must point to a pre-allocated buffer of
 // at least out_rgb_size bytes (caller guarantees size >= W*H*3).
@@ -41,7 +46,9 @@ bool render_stage4_halide(dng_host& host,
                           uint8_t* out_rgb_ptr,
                           size_t out_rgb_size,
                           uint32_t& out_w,
-                          uint32_t& out_h);
+                          uint32_t& out_h,
+                          // Productionization plan section 1.3 (Task 2).
+                          int32_t exif_orientation = 1);
 
 // R2 sized decode: the output extent the Stage4 render will produce for this
 // negative + renderer (honours renderer.MaximumSize()). Lets the pipeline size
@@ -68,7 +75,10 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               const PipelineConfig& config,
                                               std::vector<uint8_t>& out_rgb,
                                               uint32_t& out_w,
-                                              uint32_t& out_h);
+                                              uint32_t& out_h,
+                                              // Productionization plan section 1.3
+                                              // (Task 2).
+                                              int32_t exif_orientation = 1);
 
 // Pool-backed overload for device handoff path.
 // W6-3 (TD-21): config parameter added — caller passes pre-loaded PipelineConfig.
@@ -81,7 +91,10 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               uint8_t* out_rgb_ptr,
                                               size_t out_rgb_size,
                                               uint32_t& out_w,
-                                              uint32_t& out_h);
+                                              uint32_t& out_h,
+                                              // Productionization plan section 1.3
+                                              // (Task 2).
+                                              int32_t exif_orientation = 1);
 
 // W6-3 / TD-21 legacy overloads: kept for test_decode.cpp and other
 // non-production callers that have no PipelineConfig handy.  Internally

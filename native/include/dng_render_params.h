@@ -99,7 +99,12 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               const RenderParams& params,
                               uint8_t* dst,
                               bool fuse_rgba = false,
-                              DecodeContext* ctx = nullptr);
+                              DecodeContext* ctx = nullptr,
+                              // Productionization plan section 1.3 (Task 2).
+                              // EXIF 1..8; anything else is treated as 1. dst_w/dst_h
+                              // stay the UNORIENTED extent; this runner is the ONLY
+                              // place that converts them to the oriented extent.
+                              int32_t exif_orientation = 1);
 
 // Device-handoff form. Signature transcribed from dng_render_halide.cpp:1182-1192
 // (note the crop_l/crop_t/src_w/src_h parameters the plan placeholder omitted).
@@ -114,7 +119,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         const RenderParams& params,
                                         uint8_t* dst,
                                         bool fuse_rgba = false,
-                                        DecodeContext* ctx = nullptr);
+                                        DecodeContext* ctx = nullptr,
+                                        // Productionization plan section 1.3 (Task 2).
+                                        // See runRenderStage4HalideAot above.
+                                        int32_t exif_orientation = 1);
 
 // Needed by the LibRaw builder so "identity" is explicit, never uninitialised
 // (spec section 7.1.4). Signatures transcribed from dng_render_halide.cpp:663-667

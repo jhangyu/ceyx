@@ -103,6 +103,7 @@ functions:
 #include "dng_render_halide.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1088,9 +1089,54 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               const RenderParams& params,
                               uint8_t* dst,
                               bool fuse_rgba,
-                              DecodeContext* ctx) {
+                              DecodeContext* ctx,
+                              int32_t exif_orientation) {
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
         return false;
+    }
+
+    // Productionization plan section 1.3. dst_w/dst_h are the UNORIENTED output
+    // extent as computed by dng_render_stage4_output_size; the kernel writes into
+    // an oriented dst, so exactly one place converts and no call site can disagree.
+    const bool orient_transposes =
+        (exif_orientation >= 5 && exif_orientation <= 8);
+    const int out_w_oriented = orient_transposes ? dst_h : dst_w;
+    const int out_h_oriented = orient_transposes ? dst_w : dst_h;
+
+    // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
+    // indexes with dst_w/dst_h and would silently mis-stride under a swapped
+    // output. No production caller combines them (the oriented FFI entry refuses
+    // a non-RGBA phase-3 result outright), so this is a guard, not a feature.
+    assert(fuse_rgba || exif_orientation == 1);
+    if (!fuse_rgba && exif_orientation != 1) {
+        fprintf(stderr,
+                "[Stage4] refusing orientation %d on the RGB8 (!fuse_rgba) path\n",
+                exif_orientation);
+        return false;
+    }
+
+    // G-8: the GPU entry refuses src==dst and any overlap for EVERY orientation,
+    // stricter than the CPU pass (which allowed in-place for 1..4). The kernel
+    // reads permuted source coordinates, so an in-place run reads bytes it has
+    // already overwritten. The source span is computed from the ROW STRIDE (not
+    // src_w*src_p), because the SDK hands us padded tile rows; using the smaller
+    // dense span would under-report the footprint and let an overlap through.
+    {
+        const uint8_t* s = reinterpret_cast<const uint8_t*>(src);
+        const size_t dense_elems =
+            static_cast<size_t>(src_w) * src_h * src_p;
+        const size_t strided_elems =
+            static_cast<size_t>(src_row_step > 0 ? src_row_step : src_w * src_p) *
+            static_cast<size_t>(src_h);
+        const size_t src_bytes =
+            (dense_elems > strided_elems ? dense_elems : strided_elems) * sizeof(uint16_t);
+        const size_t dst_bytes =
+            static_cast<size_t>(out_w_oriented) * out_h_oriented * 4;
+        if (s < dst + dst_bytes && dst < s + src_bytes) {
+            fprintf(stderr, "[Stage4] refusing overlapping src/dst (orientation %d)\n",
+                    exif_orientation);
+            return false;  // surfaced as -402 by the FFI layer
+        }
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // Split-kernel (Vulkan) builds use Stage4DstScratch leases, not the arena.
@@ -1168,7 +1214,7 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         dst_rgba = dst_lease->data();
     }
     Buffer<uint8_t> dst_rgba_buf =
-        Buffer<uint8_t>::make_interleaved(dst_rgba, dst_w, dst_h, 4);
+        Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented, out_h_oriented, 4);
 #else
     // W7 (M-11): macOS generator outputs RGBA8 (4 channels, alpha=255 in-kernel).
     // When fuse_rgba, the caller's buffer is already RGBA8 (W*H*4) — write directly.
@@ -1184,7 +1230,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         dst_rgba = strip_scratch.ptr;
         if (!dst_rgba) return false;
     }
-    Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba, dst_w, dst_h, 4);
+    Buffer<uint8_t> dst_buf =
+        Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented, out_h_oriented, 4);
 #endif
 
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1223,6 +1270,11 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         /*crop_l=*/0,
         /*crop_t=*/0,
         src_scale,
+        // Productionization plan section 1.1: the three orientation scalars sit
+        // immediately after src_scale in every Stage4 kernel family.
+        exif_orientation,
+        /*unoriented_width=*/dst_w,
+        /*unoriented_height=*/dst_h,
         exp_buf.raw_buffer(),
         tone_buf.raw_buffer(),
         gamma_buf.raw_buffer(),
@@ -1253,6 +1305,11 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
+                                         // Plan section 1.1: three orientation
+                                         // scalars immediately after src_scale.
+                                         exif_orientation,
+                                         /*unoriented_width=*/dst_w,
+                                         /*unoriented_height=*/dst_h,
                                          exp_buf.raw_buffer(),
                                          tone_buf.raw_buffer(),
                                          gamma_buf.raw_buffer(),
@@ -1287,7 +1344,14 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
-    if (dst_rgba_buf.copy_to_host() != 0) return false;
+    // G-7: capture and check copy_to_host()'s return code.
+    {
+        const int cth = dst_rgba_buf.copy_to_host();
+        if (cth != 0) {
+            fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
+            return false;  // surfaced as -403 by the FFI layer
+        }
+    }
     auto t3 = verbose_timing ? std::chrono::high_resolution_clock::now()
                              : std::chrono::high_resolution_clock::time_point{};
 
@@ -1307,10 +1371,17 @@ bool runRenderStage4HalideAot(const uint16_t* src,
             std::chrono::duration<double, std::milli>(t4 - t0).count());
     }
 #else
-    if (dst_buf.copy_to_host() != 0) {
-        return false;
+    // G-7: capture and check copy_to_host()'s return code.
+    {
+        const int cth = dst_buf.copy_to_host();
+        if (cth != 0) {
+            fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
+            return false;  // surfaced as -403 by the FFI layer
+        }
     }
-    // W7 (M-11): strip alpha when legacy caller expects RGB8.
+    // W7 (M-11): strip alpha when legacy caller expects RGB8. Guarded above:
+    // this !fuse_rgba path runs at exif_orientation == 1 only, so dst_w/dst_h
+    // are already the oriented extent and the stride below cannot be swapped.
     if (!fuse_rgba) {
         const size_t total_px = static_cast<size_t>(dst_w) * dst_h;
         for (size_t i = 0; i < total_px; ++i) {
@@ -1346,10 +1417,45 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          const RenderParams& params,
                                          uint8_t* dst,
                                          bool fuse_rgba,
-                                         DecodeContext* ctx) {
+                                         DecodeContext* ctx,
+                                         int32_t exif_orientation) {
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
         return false;
+    }
+
+    // Productionization plan section 1.3 — identical derivation to
+    // runRenderStage4HalideAot. dst_w/dst_h stay UNORIENTED; the kernel writes
+    // an oriented dst and this is the only place the conversion happens.
+    const bool orient_transposes =
+        (exif_orientation >= 5 && exif_orientation <= 8);
+    const int out_w_oriented = orient_transposes ? dst_h : dst_w;
+    const int out_h_oriented = orient_transposes ? dst_w : dst_h;
+
+    // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
+    // indexes with dst_w/dst_h and would silently mis-stride under a swapped
+    // output. Guard, not a feature — no production caller combines them.
+    assert(fuse_rgba || exif_orientation == 1);
+    if (!fuse_rgba && exif_orientation != 1) {
+        fprintf(stderr,
+                "[Stage4] refusing orientation %d on the RGB8 (!fuse_rgba) path\n",
+                exif_orientation);
+        return false;
+    }
+
+    // G-8: refuse src==dst and any overlap for EVERY orientation. The source
+    // here is a device buffer, but it may also carry a host mirror; when it
+    // does, the caller's dst must not alias it.
+    if (stage3_device_buf->host != nullptr) {
+        const uint8_t* s = stage3_device_buf->host;
+        const size_t src_bytes = stage3_device_buf->size_in_bytes();
+        const size_t dst_bytes =
+            static_cast<size_t>(out_w_oriented) * out_h_oriented * 4;
+        if (s < dst + dst_bytes && dst < s + src_bytes) {
+            fprintf(stderr, "[Stage4] refusing overlapping src/dst (orientation %d)\n",
+                    exif_orientation);
+            return false;  // surfaced as -402 by the FFI layer
+        }
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // Split-kernel (Vulkan) builds use Stage4DstScratch leases, not the arena.
@@ -1505,7 +1611,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         dst_rgba_and = dst_lease->data();
     }
     Buffer<uint8_t> dst_rgba_buf =
-        Buffer<uint8_t>::make_interleaved(dst_rgba_and, dst_w, dst_h, 4);
+        Buffer<uint8_t>::make_interleaved(dst_rgba_and, out_w_oriented, out_h_oriented, 4);
 #else
     // W7 (M-11): macOS generator outputs RGBA8. Persistent scratch for strip path.
     // Mutex rework (plan Task 4): identical change to the runRenderStage4HalideAot
@@ -1518,7 +1624,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         dst_rgba_fd = strip_scratch.ptr;
         if (!dst_rgba_fd) return false;
     }
-    Buffer<uint8_t> dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba_fd, dst_w, dst_h, 4);
+    Buffer<uint8_t> dst_buf =
+        Buffer<uint8_t>::make_interleaved(dst_rgba_fd, out_w_oriented, out_h_oriented, 4);
 #endif
 
     exp_buf.set_host_dirty();
@@ -1552,6 +1659,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         crop_l,
         crop_t,
         src_scale,
+        // Productionization plan section 1.1: the three orientation scalars sit
+        // immediately after src_scale in every Stage4 kernel family.
+        exif_orientation,
+        /*unoriented_width=*/dst_w,
+        /*unoriented_height=*/dst_h,
         exp_buf.raw_buffer(),
         tone_buf.raw_buffer(),
         gamma_buf.raw_buffer(),
@@ -1588,6 +1700,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         scaled
         ? dng_render_stage4_scaled_preavg(src_buf.raw_buffer(),
                                          src_scale,
+                                         // Plan section 1.1: three orientation
+                                         // scalars immediately after src_scale.
+                                         exif_orientation,
+                                         /*unoriented_width=*/dst_w,
+                                         /*unoriented_height=*/dst_h,
+                                         // Box geometry stays on the UNORIENTED
+                                         // scaled extent (plan section 1.2: the
+                                         // permutation is applied at the store).
                                          dst_w,
                                          dst_h,
                                          exp_buf.raw_buffer(),
@@ -1615,6 +1735,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          dst_buf.raw_buffer())
         : dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
+                                         // Plan section 1.1: three orientation
+                                         // scalars immediately after src_scale.
+                                         exif_orientation,
+                                         /*unoriented_width=*/dst_w,
+                                         /*unoriented_height=*/dst_h,
                                          exp_buf.raw_buffer(),
                                          tone_buf.raw_buffer(),
                                          gamma_buf.raw_buffer(),
@@ -1649,7 +1774,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
-    if (dst_rgba_buf.copy_to_host() != 0) return false;
+    // G-7: capture and check copy_to_host()'s return code.
+    {
+        const int cth = dst_rgba_buf.copy_to_host();
+        if (cth != 0) {
+            fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
+            return false;  // surfaced as -403 by the FFI layer
+        }
+    }
     // G1: src device allocation fully consumed — free it through the ORIGINAL
     // struct so the owner's halide_buffer_t sees device==0 and its Buffer
     // destructor (lossless: impl->dst_buf via halide_cancel; lossy:
@@ -1686,10 +1818,16 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
             std::chrono::duration<double, std::milli>(t4_fd - t0_fd).count());
     }
 #else
-    if (dst_buf.copy_to_host() != 0) {
-        return false;
+    // G-7: capture and check copy_to_host()'s return code.
+    {
+        const int cth = dst_buf.copy_to_host();
+        if (cth != 0) {
+            fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
+            return false;  // surfaced as -403 by the FFI layer
+        }
     }
-    // W7 (M-11): strip alpha when legacy caller expects RGB8.
+    // W7 (M-11): strip alpha when legacy caller expects RGB8. Guarded above:
+    // this !fuse_rgba path runs at exif_orientation == 1 only.
     if (!fuse_rgba) {
         const size_t total_px = static_cast<size_t>(dst_w) * dst_h;
         for (size_t i = 0; i < total_px; ++i) {
@@ -1839,12 +1977,16 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                 uint8_t* out_rgb_ptr,
                                 size_t out_rgb_size,
                                 uint32_t& out_w,
-                                uint32_t& out_h) {
+                                uint32_t& out_h,
+                                int32_t exif_orientation) {
     const dng_point dst_size = computeOutputSize(negative, renderer);
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
 
     // Pool path: no resize, no page fault. W7-B: fused path outputs RGBA8.
+    // Plan section 1.3: the needed byte count is invariant under transposition
+    // (w*h*C), so the capacity check below is correct for every orientation and
+    // is deliberately made against the UNORIENTED extent.
     const size_t needed_out_size =
         static_cast<size_t>(out_w) * out_h * (config.fuse_rgba_output ? 4 : 3);
     if (out_rgb_size < needed_out_size || !out_rgb_ptr) {
@@ -1918,10 +2060,23 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          params,
                                                          out_rgb_ptr,
                                                          config.fuse_rgba_output,
-                                                         dng_decode_context_for(host));
+                                                         dng_decode_context_for(host),
+                                                         exif_orientation);
         if (render_ok) {
+            // Plan section 1.3: report the ORIENTED extent. The runner shaped the
+            // dst as (H, W) for 5..8; every caller above reads out_w/out_h.
+            if (exif_orientation >= 5 && exif_orientation <= 8) {
+                std::swap(out_w, out_h);
+            }
             return true;
         }
+    }
+
+    // The SDK CPU fallback below cannot orient. An oriented request that reaches
+    // it would silently return unoriented pixels with an oriented extent, so
+    // refuse instead (plan section 1.6: surfaced as -403 by the FFI layer).
+    if (exif_orientation != 1) {
+        return false;
     }
 
     // W7-B: the SDK fallback below writes interleaved RGB8; it cannot satisfy an
@@ -2112,7 +2267,16 @@ static void prewarm_stage4_impl(int width, int height,
                                        /*src_scale=*/1.0f / 65535.0f,
                                        /*dst_w=*/width, /*dst_h=*/height,
                                        params, dst_ptr,
-                                       /*fuse_rgba=*/true);
+                                       /*fuse_rgba=*/true,
+                                       /*ctx=*/nullptr,
+                                       // Reconciliation 2/3 caveat (b): the
+                                       // prewarm drives the same kernel and must
+                                       // pass orientation explicitly. On Metal an
+                                       // omission is a compile error, but the
+                                       // split path's argument list differs, so
+                                       // it is stated here rather than left to
+                                       // the compiler.
+                                       /*orientation=*/1);
     }
     std::fprintf(stderr, "[Warmup] s4 done\n");
     std::fflush(stderr);
@@ -2146,8 +2310,14 @@ bool render_stage4_halide(dng_host& host,
                           const PipelineConfig& config,
                           std::vector<uint8_t>& out_rgb,
                           uint32_t& out_w,
-                          uint32_t& out_h) {
+                          uint32_t& out_h,
+                          int32_t exif_orientation) {
     if (mode == RenderHalideMode::SDK) {
+        return false;
+    }
+    // The vector overload is the RGB8 (!fuse_rgba) legacy/test path; the runner
+    // guard refuses a swapped output there, so refuse up front and explicitly.
+    if (exif_orientation != 1) {
         return false;
     }
 
@@ -2174,8 +2344,14 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               const PipelineConfig& config,
                                               std::vector<uint8_t>& out_rgb,
                                               uint32_t& out_w,
-                                              uint32_t& out_h) {
+                                              uint32_t& out_h,
+                                              int32_t exif_orientation) {
     if (!stage3_device_buf) {
+        return false;
+    }
+    // Vector overload = RGB8 (!fuse_rgba) legacy/test path; see the note on
+    // render_stage4_halide's vector overload above.
+    if (exif_orientation != 1) {
         return false;
     }
 
@@ -2255,7 +2431,8 @@ bool render_stage4_halide(dng_host& host,
                           uint8_t* out_rgb_ptr,
                           size_t out_rgb_size,
                           uint32_t& out_w,
-                          uint32_t& out_h) {
+                          uint32_t& out_h,
+                          int32_t exif_orientation) {
     if (mode == RenderHalideMode::SDK) {
         return false;
     }
@@ -2296,7 +2473,8 @@ bool render_stage4_halide(dng_host& host,
                                       out_rgb_ptr,
                                       out_rgb_size,
                                       out_w,
-                                      out_h);
+                                      out_h,
+                                      exif_orientation);
 }
 
 bool render_stage4_halide_from_device_buffer(dng_host& host,
@@ -2308,7 +2486,8 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               uint8_t* out_rgb_ptr,
                                               size_t out_rgb_size,
                                               uint32_t& out_w,
-                                              uint32_t& out_h) {
+                                              uint32_t& out_h,
+                                              int32_t exif_orientation) {
     if (!stage3_device_buf) {
         return false;
     }
@@ -2335,11 +2514,16 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         return false;
     }
 
-    return runRenderStage4HalideAotFromDevice(
+    const bool ok = runRenderStage4HalideAotFromDevice(
         stage3_device_buf, src_scale,
         static_cast<int>(src_area.l), static_cast<int>(src_area.t),
         static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb_ptr, config.fuse_rgba_output,
-        dng_decode_context_for(host));
+        dng_decode_context_for(host), exif_orientation);
+    if (ok && exif_orientation >= 5 && exif_orientation <= 8) {
+        // Plan section 1.3: report the ORIENTED extent back to the caller.
+        std::swap(out_w, out_h);
+    }
+    return ok;
 }
