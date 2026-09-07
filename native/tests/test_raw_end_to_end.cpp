@@ -394,7 +394,6 @@ RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
     in.layout.cfa_pattern_count = 36;
     in.active_area = RawRect{0, 0, kSynthW, kSynthH};
     in.default_crop = RawRect{0, 0, kSynthW, kSynthH};
-    in.orientation = kRawOrientationTopLeft;
     in.black.repeat_width = 1; in.black.repeat_height = 1;
     in.black.values[0] = 512.0f;
     for (int i = 0; i < 4; ++i) {
@@ -467,7 +466,6 @@ RawErrorCode runSyntheticLinearRgb(std::vector<uint8_t>& rgba,
     in.layout.cfa_pattern_count = 0;
     in.active_area = RawRect{0, 0, kSynthW, kSynthH};
     in.default_crop = RawRect{0, 0, kSynthW, kSynthH};
-    in.orientation = kRawOrientationTopLeft;
     // Spatial tile is a 1x1 ZERO for this layout; the black level lives in
     // component_black exactly once (see the adapter, P19 T6).
     in.black.repeat_width = 1; in.black.repeat_height = 1;
@@ -818,7 +816,6 @@ int main(int argc, char** argv) {
             in.layout.cfa_pattern_count = kase.repeat_w ? 16 : 0;
             in.active_area = RawRect{0, 0, 64, 48};
             in.default_crop = RawRect{0, 0, 64, 48};
-            in.orientation = kRawOrientationTopLeft;
             in.black.repeat_width = 1; in.black.repeat_height = 1;
             in.black.values[0] = 512.0f;
             for (int i = 0; i < 4; ++i) {
@@ -891,7 +888,6 @@ int main(int argc, char** argv) {
         in.layout.cfa_pattern_count = 36;
         in.active_area = RawRect{0, 0, kW, kH};
         in.default_crop = RawRect{0, 0, kW, kH};
-        in.orientation = kRawOrientationTopLeft;
         in.black.repeat_width = 1; in.black.repeat_height = 1;
         in.black.values[0] = 512.0f;
         for (int i = 0; i < 4; ++i) {

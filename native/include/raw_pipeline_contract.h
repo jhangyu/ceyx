@@ -39,8 +39,18 @@ extern "C" {
  *       malloc+zero) is treated as 1 (identity), matching ceyx_orient_rgba's
  *       contract. No new FFI entry: ceyxDecodeIntoPhase3 already constructs a
  *       RawDevelopParams develop{} locally and simply sets this field before
- *       calling raw_pipeline_decode_file_into, whose signature is unchanged. */
-#define kRawContractVersion 5
+ *       calling raw_pipeline_decode_file_into, whose signature is unchanged.
+ *   6 - GPU orient productionization plan Task 12: RawGpuInput loses the
+ *       `orientation` field (the second, redundant orientation source; the
+ *       plan's single source of truth is RawDevelopParams::exif_orientation
+ *       added in version 5 above). Deleted alongside it: the LibRaw adapter
+ *       assignment and its flip-to-EXIF-orientation conversion helper that
+ *       populated this field, and the validator's range check + diagnostic
+ *       print that read it. Mid-struct removal with no reserved slot, per
+ *       the plan's ABI ruling: RawGpuInput crosses no compatibility boundary
+ *       (not Dart-mirrored, not serialized; produced and consumed within
+ *       this native library in the same build). */
+#define kRawContractVersion 6
 
 typedef enum RawSampleModel {
     kRawSampleModelCfa = 0,
@@ -198,7 +208,6 @@ typedef struct RawGpuInput {
 
     RawRect active_area;
     RawRect default_crop;
-    RawOrientation orientation;
 
     RawBlackLevelPattern black;
     float white_level[4];

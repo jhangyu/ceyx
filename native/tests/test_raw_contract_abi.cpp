@@ -22,19 +22,25 @@ static_assert(offsetof(RawGpuInput, plane_count) == 8, "plane_count offset moved
 static_assert(offsetof(RawGpuInput, layout) == 16, "layout offset moved");
 static_assert(offsetof(RawGpuInput, active_area) == 64, "active_area offset moved");
 static_assert(offsetof(RawGpuInput, default_crop) == 80, "default_crop offset moved");
-static_assert(offsetof(RawGpuInput, orientation) == 96, "orientation offset moved");
-static_assert(offsetof(RawGpuInput, black) == 100, "black offset moved");
-static_assert(offsetof(RawGpuInput, white_level) == 364, "white_level offset moved");
-static_assert(offsetof(RawGpuInput, as_shot_neutral) == 380,
+// GPU orient productionization plan Task 12, contract version 6: `orientation`
+// (the redundant second orientation source) is deleted outright, mid-struct,
+// with no reserved slot -- the plan's ABI ruling is that RawGpuInput crosses
+// no compatibility boundary (not Dart-mirrored, not serialized; produced and
+// consumed within this native library in the same build), so every member
+// after it shifts down by 4 bytes and the struct shrinks by 4 bytes. Values
+// below re-derived from offsetof() at edit time, not hand-computed.
+static_assert(offsetof(RawGpuInput, black) == 96, "black offset moved");
+static_assert(offsetof(RawGpuInput, white_level) == 360, "white_level offset moved");
+static_assert(offsetof(RawGpuInput, as_shot_neutral) == 376,
              "as_shot_neutral offset moved");
-static_assert(offsetof(RawGpuInput, camera_to_pcs) == 396,
+static_assert(offsetof(RawGpuInput, camera_to_pcs) == 392,
              "camera_to_pcs offset moved");
-static_assert(offsetof(RawGpuInput, decoder_backend) == 456,
+static_assert(offsetof(RawGpuInput, decoder_backend) == 452,
              "decoder_backend offset moved");
 // P19: appended at the end, contract version 2 (raw_pipeline_contract.h).
-static_assert(offsetof(RawGpuInput, component_black) == 460,
+static_assert(offsetof(RawGpuInput, component_black) == 456,
              "component_black offset moved - must stay APPENDED, never inserted");
-static_assert(sizeof(RawGpuInput) == 480, "RawGpuInput size changed");
+static_assert(sizeof(RawGpuInput) == 472, "RawGpuInput size changed");
 
 // Round 1 Task 1.3, contract version 3: RawDevelopParams gains
 // auto_exposure_mode/auto_exposure_ev, appended at the end. Same guard
@@ -148,8 +154,10 @@ int main() {
     // RawGpuInput::component_black (2); Round 1 Task 1.3 adds
     // RawDevelopParams::auto_exposure_mode/auto_exposure_ev (3); Round 2
     // Task 2.3 adds RawDevelopParams::shadows (4); GPU orient
-    // productionization plan Task 3 adds RawDevelopParams::exif_orientation (5).
-    check("contract_version", kRawContractVersion == 5);
+    // productionization plan Task 3 adds RawDevelopParams::exif_orientation (5);
+    // Task 12 deletes RawGpuInput::orientation, the redundant second
+    // orientation source (6).
+    check("contract_version", kRawContractVersion == 6);
 
     RawDevelopParams dev;
     std::memset(&dev, 0, sizeof(dev));

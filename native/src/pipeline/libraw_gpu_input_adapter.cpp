@@ -141,23 +141,6 @@ RawColorKey raw_color_key_from_libraw(uint32_t libraw_index, uint32_t colors,
     }
 }
 
-RawOrientation raw_orientation_from_libraw_flip(int32_t flip) {
-    // Inverse of tiff.cpp:631's "50132467" EXIF->flip table; see the header for
-    // the derivation. All eight dcraw bit-field values are legal, so mapping any
-    // of them to Unknown would reject a perfectly ordinary portrait file.
-    switch (flip) {
-        case 0: return kRawOrientationTopLeft;      // EXIF 1
-        case 1: return kRawOrientationTopRight;     // EXIF 2 (mirror horizontal)
-        case 2: return kRawOrientationBottomLeft;   // EXIF 4 (mirror vertical)
-        case 3: return kRawOrientationBottomRight;  // EXIF 3 (180 deg)
-        case 4: return kRawOrientationLeftTop;      // EXIF 5 (transpose)
-        case 5: return kRawOrientationLeftBottom;   // EXIF 8 (270 deg CW)
-        case 6: return kRawOrientationRightTop;     // EXIF 6 (90 deg CW)
-        case 7: return kRawOrientationRightBottom;  // EXIF 7 (anti-transpose)
-        default: return kRawOrientationUnknown;
-    }
-}
-
 uint32_t raw_bayer_channel_index_at_plane(uint32_t filters,
                                           uint32_t left_margin,
                                           uint32_t top_margin,
@@ -443,8 +426,6 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
     out_input->default_crop = RawRect{static_cast<int32_t>(v.visible_left),
                                       static_cast<int32_t>(v.visible_top),
                                       v.visible_width, v.visible_height};
-
-    out_input->orientation = raw_orientation_from_libraw_flip(v.flip);
 
     // --- black -------------------------------------------------------------
     // All THREE LibRaw terms, including the per-channel cblack[0..3] that the

@@ -125,7 +125,6 @@ struct MetaFingerprint {
     RawLayoutDescriptor layout;
     RawColorKey pattern[kRawMaxCfaPatternCount];
     RawRect active, crop;
-    RawOrientation orientation;
     RawBlackLevelPattern black;
     float white[4];
     float wb[4];
@@ -146,7 +145,6 @@ MetaFingerprint fingerprint(const RawGpuInput& in) {
     }
     f.active = in.active_area;
     f.crop = in.default_crop;
-    f.orientation = in.orientation;
     f.black = in.black;
     std::memcpy(f.white, in.white_level, sizeof(f.white));
     std::memcpy(f.wb, in.as_shot_neutral, sizeof(f.wb));
@@ -164,44 +162,6 @@ MetaFingerprint fingerprint(const RawGpuInput& in) {
 // None of these can be driven from the corpus: every present file has flip == 0,
 // cblack[0..3] == {0,0,0,0}, so the synthetic path below is the only coverage.
 // ---------------------------------------------------------------------------
-
-// F-R4-01. Expected table is the inverse of LibRaw's own EXIF->flip string,
-// third_party/libraw/src/metadata/tiff.cpp:631 ("50132467"[exif & 7] - '0'),
-// re-derived here rather than copied from the adapter so the two can disagree.
-void checkFlipTable() {
-    struct Row { int32_t flip; RawOrientation want; const char* why; };
-    static const Row rows[] = {
-        {0, kRawOrientationTopLeft,     "EXIF 1 identity"},
-        {1, kRawOrientationTopRight,    "EXIF 2 mirror horizontal"},
-        {2, kRawOrientationBottomLeft,  "EXIF 4 mirror vertical"},
-        {3, kRawOrientationBottomRight, "EXIF 3 rotate 180"},
-        {4, kRawOrientationLeftTop,     "EXIF 5 transpose"},
-        {5, kRawOrientationLeftBottom,  "EXIF 8 rotate 270 CW"},
-        {6, kRawOrientationRightTop,    "EXIF 6 rotate 90 CW"},
-        {7, kRawOrientationRightBottom, "EXIF 7 anti-transpose"},
-    };
-    // Independent re-derivation: invert the LibRaw table at test time.
-    static const char kExifToFlip[] = "50132467";
-    for (const Row& r : rows) {
-        int derived_exif = -1;
-        for (int exif = 1; exif <= 8; ++exif) {
-            if (kExifToFlip[exif & 7] - '0' == r.flip) derived_exif = exif;
-        }
-        char detail[192];
-        const RawOrientation got = raw_orientation_from_libraw_flip(r.flip);
-        std::snprintf(detail, sizeof(detail),
-                      "flip=%d libraw-table-exif=%d want=%d got=%d (%s)", r.flip,
-                      derived_exif, static_cast<int>(r.want), static_cast<int>(got),
-                      r.why);
-        report("flip-mapping", nullptr,
-               got == r.want && derived_exif == static_cast<int>(r.want), detail);
-    }
-    char detail[128];
-    const RawOrientation got = raw_orientation_from_libraw_flip(9);
-    std::snprintf(detail, sizeof(detail), "flip=9 -> %d (want Unknown)",
-                  static_cast<int>(got));
-    report("flip-out-of-range", nullptr, got == kRawOrientationUnknown, detail);
-}
 
 // F-R4-02. LibRaw's own effective black at a site after open_file()+unpack(),
 // transcribed straight from third_party/libraw/src/preprocessing/
@@ -809,7 +769,6 @@ int main(int argc, char** argv) {
 
     // Synthetic cases first: they need no corpus file and must run even when
     // every sample is missing (checked==0 still fails the run below).
-    checkFlipTable();
     checkBlackFolding();
     checkBayerPlaneOrigin();
     checkFiltersPeriodicity();

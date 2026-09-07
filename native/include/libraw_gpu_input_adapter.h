@@ -17,22 +17,6 @@
 RawColorKey raw_color_key_from_libraw(uint32_t libraw_index, uint32_t colors,
                                       const char* cdesc);
 
-// LibRaw sizes.flip -> EXIF orientation. Unknown values map to
-// kRawOrientationUnknown, which the validator then rejects (spec section 4.1.8).
-//
-// flip is a dcraw bit-field, NOT an EXIF code: bit 2 transposes, bit 1 mirrors
-// vertically, bit 0 mirrors horizontally. The inverse of LibRaw's own EXIF->flip
-// table, third_party/libraw/src/metadata/tiff.cpp:631
-// (`t_flip = "50132467"[get2() & 7] - '0'`, get2() being EXIF tag 0x0112), is
-// therefore the authority here:
-//   flip 0->EXIF 1  flip 1->EXIF 2  flip 2->EXIF 4  flip 3->EXIF 3
-//   flip 4->EXIF 5  flip 5->EXIF 8  flip 6->EXIF 6  flip 7->EXIF 7
-// Corroborated by third_party/libraw/src/metadata/identify.cpp:1294-1306
-// (270 deg -> flip 5, 180 -> 3, 90 -> 6) and by composing the bit semantics.
-// NOTE: this contradicts plan Task 7, which specifies flip 5 -> EXIF 5; that is
-// a plan defect (round-4 finding F-R4-01), upheld deviation.
-RawOrientation raw_orientation_from_libraw_flip(int32_t flip);
-
 // LibRaw colour index (what FC returns) at a PLANE-RELATIVE coordinate.
 //
 // CONTRACT ORIGIN RULING (team-lead, round 5): RawLayoutDescriptor::cfa_pattern

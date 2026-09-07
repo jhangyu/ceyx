@@ -87,7 +87,6 @@ struct Fixture {
         input.layout.cfa_pattern_count = 4;
         input.active_area = RawRect{0, 0, kW, kH};
         input.default_crop = RawRect{0, 0, kW, kH};
-        input.orientation = kRawOrientationTopLeft;
         input.black.repeat_width = 1;
         input.black.repeat_height = 1;
         input.black.values[0] = 512.0f;
@@ -226,7 +225,6 @@ int main() {
                 input.layout.cfa_pattern_count = 0;
                 input.active_area = RawRect{0, 0, kW, kH};
                 input.default_crop = RawRect{0, 0, kW, kH};
-                input.orientation = kRawOrientationTopLeft;
                 input.black.repeat_width = 1;
                 input.black.repeat_height = 1;
                 input.black.values[0] = 0.0f;
@@ -280,7 +278,6 @@ int main() {
                 input.layout.cfa_pattern_count = 0;
                 input.active_area = RawRect{0, 0, kW, kH};
                 input.default_crop = RawRect{0, 0, kW, kH};
-                input.orientation = kRawOrientationTopLeft;
                 input.black.repeat_width = 1;
                 input.black.repeat_height = 1;
                 input.black.values[0] = 0.0f;
@@ -470,10 +467,6 @@ int main() {
       expectValidate("active_area_outside_extent", f.input, kRawErrMetadataInvalid); }
     { Fixture f; f.input.layout.cfa_pattern_count = 3;
       expectValidate("cfa_count_mismatch", f.input, kRawErrMetadataInvalid); }
-    { Fixture f; f.input.orientation = kRawOrientationUnknown;
-      expectValidate("orientation_zero", f.input, kRawErrMetadataInvalid); }
-    { Fixture f; f.input.orientation = static_cast<RawOrientation>(9);
-      expectValidate("orientation_nine", f.input, kRawErrMetadataInvalid); }
     { Fixture f; f.input.black.values[0] = 20000.0f;
       expectValidate("black_ge_white", f.input, kRawErrMetadataInvalid); }
     { Fixture f; f.input.camera_to_pcs.valid = 0;

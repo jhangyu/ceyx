@@ -314,12 +314,6 @@ RawErrorCode raw_validate_gpu_input(const RawGpuInput* input,
         }
     }
 
-    if (input->orientation < kRawOrientationTopLeft ||
-        input->orientation > kRawOrientationLeftBottom) {
-        return failWith(reason_out, reason_cap, kRawErrMetadataInvalid,
-                        "orientation is not a known EXIF value");
-    }
-
     const uint32_t bw = input->black.repeat_width ? input->black.repeat_width : 1;
     const uint32_t bh = input->black.repeat_height ? input->black.repeat_height : 1;
     if (static_cast<size_t>(bw) * bh > kRawMaxCfaPatternCount) {
@@ -450,7 +444,7 @@ void raw_contract_print(const char* stage_name, const RawGpuInput* input,
 
     std::fprintf(out,
                  "[Contract] %s layout=%s size=%ux%u planes=%zu comps=%u "
-                 "sample=%s stride=%lld crop=%d,%d,%ux%u orient=%d cfa=%s "
+                 "sample=%s stride=%lld crop=%d,%d,%ux%u cfa=%s "
                  "backend=%s -> %s",
                  stage_name ? stage_name : "?",
                  raw_layout_class_name(raw_classify_layout(&input->layout)),
@@ -460,7 +454,7 @@ void raw_contract_print(const char* stage_name, const RawGpuInput* input,
                  static_cast<long long>(v.row_stride_bytes),
                  input->default_crop.x, input->default_crop.y,
                  input->default_crop.width, input->default_crop.height,
-                 static_cast<int>(input->orientation), cfa,
+                 cfa,
                  raw_backend_name(input->decoder_backend),
                  status == kRawSuccess ? "PASS" : "FAIL");
 

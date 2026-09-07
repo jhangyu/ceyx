@@ -214,7 +214,6 @@ int main(int argc, char** argv) {
         in.layout.cfa_pattern_count = 4;
         in.active_area = RawRect{0, 0, 65535, 65535};
         in.default_crop = RawRect{0, 0, 65535, 65535};
-        in.orientation = kRawOrientationTopLeft;
         in.black.repeat_width = 1; in.black.repeat_height = 1;
         in.black.values[0] = 0.0f;
         for (int i = 0; i < 4; ++i) {
