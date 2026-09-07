@@ -1083,6 +1083,10 @@ bool buildRenderParams(dng_host& host,
 static thread_local Stage4FailureReason g_stage4_failure_reason =
     Stage4FailureReason::kNone;
 
+void dngRenderStage4ResetFailureReason() {
+    g_stage4_failure_reason = Stage4FailureReason::kNone;
+}
+
 Stage4FailureReason dngRenderStage4LastFailureReason() {
     return g_stage4_failure_reason;
 }
@@ -1102,9 +1106,15 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               bool fuse_rgba,
                               DecodeContext* ctx,
                               int32_t exif_orientation) {
-    // Plan section 1.6: reset the reason FIRST, before any validation or early
-    // return, so a reason left by an earlier call on this thread can never be
-    // mistaken for this call's.
+    // Plan section 1.6: reset before any validation or early return, so a
+    // direct caller of this runner sees kNone rather than a reason inherited
+    // from an earlier call on this thread.
+    //
+    // DEFENCE IN DEPTH ONLY — not the contract (fix cycle 2, blocker B-2).
+    // A consumer reading the reason after a WHOLE PIPELINE cannot rely on this:
+    // failures upstream of Stage4 return without ever entering a runner, so
+    // nothing here executes and a stale reason would survive. Such readers must
+    // call dngRenderStage4ResetFailureReason() themselves.
     g_stage4_failure_reason = Stage4FailureReason::kNone;
 
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
@@ -1450,9 +1460,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          bool fuse_rgba,
                                          DecodeContext* ctx,
                                          int32_t exif_orientation) {
-    // Plan section 1.6: reset the reason FIRST, before any validation or early
-    // return, so a reason left by an earlier call on this thread can never be
-    // mistaken for this call's.
+    // Plan section 1.6: reset before any validation or early return, so a
+    // direct caller of this runner sees kNone rather than a reason inherited
+    // from an earlier call on this thread.
+    //
+    // DEFENCE IN DEPTH ONLY — not the contract (fix cycle 2, blocker B-2).
+    // A consumer reading the reason after a WHOLE PIPELINE cannot rely on this:
+    // failures upstream of Stage4 return without ever entering a runner, so
+    // nothing here executes and a stale reason would survive. Such readers must
+    // call dngRenderStage4ResetFailureReason() themselves.
     g_stage4_failure_reason = Stage4FailureReason::kNone;
 
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||

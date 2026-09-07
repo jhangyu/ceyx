@@ -88,11 +88,28 @@ struct DecodeContext;
 // (kCeyxOrientErrKernel), so the runners publish the reason here instead of
 // the caller having to guess from a bare false.
 //
-// STALENESS CONTRACT: the value is thread-local and PER CALL. Both runners
-// reset it to kNone as their first statement, before any validation or early
-// return, so a reason left behind by an earlier call on the same thread can
-// never be observed. Read it only immediately after a runner has returned
-// false; after a true return it is always kNone.
+// STALENESS CONTRACT (tightened in fix cycle 2, review blocker B-2):
+// READ THIS VALUE ONLY AFTER AN EXPLICIT dngRenderStage4ResetFailureReason()
+// FOLLOWED BY THE CALL UNDER TEST. The reader must own the reset.
+//
+// Why the runners resetting themselves is NOT sufficient, which is exactly what
+// B-2 caught: a consumer such as the FFI layer reads this after a WHOLE
+// PIPELINE, not after a runner. Plenty of phase-3 failures return before any
+// runner executes at all — parse failure, stage3 failure, OpcodeList2 failure,
+// a dst-too-small refusal on the RAW route. On those paths no runner runs, so
+// nothing resets, and a reader that trusted a bare "last reason" would pick up
+// a kKernel or kOverlap left by a PREVIOUS decode on the same thread and
+// overwrite the real upstream error with -403/-402. That would, among other
+// things, silently destroy the dst-too-small bounded-retry contract by turning
+// a recoverable size error into a kernel failure.
+//
+// The value is thread-local (decodes overlap under a shared_lock since Task 8,
+// so a plain static would let concurrent decodes clobber each other). The two
+// runners additionally reset on entry, which is retained as defence in depth
+// for direct runner callers — but it is NOT the contract, and no consumer may
+// rely on it in place of its own reset.
+//
+// After a true return the value is always kNone.
 //
 // kNone on a false return is legitimate and means "failed for a reason that is
 // not orientation-specific" (bad arguments, scratch allocation, SDK fallback
@@ -109,8 +126,14 @@ enum class Stage4FailureReason : int32_t {
     kKernel  = 2,  // kernel or copy_to_host returned non-zero — maps to -403
 };
 
-// Reads the current thread's most recent Stage4 failure reason. See the
-// staleness contract above: meaningful only directly after a false return.
+// Clears this thread's Stage4 failure reason to kNone. Call this IMMEDIATELY
+// BEFORE the operation whose failure you intend to classify — the reader owns
+// the reset (see the staleness contract above). Cheap: one thread-local store.
+void dngRenderStage4ResetFailureReason();
+
+// Reads the current thread's Stage4 failure reason. Meaningful only when paired
+// with a preceding dngRenderStage4ResetFailureReason(); without that pairing the
+// value may belong to an earlier call on this thread.
 Stage4FailureReason dngRenderStage4LastFailureReason();
 
 // THE shared Stage4 core. Plain buffers + RenderParams, no decoder state.
