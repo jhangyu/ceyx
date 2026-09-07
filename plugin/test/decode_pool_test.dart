@@ -417,21 +417,27 @@ void orientationContractPoolWorker(List<Object?> bootstrap) {
 }
 
 /// P4 review blocker B-1 regression fake worker: refuses the FIRST decode
-/// attempt of a transposing request with `kMsgResize` (the stale-prediction
-/// case a real `kDngErrDstTooSmall`/`kRawErrDstTooSmall` refusal produces),
-/// then accepts the retry with the CORRECTLY swapped extent.
+/// attempt of a transposing request with `kMsgResize`, then accepts the
+/// retry at an extent that is DELIBERATELY NOT the transpose of the probe —
+/// so a leftover stale reference and a correctly-cleared one produce
+/// DIFFERENT verdicts (P4 recheck B-1a: a resize-to-genuine-transpose extent
+/// validates whether or not the stale pair survives, which makes that shape
+/// vacuous as a regression test).
 ///
-/// Probes a fixed 6x4 (matching the slot-sizing capacity the first attempt
-/// was given), refuses that attempt, then on the retry returns 4x6 — the
-/// genuine transpose of 6x4 — and calls the REAL
-/// `DngDecoderService.selfVerifiedAppliedOrientation` with whatever
+/// Probes a fixed 6x4, refuses the first attempt via `kMsgResize(8, 10)` —
+/// NOT the swap of 6x4 — and the retry returns that same 8x10. Calls the
+/// REAL `DngDecoderService.selfVerifiedAppliedOrientation` with whatever
 /// `probedWidth`/`probedHeight` actually rides the retry's wire message
-/// (indices 9/10). Before the B-1 fix, `_onResize` left the stale 6x4 pair on
-/// the job, so this retry — despite being CORRECT — would still be compared
-/// against the wrong (now-stale) reference and throw a false
-/// `CeyxOrientationContractException`. After the fix, `_onResize` clears the
-/// pair, the retry carries no reference, and the assertion has nothing to
-/// verify against — so it must complete WITHOUT throwing.
+/// (indices 9/10):
+/// - stale pair present (6, 4): 8 != probedHeight(4) -> THROWS (this is what
+///   a broken `_onResize` produces — proven red below).
+/// - pair cleared (null, null): nothing to verify against -> reports the
+///   request, no throw (this is the fix — proven green below).
+///
+/// Red/green proof (P4 review mandate): captured by temporarily deleting the
+/// two `job.probedWidth = job.probedHeight = null;` pairs in `_onResize`,
+/// rerunning this single test to observe the throw, then restoring them and
+/// rerunning to observe the pass — see tmp/verify/orient_prod_t9_b1_redgreen.txt.
 void resizeThenSwappedPoolWorker(List<Object?> bootstrap) {
   final poolPort = bootstrap[0] as SendPort;
   var refused = false;
@@ -454,8 +460,9 @@ void resizeThenSwappedPoolWorker(List<Object?> bootstrap) {
     }
     if (!refused) {
       refused = true;
-      // The "true" required extent — the genuine swap of the 6x4 probe.
-      poolPort.send(<Object?>[kMsgResize, requestId, 4, 6]);
+      // Deliberately NOT the transpose of the 6x4 probe (that would be
+      // 4x6) — see the class doc for why that shape was vacuous.
+      poolPort.send(<Object?>[kMsgResize, requestId, 8, 10]);
       return;
     }
     final exifOrientation = msg.length > 8 ? msg[8] as int : 1;
@@ -464,12 +471,12 @@ void resizeThenSwappedPoolWorker(List<Object?> bootstrap) {
     try {
       final applied = DngDecoderService.selfVerifiedAppliedOrientation(
         requested: exifOrientation,
-        width: 4,
-        height: 6,
+        width: 8,
+        height: 10,
         probedWidth: probedWidth,
         probedHeight: probedHeight,
       );
-      final buf = calloc<Uint8>(4 * 6 * 4);
+      final buf = calloc<Uint8>(8 * 10 * 4);
       // [address, width, height, decodeMs, processMs, appliedOrientation] —
       // appliedOrientation rides at index 5 (_materialize, decode_pool.dart),
       // NOT in the processMs slot.
@@ -477,8 +484,8 @@ void resizeThenSwappedPoolWorker(List<Object?> bootstrap) {
         kMsgResult,
         requestId,
         buf.address,
-        4,
-        6,
+        8,
+        10,
         0.0,
         0.0,
         applied,
@@ -1437,12 +1444,14 @@ void main() {
     );
 
     test(
-      'P4 review blocker B-1: a resize retry clears the stale probed extent '
-      'so a CORRECT swapped result on the retry does not raise a false '
-      'CeyxOrientationContractException (the resize itself proves the '
-      'original probe was wrong — comparing against it would guarantee a '
-      'false positive on exactly the retry path that is supposed to recover '
-      'the decode)',
+      'P4 review blocker B-1 (recheck B-1a): a resize retry clears the stale '
+      'probed extent, so a retry at a DIFFERENT extent than the transpose of '
+      'the stale probe does not raise a false '
+      'CeyxOrientationContractException. The resize extent (8x10) is '
+      'deliberately NOT the swap of the probe (6x4, swap would be 4x6), so '
+      'the stale pair and a cleared pair produce DIFFERENT verdicts — this '
+      'is discriminating where the prior (now-fixed) version compared '
+      'against a resize extent that happened to validate either way',
       () async {
         pool = CeyxDecodePool(
           width: 1,
