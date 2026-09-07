@@ -4,8 +4,10 @@
 //
 // Loads a BUILT libdng_decoder_native (path given as argv[1]) at runtime and
 // asserts it exports the fused-orientation Halide AOT kernels: the Stage4
-// entries must each carry an "orientation" scalar argument in the
-// introspection struct Halide's codegen emits for every AOT filter
+// entries must each carry the six host-computed affine-coefficient scalar
+// arguments (orient_a_x, orient_b_x, orient_c_x, orient_a_y, orient_b_y,
+// orient_c_y -- T7b's "kernel is pure multiply-add" formulation, bac3cbe) in
+// the introspection struct Halide's codegen emits for every AOT filter
 // (`<kernel>_metadata()`, declared in HalideRuntime.h as
 // `halide_filter_metadata_t`). A pre-fusion build exports the SAME function
 // NAMES (dng_render_stage4, dng_render_stage4_scaled_preavg -- the generator
@@ -15,6 +17,15 @@
 // R-14 describes: the FFI symbol lookup that consumes these kernels is
 // guarded, so one silently-stale/mismatched kernel nulls the whole feature
 // group with no crash and no red functional test.
+//
+// LOCKSTEP NOTE: this argument-name list is coupled to the fused kernels'
+// signature by construction (that coupling IS the capability signal — see
+// above). Any future task that renames/reshapes these scalar arguments MUST
+// update kRequiredArgs below (and android_build.yml's `strings` literal,
+// currently orient_a_x) in the SAME change. This file has already been
+// updated once for exactly this reason: T7b (bac3cbe) replaced the original
+// single "orientation" + unoriented_width/unoriented_height scalars with the
+// six affine coefficients checked below.
 //
 // This is a BUILD-INTEGRITY check, not a functional test (plan G-14): it
 // never allocates an image buffer, dispatches a kernel over real pixels, or
@@ -100,17 +111,36 @@ const KernelCheck kChecks[] = {
      "dng_render_stage4_scaled_preavg"},
 };
 
-bool HasOrientationArg(const HalideFilterMetadataMini *md) {
+// T7b (bac3cbe): the fused kernels take six host-computed affine
+// coefficients instead of a single orientation code + unoriented extent.
+// All six must be present; this is a stronger check than the single-name
+// check it replaces (a build missing just one coefficient would silently
+// mis-warp, not merely mis-report an extent).
+const char *const kRequiredArgs[] = {
+    "orient_a_x", "orient_b_x", "orient_c_x",
+    "orient_a_y", "orient_b_y", "orient_c_y",
+};
+
+// Returns the first required argument name NOT found in md's argument list,
+// or nullptr if all are present.
+const char *FirstMissingRequiredArg(const HalideFilterMetadataMini *md) {
   if (md == nullptr || md->arguments == nullptr) {
-    return false;
+    return kRequiredArgs[0];
   }
-  for (int32_t i = 0; i < md->num_arguments; ++i) {
-    const char *name = md->arguments[i].name;
-    if (name != nullptr && std::strcmp(name, "orientation") == 0) {
-      return true;
+  for (const char *required : kRequiredArgs) {
+    bool found = false;
+    for (int32_t i = 0; i < md->num_arguments; ++i) {
+      const char *name = md->arguments[i].name;
+      if (name != nullptr && std::strcmp(name, required) == 0) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return required;
     }
   }
-  return false;
+  return nullptr;
 }
 
 #if defined(_WIN32)
@@ -162,16 +192,18 @@ int main(int argc, char **argv) {
     }
     MetadataFn fn = reinterpret_cast<MetadataFn>(sym);
     const HalideFilterMetadataMini *md = fn();
-    if (!HasOrientationArg(md)) {
+    const char *missing_arg = FirstMissingRequiredArg(md);
+    if (missing_arg != nullptr) {
       std::fprintf(stderr,
-                   "%s is exported but declares no 'orientation' argument "
-                   "-- pre-fusion kernel shape\n",
-                   check.kernel_label);
-      std::printf("PROBE_RESULT=missing:%s.orientation\n", check.kernel_label);
+                   "%s is exported but declares no '%s' argument -- "
+                   "pre-T7b or otherwise stale kernel shape\n",
+                   check.kernel_label, missing_arg);
+      std::printf("PROBE_RESULT=missing:%s.%s\n", check.kernel_label, missing_arg);
       rc = 1;
       break;
     }
-    std::fprintf(stderr, "ok: %s exports 'orientation'\n", check.kernel_label);
+    std::fprintf(stderr, "ok: %s exports all six affine-coefficient args\n",
+                 check.kernel_label);
   }
 
   CloseLib(handle);

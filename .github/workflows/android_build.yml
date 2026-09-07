@@ -315,7 +315,7 @@ jobs:
       # fix already uses, architecture-agnostic ELF symbol-table read) PLUS
       # a static-data check that plain `strings` (byte-scan, no ELF/arch
       # awareness needed) can perform on ANY architecture's binary — the
-      # literal argument name "orientation" is Halide-generated const string
+      # literal argument name "orient_a_x" is Halide-generated const string
       # data inside `dng_render_stage4_metadata()`'s static
       # halide_filter_metadata_t (see orient_capability_probe.cpp's header
       # for the full rationale). Weaker than the native legs' real function
@@ -324,8 +324,16 @@ jobs:
       # honestly prove, exactly as the JXL cross-leg note in
       # macos_build.yml documents for that platform's equivalent limitation.
       # Confirmed locally (tmp/verify/orient_prod_t11_*): the pre-fusion
-      # commit's generator source has ZERO occurrences of "orientation" at
-      # all, so this string's presence is a real, not coincidental, signal.
+      # commit's generator source has ZERO occurrences of "orientation" (or
+      # any orient_* name) at all, so this string's presence is a real, not
+      # coincidental, signal.
+      #
+      # LOCKSTEP NOTE (T7b, bac3cbe): the checked literal was "orientation"
+      # until T7b replaced the single orientation-code scalar with six
+      # host-computed affine coefficients (orient_a_x/b_x/c_x/a_y/b_y/c_y);
+      # this step's literal was updated in the SAME lockstep as
+      # orient_capability_probe.cpp's kRequiredArgs to match. Any future
+      # kernel-signature task must update both together.
       #
       # Output to a FILE, then grepped — never `nm`/`strings | grep -q`
       # (G-9/R-16: pipefail would turn a SIGPIPE on a successful match into
@@ -359,12 +367,12 @@ jobs:
             fi
           done
           set +e
-          grep -qx "orientation" android_so_strings.txt
+          grep -qx "orient_a_x" android_so_strings.txt
           rc=$?
           set -e
-          echo "RC=${rc} (string: orientation)"
+          echo "RC=${rc} (string: orient_a_x)"
           if [ "${rc}" -ne 0 ]; then
-            missing="${missing} string:orientation"
+            missing="${missing} string:orient_a_x"
           fi
           if [ -n "${missing}" ]; then
             echo "::error::missing fused-orientation signal(s) in ${SO}:${missing} — this .so may be a stale pre-fusion build (the generator names never changed, so symbol presence alone does not prove the kernel was rebuilt with orientation fused in)." >&2
