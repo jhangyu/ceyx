@@ -1057,10 +1057,38 @@ set(JPEG_VERSION_STRING \"62\")
     # libraw-cmake silently builds serial, so the only trustworthy evidence
     # that this took effect is the "compiled with OpenMP support ... YES" line
     # at libraw-cmake/CMakeLists.txt:385 plus a timing measurement.
+    # F-T8b-2 FIX (2026-09-07): these MUST be FORCEd CACHE entries, not plain
+    # set()s. libraw-cmake declares `option(ENABLE_OPENMP ... ON)`
+    # (third_party/libraw-cmake/CMakeLists.txt:84) and CMP0077=NEW is NOT in
+    # effect in that child directory scope, so option() CLEARS a plain normal
+    # variable of the same name and the default (ON) wins. Both branches below
+    # were therefore no-ops: desktop got ON by accident, and mobile got ON in
+    # violation of the P17 user ruling at the top of this file (line ~407,
+    # "OpenMP ON for desktop, OFF for mobile").
+    #
+    # This was predicted verbatim at lines ~1302-1310 of this file and called
+    # "latent, currently-harmless": harmless only because find_package(OpenMP)
+    # failed by itself on desktops with no libomp, which masked the broken
+    # override. The Android NDK removes that accidental safety net -- its clang
+    # accepts -fopenmp=libomp and the NDK ships libomp, so the lookup SUCCEEDS,
+    # ENABLE_OPENMP stays ON, and the Android build linked libomp.so.
+    #
+    # Measured consequence before this fix: the shipped
+    # plugin/android/.../libdng_decoder_native.so carried a libomp.so DT_NEEDED
+    # entry while using ZERO OpenMP symbols (pure link-line residue), and
+    # Android has no /system/lib64/libomp.so -- so dlopen(RTLD_NOW) failed with
+    # 'library "libomp.so" not found' and the library could not load at all.
+    # Evidence: tmp/verify/orient_prod_t8b_so_refresh.txt, findings F-T8b-1/2.
+    #
+    # The FORCEd-CACHE pattern is the one mechanism proven to work here -- see
+    # the identical ENABLE_LCMS fix at line ~1313, adopted after a plain set()
+    # was measured NOT to work. option() leaves an existing cache entry alone.
     if(CEYX_ENABLE_DESKTOP_OPENMP)
-        set(ENABLE_OPENMP ON)
+        set(ENABLE_OPENMP ON CACHE BOOL
+            "LibRaw OpenMP: ON for desktop per the P17 policy (F-T8b-2)" FORCE)
     else()
-        set(ENABLE_OPENMP OFF)
+        set(ENABLE_OPENMP OFF CACHE BOOL
+            "LibRaw OpenMP: OFF for mobile (Android/iOS) per the P17 policy (F-T8b-2)" FORCE)
     endif()
     set(ENABLE_EXAMPLES OFF)
     set(LIBRAW_INSTALL OFF)
