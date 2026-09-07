@@ -16,9 +16,12 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 ///
 /// AC-3.2: `DngImage()` constructed without `appliedOrientation` yields 1.
 ///
-/// AC-3.3: the extent-consistency self-verification rule reports
-/// `appliedOrientation == 1` when a transposing request came back unswapped
-/// (native degraded to the unoriented fallback per spec §1.3/Task 2 AC-2.6).
+/// AC-3.3: the extent-consistency self-verification rule (AMENDED by
+/// productionization plan Task 9, reconciliation 2/3: the scratch-degrade
+/// fallback that used to make "unswapped extent" a benign signal is deleted,
+/// so this rule now throws [CeyxOrientationContractException] instead of
+/// reporting `appliedOrientation == 1` in that case; with no reference to
+/// verify against it trusts the success code and reports the request).
 ///
 /// AC-3.4 (dart analyze 0 issues) is verified out-of-band by the test runner,
 /// not inside this file.
@@ -205,23 +208,31 @@ void main() {
     });
 
     test(
-      'transposing orientation that came back UNSWAPPED (native degraded) '
-      'reports 1, not the request',
+      'transposing orientation that came back UNSWAPPED now raises a '
+      'contract error instead of silently reporting 1 (productionization '
+      'plan Task 9, reconciliation 2/3: the scratch-degrade fallback that '
+      'used to make this a benign signal is gone, so an unswapped extent on '
+      'a transposing request means the kernel silently failed to orient)',
       () {
-        final applied = DngDecoderService.selfVerifiedAppliedOrientation(
-          requested: 6,
-          width: 640, // NOT swapped vs. the probe -> degraded
-          height: 480,
-          probedWidth: 640,
-          probedHeight: 480,
+        expect(
+          () => DngDecoderService.selfVerifiedAppliedOrientation(
+            requested: 6,
+            width: 640, // NOT swapped vs. the reference -> contract violation
+            height: 480,
+            probedWidth: 640,
+            probedHeight: 480,
+          ),
+          throwsA(isA<CeyxOrientationContractException>()),
         );
-        expect(applied, 1);
       },
     );
 
     test(
-      'transposing orientation with an unavailable probe cannot be '
-      'verified and reports 1',
+      'transposing orientation with no unoriented reference to compare '
+      'against (probedWidth/probedHeight both null) trusts the success code '
+      'and reports the request — the old conservative "cannot verify -> '
+      'report 1" no longer applies once the fallback it was guarding '
+      'against is deleted',
       () {
         final applied = DngDecoderService.selfVerifiedAppliedOrientation(
           requested: 7,
@@ -230,7 +241,7 @@ void main() {
           probedWidth: null,
           probedHeight: null,
         );
-        expect(applied, 1);
+        expect(applied, 7);
       },
     );
 

@@ -1,5 +1,4 @@
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
@@ -174,6 +173,44 @@ class DngBufferTooSmallException implements Exception {
   String toString() =>
       'DngBufferTooSmallException(${width}x$height, '
       'requires $requiredBytes bytes)';
+}
+
+/// Productionization plan Task 9 (reconciliation 2/3): raised by
+/// [DngDecoderService.selfVerifiedAppliedOrientation] when a transposing
+/// request (EXIF 5/6/7/8) comes back with an extent that is NOT swapped
+/// relative to the unoriented reference the caller supplied.
+///
+/// With the scratch-checkout degradation arm deleted (fusion applies
+/// orientation on every route), there is no longer a benign reason for this
+/// to happen — an unswapped extent on a transposing request now means the
+/// GPU kernel silently failed to orient (spec §4.2's "runs on zeros /
+/// does-nothing" silent-failure mode: dims correct, error code 0, timings
+/// plausible). This is a CONTRACT VIOLATION, not a degradation signal, so it
+/// is thrown rather than silently downgraded to `appliedOrientation = 1`.
+class CeyxOrientationContractException implements Exception {
+  CeyxOrientationContractException({
+    required this.requestedOrientation,
+    required this.width,
+    required this.height,
+    this.filePath,
+  });
+
+  /// The EXIF orientation (5, 6, 7, or 8) that was requested.
+  final int requestedOrientation;
+
+  /// The extent the native decode actually returned.
+  final int width;
+  final int height;
+
+  /// The file being decoded, when available, for diagnostics.
+  final String? filePath;
+
+  @override
+  String toString() =>
+      'CeyxOrientationContractException(requested=$requestedOrientation, '
+      'returned=${width}x$height'
+      '${filePath != null ? ", path=$filePath" : ""}): kernel did not '
+      'transpose extents for a transposing orientation request';
 }
 
 class _DecodeWorkerResult {
@@ -600,52 +637,59 @@ class DngDecoderService {
   }
 
   /// True for the four EXIF orientations that swap width and height (5, 6,
-  /// 7, 8). Mirrors `exif_orientation.dart`'s table (native-rotation spec
-  /// §1.2/§1.3) and the native `ceyx_orientation_transposes` predicate, kept
-  /// as a small local copy so this file's self-verifying consistency check
-  /// (below) does not need an extra FFI round trip.
+  /// 7, 8). Mirrors the native `ceyx_orientation_transposes` predicate
+  /// (`native/include/ceyx_orient.h`) — the in-repo source of truth — kept as
+  /// a small local copy so this file's mechanical consistency check (below)
+  /// does not need an extra FFI round trip. (Productionization plan Task 9:
+  /// this file has no Dart-side rotation code of its own and does not mirror
+  /// any `exif_orientation.dart` — that file is Halcyon's, not ceyx's.)
   static bool _orientationTransposes(int exifOrientation) =>
       exifOrientation == 5 ||
       exifOrientation == 6 ||
       exifOrientation == 7 ||
       exifOrientation == 8;
 
-  /// The self-verifying extent-consistency rule used by
+  /// The mechanical extent-consistency assertion used by
   /// [decodeIntoPointerOriented] to decide what to report as
   /// `appliedOrientation`. Hoisted to a standalone, directly-testable static
   /// so the production decision and the unit tests cannot drift apart (they
   /// call this exact function, not a re-derived copy).
   ///
-  /// Reports [requested] ONLY when the returned extent is verifiably
-  /// consistent with that orientation having been applied:
+  /// AMENDED by productionization plan Task 9 (reconciliation 2/3): with the
+  /// scratch-checkout degradation arm deleted, fusion applies orientation on
+  /// every route, so this is no longer a "trust vs. downgrade" decision —
+  /// it is the one client-side proof that the kernel actually oriented
+  /// (spec §4.2's silent-failure mode: kernel runs on zeros or does nothing,
+  /// returns success, dims correct, timings plausible). It stays a FREE
+  /// assertion: it only compares values the caller already has, and it no
+  /// longer performs its own FFI probe round trip (that forced second call
+  /// is deleted — see [decodeIntoPointerOriented]).
+  ///
   /// - identity (`requested == 1`) always reports 1.
   /// - a non-transposing orientation (2/3/4) always reports [requested] —
-  ///   Task 2's scratch-unavailable degrade path is exclusive to the
-  ///   transposing cases, so a successful decode here means it applied.
-  /// - a transposing orientation (5/6/7/8) reports [requested] only when the
-  ///   returned extent is swapped relative to the unoriented probe. When the
-  ///   probe is unavailable, there is nothing to compare against, so this
-  ///   reports `1` (cannot verify, conservative). An extent that came back
-  ///   UNSWAPPED relative to an available probe is evidence of the native
-  ///   degrade path and also reports `1`.
+  ///   there is no swap to verify, so a successful decode means it applied.
+  /// - a transposing orientation (5/6/7/8):
+  ///   - when the caller supplies the file's unoriented reference extent
+  ///     ([probedWidth]/[probedHeight]) and the returned extent is swapped
+  ///     relative to it, reports [requested] (verified).
+  ///   - when the caller supplies that reference and the returned extent
+  ///     came back UNSWAPPED, throws [CeyxOrientationContractException] —
+  ///     this can no longer be a benign degrade (that arm is gone), so an
+  ///     unswapped extent on a transposing request means the kernel silently
+  ///     failed to orient.
+  ///   - when the caller has no reference to compare against (both null),
+  ///     there is nothing to verify against, so this reports [requested]
+  ///     rather than conservatively downgrading — the fallback contract that
+  ///     motivated the old conservative "report 1" no longer exists.
   ///
-  /// KNOWN LIMITATION (spec-exact, not a bug to fix here): when the
-  /// unoriented frame is exactly SQUARE, a genuine transpose and a silent
-  /// scratch-exhaustion degrade (spec §1.3/Task 2 AC-2.6) produce the
-  /// IDENTICAL extent, so this cannot distinguish them and — because the
-  /// swap check below is trivially satisfied for a square extent — reports
-  /// [requested] either way, trusting the (overwhelmingly common) case that
-  /// it really did apply. An earlier revision of this method special-cased
-  /// a square probe as always-unverifiable and reported `1` instead, but
-  /// that silently DOUBLE-ROTATES every ordinary (non-degraded)
-  /// square-frame transposing decode, which is a deterministic wrong answer
-  /// on the common path — worse than the rare misreport on a
-  /// scratch-exhaustion square frame this was trying to catch. Reverted
-  /// (round-2 fix cycle 2). The principled fix is an explicit native
-  /// degradation signal (a dedicated result field or error code Task 2
-  /// doesn't currently expose); a process-global "last decode degraded"
-  /// flag would be racy under concurrent pool workers and needs a per-call
-  /// design — parked, out of this round's scope.
+  /// KNOWN LIMITATION (unchanged from the prior revision): when the
+  /// unoriented frame is exactly SQUARE, the swap check is trivially
+  /// satisfied either way, so a genuine transpose cannot be distinguished
+  /// from a hypothetical silent no-op on a square frame. This is accepted:
+  /// the alternative (treating square as always-unverifiable) would falsely
+  /// flag every ordinary square-frame transposing decode as a contract
+  /// violation, which is worse than the rare square-frame miss this cannot
+  /// catch.
   @visibleForTesting
   static int selfVerifiedAppliedOrientation({
     required int requested,
@@ -653,16 +697,26 @@ class DngDecoderService {
     required int height,
     required int? probedWidth,
     required int? probedHeight,
+    String? filePathForError,
   }) {
     if (requested == 1) return 1;
     if (!_orientationTransposes(requested)) return requested;
-    if (probedWidth != null &&
-        probedHeight != null &&
-        width == probedHeight &&
-        height == probedWidth) {
+    if (probedWidth == null || probedHeight == null) {
+      // No unoriented reference to verify against. The (deleted)
+      // scratch-degrade fallback was the only reason the extent could ever
+      // legitimately come back unswapped; without a reference there is
+      // nothing to detect that against, so trust the success code.
       return requested;
     }
-    return 1;
+    if (width == probedHeight && height == probedWidth) {
+      return requested;
+    }
+    throw CeyxOrientationContractException(
+      requestedOrientation: requested,
+      width: width,
+      height: height,
+      filePath: filePathForError,
+    );
   }
 
   /// Native-rotation spec Task 3: orientation-aware sibling of
@@ -672,17 +726,16 @@ class DngDecoderService {
   /// trailing `appliedOrientation` element:
   /// `[address, width, height, decodeMs, processMs, appliedOrientation]`.
   ///
-  /// SELF-VERIFYING, not trusting: `appliedOrientation` is reported as
-  /// [exifOrientation] ONLY when the returned extent is consistent with that
-  /// orientation actually having been applied. For a transposing orientation
-  /// (5/6/7/8) that means the returned width/height must be swapped relative
-  /// to the file's UNORIENTED extent (probed via [probeOutputSize]); if the
-  /// extent came back unswapped, the native side degraded (Task 2's
-  /// scratch-checkout-failure fallback, spec §1.3/AC-2.6) and this reports
-  /// `1` instead, so the caller never assumes an orientation was applied that
-  /// wasn't. A single `orient.degraded|` diagnostic line is written to
-  /// stderr when the check fires (spec §7 R-2), so a run of degradations is
-  /// observable without gating correctness on it.
+  /// AMENDED by productionization plan Task 9 (reconciliation 2/3): this no
+  /// longer calls `probeOutputSize` internally (that was a full header parse
+  /// on every transposing decode, and the arm it was defending against is
+  /// gone). Instead [probedWidth]/[probedHeight] let the CALLER supply the
+  /// unoriented reference extent it already computed for its own
+  /// buffer-capacity check — `CeyxDecodePool` does exactly this (it already
+  /// probes for slot sizing) — so [selfVerifiedAppliedOrientation] verifies
+  /// for free instead of re-deriving the reference via FFI. Both null (no
+  /// caller-supplied reference) means "nothing to verify against", so a
+  /// success reports [exifOrientation] as applied without throwing.
   ///
   /// [decodeIntoPointer] (unoriented) is untouched by this method and stays
   /// byte-identical — it is this method's A/B control.
@@ -694,6 +747,8 @@ class DngDecoderService {
     int dstCapacity, {
     int? maxDim,
     required int exifOrientation,
+    int? probedWidth,
+    int? probedHeight,
   }) {
     if (!_initialized) {
       initialize();
@@ -707,20 +762,6 @@ class DngDecoderService {
       throw StateError(
         'ceyx_decode_into_buffer_oriented unavailable in this dylib',
       );
-    }
-
-    // Unoriented extent, for the post-decode consistency check below.
-    // Non-transposing orientations (including identity) never need this: the
-    // native side never transposes for them, so there is nothing to verify
-    // beyond "did the decode succeed", which _finishPointerTransfer already
-    // checks.
-    final needsConsistencyCheck = _orientationTransposes(exifOrientation);
-    int? probedWidth;
-    int? probedHeight;
-    if (needsConsistencyCheck) {
-      final probe = probeOutputSize(filePath, maxDim: maxDim);
-      probedWidth = probe?.width;
-      probedHeight = probe?.height;
     }
 
     final pathPtr = filePath.toNativeUtf8();
@@ -744,23 +785,19 @@ class DngDecoderService {
       final width = transfer[1] as int;
       final height = transfer[2] as int;
 
+      // No internal probe round trip anymore (see the doc comment above):
+      // probedWidth/probedHeight come from the caller when it already has
+      // them (CeyxDecodePool's slot-sizing probe); null when it doesn't,
+      // in which case the assertion trusts the success code rather than
+      // throwing a false contract violation.
       final appliedOrientation = selfVerifiedAppliedOrientation(
         requested: exifOrientation,
         width: width,
         height: height,
         probedWidth: probedWidth,
         probedHeight: probedHeight,
+        filePathForError: filePath,
       );
-      if (needsConsistencyCheck && appliedOrientation == 1) {
-        // Either the probe was unavailable, the probed frame was square
-        // (swap undetectable), or the extent came back unswapped (native
-        // degraded to the unoriented fallback). This method never claims an
-        // orientation was applied that it cannot verify (spec §7 R-2).
-        stderr.writeln(
-          'orient.degraded|path=$filePath|exif=$exifOrientation'
-          '|width=$width|height=$height',
-        );
-      }
 
       return <Object?>[...transfer, appliedOrientation];
     } finally {

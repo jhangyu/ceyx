@@ -14,7 +14,12 @@
 library;
 
 export 'src/dng_decoder_service.dart'
-    show DngImage, DngErrorCode, DngDecodeException, DngDecoderService;
+    show
+        DngImage,
+        DngErrorCode,
+        DngDecodeException,
+        DngDecoderService,
+        CeyxOrientationContractException;
 
 // WP6: the fixed-slot native buffer pool and its explicit release entry.
 export 'src/native_buffer_pool.dart' show CeyxNativeBufferPool, CeyxNativeBuffer;

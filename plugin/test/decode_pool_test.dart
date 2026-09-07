@@ -342,6 +342,73 @@ void orientationWirePoolWorker(List<Object?> bootstrap) {
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
 
+/// Productionization plan Task 9 (reconciliation 2/3) fake worker: proves the
+/// PRODUCTION dispatch path (`_prepareAndEnqueue` probing, `_dispatch`
+/// widening the wire, the worker reading indices 9/10) actually reaches
+/// `DngDecoderService.selfVerifiedAppliedOrientation` with a real
+/// caller-supplied reference — by calling that EXACT static (not a
+/// re-derived copy), same discipline as native_rotation_bindings_test.dart's
+/// AC-3.3 group.
+///
+/// Answers `probeSize` with a fixed NON-square 6x4 extent (so a swap is
+/// actually detectable), and for `decode` returns a fixed extent equal to
+/// the UNORIENTED probe (6x4) regardless of the requested orientation —
+/// simulating a kernel that silently failed to transpose. Reads
+/// `probedWidth`/`probedHeight` off message indices 9/10 exactly as the real
+/// `ceyxDecodeWorkerMain` does, so a wire that failed to carry them would
+/// make this fake report a false pass (nothing to verify against) instead of
+/// the expected throw — the test is only meaningful because the wire is
+/// real.
+void orientationContractPoolWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  final jobs = ReceivePort();
+  jobs.listen((Object? message) {
+    final msg = message as List<Object?>;
+    if (msg[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (msg[0] == kMsgConfigSlots) {
+      poolPort.send(<Object?>[kMsgSlotsAck, msg[1] as int]);
+      return;
+    }
+    final requestId = msg[1] as int;
+    final type = CeyxPoolJobType.values[msg[2] as int];
+    if (type == CeyxPoolJobType.probeSize) {
+      poolPort.send(<Object?>[kMsgResult, requestId, 6, 4]);
+      return;
+    }
+    final exifOrientation = msg.length > 8 ? msg[8] as int : 1;
+    final probedWidth = msg.length > 9 ? msg[9] as int : null;
+    final probedHeight = msg.length > 10 ? msg[10] as int : null;
+    try {
+      // Same-shaped extent as the probe -> UNSWAPPED for a transposing
+      // request, which is exactly the silent-failure shape this proves is
+      // caught rather than downgraded.
+      final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+        requested: exifOrientation,
+        width: 6,
+        height: 4,
+        probedWidth: probedWidth,
+        probedHeight: probedHeight,
+      );
+      final buf = calloc<Uint8>(6 * 4 * 4);
+      poolPort.send(<Object?>[
+        kMsgResult,
+        requestId,
+        buf.address,
+        6,
+        4,
+        0.0,
+        applied.toDouble(),
+      ]);
+    } catch (e) {
+      poolPort.send(<Object?>[kMsgError, requestId, e]);
+    }
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
 /// WP3a fake worker: handles [CeyxPoolJobType.encode] without loading any
 /// dylib. `quality` (the 4th `encodeArgs` element) doubles as an artificial
 /// answer-delay in milliseconds, so tests can land a generation bump while an
@@ -488,6 +555,37 @@ void main() {
     await pool.decode('other.dng');
     expect(pool.debugCoalescedCount, equals(1));
   });
+
+  test(
+    'productionization plan Task 9, Step 9.5: two jobs identical except '
+    '`exifOrientation` do NOT coalesce and dispatch TWO decodes — the '
+    "`e2704be` coalescing key component (see decode_pool.dart's `submit`, "
+    'where `key = (type, path, maxDim, exifOrientation)`) must never be '
+    'silently dropped by a future refactor, or a portrait and a landscape '
+    'request for the same path would wrongly share one decode',
+    () async {
+      pool = CeyxDecodePool(width: 2, entryPoint: fakePoolWorker);
+      final a = pool.submit(
+        CeyxPoolJobType.decode,
+        'slow:40:orient_key.dng',
+        exifOrientation: 1,
+      );
+      final b = pool.submit(
+        CeyxPoolJobType.decode,
+        'slow:40:orient_key.dng',
+        exifOrientation: 6,
+      );
+      expect(
+        pool.debugCoalescedCount,
+        equals(0),
+        reason: 'identical path but different exifOrientation must not '
+            'coalesce',
+      );
+      final results = await Future.wait([a, b]);
+      expect(identical(results[0], results[1]), isFalse);
+      expect(pool.debugDispatchCountFor('slow:40:orient_key.dng'), equals(2));
+    },
+  );
 
   test(
     'TC-931: a result whose generation is stale is discarded, not delivered',
@@ -1154,10 +1252,14 @@ void main() {
     });
 
     test(
-      'TC-1091 (AC-4.1): orientation rides at job-message index 8, present '
-      'ONLY for a non-identity request — an orientation-1 pooled decode keeps '
-      'the pre-Task-4 length-8 shape (untouched indices 0..7), while '
-      'orientation 6 widens by exactly one element carrying that value',
+      'TC-1091 (AC-4.1, amended by productionization plan Task 9 '
+      'reconciliation 2/3): orientation rides at job-message index 8, '
+      'present ONLY for a non-identity request — an orientation-1 pooled '
+      'decode keeps the pre-Task-4 length-8 shape (untouched indices 0..7), '
+      'while orientation 6 widens by THREE elements: orientation itself plus '
+      'the probed unoriented (width, height) pair the pool already has from '
+      'its slot-sizing probe (`orientationWirePoolWorker` always answers '
+      "probeSize with a fixed 4x4, so the pair is always available here)",
       () async {
         pool = CeyxDecodePool(width: 1, entryPoint: orientationWirePoolWorker);
         final identity = await pool.decode(
@@ -1176,7 +1278,12 @@ void main() {
               'past its pre-Task-4 shape (5 base fields + placeholder + '
               'address + capacity)',
         );
-        expect(oriented.decodeMs, equals(9));
+        expect(
+          oriented.decodeMs,
+          equals(11),
+          reason: 'orientation (index 8) + probedWidth (9) + probedHeight '
+              '(10), since the fake probe always succeeds',
+        );
         // processMs smuggles message[8] (-1 when absent, per the fake
         // worker's convention).
         expect(identity.processMs, equals(-1));
@@ -1226,6 +1333,24 @@ void main() {
               'a second decode of the same path at a different orientation '
               'must hit the existing size cache entry, not re-probe — '
               'proving the cache key was NOT widened to include orientation',
+        );
+      },
+    );
+
+    test(
+      'productionization plan Task 9 (reconciliation 2/3): the production '
+      'dispatch path forwards the already-probed unoriented extent through '
+      'to the assertion, so a transposing decode that comes back unswapped '
+      'raises CeyxOrientationContractException through the pool rather than '
+      'silently materializing appliedOrientation 1',
+      () async {
+        pool = CeyxDecodePool(
+          width: 1,
+          entryPoint: orientationContractPoolWorker,
+        );
+        await expectLater(
+          pool.decode('orient_contract_violation.dng', exifOrientation: 6),
+          throwsA(isA<CeyxOrientationContractException>()),
         );
       },
     );

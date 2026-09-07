@@ -143,6 +143,15 @@ const String kMsgError = 'error';
 /// this job. They sit AFTER `encodeArgs` so the existing `message.length > 5`
 /// read is unaffected, and their ABSENCE is the degraded route — a worker that
 /// sees no address and a pool that took no slot agree by construction.
+///
+/// Productionization plan Task 9 (reconciliation 2/3): gains two more
+/// optional trailing elements AFTER `exifOrientation` (fixed index 8),
+/// `probedWidth` and `probedHeight` — the file's unoriented extent, present
+/// ONLY when the pool already probed it (for slot sizing) AND the requested
+/// orientation transposes. This is the reference
+/// `DngDecoderService.selfVerifiedAppliedOrientation` compares the returned
+/// extent against; their absence means "nothing to verify against" on the
+/// worker side, same as before this pair existed.
 const String kMsgJob = 'job';
 
 /// `[kMsgResize, int requestId, int width, int height]` — WP10.
@@ -255,6 +264,14 @@ class CeyxDecodePool {
   /// Process-wide instance used by host apps.
   static final CeyxDecodePool shared = CeyxDecodePool();
 
+  /// True for the four EXIF orientations that swap width and height (5, 6, 7,
+  /// 8). Small local copy of the same predicate `dng_decoder_service.dart`
+  /// and the native `ceyx_orientation_transposes` keep — see that file's
+  /// `_orientationTransposes` doc comment for why this is duplicated rather
+  /// than shared.
+  static bool _transposesOrientation(int exifOrientation) =>
+      exifOrientation >= 5 && exifOrientation <= 8;
+
   /// Loud-log sink. Host apps replace this to route pool events into their own
   /// perf log; the default prints, because a silently narrowed pool is exactly
   /// the defect class this line exists to prevent.
@@ -326,6 +343,18 @@ class CeyxDecodePool {
   final LinkedHashMap<String, int> _sizeCache = LinkedHashMap<String, int>();
   static const int _kSizeCacheLimit = 512;
   static const int _kNoPooledRoute = -1;
+
+  /// Productionization plan Task 9 (reconciliation 2/3): `'$path|$maxDim' ->
+  /// unoriented (width, height)`, populated ALONGSIDE [_sizeCache] (same key,
+  /// same probe, same eviction) by [_probeSizeFor] — never a second probe.
+  /// This is "the extent the caller already computed for its own capacity
+  /// check" the plan's assertion compares against, so a transposing decode's
+  /// consistency check no longer needs its own FFI round trip. Absent (no
+  /// entry) whenever the size cache holds [_kNoPooledRoute] or nothing yet;
+  /// a transposing decode in that state simply has nothing to verify against,
+  /// same as before this cache existed.
+  final LinkedHashMap<String, (int, int)> _extentCache =
+      LinkedHashMap<String, (int, int)>();
 
   /// Dispatches per path, including retries. Keyed by path rather than request
   /// id because a retry deliberately REUSES its request id (that is what makes
@@ -584,6 +613,19 @@ class CeyxDecodePool {
           return;
         }
       }
+      // Productionization plan Task 9 (reconciliation 2/3): the same probe
+      // that sized the slot above already learned the unoriented extent —
+      // hand it to the job so `_dispatch` can forward it to the worker's
+      // consistency assertion, with no second probe. Only meaningful for a
+      // transposing request; a non-transposing/identity job never verifies
+      // against it.
+      if (_transposesOrientation(job.exifOrientation)) {
+        final extent = _extentCache[_sizeKey(job.path, job.maxDim)];
+        if (extent != null) {
+          job.probedWidth = extent.$1;
+          job.probedHeight = extent.$2;
+        }
+      }
     } catch (e) {
       // Probe or acquire blew up. Drop the slot idea and take the old route.
       logger('pool|POOLED_PREPARE_FAILED|${job.path}|$e');
@@ -636,13 +678,17 @@ class CeyxDecodePool {
       return null;
     }
     final bytes = width * height * 4;
-    _putSizeCache(key, bytes);
+    _putSizeCache(key, bytes, extent: (width, height));
     return bytes;
   }
 
   static String _sizeKey(String path, int? maxDim) => '$path|$maxDim';
 
-  void _putSizeCache(String key, int bytes) {
+  /// [extent] is the same probe's unoriented (width, height), cached in
+  /// [_extentCache] under the identical key/eviction discipline as
+  /// [_sizeCache] — omitted (and any stale entry removed) whenever [bytes] is
+  /// [_kNoPooledRoute], since there is nothing to verify against there.
+  void _putSizeCache(String key, int bytes, {(int, int)? extent}) {
     _sizeCache.remove(key);
     _sizeCache[key] = bytes;
     while (_sizeCache.length > _kSizeCacheLimit) {
@@ -650,6 +696,13 @@ class CeyxDecodePool {
       // makes "first" the least recently written — LRU without a second
       // structure to keep in sync.
       _sizeCache.remove(_sizeCache.keys.first);
+    }
+    _extentCache.remove(key);
+    if (extent != null && bytes != _kNoPooledRoute) {
+      _extentCache[key] = extent;
+      while (_extentCache.length > _kSizeCacheLimit) {
+        _extentCache.remove(_extentCache.keys.first);
+      }
     }
   }
 
@@ -899,7 +952,21 @@ class CeyxDecodePool {
       // pre-Task-4 length-8 pooled shape, so a pre-existing wire-shape
       // assertion sized on "5 base fields + placeholder + address + capacity"
       // is untouched by a caller that never asks for rotation.
-      if (slot != null && job.exifOrientation != 1)
+      if (slot != null &&
+          job.exifOrientation != 1 &&
+          job.probedWidth != null &&
+          job.probedHeight != null)
+        // Productionization plan Task 9: probed extent riding at indices 9/10
+        // — only ever appended alongside orientation (index 8), never alone.
+        ...<Object?>[
+          encodeArgs,
+          slot.address,
+          slot.capacity,
+          job.exifOrientation,
+          job.probedWidth,
+          job.probedHeight,
+        ]
+      else if (slot != null && job.exifOrientation != 1)
         ...<Object?>[
           encodeArgs,
           slot.address,
@@ -1497,6 +1564,15 @@ class _PoolJob {
   // native rotation. Threaded onto the job message at a fixed trailing index
   // (see _dispatch) so _probeSizeFor's cache key stays untouched.
   final int exifOrientation;
+  // Productionization plan Task 9 (reconciliation 2/3): the file's UNORIENTED
+  // extent, when [exifOrientation] transposes AND `_prepareAndEnqueue` already
+  // has it cached from the probe it ran for slot sizing — the "already
+  // computed for its own capacity check" reference the plan's assertion
+  // compares against. Null whenever unavailable (non-transposing orientation,
+  // uncached path, or degraded/unpooled route); [_dispatch] omits the wire
+  // fields entirely in that case, so a worker never sees a partial pair.
+  int? probedWidth;
+  int? probedHeight;
   // WP3a: [rgbaAddress, width, height, quality] for CeyxPoolJobType.encode
   // jobs; null for every other job type.
   final List<Object?>? encodeArgs;
@@ -1679,6 +1755,13 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
           // Native-rotation spec Task 4: read behind the same widening guard
           // idiom, defaulting to identity for any pre-Task-4 message shape.
           final exifOrientation = message.length > 8 ? message[8] as int : 1;
+          // Productionization plan Task 9 (reconciliation 2/3): the pool's
+          // already-probed unoriented extent, present only alongside
+          // orientation (see kMsgJob's doc comment) — forwarded so
+          // `selfVerifiedAppliedOrientation` has a real reference to verify
+          // against instead of trusting a null pair.
+          final probedWidth = message.length > 9 ? message[9] as int : null;
+          final probedHeight = message.length > 10 ? message[10] as int : null;
           if (dstAddress != 0 &&
               exifOrientation != 1 &&
               service.decodeIntoBufferOrientedAvailable) {
@@ -1689,6 +1772,8 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
                 dstCapacity,
                 maxDim: maxDim,
                 exifOrientation: exifOrientation,
+                probedWidth: probedWidth,
+                probedHeight: probedHeight,
               );
               poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
             } on DngBufferTooSmallException catch (e) {
