@@ -424,6 +424,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
                                             const char *label) {
   // (a) overlapping src/dst.
   {
+    std::fprintf(stderr, "[%s] case=a (direct overlap) setup\n", label);
     std::vector<uint16_t> buf(4 * 4 * 4, 0);   // room for src AND dst aliasing
     RenderParams params{};                      // unused before the overlap
                                                  // check; default-constructed
@@ -443,6 +444,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
 
   // (b) null dst -> false, reason stays kNone (no over-claiming).
   {
+    std::fprintf(stderr, "[%s] case=b (null dst) setup\n", label);
     std::vector<uint16_t> src(4 * 4 * 4, 0);
     RenderParams params{};
     const bool ok = runRenderStage4HalideAot(
@@ -460,6 +462,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
   // re-triggered here for a self-contained case), then a REAL successful
   // decode, then the reason must read kNone again.
   {
+    std::fprintf(stderr, "[%s] case=c (staleness reset, DNG) setup\n", label);
     std::vector<uint16_t> buf(4 * 4 * 4, 0);
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
@@ -493,6 +496,7 @@ static void caseStage4FailureReasonRedState(const char *good_path,
   // that is a structural finding (thread_local wrong for RAW), not something
   // to patch around here.
   if (raw_path) {
+    std::fprintf(stderr, "[%s] case=e (staleness reset, RAW) setup\n", label);
     std::vector<uint16_t> buf(4 * 4 * 4, 0);
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
@@ -521,17 +525,22 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     }
   }
 
-  // (f) B-2 sharpest case (bridge owner's addendum): a decode that fails
-  // pre-runner — specifically at ceyxDecodeIntoPrepare's dst-too-small
-  // refusal, which is BEFORE the reset line even runs (prepare happens
-  // before the fused branch's ceyxMapStage4FailureReason path is reachable
-  // at all) — immediately AFTER a stale same-thread kOverlap. Unlike (d),
-  // this does not depend on finding a fixture that passes the probe but
-  // fails before Stage4: dst-too-small is deterministically reachable on
-  // ANY valid file. The generic kCeyxErrDstTooSmall must survive exactly,
-  // proving the mapping function is never even invoked on a path that never
-  // touches phase 3.
+  // (f) PIN, not a B-2 regression case (reviewer correction, S-3): this
+  // case CANNOT fail for "B-2" — dst_capacity=1 fails inside
+  // ceyxDecodeIntoPrepare, which returns 31 lines ABOVE the
+  // dngRenderStage4ResetFailureReason() call and the mapper; deleting the
+  // reset entirely would not turn this case red, so it proves nothing about
+  // the reset fix itself. What it DOES pin, and is worth keeping for: the
+  // mapper (ceyxMapStage4FailureReason) is structurally unreachable from a
+  // prepare-level refusal path, regardless of what stale reason sits on this
+  // thread. If a future edit hoists or widens the mapper's call site so it
+  // starts covering prepare-level failures too, this is the regression that
+  // would first go red. The REAL composed B-2 closure — stale kOverlap
+  // reaching all the way through phase 3 to a pre-Stage4 failure — is case
+  // (d) below, using raw_sample.arw.trunc.raw.
   if (good_path) {
+    std::fprintf(stderr, "[%s] case=f (prepare-refusal mapper-unreachable pin) setup\n",
+                 label);
     std::vector<uint16_t> buf(4 * 4 * 4, 0);
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
@@ -548,22 +557,27 @@ static void caseStage4FailureReasonRedState(const char *good_path,
     CHECK(r != nullptr, "[%s] B-1f null result", label);
     if (r) {
       CHECK(r->error_code == kCeyxErrDstTooSmall,
-            "[%s] B-1f expected kCeyxErrDstTooSmall (%d), got %d — the "
-            "stale kOverlap CLOBBERED a pre-decode refusal (B-2 regression)",
+            "[%s] B-1f PIN VIOLATED: expected kCeyxErrDstTooSmall (%d), got "
+            "%d — the mapper became reachable from a prepare-level refusal",
             label, kCeyxErrDstTooSmall, r->error_code);
       dng_free_result(r);
     }
   }
 
-  // (d) B-2: a decode that fails UPSTREAM of Stage4 — after
-  // ceyxDecodeIntoPrepare succeeds (so the new reset-before-phase3 line
-  // actually runs) but before the runner is ever reached — must NOT have its
-  // generic error code clobbered by a STALE reason left by an earlier decode
-  // on this thread. Setup: force a stale kOverlap via the direct runner call
-  // (as in (a)/(c)), THEN decode a file that is malformed enough to fail
-  // during unpack/adapter-build (never reaching Stage4) but still parses far
-  // enough for ceyxDecodeIntoPrepare's metadata-only probe to succeed.
+  // (d) THE composed B-2 closure: a decode that fails UPSTREAM of Stage4 —
+  // after ceyxDecodeIntoPrepare succeeds (so the reset-before-phase3 line
+  // actually runs, unlike (f) above) but before the runner is ever reached —
+  // must NOT have its generic error code clobbered by a STALE reason left by
+  // an earlier decode on this thread. Setup: force a stale kOverlap via the
+  // direct runner call (as in (a)/(c)), THEN decode a file that is malformed
+  // enough to fail during unpack/adapter-build (never reaching Stage4) but
+  // still parses far enough for ceyxDecodeIntoPrepare's metadata-only probe
+  // to succeed. Expected fixture: image_samples/raw_corpus/raw_sample.arw.
+  // trunc.raw (reviewer-verified: reaches phase 3 with the stale kOverlap
+  // still set, fails pre-Stage4, generic code survives).
   if (upstream_fail_path) {
+    std::fprintf(stderr, "[%s] case=d (composed B-2: stale overlap + upstream-of-Stage4 failure) setup\n",
+                 label);
     std::vector<uint16_t> buf(4 * 4 * 4, 0);
     RenderParams params{};
     const bool overlap_ok = runRenderStage4HalideAot(
@@ -652,9 +666,12 @@ int main(int argc, char **argv) {
   // B-1/B-2 red-state proof is route-agnostic (it drives the shared
   // low-level runner directly), so it runs once, not once per sample class.
   // argv[1] (DNG) and argv[3] (.arw, RAW) cover the staleness/reset halves
-  // on both routes (B-1c, B-1e); argv[6], if given, is a malformed fixture
-  // for the upstream-of-Stage4 clobber case (B-1d) — optional, since no
-  // corpus fixture is guaranteed to pass the probe but fail before Stage4.
+  // on both routes (case c, case e); argv[6], if given, is the composed B-2
+  // closure fixture for case (d) — reviewer-recommended:
+  // image_samples/raw_corpus/raw_sample.arw.trunc.raw (passes the metadata
+  // probe, then fails before Stage4 with the stale kOverlap still set).
+  // Optional: without argv[6] this one case is documented-not-exercised
+  // rather than skipped silently.
   {
     const char *dng_any = argc > 1 ? argv[1] : nullptr;
     const char *raw_any = argc > 3 ? argv[3] : nullptr;
