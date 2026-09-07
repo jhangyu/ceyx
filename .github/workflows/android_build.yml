@@ -366,14 +366,16 @@ jobs:
               missing="${missing} symbol:${sym}"
             fi
           done
-          set +e
-          grep -qx "orient_a_x" android_so_strings.txt
-          rc=$?
-          set -e
-          echo "RC=${rc} (string: orient_a_x)"
-          if [ "${rc}" -ne 0 ]; then
-            missing="${missing} string:orient_a_x"
-          fi
+          for coeff in orient_a_x orient_b_x orient_c_x orient_a_y orient_b_y orient_c_y; do
+            set +e
+            grep -qx "${coeff}" android_so_strings.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (string: ${coeff})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} string:${coeff}"
+            fi
+          done
           if [ -n "${missing}" ]; then
             echo "::error::missing fused-orientation signal(s) in ${SO}:${missing} — this .so may be a stale pre-fusion build (the generator names never changed, so symbol presence alone does not prove the kernel was rebuilt with orientation fused in)." >&2
             exit 1
@@ -492,7 +494,8 @@ jobs:
           python3 native/scripts/assert_android_so_dt_needed_closure.py \
             --readelf "${LLVM_READELF}" \
             --so-dir "${ARTIFACT_DIR}/native" \
-            --bundled "libheif.so,libde265.so,libdng_decoder_native.so,libc++_shared.so"
+            --bundled "libheif.so,libde265.so,libdng_decoder_native.so" \
+            --optional-bundled "libc++_shared.so"
           rc=$?
           set -e
           echo "DT_NEEDED_CLOSURE_RC=${rc}"

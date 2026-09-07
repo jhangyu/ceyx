@@ -32,17 +32,35 @@ Usage:
     assert_android_so_dt_needed_closure.py \
         --readelf <path-to-llvm-readelf> \
         --so-dir <directory containing the packaged .so files> \
-        --bundled libheif.so,libde265.so,libdng_decoder_native.so[,libc++_shared.so] \
+        --bundled libheif.so,libde265.so,libdng_decoder_native.so \
+        [--optional-bundled libc++_shared.so] \
         [--whitelist name1,name2,...]   # overrides DEFAULT_SYSTEM_WHITELIST; for
                                           # local negative-control testing ONLY --
                                           # CI must never pass this flag, so the
                                           # measured default is always what runs there.
 
+--bundled is a claim that MUST be backed by measurement: every name listed
+must actually exist as a file in --so-dir, or the script fails naming it.
+(This closes the exact assumed-not-measured gap the script exists to
+prevent: android_build.yml used to pass libc++_shared.so as --bundled even
+on builds where it is never staged, so a DT_NEEDED entry pointing at a file
+that plain does not exist in the artifact would have silently passed
+closure.) The allowed-bundled set actually used for DT_NEEDED resolution is
+derived from the --so-dir glob itself (every *.so file actually present),
+not from the --bundled string. Use --optional-bundled for a name that is a
+legitimate DT_NEEDED target when present but may legitimately be ABSENT
+from --so-dir on some build configurations (e.g. libc++_shared.so is only
+staged when the Android STL resolves to c++_shared, see heif.cmake) --
+list it there instead of --bundled and it is allowed as a DT_NEEDED target
+without being required to exist in --so-dir.
+
 Prints one line per .so file (name, DT_NEEDED, and any entries outside the
 allowed set), then a final `CLOSURE_RESULT=ok` or
 `CLOSURE_RESULT=fail:<so>:<missing-lib>[,<so>:<missing-lib>...]` naming
 EVERY offending entry, not just the first (this repo's documented failure
-class for single-name error reporting).
+class for single-name error reporting). A --bundled name absent from
+--so-dir (and not listed in --optional-bundled) is reported as
+`CLOSURE_RESULT=fail:declared-bundled-not-found:<name>[,...]`.
 """
 import argparse
 import subprocess
@@ -85,7 +103,12 @@ def main() -> int:
     ap.add_argument("--readelf", required=True)
     ap.add_argument("--so-dir", required=True)
     ap.add_argument("--bundled", required=True,
-                     help="comma-separated bundled .so names shipped alongside the set")
+                     help="comma-separated bundled .so names shipped alongside the set; "
+                          "each MUST actually exist in --so-dir or the script fails naming it")
+    ap.add_argument("--optional-bundled", default="",
+                     help="comma-separated .so names allowed as DT_NEEDED targets that may "
+                          "legitimately be ABSENT from --so-dir on some build configurations "
+                          "(e.g. libc++_shared.so when the STL resolves to c++_static)")
     ap.add_argument(
         "--whitelist",
         default=",".join(sorted(DEFAULT_SYSTEM_WHITELIST)),
@@ -95,14 +118,30 @@ def main() -> int:
     args = ap.parse_args()
 
     bundled = {n.strip() for n in args.bundled.split(",") if n.strip()}
+    optional_bundled = {n.strip() for n in args.optional_bundled.split(",") if n.strip()}
     whitelist = {n.strip() for n in args.whitelist.split(",") if n.strip()}
-    allowed = bundled | whitelist
 
     so_dir = Path(args.so_dir)
     so_files = sorted(so_dir.glob("*.so"))
     if not so_files:
         print(f"CLOSURE_RESULT=fail:no-so-files-in:{so_dir}")
         return 1
+
+    # The allowed-bundled set is DERIVED from what is actually on disk, not
+    # from the --bundled string -- a declared name that isn't backed by a
+    # real file must not silently pass closure.
+    actual_so_names = {so.name for so in so_files}
+    declared_but_absent = sorted(
+        n for n in bundled if n not in actual_so_names and n not in optional_bundled
+    )
+    if declared_but_absent:
+        print(
+            "CLOSURE_RESULT=fail:declared-bundled-not-found:"
+            + ",".join(declared_but_absent)
+        )
+        return 1
+
+    allowed = actual_so_names | optional_bundled | whitelist
 
     all_missing = []
     for so in so_files:
