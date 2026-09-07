@@ -35,6 +35,8 @@ clamp, which is the largest block that is genuinely identical.
 Usage
 -----
     python3 native/scripts/derive_oriented_stage4.py --check
+    python3 native/scripts/derive_oriented_stage4.py --selfcheck
+    python3 native/scripts/derive_oriented_stage4.py --selfcheck --mutate-coeff  # red
     python3 native/scripts/derive_oriented_stage4.py --print
 """
 
@@ -91,13 +93,15 @@ def extract_block(body: str) -> "str | None":
     return None
 
 
-# --- Algebraic self-check of the flag form (Task 7) -------------------------
-# The generator computes the permutation branch-free from three flags.  This
-# reimplements that arithmetic in Python and compares it against the EXIF table
-# transcribed from ceyx_orient.cpp:104-245, for every orientation and every
-# pixel of a non-square frame.  It cannot prove the Vulkan lowering is correct
-# (that is Task 8's on-device gate) but it does prove the FORMULA is, which is
-# the part a transcription slip would break.
+# --- Algebraic self-check of the affine coefficient table (Task 7b) ---------
+# The generator no longer decides anything: the host computes six int32
+# coefficients (ceyx_orient_affine_coeffs in native/include/ceyx_orient.h) and
+# the kernel evaluates ux = a_x*x + b_x*y + c_x, uy = a_y*x + b_y*y + c_y.
+# This reimplements that coefficient table in Python and compares the resulting
+# affine map against the EXIF table transcribed from ceyx_orient.cpp:104-245,
+# for every orientation and every pixel of a non-square frame.  It cannot prove
+# the Vulkan lowering is correct (that is the on-device gate) but it does prove
+# the COEFFICIENTS are, which is the part a transcription slip would break.
 ORIENT_TABLE = {
     1: lambda x, y, w, h: (x, y),
     2: lambda x, y, w, h: (w - 1 - x, y),
@@ -110,19 +114,41 @@ ORIENT_TABLE = {
 }
 
 
-def flag_form(x: int, y: int, o: int, uw: int, uh: int) -> "tuple[int, int]":
-    """Mirror of the generator's branch-free derivation."""
-    valid = 1 <= o <= 8
-    s = 1 if (valid and o >= 5) else 0
-    fx = 1 if (valid and o in (2, 3, 7, 8)) else 0
-    fy = 1 if (valid and o in (3, 4, 6, 7)) else 0
-    a = x + s * (y - x)
-    b = y + s * (x - y)
-    return (a + fx * (uw - 1 - 2 * a), b + fy * (uh - 1 - 2 * b))
+def affine_coeffs(o: int, uw: int, uh: int) -> "tuple[int, int, int, int, int, int]":
+    """Mirror of ceyx_orient_affine_coeffs(); returns (a_x,b_x,c_x,a_y,b_y,c_y).
+
+    Invalid orientations fall through to the identity row, matching the C
+    helper's `default:` and ceyx_orient_rgba's "invalid -> 1".
+    """
+    table = {
+        1: (1, 0, 0, 0, 1, 0),
+        2: (-1, 0, uw - 1, 0, 1, 0),
+        3: (-1, 0, uw - 1, 0, -1, uh - 1),
+        4: (1, 0, 0, 0, -1, uh - 1),
+        5: (0, 1, 0, 1, 0, 0),
+        6: (0, 1, 0, -1, 0, uh - 1),
+        7: (0, -1, uw - 1, -1, 0, uh - 1),
+        8: (0, -1, uw - 1, 1, 0, 0),
+    }
+    return table.get(o, (1, 0, 0, 0, 1, 0))
+
+
+# Red-state control: when set, exactly one coefficient of one orientation is
+# perturbed, so --selfcheck MUST report failure.  A check never observed
+# failing is not evidence.
+MUTATE_COEFF = False
+
+
+def affine_form(x: int, y: int, o: int, uw: int, uh: int) -> "tuple[int, int]":
+    """The kernel's arithmetic: two integer multiply-adds, nothing else."""
+    a_x, b_x, c_x, a_y, b_y, c_y = affine_coeffs(o, uw, uh)
+    if MUTATE_COEFF and o == 6:
+        c_y += 1
+    return (a_x * x + b_x * y + c_x, a_y * x + b_y * y + c_y)
 
 
 def selfcheck() -> int:
-    """Exhaustive compare of the flag form against the EXIF table."""
+    """Exhaustive compare of the affine coefficient table vs the EXIF table."""
     uw, uh = 7, 5          # non-square and both odd, so axis swaps cannot hide
     failures = 0
     for o in range(1, 9):
@@ -130,7 +156,7 @@ def selfcheck() -> int:
         ow, oh = (uh, uw) if o >= 5 else (uw, uh)
         for y in range(oh):
             for x in range(ow):
-                got = flag_form(x, y, o, uw, uh)
+                got = affine_form(x, y, o, uw, uh)
                 want = ORIENT_TABLE[o](x, y, uw, uh)
                 if got != want:
                     failures += 1
@@ -144,7 +170,7 @@ def selfcheck() -> int:
     for o in (-1, 0, 9, 255):
         for y in range(uh):
             for x in range(uw):
-                if flag_form(x, y, o, uw, uh) != (x, y):
+                if affine_form(x, y, o, uw, uh) != (x, y):
                     failures += 1
                     print(f"SELFCHECK FAIL invalid o={o} not identity",
                           file=sys.stderr)
@@ -152,6 +178,7 @@ def selfcheck() -> int:
     if failures == 0:
         print("SELFCHECK MATCH invalid->identity")
         print(f"SELFCHECK OK 8/8 orientations exhaustive on {uw}x{uh}")
+        print("SELFCHECK FORM=affine (ux=a_x*x+b_x*y+c_x, uy=a_y*x+b_y*y+c_y)")
     else:
         print(f"SELFCHECK FAILURES={failures}", file=sys.stderr)
     return 1 if failures else 0
@@ -162,7 +189,11 @@ def main() -> int:
     ap.add_argument("--check", action="store_true",
                     help="assert every block is byte-identical (exit 1 on drift)")
     ap.add_argument("--selfcheck", action="store_true",
-                    help="algebraically verify the flag form against the EXIF table")
+                    help="algebraically verify the affine coefficient table "
+                         "against the EXIF table")
+    ap.add_argument("--mutate-coeff", action="store_true",
+                    help="red-state control: perturb one coefficient so "
+                         "--selfcheck must fail")
     ap.add_argument("--print", dest="do_print", action="store_true",
                     help="print the reference block text")
     ap.add_argument("--file", default=DEFAULT_GENERATOR,
@@ -171,6 +202,10 @@ def main() -> int:
 
     if not args.check and not args.do_print and not args.selfcheck:
         ap.error("one of --check / --selfcheck / --print is required")
+
+    if args.mutate_coeff:
+        global MUTATE_COEFF
+        MUTATE_COEFF = True
 
     if args.selfcheck:
         rc = selfcheck()

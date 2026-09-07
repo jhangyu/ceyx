@@ -88,4 +88,57 @@ CEYX_FFI_EXPORT int32_t ceyx_orientation_transposes(int32_t exif_orientation);
 static inline bool ceyx_orientation_transposes_inline(int32_t exif_orientation) {
   return exif_orientation >= 5 && exif_orientation <= 8;
 }
+
+// T7b: affine coefficients for the fused GPU Stage4 orientation permutation.
+//
+// The Stage4 kernels no longer decide anything about orientation. They receive
+// six int32 scalars and evaluate only
+//
+//     ux = a_x*x + b_x*y + c_x
+//     uy = a_y*x + b_y*y + c_y
+//
+// where (x, y) is the ORIENTED output coordinate and (ux, uy) the UNORIENTED
+// source coordinate. This function is the whole decision, and it runs on the
+// host in plain C++.
+//
+// Why the decision moved here: two in-kernel formulations of the same
+// permutation mis-lowered on Adreno 750 / Vulkan while their CPU controls were
+// 8/8 correct -- F-T6-1 (8-way `select` equality chain; CSE collapse across
+// duplicate arm values) and F-T8-1 (branch-free flags; every orientation with
+// >= 1 flag set behaved as if more were set, consistent with
+// cast<int32_t>(bool) lowering to selects internally). See
+// docs/logs/2026-09-07/Task_t6_android_device_gate.md and
+// Task_t8_android_device_gate.md. Host arithmetic was never in doubt in either
+// gate, so the branch belongs here and the kernel keeps only multiply-add.
+//
+// `out` receives {a_x, b_x, c_x, a_y, b_y, c_y} in that order -- the same order
+// the kernels declare the inputs, immediately after src_scale. uw/uh are the
+// UNORIENTED output extents; the transposed extents are the dst buffer's, never
+// these. Orientations outside 1..8 yield the identity, matching
+// ceyx_orient_rgba's "invalid -> 1".
+//
+// Header-only on purpose: like ceyx_orientation_transposes_inline above, this
+// must survive Phase 4's deletion of ceyx_orient.cpp, so it takes no link
+// dependency on that TU.
+static inline void ceyx_orient_affine_coeffs(int32_t exif_orientation,
+                                             int32_t uw, int32_t uh,
+                                             int32_t out[6]) {
+  int32_t a_x = 1, b_x = 0, c_x = 0;
+  int32_t a_y = 0, b_y = 1, c_y = 0;
+  switch (exif_orientation) {
+    case 2:  a_x = -1; c_x = uw - 1;                                  break;
+    case 3:  a_x = -1; c_x = uw - 1; b_y = -1; c_y = uh - 1;          break;
+    case 4:                          b_y = -1; c_y = uh - 1;          break;
+    case 5:  a_x = 0; b_x = 1;       a_y = 1;  b_y = 0;               break;
+    case 6:  a_x = 0; b_x = 1;       a_y = -1; b_y = 0; c_y = uh - 1; break;
+    case 7:  a_x = 0; b_x = -1; c_x = uw - 1;
+                                     a_y = -1; b_y = 0; c_y = uh - 1; break;
+    case 8:  a_x = 0; b_x = -1; c_x = uw - 1;
+                                     a_y = 1;  b_y = 0;               break;
+    case 1:
+    default: break;  // identity; invalid orientations behave as 1
+  }
+  out[0] = a_x; out[1] = b_x; out[2] = c_x;
+  out[3] = a_y; out[4] = b_y; out[5] = c_y;
+}
 #endif

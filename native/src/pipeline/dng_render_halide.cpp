@@ -1130,6 +1130,16 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     const int out_w_oriented = orient_transposes ? dst_h : dst_w;
     const int out_h_oriented = orient_transposes ? dst_w : dst_h;
 
+    // T7b: orientation stops HERE. The kernels take six affine coefficients
+    // {a_x,b_x,c_x,a_y,b_y,c_y} and evaluate ux = a_x*x + b_x*y + c_x,
+    // uy = a_y*x + b_y*y + c_y — no branch of any kind survives into the GPU
+    // code, because two in-kernel formulations mis-lowered on Adreno 750
+    // (F-T6-1 select chain, F-T8-1 boolean flags) while their CPU controls were
+    // 8/8 correct. The unoriented extents fold into c_x/c_y, so dst_w/dst_h are
+    // not passed separately any more.
+    int32_t orient_coeffs[6];
+    ceyx_orient_affine_coeffs(exif_orientation, dst_w, dst_h, orient_coeffs);
+
     // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
     // indexes with dst_w/dst_h and would silently mis-stride under a swapped
     // output. No production caller combines them (the oriented FFI entry refuses
@@ -1304,11 +1314,10 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         /*crop_l=*/0,
         /*crop_t=*/0,
         src_scale,
-        // Productionization plan section 1.1: the three orientation scalars sit
-        // immediately after src_scale in every Stage4 kernel family.
-        exif_orientation,
-        /*unoriented_width=*/dst_w,
-        /*unoriented_height=*/dst_h,
+        // T7b: the six affine coefficients sit immediately after src_scale in
+        // every Stage4 kernel family. No orientation value reaches the kernel.
+        orient_coeffs[0], orient_coeffs[1], orient_coeffs[2],
+        orient_coeffs[3], orient_coeffs[4], orient_coeffs[5],
         exp_buf.raw_buffer(),
         tone_buf.raw_buffer(),
         gamma_buf.raw_buffer(),
@@ -1339,11 +1348,11 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #else
     const int result = dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
-                                         // Plan section 1.1: three orientation
-                                         // scalars immediately after src_scale.
-                                         exif_orientation,
-                                         /*unoriented_width=*/dst_w,
-                                         /*unoriented_height=*/dst_h,
+                                         // T7b: six affine coefficients
+                                         // immediately after src_scale.
+                                         orient_coeffs[0], orient_coeffs[1],
+                                         orient_coeffs[2], orient_coeffs[3],
+                                         orient_coeffs[4], orient_coeffs[5],
                                          exp_buf.raw_buffer(),
                                          tone_buf.raw_buffer(),
                                          gamma_buf.raw_buffer(),
@@ -1484,6 +1493,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         ceyx_orientation_transposes_inline(exif_orientation);
     const int out_w_oriented = orient_transposes ? dst_h : dst_w;
     const int out_h_oriented = orient_transposes ? dst_w : dst_h;
+
+    // T7b: identical derivation to runRenderStage4HalideAot — orientation stops
+    // here and only the six affine coefficients reach the kernel.
+    int32_t orient_coeffs[6];
+    ceyx_orient_affine_coeffs(exif_orientation, dst_w, dst_h, orient_coeffs);
 
     // Reconciliation 2/3 caveat (a): the !fuse_rgba RGB8 alpha-strip loop below
     // indexes with dst_w/dst_h and would silently mis-stride under a swapped
@@ -1725,11 +1739,10 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         crop_l,
         crop_t,
         src_scale,
-        // Productionization plan section 1.1: the three orientation scalars sit
-        // immediately after src_scale in every Stage4 kernel family.
-        exif_orientation,
-        /*unoriented_width=*/dst_w,
-        /*unoriented_height=*/dst_h,
+        // T7b: the six affine coefficients sit immediately after src_scale in
+        // every Stage4 kernel family. No orientation value reaches the kernel.
+        orient_coeffs[0], orient_coeffs[1], orient_coeffs[2],
+        orient_coeffs[3], orient_coeffs[4], orient_coeffs[5],
         exp_buf.raw_buffer(),
         tone_buf.raw_buffer(),
         gamma_buf.raw_buffer(),
@@ -1766,11 +1779,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         scaled
         ? dng_render_stage4_scaled_preavg(src_buf.raw_buffer(),
                                          src_scale,
-                                         // Plan section 1.1: three orientation
-                                         // scalars immediately after src_scale.
-                                         exif_orientation,
-                                         /*unoriented_width=*/dst_w,
-                                         /*unoriented_height=*/dst_h,
+                                         // T7b: six affine coefficients
+                                         // immediately after src_scale.
+                                         orient_coeffs[0], orient_coeffs[1],
+                                         orient_coeffs[2], orient_coeffs[3],
+                                         orient_coeffs[4], orient_coeffs[5],
                                          // Box geometry stays on the UNORIENTED
                                          // scaled extent (plan section 1.2: the
                                          // permutation is applied at the store).
@@ -1801,11 +1814,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          dst_buf.raw_buffer())
         : dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
-                                         // Plan section 1.1: three orientation
-                                         // scalars immediately after src_scale.
-                                         exif_orientation,
-                                         /*unoriented_width=*/dst_w,
-                                         /*unoriented_height=*/dst_h,
+                                         // T7b: six affine coefficients
+                                         // immediately after src_scale.
+                                         orient_coeffs[0], orient_coeffs[1],
+                                         orient_coeffs[2], orient_coeffs[3],
+                                         orient_coeffs[4], orient_coeffs[5],
                                          exp_buf.raw_buffer(),
                                          tone_buf.raw_buffer(),
                                          gamma_buf.raw_buffer(),

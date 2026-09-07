@@ -25,11 +25,17 @@ public:
     // Other targets keep the original interleaved RGB layout for performance.
     Input<Buffer<uint16_t>> src{"src", 3};          // x, y, c
     Input<float> src_scale{"src_scale"};            // usually 1 / 65535
-    // Fused EXIF orientation (productionization plan §1.1). RUNTIME scalars, not
-    // GeneratorParams: one archive serves all 8 cases.
-    Input<int32_t> orientation{"orientation"};
-    Input<int32_t> unoriented_width{"unoriented_width"};
-    Input<int32_t> unoriented_height{"unoriented_height"};
+    // Fused EXIF orientation (productionization plan §1.1, T7b affine form).
+    // RUNTIME scalars, not GeneratorParams: one archive serves all 8 cases.
+    // ux = a_x*x + b_x*y + c_x, uy = a_y*x + b_y*y + c_y. The host derives all
+    // six with ceyx_orient_affine_coeffs(); the unoriented extents are folded
+    // into the c terms, so the kernel never sees an orientation value.
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};   // 4098
     Input<Buffer<float>> tone_curve{"tone_curve", 1}; // 4098
     Input<Buffer<float>> encode_gamma{"encode_gamma", 1}; // 4098
@@ -99,38 +105,28 @@ public:
         //   4: (x, H-1-y)          8: (W-1-y, x)
         // Cases 5-8 transpose, so the caller sizes dst as (H, W).
         //
-        // FLAG FORM (F-T6-1; docs/logs/2026-09-07/Task_t6_android_device_gate.md).
-        // The 8-way `select` equality chain that used to stand here MISCOMPILES
-        // on Adreno 750 / Vulkan: asked 4, 5, 6 it produced the image for 3, and
-        // asked 8 it produced 7 -- byte-exactly, so a control-flow defect, not
-        // numeric drift. The CPU control on the same text was 8/8 correct, so the
-        // table was right and the SPIR-V lowering was not. Suspected mechanism is
-        // a CSE collapse across select arms that share a value expression (ux
-        // arms duplicate at (2,3),(5,6),(7,8); uy arms at (3,4),(6,7)).
-        // This form derives three booleans from o and then computes the
-        // coordinate BRANCH-FREE, so there are no select arms left to collapse.
-        // DO NOT re-land the equality-chain form on any backend.
-        //   orient_swap   : o in {5,6,7,8}  transpose the axes
-        //   orient_flip_x : o in {2,3,7,8}  mirror within the unoriented width
-        //   orient_flip_y : o in {3,4,6,7}  mirror within the unoriented height
-        Expr o = orientation;
-        Expr uw = unoriented_width;
-        Expr uh = unoriented_height;
-        Expr orient_valid = (o >= 1) && (o <= 8);  // anything else behaves as 1
-        Expr orient_swap = orient_valid && (o >= 5);
-        Expr orient_flip_x =
-            orient_valid && ((o == 2) || (o == 3) || (o == 7) || (o == 8));
-        Expr orient_flip_y =
-            orient_valid && ((o == 3) || (o == 4) || (o == 6) || (o == 7));
-        Expr orient_s = cast<int32_t>(orient_swap);
-        Expr orient_fx = cast<int32_t>(orient_flip_x);
-        Expr orient_fy = cast<int32_t>(orient_flip_y);
-        // orient_a/orient_b are the transposed-but-unmirrored coordinate;
-        // orient_fx/orient_fy then mirror them inside the unoriented extent.
-        Expr orient_a = x + orient_s * (y - x);
-        Expr orient_b = y + orient_s * (x - y);
-        Expr ux = orient_a + orient_fx * (uw - 1 - 2 * orient_a);
-        Expr uy = orient_b + orient_fy * (uh - 1 - 2 * orient_b);
+        // AFFINE FORM (T7b). The kernel decides NOTHING about orientation. The
+        // host computes six int32 coefficients with ceyx_orient_affine_coeffs()
+        // (native/include/ceyx_orient.h) and the kernel evaluates one integer
+        // multiply-add per axis. There is deliberately no select, no boolean,
+        // no cast-from-bool and no comparison against an orientation value
+        // anywhere below; the unoriented extents are folded into the c terms on
+        // the host, so no extent scalar reaches the kernel either.
+        // Two earlier IN-KERNEL formulations mis-lowered on Adreno 750 / Vulkan
+        // while their CPU controls were 8/8 correct on the same text:
+        //   F-T6-1 (Task_t6_android_device_gate.md) 8-way equality chain of
+        //     selects -- asked 4,5,6 it produced the image for 3, asked 8 it
+        //     produced 7, byte-exactly. Suspected CSE collapse across select
+        //     arms sharing a value expression.
+        //   F-T8-1 (Task_t8_android_device_gate.md) branch-free three-flag form
+        //     -- 30/40 byte-compares mismatched; every orientation with at
+        //     least one flag set behaved as if more flags were set, and only
+        //     the all-clear and all-set cases survived. Consistent with the
+        //     bool-to-int conversion lowering to selects internally.
+        // DO NOT re-land either form on any backend, and do not reintroduce an
+        // orientation scalar here: the branch belongs on the host.
+        Expr ux = orient_a_x * x + orient_b_x * y + orient_c_x;
+        Expr uy = orient_a_y * x + orient_b_y * y + orient_c_y;
         // ---- end fused orientation permutation ----
         Expr sx = clamp(ux, 0, src.dim(0).extent() - 1);
         Expr sy = clamp(uy, 0, src.dim(1).extent() - 1);
@@ -563,11 +559,17 @@ public:
     Input<int32_t> crop_l{"crop_l"};
     Input<int32_t> crop_t{"crop_t"};
     Input<float> src_scale{"src_scale"};
-    // Fused EXIF orientation (productionization plan §1.1). RUNTIME scalars, not
-    // GeneratorParams: one archive serves all 8 cases.
-    Input<int32_t> orientation{"orientation"};
-    Input<int32_t> unoriented_width{"unoriented_width"};
-    Input<int32_t> unoriented_height{"unoriented_height"};
+    // Fused EXIF orientation (productionization plan §1.1, T7b affine form).
+    // RUNTIME scalars, not GeneratorParams: one archive serves all 8 cases.
+    // ux = a_x*x + b_x*y + c_x, uy = a_y*x + b_y*y + c_y. The host derives all
+    // six with ceyx_orient_affine_coeffs(); the unoriented extents are folded
+    // into the c terms, so the kernel never sees an orientation value.
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
     Input<Buffer<float>> tone_curve{"tone_curve", 1};
     Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
@@ -629,38 +631,28 @@ public:
         //   4: (x, H-1-y)          8: (W-1-y, x)
         // Cases 5-8 transpose, so the caller sizes dst as (H, W).
         //
-        // FLAG FORM (F-T6-1; docs/logs/2026-09-07/Task_t6_android_device_gate.md).
-        // The 8-way `select` equality chain that used to stand here MISCOMPILES
-        // on Adreno 750 / Vulkan: asked 4, 5, 6 it produced the image for 3, and
-        // asked 8 it produced 7 -- byte-exactly, so a control-flow defect, not
-        // numeric drift. The CPU control on the same text was 8/8 correct, so the
-        // table was right and the SPIR-V lowering was not. Suspected mechanism is
-        // a CSE collapse across select arms that share a value expression (ux
-        // arms duplicate at (2,3),(5,6),(7,8); uy arms at (3,4),(6,7)).
-        // This form derives three booleans from o and then computes the
-        // coordinate BRANCH-FREE, so there are no select arms left to collapse.
-        // DO NOT re-land the equality-chain form on any backend.
-        //   orient_swap   : o in {5,6,7,8}  transpose the axes
-        //   orient_flip_x : o in {2,3,7,8}  mirror within the unoriented width
-        //   orient_flip_y : o in {3,4,6,7}  mirror within the unoriented height
-        Expr o = orientation;
-        Expr uw = unoriented_width;
-        Expr uh = unoriented_height;
-        Expr orient_valid = (o >= 1) && (o <= 8);  // anything else behaves as 1
-        Expr orient_swap = orient_valid && (o >= 5);
-        Expr orient_flip_x =
-            orient_valid && ((o == 2) || (o == 3) || (o == 7) || (o == 8));
-        Expr orient_flip_y =
-            orient_valid && ((o == 3) || (o == 4) || (o == 6) || (o == 7));
-        Expr orient_s = cast<int32_t>(orient_swap);
-        Expr orient_fx = cast<int32_t>(orient_flip_x);
-        Expr orient_fy = cast<int32_t>(orient_flip_y);
-        // orient_a/orient_b are the transposed-but-unmirrored coordinate;
-        // orient_fx/orient_fy then mirror them inside the unoriented extent.
-        Expr orient_a = x + orient_s * (y - x);
-        Expr orient_b = y + orient_s * (x - y);
-        Expr ux = orient_a + orient_fx * (uw - 1 - 2 * orient_a);
-        Expr uy = orient_b + orient_fy * (uh - 1 - 2 * orient_b);
+        // AFFINE FORM (T7b). The kernel decides NOTHING about orientation. The
+        // host computes six int32 coefficients with ceyx_orient_affine_coeffs()
+        // (native/include/ceyx_orient.h) and the kernel evaluates one integer
+        // multiply-add per axis. There is deliberately no select, no boolean,
+        // no cast-from-bool and no comparison against an orientation value
+        // anywhere below; the unoriented extents are folded into the c terms on
+        // the host, so no extent scalar reaches the kernel either.
+        // Two earlier IN-KERNEL formulations mis-lowered on Adreno 750 / Vulkan
+        // while their CPU controls were 8/8 correct on the same text:
+        //   F-T6-1 (Task_t6_android_device_gate.md) 8-way equality chain of
+        //     selects -- asked 4,5,6 it produced the image for 3, asked 8 it
+        //     produced 7, byte-exactly. Suspected CSE collapse across select
+        //     arms sharing a value expression.
+        //   F-T8-1 (Task_t8_android_device_gate.md) branch-free three-flag form
+        //     -- 30/40 byte-compares mismatched; every orientation with at
+        //     least one flag set behaved as if more flags were set, and only
+        //     the all-clear and all-set cases survived. Consistent with the
+        //     bool-to-int conversion lowering to selects internally.
+        // DO NOT re-land either form on any backend, and do not reintroduce an
+        // orientation scalar here: the branch belongs on the host.
+        Expr ux = orient_a_x * x + orient_b_x * y + orient_c_x;
+        Expr uy = orient_a_y * x + orient_b_y * y + orient_c_y;
         // ---- end fused orientation permutation ----
         // Per-class clamp: this kernel gathers from a cropped 1D interleaved
         // source, so the permuted coordinate carries the crop offset.
@@ -1656,11 +1648,17 @@ public:
 
     Input<Buffer<uint16_t>> src{"src", 3};          // x, y, c (Stage3 output)
     Input<float> src_scale{"src_scale"};            // usually 1 / 65535
-    // Fused EXIF orientation (productionization plan §1.1). RUNTIME scalars, not
-    // GeneratorParams: one archive serves all 8 cases.
-    Input<int32_t> orientation{"orientation"};
-    Input<int32_t> unoriented_width{"unoriented_width"};
-    Input<int32_t> unoriented_height{"unoriented_height"};
+    // Fused EXIF orientation (productionization plan §1.1, T7b affine form).
+    // RUNTIME scalars, not GeneratorParams: one archive serves all 8 cases.
+    // ux = a_x*x + b_x*y + c_x, uy = a_y*x + b_y*y + c_y. The host derives all
+    // six with ceyx_orient_affine_coeffs(); the unoriented extents are folded
+    // into the c terms, so the kernel never sees an orientation value.
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
     // Requested output size, in UNORIENTED geometry (i.e. equal to
     // unoriented_width/unoriented_height). The box cells tile the source, so
     // this must NOT be the swapped `dst` extent for a transposing orientation.
@@ -1730,38 +1728,28 @@ public:
         //   4: (x, H-1-y)          8: (W-1-y, x)
         // Cases 5-8 transpose, so the caller sizes dst as (H, W).
         //
-        // FLAG FORM (F-T6-1; docs/logs/2026-09-07/Task_t6_android_device_gate.md).
-        // The 8-way `select` equality chain that used to stand here MISCOMPILES
-        // on Adreno 750 / Vulkan: asked 4, 5, 6 it produced the image for 3, and
-        // asked 8 it produced 7 -- byte-exactly, so a control-flow defect, not
-        // numeric drift. The CPU control on the same text was 8/8 correct, so the
-        // table was right and the SPIR-V lowering was not. Suspected mechanism is
-        // a CSE collapse across select arms that share a value expression (ux
-        // arms duplicate at (2,3),(5,6),(7,8); uy arms at (3,4),(6,7)).
-        // This form derives three booleans from o and then computes the
-        // coordinate BRANCH-FREE, so there are no select arms left to collapse.
-        // DO NOT re-land the equality-chain form on any backend.
-        //   orient_swap   : o in {5,6,7,8}  transpose the axes
-        //   orient_flip_x : o in {2,3,7,8}  mirror within the unoriented width
-        //   orient_flip_y : o in {3,4,6,7}  mirror within the unoriented height
-        Expr o = orientation;
-        Expr uw = unoriented_width;
-        Expr uh = unoriented_height;
-        Expr orient_valid = (o >= 1) && (o <= 8);  // anything else behaves as 1
-        Expr orient_swap = orient_valid && (o >= 5);
-        Expr orient_flip_x =
-            orient_valid && ((o == 2) || (o == 3) || (o == 7) || (o == 8));
-        Expr orient_flip_y =
-            orient_valid && ((o == 3) || (o == 4) || (o == 6) || (o == 7));
-        Expr orient_s = cast<int32_t>(orient_swap);
-        Expr orient_fx = cast<int32_t>(orient_flip_x);
-        Expr orient_fy = cast<int32_t>(orient_flip_y);
-        // orient_a/orient_b are the transposed-but-unmirrored coordinate;
-        // orient_fx/orient_fy then mirror them inside the unoriented extent.
-        Expr orient_a = x + orient_s * (y - x);
-        Expr orient_b = y + orient_s * (x - y);
-        Expr ux = orient_a + orient_fx * (uw - 1 - 2 * orient_a);
-        Expr uy = orient_b + orient_fy * (uh - 1 - 2 * orient_b);
+        // AFFINE FORM (T7b). The kernel decides NOTHING about orientation. The
+        // host computes six int32 coefficients with ceyx_orient_affine_coeffs()
+        // (native/include/ceyx_orient.h) and the kernel evaluates one integer
+        // multiply-add per axis. There is deliberately no select, no boolean,
+        // no cast-from-bool and no comparison against an orientation value
+        // anywhere below; the unoriented extents are folded into the c terms on
+        // the host, so no extent scalar reaches the kernel either.
+        // Two earlier IN-KERNEL formulations mis-lowered on Adreno 750 / Vulkan
+        // while their CPU controls were 8/8 correct on the same text:
+        //   F-T6-1 (Task_t6_android_device_gate.md) 8-way equality chain of
+        //     selects -- asked 4,5,6 it produced the image for 3, asked 8 it
+        //     produced 7, byte-exactly. Suspected CSE collapse across select
+        //     arms sharing a value expression.
+        //   F-T8-1 (Task_t8_android_device_gate.md) branch-free three-flag form
+        //     -- 30/40 byte-compares mismatched; every orientation with at
+        //     least one flag set behaved as if more flags were set, and only
+        //     the all-clear and all-set cases survived. Consistent with the
+        //     bool-to-int conversion lowering to selects internally.
+        // DO NOT re-land either form on any backend, and do not reintroduce an
+        // orientation scalar here: the branch belongs on the host.
+        Expr ux = orient_a_x * x + orient_b_x * y + orient_c_x;
+        Expr uy = orient_a_y * x + orient_b_y * y + orient_c_y;
         // ---- end fused orientation permutation ----
 
         // ---- box-filter downscale of the Stage3 source -----------------
