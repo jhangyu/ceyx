@@ -694,8 +694,14 @@ class CeyxDecodePool {
     }
     final width = size[0] as int;
     final height = size[1] as int;
-    if (width <= 0 || height <= 0) {
-      // The dylib predates the entry for this route, or the probe failed.
+    if (width <= 0 || height <= 0 || width * height > _kMaxProbedPixels) {
+      // Non-positive: the dylib predates the entry for this route, or the probe
+      // failed. Above the ceiling: the answer cannot describe a real image, so
+      // it is the same "no pooled route" state rather than an allocation
+      // request — a probe answer is untrusted input, and turning an implausible
+      // one into a malloc asked the allocator for 844 TB (found by an
+      // independent gate; the failing allocation is real latency on the decode
+      // path, and the photo then opens through the degraded route anyway).
       _putSizeCache(key, _kNoPooledRoute);
       return null;
     }
@@ -703,6 +709,13 @@ class CeyxDecodePool {
     _putSizeCache(key, bytes, extent: (width, height));
     return bytes;
   }
+
+  /// Upper bound on a probed extent, MIRRORING the in-repo source of truth
+  /// `kRawMaxPixelCount` (`native/include/raw_gpu_pipeline.h:154`) rather than
+  /// inventing a second policy — the same mirroring pattern
+  /// `dng_decoder_service.dart` uses for `_orientationTransposes` vs
+  /// `ceyx_orient.h`. If that constant changes, change this one with it.
+  static const int _kMaxProbedPixels = 268435456;
 
   static String _sizeKey(String path, int? maxDim) => '$path|$maxDim';
 
