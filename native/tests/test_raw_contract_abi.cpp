@@ -54,7 +54,11 @@ static_assert(offsetof(RawDevelopParams, auto_exposure_ev) == 20,
 // appended at the end. Same guard pattern.
 static_assert(offsetof(RawDevelopParams, shadows) == 24,
              "shadows offset moved - must stay APPENDED, never inserted");
-static_assert(sizeof(RawDevelopParams) == 28, "RawDevelopParams size changed");
+// GPU orient productionization plan Task 3, contract version 5:
+// RawDevelopParams gains exif_orientation, appended at the end.
+static_assert(offsetof(RawDevelopParams, exif_orientation) == 28,
+             "exif_orientation offset moved - must stay APPENDED, never inserted");
+static_assert(sizeof(RawDevelopParams) == 32, "RawDevelopParams size changed");
 
 namespace {
 
@@ -138,12 +142,14 @@ int main() {
     check("color_transform_capacity",
           sizeof(xform.m) / sizeof(xform.m[0]) == 12);
 
-    // P19/Round 1/Round 2: the contract version is bumped whenever the plain-C
-    // surface changes. Phase 17 shipped version 1 implicitly; Phase 19 added
-    // the linear-RGB acceptance and RawGpuInput::component_black (2); Round 1
-    // Task 1.3 adds RawDevelopParams::auto_exposure_mode/auto_exposure_ev (3);
-    // Round 2 Task 2.3 adds RawDevelopParams::shadows (4).
-    check("contract_version", kRawContractVersion == 4);
+    // P19/Round 1/Round 2/GPU-orient-productionization: the contract version
+    // is bumped whenever the plain-C surface changes. Phase 17 shipped
+    // version 1 implicitly; Phase 19 added the linear-RGB acceptance and
+    // RawGpuInput::component_black (2); Round 1 Task 1.3 adds
+    // RawDevelopParams::auto_exposure_mode/auto_exposure_ev (3); Round 2
+    // Task 2.3 adds RawDevelopParams::shadows (4); GPU orient
+    // productionization plan Task 3 adds RawDevelopParams::exif_orientation (5).
+    check("contract_version", kRawContractVersion == 5);
 
     RawDevelopParams dev;
     std::memset(&dev, 0, sizeof(dev));
@@ -161,6 +167,13 @@ int main() {
     RawDevelopParams dev_aggregate_init{};
     check("develop_params_shadows_default_is_5",
           dev_aggregate_init.shadows == 5.0f);
+    // GPU orient productionization plan Task 3: exif_orientation default-member-
+    // initialises to 1 (identity) under aggregate-init, matching the untouched
+    // pre-existing decode paths; memset(0) also yields 0, which the kernel's
+    // select-chain treats as identity (documented above the field).
+    check("develop_params_exif_orientation_default_is_1",
+          dev_aggregate_init.exif_orientation == 1);
+    check("develop_params_exif_orientation_is_zeroable", dev.exif_orientation == 0);
 
     RawGpuInput cb;
     std::memset(&cb, 0, sizeof(cb));

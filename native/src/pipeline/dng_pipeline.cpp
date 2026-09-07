@@ -1174,12 +1174,16 @@ bool runHalideStage3ForBayer(dng_host &host,
 // runStage4ToRgb but may call it in its fallback path.
 // M-1: stage4_out_ptr/stage4_out_size — internal names reflect that the buffer
 // may hold either RGB8 or RGBA8 depending on config.fuse_rgba_output.
+// Productionization plan §1.4 (Task 3): exif_orientation is an explicit
+// trailing argument threaded from decodeToRgbSizedImpl through decodeStages
+// to every Stage4 call site, default 1 (identity) for the unoriented callers.
 bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     const PipelineConfig &config,
                     uint32_t inputWidth, uint32_t inputHeight,
                     int32_t maxDim,
                     uint8_t *&stage4_out_ptr, size_t &stage4_out_size,
-                    uint32_t &outW, uint32_t &outH);
+                    uint32_t &outW, uint32_t &outH,
+                    int32_t exif_orientation);
 
 // Phase 8.2.2 — Stage3→Stage4 GPU device handoff.
 // Dispatches Stage3 (async), does Stage4 CPU prep while GPU runs, then calls
@@ -1198,7 +1202,8 @@ bool runHalideStage3And4Fused(dng_host &host,
                                uint8_t *&stage4_out_ptr,
                                size_t &stage4_out_size,
                                uint32_t &outW,
-                               uint32_t &outH) {
+                               uint32_t &outH,
+                               int32_t exif_orientation) {
   if (!config.route.fused_demosaic_warp || !config.route.stage3_stage4_device_handoff)
     return false;
 
@@ -1287,7 +1292,7 @@ bool runHalideStage3And4Fused(dng_host &host,
   if (deviceBuf) {
     stage4Ok = render_stage4_halide_from_device_buffer(
         host, negative, renderer, deviceBuf, srcScale, config,
-        stage4_out_ptr, stage4_out_size, outW, outH);
+        stage4_out_ptr, stage4_out_size, outW, outH, exif_orientation);
   }
 
   const auto fusedEnd = Clock::now();
@@ -1341,7 +1346,8 @@ bool runHalideStage3And4Fused(dng_host &host,
   negative.SetStage3Image(stage3Stub);
 
   if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight, maxDim,
-                      stage4_out_ptr, stage4_out_size, outW, outH))
+                      stage4_out_ptr, stage4_out_size, outW, outH,
+                      exif_orientation))
     return false;
 
   if (timing) {
@@ -1394,7 +1400,8 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     uint32_t inputWidth, uint32_t inputHeight,
                     int32_t maxDim,
                     uint8_t *&stage4_out_ptr, size_t &stage4_out_size,
-                    uint32_t &outW, uint32_t &outH) {
+                    uint32_t &outW, uint32_t &outH,
+                    int32_t exif_orientation) {
   dng_render renderer(host, negative);
   renderer.SetMaximumSize(stage4MaximumSize(inputWidth, inputHeight, maxDim));
   renderer.SetFinalPixelType(ttByte);
@@ -1414,7 +1421,8 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   bool ok = render_stage4_halide(host, negative, renderer,
                                  RenderHalideMode::HALIDE_GPU,
                                  config,
-                                 stage4_out_ptr, stage4_out_size, outW, outH);
+                                 stage4_out_ptr, stage4_out_size, outW, outH,
+                                 exif_orientation);
   if (ok)
     return true;
 
@@ -1431,7 +1439,8 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
                                         size_t &stage4_out_size,
                                         uint32_t &outW,
                                         uint32_t &outH,
-                                        bool &restoreFailed) {
+                                        bool &restoreFailed,
+                                        int32_t exif_orientation) {
   restoreFailed = false;
   if (!config.route.stage2_stage4_device_handoff)
     return false;
@@ -1470,7 +1479,7 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
   const float srcScale = 1.0f / static_cast<float>(handoff.pixel_range);
   const bool ok = render_stage4_halide_from_device_buffer(
       host, negative, renderer, handoff.device_buffer, srcScale, config,
-      stage4_out_ptr, stage4_out_size, outW, outH);
+      stage4_out_ptr, stage4_out_size, outW, outH, exif_orientation);
   if (ok) {
     halide_stage2_ol2_clear_device_handoff(host);
     return true;
@@ -1519,7 +1528,8 @@ bool decodeStages(ConcurrentDngHost &host,
                   const ParsedDngMetadata &metadata,
                   int32_t maxDim,
                   const Clock::time_point &decodeStart,
-                  DngPipelineResult &result) {
+                  DngPipelineResult &result,
+                  int32_t exif_orientation) {
   const bool isBayer = metadata.isBayer;
   const uint32_t inputWidth = metadata.inputWidth;
   const uint32_t inputHeight = metadata.inputHeight;
@@ -1609,13 +1619,14 @@ bool decodeStages(ConcurrentDngHost &host,
     allDone = runHalideStage3And4Fused(
         host, negative, config, inputWidth, inputHeight, effectiveMaxDim,
         &stage3Timing, &stage3Workspace,
-        result.rgb_ptr, result.rgb_size, result.width, result.height);
+        result.rgb_ptr, result.rgb_size, result.width, result.height,
+        exif_orientation);
   } else {
     bool restoreFailed = false;
     allDone = runLossyStage2Stage4DeviceHandoff(
         host, negative, config, inputWidth, inputHeight,
         result.rgb_ptr, result.rgb_size, result.width, result.height,
-        restoreFailed);
+        restoreFailed, exif_orientation);
     if (restoreFailed) {
       result.error_code = kDngErrStage2HandoffRestoreFailed;
       return false;
@@ -1647,7 +1658,7 @@ bool decodeStages(ConcurrentDngHost &host,
   const auto processStart = Clock::now();
   if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight,
                       effectiveMaxDim, result.rgb_ptr, result.rgb_size,
-                      result.width, result.height)) {
+                      result.width, result.height, exif_orientation)) {
     result.error_code = kDngErrStage4Failed;
     return false;
   }
@@ -1985,7 +1996,8 @@ namespace {
 // either this function or decodeStages grows.
 bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
                           uint8_t *dst, size_t dst_capacity,
-                          DngPipelineResult &result) {
+                          DngPipelineResult &result,
+                          int32_t exif_orientation) {
   // L-4: signal pending decode so warmup yields between sub-steps.  Counter
   // is incremented before the mutex lock so warmup (which checks the counter
   // after releasing the mutex between steps) detects this decode immediately.
@@ -2092,7 +2104,7 @@ bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
     }
     const bool ok =
         decodeStages(host, config, *negative, metadata, max_dim, decodeStart,
-                     result);
+                     result, exif_orientation);
     // W7-B: on the fused path the orchestrators filled result.rgb_ptr with an
     // RGBA8 buffer from the checkout pool; expose it as rgba_ptr and null out
     // rgb_ptr so the FFI layer takes the zero-extra-pass path.
@@ -2128,7 +2140,8 @@ bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
 // dng_pipeline_decode_to_rgb forwarding here with max_dim = 0.
 bool dng_pipeline_decode_to_rgb_sized(const char *file_path, int32_t max_dim,
                                       DngPipelineResult &result) {
-  return decodeToRgbSizedImpl(file_path, max_dim, nullptr, 0, result);
+  return decodeToRgbSizedImpl(file_path, max_dim, nullptr, 0, result,
+                              /*exif_orientation=*/1);
 }
 
 // WP10: the caller-owned-buffer sibling. Additive; the two entries share one
@@ -2136,5 +2149,19 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path, int32_t max_dim,
 bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
                                      uint8_t *dst, size_t dst_capacity,
                                      DngPipelineResult &result) {
-  return decodeToRgbSizedImpl(file_path, max_dim, dst, dst_capacity, result);
+  return decodeToRgbSizedImpl(file_path, max_dim, dst, dst_capacity, result,
+                              /*exif_orientation=*/1);
+}
+
+// Productionization plan §1.4 (Task 3, Step 3.2): the oriented sibling.
+// exif_orientation threads as an explicit argument all the way down —
+// decodeToRgbSizedImpl -> decodeStages -> the three Stage4 dispatchers — and
+// is never placed on PipelineConfig (that struct is env-loaded route/settings
+// state; per-call data there invites a future cache bug).
+bool dng_pipeline_decode_to_rgb_into_oriented(const char *file_path, int32_t max_dim,
+                                              uint8_t *dst, size_t dst_capacity,
+                                              int32_t exif_orientation,
+                                              DngPipelineResult &result) {
+  return decodeToRgbSizedImpl(file_path, max_dim, dst, dst_capacity, result,
+                              exif_orientation);
 }

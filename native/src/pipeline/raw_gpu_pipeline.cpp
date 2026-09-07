@@ -282,13 +282,29 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     const uint32_t src_h = crop.height;
     uint32_t out_w = 0, out_h = 0;
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-    const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
+
+    // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
+    // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
+    // bridge wrappers (render_stage4_halide_from_device_buffer), the low-level
+    // runRenderStage4HalideAotFromDevice used on this route has NO out_w/out_h
+    // reference params to write the oriented extent back through -- so this
+    // caller must derive and publish the oriented extent itself, or every
+    // transposing orientation (5-8) reports/allocates the wrong (unswapped)
+    // dimensions. Mirrors §1.3's derivation exactly.
+    const bool transposes =
+        develop.exif_orientation >= 5 && develop.exif_orientation <= 8;
+    const uint32_t oriented_w = transposes ? out_h : out_w;
+    const uint32_t oriented_h = transposes ? out_w : out_h;
+    const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
 
     // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
     // all three branches stay structurally identical to one another.
+    // oriented_w/oriented_h (not out_w/out_h) is what makeRgbaCheckout
+    // publishes into out.width/out.height and checks the caller buffer
+    // against -- the caller's buffer was sized against the (oriented) probe.
     std::optional<RgbaCheckoutGuard> rgba;
     if (const RawErrorCode grc =
-            makeRgbaCheckout(out, rgba_bytes, &rgba, out_w, out_h);
+            makeRgbaCheckout(out, rgba_bytes, &rgba, oriented_w, oriented_h);
         grc != kRawSuccess) {
         return grc;
     }
@@ -307,13 +323,15 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
-                                            /*fuse_rgba=*/true)) {
+                                            /*fuse_rgba=*/true,
+                                            /*ctx=*/nullptr,
+                                            develop.exif_orientation)) {
         return kRawErrKernelFailed;
     }
 
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
-    out.width = out_w;
-    out.height = out_h;
+    out.width = oriented_w;
+    out.height = oriented_h;
     out.rgba_size = rgba_bytes;
     out.rgba_ptr = rgba->release();   // ownership moves to the caller
     return kRawSuccess;
@@ -420,13 +438,29 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     const uint32_t src_h = crop.height;
     uint32_t out_w = 0, out_h = 0;
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-    const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
+
+    // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
+    // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
+    // bridge wrappers (render_stage4_halide_from_device_buffer), the low-level
+    // runRenderStage4HalideAotFromDevice used on this route has NO out_w/out_h
+    // reference params to write the oriented extent back through -- so this
+    // caller must derive and publish the oriented extent itself, or every
+    // transposing orientation (5-8) reports/allocates the wrong (unswapped)
+    // dimensions. Mirrors §1.3's derivation exactly.
+    const bool transposes =
+        develop.exif_orientation >= 5 && develop.exif_orientation <= 8;
+    const uint32_t oriented_w = transposes ? out_h : out_w;
+    const uint32_t oriented_h = transposes ? out_w : out_h;
+    const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
 
     // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
     // all three branches stay structurally identical to one another.
+    // oriented_w/oriented_h (not out_w/out_h) is what makeRgbaCheckout
+    // publishes into out.width/out.height and checks the caller buffer
+    // against -- the caller's buffer was sized against the (oriented) probe.
     std::optional<RgbaCheckoutGuard> rgba;
     if (const RawErrorCode grc =
-            makeRgbaCheckout(out, rgba_bytes, &rgba, out_w, out_h);
+            makeRgbaCheckout(out, rgba_bytes, &rgba, oriented_w, oriented_h);
         grc != kRawSuccess) {
         return grc;
     }
@@ -440,13 +474,15 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
-                                            /*fuse_rgba=*/true)) {
+                                            /*fuse_rgba=*/true,
+                                            /*ctx=*/nullptr,
+                                            develop.exif_orientation)) {
         return kRawErrKernelFailed;
     }
 
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
-    out.width = out_w;
-    out.height = out_h;
+    out.width = oriented_w;
+    out.height = oriented_h;
     out.rgba_size = rgba_bytes;
     out.rgba_ptr = rgba->release();   // ownership moves to the caller
     return kRawSuccess;
@@ -552,13 +588,29 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     const uint32_t src_h = crop.height;
     uint32_t out_w = 0, out_h = 0;
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-    const size_t rgba_bytes = static_cast<size_t>(out_w) * out_h * 4;
+
+    // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
+    // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
+    // bridge wrappers (render_stage4_halide_from_device_buffer), the low-level
+    // runRenderStage4HalideAotFromDevice used on this route has NO out_w/out_h
+    // reference params to write the oriented extent back through -- so this
+    // caller must derive and publish the oriented extent itself, or every
+    // transposing orientation (5-8) reports/allocates the wrong (unswapped)
+    // dimensions. Mirrors §1.3's derivation exactly.
+    const bool transposes =
+        develop.exif_orientation >= 5 && develop.exif_orientation <= 8;
+    const uint32_t oriented_w = transposes ? out_h : out_w;
+    const uint32_t oriented_h = transposes ? out_w : out_h;
+    const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
 
     // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
     // all three branches stay structurally identical to one another.
+    // oriented_w/oriented_h (not out_w/out_h) is what makeRgbaCheckout
+    // publishes into out.width/out.height and checks the caller buffer
+    // against -- the caller's buffer was sized against the (oriented) probe.
     std::optional<RgbaCheckoutGuard> rgba;
     if (const RawErrorCode grc =
-            makeRgbaCheckout(out, rgba_bytes, &rgba, out_w, out_h);
+            makeRgbaCheckout(out, rgba_bytes, &rgba, oriented_w, oriented_h);
         grc != kRawSuccess) {
         return grc;
     }
@@ -572,13 +624,15 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             static_cast<int>(out_w),
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
-                                            /*fuse_rgba=*/true)) {
+                                            /*fuse_rgba=*/true,
+                                            /*ctx=*/nullptr,
+                                            develop.exif_orientation)) {
         return kRawErrKernelFailed;
     }
 
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
-    out.width = out_w;
-    out.height = out_h;
+    out.width = oriented_w;
+    out.height = oriented_h;
     out.rgba_size = rgba_bytes;
     out.rgba_ptr = rgba->release();   // ownership moves to the caller
     return kRawSuccess;
@@ -816,11 +870,21 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // is nothing between here and the next build() call on this call path.
     out.color_diag = raw_adapter_last_color_diagnostics();
     // The adapter owns the metadata half of RawDevelopParams; the develop knobs
-    // stay the caller's.
+    // stay the caller's. adapter.build() resets `effective` to
+    // RawDevelopParams{} internally (libraw_gpu_input_adapter.cpp:333-335), so
+    // EVERY caller-input field must be restored here explicitly or it silently
+    // reverts to the struct's default -- this bug already ate exif_orientation
+    // once (Task 3 fix-cycle 2): the branches always saw the default (1,
+    // identity) regardless of what the caller requested, because this list was
+    // written before the field existed and nothing re-checks it against the
+    // struct's current field set. Any FUTURE RawDevelopParams field will
+    // vanish the same way unless it is added here too -- flagged as a
+    // parking-lot risk, not fixed structurally in this task.
     effective.max_output_long_edge = develop.max_output_long_edge;
     effective.exposure_ev = develop.exposure_ev;
     effective.tone_curve_strength = develop.tone_curve_strength;
     effective.output_space = develop.output_space;
+    effective.exif_orientation = develop.exif_orientation;
     if (build_rc != kRawSuccess) {
         std::fprintf(stderr, "[RawPipeline] contract FAIL (%s: %s)\n",
                      raw_error_name(build_rc), reason);

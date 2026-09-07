@@ -200,6 +200,20 @@ bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
                                      uint8_t *dst, size_t dst_capacity,
                                      DngPipelineResult &result);
 
+// Productionization plan §1.4 (Task 3, AMENDED by reconciliation 2/3): the
+// oriented sibling of dng_pipeline_decode_to_rgb_into. exif_orientation is an
+// EXPLICIT PARAMETER, not a PipelineConfig field — PipelineConfig is
+// env-loaded route/settings state (loadFromEnv()), and per-call data placed
+// there invites a future caller to assume it is stable and cache it.
+// exif_orientation: EXIF tag values 1..8; any other value is treated as 1
+// (identity), matching ceyx_orient_rgba's contract. dng_pipeline_decode_to_rgb_into
+// forwards here with exif_orientation = 1, so the two entries share one body
+// and can never drift (§1.4, Step 3.2).
+bool dng_pipeline_decode_to_rgb_into_oriented(const char *file_path, int32_t max_dim,
+                                              uint8_t *dst, size_t dst_capacity,
+                                              int32_t exif_orientation,
+                                              DngPipelineResult &result);
+
 // WP10: metadata-only output-extent probe. Same sizing rules as
 // dng_pipeline_decode_to_rgb_sized (the same stage4MaximumSize() +
 // dng_render_stage4_output_size() pair, and the same non-Bayer downgrade of

@@ -32,8 +32,15 @@ extern "C" {
  *       aggregate-init call site (`RawDevelopParams{}`) keeps the pre-Task-2.3
  *       black-lift value without editing those call sites; a raw memset(0)
  *       still yields 0.0f (removes the black lift), same as any other field
- *       here. */
-#define kRawContractVersion 4
+ *       here.
+ *   5 - GPU orient productionization plan Task 3: RawDevelopParams gains
+ *       exif_orientation (appended at the end, no existing offset moves).
+ *       EXIF tag values 1..8; any other value (including 0 from memset/
+ *       malloc+zero) is treated as 1 (identity), matching ceyx_orient_rgba's
+ *       contract. No new FFI entry: ceyxDecodeIntoPhase3 already constructs a
+ *       RawDevelopParams develop{} locally and simply sets this field before
+ *       calling raw_pipeline_decode_file_into, whose signature is unchanged. */
+#define kRawContractVersion 5
 
 typedef enum RawSampleModel {
     kRawSampleModelCfa = 0,
@@ -261,6 +268,17 @@ typedef struct RawDevelopParams {
      * call site hash-identical to the pre-Task-2.3 hard-coded literal --
      * memset(0)/malloc+zero callers get 0.0f (no black lift) instead. */
     float shadows = 5.0f;
+
+    /* GPU orient productionization plan Task 3, contract version 5. Appended
+     * at the end on purpose: no existing field's offset changes.
+     *
+     * EXIF orientation 1..8 for the fused GPU orientation store-stage
+     * permutation; anything else is treated as 1 (identity), matching
+     * ceyx_orient_rgba. Default-member-initialised to 1 so every existing
+     * aggregate-init call site (`RawDevelopParams{}`) keeps behaving as an
+     * unoriented decode without editing those call sites; a raw memset(0)
+     * also yields 0, which the kernel's select-chain treats as identity. */
+    int32_t exif_orientation = 1;
 } RawDevelopParams;
 
 /* Every field required by spec section 6.5. */
