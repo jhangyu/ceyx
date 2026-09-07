@@ -312,7 +312,13 @@ class CeyxDecodePool {
   /// decode entry (it owns the allocation and `dng_free_rgba_buffer` owns the
   /// free) — the pool then owns nothing and every code path below degrades to
   /// the pre-WP6 behaviour, unchanged.
-  static CeyxNativeBufferPool? nativeBufferPool;
+  /// WP2: defaults to the process-wide pool rather than null. A null default
+  /// was degradation path P5 — a host that never assigned this field took the
+  /// legacy allocating route for every decode, silently. There is no allocating
+  /// route left to take, so "no pool" is no longer a coherent state. The type
+  /// stays nullable so a test can assign null to exercise the no-pool branch
+  /// until WP5 removes it.
+  static CeyxNativeBufferPool? nativeBufferPool = CeyxNativeBufferPool.shared;
 
   /// Test-only: how many isolates this pool has spawned, ever. After warmup
   /// this must NOT grow per decode — that is the whole point of the pool.

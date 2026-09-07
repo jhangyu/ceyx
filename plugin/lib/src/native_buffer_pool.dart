@@ -94,6 +94,12 @@ class CeyxNativeBufferPool {
   @visibleForTesting
   int debugUnpooledAllocations = 0;
 
+  /// Test-visible count of foreign addresses taken over by [adoptUnpooled].
+  /// Separate from [debugUnpooledAllocations] on purpose: that one means "this
+  /// photo was larger than a slot", this one means "a degradation path fired".
+  @visibleForTesting
+  int debugAdoptions = 0;
+
   @visibleForTesting
   int get debugIdleCount => _idle.length;
 
@@ -113,6 +119,13 @@ class CeyxNativeBufferPool {
         bytes,
         false,
       );
+      // WP2: an unpooled buffer is still THIS pool's to reclaim. Without this
+      // registration `ownsAddress` answered false, `tryReleaseByAddress`
+      // refused it, and the decode pool handed a malloc'd address to the
+      // dylib's own free. `_returnToFreeList` already routes `!pooled` to
+      // `_disposeBuffer`, and `_disposeBuffer` removes the entry, so this is
+      // the only line that was missing.
+      _byAddress[buffer.address] = buffer;
       return Future<CeyxNativeBuffer>.value(buffer);
     }
 
@@ -141,6 +154,27 @@ class CeyxNativeBufferPool {
     final waiter = _Waiter(bytes);
     _waiting.add(waiter);
     return waiter.completer.future;
+  }
+
+  /// Takes ownership of an address this pool did NOT allocate, as an UNPOOLED
+  /// buffer: it occupies no slot, counts against no bound, and its release
+  /// frees rather than returns.
+  ///
+  /// Used by the decode pool's self-allocating fallback, where the worker
+  /// isolate had to allocate (it cannot reach this Dart object) and the pool
+  /// must still be the single owner of every live RGBA address.
+  CeyxNativeBuffer adoptUnpooled(int address, int bytes) {
+    assert(address != 0, 'cannot adopt the null address');
+    assert(bytes > 0);
+    assert(
+      !_byAddress.containsKey(address),
+      'address 0x${address.toRadixString(16)} is already owned by this pool',
+    );
+    debugAdoptions++;
+    debugCheckedOut++;
+    final buffer = CeyxNativeBuffer._(address, bytes, false);
+    _byAddress[address] = buffer;
+    return buffer;
   }
 
   /// Returns [buffer] for reuse. Idempotent: a second return is a no-op, not a
