@@ -1034,6 +1034,11 @@ class CeyxDecodePool {
       _byRequestId.remove(requestId);
       worker.currentJob = null;
       _releaseSlot(job);
+      // B-1 fix: a resize proves the earlier probe was wrong, so the stale
+      // reference must not ride into the degraded redispatch either — same
+      // reasoning as the first-refusal clear below.
+      job.probedWidth = null;
+      job.probedHeight = null;
       job.awaitingRetry = true;
       _queue.add(job);
       _pump();
@@ -1041,6 +1046,16 @@ class CeyxDecodePool {
     }
     job.resized = true;
     _putSizeCache(_sizeKey(job.path, job.maxDim), bytes);
+    // B-1 fix (P4 review blocker): a resize means the probe extent this job
+    // carried was WRONG, so the stale probedWidth/probedHeight must not ride
+    // the retry's wire message into `selfVerifiedAppliedOrientation` — that
+    // would compare the correct result against a known-bad reference and
+    // guarantee a false CeyxOrientationContractException. `_dispatch` only
+    // omits the pair when both are null, restoring the "nothing to verify
+    // against" branch, and `_prepareAndEnqueue` is not re-entered on this
+    // path to re-derive a fresh one.
+    job.probedWidth = null;
+    job.probedHeight = null;
     _byRequestId.remove(requestId);
     worker.currentJob = null;
     _releaseSlot(job);

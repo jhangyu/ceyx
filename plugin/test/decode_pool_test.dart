@@ -4,6 +4,9 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ceyx/ceyx.dart';
+// P4 review blocker B-1 regression test: kMsgResize is not in the barrel's
+// `show` list (native_buffer_pool_test.dart:11 sets the same precedent).
+import 'package:ceyx/src/decode_pool.dart' show kMsgResize;
 import 'package:ffi/ffi.dart' show calloc;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -393,6 +396,9 @@ void orientationContractPoolWorker(List<Object?> bootstrap) {
         probedHeight: probedHeight,
       );
       final buf = calloc<Uint8>(6 * 4 * 4);
+      // [address, width, height, decodeMs, processMs, appliedOrientation] —
+      // unreachable when selfVerifiedAppliedOrientation throws (the only
+      // case this fake exercises), kept shape-correct regardless.
       poolPort.send(<Object?>[
         kMsgResult,
         requestId,
@@ -400,7 +406,82 @@ void orientationContractPoolWorker(List<Object?> bootstrap) {
         6,
         4,
         0.0,
-        applied.toDouble(),
+        0.0,
+        applied,
+      ]);
+    } catch (e) {
+      poolPort.send(<Object?>[kMsgError, requestId, e]);
+    }
+  });
+  poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
+}
+
+/// P4 review blocker B-1 regression fake worker: refuses the FIRST decode
+/// attempt of a transposing request with `kMsgResize` (the stale-prediction
+/// case a real `kDngErrDstTooSmall`/`kRawErrDstTooSmall` refusal produces),
+/// then accepts the retry with the CORRECTLY swapped extent.
+///
+/// Probes a fixed 6x4 (matching the slot-sizing capacity the first attempt
+/// was given), refuses that attempt, then on the retry returns 4x6 — the
+/// genuine transpose of 6x4 — and calls the REAL
+/// `DngDecoderService.selfVerifiedAppliedOrientation` with whatever
+/// `probedWidth`/`probedHeight` actually rides the retry's wire message
+/// (indices 9/10). Before the B-1 fix, `_onResize` left the stale 6x4 pair on
+/// the job, so this retry — despite being CORRECT — would still be compared
+/// against the wrong (now-stale) reference and throw a false
+/// `CeyxOrientationContractException`. After the fix, `_onResize` clears the
+/// pair, the retry carries no reference, and the assertion has nothing to
+/// verify against — so it must complete WITHOUT throwing.
+void resizeThenSwappedPoolWorker(List<Object?> bootstrap) {
+  final poolPort = bootstrap[0] as SendPort;
+  var refused = false;
+  final jobs = ReceivePort();
+  jobs.listen((Object? message) {
+    final msg = message as List<Object?>;
+    if (msg[0] == kMsgShutdown) {
+      jobs.close();
+      return;
+    }
+    if (msg[0] == kMsgConfigSlots) {
+      poolPort.send(<Object?>[kMsgSlotsAck, msg[1] as int]);
+      return;
+    }
+    final requestId = msg[1] as int;
+    final type = CeyxPoolJobType.values[msg[2] as int];
+    if (type == CeyxPoolJobType.probeSize) {
+      poolPort.send(<Object?>[kMsgResult, requestId, 6, 4]);
+      return;
+    }
+    if (!refused) {
+      refused = true;
+      // The "true" required extent — the genuine swap of the 6x4 probe.
+      poolPort.send(<Object?>[kMsgResize, requestId, 4, 6]);
+      return;
+    }
+    final exifOrientation = msg.length > 8 ? msg[8] as int : 1;
+    final probedWidth = msg.length > 9 ? msg[9] as int : null;
+    final probedHeight = msg.length > 10 ? msg[10] as int : null;
+    try {
+      final applied = DngDecoderService.selfVerifiedAppliedOrientation(
+        requested: exifOrientation,
+        width: 4,
+        height: 6,
+        probedWidth: probedWidth,
+        probedHeight: probedHeight,
+      );
+      final buf = calloc<Uint8>(4 * 6 * 4);
+      // [address, width, height, decodeMs, processMs, appliedOrientation] —
+      // appliedOrientation rides at index 5 (_materialize, decode_pool.dart),
+      // NOT in the processMs slot.
+      poolPort.send(<Object?>[
+        kMsgResult,
+        requestId,
+        buf.address,
+        4,
+        6,
+        0.0,
+        0.0,
+        applied,
       ]);
     } catch (e) {
       poolPort.send(<Object?>[kMsgError, requestId, e]);
@@ -1352,6 +1433,26 @@ void main() {
           pool.decode('orient_contract_violation.dng', exifOrientation: 6),
           throwsA(isA<CeyxOrientationContractException>()),
         );
+      },
+    );
+
+    test(
+      'P4 review blocker B-1: a resize retry clears the stale probed extent '
+      'so a CORRECT swapped result on the retry does not raise a false '
+      'CeyxOrientationContractException (the resize itself proves the '
+      'original probe was wrong — comparing against it would guarantee a '
+      'false positive on exactly the retry path that is supposed to recover '
+      'the decode)',
+      () async {
+        pool = CeyxDecodePool(
+          width: 1,
+          entryPoint: resizeThenSwappedPoolWorker,
+        );
+        final image = await pool.decode(
+          'orient_resize_then_swapped.dng',
+          exifOrientation: 6,
+        );
+        expect(image.appliedOrientation, equals(6));
       },
     );
   });
