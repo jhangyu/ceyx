@@ -30,6 +30,10 @@ void main() {
     // unowned by the pool — which is what makes deleting the dylib-free tail
     // safe rather than merely plausible.
     expect(CeyxDecodePool.debugUnownedWraps, 0);
+    // WP2 Task 2.5: nothing may still be checked out anywhere on this isolate
+    // when a test ends — the Dart-side replacement for the native
+    // checked-out-count leak assertion.
+    expect(CeyxNativeBufferPool.debugTotalLiveAddresses, 0);
   });
 
   tearDown(() {

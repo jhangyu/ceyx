@@ -33,7 +33,16 @@ class CeyxNativeBufferPool {
   CeyxNativeBufferPool({
     required this.maxBuffers,
     this.maxBufferBytes = _kDefaultMaxBufferBytes,
-  }) : assert(maxBuffers > 0, 'a pool with no slots is not a pool');
+  }) : assert(maxBuffers > 0, 'a pool with no slots is not a pool') {
+    _instances.add(WeakReference<CeyxNativeBufferPool>(this));
+  }
+
+  /// Every pool constructed on this isolate, held WEAKLY so a test pool that
+  /// goes out of scope stops contributing. A registry that retained everything
+  /// would turn [debugTotalLiveAddresses] into a monotonically rising number
+  /// nobody could assert on — a gauge that has silently stopped working.
+  static final List<WeakReference<CeyxNativeBufferPool>> _instances =
+      <WeakReference<CeyxNativeBufferPool>>[];
 
   /// 256MB. Comfortably above a 108MP RGBA frame (~432MB is beyond it — such a
   /// frame is served unpooled on purpose rather than permanently inflating a
@@ -99,6 +108,39 @@ class CeyxNativeBufferPool {
   /// photo was larger than a slot", this one means "a degradation path fired".
   @visibleForTesting
   int debugAdoptions = 0;
+
+  /// Addresses this pool currently considers checked out — pooled, unpooled
+  /// oversize and adopted alike. The Dart-side replacement for the native
+  /// `dng_rgba_output_checked_out_count()` gauge, at the same strength.
+  ///
+  /// DERIVED from [_byAddress], never maintained as a parallel set: two
+  /// structures that must agree eventually disagree, and the disagreement
+  /// would be invisible precisely when the gauge matters.
+  @visibleForTesting
+  Set<int> get debugLiveAddresses => _byAddress.entries
+      .where((e) => !e.value.released)
+      .map((e) => e.key)
+      .toSet();
+
+  /// Live checkouts across EVERY pool on this isolate, including [shared] and
+  /// any test-constructed pool. This is the half of the native gauge that
+  /// per-buffer identity accounting cannot express: "is anything, anywhere,
+  /// still checked out right now?" A test that ends non-zero has found a leak
+  /// in exactly the sense the native gauge meant.
+  ///
+  /// Counts CHECKED-OUT buffers, not allocated ones: an idle pooled buffer is
+  /// reuse, not a leak.
+  @visibleForTesting
+  static int get debugTotalLiveAddresses {
+    _instances.removeWhere(
+      (WeakReference<CeyxNativeBufferPool> ref) => ref.target == null,
+    );
+    var total = 0;
+    for (final ref in _instances) {
+      total += ref.target!.debugLiveAddresses.length;
+    }
+    return total;
+  }
 
   @visibleForTesting
   int get debugIdleCount => _idle.length;
