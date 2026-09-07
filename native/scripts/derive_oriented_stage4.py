@@ -55,11 +55,12 @@ DEFAULT_GENERATOR = os.path.join(
 START_MARKER = "// Fused EXIF orientation:"
 END_MARKER = "// ---- end fused orientation permutation ----"
 
-# Classes that MUST carry the block once their task has landed.  The Vulkan
-# split kernel lands in Task 7; until then it is reported as absent, which is
-# informational, not a failure.
-REQUIRED_CLASSES = ("DngRenderStage4", "DngRenderStage4ScaledPreAvg")
-OPTIONAL_CLASSES = ("DngRenderStage4Android",)
+# Classes that MUST carry the block.  The Vulkan split kernel joined the set in
+# Task 7, so all three are now mandatory and there are no optional classes left:
+# an absent block is a hard failure, not a note.
+REQUIRED_CLASSES = ("DngRenderStage4", "DngRenderStage4ScaledPreAvg",
+                    "DngRenderStage4Android")
+OPTIONAL_CLASSES = ()
 
 CLASS_RE = re.compile(r"^class\s+(\w+)\s*:\s*public\s+Halide::Generator", re.M)
 
@@ -90,18 +91,91 @@ def extract_block(body: str) -> "str | None":
     return None
 
 
+# --- Algebraic self-check of the flag form (Task 7) -------------------------
+# The generator computes the permutation branch-free from three flags.  This
+# reimplements that arithmetic in Python and compares it against the EXIF table
+# transcribed from ceyx_orient.cpp:104-245, for every orientation and every
+# pixel of a non-square frame.  It cannot prove the Vulkan lowering is correct
+# (that is Task 8's on-device gate) but it does prove the FORMULA is, which is
+# the part a transcription slip would break.
+ORIENT_TABLE = {
+    1: lambda x, y, w, h: (x, y),
+    2: lambda x, y, w, h: (w - 1 - x, y),
+    3: lambda x, y, w, h: (w - 1 - x, h - 1 - y),
+    4: lambda x, y, w, h: (x, h - 1 - y),
+    5: lambda x, y, w, h: (y, x),
+    6: lambda x, y, w, h: (y, h - 1 - x),
+    7: lambda x, y, w, h: (w - 1 - y, h - 1 - x),
+    8: lambda x, y, w, h: (w - 1 - y, x),
+}
+
+
+def flag_form(x: int, y: int, o: int, uw: int, uh: int) -> "tuple[int, int]":
+    """Mirror of the generator's branch-free derivation."""
+    valid = 1 <= o <= 8
+    s = 1 if (valid and o >= 5) else 0
+    fx = 1 if (valid and o in (2, 3, 7, 8)) else 0
+    fy = 1 if (valid and o in (3, 4, 6, 7)) else 0
+    a = x + s * (y - x)
+    b = y + s * (x - y)
+    return (a + fx * (uw - 1 - 2 * a), b + fy * (uh - 1 - 2 * b))
+
+
+def selfcheck() -> int:
+    """Exhaustive compare of the flag form against the EXIF table."""
+    uw, uh = 7, 5          # non-square and both odd, so axis swaps cannot hide
+    failures = 0
+    for o in range(1, 9):
+        # For transposing orientations the output frame is (H, W).
+        ow, oh = (uh, uw) if o >= 5 else (uw, uh)
+        for y in range(oh):
+            for x in range(ow):
+                got = flag_form(x, y, o, uw, uh)
+                want = ORIENT_TABLE[o](x, y, uw, uh)
+                if got != want:
+                    failures += 1
+                    if failures <= 5:
+                        print(f"SELFCHECK FAIL o={o} (x={x},y={y}) "
+                              f"got={got} want={want}", file=sys.stderr)
+        if failures == 0:
+            print(f"SELFCHECK MATCH o={o}")
+    # Out-of-range orientations must degrade to the identity, matching
+    # ceyx_orient_rgba's "invalid -> 1".
+    for o in (-1, 0, 9, 255):
+        for y in range(uh):
+            for x in range(uw):
+                if flag_form(x, y, o, uw, uh) != (x, y):
+                    failures += 1
+                    print(f"SELFCHECK FAIL invalid o={o} not identity",
+                          file=sys.stderr)
+                    break
+    if failures == 0:
+        print("SELFCHECK MATCH invalid->identity")
+        print(f"SELFCHECK OK 8/8 orientations exhaustive on {uw}x{uh}")
+    else:
+        print(f"SELFCHECK FAILURES={failures}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
                     help="assert every block is byte-identical (exit 1 on drift)")
+    ap.add_argument("--selfcheck", action="store_true",
+                    help="algebraically verify the flag form against the EXIF table")
     ap.add_argument("--print", dest="do_print", action="store_true",
                     help="print the reference block text")
     ap.add_argument("--file", default=DEFAULT_GENERATOR,
                     help="generator source to inspect")
     args = ap.parse_args()
 
-    if not args.check and not args.do_print:
-        ap.error("one of --check / --print is required")
+    if not args.check and not args.do_print and not args.selfcheck:
+        ap.error("one of --check / --selfcheck / --print is required")
+
+    if args.selfcheck:
+        rc = selfcheck()
+        if rc or not (args.check or args.do_print):
+            return rc
 
     with open(args.file, "r", encoding="utf-8") as fh:
         text = fh.read()

@@ -98,17 +98,39 @@ public:
         //   3: (W-1-x, H-1-y)      7: (W-1-y, H-1-x)
         //   4: (x, H-1-y)          8: (W-1-y, x)
         // Cases 5-8 transpose, so the caller sizes dst as (H, W).
+        //
+        // FLAG FORM (F-T6-1; docs/logs/2026-09-07/Task_t6_android_device_gate.md).
+        // The 8-way `select` equality chain that used to stand here MISCOMPILES
+        // on Adreno 750 / Vulkan: asked 4, 5, 6 it produced the image for 3, and
+        // asked 8 it produced 7 -- byte-exactly, so a control-flow defect, not
+        // numeric drift. The CPU control on the same text was 8/8 correct, so the
+        // table was right and the SPIR-V lowering was not. Suspected mechanism is
+        // a CSE collapse across select arms that share a value expression (ux
+        // arms duplicate at (2,3),(5,6),(7,8); uy arms at (3,4),(6,7)).
+        // This form derives three booleans from o and then computes the
+        // coordinate BRANCH-FREE, so there are no select arms left to collapse.
+        // DO NOT re-land the equality-chain form on any backend.
+        //   orient_swap   : o in {5,6,7,8}  transpose the axes
+        //   orient_flip_x : o in {2,3,7,8}  mirror within the unoriented width
+        //   orient_flip_y : o in {3,4,6,7}  mirror within the unoriented height
         Expr o = orientation;
         Expr uw = unoriented_width;
         Expr uh = unoriented_height;
-        Expr ux = select(o == 2 || o == 3, uw - 1 - x,
-                         o == 5 || o == 6, y,
-                         o == 7 || o == 8, uw - 1 - y,
-                                           x);
-        Expr uy = select(o == 3 || o == 4, uh - 1 - y,
-                         o == 5 || o == 8, x,
-                         o == 6 || o == 7, uh - 1 - x,
-                                           y);
+        Expr orient_valid = (o >= 1) && (o <= 8);  // anything else behaves as 1
+        Expr orient_swap = orient_valid && (o >= 5);
+        Expr orient_flip_x =
+            orient_valid && ((o == 2) || (o == 3) || (o == 7) || (o == 8));
+        Expr orient_flip_y =
+            orient_valid && ((o == 3) || (o == 4) || (o == 6) || (o == 7));
+        Expr orient_s = cast<int32_t>(orient_swap);
+        Expr orient_fx = cast<int32_t>(orient_flip_x);
+        Expr orient_fy = cast<int32_t>(orient_flip_y);
+        // orient_a/orient_b are the transposed-but-unmirrored coordinate;
+        // orient_fx/orient_fy then mirror them inside the unoriented extent.
+        Expr orient_a = x + orient_s * (y - x);
+        Expr orient_b = y + orient_s * (x - y);
+        Expr ux = orient_a + orient_fx * (uw - 1 - 2 * orient_a);
+        Expr uy = orient_b + orient_fy * (uh - 1 - 2 * orient_b);
         // ---- end fused orientation permutation ----
         Expr sx = clamp(ux, 0, src.dim(0).extent() - 1);
         Expr sy = clamp(uy, 0, src.dim(1).extent() - 1);
@@ -507,14 +529,27 @@ public:
 // HARD CONSTRAINT: do NOT port the macOS `rendered_rgb.compute_at` schedule —
 // any materialized compute_at producer still collapses G/B to the last select
 // branch on Vulkan (pre-check Probe B, re-confirmed 2026-07-05 with
-// align_bounds; TailStrategy::GuardWithIf is a compile error on this target:
-// dynamic workgroup sizes need Vulkan v1.3). The kernel body must stay fully
-// inlined; unroll(c) + select folds c per copy and CSE shares the
-// c-independent pipeline body, so inlining costs no redundant compute.
+// align_bounds). The kernel body must stay fully inlined; unroll(c) + select
+// folds c per copy and CSE shares the c-independent pipeline body, so inlining
+// costs no redundant compute.
+//
+// TailStrategy::GuardWithIf COMPILES on this target (RC=0 for
+// arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query,
+// host-vulkan and host-metal), verified with a positive control showing the
+// guard_tail=true/false archives differ in size and SHA-256 (finding F-V3-9,
+// docs/logs/2026-09-07/Task_vk_orient_v3_findings.md). The comment previously
+// here claimed it required Vulkan v1.3 dynamic workgroup sizes; that claim was
+// false as stated. Device CORRECTNESS of the guard is gated on real hardware
+// (Task 6); note F-T6-3 -- TailStrategy::Auto already bounds the tail on this
+// device, so guard_tail=false is NOT a red-state correctness control here.
 // =============================================================================
 class DngRenderStage4Android : public Halide::Generator<DngRenderStage4Android> {
 public:
     GeneratorParam<int32_t> diag_stage{"diag_stage", -1};
+    // Sub-tile tail safety. ON by default: with -no_asserts-no_bounds_query the
+    // default (ShiftInwards) tail writes a full tile into a smaller buffer.
+    // Compiles on Metal AND on the Android Vulkan target (finding F-V3-9).
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
 
     // W2: single flat-1D interleaved src (replaces three planar src_r/g/b).
     // Contents = SDK interleaved RGB buffer (row-major, channel stride 1) laid
@@ -528,6 +563,11 @@ public:
     Input<int32_t> crop_l{"crop_l"};
     Input<int32_t> crop_t{"crop_t"};
     Input<float> src_scale{"src_scale"};
+    // Fused EXIF orientation (productionization plan §1.1). RUNTIME scalars, not
+    // GeneratorParams: one archive serves all 8 cases.
+    Input<int32_t> orientation{"orientation"};
+    Input<int32_t> unoriented_width{"unoriented_width"};
+    Input<int32_t> unoriented_height{"unoriented_height"};
     Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
     Input<Buffer<float>> tone_curve{"tone_curve", 1};
     Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
@@ -578,8 +618,54 @@ public:
         dst.dim(2).set_bounds(0, 4);
         dst.dim(2).set_stride(1);
 
-        Expr sx = clamp(x + crop_l, 0, src_width - 1);
-        Expr sy = clamp(y + crop_t, 0, src_height - 1);
+        // Fused EXIF orientation: permute the OUTPUT coordinate back to the
+        // unoriented coordinate before any pixel math runs. Every arithmetic
+        // expression below is untouched, so the fused result is a pure index
+        // permutation of the unfused one -> byte-exact by construction.
+        // Table mirrors native/tests/oracle/ceyx_orient_oracle.cpp exactly.
+        //   1: (x, y)              5: (y, x)
+        //   2: (W-1-x, y)          6: (y, H-1-x)
+        //   3: (W-1-x, H-1-y)      7: (W-1-y, H-1-x)
+        //   4: (x, H-1-y)          8: (W-1-y, x)
+        // Cases 5-8 transpose, so the caller sizes dst as (H, W).
+        //
+        // FLAG FORM (F-T6-1; docs/logs/2026-09-07/Task_t6_android_device_gate.md).
+        // The 8-way `select` equality chain that used to stand here MISCOMPILES
+        // on Adreno 750 / Vulkan: asked 4, 5, 6 it produced the image for 3, and
+        // asked 8 it produced 7 -- byte-exactly, so a control-flow defect, not
+        // numeric drift. The CPU control on the same text was 8/8 correct, so the
+        // table was right and the SPIR-V lowering was not. Suspected mechanism is
+        // a CSE collapse across select arms that share a value expression (ux
+        // arms duplicate at (2,3),(5,6),(7,8); uy arms at (3,4),(6,7)).
+        // This form derives three booleans from o and then computes the
+        // coordinate BRANCH-FREE, so there are no select arms left to collapse.
+        // DO NOT re-land the equality-chain form on any backend.
+        //   orient_swap   : o in {5,6,7,8}  transpose the axes
+        //   orient_flip_x : o in {2,3,7,8}  mirror within the unoriented width
+        //   orient_flip_y : o in {3,4,6,7}  mirror within the unoriented height
+        Expr o = orientation;
+        Expr uw = unoriented_width;
+        Expr uh = unoriented_height;
+        Expr orient_valid = (o >= 1) && (o <= 8);  // anything else behaves as 1
+        Expr orient_swap = orient_valid && (o >= 5);
+        Expr orient_flip_x =
+            orient_valid && ((o == 2) || (o == 3) || (o == 7) || (o == 8));
+        Expr orient_flip_y =
+            orient_valid && ((o == 3) || (o == 4) || (o == 6) || (o == 7));
+        Expr orient_s = cast<int32_t>(orient_swap);
+        Expr orient_fx = cast<int32_t>(orient_flip_x);
+        Expr orient_fy = cast<int32_t>(orient_flip_y);
+        // orient_a/orient_b are the transposed-but-unmirrored coordinate;
+        // orient_fx/orient_fy then mirror them inside the unoriented extent.
+        Expr orient_a = x + orient_s * (y - x);
+        Expr orient_b = y + orient_s * (x - y);
+        Expr ux = orient_a + orient_fx * (uw - 1 - 2 * orient_a);
+        Expr uy = orient_b + orient_fy * (uh - 1 - 2 * orient_b);
+        // ---- end fused orientation permutation ----
+        // Per-class clamp: this kernel gathers from a cropped 1D interleaved
+        // source, so the permuted coordinate carries the crop offset.
+        Expr sx = clamp(ux + crop_l, 0, src_width - 1);
+        Expr sy = clamp(uy + crop_t, 0, src_height - 1);
 
         // W2: input-side interleaved gather (replaces three planar reads).
         Expr base = (sy * src_row_stride_px + sx) * 3;
@@ -888,9 +974,14 @@ public:
         if (get_target().has_gpu_feature()) {
             Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
             dst.bound(c, 0, 4)
-               .reorder(c, x, y)
-               .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
-               .unroll(c);
+               .reorder(c, x, y);
+            if (guard_tail) {
+                dst.gpu_tile(x, y, xo, yo, xi, yi, 16, 16,
+                             TailStrategy::GuardWithIf);
+            } else {
+                dst.gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+            }
+            dst.unroll(c);
         } else {
             Var yo("yo"), yi("yi");
             dst.bound(c, 0, 4)
@@ -1638,17 +1729,39 @@ public:
         //   3: (W-1-x, H-1-y)      7: (W-1-y, H-1-x)
         //   4: (x, H-1-y)          8: (W-1-y, x)
         // Cases 5-8 transpose, so the caller sizes dst as (H, W).
+        //
+        // FLAG FORM (F-T6-1; docs/logs/2026-09-07/Task_t6_android_device_gate.md).
+        // The 8-way `select` equality chain that used to stand here MISCOMPILES
+        // on Adreno 750 / Vulkan: asked 4, 5, 6 it produced the image for 3, and
+        // asked 8 it produced 7 -- byte-exactly, so a control-flow defect, not
+        // numeric drift. The CPU control on the same text was 8/8 correct, so the
+        // table was right and the SPIR-V lowering was not. Suspected mechanism is
+        // a CSE collapse across select arms that share a value expression (ux
+        // arms duplicate at (2,3),(5,6),(7,8); uy arms at (3,4),(6,7)).
+        // This form derives three booleans from o and then computes the
+        // coordinate BRANCH-FREE, so there are no select arms left to collapse.
+        // DO NOT re-land the equality-chain form on any backend.
+        //   orient_swap   : o in {5,6,7,8}  transpose the axes
+        //   orient_flip_x : o in {2,3,7,8}  mirror within the unoriented width
+        //   orient_flip_y : o in {3,4,6,7}  mirror within the unoriented height
         Expr o = orientation;
         Expr uw = unoriented_width;
         Expr uh = unoriented_height;
-        Expr ux = select(o == 2 || o == 3, uw - 1 - x,
-                         o == 5 || o == 6, y,
-                         o == 7 || o == 8, uw - 1 - y,
-                                           x);
-        Expr uy = select(o == 3 || o == 4, uh - 1 - y,
-                         o == 5 || o == 8, x,
-                         o == 6 || o == 7, uh - 1 - x,
-                                           y);
+        Expr orient_valid = (o >= 1) && (o <= 8);  // anything else behaves as 1
+        Expr orient_swap = orient_valid && (o >= 5);
+        Expr orient_flip_x =
+            orient_valid && ((o == 2) || (o == 3) || (o == 7) || (o == 8));
+        Expr orient_flip_y =
+            orient_valid && ((o == 3) || (o == 4) || (o == 6) || (o == 7));
+        Expr orient_s = cast<int32_t>(orient_swap);
+        Expr orient_fx = cast<int32_t>(orient_flip_x);
+        Expr orient_fy = cast<int32_t>(orient_flip_y);
+        // orient_a/orient_b are the transposed-but-unmirrored coordinate;
+        // orient_fx/orient_fy then mirror them inside the unoriented extent.
+        Expr orient_a = x + orient_s * (y - x);
+        Expr orient_b = y + orient_s * (x - y);
+        Expr ux = orient_a + orient_fx * (uw - 1 - 2 * orient_a);
+        Expr uy = orient_b + orient_fy * (uh - 1 - 2 * orient_b);
         // ---- end fused orientation permutation ----
 
         // ---- box-filter downscale of the Stage3 source -----------------
