@@ -280,91 +280,6 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
   return result;
 }
 
-#if defined(DNG_STAGE4_SPLIT_KERNEL)
-// TEMP-VULKAN-ORIENT (deleted in Task 9): the Vulkan split kernel does not
-// carry the fused orientation until Task 7/Phase 3 lands. Until then this
-// build decodes unoriented and orients on the CPU, exactly as before the
-// productionization plan — this is the CURRENT (pre-plan) body of
-// ceyx_decode_into_buffer_oriented, moved verbatim into a static function
-// under this guard (plan §3 Task 4 Step 4.2).
-static DngResult *ceyxDecodeIntoBufferOrientedCpuLegacy(
-    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
-    int32_t exif_orientation, RawRoute route, DngResult *result) {
-  const bool transposes = ceyx_orientation_transposes(exif_orientation) != 0;
-
-  // Non-transposing (1,2,3,4 and every out-of-range value, which the host's
-  // table treats as 1): decode straight into the caller's buffer and orient it
-  // in place. Zero extra memory — the common non-identity case, orientation 3,
-  // lands here.
-  if (!transposes) {
-    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
-                         /*exif_orientation=*/1, result);
-    if (result->error_code != 0) return result;
-    int32_t ow = 0, oh = 0;
-    const int32_t orc =
-        ceyx_orient_rgba(dst, dst, dst_capacity, result->width, result->height,
-                         exif_orientation, &ow, &oh);
-    if (orc != 0) {
-      // Structurally unreachable: capacity was proven in phase 2 and in-place
-      // is legal for every non-transposing case. Reported rather than ignored,
-      // because silently handing back half-oriented pixels is worse than an
-      // error the caller can see.
-      result->rgba_data = nullptr;
-      result->error_code = orc;
-      return result;
-    }
-    result->width = ow;
-    result->height = oh;
-    return result;
-  }
-
-  // Transposing (5,6,7,8): the decode cannot write its own source in place, so
-  // it goes to a scratch frame from the SAME pool the decoders use — bounded
-  // by the configured slot count, not by the number of photos.
-  const size_t need =
-      static_cast<size_t>(result->width) * result->height * 4;
-  uint8_t *scratch = g_force_scratch_failure.load(std::memory_order_relaxed)
-                         ? nullptr
-                         : dng_rgba_output_acquire(need);
-  if (!scratch) {
-    // MANDATED DEGRADATION (spec §4 Task 2). A scratch shortage is a
-    // memory-pressure blip; refusing the decode would turn it into "the photo
-    // will not open". Decode unoriented into dst and return SUCCESS with the
-    // UNSWAPPED extent — the caller's extent-consistency check sees that the
-    // extent did not swap, reports appliedOrientation = 1, and rotates on the
-    // host exactly as it does for every non-ceyx decoder arm.
-    ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
-                         /*exif_orientation=*/1, result);
-    return result;
-  }
-
-  ceyxDecodeIntoPhase3(file_path, max_dim, route, scratch, need,
-                       /*exif_orientation=*/1, result);
-  if (result->error_code != 0) {
-    dng_rgba_output_release(scratch);
-    return result;
-  }
-
-  int32_t ow = 0, oh = 0;
-  const int32_t orc =
-      ceyx_orient_rgba(scratch, dst, dst_capacity, result->width,
-                       result->height, exif_orientation, &ow, &oh);
-  dng_rgba_output_release(scratch);
-  if (orc != 0) {
-    result->rgba_data = nullptr;
-    result->error_code = orc;
-    return result;
-  }
-  // Pointer identity contract, preserved: phase 3 set rgba_data to the SCRATCH
-  // (its own dst), which must never escape to the caller. The oriented pixels
-  // are in the caller's buffer, so that is what is reported.
-  result->rgba_data = dst;
-  result->width = ow;
-  result->height = oh;
-  return result;
-}
-#endif  // DNG_STAGE4_SPLIT_KERNEL
-
 CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
     const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
     int32_t exif_orientation) {
@@ -378,16 +293,10 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
     return result;
   }
 
-#if defined(DNG_STAGE4_SPLIT_KERNEL)
-  // Vulkan split-kernel build: dispatch to the CPU-legacy path above (see its
-  // marker comment for why it still exists and when it goes away).
-  return ceyxDecodeIntoBufferOrientedCpuLegacy(file_path, max_dim, dst,
-                                               dst_capacity, exif_orientation,
-                                               route, result);
-#else
-  // Fused path: the kernel writes oriented pixels straight into the caller's
-  // buffer. No scratch, no second pass, no degradation arm — the transposing
-  // in-place impossibility that motivated them no longer exists.
+  // Fused path (Task 9: the only path now, on every platform). The kernel
+  // writes oriented pixels straight into the caller's buffer. No scratch, no
+  // second pass, no degradation arm — the transposing in-place impossibility
+  // that motivated them no longer exists.
   //
   // R-19 (named behaviour change, plan §3 Task 4): post-fusion there is no
   // successful-but-unoriented return value any more. Previously a scratch
@@ -422,7 +331,6 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   }
   result->rgba_data = dst;   // pipeline already reported the ORIENTED extent
   return result;
-#endif
 }
 
 }  // extern "C"

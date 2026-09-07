@@ -1,8 +1,10 @@
 // Task 1 (native-rotation spec, native-rotation-contract.md): correctness
 // coverage for ceyx_orient_rgba / ceyx_orientation_transposes against an
 // INDEPENDENT naive per-pixel reference implementation written in this file.
-// The reference deliberately shares no code with native/src/ffi/ceyx_orient.cpp
-// or with native/tests/probe_strided_output.cpp's cpuReferenceOrient.
+// The reference deliberately shares no code with
+// native/tests/oracle/ceyx_orient_oracle.cpp (Task 9: moved out of
+// native/src/ffi/ so it no longer ships in the production dylib) or with
+// native/tests/probe_strided_output.cpp's cpuReferenceOrient.
 //
 // Semantics under test mirror Halcyon's
 // lib/services/image_pipeline/exif_orientation.dart exifTransformFor table:

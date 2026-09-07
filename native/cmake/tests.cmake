@@ -297,7 +297,7 @@ target_include_directories(test_raw_layout_contract PRIVATE ${INC_DIR})
 # the whole decoder library, same pattern as test_raw_layout_contract above.
 add_executable(test_ceyx_orient
     tests/test_ceyx_orient.cpp
-    src/ffi/ceyx_orient.cpp)
+    tests/oracle/ceyx_orient_oracle.cpp)
 target_include_directories(test_ceyx_orient PRIVATE ${INC_DIR})
 
 # Round 1 Task 1.2: histogram-based auto-exposure estimator, plain math over a
@@ -1627,12 +1627,13 @@ endif()
 # gpu_orient_productionization_plan.md). Dispatches dng_render_stage4 and
 # dng_render_stage4_scaled_preavg directly (not through the host bridge, so
 # device_interface/device can be inspected before copy_to_host()), and uses
-# native/src/ffi/ceyx_orient.cpp as the CPU oracle (plan ruling on spec
-# D1(d): ceyx_orient.cpp/.h survive Task 9 as a TEST-ONLY oracle). Source set
-# and link list mirror test_device_handoff above; this is macOS/Metal only
-# (G-14: not added to CI, not gated on Vulkan/Android).
+# native/tests/oracle/ceyx_orient_oracle.cpp as the CPU oracle (plan ruling on
+# spec D1(d): ceyx_orient.cpp/.h survive Task 9 as a TEST-ONLY oracle, moved
+# out of native/src/ in Task 9 Step 9.2 so it no longer ships in the dylib).
+# Source set and link list mirror test_device_handoff above; this is
+# macOS/Metal only (G-14: not added to CI, not gated on Vulkan/Android).
 add_executable(test_stage4_oriented tests/test_stage4_oriented.cpp
-    src/ffi/ceyx_orient.cpp
+    tests/oracle/ceyx_orient_oracle.cpp
     src/pipeline/dng_pipeline.cpp
     src/pipeline/dng_halide_device.cpp
     src/pipeline/dng_opcodelist2_halide.cpp

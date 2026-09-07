@@ -2,11 +2,25 @@
 
 // Native EXIF orientation pass (native-rotation spec, Task 1, Design C).
 //
+// CEYX_ORIENT_ORACLE_ONLY (productionization plan Task 9): as of Task 9 the
+// declarations below are TEST-ONLY. The implementation TU that used to back
+// them (`ceyx_orient.cpp`) moved to `native/tests/oracle/ceyx_orient_oracle.cpp`
+// and no longer ships in `libdng_decoder_native`/the production dylib — every
+// production decode route fuses orientation into the GPU Stage4 kernel
+// instead (spec D1). What survives here is the CPU reference oracle that
+// gate tests (`test_ceyx_orient`, `test_stage4_oriented`) byte-compare the
+// fused GPU output against, plus the `CeyxOrientError` enum, which outlives
+// the function because -402/-403 remain live production error codes returned
+// by the fused path (`ceyx_decode_into_ffi.cpp`). Do NOT call
+// `ceyx_orient_rgba`/`ceyx_orientation_transposes` from any TU that ships in
+// the production library; link `ceyx_orient_oracle.cpp` explicitly in test
+// targets only (`native/cmake/tests.cmake`).
+//
 // Pure 8-case EXIF orientation transform over an RGBA8 buffer. This TU has
 // NO dependency on Halide, the DNG SDK, LibRaw, or any other ceyx header, so
 // it compiles and links in milliseconds standalone and is reusable as both
-// the CPU fallback path (ceyx_decode_into_buffer_oriented, Task 2) and the
-// GPU-strided design's CPU reference oracle if that design is ever adopted.
+// the CPU fallback path (ceyx_decode_into_buffer_oriented, Task 2, REMOVED in
+// Task 9) and the GPU-strided design's CPU reference oracle.
 //
 // Semantics mirror Halcyon's lib/services/image_pipeline/exif_orientation.dart
 // table exactly: quarter-turns-clockwise are applied FIRST, then a horizontal
@@ -49,6 +63,8 @@ enum CeyxOrientError {
   kCeyxOrientErrKernel   = -403,
 };
 
+/// CEYX_ORIENT_ORACLE_ONLY — see the file header. Test-only after Task 9.
+///
 /// Applies EXIF orientation 1..8 to an RGBA8 frame of width x height pixels.
 ///
 /// src == dst is legal ONLY when the orientation does not transpose
@@ -72,6 +88,10 @@ CEYX_FFI_EXPORT int32_t ceyx_orient_rgba(const uint8_t *src, uint8_t *dst,
                                          int32_t *out_width,
                                          int32_t *out_height);
 
+/// CEYX_ORIENT_ORACLE_ONLY — see the file header. Test-only after Task 9.
+/// Production call sites use `ceyx_orientation_transposes_inline` below
+/// instead (it survives Task 9's deletion of the implementing TU).
+///
 /// True (1) when exif_orientation swaps width and height (5, 6, 7, 8);
 /// false (0) for every other int, including values outside 1..8.
 CEYX_FFI_EXPORT int32_t ceyx_orientation_transposes(int32_t exif_orientation);
