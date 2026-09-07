@@ -157,8 +157,14 @@ DispatchResult dispatchFull(Halide::Runtime::Buffer<uint16_t>& src_buf,
     DispatchResult r;
     src_buf.set_host_dirty();
     dst.set_host_dirty(false);
+    // T7b: the kernel takes six host-computed affine coefficients (a_x, b_x,
+    // c_x, a_y, b_y, c_y) instead of orientation/unoriented_width/height —
+    // no select/boolean/cast-from-bool survives into GPU code (F-T6-1/F-T8-1).
+    int32_t coeffs[6];
+    ceyx_orient_affine_coeffs(orientation, unoriented_w, unoriented_h, coeffs);
     r.kernel_rc = dng_render_stage4(
-        src_buf.raw_buffer(), src_scale, orientation, unoriented_w, unoriented_h,
+        src_buf.raw_buffer(), src_scale,
+        coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
         exp_buf.raw_buffer(), tone_buf.raw_buffer(), gamma_buf.raw_buffer(),
         cw_buf.raw_buffer(), c2r_buf.raw_buffer(), r2f_buf.raw_buffer(),
         hs_table_buf.raw_buffer(), hs_encode_buf.raw_buffer(), hs_decode_buf.raw_buffer(),
@@ -199,8 +205,12 @@ DispatchResult dispatchScaled(Halide::Runtime::Buffer<uint16_t>& src_buf,
     DispatchResult r;
     src_buf.set_host_dirty();
     dst.set_host_dirty(false);
+    // T7b: see dispatchFull's comment — same six-coefficient replacement.
+    int32_t coeffs[6];
+    ceyx_orient_affine_coeffs(orientation, unoriented_w, unoriented_h, coeffs);
     r.kernel_rc = dng_render_stage4_scaled_preavg(
-        src_buf.raw_buffer(), src_scale, orientation, unoriented_w, unoriented_h,
+        src_buf.raw_buffer(), src_scale,
+        coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
         out_w, out_h,
         exp_buf.raw_buffer(), tone_buf.raw_buffer(), gamma_buf.raw_buffer(),
         cw_buf.raw_buffer(), c2r_buf.raw_buffer(), r2f_buf.raw_buffer(),
