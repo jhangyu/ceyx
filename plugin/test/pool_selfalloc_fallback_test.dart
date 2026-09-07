@@ -105,6 +105,13 @@ class ThrowingAcquirePool extends CeyxNativeBufferPool {
 }
 
 void main() {
+  tearDown(() {
+    // WP2 Task 2.4: the standing proof that no address reached the wrap site
+    // unowned by the pool — which is what makes deleting the dylib-free tail
+    // safe rather than merely plausible.
+    expect(CeyxDecodePool.debugUnownedWraps, 0);
+  });
+
   late CeyxDecodePool pool;
   final freed = <int>[];
 

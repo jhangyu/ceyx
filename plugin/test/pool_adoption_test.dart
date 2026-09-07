@@ -6,6 +6,13 @@ import 'package:ffi/ffi.dart' show malloc;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  tearDown(() {
+    // WP2 Task 2.4: the standing proof that no address reached the wrap site
+    // unowned by the pool — which is what makes deleting the dylib-free tail
+    // safe rather than merely plausible.
+    expect(CeyxDecodePool.debugUnownedWraps, 0);
+  });
+
   test('an oversize acquire is pool-owned and releasable by address', () async {
     final freed = <int>[];
     CeyxNativeBufferPool.debugFreeHook = freed.add;

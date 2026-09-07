@@ -311,6 +311,13 @@ class CeyxDecodePool {
   @visibleForTesting
   static void Function(int address)? debugNativeFree;
 
+  /// WP2 defect gauge: how many times a native RGBA address arrived at the
+  /// wrap/free site WITHOUT being owned by [nativeBufferPool]. Permanent, not
+  /// temporary: it is the standing detector for the invariant that every live
+  /// full-resolution RGBA address is pool-owned. MUST stay 0.
+  @visibleForTesting
+  static int debugUnownedWraps = 0;
+
   /// WP6: the native buffer pool a decode payload's RGBA buffer came from,
   /// when it came from one.
   ///
@@ -1423,7 +1430,20 @@ class CeyxDecodePool {
       // test owns the fake allocation and frees it through the seam.
       return ptr.asTypedList(length);
     }
-    return ptr.asTypedList(length, finalizer: _nativeFreePtr);
+    // WP2 reachability proof: reaching here means an address the pool does not
+    // own arrived at the wrap site. After adoption there is no such address; if
+    // this counter ever leaves zero, deleting the dylib-free tail below is
+    // wrong. Counted AFTER the test seam on purpose — a fake address driven
+    // through the seam is not evidence of an unowned production wrap.
+    debugUnownedWraps++;
+    // WP2 step 7: the `finalizer: _nativeFreePtr` argument that used to live
+    // here is DELETED along with `dng_free_rgba_buffer` itself (WP5). Choice
+    // recorded: a plain view guarded by the gauge, NOT a StateError. Throwing
+    // would invent a new way for a photo to fail to open — the exact outcome
+    // this campaign's contract forbids — for a state the gauge above proves
+    // does not occur. The gauge, asserted zero across the suites, is the
+    // detector; the throw would be a self-inflicted failure mode.
+    return ptr.asTypedList(length);
   }
 
   /// Explicit free for the ONE arm that never materialises (soft cancel).
@@ -1439,11 +1459,13 @@ class CeyxDecodePool {
       return;
     }
     if (address == 0) return;
-    _freeBindings.dngFreeRgbaBuffer(Pointer<Void>.fromAddress(address));
+    // WP2 step 7: the dylib-free tail is DELETED. Every live RGBA address is
+    // pool-owned (Tasks 2.1-2.3), so the first line above returns for all of
+    // them; reaching here means the same unowned-address defect the wrap site
+    // counts, so it is counted with the same gauge rather than handed to a
+    // free function that no longer owns anything.
+    debugUnownedWraps++;
   }
-
-  Pointer<NativeFinalizerFunction> get _nativeFreePtr =>
-      _freeBindings.dngFreeRgbaBufferPtr.cast();
 
   /// Symbol-table access to `dng_free_rgba_buffer` on the POOL's isolate (the
   /// host's UI isolate in production).
