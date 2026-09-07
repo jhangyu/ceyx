@@ -290,6 +290,34 @@ bool recordAndCompareHash(const std::string& id, const uint8_t* rgba,
     return ok;
 }
 
+// WP3: the suite owns its own RGBA output, because the native RGBA pool is
+// being retired. The vector IS the release: no explicit free, and no way to
+// forget one. Sized from the pipeline's own probe rather than a constant, so a
+// kRawErrDstTooSmall regression still shows up as a refusal instead of being
+// masked by slack.
+struct TestRgbaBuffer {
+    std::vector<uint8_t> data;
+    explicit TestRgbaBuffer(size_t bytes) : data(bytes, 0) {}
+    uint8_t* ptr() { return data.data(); }
+    size_t size() const { return data.size(); }
+};
+
+// `max_long_edge` mirrors RawDevelopParams::max_output_long_edge, so a sized
+// decode is sized from the SAME rule the decode itself applies. When the probe
+// fails there is no extent to size from — that is the normal case for the
+// expected-failure corpus entries, which never reach an output write — so the
+// buffer stays minimal but NON-NULL, keeping the call on the caller-buffer
+// route without inventing a size.
+TestRgbaBuffer probeSizedBuffer(const char* path, uint32_t max_long_edge = 0) {
+    uint32_t w = 0, h = 0;
+    if (path && raw_pipeline_probe_output_size(path, max_long_edge, &w, &h) ==
+                    kRawSuccess &&
+        w != 0 && h != 0) {
+        return TestRgbaBuffer(static_cast<size_t>(w) * h * 4);
+    }
+    return TestRgbaBuffer(4);
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic X-Trans frame, shared by the routing case, the FujiGreen
 // kernel-contract case (round-6 should-fix S-R6-01) and the pixel-exact case
@@ -409,14 +437,22 @@ RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
     develop.output_space = kRawOutputColorSpaceSrgb;
 
     RawPipelineResult out;
-    const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
-    rgba.clear();
+    // WP3: the caller owns the output. `rgba` IS the decode destination, so the
+    // former copy-then-release pair collapses into a resize, and there is no
+    // pool checkout to forget.
+    rgba.assign(static_cast<size_t>(kSynthW) * kSynthH * 4, 0);
+    const RawErrorCode rc =
+        raw_pipeline_decode_to_rgba_into(in, develop, rgba.data(), rgba.size(), out);
     out_w = out.width;
     out_h = out.height;
     diag = out.diag;
-    if (out.rgba_ptr) {
-        rgba.assign(out.rgba_ptr, out.rgba_ptr + out.rgba_size);
-        dng_rgba_output_release(out.rgba_ptr);
+    // WP3 coverage: the release call proved every checkout was returned; the
+    // caller-ownership equivalent is that a success publishes the CALLER's
+    // address and a failure publishes none.
+    if (out.rgba_ptr == rgba.data()) {
+        rgba.resize(out.rgba_size);
+    } else {
+        rgba.clear();
     }
     return rc;
 }
@@ -487,14 +523,17 @@ RawErrorCode runSyntheticLinearRgb(std::vector<uint8_t>& rgba,
     develop.output_space = kRawOutputColorSpaceSrgb;
 
     RawPipelineResult out;
-    const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
-    rgba.clear();
+    // WP3: see runSyntheticXTrans — the caller owns the output buffer.
+    rgba.assign(static_cast<size_t>(kSynthW) * kSynthH * 4, 0);
+    const RawErrorCode rc =
+        raw_pipeline_decode_to_rgba_into(in, develop, rgba.data(), rgba.size(), out);
     out_w = out.width;
     out_h = out.height;
     diag = out.diag;
-    if (out.rgba_ptr) {
-        rgba.assign(out.rgba_ptr, out.rgba_ptr + out.rgba_size);
-        dng_rgba_output_release(out.rgba_ptr);
+    if (out.rgba_ptr == rgba.data()) {
+        rgba.resize(out.rgba_size);
+    } else {
+        rgba.clear();
     }
     return rc;
 }
@@ -581,8 +620,9 @@ int main(int argc, char** argv) {
         develop.output_space = kRawOutputColorSpaceSrgb;
 
         RawPipelineResult result;
-        const RawErrorCode rc =
-            raw_pipeline_decode_file(s.path.c_str(), develop, result);
+        TestRgbaBuffer buf = probeSizedBuffer(s.path.c_str());
+        const RawErrorCode rc = raw_pipeline_decode_file_into(
+            s.path.c_str(), develop, buf.ptr(), buf.size(), result);
         ++checked;
         char detail[320];
 
@@ -706,7 +746,12 @@ int main(int argc, char** argv) {
                    rc != kRawSuccess && result.rgba_ptr == nullptr, detail);
         }
 
-        if (result.rgba_ptr) dng_rgba_output_release(result.rgba_ptr);
+        // WP3 coverage: the release call proved this loop returned every
+        // checkout it took. Under caller ownership `buf` is freed by its own
+        // destructor at the end of each iteration, and the success branches
+        // above already assert result.rgba_ptr is non-null while the failure
+        // branches assert it is null — so "no output escapes" is still checked,
+        // per case rather than by a shared counter.
     }
 
     // Forced native fallback still completes end to end.
@@ -715,18 +760,21 @@ int main(int argc, char** argv) {
         develop.tone_curve_strength = 1.0f;
         develop.output_space = kRawOutputColorSpaceSrgb;
         RawPipelineResult forced;
-        const RawErrorCode rc =
-            raw_pipeline_decode_file_forced(first_bayer.c_str(), develop,
-                                            RawForcedBackend::kLibRawNative, forced);
+        TestRgbaBuffer buf = probeSizedBuffer(first_bayer.c_str());
+        const RawErrorCode rc = raw_pipeline_decode_file_forced_into(
+            first_bayer.c_str(), develop, RawForcedBackend::kLibRawNative,
+            buf.ptr(), buf.size(), forced);
         char detail[200];
         std::snprintf(detail, sizeof(detail), "backend=%s size=%ux%u rc=%s",
                       raw_backend_name(forced.diag.unpack_backend),
                       forced.width, forced.height, raw_error_name(rc));
+        // WP3 coverage: rgba_ptr != nullptr becomes the stronger
+        // rgba_ptr == buf.ptr() — the decode used the caller's buffer, so no
+        // pool allocation happened behind it.
         report("forced-fallback", "first_bayer",
-               rc == kRawSuccess && forced.rgba_ptr != nullptr &&
+               rc == kRawSuccess && forced.rgba_ptr == buf.ptr() &&
                    forced.diag.unpack_backend == kRawDecoderBackendLibRawNative,
                detail);
-        if (forced.rgba_ptr) dng_rgba_output_release(forced.rgba_ptr);
     }
 
     // The DNG route must still work through the new entry point, unchanged.
@@ -752,18 +800,18 @@ int main(int argc, char** argv) {
         develop.tone_curve_strength = 1.0f;
         develop.output_space = kRawOutputColorSpaceSrgb;
         RawPipelineResult forced;
-        const RawErrorCode rc =
-            raw_pipeline_decode_file_forced(first_xtrans.c_str(), develop,
-                                            RawForcedBackend::kLibRawNative, forced);
+        TestRgbaBuffer buf = probeSizedBuffer(first_xtrans.c_str());
+        const RawErrorCode rc = raw_pipeline_decode_file_forced_into(
+            first_xtrans.c_str(), develop, RawForcedBackend::kLibRawNative,
+            buf.ptr(), buf.size(), forced);
         char detail[200];
         std::snprintf(detail, sizeof(detail), "backend=%s size=%ux%u rc=%s",
                       raw_backend_name(forced.diag.unpack_backend),
                       forced.width, forced.height, raw_error_name(rc));
         report("xtrans-forced-fallback", "first_xtrans",
-               rc == kRawSuccess && forced.rgba_ptr != nullptr &&
+               rc == kRawSuccess && forced.rgba_ptr == buf.ptr() &&
                    forced.diag.unpack_backend == kRawDecoderBackendLibRawNative,
                detail);
-        if (forced.rgba_ptr) dng_rgba_output_release(forced.rgba_ptr);
     } else {
         std::printf("[RawE2E] SKIP xtrans-forced-fallback (no X-Trans sample "
                     "file present)\n");
@@ -830,7 +878,12 @@ int main(int argc, char** argv) {
             develop.tone_curve_strength = 1.0f;
             develop.output_space = kRawOutputColorSpaceSrgb;
             RawPipelineResult out;
-            const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+            // WP3: the class is refused before any output is written, so the
+            // caller buffer is minimal — it exists to keep this call off the
+            // pool route, not to receive pixels.
+            TestRgbaBuffer buf(4);
+            const RawErrorCode rc = raw_pipeline_decode_to_rgba_into(
+                in, develop, buf.ptr(), buf.size(), out);
 
             char detail[200];
             std::snprintf(detail, sizeof(detail), "class=%s error=%s rgba=%s",
@@ -838,7 +891,6 @@ int main(int argc, char** argv) {
                           out.rgba_ptr ? "NON-NULL" : "null");
             report("layout-routing", nullptr,
                    rc == kRawErrLayoutUnsupported && out.rgba_ptr == nullptr, detail);
-            if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
         }
     }
 
@@ -902,7 +954,11 @@ int main(int argc, char** argv) {
         develop.tone_curve_strength = 1.0f;
         develop.output_space = kRawOutputColorSpaceSrgb;
         RawPipelineResult out;
-        const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+        // WP3: synthetic frame, so the extent is known exactly (no probe, no
+        // guess): kW*kH*4 is what this decode must produce.
+        TestRgbaBuffer buf(static_cast<size_t>(kW) * kH * 4);
+        const RawErrorCode rc = raw_pipeline_decode_to_rgba_into(
+            in, develop, buf.ptr(), buf.size(), out);
 
         const bool alpha_ok = rc == kRawSuccess && out.rgba_ptr &&
             alphaAll255(out.rgba_ptr,
@@ -930,7 +986,6 @@ int main(int argc, char** argv) {
                    out.diag.cfa_repeat_width == 6 &&
                    out.diag.cfa_repeat_height == 6,
                detail);
-        if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
     }
 
     // P19 T8: synthetic linear-RGB (Foveon X3F) product route. This is the
@@ -1167,13 +1222,15 @@ int main(int argc, char** argv) {
             in.layout.cfa_pattern = corrupted;
 
             RawPipelineResult out;
-            const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, dev, out);
+            // WP3: refused at layout validation, before any output write.
+            TestRgbaBuffer buf(4);
+            const RawErrorCode rc = raw_pipeline_decode_to_rgba_into(
+                in, dev, buf.ptr(), buf.size(), out);
             char detail[160];
             std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
                           raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null");
             report("bad-cfa-explicit-failure", nullptr,
                    rc == kRawErrLayoutUnsupported && out.rgba_ptr == nullptr, detail);
-            if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
         }
     } else {
         std::printf("[RawE2E] SKIP bad-cfa-explicit-failure (no X-Trans sample "
@@ -1233,10 +1290,16 @@ int main(int argc, char** argv) {
         develop.max_output_long_edge = 0;
 
         RawPipelineResult rs{}, nat{};
-        const RawErrorCode rs_rc = raw_pipeline_decode_file_forced(
-            s.path.c_str(), develop, RawForcedBackend::kRawSpeed3, rs);
-        const RawErrorCode nat_rc = raw_pipeline_decode_file_forced(
-            s.path.c_str(), develop, RawForcedBackend::kLibRawNative, nat);
+        // WP3: two SEPARATE caller buffers — the whole point of this case is to
+        // compare two decodes byte for byte, so they must never share storage.
+        TestRgbaBuffer rs_buf = probeSizedBuffer(s.path.c_str());
+        TestRgbaBuffer nat_buf = probeSizedBuffer(s.path.c_str());
+        const RawErrorCode rs_rc = raw_pipeline_decode_file_forced_into(
+            s.path.c_str(), develop, RawForcedBackend::kRawSpeed3,
+            rs_buf.ptr(), rs_buf.size(), rs);
+        const RawErrorCode nat_rc = raw_pipeline_decode_file_forced_into(
+            s.path.c_str(), develop, RawForcedBackend::kLibRawNative,
+            nat_buf.ptr(), nat_buf.size(), nat);
 
         if (rs_rc != kRawSuccess || nat_rc != kRawSuccess) {
             // Not a pass. A body RawSpeed3 declines is a legitimate outcome,
@@ -1246,8 +1309,6 @@ int main(int argc, char** argv) {
                         s.id.c_str(),
                         rs_rc != kRawSuccess ? "rawspeed3 declined" : "native failed",
                         raw_error_name(rs_rc), raw_error_name(nat_rc));
-            if (rs.rgba_ptr) dng_rgba_output_release(rs.rgba_ptr);
-            if (nat.rgba_ptr) dng_rgba_output_release(nat.rgba_ptr);
             continue;
         }
 
@@ -1268,8 +1329,6 @@ int main(int argc, char** argv) {
                         "unpack(), warnings=0x%08x)\n",
                         s.id.c_str(), raw_backend_name(rs.diag.unpack_backend),
                         rs.diag.rawspeed_warning_bits);
-            dng_rgba_output_release(rs.rgba_ptr);
-            dng_rgba_output_release(nat.rgba_ptr);
             continue;
         }
 
@@ -1281,8 +1340,6 @@ int main(int argc, char** argv) {
                           rs.width, rs.height, nat.width, nat.height,
                           rs.rgba_size, nat.rgba_size);
             report("xtrans-cross-backend dimensions", s.id.c_str(), false, detail);
-            dng_rgba_output_release(rs.rgba_ptr);
-            dng_rgba_output_release(nat.rgba_ptr);
             continue;
         }
 
@@ -1310,8 +1367,7 @@ int main(int argc, char** argv) {
         report("xtrans-cross-backend", s.id.c_str(),
                identical || (psnr >= 99.0 && max_abs <= 1), detail);
 
-        dng_rgba_output_release(rs.rgba_ptr);
-        dng_rgba_output_release(nat.rgba_ptr);
+        // WP3: rs_buf / nat_buf release themselves at scope exit.
     }
 
     // Informational only (spec section 6.3): recorded so a future regression has
@@ -1334,11 +1390,12 @@ int main(int argc, char** argv) {
             for (int r = 0; r < 3 && usable; ++r) {
                 RawPipelineResult out{};
                 const auto t0 = std::chrono::high_resolution_clock::now();
-                const RawErrorCode rc = raw_pipeline_decode_file_forced(
-                    s.path.c_str(), develop, backends[b], out);
+                TestRgbaBuffer buf = probeSizedBuffer(s.path.c_str());
+                const RawErrorCode rc = raw_pipeline_decode_file_forced_into(
+                    s.path.c_str(), develop, backends[b],
+                    buf.ptr(), buf.size(), out);
                 const auto t1 = std::chrono::high_resolution_clock::now();
                 ms[b][r] = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
                 if (rc != kRawSuccess) usable = false;
             }
         }
@@ -1420,7 +1477,9 @@ int main(int argc, char** argv) {
             // auto_exposure_mode left at its zero-init default, kRawAutoExposureOn --
             // ON is the user-approved default (decision D-10).
             RawPipelineResult result{};
-            const RawErrorCode rc = raw_pipeline_decode_file(t.path, develop, result);
+            TestRgbaBuffer buf = probeSizedBuffer(t.path);
+            const RawErrorCode rc = raw_pipeline_decode_file_into(
+                t.path, develop, buf.ptr(), buf.size(), result);
             bool ok = false;
             char detail[320];
             if (rc == kRawSuccess && result.rgba_ptr && result.width > 0 && result.height > 0) {
@@ -1437,7 +1496,6 @@ int main(int argc, char** argv) {
             }
             report("midgray_pins", t.id, ok, detail);
             ++checked;
-            if (result.rgba_ptr) dng_rgba_output_release(result.rgba_ptr);
         }
     }
 
@@ -1507,8 +1565,10 @@ int main(int argc, char** argv) {
             baseline_develop.tone_curve_strength = 1.0f;
             baseline_develop.output_space = kRawOutputColorSpaceSrgb;
             RawPipelineResult baseline_result{};
-            const RawErrorCode brc =
-                raw_pipeline_decode_file(path, baseline_develop, baseline_result);
+            TestRgbaBuffer baseline_buf = probeSizedBuffer(path);
+            const RawErrorCode brc = raw_pipeline_decode_file_into(
+                path, baseline_develop, baseline_buf.ptr(), baseline_buf.size(),
+                baseline_result);
 
             LibRawFrontendContext ctx;
             const RawErrorCode orc = ctx.open_and_unpack(path);
@@ -1516,6 +1576,9 @@ int main(int argc, char** argv) {
             bool ok = false;
             char detail[500];
             RawPipelineResult scaled_result{};
+            // WP3: a SECOND buffer — the baseline render above is still being
+            // read for its luma when the scaled render runs.
+            TestRgbaBuffer scaled_buf = probeSizedBuffer(path);
             if (brc == kRawSuccess && baseline_result.rgba_ptr && orc == kRawSuccess) {
                 const double baseline_luma = centralCropMeanLumaRgba(
                     baseline_result.rgba_ptr, baseline_result.width, baseline_result.height);
@@ -1569,8 +1632,9 @@ int main(int argc, char** argv) {
                     const RawErrorCode arc =
                         adapter.build(ctx, &input, &scaled_develop, reason, sizeof(reason));
                     if (arc == kRawSuccess) {
-                        const RawErrorCode rrc =
-                            raw_pipeline_decode_to_rgba(input, scaled_develop, scaled_result);
+                        const RawErrorCode rrc = raw_pipeline_decode_to_rgba_into(
+                            input, scaled_develop, scaled_buf.ptr(),
+                            scaled_buf.size(), scaled_result);
                         if (rrc == kRawSuccess && scaled_result.rgba_ptr) {
                             const double scaled_luma = centralCropMeanLumaRgba(
                                 scaled_result.rgba_ptr, scaled_result.width,
@@ -1621,12 +1685,15 @@ int main(int argc, char** argv) {
             }
             report("synthetic_underexposure_recovers", "foveon_x3f_linear", ok, detail);
             ++checked;
-            if (scaled_result.rgba_ptr) dng_rgba_output_release(scaled_result.rgba_ptr);
-            if (baseline_result.rgba_ptr) dng_rgba_output_release(baseline_result.rgba_ptr);
         }
     }
 
-    // Nothing may stay checked out, on success or failure.
+    // WP3: this gauge now asserts something STRONGER than it used to. Every
+    // decode in this suite supplies its own buffer, so the native RGBA pool
+    // must never have been entered at all — a non-zero count here means some
+    // path still took a pool checkout, which is exactly the owning mode WP3
+    // exists to prove unreachable. (Read through the FFI facade, which is the
+    // same counter the pool's own checked-out accessor reports.)
     {
         char detail[120];
         const size_t rgba_out = dng_debug_pool_checked_out();

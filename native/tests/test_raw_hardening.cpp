@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "dng_ffi_api.h"     // dng_debug_pool_checked_out (WP3 pool-entry gauge)
 #include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
 
@@ -76,21 +77,53 @@ std::string resolveBayerSample(const char* manifest_path) {
     return "";
 }
 
+// WP3: the suite owns its own RGBA output, because the native RGBA pool is
+// being retired. The vector IS the release: no explicit free, and no way to
+// forget one. Sized from the probe rather than a constant, so a
+// kRawErrDstTooSmall regression still shows up as a refusal instead of being
+// masked by slack.
+struct TestRgbaBuffer {
+    std::vector<uint8_t> data;
+    explicit TestRgbaBuffer(size_t bytes) : data(bytes, 0) {}
+    uint8_t* ptr() { return data.data(); }
+    size_t size() const { return data.size(); }
+};
+
+// Size a buffer for `path` from the pipeline's own probe. When the probe fails
+// — which is the NORMAL case in this suite, whose inputs are deliberately
+// unopenable — there is no extent to size from, so the buffer stays minimal but
+// NON-NULL: what matters for these cases is that the decode is on the
+// caller-buffer route at all, and they fail long before any output is written.
+// A minimal buffer is deliberately not a guessed constant: it is too small for
+// any real image, so a case that unexpectedly starts decoding is refused with
+// kRawErrDstTooSmall instead of silently passing on slack.
+TestRgbaBuffer probeSizedBuffer(const char* path) {
+    uint32_t w = 0, h = 0;
+    if (path && raw_pipeline_probe_output_size(path, 0, &w, &h) == kRawSuccess &&
+        w != 0 && h != 0) {
+        return TestRgbaBuffer(static_cast<size_t>(w) * h * 4);
+    }
+    return TestRgbaBuffer(4);
+}
+
 // Every malformed case asserts the same three things, so a new fixture is one
 // line rather than a copied block.
 void expectCleanFailure(const char* case_name, const char* path) {
     RawDevelopParams develop{};
     develop.tone_curve_strength = 1.0f;
     RawPipelineResult out;
-    const RawErrorCode rc = raw_pipeline_decode_file(path, develop, out);
+    TestRgbaBuffer buf = probeSizedBuffer(path);
+    const RawErrorCode rc =
+        raw_pipeline_decode_file_into(path, develop, buf.ptr(), buf.size(), out);
 
-    const size_t checked_out = dng_rgba_output_checked_out_count();
     char detail[280];
-    std::snprintf(detail, sizeof(detail), "error=%s rgba=%s pool=%zu",
-                  raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null", checked_out);
-    report(case_name, rc != kRawSuccess && out.rgba_ptr == nullptr && checked_out == 0,
-           detail);
-    if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+    std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
+                  raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null");
+    // WP3 coverage: the native pool's checked-out gauge (==0)
+    // caught an output buffer escaping a failure path without a matching
+    // release. Under caller ownership the equivalent is that the failure
+    // publishes NO buffer at all: out.rgba_ptr == nullptr.
+    report(case_name, rc != kRawSuccess && out.rgba_ptr == nullptr, detail);
 }
 
 int alwaysCancel(void*) { return 1; }
@@ -227,13 +260,17 @@ int main(int argc, char** argv) {
         RawDevelopParams develop{};
         develop.tone_curve_strength = 1.0f;
         RawPipelineResult out;
-        const RawErrorCode rc = raw_pipeline_decode_to_rgba(in, develop, out);
+        // WP3: the refusal happens at the trust-boundary ceiling, before any
+        // output sizing, so the caller buffer here is deliberately minimal —
+        // its job is only to keep this call off the pool route.
+        TestRgbaBuffer buf(4);
+        const RawErrorCode rc = raw_pipeline_decode_to_rgba_into(
+            in, develop, buf.ptr(), buf.size(), out);
         char detail[160];
         std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
                       raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null");
         report("oversize-dimensions",
                rc == kRawErrSizeOverflow && out.rgba_ptr == nullptr, detail);
-        if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
     }
 
     // 5. Cancellation, before and after dispatch.
@@ -242,31 +279,36 @@ int main(int argc, char** argv) {
     } else {
         RawDevelopParams develop{};
         develop.tone_curve_strength = 1.0f;
-
+        // One probe-sized buffer per call: the three cases below must not share
+        // an output, or a stale write from one would be readable in the next.
         RawCancelToken early;
         early.callback = alwaysCancel;
         early.user_data = nullptr;
         RawPipelineResult out_early;
-        const RawErrorCode rc_early = raw_pipeline_decode_file_cancellable(
-            bayer.c_str(), develop, early, out_early);
+        TestRgbaBuffer buf_early = probeSizedBuffer(bayer.c_str());
+        const RawErrorCode rc_early = raw_pipeline_decode_file_cancellable_into(
+            bayer.c_str(), develop, early, buf_early.ptr(), buf_early.size(),
+            out_early);
         char detail[200];
-        std::snprintf(detail, sizeof(detail), "error=%s rgba=%s pool=%zu",
+        std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
                       raw_error_name(rc_early),
-                      out_early.rgba_ptr ? "NON-NULL" : "null",
-                      dng_rgba_output_checked_out_count());
+                      out_early.rgba_ptr ? "NON-NULL" : "null");
+        // WP3 coverage: the gauge caught a checkout surviving a cancellation;
+        // the caller-ownership equivalent is that the cancelled decode
+        // publishes no buffer.
         report("cancel-before-dispatch",
-               rc_early == kRawErrCancelled && out_early.rgba_ptr == nullptr &&
-                   dng_rgba_output_checked_out_count() == 0,
+               rc_early == kRawErrCancelled && out_early.rgba_ptr == nullptr,
                detail);
-        if (out_early.rgba_ptr) dng_rgba_output_release(out_early.rgba_ptr);
 
         DispatchCounter counter;
         RawCancelToken late;
         late.callback = cancelAtLastPoll;
         late.user_data = &counter;
         RawPipelineResult out_late;
-        const RawErrorCode rc_late = raw_pipeline_decode_file_cancellable(
-            bayer.c_str(), develop, late, out_late);
+        TestRgbaBuffer buf_late = probeSizedBuffer(bayer.c_str());
+        const RawErrorCode rc_late = raw_pipeline_decode_file_cancellable_into(
+            bayer.c_str(), develop, late, buf_late.ptr(), buf_late.size(),
+            out_late);
         // Whatever the verdict, the GPU command must have completed before the
         // LibRaw processor was recycled: reading the output buffer here must not
         // fault (see spec section 5.2.5). Under ASan this is the assertion that
@@ -274,31 +316,34 @@ int main(int argc, char** argv) {
         volatile uint8_t probe = 0;
         if (out_late.rgba_ptr) probe = out_late.rgba_ptr[0];
         (void)probe;
-        const size_t late_pool = dng_rgba_output_checked_out_count();
         std::snprintf(detail, sizeof(detail),
-                      "error=%s polls=%d rgba=%s pool=%zu",
+                      "error=%s polls=%d rgba=%s",
                       raw_error_name(rc_late), counter.calls,
-                      out_late.rgba_ptr ? "NON-NULL" : "null", late_pool);
+                      out_late.rgba_ptr ? "NON-NULL" : "null");
         // The token must have survived to the pre-dispatch poll (otherwise the
         // later poll points are dead code), the verdict must be the specific
         // cancellation error, and nothing may be left half-populated.
         report("cancel-at-last-pre-dispatch-poll",
                counter.calls >= kPreDispatchPollOrdinal &&
                    rc_late == kRawErrCancelled &&
-                   out_late.rgba_ptr == nullptr && late_pool == 0,
+                   out_late.rgba_ptr == nullptr,
                detail);
-        if (out_late.rgba_ptr) dng_rgba_output_release(out_late.rgba_ptr);
 
         // The uncancelled control must still succeed.
         RawCancelToken none;
         none.callback = neverCancel;
         none.user_data = nullptr;
         RawPipelineResult out_ok;
-        const RawErrorCode rc_ok =
-            raw_pipeline_decode_file_cancellable(bayer.c_str(), develop, none, out_ok);
-        report("cancel-token-noop", rc_ok == kRawSuccess && out_ok.rgba_ptr != nullptr,
-               "uncancelled decode still succeeds");
-        if (out_ok.rgba_ptr) dng_rgba_output_release(out_ok.rgba_ptr);
+        TestRgbaBuffer buf_ok = probeSizedBuffer(bayer.c_str());
+        const RawErrorCode rc_ok = raw_pipeline_decode_file_cancellable_into(
+            bayer.c_str(), develop, none, buf_ok.ptr(), buf_ok.size(), out_ok);
+        // WP3 coverage: on success the gauge proved the checkout was accounted
+        // for; caller ownership makes the stronger statement directly —
+        // out.rgba_ptr IS the caller's buffer, so nothing was allocated behind
+        // the caller's back.
+        report("cancel-token-noop",
+               rc_ok == kRawSuccess && out_ok.rgba_ptr == buf_ok.ptr(),
+               "uncancelled decode still succeeds into the caller buffer");
     }
 
     // 6. GPU-mandatory: no CPU render fallback (spec section 2.6).
@@ -309,34 +354,39 @@ int main(int argc, char** argv) {
         RawDevelopParams develop{};
         develop.tone_curve_strength = 1.0f;
         RawPipelineResult out;
-        const RawErrorCode rc = raw_pipeline_decode_file(bayer.c_str(), develop, out);
-        const size_t pool = dng_rgba_output_checked_out_count();
+        TestRgbaBuffer buf = probeSizedBuffer(bayer.c_str());
+        const RawErrorCode rc = raw_pipeline_decode_file_into(
+            bayer.c_str(), develop, buf.ptr(), buf.size(), out);
         char detail[200];
-        std::snprintf(detail, sizeof(detail), "error=%s rgba=%s pool=%zu",
-                      raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null", pool);
+        std::snprintf(detail, sizeof(detail), "error=%s rgba=%s",
+                      raw_error_name(rc), out.rgba_ptr ? "NON-NULL" : "null");
         report("gpu-unavailable",
-               rc == kRawErrGpuUnavailable && out.rgba_ptr == nullptr && pool == 0,
-               detail);
-        if (out.rgba_ptr) dng_rgba_output_release(out.rgba_ptr);
+               rc == kRawErrGpuUnavailable && out.rgba_ptr == nullptr, detail);
 
         // Control: with the override cleared the same file must decode, so the
         // failure above is attributable to the switch and not to a broken build.
         unsetenv("DNG_RAW_FORCE_GPU_UNAVAILABLE");
         RawPipelineResult ok_out;
-        const RawErrorCode ok_rc = raw_pipeline_decode_file(bayer.c_str(), develop, ok_out);
+        TestRgbaBuffer ok_buf = probeSizedBuffer(bayer.c_str());
+        const RawErrorCode ok_rc = raw_pipeline_decode_file_into(
+            bayer.c_str(), develop, ok_buf.ptr(), ok_buf.size(), ok_out);
         char ok_detail[200];
         std::snprintf(ok_detail, sizeof(ok_detail), "error=%s rgba=%s size=%ux%u",
                       raw_error_name(ok_rc), ok_out.rgba_ptr ? "NON-NULL" : "null",
                       ok_out.width, ok_out.height);
         report("gpu-available-control",
-               ok_rc == kRawSuccess && ok_out.rgba_ptr != nullptr, ok_detail);
-        if (ok_out.rgba_ptr) dng_rgba_output_release(ok_out.rgba_ptr);
+               ok_rc == kRawSuccess && ok_out.rgba_ptr == ok_buf.ptr(), ok_detail);
     }
 
-    // Nothing may stay checked out, on success or failure.
+    // WP3: this gauge now asserts something STRONGER than it used to. Every
+    // decode above supplies its own buffer, so the native RGBA pool must never
+    // have been entered at all — a non-zero count here means some path still
+    // took a pool checkout, which is exactly the owning mode WP3 exists to
+    // prove unreachable. Read through the FFI facade, which reports the same
+    // counter the pool's own accessor does (dng_ffi_api.cpp:248).
     {
         char detail[120];
-        const size_t left = dng_rgba_output_checked_out_count();
+        const size_t left = dng_debug_pool_checked_out();
         std::snprintf(detail, sizeof(detail), "rgba_checked_out=%zu", left);
         report("pool-leak", left == 0, detail);
     }

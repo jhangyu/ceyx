@@ -749,6 +749,20 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
     return rc;
 }
 
+// WP3: caller-buffer sibling of raw_pipeline_decode_to_rgba. The binding
+// happens HERE, inside the pipeline, not at the call site: A3.2 rejects
+// caller-pre-set result fields, and this entry (unlike decodeFileImpl) does not
+// reset `out`, so a test pre-setting the fields would work by accident and
+// teach the wrong pattern.
+RawErrorCode raw_pipeline_decode_to_rgba_into(const RawGpuInput& input,
+                                              const RawDevelopParams& develop,
+                                              uint8_t* dst, size_t dst_capacity,
+                                              RawPipelineResult& out) {
+    out.caller_dst = dst;
+    out.caller_dst_capacity = dst_capacity;
+    return raw_pipeline_decode_to_rgba(input, develop, out);
+}
+
 namespace {
 
 RawErrorCode decodeFileImpl(const char* file_path,
@@ -985,6 +999,16 @@ RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
                           /*dst=*/nullptr, /*dst_capacity=*/0, out);
 }
 
+// WP3: caller-buffer sibling. Contract on the declaration.
+RawErrorCode raw_pipeline_decode_file_forced_into(const char* file_path,
+                                                  const RawDevelopParams& develop,
+                                                  RawForcedBackend forced,
+                                                  uint8_t* dst, size_t dst_capacity,
+                                                  RawPipelineResult& out) {
+    const RawCancelToken none;
+    return decodeFileImpl(file_path, develop, forced, none, dst, dst_capacity, out);
+}
+
 int raw_pipeline_gpu_available() {
     // Test override first: the GPU-mandatory contract (spec section 2.6) is
     // unreachable on working hardware otherwise, and an untested error branch
@@ -1004,4 +1028,14 @@ RawErrorCode raw_pipeline_decode_file_cancellable(const char* file_path,
                                                   RawPipelineResult& out) {
     return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel,
                           /*dst=*/nullptr, /*dst_capacity=*/0, out);
+}
+
+// WP3: caller-buffer sibling. Contract on the declaration.
+RawErrorCode raw_pipeline_decode_file_cancellable_into(const char* file_path,
+                                                       const RawDevelopParams& develop,
+                                                       const RawCancelToken& cancel,
+                                                       uint8_t* dst, size_t dst_capacity,
+                                                       RawPipelineResult& out) {
+    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel,
+                          dst, dst_capacity, out);
 }

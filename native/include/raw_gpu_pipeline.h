@@ -77,6 +77,18 @@ RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
                                          const RawDevelopParams& develop,
                                          RawPipelineResult& out);
 
+// WP3 (lead ruling 2026-09-07, additive-only): caller-buffer sibling of
+// raw_pipeline_decode_to_rgba. `dst` is bound to the result HERE, inside the
+// pipeline, so the A3.2 rule above ("never pre-set by a caller") stays true.
+// On success out.rgba_ptr == dst; `dst` is never freed and never released to
+// the RGBA pool on any path. Exists because the plain entry above is one of the
+// four routes that could still reach the RGBA pool's owning checkout, and WP3
+// must prove that mode unreachable rather than merely unused by one route.
+RawErrorCode raw_pipeline_decode_to_rgba_into(const RawGpuInput& input,
+                                              const RawDevelopParams& develop,
+                                              uint8_t* dst, size_t dst_capacity,
+                                              RawPipelineResult& out);
+
 // Full route including probe, generic unpack and the adapter. The frontend
 // context lives on this function's stack and is destroyed only after the
 // device->host read has completed (spec section 5.1.5).
@@ -125,6 +137,14 @@ RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
                                              RawForcedBackend forced,
                                              RawPipelineResult& out);
 
+// WP3 (lead ruling 2026-09-07, additive-only): caller-buffer sibling of the
+// forced entry, same relationship to it as _into has to raw_pipeline_decode_file.
+RawErrorCode raw_pipeline_decode_file_forced_into(const char* file_path,
+                                                  const RawDevelopParams& develop,
+                                                  RawForcedBackend forced,
+                                                  uint8_t* dst, size_t dst_capacity,
+                                                  RawPipelineResult& out);
+
 // Absolute ceiling on width*height, checked BEFORE any allocation
 // (spec section 10.1). 2^28 pixels (268435456) still leaves a 6.7x margin
 // over the largest frame in the corpus (7752x5178 = 40.1 MP) while staying
@@ -161,5 +181,14 @@ RawErrorCode raw_pipeline_decode_file_cancellable(const char* file_path,
                                                   const RawDevelopParams& develop,
                                                   const RawCancelToken& cancel,
                                                   RawPipelineResult& out);
+
+// WP3 (lead ruling 2026-09-07, additive-only): caller-buffer sibling of the
+// cancellable entry. Cancellation semantics are unchanged; only the RGBA output
+// ownership differs.
+RawErrorCode raw_pipeline_decode_file_cancellable_into(const char* file_path,
+                                                       const RawDevelopParams& develop,
+                                                       const RawCancelToken& cancel,
+                                                       uint8_t* dst, size_t dst_capacity,
+                                                       RawPipelineResult& out);
 
 #endif  // RAW_GPU_PIPELINE_H_
