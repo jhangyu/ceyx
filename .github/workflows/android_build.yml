@@ -461,6 +461,46 @@ jobs:
             fi
           fi
 
+      # DT_NEEDED CLOSURE (CI hardening after the T8b live-load episode,
+      # tmp/verify/orient_prod_t8b_so_refresh.txt): the check two steps above
+      # only verifies libc++_shared.so's presence/absence against the
+      # resolved STL; it says nothing about every OTHER DT_NEEDED entry of
+      # every packaged .so actually being satisfiable on-device. That gap is
+      # exactly how the shipped decoder carried a libomp.so dependency
+      # Android does not provide for weeks -- only a real device dlopen()
+      # caught it (root-caused and fixed in 68dd3a5). This step generalises
+      # that catch: for every .so in the artifact dir, every DT_NEEDED entry
+      # must be either bundled alongside it or in a MEASURED (not assumed)
+      # whitelist of platform-provided libraries -- see
+      # native/scripts/assert_android_so_dt_needed_closure.py's header and
+      # tmp/verify/orient_prod_t11c_device_whitelist.txt for the on-device
+      # `adb shell ls /system/lib64/<name>` measurement the default
+      # whitelist transcribes (device PHY110, serial cc5bf709). No
+      # --whitelist override is passed here on purpose -- CI always runs
+      # against the measured default; overriding it is for local
+      # negative-control testing only (see the script's own header).
+      - name: Assert DT_NEEDED closure across the packaged Android .so set (Task 11 follow-up)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          LLVM_READELF="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          if [ ! -x "${LLVM_READELF}" ]; then
+            echo "::error::llvm-readelf not found at ${LLVM_READELF} — NDK layout may have changed (r27c expected)." >&2
+            exit 1
+          fi
+          set +e
+          python3 native/scripts/assert_android_so_dt_needed_closure.py \
+            --readelf "${LLVM_READELF}" \
+            --so-dir "${ARTIFACT_DIR}/native" \
+            --bundled "libheif.so,libde265.so,libdng_decoder_native.so,libc++_shared.so"
+          rc=$?
+          set -e
+          echo "DT_NEEDED_CLOSURE_RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::a packaged .so has a DT_NEEDED entry neither bundled nor in the measured system whitelist — see the output above for which library/libraries are unexplained (all offenders are named, not just the first)." >&2
+            exit 1
+          fi
+
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`
       # verbatim, so no rename step exists between here and the release. The
