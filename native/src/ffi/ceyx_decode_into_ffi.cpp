@@ -396,13 +396,27 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   // decode failure — whatever the Stage4 kernel failure is (result->error_code
   // set by the pipeline, rgba_data left null). This is the accepted
   // consequence of D1, not an oversight.
+  // B-2 fix (round reviewer, fix cycle 2): reset the reason to kNone
+  // IMMEDIATELY before phase 3, not just rely on the runner resetting it on
+  // its own next call. Without this reset here, a failure that never reaches
+  // Stage4 at all — file-not-found, parse failure, OpcodeList2 failure, or
+  // the RAW pre-runner dst-too-small backstop in makeRgbaCheckout — would
+  // read whatever reason a PRIOR decode on this thread left behind and
+  // clobber the real, correct error code with a stale -402/-403. The runner
+  // itself resets at its own entry (dng_render_halide.cpp), which is enough
+  // ONLY when the runner actually runs; this call may return failure without
+  // ever reaching it.
+  dngRenderStage4ResetFailureReason();
   ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
                        exif_orientation, result);
   if (result->error_code != 0) {
-    // B-1: dngRenderStage4LastFailureReason() is meaningful directly after
-    // this failure return, on EITHER route — both funnel through the shared
-    // Stage4 runner, whether via dng_pipeline_decode_to_rgb_into_oriented
-    // (DNG) or raw_pipeline_decode_file_into (RAW).
+    // The read below is honest ONLY because of the reset immediately above:
+    // many phase-3 failures (bad file, parse, OpcodeList2, the RAW
+    // pre-runner capacity backstop) return without Stage4 ever executing, so
+    // the runner's own reset-on-entry never fires on this call. Without the
+    // explicit reset here this read could observe a STALE reason left by an
+    // earlier decode on this thread and overwrite a correct generic error
+    // (e.g. kCeyxErrDstTooSmall) with a wrong -402/-403 (B-2).
     ceyxMapStage4FailureReason(result);
     return result;
   }

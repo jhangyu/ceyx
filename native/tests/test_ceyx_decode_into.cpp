@@ -419,6 +419,8 @@ static void caseOrientedStep43(const char *path, const char *label) {
 // is the correct and only layer at which "src/dst overlap" is even
 // expressible.
 static void caseStage4FailureReasonRedState(const char *good_path,
+                                            const char *raw_path,
+                                            const char *upstream_fail_path,
                                             const char *label) {
   // (a) overlapping src/dst.
   {
@@ -485,6 +487,104 @@ static void caseStage4FailureReasonRedState(const char *good_path,
           label, static_cast<int>(dngRenderStage4LastFailureReason()));
   }
 
+  // (e) V-1 close: repeat the staleness half (c) with the RAW route (.arw),
+  // not just DNG. Proves the RAW route also dispatches Stage4 on the CALLER
+  // thread — thread_local is the right carrier for it too. If this fails,
+  // that is a structural finding (thread_local wrong for RAW), not something
+  // to patch around here.
+  if (raw_path) {
+    std::vector<uint16_t> buf(4 * 4 * 4, 0);
+    RenderParams params{};
+    const bool overlap_ok = runRenderStage4HalideAot(
+        buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
+        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+    CHECK(!overlap_ok, "[%s] B-1e RAW setup overlap call unexpectedly succeeded",
+          label);
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
+          "[%s] B-1e RAW setup expected kOverlap", label);
+
+    int32_t w = 0, h = 0;
+    if (probe(raw_path, kOrientMaxDim, &w, &h)) {
+      const size_t need = static_cast<size_t>(w) * h * 4;
+      std::vector<uint8_t> dst(need);
+      DngResult *r = ceyx_decode_into_buffer_oriented(raw_path, kOrientMaxDim,
+                                                       dst.data(), need, 1);
+      CHECK(r && r->error_code == 0,
+            "[%s] B-1e RAW reset-half decode failed (error=%d)", label,
+            r ? r->error_code : -1);
+      if (r) { r->rgba_data = nullptr; dng_free_result(r); }
+      CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kNone,
+            "[%s] B-1e RAW route did not reset the reason to kNone after a "
+            "successful decode — thread_local may be the wrong carrier for "
+            "the RAW route (STRUCTURAL, do not patch around), got %d",
+            label, static_cast<int>(dngRenderStage4LastFailureReason()));
+    }
+  }
+
+  // (d) B-2: a decode that fails UPSTREAM of Stage4 — after
+  // ceyxDecodeIntoPrepare succeeds (so the new reset-before-phase3 line
+  // actually runs) but before the runner is ever reached — must NOT have its
+  // generic error code clobbered by a STALE reason left by an earlier decode
+  // on this thread. Setup: force a stale kOverlap via the direct runner call
+  // (as in (a)/(c)), THEN decode a file that is malformed enough to fail
+  // during unpack/adapter-build (never reaching Stage4) but still parses far
+  // enough for ceyxDecodeIntoPrepare's metadata-only probe to succeed.
+  if (upstream_fail_path) {
+    std::vector<uint16_t> buf(4 * 4 * 4, 0);
+    RenderParams params{};
+    const bool overlap_ok = runRenderStage4HalideAot(
+        buf.data(), 4, 4, 3, 0, 0, 0, 1.0f, 4, 4, params,
+        reinterpret_cast<uint8_t *>(buf.data()), true, nullptr, 1);
+    CHECK(!overlap_ok, "[%s] B-1d setup overlap call unexpectedly succeeded",
+          label);
+    CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kOverlap,
+          "[%s] B-1d setup expected kOverlap", label);
+
+    // Deliberately NOT the shared probe() helper: that always CHECKs rc==0,
+    // and this fixture is EXPECTED to possibly fail even the probe (see the
+    // else-branch note below) — that must not itself register as a failure.
+    int32_t w = 0, h = 0;
+    const bool probe_ok =
+        ceyx_probe_output_size(upstream_fail_path, kOrientMaxDim, &w, &h) ==
+            0 &&
+        w > 0 && h > 0;
+    if (!probe_ok) {
+      // The fixture doesn't pass even the metadata probe, so
+      // ceyxDecodeIntoPrepare itself refuses before the reset line is ever
+      // reached — that path is unaffected by B-2 by construction (the reset
+      // is inside the fused branch, downstream of prepare) and this subcase
+      // has nothing further to prove with this fixture. Documented rather
+      // than silently skipped.
+      std::fprintf(stderr,
+                   "[%s] B-1d note: %s fails the pre-decode probe too, so "
+                   "the upstream-of-Stage4 case is not exercised by this "
+                   "fixture (prepare-level failures never reach the reset "
+                   "line at all).\n",
+                   label, upstream_fail_path);
+    } else {
+      const size_t need = static_cast<size_t>(w) * h * 4;
+      std::vector<uint8_t> dst(need);
+      DngResult *r = ceyx_decode_into_buffer_oriented(
+          upstream_fail_path, kOrientMaxDim, dst.data(), need, 6);
+      CHECK(r != nullptr, "[%s] B-1d null result", label);
+      if (r) {
+        CHECK(r->error_code != 0,
+              "[%s] B-1d malformed fixture unexpectedly decoded successfully",
+              label);
+        CHECK(r->error_code != kCeyxOrientErrOverlap &&
+                  r->error_code != kCeyxOrientErrKernel,
+              "[%s] B-1d generic error %d was CLOBBERED by the stale "
+              "reason (B-2 regression)",
+              label, r->error_code);
+        CHECK(dngRenderStage4LastFailureReason() == Stage4FailureReason::kNone,
+              "[%s] B-1d reason not reset to kNone by an upstream-of-Stage4 "
+              "failure, got %d",
+              label, static_cast<int>(dngRenderStage4LastFailureReason()));
+        dng_free_result(r);
+      }
+    }
+  }
+
   // Numeric mapping proof: ceyxMapStage4FailureReason (ceyx_decode_into_ffi.cpp,
   // static, not reachable from this TU) maps kOverlap -> kCeyxOrientErrOverlap
   // and kKernel -> kCeyxOrientErrKernel. What IS checkable here is that those
@@ -515,12 +615,18 @@ int main(int argc, char **argv) {
     {argc > 5 ? argv[5] : nullptr, "linear-rgb-raw"},
   };
 
-  // B-1 red-state proof is route-agnostic (it drives the shared low-level
-  // runner directly), so it runs once, not once per sample class. Uses
-  // whichever first sample is available for its staleness/reset half.
+  // B-1/B-2 red-state proof is route-agnostic (it drives the shared
+  // low-level runner directly), so it runs once, not once per sample class.
+  // argv[1] (DNG) and argv[3] (.arw, RAW) cover the staleness/reset halves
+  // on both routes (B-1c, B-1e); argv[6], if given, is a malformed fixture
+  // for the upstream-of-Stage4 clobber case (B-1d) — optional, since no
+  // corpus fixture is guaranteed to pass the probe but fail before Stage4.
   {
-    const char *any = argc > 1 ? argv[1] : nullptr;
-    caseStage4FailureReasonRedState(any, "b1-redstate");
+    const char *dng_any = argc > 1 ? argv[1] : nullptr;
+    const char *raw_any = argc > 3 ? argv[3] : nullptr;
+    const char *upstream_fail = argc > 6 ? argv[6] : nullptr;
+    caseStage4FailureReasonRedState(dng_any, raw_any, upstream_fail,
+                                    "b1-redstate");
   }
 
   for (const auto &s : samples) {
