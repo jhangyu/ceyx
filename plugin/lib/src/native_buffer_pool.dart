@@ -132,13 +132,19 @@ class CeyxNativeBufferPool {
   /// reuse, not a leak.
   @visibleForTesting
   static int get debugTotalLiveAddresses {
-    _instances.removeWhere(
-      (WeakReference<CeyxNativeBufferPool> ref) => ref.target == null,
-    );
     var total = 0;
-    for (final ref in _instances) {
-      total += ref.target!.debugLiveAddresses.length;
-    }
+    // Each target is read ONCE into a local. A previous revision pruned dead
+    // references first and then dereferenced with `!`, which is a
+    // time-of-check/time-of-use race: the collector can take a target between
+    // the prune and the read, and the `!` then throws. It survived a local run
+    // and failed an independent one — GC timing is not part of the contract,
+    // so the code must not depend on it.
+    _instances.removeWhere((WeakReference<CeyxNativeBufferPool> ref) {
+      final pool = ref.target;
+      if (pool == null) return true; // dead: prune as hygiene, not correctness
+      total += pool.debugLiveAddresses.length;
+      return false;
+    });
     return total;
   }
 
