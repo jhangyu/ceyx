@@ -387,6 +387,20 @@ jobs:
           SO="native/build-linux/libdng_decoder_native.so"
           cmake --build native/build-linux --target orient_capability_probe -j"$(nproc)"
           PROBE="${{ github.workspace }}/native/build-linux/orient_capability_probe"
+          # The probe dlopen()s $SO in its own process, so libdng_decoder_native.so's
+          # own DT_NEEDED (libheif.so.1) and libheif.so.1's own transitive
+          # DT_NEEDED (libde265.so.0) must both be resolvable by the dynamic
+          # loader at THIS step. cmake/heif.cmake's POST_BUILD copy already
+          # staged both companions directly beside the .so in native/build-linux
+          # (see the "Stage native artifacts" step below, which cp's them FROM
+          # native/build-linux/libheif.so.1 and native/build-linux/libde265.so.0
+          # -- i.e. they exist there from the "Build dng_decoder_native" step
+          # above, before this probe runs), so pointing LD_LIBRARY_PATH at that
+          # single directory covers both hops. Same transitivity gap the G1
+          # step further down already documents (GNU ld's non-transitive
+          # DT_RUNPATH default) -- this is that same CI-only fallback, applied
+          # to the probe's own process instead of codec_capability_probe.py's.
+          export LD_LIBRARY_PATH="${{ github.workspace }}/native/build-linux:${LD_LIBRARY_PATH:-}"
           set +e
           "$PROBE" "$SO" > orient_capability_probe_output.txt 2>&1
           rc=$?
