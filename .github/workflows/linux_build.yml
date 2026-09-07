@@ -365,50 +365,90 @@ jobs:
 
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
       # G-E) — user-ordered CI build-integrity probe: does the just-built
-      # .so export the fused-orientation Halide kernels? Not a functional
-      # test (G-14): the probe never decodes a file or dispatches over real
-      # pixels, it inspects the compiled kernel's Halide-emitted argument
-      # metadata (see native/tests/orient_capability_probe.cpp header) —
-      # symbol NAME presence alone (what AC-L5 above checks) cannot detect a
-      # stale pre-fusion kernel, since the generator names never changed.
+      # .so contain the fused-orientation Halide kernels? Not a functional
+      # test (G-14): this never decodes a file or dispatches over real
+      # pixels, it scans for static string data Halide's codegen emits
+      # inside the Stage4 kernels' introspection metadata (see
+      # native/tests/orient_capability_probe.cpp header) — symbol NAME
+      # presence alone (what AC-L5 above checks) cannot detect a stale
+      # pre-fusion kernel, since the generator names never changed.
       #
-      # Same-arch host build (no cross-compile on this Linux leg), so dlopen
-      # of the just-built .so from a host process is always valid here.
+      # RUNTIME-PROBE-VS-STRINGS-SIGNAL (round 2, CI-red diagnosis): the
+      # dlopen+dlsym runtime probe (orient_capability_probe.cpp, still used
+      # on macOS below) failed here with PROBE_RESULT=missing:dng_render_
+      # stage4_metadata even after a genuinely fused, correctly-loaded .so
+      # (LD_LIBRARY_PATH fix landed first and resolved the load itself).
+      # This Linux build links with a restricted dynamic export surface —
+      # only the hand-written FFI symbols in native/src/ffi/ get exported
+      # (see AC-L5 above, which enumerates exactly that whitelist) — so
+      # Halide's AOT-generated `<kernel>_metadata()` entry points are never
+      # in the .so's dynamic symbol table for dlsym to find, structurally
+      # the same failure mode already fixed for Windows (which exports
+      # nothing by default at all). macOS is the only platform where the
+      # runtime probe is valid, because it default-exports every symbol
+      # unless explicitly hidden — that asymmetry is now proven by two
+      # independent platform failures, not assumed. Do NOT widen the export
+      # surface to make dlsym work here: that would ship a wider ABI purely
+      # for a test's convenience.
       #
-      # RC is read directly from the probe's own process exit code, never
-      # through a pipe — the G-9/R-16 `nm | grep -q` pipefail-inversion trap
-      # (a PRESENT symbol reads as failure because grep exits before the
-      # producer finishes writing, SIGPIPE-killing it) does not apply: this
-      # step never pipes the probe's stdout into grep for the pass/fail
-      # decision, it reads `$?` immediately after the direct invocation.
-      - name: Build + run orientation capability probe (Task 11 / G-E)
+      # Same strings-literal scan already used on Android (cross-arch, no
+      # execution possible) and Windows (no dllexport on metadata symbols):
+      # grep the built .so for the dng_render_stage4_split kernel-name
+      # literal (Linux is a Vulkan/split platform, same as Windows/Android)
+      # plus the six orient_a_x/b_x/c_x/a_y/b_y/c_y coefficient literals,
+      # failing naming ALL missing entries. LOCKSTEP NOTE: this literal set
+      # is coupled to orient_capability_probe.cpp's kRequiredArgs/kChecks by
+      # construction (see that file's header comment); any future
+      # kernel-signature change must update all three CI legs' literal
+      # lists (this one, android_build.yml's, windows_build.yml's) together.
+      #
+      # Output to a FILE, then grepped — never `strings | grep -q` (G-9/R-16:
+      # pipefail would turn a SIGPIPE on a successful match into a false
+      # failure).
+      - name: Assert fused-orientation kernel signals present in Linux .so (Task 11 / G-E)
         working-directory: ${{ github.workspace }}
         run: |
           SO="native/build-linux/libdng_decoder_native.so"
-          cmake --build native/build-linux --target orient_capability_probe -j"$(nproc)"
-          PROBE="${{ github.workspace }}/native/build-linux/orient_capability_probe"
-          # The probe dlopen()s $SO in its own process, so libdng_decoder_native.so's
-          # own DT_NEEDED (libheif.so.1) and libheif.so.1's own transitive
-          # DT_NEEDED (libde265.so.0) must both be resolvable by the dynamic
-          # loader at THIS step. cmake/heif.cmake's POST_BUILD copy already
-          # staged both companions directly beside the .so in native/build-linux
-          # (see the "Stage native artifacts" step below, which cp's them FROM
-          # native/build-linux/libheif.so.1 and native/build-linux/libde265.so.0
-          # -- i.e. they exist there from the "Build dng_decoder_native" step
-          # above, before this probe runs), so pointing LD_LIBRARY_PATH at that
-          # single directory covers both hops. Same transitivity gap the G1
-          # step further down already documents (GNU ld's non-transitive
-          # DT_RUNPATH default) -- this is that same CI-only fallback, applied
-          # to the probe's own process instead of codec_capability_probe.py's.
-          export LD_LIBRARY_PATH="${{ github.workspace }}/native/build-linux:${LD_LIBRARY_PATH:-}"
+          if command -v llvm-strings >/dev/null 2>&1; then
+            STRINGS_TOOL="llvm-strings"
+          elif command -v strings >/dev/null 2>&1; then
+            STRINGS_TOOL="strings"
+          else
+            echo "::error::neither llvm-strings nor strings is on PATH; capability is UNVERIFIED, refusing to publish." >&2
+            exit 1
+          fi
           set +e
-          "$PROBE" "$SO" > orient_capability_probe_output.txt 2>&1
+          "${STRINGS_TOOL}" "$SO" > so_strings.txt 2>&1
           rc=$?
           set -e
-          cat orient_capability_probe_output.txt
-          echo "ORIENT_CAPABILITY_PROBE_RC=${rc}"
+          echo "STRINGS_TOOL=${STRINGS_TOOL} STRINGS_RC=${rc}"
           if [ "${rc}" -ne 0 ]; then
-            echo "::error::orient_capability_probe reported the shipped .so does not export the fused-orientation kernel(s); see output above for which symbol/capability is missing." >&2
+            echo "::error::${STRINGS_TOOL} failed reading ${SO}; capability is UNVERIFIED, refusing to publish." >&2
+            exit 1
+          fi
+          missing=""
+          for sym in dng_render_stage4_split; do
+            set +e
+            grep -qx "${sym}" so_strings.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (symbol literal: ${sym})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} symbol:${sym}"
+            fi
+          done
+          for coeff in orient_a_x orient_b_x orient_c_x orient_a_y orient_b_y orient_c_y; do
+            set +e
+            grep -qx "${coeff}" so_strings.txt
+            rc=$?
+            set -e
+            echo "RC=${rc} (string: ${coeff})"
+            if [ "${rc}" -ne 0 ]; then
+              missing="${missing} string:${coeff}"
+            fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::missing fused-orientation signal(s) in ${SO}:${missing} — this .so may be a stale pre-fusion build (the generator names never changed, so symbol presence alone does not prove the kernel was rebuilt with orientation fused in)." >&2
             exit 1
           fi
 
