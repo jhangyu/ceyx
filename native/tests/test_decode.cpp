@@ -406,6 +406,19 @@ void copyFromStridedInterleaved16(const uint16_t* srcBase,
     }
 }
 
+// WP1 phase 1: the alpha-strip adapter formerly provided by the production
+// !fuse_rgba path (dng_render_halide.cpp). It lives here now because the
+// regression harness is its only consumer. Deliberately scalar and
+// single-threaded: this runs inside a timing-instrumented binary, and a thread
+// pool here would add variance to the numbers this harness exists to compare.
+static void stripRgbaToRgb(const uint8_t* rgba, uint8_t* rgb, size_t total_px) {
+    for (size_t i = 0; i < total_px; ++i) {
+        rgb[i * 3 + 0] = rgba[i * 4 + 0];
+        rgb[i * 3 + 1] = rgba[i * 4 + 1];
+        rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+}
+
 // Compute PSNR between two buffers (8-bit data)
 double computePSNR_8bit(const uint8_t* img1, const uint8_t* img2, size_t pixelCount) {
     if (!img1 || !img2 || pixelCount == 0) return 0;
@@ -1137,6 +1150,16 @@ StagePSNR testDNG(dng_host& host,
         const size_t preallocSize = static_cast<size_t>(width) * height * 3;
         vector<uint8_t> rgbData(preallocSize, 0);
 
+        // WP1 phase 1: render 4-channel and strip locally. fuse_rgba_output
+        // defaults to false (dng_pipeline_config.h:101) and loadFromEnv() never
+        // sets it -- only the production decode entry does (dng_pipeline.cpp:2045)
+        // -- so the harness must set it explicitly rather than relying on the
+        // default.
+        PipelineConfig harnessConfig = PipelineConfig::loadFromEnv();
+        harnessConfig.fuse_rgba_output = true;
+        const size_t rgbaScratchSize = static_cast<size_t>(width) * height * 4;
+        vector<uint8_t> rgbaScratch(rgbaScratchSize, 0);
+
 #if defined(__ANDROID__)
         // R3-4: prime the Android Stage4 host scratch pool (Stage4ScratchPool /
         // stage4DstScratch() in dng_render_halide.cpp) with an untimed throwaway
@@ -1158,10 +1181,12 @@ StagePSNR testDNG(dng_host& host,
             warmupRenderer.SetMaximumSize(max(width, height));
             warmupRenderer.SetFinalPixelType(ttByte);
             warmupRenderer.SetFinalSpace(dng_space_sRGB::Get());
-            vector<uint8_t> warmupScratch(preallocSize, 0);
+            vector<uint8_t> warmupScratch(rgbaScratchSize, 0);
             uint32_t warmupW = 0, warmupH = 0;
             (void)render_stage4_halide(host, *negative, warmupRenderer, renderMode,
-                                       warmupScratch, warmupW, warmupH);
+                                       harnessConfig,
+                                       warmupScratch.data(), warmupScratch.size(),
+                                       warmupW, warmupH);
         }
 #endif  // __ANDROID__
 
@@ -1192,13 +1217,22 @@ StagePSNR testDNG(dng_host& host,
                                             *negative,
                                             renderer,
                                             renderMode,
-                                            rgbData,
+                                            harnessConfig,
+                                            rgbaScratch.data(),
+                                            rgbaScratch.size(),
                                             outW,
                                             outH);
             if (!renderOk) {
                 cerr << "ERROR: Stage4 Halide render failed; refusing SDK fallback\n";
                 return failedResult;
             }
+            // rgbData stays W*H*3 so every downstream consumer (PSNR compare,
+            // baseline save, buffer.fData) is byte-for-byte unchanged. Strip is
+            // included in the Stage4 timing window, matching where the
+            // production !fuse_rgba path used to perform this work.
+            rgbData.resize(static_cast<size_t>(outW) * outH * 3);
+            stripRgbaToRgb(rgbaScratch.data(), rgbData.data(),
+                           static_cast<size_t>(outW) * outH);
         }
 
         if (!tryHalideRender) {
