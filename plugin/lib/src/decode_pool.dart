@@ -4,7 +4,7 @@ import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:ffi/ffi.dart' show calloc;
+import 'package:ffi/ffi.dart' show calloc, malloc;
 import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
@@ -125,6 +125,14 @@ const String kMsgReady = 'ready';
 const String kMsgUnavailable = 'unavailable';
 
 /// `[kMsgResult, int requestId, Object? payload...]`
+///
+/// A DECODE payload is `[address, width, height, decodeMs, processMs]`, widened
+/// on the oriented pooled route by `appliedOrientation` at index 5, and widened
+/// again by WP2's self-allocating sink with the ALLOCATED byte count at index 6.
+/// A payload of length >= 7 with a non-null index 6 therefore means "the worker
+/// allocated this address itself; adopt it" — see `_decodeSelfAllocated` and
+/// `_completeJob`'s adoption block. The pooled arms are deliberately NOT padded
+/// to seven, so "absent" and "explicitly null" cannot be confused.
 const String kMsgResult = 'result';
 
 /// `[kMsgError, int requestId, Object error]`
@@ -221,7 +229,8 @@ typedef CeyxPoolWorkerEntry = void Function(List<Object?> bootstrap);
 /// ## Decode-payload ownership (H2-A)
 ///
 /// A [CeyxPoolJobType.decode] result crosses the port as a bare native ADDRESS
-/// plus dimensions ([DngDecoderService.decodeForPointerTransfer]); the ~97MB
+/// plus dimensions (WP2: [DngDecoderService.decodeIntoPointer], into either a
+/// pre-acquired pool slot or the worker's own allocation); the ~97MB
 /// RGBA buffer is never copied into the Dart heap. Between the worker's send
 /// and the pool's handling of that message, NO Dart object owns the buffer.
 /// The pool then takes ownership on exactly one of two mutually exclusive
@@ -1242,6 +1251,19 @@ class CeyxDecodePool {
   ) {
     final job = _byRequestId.remove(requestId);
     worker.currentJob = null;
+    // WP2: a self-allocated payload carries its byte count as element 5. Adopt
+    // it BEFORE any branch below runs, because all three of them consult
+    // `ownsAddress`: the success branch decides finalizer-vs-safety-net, the
+    // discard branch decides free-vs-return, and the error branch must not see
+    // a half-owned address either. (On the error branch there is no payload, so
+    // there is nothing to adopt.)
+    if (job != null &&
+        job.type == CeyxPoolJobType.decode &&
+        payload != null &&
+        payload.length >= 7 &&
+        payload[6] != null) {
+      nativeBufferPool?.adoptUnpooled(payload[0] as int, payload[6] as int);
+    }
     if (job != null) {
       _byKey.remove(job.key);
       if (error != null) {
@@ -1659,9 +1681,10 @@ class _PoolWorker {
 /// JPEGs — the copy is negligible and the wire type is unchanged).
 ///
 /// H2-A: DECODE results do not. They cross as a bare native address plus
-/// dimensions ([DngDecoderService.decodeForPointerTransfer]); the worker
+/// dimensions (WP2: [DngDecoderService.decodeIntoPointer]); the worker
 /// neither copies nor frees the RGBA buffer, and the pool takes ownership on
-/// arrival. See the ownership section on [CeyxDecodePool] for the two arms and
+/// arrival — by holding the slot it pre-acquired, or by adopting the address
+/// the worker had to allocate itself (see `_decodeSelfAllocated`). See the ownership section on [CeyxDecodePool] for the two arms and
 /// the bounded-leak inventory. `DngDecoderService.decodeOnWorker` (the
 /// `Isolate.run` A/B control) still uses the copy path unchanged.
 void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
@@ -1817,7 +1840,19 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
               poolPort.send(<Object?>[kMsgResize, requestId, e.width, e.height]);
             }
           } else {
-            final image = service.decodeForPointerTransfer(path, maxDim: maxDim);
+            // WP2: this arm used to call the service's pointer-transfer entry,
+            // which decoded through the dylib's ALLOCATING decode entry. That
+            // entry is being deleted (WP5), so the worker sizes and allocates
+            // the buffer itself and the pool adopts the address on receipt.
+            //
+            // The pooled arms above send five elements (six on the oriented
+            // route, whose sixth is appliedOrientation); this one sends SEVEN,
+            // the extra element being the byte count the worker allocated. That
+            // asymmetry IS the wire signal the pool adopts on — do not
+            // normalise it by padding the pooled arms with a null, or "no
+            // seventh element" and "an explicit null" become
+            // indistinguishable.
+            final image = _decodeSelfAllocated(service, path, maxDim);
             poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
           }
         case CeyxPoolJobType.encode:
@@ -1839,6 +1874,77 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
 
   poolPort.send(<Object?>[kMsgReady, jobs.sendPort]);
 }
+
+/// WP2: the ONE sink every degradation path lands in (P1 probe failure,
+/// P2 acquire throw, P3 decode-into refused twice, P4 resize reacquire failed).
+///
+/// The worker cannot reach `CeyxNativeBufferPool` — that object lives on the
+/// pool's isolate — so it allocates here and the pool ADOPTS the address on
+/// receipt. The result is that no route allocates through the dylib, while a
+/// photo whose slot could not be pre-acquired still opens.
+///
+/// Returns the pointer-transfer wire shape widened to SEVEN elements:
+/// `[address, width, height, decodeMs, processMs, appliedOrientation, bytes]`.
+///
+/// PLAN CORRECTION (v2 Task 2.2 said element 5): index 5 is already taken by
+/// `appliedOrientation` on the oriented pooled arm (`_materialize` reads it
+/// there), so the allocated byte count rides at index 6 instead. This route
+/// calls the UNORIENTED `decodeIntoPointer`, so its orientation element is the
+/// explicit identity 1 rather than a hole.
+List<Object?> _decodeSelfAllocated(
+  DngDecoderService service,
+  String path,
+  int? maxDim,
+) {
+  return ceyxDecodeSelfAllocated(
+    path: path,
+    probe: () => service.probeOutputSize(path, maxDim: maxDim),
+    decodeInto: (address, bytes) =>
+        service.decodeIntoPointer(path, address, bytes, maxDim: maxDim),
+  );
+}
+
+/// The body of [_decodeSelfAllocated], with its four collaborators injectable
+/// so the allocate/decode/free contract can be asserted without a dylib.
+/// Production always calls it through [_decodeSelfAllocated]; the seam adds no
+/// branch to the production path.
+@visibleForTesting
+List<Object?> ceyxDecodeSelfAllocated({
+  required String path,
+  required ({int width, int height})? Function() probe,
+  required List<Object?> Function(int address, int bytes) decodeInto,
+  int Function(int bytes) allocate = _mallocAddress,
+  void Function(int address) free = _freeAddress,
+}) {
+  final extent = probe();
+  if (extent == null) {
+    // No size is knowable. The probe and the decode share one native routing
+    // switch, so a file that cannot be probed cannot be decoded either — this
+    // is the same outcome the legacy route produced, not a new one.
+    throw DngDecodeException(
+      DngErrorCode.parseFailed,
+      'output extent probe failed for $path; cannot size a decode buffer',
+    );
+  }
+  final bytes = extent.width * extent.height * 4;
+  final address = allocate(bytes);
+  try {
+    // The ALLOCATED count travels, not one recomputed from the decoded extent:
+    // a decode may report a smaller oriented extent than the probe, and the
+    // pool's accounting must describe the allocation it is adopting.
+    // Element 5 is appliedOrientation: this route never orients, so identity.
+    return <Object?>[...decodeInto(address, bytes), 1, bytes];
+  } catch (_) {
+    // Nothing escaped, so nothing downstream can free it. Free here or leak.
+    free(address);
+    rethrow;
+  }
+}
+
+int _mallocAddress(int bytes) => malloc<Uint8>(bytes).address;
+
+void _freeAddress(int address) =>
+    malloc.free(Pointer<Uint8>.fromAddress(address));
 
 /// WP3a: the encode job's worker-side implementation. `args` is
 /// `[rgbaAddress, width, height, quality]`. Called on an ALREADY-RUNNING pool
