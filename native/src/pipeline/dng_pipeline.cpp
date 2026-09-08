@@ -1571,7 +1571,14 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
   // With the pool deleted it uses a LOCAL scratch that is freed immediately.
   // This is prewarm scratch, not decode output: it never escapes this scope and
   // is never handed to a caller, so it does not reintroduce library-owned
-  // full-resolution output. WP6 owns deciding whether it should exist at all.
+  // full-resolution output. WP6 RESOLUTION (2026-09-08): KEEP. This scratch is
+  // a different mechanism than WP6's actual scope (the deleted step-2 pool
+  // page pre-commit, replaced by CeyxNativeBufferPool.warmUpFor on the Dart
+  // side). dng_render_stage4_prewarm_for_size has a 2-arg (GPU-only) and a
+  // 4-arg (+ D2H into dst) overload; without a destination here the code
+  // falls back to the 2-arg form and silently loses the measured D2H
+  // page-warm saving above. It never touches any pool in either direction, so
+  // I1 is not implicated.
   {
     std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
     const size_t rgbaByteCount =
