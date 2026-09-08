@@ -65,21 +65,24 @@ DngResult *ceyx_decode_into_buffer(const char *file_path, int32_t max_dim,
 /// ADDITIVE: older binaries lack this symbol. Callers MUST resolve it
 /// defensively and fall back to ceyx_decode_into_buffer + host-side rotation.
 ///
-/// NO DEGRADATION ARM. This entry either returns the correctly ORIENTED extent
-/// or it fails. It never silently returns unoriented pixels with the unswapped
-/// extent. Two changes removed the arm that used to be documented here: the
-/// fused kernel writes the oriented pixels (transposing included) straight into
-/// dst, so no scratch frame is taken at all; and an orientation failure is a
-/// decode failure rather than a successful unoriented render (R-19). There is
-/// no RGBA pool left for a scratch checkout to fail against.
+/// ORIENTATION FAILURE IS DECODE FAILURE. This entry either returns the
+/// correctly ORIENTED extent or it fails outright; it never falls back to an
+/// unoriented render. On failure the returned DngResult carries one of the
+/// orientation error codes (kCeyxOrientErrBadArgs = -401, kCeyxOrientErrOverlap
+/// = -402, kCeyxOrientErrKernel = -403; see ceyx_orient.h) and
+/// result->width/height are zeroed. The fused kernel writes the oriented
+/// pixels (transposing included) straight into dst, so no scratch frame is
+/// taken at all.
 DngResult *ceyx_decode_into_buffer_oriented(const char *file_path,
                                             int32_t max_dim, uint8_t *dst,
                                             size_t dst_capacity,
                                             int32_t exif_orientation);
 
-/// WP5 (user ruling R3): the AC-2.6 scratch-failure test hook is DELETED. It
-/// forced a scratch checkout to fail so the degradation arm could be
-/// exercised; there is no scratch checkout and no degradation arm.
+/// WP5 (user ruling R3): the AC-2.6 scratch-failure test hook
+/// (ceyx_debug_force_scratch_failure) is now INERT. There is no scratch
+/// checkout and no degradation arm left for it to force a failure against;
+/// its flag has zero readers. The symbol is still exported for ABI stability
+/// only -- calling it is a no-op.
 
 #ifdef __cplusplus
 }
