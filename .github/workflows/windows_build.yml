@@ -462,9 +462,12 @@ jobs:
           # omission; Linux and macOS export by default visibility and so could
           # never have caught it. This step is the only place that can.
           #
-          # dng_decode_and_process is the POSITIVE CONTROL: it has been exported
-          # since the first Windows build, so its absence means this check is
-          # broken (wrong tool, wrong file), not that the build regressed.
+          # ceyx_decode_into_buffer_oriented is the POSITIVE CONTROL: it is
+          # always compiled and always CEYX_FFI_EXPORT'd with no per-platform
+          # guard (native/src/ffi/ceyx_decode_into_ffi.cpp:1-8, :277), so its
+          # absence means this check is broken (wrong tool, wrong file), not
+          # that the build regressed.
+          # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
           #
           # ceyx_encode_webp_rgba8 is deliberately NOT gated: it is compiled to
           # return kCeyxEncodeErrUnsupported where no vendored libwebp dist
@@ -505,7 +508,7 @@ jobs:
           # src/ffi/heif_ffi_api.cpp applies FFI_EXPORT (__declspec(dllexport))
           # to each definition. Without that, every check above still passes and
           # Dart's lookupFunction fails on the user's machine instead.
-          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 \
+          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8 \
                      heif_probe heif_decode_rgba heif_release heif_error_name; do
             set +e
             grep -w "${sym}" dll_exports.txt

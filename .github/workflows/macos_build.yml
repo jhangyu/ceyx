@@ -779,10 +779,13 @@ jobs:
       # G3 fix (task #9): macOS had no FFI export-symbol assertion at all,
       # unlike Linux (AC-L5) and Windows (AC-W4) — a definition missing
       # FFI_EXPORT would pass every check above and fail only at a Dart
-      # consumer's lookupFunction. dng_decode_and_process is the POSITIVE
-      # CONTROL (exported since the first build); its absence means this
-      # check itself is broken, not that the build regressed. Output to a
-      # file, then grepped, same pipefail-avoidance reasoning as above.
+      # consumer's lookupFunction. ceyx_decode_into_buffer_oriented is the
+      # POSITIVE CONTROL (always compiled and always CEYX_FFI_EXPORT'd, no
+      # per-platform guard -- see native/src/ffi/ceyx_decode_into_ffi.cpp:1-8
+      # and :277); its absence means this check itself is broken, not that
+      # the build regressed. Output to a file, then grepped, same
+      # pipefail-avoidance reasoning as above.
+      # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
       - name: Assert required FFI exports present in dylib (G3)
         run: |
           set +e
@@ -796,7 +799,7 @@ jobs:
             exit 1
           fi
           missing=""
-          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8 ceyx_encode_webp_rgba8; do
+          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8 ceyx_encode_webp_rgba8; do
             set +e
             grep -q "${sym}" dylib_exports.txt
             rc=$?

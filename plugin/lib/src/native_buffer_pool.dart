@@ -140,7 +140,12 @@ class CeyxNativeBufferPool {
   ///
   /// Counts CHECKED-OUT buffers, not allocated ones: an idle pooled buffer is
   /// reuse, not a leak.
-  @visibleForTesting
+  ///
+  /// Not test-only: `app/bin/benchmark_raw_zero_copy.dart` reads this as its
+  /// production pool-leak gauge (the replacement for the deleted native
+  /// `poolCheckedOut` counter), so it is intentionally NOT
+  /// `@visibleForTesting` even though every other `debug*` member on this
+  /// class is. Debug/diagnostics API, not a test seam.
   static int get debugTotalLiveAddresses {
     var total = 0;
     // Each target is read ONCE into a local. A previous revision pruned dead

@@ -333,10 +333,13 @@ jobs:
           # rather than in CI. "The .so exists and is non-zero" was the entire
           # prior contract, and it cannot see a missing export.
           #
-          # dng_decode_and_process is the POSITIVE CONTROL: it has always been
-          # exported, so if it is ever absent the check itself is broken (wrong
-          # file, wrong nm flags) rather than the build being at fault. A gate
-          # that can only ever pass is not evidence.
+          # ceyx_decode_into_buffer_oriented is the POSITIVE CONTROL: it is
+          # always compiled and always CEYX_FFI_EXPORT'd with no per-platform
+          # guard (native/src/ffi/ceyx_decode_into_ffi.cpp:1-8, :277), so if
+          # it is ever absent the check itself is broken (wrong file, wrong
+          # nm flags) rather than the build being at fault. A gate that can
+          # only ever pass is not evidence.
+          # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
           #
           # ceyx_encode_webp_rgba8 is deliberately NOT gated: cmake/encode.cmake
           # compiles it to return kCeyxEncodeErrUnsupported when no vendored
@@ -348,7 +351,7 @@ jobs:
           # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
           echo "== AC-L5: required FFI exports present in .so =="
           missing=""
-          for sym in dng_decode_and_process ceyx_encode_jpeg_rgba8; do
+          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8; do
             set +e
             grep -E " T ${sym}\$" nm_dynsyms.txt
             rc=$?
