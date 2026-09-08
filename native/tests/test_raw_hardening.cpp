@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-#include "dng_ffi_api.h"     // dng_debug_pool_checked_out (WP3 pool-entry gauge)
+#include "dng_ffi_api.h"     // DngResult, dng_free_result
 #include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
 
@@ -378,18 +378,13 @@ int main(int argc, char** argv) {
                ok_rc == kRawSuccess && ok_out.rgba_ptr == ok_buf.ptr(), ok_detail);
     }
 
-    // WP3: this gauge now asserts something STRONGER than it used to. Every
-    // decode above supplies its own buffer, so the native RGBA pool must never
-    // have been entered at all — a non-zero count here means some path still
-    // took a pool checkout, which is exactly the owning mode WP3 exists to
-    // prove unreachable. Read through the FFI facade, which reports the same
-    // counter the pool's own accessor does (dng_ffi_api.cpp:248).
-    {
-        char detail[120];
-        const size_t left = dng_debug_pool_checked_out();
-        std::snprintf(detail, sizeof(detail), "rgba_checked_out=%zu", left);
-        report("pool-leak", left == 0, detail);
-    }
+    // WP5: the "pool-leak" case is DELETED with the pool it measured. Its
+    // property -- "no decode in this suite entered the native RGBA pool" -- is
+    // not merely unmeasurable now, it is unstateable: there is no pool to
+    // enter. The coverage did not evaporate, it moved earlier and got stronger:
+    // every decode above asserts rgba_ptr == its own buffer, which proves per
+    // call that no library allocation occurred, whereas the deleted counter
+    // could only say that whatever was taken had been given back.
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - t_start).count();

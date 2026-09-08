@@ -248,7 +248,7 @@ public:
             // decodes) the two are identical; with the multi-entry list that
             // concurrency produces, back()-only misses a usable buffer sitting
             // anywhere else and allocates fresh instead. Mirrors the scan
-            // RgbaOutputPool already uses (dng_pipeline.cpp).
+            // the Stage4 output path already uses (dng_pipeline.cpp).
             size_t bestIdx = free_.size();
             size_t bestCap = SIZE_MAX;
             for (size_t i = 0; i < free_.size(); ++i) {

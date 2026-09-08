@@ -40,15 +40,10 @@ static void caseRefusals(const char *path, const char *label) {
   if (!probe(path, 0, &w, &h)) return;
   const size_t need = static_cast<size_t>(w) * h * 4;
   std::vector<uint8_t> buf(need);
-  // Baseline-delta, not absolute zero. dng_debug_pool_checked_out() is a
-  // PROCESS-GLOBAL counter, so asserting == 0 makes this case's verdict depend
-  // on every case that ran before it: one earlier leak poisons the baseline and
-  // this case reports a failure it did not cause. Demonstrated during mutation
-  // M-5, where a DNG-side leak turned both RAW classes red on this very line.
-  // A gate that can only be trusted when everything before it passed is half a
-  // gate; comparing against a sampled baseline makes the verdict local.
-  const size_t before = dng_debug_pool_checked_out();
-
+  // WP5: the process-global pool counter this case used to sample is gone with
+  // the pool. What it was really asserting -- "a refusal did not hand out a
+  // buffer" -- is now checked directly below as rgba_data == nullptr on each
+  // refusal, which is a local, per-call fact rather than a global delta.
   DngResult *s = ceyx_decode_into_buffer(path, 0, buf.data(), need - 1);
   CHECK(s && s->error_code == kCeyxErrDstTooSmall, "[%s] short not refused",
         label);
@@ -59,15 +54,14 @@ static void caseRefusals(const char *path, const char *label) {
 
   DngResult *n = ceyx_decode_into_buffer(path, 0, nullptr, need);
   CHECK(n && n->error_code == kCeyxErrDstTooSmall, "[%s] null dst", label);
+  CHECK(n && n->rgba_data == nullptr, "[%s] null dst returned a pointer", label);
   if (n) dng_free_result(n);
 
   DngResult *z = ceyx_decode_into_buffer(path, 0, buf.data(), 0);
   CHECK(z && z->error_code == kCeyxErrDstTooSmall, "[%s] zero cap", label);
+  CHECK(z && z->rgba_data == nullptr, "[%s] zero cap returned a pointer", label);
   if (z) dng_free_result(z);
 
-  CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] refusal acquired a buffer (checked_out %zu -> %zu)", label,
-        before, dng_debug_pool_checked_out());
 }
 
 // AC15.4 / AC15.5 — pointer identity, no ownership taken, failure leaves the
@@ -79,7 +73,6 @@ static void caseOwnership(const char *path, const char *label) {
   const size_t need = static_cast<size_t>(w) * h * 4;
   std::vector<uint8_t> buf(need, 0xAB);
 
-  const size_t before = dng_debug_pool_checked_out();
   DngResult *r = ceyx_decode_into_buffer(path, 0, buf.data(), need);
   CHECK(r != nullptr, "[%s] null result", label);
   if (!r) return;
@@ -87,12 +80,12 @@ static void caseOwnership(const char *path, const char *label) {
   CHECK(r->rgba_data == buf.data(),
         "[%s] rgba_data must BE the caller buffer (%p vs %p)", label,
         static_cast<void *>(r->rgba_data), static_cast<void *>(buf.data()));
-  CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] a pool buffer was checked out", label);
+  // WP5: "no pool buffer was checked out" is now expressed by the pointer
+  // identity above -- if the decode had allocated its own output, rgba_data
+  // would not BE buf.data(). That is a stronger statement than the old counter
+  // delta, which could not tell "never allocated" from "allocated and returned".
   r->rgba_data = nullptr;
   dng_free_result(r);
-  CHECK(dng_debug_pool_checked_out() == before, "[%s] free disturbed the pool",
-        label);
 }
 
 static void caseFailureLeavesBufferAlone(const char *good, const char *label) {
@@ -100,16 +93,14 @@ static void caseFailureLeavesBufferAlone(const char *good, const char *label) {
   if (!probe(good, 0, &w, &h)) return;
   const size_t need = static_cast<size_t>(w) * h * 4;
   std::vector<uint8_t> buf(need, 0xAB);
-  // Baseline-delta for the same reason as caseRefusals above.
-  const size_t before = dng_debug_pool_checked_out();
   DngResult *r = ceyx_decode_into_buffer("/nonexistent/broken.raw", 0,
                                          buf.data(), need);
   CHECK(r && r->error_code != 0, "[%s] corrupt reported success", label);
   if (r) dng_free_result(r);
   CHECK(buf[0] == 0xAB, "[%s] caller buffer clobbered on failure", label);
-  CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] failure left a checkout (a guard released dst?) %zu -> %zu",
-        label, before, dng_debug_pool_checked_out());
+  // WP5: the old counter delta here asked "did a failure path release dst into
+  // the pool?". With the pool and every release arm deleted, no code path can;
+  // the surviving observable is that the caller's bytes are untouched, above.
 }
 
 // AC15.6 — probe and decode agree.
@@ -247,27 +238,38 @@ static void caseOrientedExtents(const char *path, const char *label) {
 
 // AC-2.5 — the scratch is released on EVERY exit. 50 successes mixing
 // transposing and non-transposing orientations, then 50 forced failures
-// (nonexistent path, undersized dst), each measured as a delta against a
-// sampled baseline rather than against absolute zero (same reasoning as
-// caseRefusals above: the counter is process-global).
+// (nonexistent path, undersized dst).
+//
+// WP5: the scratch this case accounted for no longer exists -- the fused kernel
+// writes oriented pixels straight into dst -- and neither does the pool counter
+// it used. What survives, and is what the case is really for, is that 50
+// successes and 50 failures in a row all keep writing into the CALLER's buffer
+// and none of them corrupts the next call. That is asserted per iteration now
+// rather than as one global delta at the end, which also localises a failure to
+// the iteration that caused it.
 static void caseOrientedScratchAccounting(const char *path, const char *label) {
   int32_t w = 0, h = 0;
   if (!probe(path, kOrientMaxDim, &w, &h)) return;
   const size_t need = static_cast<size_t>(w) * h * 4;
   std::vector<uint8_t> buf(need);
 
-  const size_t before = dng_debug_pool_checked_out();
   // Orientations chosen so the loop alternates transposing (6, 8, 5, 7) with
-  // non-transposing (1, 3, 2, 4): a leak on either arm shows up.
+  // non-transposing (1, 3, 2, 4): a regression on either arm shows up.
   const int32_t cycle[] = {1, 6, 3, 8, 2, 5, 4, 7, 6, 1};
+  int successOwnershipViolations = 0;
   for (int i = 0; i < 50; ++i) {
     DngResult *r = ceyx_decode_into_buffer_oriented(
         path, kOrientMaxDim, buf.data(), need, cycle[i % 10]);
-    if (r) { r->rgba_data = nullptr; dng_free_result(r); }
+    if (r) {
+      if (r->error_code == 0 && r->rgba_data != buf.data())
+        ++successOwnershipViolations;
+      r->rgba_data = nullptr;
+      dng_free_result(r);
+    }
   }
-  CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] AC-2.5 50 oriented successes leaked scratch (%zu -> %zu)", label,
-        before, dng_debug_pool_checked_out());
+  CHECK(successOwnershipViolations == 0,
+        "[%s] AC-2.5 %d of 50 oriented successes did not write into the "
+        "caller's buffer", label, successOwnershipViolations);
 
   for (int i = 0; i < 25; ++i) {
     // Failure class 1: the file does not exist (fails in phase 1, before any
@@ -280,22 +282,22 @@ static void caseOrientedScratchAccounting(const char *path, const char *label) {
                                                     buf.data(), need - 1, 6);
     CHECK(b && b->error_code == kCeyxErrDstTooSmall,
           "[%s] AC-2.5 undersized dst not refused", label);
+    CHECK(b && b->rgba_data == nullptr,
+          "[%s] AC-2.5 refusal returned a pointer", label);
     if (b) dng_free_result(b);
   }
-  CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] AC-2.5 50 oriented failures leaked scratch (%zu -> %zu)", label,
-        before, dng_debug_pool_checked_out());
 }
 
 // AC-2.6, RETIRED BY R-19 (productionization plan §3 Task 4 "NAMED BEHAVIOUR
 // CHANGE"): the fused GPU path never checks out scratch for an oriented
 // decode — the kernel writes the oriented pixels straight into the caller's
-// buffer, transposing included — so `ceyx_debug_force_scratch_failure` has
-// nothing left to degrade. This case now asserts exactly that: forcing the
-// (now-vestigial) flag does NOT change the outcome, i.e. the decode still
-// succeeds with the correctly ORIENTED (swapped) extent, not a silent
-// fallback to unoriented. A regression back to the old degradation behaviour
-// would fail this on the extent-swap assertion.
+// buffer, transposing included — so there was nothing left to degrade.
+// WP5 (user ruling R3) deleted the scratch-failure hook this case used to
+// flip. The REGRESSION VALUE was never in the flip: it is the
+// extent-swap assertion, i.e. that two independent oriented decodes of the same
+// file both report the correctly ORIENTED (swapped) extent rather than a silent
+// unoriented fallback. That assertion is kept verbatim, as a control/forced
+// PAIR, so a regression back to the old degradation behaviour still fails here.
 static void caseOrientedDegradationRetired(const char *path,
                                            const char *label) {
   int32_t w = 0, h = 0;
@@ -310,17 +312,14 @@ static void caseOrientedDegradationRetired(const char *path,
   const int32_t cw = c ? c->width : 0, ch = c ? c->height : 0;
   if (c) { c->rgba_data = nullptr; dng_free_result(c); }
 
-  const size_t before = dng_debug_pool_checked_out();
-  const int32_t prev = ceyx_debug_force_scratch_failure(1);
   DngResult *r = ceyx_decode_into_buffer_oriented(path, kOrientMaxDim,
                                                   forced.data(), need, 6);
-  ceyx_debug_force_scratch_failure(prev);
 
   CHECK(r != nullptr, "[%s] R-19 null result", label);
   if (!r) return;
   CHECK(r->error_code == 0,
-        "[%s] R-19 forcing the retired scratch-failure flag must not fail "
-        "the fused decode (error=%d)", label, r->error_code);
+        "[%s] R-19 second oriented decode must not fail (error=%d)", label,
+        r->error_code);
   CHECK(r->rgba_data == forced.data(),
         "[%s] R-19 pointer identity broken", label);
   // The extent MUST be swapped (H, W): the flag has no mechanism left to act
@@ -331,8 +330,6 @@ static void caseOrientedDegradationRetired(const char *path,
         label, r->width, r->height, cw, ch);
   r->rgba_data = nullptr;
   dng_free_result(r);
-  CHECK(dng_debug_pool_checked_out() == before,
-        "[%s] R-19 case disturbed the pool", label);
 }
 
 // Step 4.3 — dedicated regression for the acceptance criterion as literally

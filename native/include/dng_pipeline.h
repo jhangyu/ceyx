@@ -8,15 +8,17 @@ class dng_negative;
 
 struct DngPipelineResult {
   // W7-B (P15): fused interleaved RGBA8 output (alpha=255). WP1 phase 3: this
-  // is now the only Stage4 output field — RGB8 output no longer exists. The
-  // buffer comes from the checkout-style RGBA output pool
-  // (dng_rgba_output_acquire) and MUST be returned via
-  // dng_rgba_output_release when freed.
+  // is now the only Stage4 output field — RGB8 output no longer exists.
+  // WP5: the buffer is ALWAYS the caller's. The library neither allocates nor
+  // frees it, on any path.
   uint8_t* rgba_ptr = nullptr;
   size_t   rgba_size = 0;
-  // WP10: when true, rgba_ptr points at a CALLER-OWNED buffer. It must
-  // never be released to RgbaOutputPool and never deleted. Set only by
-  // dng_decode_into_buffer.
+  // WP10: when true, rgba_ptr points at a CALLER-OWNED buffer, which must never
+  // be freed by the library. WP5: with the output pool deleted there is no
+  // other kind of buffer, so on every surviving decode route this is true; the
+  // flag is retained because it is what the caller-binding step sets, and
+  // because `rgba_ptr == dst` remains the caller's proof rather than its
+  // assumption.
   //
   // This field is an INPUT to dng_pipeline_decode_to_rgb_sized, unlike every
   // other field on this struct, which is an output. That is why that function
@@ -33,18 +35,10 @@ struct DngPipelineResult {
   int32_t error_code = 0;
 };
 
-// W7-B (P15): shared, process-scoped, checkout-style pool for the returned
-// RGBA output buffer. Used by the fused Stage4 bridge (acquire) and by
-// the FFI layer (release on free). Hands out distinct per-decode buffers so a
-// buffer handed to Dart via zero-copy NativeFinalizer is never overwritten by
-// a subsequent decode. acquire() returns uninitialised storage (every byte is
-// overwritten before read); release() returns true if the pointer was
-// pool-owned (reclaimed) or false if the caller must delete[] it.
-uint8_t* dng_rgba_output_acquire(size_t bytes);
-bool dng_rgba_output_release(uint8_t* ptr);
-// W5-#15: debug accessor — number of RGBA buffers currently checked out.
-// Zero after every dng_free_result cycle on a correct run.
-size_t dng_rgba_output_checked_out_count();
+// WP5: the process-scoped, checkout-style RGBA output pool and its three
+// accessors are DELETED. Distinct per-decode buffers -- the property the pool
+// existed to provide -- are now guaranteed by the caller supplying its own
+// destination for every decode.
 
 // Mutex rework (plan Task 6, spec R7/R8). Admission control accessors.
 //
@@ -171,9 +165,10 @@ bool dng_pipeline_decode_to_rgb_sized(const char *file_path,
 // the reset would wipe a pre-set pointer and the decode would quietly fall back
 // to the pool while the caller believed it owned the buffer.
 //
-// Ownership: dst is never released to RgbaOutputPool and never freed by the
-// library, on ANY exit path — the checkout guards are constructed inactive when
-// result.rgba_caller_owned is set.
+// Ownership: dst is never freed by the library, on ANY exit path. WP5: this
+// used to be enforced by constructing the checkout guard inactive; the guard
+// and the pool it returned buffers to are both deleted, so there is no longer
+// any code path that could free dst.
 bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
                                      uint8_t *dst, size_t dst_capacity,
                                      DngPipelineResult &result);

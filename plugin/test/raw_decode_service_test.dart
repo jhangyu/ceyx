@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:ceyx/src/raw_error_codes.dart';
 
 /// Service-layer contract for the generic RAW route (Phase 18 spec §3.2, §4).
@@ -42,7 +43,11 @@ void main() {
       expect(image.rgbaData.length, image.width * image.height * 4);
       // The worker path frees the native buffer deterministically in its
       // finally block, so this assertion does not depend on GC.
-      expect(service.poolCheckedOut, 0);
+      // WP5: was service.poolCheckedOut (the native pool gauge, now deleted
+      // with the pool). CeyxNativeBufferPool.debugTotalLiveAddresses is the
+      // user-designated equivalent-strength replacement and has MORE reach:
+      // it counts live checkouts across every pool on the isolate.
+      expect(CeyxNativeBufferPool.debugTotalLiveAddresses, 0);
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );
@@ -67,8 +72,8 @@ void main() {
               .having((e) => e.isCancelled, 'isCancelled', isFalse),
         ),
       );
-      // Failure path: rgba=null, pool untouched (raw_ffi_api.cpp:46-49).
-      expect(service.poolCheckedOut, 0);
+      // Failure path: nothing was handed out, so nothing is live.
+      expect(CeyxNativeBufferPool.debugTotalLiveAddresses, 0);
     },
   );
 
@@ -84,7 +89,7 @@ void main() {
             .having((e) => e.message, 'message', contains('dng')),
       ),
     );
-    expect(service.poolCheckedOut, 0);
+    expect(CeyxNativeBufferPool.debugTotalLiveAddresses, 0);
   });
 
   test(

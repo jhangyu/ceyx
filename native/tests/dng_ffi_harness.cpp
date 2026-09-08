@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    // WP5 leak assertion, replacing dng_debug_pool_checked_out(). Under caller
+    // WP5 leak assertion, replacing the deleted native pool gauge. Under caller
     // ownership the property "nothing leaked from the pool" is expressed as
     // "the decode wrote into MY buffer", i.e. no pool buffer was ever
     // allocated behind this decode. This is a stronger statement than the old

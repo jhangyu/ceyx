@@ -1725,18 +1725,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    // WP3: this gauge now asserts something STRONGER than it used to. Every
-    // decode in this suite supplies its own buffer, so the native RGBA pool
-    // must never have been entered at all — a non-zero count here means some
-    // path still took a pool checkout, which is exactly the owning mode WP3
-    // exists to prove unreachable. (Read through the FFI facade, which is the
-    // same counter the pool's own checked-out accessor reports.)
-    {
-        char detail[120];
-        const size_t rgba_out = dng_debug_pool_checked_out();
-        std::snprintf(detail, sizeof(detail), "rgba_checked_out=%zu", rgba_out);
-        report("pool-leak", nullptr, rgba_out == 0, detail);
-    }
+    // WP5: the "pool-leak" case is DELETED with the pool it measured, for the
+    // same reason as its twin in test_raw_hardening.cpp. Its property is now
+    // unstateable rather than merely unmeasured, and the per-decode
+    // rgba_ptr == caller-buffer assertions throughout this suite cover it more
+    // tightly than the end-of-run counter did.
 
     if (record_hashes) {
         char detail[200];

@@ -11,13 +11,13 @@ functions:
   - name: "applyOpcodeList3"
     description: "Apply OpcodeList3 to a Stage3 image, using Halide WarpRectilinear when config allows."
     lines: "126-154"
-  - name: "RgbaOutputPool"
+  - name: "acquireStage4OutputBuffer"
     description: "W7-B checkout-style pool; W1 fixes: best-fit acquire, H-2 defensive release, M-12 free_ cap ≤2."
     lines: "227-309"
-  - name: "ScopedRgbaCheckout / acquireStage4OutputBuffer"
+  - name: "acquireStage4OutputBuffer"
     description: "H-1 RAII scope-guard for checkout pool + M-8 size-assert on reuse path."
     lines: "311-359"
-  - name: "warmPipelinePoolsForSize"
+  - name: "dng_pipeline_warmup_for_size"
     description: "Idle-time pool prewarm for the process-wide RGB/RGBA checkout pools; L-5 per-size warmed cache skips redundant memset. Mutex rework Task 4 dropped the Stage-3 half (its pool no longer exists; arena pages belong to a decode that has not started)."
     lines: "361-406"
   - name: "extractStage2Bayer16"
@@ -33,7 +33,7 @@ functions:
     description: "SDK Stage3, M-2 config-taking Stage3 orchestrator, Stage4 render via Halide GPU."
     lines: "854-919"
   - name: "ParsedDngMetadata / parseDngFile / decodeStages"
-    description: "DNG parse + Stage1/2/3/4 decode orchestration. H-1 ScopedRgbaCheckout guard in decodeStages."
+    description: "DNG parse + Stage1/2/3/4 decode orchestration; Stage4 writes into the caller's buffer."
     lines: "974-1140"
   - name: "pipelineSingleFlightMutex"
     description: "File-scope std::shared_mutex accessor; warmup always exclusive, decodes always shared (overlap)."
@@ -214,97 +214,11 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
 // property the pool existed for (~262ms eager zero-fill avoided) while being
 // unshareable by construction. See prepareStage3WorkspacePtr below.
 
-// W7-B (P15): checkout-style RGBA output pool. See dng_pipeline.h for the
-// rationale (distinct per-decode buffers so a zero-copy buffer handed to Dart
-// is not clobbered by the next decode). Mirrors the FFI W7-A RgbaPool that it
-// supersedes; consolidating here gives a single owner so both the Android
-// fused bridge (acquire) and the FFI free path (release) reach the same pool.
-//
-// W1 fixes (H-1/M-12/H-2):
-//   - acquire: best-fit selection (smallest free slot >= bytes)
-//   - release: unknown-pointer defense (logged no-op, prevents caller delete[])
-//   - free_ capped at kMaxFreeSlots; excess released (largest first)
-class RgbaOutputPool {
- public:
-  uint8_t *acquire(size_t bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    // Best-fit: find the smallest free slot with cap >= bytes.
-    size_t bestIdx = free_.size();  // sentinel: no fit found
-    size_t bestCap = SIZE_MAX;
-    for (size_t i = 0; i < free_.size(); ++i) {
-      if (free_[i].cap >= bytes && free_[i].cap < bestCap) {
-        bestIdx = i;
-        bestCap = free_[i].cap;
-      }
-    }
-    if (bestIdx < free_.size()) {
-      uint8_t *p = free_[bestIdx].buf.release();
-      size_t cap = free_[bestIdx].cap;
-      free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(bestIdx));
-      checked_out_.emplace(p, cap);
-      return p;
-    }
-    uint8_t *p = new (std::nothrow) uint8_t[bytes];  // no value-init
-    if (p) checked_out_.emplace(p, bytes);
-    return p;
-  }
-  bool release(uint8_t *ptr) {
-    if (!ptr) return false;
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = checked_out_.find(ptr);
-    if (it == checked_out_.end()) {
-      // H-2 pool defense: unknown pointer — absorb and log rather than
-      // returning false and letting the caller fall through to delete[]
-      // (which risks double-free if the pointer was pool-owned earlier).
-      fprintf(stderr, "[RgbaOutputPool] release() called with unknown "
-              "pointer %p; absorbing to prevent double-free\n",
-              static_cast<void *>(ptr));
-      return true;
-    }
-    size_t cap = it->second;
-    checked_out_.erase(it);
-    // M-12: cap free_ at kMaxFreeSlots to bound memory growth.
-    // Evict the largest slot (most wasteful) to make room.
-    if (free_.size() >= kMaxFreeSlots) {
-      size_t largestIdx = 0;
-      for (size_t i = 1; i < free_.size(); ++i) {
-        if (free_[i].cap > free_[largestIdx].cap)
-          largestIdx = i;
-      }
-      // If the incoming buffer is larger than all cached slots,
-      // discard it directly instead of evicting a smaller one.
-      if (cap > free_[largestIdx].cap) {
-        delete[] ptr;
-        return true;
-      }
-      free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(largestIdx));
-    }
-    free_.push_back({std::unique_ptr<uint8_t[]>(ptr), cap});
-    return true;
-  }
-  // Debug accessor: number of buffers currently checked out.
-  // Exposed so the Batch 1 leak check can assert this doesn't grow
-  // across repeated failed decodes.
-  size_t checked_out_count() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return checked_out_.size();
-  }
-
- private:
-  static constexpr size_t kMaxFreeSlots = 2;
-  struct Slot {
-    std::unique_ptr<uint8_t[]> buf;
-    size_t cap;
-  };
-  mutable std::mutex mutex_;
-  std::vector<Slot> free_;
-  std::unordered_map<uint8_t *, size_t> checked_out_;
-};
-
-RgbaOutputPool &rgbaOutputPool() {
-  static RgbaOutputPool pool;
-  return pool;
-}
+// WP5: the checkout-style RGBA output pool that lived here is DELETED, along
+// with its acquire/release/checked_out_count accessors and the three C-linkage
+// bridges that exported them. Every full-resolution RGBA output address in the
+// process is now owned by a CeyxNativeBufferPool on a Dart isolate and reaches
+// this pipeline as a caller-supplied destination.
 
 }  // namespace (reopened below)
 
@@ -545,30 +459,15 @@ size_t dng_decode_arena_high_water_bytes() {
 
 namespace {
 
-// W1 H-1: RAII guard for checkout-style RGBA output pool buffers. Releases
-// the buffer back to the pool on scope exit unless disarmed by commit().
-// WP1 phase 3: this is now the only Stage4 output guard — RGB8 output no
-// longer exists.
-class ScopedRgbaCheckout {
- public:
-  explicit ScopedRgbaCheckout(uint8_t *&ptr_ref, bool active)
-      : ptr_ref_(ptr_ref), active_(active) {}
-  ~ScopedRgbaCheckout() {
-    if (active_ && ptr_ref_) {
-      rgbaOutputPool().release(ptr_ref_);
-      ptr_ref_ = nullptr;
-    }
-  }
-  void commit() { active_ = false; }
-  ScopedRgbaCheckout(const ScopedRgbaCheckout &) = delete;
-  ScopedRgbaCheckout &operator=(const ScopedRgbaCheckout &) = delete;
- private:
-  uint8_t *&ptr_ref_;
-  bool active_;
-};
+// WP5: ScopedRgbaCheckout is DELETED. Its whole job was to return a
+// pool-owned buffer on a failure path. With the pool gone, the Stage4 output is
+// always the caller's buffer, which the library must never release on ANY path
+// -- so there is nothing left to guard, and no guard is the correct shape. It
+// is not replaced by a defensive no-op: a guard that guards nothing invites a
+// future reader to give it something to do.
 
 // Acquire the Stage4 output buffer: an interleaved RGBA8 buffer from the
-// checkout-style RgbaOutputPool. WP1 phase 3: RGB8 output no longer exists.
+// checkout-style output pool. WP1 phase 3: RGB8 output no longer exists.
 // Reuses an already-set ptr (e.g. a device-handoff fallback re-entering
 // runStage4ToRgb) to avoid leaking a previously checked-out buffer.
 // R2 sized decode: the single place that decides the Stage4 MaximumSize cap.
@@ -607,77 +506,41 @@ uint32_t stage4MaximumSize(uint32_t inputWidth, uint32_t inputHeight,
   return requested < full ? requested : full;
 }
 
-// WP1 phase 3: collapsed to the RGBA-only arm — RGB8 output no longer exists,
-// so `need` is unconditionally width*height*4.
+// WP5: this no longer ACQUIRES anything -- it validates that the caller's
+// buffer is present and large enough. The name is kept because every call site
+// reads "can I write Stage4 output here?", which is still exactly what it
+// answers. A null ptr used to mean "allocate from the pool"; with the pool
+// deleted it means the caller supplied no destination, which is a hard refusal
+// rather than a silent fallback -- falling back would be the library allocating
+// full-resolution RGBA output, the precise thing this campaign removed.
 bool acquireStage4OutputBuffer(const PipelineConfig &config,
                                uint32_t width, uint32_t height,
                                uint8_t *&ptr, size_t &size) {
   (void)config;
   const size_t need = static_cast<size_t>(width) * height * 4;
-  if (ptr) {
-    // M-8: size assert on reuse path. Within a single decode, all acquires
-    // share the same W/H (from ParsedDngMetadata), so this is a latent defense
-    // against future callers that might re-enter with different dimensions.
-    if (size < need) {
-      fprintf(stderr, "[Pipeline] acquireStage4OutputBuffer: reuse buffer "
-              "size %zu < needed %zu; refusing reuse\n", size, need);
-      return false;
-    }
-    return true;
-  }
-  size = need;
-  ptr = rgbaOutputPool().acquire(size);
-  return ptr != nullptr;
-}
-
-// WP5/WP6: this function is deleted outright once the RGBA half goes (the
-// warmup page pre-commit moves to the Dart pool). Do not add anything to it.
-bool warmPipelinePoolsForSize(int32_t width, int32_t height) {
-  if (width <= 0 || height <= 0) {
+  if (!ptr) {
+    fprintf(stderr, "[Pipeline] acquireStage4OutputBuffer: no caller buffer; "
+            "the library does not allocate decode output\n");
     return false;
   }
-  const size_t w = static_cast<size_t>(width);
-  const size_t h = static_cast<size_t>(height);
-
-  // Mutex rework (plan Task 4): the Stage-3 half of the warm is gone. Its
-  // purpose was to pre-commit pages inside a process-wide pool that no longer
-  // exists; arena pages belong to a decode that has not started, so there is
-  // nothing here to pre-commit. Deliberate, small reduction in what warmup
-  // pre-commits. WP1 phase 3: the RGB8 half is gone too — RGB8 output no
-  // longer exists. Only the RGBA pool below is still process-wide and warmed.
-  //
-  // L-5: per-size warmed cache — skip redundant memset when the same
-  // size was already warmed. Pools are grow-only (new[]), so a prior
-  // acquire at this size guarantees the pages are already committed.
-  //
-  // No mutex needed: warmPipelinePoolsForSize is reached ONLY under the
-  // exclusive warmup lock, never from the shared decode path. That is the
-  // surviving invariant — the previous comment named
-  // pipelineSingleFlightMutex, which after the mutex rework no longer means
-  // "one caller at a time" for decodes. If the invariant ever breaks, the
-  // failure mode is benign: a redundant or skipped memset of pool memory that
-  // is about to be overwritten. It is stated so a future reader neither panics
-  // nor relies on more than it gives.
-  static int32_t warmedW = 0, warmedH = 0;
-  const bool alreadyWarmed = (width == warmedW && height == warmedH);
-  // W7 (M-11): seed one committed RGBA8 buffer into the checkout pool so the
-  // first fused decode does not pay the ~96MB first-touch page-fault. Previously
-  // Android-only (W7-B); now all platforms use the fused RGBA path.
-  const size_t rgbaByteCount = w * h * 4;
-  uint8_t *rgba = rgbaOutputPool().acquire(rgbaByteCount);
-  if (!rgba) {
+  // M-8: size check. Within a single decode all calls share the same W/H (from
+  // ParsedDngMetadata); this also covers a device-handoff fallback re-entering
+  // with the buffer already set.
+  if (size < need) {
+    fprintf(stderr, "[Pipeline] acquireStage4OutputBuffer: buffer size %zu < "
+            "needed %zu; refusing\n", size, need);
     return false;
-  }
-  if (!alreadyWarmed) {
-    std::memset(rgba, 0, rgbaByteCount);
-  }
-  rgbaOutputPool().release(rgba);
-  if (!alreadyWarmed) {
-    warmedW = width;
-    warmedH = height;
   }
   return true;
 }
+
+// WP5/WP6: the pool-warming helper that lived here is DELETED outright, not
+// left as an empty function. After WP1 removed its RGB8 half and WP5 removed its RGBA half, all
+// that remained was the per-size `alreadyWarmed` cache whose only purpose was
+// to skip the two memsets that are now gone. A warm entry point that warms
+// nothing is exactly the silently-inert shape this contract exists to remove.
+// The warmedW/warmedH statics died with it. The page pre-commit it provided is
+// served by the Dart pool writing to its own buffer (WP6).
 
 class ScopedStage2DeviceHandoff {
  public:
@@ -1481,19 +1344,11 @@ bool decodeStages(ConcurrentDngHost &host,
   std::vector<uint16_t> stage3Workspace;
   DngPipelineStage3Timing stage3Timing;
 
-  // H-1: RAII guard for the checkout-style RGBA output pool. If any path
-  // below acquires a buffer (via acquireStage4OutputBuffer) but then fails,
-  // the guard releases it back to the pool on scope exit — preventing the
-  // checked-out buffer from leaking permanently. Disarmed on success.
-  // WP1 phase 3: this is now the only guard — RGB8 output no longer exists.
-  // WP10: a CALLER-OWNED buffer must never be released into the pool on a
-  // failure path — the pool would then hand a Dart-owned address to the next
-  // decode, and RgbaOutputPool::release absorbs unknown pointers silently
-  // (:337-347), so the corruption would be undetectable at the release site.
-  // The guard is constructed INACTIVE in that case; the caller keeps
-  // ownership on every exit path, success or failure.
-  ScopedRgbaCheckout checkoutGuard(
-      result.rgba_ptr, !result.rgba_caller_owned);
+  // WP5: no output-buffer guard. result.rgba_ptr is the CALLER's buffer on
+  // every path, so the caller keeps ownership on every exit -- success, failure
+  // and exception alike -- and this function must not free or release it.
+  // The guard that used to sit here existed only to return a pool-owned buffer;
+  // with no pool there is nothing to return.
 
   // Phase 8.2.2: try fused Stage3+4 device handoff when applicable.
   bool allDone = false;
@@ -1522,7 +1377,6 @@ bool decodeStages(ConcurrentDngHost &host,
   if (allDone) {
     result.process_ms = 0;
     result.error_code = kDngSuccess;
-    checkoutGuard.commit();
     return true;
   }
 
@@ -1547,7 +1401,6 @@ bool decodeStages(ConcurrentDngHost &host,
   result.process_ms =
       std::chrono::duration<double, std::milli>(processEnd - processStart).count();
   result.error_code = kDngSuccess;
-  checkoutGuard.commit();
   return true;
 }
 
@@ -1563,20 +1416,8 @@ DecodeContext *dng_decode_context_for(dng_host &host) {
   return concurrent ? concurrent->decodeContext() : nullptr;
 }
 
-// W7-B (P15): public shared RGBA output pool accessors (declared in
-// dng_pipeline.h). Forward to the anonymous-namespace singleton, whose names
-// remain in scope for the rest of this translation unit.
-uint8_t *dng_rgba_output_acquire(size_t bytes) {
-  return rgbaOutputPool().acquire(bytes);
-}
-
-bool dng_rgba_output_release(uint8_t *ptr) {
-  return rgbaOutputPool().release(ptr);
-}
-
-size_t dng_rgba_output_checked_out_count() {
-  return rgbaOutputPool().checked_out_count();
-}
+// WP5: the three C-linkage RGBA-pool bridges (acquire / release /
+// checked_out_count) are DELETED along with the pool they forwarded to.
 
 // Single-flight mutex serializing the public FFI entry points against the
 // background warmup hook.  Both paths mutate shared native pools (RGBA output
@@ -1643,15 +1484,11 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
   // Yield to pending decode between steps.
   if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
 
-  // Step 2: Pool touch (stage3 workspace, RGB output, RGBA output pools).
-  {
-    std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
-    if (!warmPipelinePoolsForSize(width, height)) {
-      return false;
-    }
-  }
-
-  if (pendingDecodeCount().load(std::memory_order_acquire) > 0) return true;
+  // WP5: step 2 (the output-pool page pre-commit) is DELETED with the pool.
+  // It acquired one full-size RGBA buffer, memset it, and released it, purely
+  // to fault the pages in ahead of the first decode. Those pages now belong to
+  // a Dart-side CeyxNativeBufferPool buffer, so the pre-commit belongs there
+  // too (WP6). Steps 1 and 3+ are unaffected.
 
 #if defined(__ANDROID__)
   // R3-3 Option B (user-approved trade-off, 2026-07-05): when the persistent
@@ -1728,17 +1565,22 @@ bool dng_pipeline_warmup_for_size(int32_t width, int32_t height) {
   // Step 4: Stage4 render GPU pipeline prewarm (~440ms cold).
   // W7-E: prime the Stage4 render GPU pipeline at the actual size (matrix S4
   // cold ~440ms vs warm ~192ms). No-op on non-Android; per-size cached inside.
-  // G3: pass the pool RGBA buffer so the prewarm's D2H warms the exact host
-  // pages production will target — eliminates ~63ms first-decode copy_host
-  // cold penalty (SM8650 measurement: 80.5→17.0ms after this change).
+  // G3: give the prewarm a real destination so its D2H warms host pages —
+  // eliminates ~63ms first-decode copy_host cold penalty (SM8650 measurement:
+  // 80.5→17.0ms). WP5: this used to borrow a buffer from the RGBA output pool.
+  // With the pool deleted it uses a LOCAL scratch that is freed immediately.
+  // This is prewarm scratch, not decode output: it never escapes this scope and
+  // is never handed to a caller, so it does not reintroduce library-owned
+  // full-resolution output. WP6 owns deciding whether it should exist at all.
   {
     std::unique_lock<std::shared_mutex> guard(pipelineSingleFlightMutex());
     const size_t rgbaByteCount =
         static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-    uint8_t *rgba = rgbaOutputPool().acquire(rgbaByteCount);
-    if (rgba) {
-      dng_render_stage4_prewarm_for_size(width, height, rgba, rgbaByteCount);
-      rgbaOutputPool().release(rgba);
+    std::unique_ptr<uint8_t[]> scratch(
+        new (std::nothrow) uint8_t[rgbaByteCount]);
+    if (scratch) {
+      dng_render_stage4_prewarm_for_size(width, height, scratch.get(),
+                                         rgbaByteCount);
     } else {
       dng_render_stage4_prewarm_for_size(width, height);
     }
@@ -1988,7 +1830,7 @@ bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
 
 // The pre-existing public entry forwards with nullptr, so its behaviour is
 // unchanged BY CONSTRUCTION rather than by inspection — the same argument this
-// codebase already makes for dng_decode_and_process forwarding to
+// codebase already makes for the legacy full-res entry forwarding to
 // decodeAndProcessImpl with max_dim = 0 (dng_ffi_api.cpp:153-155), and for
 // dng_pipeline_decode_to_rgb forwarding here with max_dim = 0.
 bool dng_pipeline_decode_to_rgb_sized(const char *file_path, int32_t max_dim,

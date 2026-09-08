@@ -88,15 +88,18 @@ Future<void> main(List<String> args) async {
     print('[WORKER] dart_total_ms=${workerSw.elapsedMilliseconds}');
     _assertValidImage(workerImage, 'worker decode');
 
-    final afterWorker = service.poolCheckedOut;
-    if (afterWorker == null) {
-      _fail('dng_debug_pool_checked_out missing from the loaded dylib');
-    }
+    // WP5: was service.poolCheckedOut, the native pool gauge, which is deleted
+    // along with the pool it counted. CeyxNativeBufferPool.debugTotalLiveAddresses
+    // is the user-designated equivalent-strength replacement and has more reach
+    // (it counts live checkouts across every pool on the isolate, not one
+    // native counter). Note this is now never null, so the "symbol missing"
+    // bail-out below is gone rather than converted into a skip.
+    final afterWorker = CeyxNativeBufferPool.debugTotalLiveAddresses;
     if (afterWorker != 0) {
-      print('[POOL FAIL] checked_out=$afterWorker');
+      print('[POOL FAIL] live_addresses=$afterWorker');
       exit(1);
     }
-    print('[POOL PASS] checked_out=0');
+    print('[POOL PASS] live_addresses=0');
 
     if (workerOnly) {
       print('[INFO] --worker-only: skipping the zero-copy and GC phases');
@@ -135,14 +138,14 @@ Future<void> main(List<String> args) async {
       final garbage = Uint8List(4 * 1024 * 1024);
       garbage[0] = i;
     }
-    var checkedOut = service.poolCheckedOut ?? -1;
+    var checkedOut = CeyxNativeBufferPool.debugTotalLiveAddresses;
     while (checkedOut != 0 && gcSw.elapsedMilliseconds < gcTimeoutMs) {
       await Future<void>.delayed(const Duration(milliseconds: 50));
-      checkedOut = service.poolCheckedOut ?? -1;
+      checkedOut = CeyxNativeBufferPool.debugTotalLiveAddresses;
     }
     gcSw.stop();
     print(
-      '[POOL GC] checked_out=$checkedOut after ${gcSw.elapsedMilliseconds}ms '
+      '[POOL GC] live_addresses=$checkedOut after ${gcSw.elapsedMilliseconds}ms '
       '(informational: NativeFinalizer runs only on GC)',
     );
   } on RawUnavailableException catch (e) {

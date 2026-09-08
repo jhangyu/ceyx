@@ -3,7 +3,7 @@
 /* RAW (LibRaw) route FFI surface.
  *
  * Extracted from dng_ffi_api.h on 2026-08-25. The RAW route returns the same
- * DngResult as the DNG route and reuses dng_free_result/dng_free_rgba_buffer
+ * DngResult as the DNG route and reuses dng_free_result
  * for teardown, so this header includes dng_ffi_api.h rather than duplicating
  * the struct: the ABI is shared by design, and duplicating it would create two
  * definitions to keep in sync with plugin/lib/src/dng_bindings.dart.
@@ -19,14 +19,13 @@
 extern "C" {
 #endif
 
-/* Generic (non-DNG) RAW decode. Returns the SAME DngResult layout as
- * dng_decode_and_process, so no Dart struct change is needed; free it with
- * dng_free_result(). max_dim <= 0 means full resolution.
- * error_code carries a RawErrorCode (<= -201) on failure. */
+/* WP5: the allocating generic-RAW decode entry that used to be declared here
+ * is DELETED. Generic RAW is decoded through ceyx_decode_into_buffer
+ * (ceyx_decode_into.h), which writes into a CALLER-OWNED buffer; the library
+ * no longer allocates full-resolution RGBA output on any path. */
 struct RawDecodeDiagnostics;
-DngResult *raw_decode_and_process(const char *file_path, int32_t max_dim);
 
-/* Diagnostics for the calling thread's most recent raw_decode_and_process.
+/* Diagnostics for the calling thread's most recent RAW decode.
  * Returns 0 on success, -1 when out is null or no decode has run. */
 int32_t raw_last_diagnostics(struct RawDecodeDiagnostics *out);
 
@@ -62,9 +61,9 @@ typedef struct RawColorDiagnostics {
     char     reason[128];
 } RawColorDiagnostics;
 
-/* Colour diagnostics for the calling thread's most recent
- * raw_decode_and_process. Returns 0 on success, -1 when out is null or no
- * decode has run yet (mirrors raw_last_diagnostics's contract exactly).
+/* Colour diagnostics for the calling thread's most recent RAW decode.
+ * Returns 0 on success, -1 when out is null or no decode has run yet
+ * (mirrors raw_last_diagnostics's contract exactly).
  *
  * Round 2 Task 2.6 threads the real values through RawPipelineResult
  * (raw_gpu_pipeline.h's RawColorPipelineDiagnostics) from where each is
@@ -85,20 +84,20 @@ typedef struct RawColorDiagnostics {
 int32_t raw_last_color_diagnostics(RawColorDiagnostics *out);
 
 /* R6 fix: wires the decode-INTO entry point (ceyx_decode_into_buffer's
- * generic-RAW arm, native/src/ffi/ceyx_decode_into_ffi.cpp) into the SAME
- * thread-local diagnostics state raw_decode_and_process writes, so
- * raw_last_diagnostics()/raw_last_color_diagnostics() reflect the most recent
- * decode regardless of which entry point produced it. Before this, a
- * decode-into call left both queries describing whatever earlier
- * raw_decode_and_process call last ran on this thread (or "no decode has run"
- * if none had) -- stale-by-construction, not merely stale-by-timing.
+ * generic-RAW arm, native/src/ffi/ceyx_decode_into_ffi.cpp) into the
+ * thread-local diagnostics state the two queries above read, so they reflect
+ * the most recent decode. WP5 deleted the allocating RAW entry that used to
+ * share this duty, so this is now the SOLE writer -- which is the intended end
+ * state. Before the R6 fix a decode-into call left both queries describing
+ * whatever earlier allocating-entry call last ran on this thread (or "no decode
+ * has run" if none had) -- stale-by-construction, not merely by timing.
  *
  * Internal call, same binary, never looked up via dlsym/FFI -- deliberately
  * NOT RAW_FFI_EXPORT'd and not part of the Dart-visible surface. `diag` is
  * required; `color_diag` may be null (a route with no colour pipeline, e.g. a
  * failure before the adapter ran, simply leaves the colour channel
- * unrecorded, exactly as raw_decode_and_process already treats a failed
- * build()). RawColorPipelineDiagnostics is forward-declared only: this header
+ * unrecorded, exactly as the deleted allocating entry already treated a
+ * failed build()). RawColorPipelineDiagnostics is forward-declared only: this header
  * never needs its layout, only a pointer to it. */
 struct RawColorPipelineDiagnostics;
 void raw_record_decode_into_diagnostics(

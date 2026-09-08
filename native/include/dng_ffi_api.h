@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/// Result structure returned by dng_decode_and_process.
+/// Result structure returned by the decode entries (ceyx_decode_into.h).
 /// The caller MUST free this with dng_free_result().
 ///
 /// ABI contract: 6 fields; do NOT reorder or insert fields in the middle.
@@ -33,46 +33,28 @@ int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffer,
 /// Free a buffer allocated by dng_extract_preview_jpeg.
 void dng_free_buffer(uint8_t *buffer);
 
-/// Decode a DNG file and process it through the Halide pipeline.
-/// Returns a heap-allocated DngResult. Caller must free with dng_free_result().
-DngResult *dng_decode_and_process(const char *file_path);
-
-/// Decode a DNG file, capping the OUTPUT long edge at max_dim.
-/// The aspect ratio is preserved, so the result is at most max_dim on its
-/// longer side (the shorter side scales proportionally).
-///
-/// max_dim <= 0 means full resolution and behaves exactly like
-/// dng_decode_and_process. Sized decoding is only available for Bayer/CFA
-/// input on the GPU path; any other input silently-but-loudly (see the
-/// [Pipeline] log line) falls back to full resolution, so callers must read
-/// the returned width/height rather than assuming they got what they asked for.
-///
-/// Additive export: older binaries lack this symbol, so callers should resolve
-/// it defensively and fall back to dng_decode_and_process.
-/// Returns a heap-allocated DngResult. Caller must free with dng_free_result().
-DngResult *dng_decode_and_process_sized(const char *file_path,
-                                        int32_t max_dim);
+/// WP5: the allocating decode entries that used to be declared here are
+/// DELETED. Decoding goes through ceyx_decode_into_buffer (ceyx_decode_into.h),
+/// which writes into a CALLER-OWNED buffer; the library allocates no
+/// full-resolution RGBA output on any path. max_dim carries over unchanged.
 
 /// Warm process-scoped native resources for a likely decode size.
 /// This warms shared lossless/lossy workspaces and lossy MapPolynomial state.
 /// Returns 0 on success, or a negative error code.
 int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height);
 
-/// Free a DngResult previously returned by dng_decode_and_process.
-/// This function frees BOTH the DngResult struct AND its rgba_data buffer
-/// (when rgba_data is non-NULL). Callers that transfer rgba_data ownership to
-/// a NativeFinalizer (zero-copy path) MUST clear result->rgba_data = NULL
-/// before calling this function to avoid a double-free.
+/// Free a DngResult previously returned by a decode entry.
+/// WP5: this frees ONLY the struct. It does NOT free rgba_data, because
+/// rgba_data always points at the buffer the CALLER supplied to the decode --
+/// the library never owns it. Callers therefore do NOT need to clear
+/// result->rgba_data first; doing so is harmless but no longer required.
 void dng_free_result(DngResult *result);
 
-/// Free a standalone RGBA buffer returned by dng_decode_and_process.
-/// Used for zero-copy memory management from Dart via NativeFinalizer.
-void dng_free_rgba_buffer(void *ptr);
-
-/// W5-#15: Debug/stats — number of RGBA pool buffers currently checked out.
-/// Returns 0 when all decode results have been properly freed.
-/// Used by dng_ffi_harness to machine-check the H-1 leak guarantee.
-size_t dng_debug_pool_checked_out(void);
+/// WP5: the standalone RGBA free entry and the native pool's checked-out gauge
+/// are DELETED with the RGBA output pool they served. The process-wide
+/// "nothing leaked" gauge is now CeyxNativeBufferPool.debugTotalLiveAddresses
+/// on the Dart side, which counts live addresses across every isolate
+/// (user ruling OQ-4).
 
 /// R4 item 1 (rulings r-1, r-5, r-6). Sets the number of concurrent full-frame
 /// decode slots. The HOST'S USER SETTING IS THE SINGLE SOURCE OF TRUTH, and
@@ -123,8 +105,8 @@ int64_t dng_decode_recommendation_class_pixels(int32_t index);
 int32_t dng_decoder_set_pipeline_cache_path(const char *path);
 
 /// R3-3: Flush the pipeline cache to disk now (if dirty). Also invoked
-/// automatically at the end of dng_decoder_warmup_for_size and
-/// dng_decode_and_process. Returns 0 on success or nothing-to-do, -1 when
+/// automatically at the end of dng_decoder_warmup_for_size and of a decode.
+/// Returns 0 on success or nothing-to-do, -1 when
 /// unsupported on this build, -2 on (non-fatal) save failure.
 int32_t dng_decoder_save_pipeline_cache(void);
 

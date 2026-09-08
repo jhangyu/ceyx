@@ -169,16 +169,15 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
   RawPipelineResult out;
   const RawErrorCode rc =
       raw_pipeline_decode_file_into(file_path, develop, dst, dst_capacity, out);
-  // R6 fix: raw_decode_and_process (raw_ffi_api.cpp) records out.diag/
-  // out.color_diag into thread-local state on every call, success or
-  // failure, so raw_last_diagnostics()/raw_last_color_diagnostics() always
-  // describe the most recent decode on this thread. This decode-INTO entry
-  // point used to skip that recording entirely — a caller who decoded via
-  // ceyx_decode_into_buffer and then queried raw_last_diagnostics() got
-  // whatever an earlier raw_decode_and_process call had left behind (or "no
-  // decode has run" if none had), never THIS call's diagnostics. Record
-  // unconditionally, matching raw_decode_and_process's unconditional
-  // g_last_diagnostics = out.diag (raw_ffi_api.cpp) before its success check.
+  // R6 fix: record out.diag/out.color_diag into thread-local state on every
+  // call, success or failure, so raw_last_diagnostics() and
+  // raw_last_color_diagnostics() always describe the most recent decode on this
+  // thread. This decode-INTO entry point used to skip that recording entirely —
+  // a caller who decoded here and then queried raw_last_diagnostics() got
+  // whatever the deleted allocating RAW entry had left behind (or "no decode has
+  // run" if none had), never THIS call's diagnostics. WP5 deleted that entry, so
+  // this call is now the SOLE writer; recording unconditionally, before the
+  // success check, is what makes the queries honest on a failed decode too.
   raw_record_decode_into_diagnostics(&out.diag, &out.color_diag);
   result->decode_ms = out.diag.raw_unpack_ms;
   result->process_ms = out.diag.gpu_process_ms;
@@ -249,18 +248,13 @@ static void ceyxMapStage4FailureReason(DngResult *result) {
   }
 }
 
-// AC-2.6 hook. The degradation arm is reachable in production only under real
-// memory pressure, which a test cannot induce reliably or cheaply; without a
-// hook the one branch whose whole purpose is "never fail the decode" would be
-// the one branch never executed. Process-global and relaxed: it is flipped by
-// a single-threaded test around a single call.
-static std::atomic<int32_t> g_force_scratch_failure{0};
+// WP5 (user ruling R3): the AC-2.6 scratch-failure test hook and its flag are
+// DELETED. The degradation arm they existed to exercise no longer exists -- the
+// fused kernel writes oriented pixels straight into the caller's buffer, so no
+// scratch is taken -- which left the flag written by its setter and read by
+// nothing.
 
 extern "C" {
-
-CEYX_FFI_EXPORT int32_t ceyx_debug_force_scratch_failure(int32_t enable) {
-  return g_force_scratch_failure.exchange(enable, std::memory_order_relaxed);
-}
 
 CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
                                                    int32_t max_dim,
@@ -336,21 +330,13 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
 }  // extern "C"
 
 // Deliberate absence, recorded so it is not "fixed" later: there is NO
-// failure-path release here. raw_decode_and_process has an
-// `else if (out.rgba_ptr) { dng_rgba_output_release(...) }` arm
-// (raw_ffi_api.cpp:84-87) because ITS buffer is pool-owned. With a caller
-// buffer there is nothing pool-owned to give back, and releasing dst into the
-// pool would hand a Dart-owned address to the next decode — the exact
-// corruption the borrowing guards exist to prevent, and one the pool would
-// absorb silently (RgbaOutputPool::release logs unknown pointers as a no-op).
+// failure-path release in this file, and there is nothing left that could need
+// one. `dst` is the CALLER's buffer on every path, and WP5 deleted the RGBA
+// output pool, so there is no pool to release anything to and no library-owned
+// buffer to give back. Freeing dst here would corrupt a Dart-owned address.
 //
-// SIBLING NOTE (Task 2), because the paragraph above now has exactly one
-// exception and an unqualified "this file never releases" would be false:
-// ceyx_decode_into_buffer_oriented's transposing arm checks a SCRATCH frame out
-// of that same pool, and the scratch IS pool-owned, so this file DOES release
-// it — on every exit without exception: the decode-failure return, the
-// orientation-error return, and the success path. `dst` remains untouched by
-// the rule above; the two buffers are never confused because the scratch never
-// leaves this function and result->rgba_data is re-pointed at `dst` before the
-// oriented entry returns. The one arm that takes no scratch at all is the
-// checkout-failure degradation, which has nothing to release.
+// This paragraph used to carry an exception: the oriented entry's transposing
+// arm checked a SCRATCH frame out of that pool and did release it. Both the
+// scratch checkout and the pool are gone -- the fused kernel writes the
+// oriented pixels, transposing included, directly into dst -- so the rule is
+// now unqualified.

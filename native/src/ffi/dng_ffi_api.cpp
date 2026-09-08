@@ -87,59 +87,10 @@ FFI_EXPORT int32_t dng_decoder_pipeline_cache_status(void) {
   return -1;  // unsupported on this build
 }
 
-// R2 sized decode: shared body for both exported entries. max_dim <= 0 is the
-// full-resolution path; the old export forwards with 0 so its behaviour is
-// unchanged by construction rather than by inspection.
-static DngResult *decodeAndProcessImpl(const char *file_path, int32_t max_dim) {
-  DngResult *result =
-      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
-  if (!result)
-    return nullptr;
-
-  DngPipelineResult pipeline;
-  if (!dng_pipeline_decode_to_rgb_sized(file_path, max_dim, pipeline)) {
-    result->error_code = pipeline.error_code;
-    result->decode_ms = pipeline.decode_ms;
-    result->process_ms = pipeline.process_ms;
-    std::cerr << "[FFI] Pipeline v2 failed: " << result->error_code << "\n";
-    return result;
-  }
-
-  // WP1 phase 3: the RGB8 repack fallback is deleted — RGB8 output no
-  // longer exists anywhere in the pipeline. The terminal behaviour when
-  // rgba_ptr is unset is this existing error path.
-  uint8_t *rgba = pipeline.rgba_ptr;
-  if (!rgba) {
-    result->error_code = kDngErrRgbaAllocFailed;
-    return result;
-  }
-
-  result->rgba_data = rgba;
-  result->width = static_cast<int32_t>(pipeline.width);
-  result->height = static_cast<int32_t>(pipeline.height);
-  result->error_code = 0;
-  result->decode_ms = pipeline.decode_ms;
-  result->process_ms = pipeline.process_ms;
-
-  // [FFI] Success stderr removed (W6-5 / TD-23): timing fields on result
-  // struct are sufficient; always-on stderr polluted Xcode console and
-  // CI timing parsers. Re-enable via DiagnosticConfig in the future if
-  // a dedicated debug channel is needed.
-
-  // R3-3: flush any newly created pipeline state to the persistent cache
-  // (dirty-flag no-op when nothing changed; never affects the result).
-  dngAutoSaveVkPipelineCache();
-  return result;
-}
-
-FFI_EXPORT DngResult *dng_decode_and_process(const char *file_path) {
-  return decodeAndProcessImpl(file_path, 0);
-}
-
-FFI_EXPORT DngResult *dng_decode_and_process_sized(const char *file_path,
-                                                   int32_t max_dim) {
-  return decodeAndProcessImpl(file_path, max_dim);
-}
+// WP5: the two allocating full-resolution decode entries and their shared body
+// are DELETED. They were this library's only routes that allocated RGBA output.
+// Callers use ceyx_decode_into_buffer (ceyx_decode_into.h), which writes into a
+// buffer the caller owns.
 
 FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
   if (width <= 0 || height <= 0) {
@@ -204,32 +155,29 @@ FFI_EXPORT void dng_free_buffer(uint8_t *buffer) {
 FFI_EXPORT void dng_free_result(DngResult *result) {
   if (!result)
     return;
-  // Frees rgba_data when non-NULL, then frees the struct itself.
-  // Zero-copy callers MUST clear result->rgba_data before calling this
-  // (see _decodeZeroCopy in dng_decoder_service.dart) to avoid double-free.
-  // W5 (H-2 FFI): the pool's release() now absorbs unknown pointers as a
-  // logged no-op (W1 pool defense), so the delete[] fallback is removed to
-  // prevent heap corruption if a pool-owned pointer is mistakenly released
-  // twice. Dart already nulls rgba_data at dng_decoder_service.dart:293.
-  if (result->rgba_data) {
-    dng_rgba_output_release(result->rgba_data);
-    result->rgba_data = nullptr;
-  }
+  // WP5: frees ONLY the struct. It deliberately does NOT touch rgba_data.
+  //
+  // This is not an omission, it is the ownership rule. With every allocating
+  // decode entry deleted, result->rgba_data is ALWAYS a pointer the CALLER
+  // supplied to ceyx_decode_into_buffer, so the library must never free it.
+  // The previous body released it into the RGBA output pool, which -- once
+  // every caller supplies its own buffer -- meant handing a caller-owned
+  // address to the pool's free list on every call. The pool's "absorb unknown
+  // pointers and log" arm hid that, so it never surfaced as a failure.
+  //
+  // Turning that arm into free()/delete[] instead of removing it would have
+  // been strictly worse: callers pass the data() of a live std::vector or a
+  // Dart-owned allocation, so it would be heap corruption rather than a silent
+  // no-op. Removing the arm makes every call site correct by construction
+  // rather than correct only if it remembered to null the field first.
   std::free(result);
 }
 
-FFI_EXPORT void dng_free_rgba_buffer(void *ptr) {
-  if (!ptr)
-    return;
-  // W5 (H-2 FFI): pool absorbs all pointers (known or unknown) — no
-  // delete[] fallback. See dng_free_result comment above.
-  uint8_t *p = static_cast<uint8_t *>(ptr);
-  dng_rgba_output_release(p);
-}
-
-FFI_EXPORT size_t dng_debug_pool_checked_out(void) {
-  return dng_rgba_output_checked_out_count();
-}
+// WP5: the standalone RGBA free entry and the native pool's checked-out gauge
+// are DELETED with the pool they served. The process-wide "nothing leaked"
+// gauge they backed is now CeyxNativeBufferPool.debugTotalLiveAddresses on the
+// Dart side, which counts live addresses across every isolate -- strictly more
+// reach than the native counter had (user ruling OQ-4 / plan O10).
 
 // ---------------------------------------------------------------------------
 // R4 item 1 — three-layer parallelism sync (rulings r-1, r-5, r-6).

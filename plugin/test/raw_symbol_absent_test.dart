@@ -10,6 +10,15 @@ import 'package:ceyx/src/raw_error_codes.dart';
 /// RawUnavailableException — not a crash, and not a silent fallback to the
 /// DNG parser (which would report a misleading DNG error code for a RAF).
 ///
+/// WP5 (user ruling R4): the CONDITION is restated, the property is unchanged.
+/// It used to be "the dylib does not export raw_decode_and_process". WP5 deletes
+/// that entry, so the old condition is true of every current build while RAW
+/// decoding works — it no longer selects the situation this test is about. The
+/// condition that actually makes RAW decoding impossible, and the one every RAW
+/// path now gates on, is "the dylib lacks the DECODE-INTO PAIR"
+/// (ceyx_probe_output_size + ceyx_decode_into_buffer). The old dylib fixture
+/// satisfies it for the same reason it satisfied the old one: it predates both.
+///
 /// Fixture: the pre-Phase-17 dylib snapshotted by Task 1 into
 /// tmp/old-dylib-raw/, overridable via DNG_OLD_RAW_DYLIB. Skips with an
 /// explicit reason when absent, following dng_sized_decode_fallback_test.dart.
@@ -33,17 +42,20 @@ void main() {
       skipReason =
           'reason: no symbol-less dylib snapshot at $oldDylibPath — re-run '
           'Phase 18 Task 1 Step 3, or set DNG_OLD_RAW_DYLIB';
-    } else if (DngNativeBindings.fromPath(oldDylibPath).rawDecodeAvailable) {
+    } else if (DngNativeBindings.fromPath(
+      oldDylibPath,
+    ).decodeIntoBufferAvailable) {
       skipReason =
-          'reason: dylib at $oldDylibPath DOES export raw_decode_and_process';
+          'reason: dylib at $oldDylibPath DOES export the decode-into pair, '
+          'so it cannot exercise the symbol-absent path';
     } else {
       oldDylibUsable = true;
     }
   });
 
   test(
-    'decode() on a RAF throws RawUnavailableException when the dylib has no '
-    'RAW symbols',
+    'decode() on a RAF throws RawUnavailableException when the dylib lacks '
+    'the decode-into pair',
     () {
       if (!oldDylibUsable) {
         markTestSkipped(skipReason);

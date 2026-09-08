@@ -271,18 +271,48 @@ class DngDecoderService {
     _initialized = true;
   }
 
-  /// Whether the loaded native library exports `dng_decode_and_process_sized`.
-  /// Initializes the service if needed.
+  /// Whether this service can perform a SIZED decode (cap the output long edge).
+  ///
+  /// WP5: this used to report "does the dylib export
+  /// `dng_decode_and_process_sized`". That entry is deleted, so the old
+  /// question answers "no" on every current build while sized decoding works —
+  /// the same inverted-probe problem as [rawDecodeAvailable], and it was caught
+  /// the same way: plugin/bin/prod_shape_probe.dart failed with
+  /// `sizedDecodeAvailable==false` on the very same line that reported
+  /// `sized(maxDim:200)=200x133`, i.e. its own output proved the capability it
+  /// was denying.
+  ///
+  /// Re-pointed at the condition that actually determines it:
+  /// `ceyx_decode_into_buffer` takes the SAME `max_dim` the deleted entry took
+  /// and applies the same sizing rule, so the decode-into pair being present IS
+  /// sized-decode being available.
+  ///
+  /// (The BINDINGS-level `DngNativeBindings.sizedDecodeAvailable` keeps its
+  /// original meaning — it describes a loaded image, which is what the
+  /// pinned-old-dylib tests assert about.)
   bool get sizedDecodeAvailable {
     if (!_initialized) initialize();
-    return _bindings.sizedDecodeAvailable;
+    return _bindings.decodeIntoBufferAvailable;
   }
 
-  /// Whether the loaded native library exports `raw_decode_and_process`.
-  /// Initializes the service if needed.
+  /// Whether this service can decode a generic RAW file.
+  ///
+  /// WP5: this used to report "does the dylib export `raw_decode_and_process`".
+  /// That entry is deleted, so the old question now answers "no" on every
+  /// current build while RAW decoding works perfectly — a capability probe that
+  /// reports the OPPOSITE of the truth. It is re-pointed at the condition the
+  /// RAW decode paths ACTUALLY gate on: `_decodeRawZeroCopy`,
+  /// `_decodeRawToTransferable` and `_decodeRawToPointer` each throw
+  /// [RawUnavailableException] when [decodeIntoBufferAvailable] is false, and
+  /// nothing anywhere consults the legacy symbol. The probe and the gate now
+  /// give the same answer by construction rather than by coincidence.
+  ///
+  /// (The BINDINGS-level `DngNativeBindings.rawDecodeAvailable` keeps its
+  /// original meaning — it describes a loaded image, and pinned-old-dylib tests
+  /// depend on that. This getter answers a different question: can I decode.)
   bool get rawDecodeAvailable {
     if (!_initialized) initialize();
-    return _bindings.rawDecodeAvailable;
+    return _bindings.decodeIntoBufferAvailable;
   }
 
   /// Pushes the host's configured decode-lane width onto the native slot pool.

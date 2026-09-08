@@ -46,9 +46,11 @@ int32_t ceyx_probe_output_size(const char *file_path, int32_t max_dim,
                                int32_t *out_width, int32_t *out_height);
 
 /// Format-agnostic decode into a CALLER-OWNED buffer.
-/// OWNERSHIP: dst is never freed, never released to any pool, never retained.
+/// OWNERSHIP: dst is never freed and never retained by the library.
 /// On success result->rgba_data == dst (pointer identity is the contract).
-/// The caller MUST clear result->rgba_data before dng_free_result().
+/// WP5: the caller no longer needs to clear result->rgba_data before
+/// dng_free_result() -- that call frees ONLY the struct now. Clearing it first
+/// remains harmless.
 /// dst NULL / capacity 0 / capacity < w*h*4 -> kCeyxErrDstTooSmall with
 /// width and height FILLED IN and rgba_data NULL, before any pixel work.
 /// Returns a heap-allocated DngResult; free with dng_free_result().
@@ -63,24 +65,21 @@ DngResult *ceyx_decode_into_buffer(const char *file_path, int32_t max_dim,
 /// ADDITIVE: older binaries lack this symbol. Callers MUST resolve it
 /// defensively and fall back to ceyx_decode_into_buffer + host-side rotation.
 ///
-/// DEGRADATION (contractual, not a bug): the transposing orientations (5..8)
-/// need one scratch frame, taken from the SAME RGBA pool the decoders use. If
-/// that checkout fails, this entry decodes UNORIENTED into dst and reports
-/// SUCCESS with the UNSWAPPED extent. Memory pressure must never turn into
-/// "the photo will not open"; the caller detects the degradation by comparing
-/// the returned extent against the orientation it asked for (that is exactly
-/// what the Dart side's appliedOrientation consistency check does).
+/// NO DEGRADATION ARM. This entry either returns the correctly ORIENTED extent
+/// or it fails. It never silently returns unoriented pixels with the unswapped
+/// extent. Two changes removed the arm that used to be documented here: the
+/// fused kernel writes the oriented pixels (transposing included) straight into
+/// dst, so no scratch frame is taken at all; and an orientation failure is a
+/// decode failure rather than a successful unoriented render (R-19). There is
+/// no RGBA pool left for a scratch checkout to fail against.
 DngResult *ceyx_decode_into_buffer_oriented(const char *file_path,
                                             int32_t max_dim, uint8_t *dst,
                                             size_t dst_capacity,
                                             int32_t exif_orientation);
 
-/// TEST HOOK — not part of the shipping contract, and deliberately named so.
-/// When set non-zero, the scratch checkout inside
-/// ceyx_decode_into_buffer_oriented is forced to fail, which is the only way
-/// to exercise the degradation arm above without exhausting real memory
-/// (AC-2.6). Returns the previous value. Always 0 unless a test set it.
-int32_t ceyx_debug_force_scratch_failure(int32_t enable);
+/// WP5 (user ruling R3): the AC-2.6 scratch-failure test hook is DELETED. It
+/// forced a scratch checkout to fail so the degradation arm could be
+/// exercised; there is no scratch checkout and no degradation arm.
 
 #ifdef __cplusplus
 }

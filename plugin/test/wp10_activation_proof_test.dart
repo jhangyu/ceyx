@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:ffi/ffi.dart' show malloc;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -97,7 +98,14 @@ void main() {
         // from a real write.
         buf.asTypedList(bytes).fillRange(0, bytes, 0xAB);
         try {
-          final checkedOutBefore = service.poolCheckedOut;
+          // WP5: was service.poolCheckedOut (native pool gauge, deleted with
+          // the pool). Rewired onto the Dart process-wide gauge, which is the
+          // user-designated equivalent-strength replacement. This ALSO removes
+          // a silent weakening: the old code guarded the assertion with
+          // `if (checkedOutBefore != null)`, so once the native symbol went
+          // away the check would have stopped running while the test stayed
+          // green. The gauge below is never null, so the assertion always runs.
+          final liveBefore = CeyxNativeBufferPool.debugTotalLiveAddresses;
 
           final wire = service.decodeIntoPointer(path, buf.address, bytes);
           final address = wire[0] as int;
@@ -123,13 +131,13 @@ void main() {
                 'the untouched sentinel',
           );
 
-          if (checkedOutBefore != null) {
+          {
             expect(
-              service.poolCheckedOut,
-              checkedOutBefore,
-              reason: 'a caller-owned buffer must never be checked out of '
-                  "the native RGBA pool -- WP10's whole point is that this "
-                  'route never touches it',
+              CeyxNativeBufferPool.debugTotalLiveAddresses,
+              liveBefore,
+              reason: 'a caller-owned buffer must never become a pool '
+                  "checkout -- WP10's whole point is that this route "
+                  'allocates nothing behind the caller',
             );
           }
         } finally {

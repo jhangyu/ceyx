@@ -802,15 +802,15 @@ RawErrorCode decodeFileImpl(const char* file_path,
         // The ownership-move block below is unchanged and is already right for
         // this case: it clears dng->rgba_data before dng_free_result, which is
         // exactly what a caller-owned buffer needs.
-        DngResult* dng =
-            out.caller_dst
-                ? ceyx_decode_into_buffer(
-                      file_path,
-                      static_cast<int32_t>(develop.max_output_long_edge),
-                      out.caller_dst, out.caller_dst_capacity)
-                : dng_decode_and_process_sized(
-                      file_path,
-                      static_cast<int32_t>(develop.max_output_long_edge));
+        // WP5: this was a ternary whose else-arm called the allocating sized
+        // DNG entry when out.caller_dst was null. After WP3 collapsed the
+        // checkout guard to borrow-only, caller_dst is never null on any
+        // surviving route, so the else-arm was already dead; WP5 deletes the
+        // entry it called. Collapsed to the arm that was always taken -- the
+        // correct code was already here.
+        DngResult* dng = ceyx_decode_into_buffer(
+            file_path, static_cast<int32_t>(develop.max_output_long_edge),
+            out.caller_dst, out.caller_dst_capacity);
         if (!dng) {
             out.error = kRawErrAllocationFailed;
             return out.error;
@@ -955,18 +955,11 @@ RawErrorCode raw_pipeline_probe_output_size(const char* file_path,
     return kRawSuccess;
 }
 
-RawErrorCode raw_pipeline_decode_file(const char* file_path,
-                                      const RawDevelopParams& develop,
-                                      RawPipelineResult& out) {
-    const RawCancelToken none;
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none,
-                          /*dst=*/nullptr, /*dst_capacity=*/0, out);
-}
-
-// WP10 (A3.2): the caller-buffer sibling. Identical to the entry above in every
-// respect except that the caller's buffer is passed down as a parameter and
-// bound after decodeFileImpl's internal reset. The three pre-existing public
-// entries keep their exact signatures and behaviour; this is purely additive.
+// WP5: the null-destination entries (raw_pipeline_decode_file, _forced and
+// _cancellable) are DELETED. They passed dst=nullptr, which since WP3's
+// borrow-only collapse is refused by makeRgbaCheckout, so they could not
+// succeed on any RAW route. The caller-buffer siblings below are the only
+// form that remains.
 RawErrorCode raw_pipeline_decode_file_into(const char* file_path,
                                            const RawDevelopParams& develop,
                                            uint8_t* dst, size_t dst_capacity,
@@ -974,15 +967,6 @@ RawErrorCode raw_pipeline_decode_file_into(const char* file_path,
     const RawCancelToken none;
     return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none,
                           dst, dst_capacity, out);
-}
-
-RawErrorCode raw_pipeline_decode_file_forced(const char* file_path,
-                                             const RawDevelopParams& develop,
-                                             RawForcedBackend forced,
-                                             RawPipelineResult& out) {
-    const RawCancelToken none;
-    return decodeFileImpl(file_path, develop, forced, none,
-                          /*dst=*/nullptr, /*dst_capacity=*/0, out);
 }
 
 // WP3: caller-buffer sibling. Contract on the declaration.
@@ -1006,14 +990,6 @@ int raw_pipeline_gpu_available() {
     // One probe, not a second opinion: this is the same capability gate the DNG
     // route's requireGpuBackend already calls.
     return dng_halide_gpu_available() ? 1 : 0;
-}
-
-RawErrorCode raw_pipeline_decode_file_cancellable(const char* file_path,
-                                                  const RawDevelopParams& develop,
-                                                  const RawCancelToken& cancel,
-                                                  RawPipelineResult& out) {
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel,
-                          /*dst=*/nullptr, /*dst_capacity=*/0, out);
 }
 
 // WP3: caller-buffer sibling. Contract on the declaration.
