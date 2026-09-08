@@ -400,6 +400,12 @@ class DngDecoderService {
     if (result != 0) {
       throw DngDecodeException(result, 'Native warmup failed');
     }
+    // WP6: replaces the native warmup's step-2 pool touch
+    // (warmPipelinePoolsForSize), deleted with the native pools. The pages
+    // that matter are now the Dart pool's, so the Dart pool commits them.
+    // Run on the CALLING isolate (not the spawned worker above):
+    // CeyxNativeBufferPool.shared lives on the main isolate only.
+    await CeyxNativeBufferPool.shared.warmUpFor(width * height * 4);
   }
 
   /// R3-3: Set the VkPipelineCache persistence file path (Android/Vulkan only).

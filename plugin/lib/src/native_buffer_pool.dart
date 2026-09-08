@@ -164,6 +164,37 @@ class CeyxNativeBufferPool {
   @visibleForTesting
   int get debugWaiterCount => _waiting.length;
 
+  /// The size last pre-committed by [warmUpFor], so a repeat call at the
+  /// same size is a no-op. `null` before the first successful warm.
+  int? _warmedBytes;
+
+  /// Pre-commits the pages of one pooled buffer at [bytes], so the first real
+  /// decode does not pay the ~96MB first-touch page-fault. Replaces the
+  /// native warmup's step-2 pool touch (`warmPipelinePoolsForSize`), deleted
+  /// with the native pools in WP5. Idempotent per size: a second call at the
+  /// same size is a no-op, because the pages are already committed.
+  ///
+  /// Fills the WHOLE buffer rather than touching one byte per page: page size
+  /// differs across the two platforms this pool runs on (Apple Silicon uses
+  /// 16KiB pages; Android ARM64 commonly uses 4KiB, but is not guaranteed
+  /// to), so a single stride assumption would silently under-commit on
+  /// whichever platform guessed wrong while still reporting success. A full
+  /// fill is stride-independent and correct on both.
+  ///
+  /// Never blocks a real decode: if [acquire] would have to wait (pool at
+  /// cap, nothing idle), the warm is skipped outright rather than queued
+  /// behind a real request — warmup is an optimisation, and an optimisation
+  /// that delays the thing it optimises has inverted its own purpose.
+  Future<void> warmUpFor(int bytes) async {
+    if (bytes <= 0 || bytes == _warmedBytes) return;
+    final buffer = acquireOrNull(bytes);
+    if (buffer == null) return;
+    final ptr = Pointer<Uint8>.fromAddress(buffer.address);
+    ptr.asTypedList(buffer.capacity).fillRange(0, buffer.capacity, 0);
+    release(buffer);
+    _warmedBytes = bytes;
+  }
+
   /// Checks out a buffer of at least [bytes]. Completes immediately when a slot
   /// is free; otherwise waits for a return — never allocates past [maxBuffers].
   Future<CeyxNativeBuffer> acquire(int bytes) {
