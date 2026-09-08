@@ -522,10 +522,19 @@ class DngDecoderService {
   /// (G4) or on a format whose geometry moves during unpack (R11.1).
   ///
   /// Must only be called on a worker isolate.
+  /// Test seam: when set, [probeOutputSize] answers this instead of asking the
+  /// dylib. Exists to drive a probe/decode extent DISAGREEMENT, which is the
+  /// one condition the sync arms' resize retry exists for and which cannot
+  /// otherwise be produced on demand (a correct probe never disagrees).
+  @visibleForTesting
+  static ({int width, int height})? debugProbeOutputSizeOverride;
+
   ({int width, int height})? probeOutputSize(String filePath, {int? maxDim}) {
     if (!_initialized) {
       initialize();
     }
+    final override = debugProbeOutputSizeOverride;
+    if (override != null) return override;
     final probe = _bindings.ceyxProbeOutputSize;
     if (probe == null) return null;
 
@@ -924,9 +933,13 @@ class DngDecoderService {
   /// (`decode_pool.dart`). A pooled buffer is meant to come back through
   /// `DngImage.releaseToPool()`; this catches the callers that forget, and its
   /// reclaim is counted separately so a test can assert it never fired.
-  static final Finalizer<int> _poolSafetyNet = Finalizer<int>((address) {
-    CeyxNativeBufferPool.shared.releaseByAddressFromFinalizer(address);
-  });
+  /// Keyed on (buffer, the checkout it was armed for) rather than a bare
+  /// address: the pool reuses buffer instances, so after a release-and-reacquire
+  /// an address alone cannot tell "still mine" from "someone else's now".
+  static final Finalizer<(CeyxNativeBuffer, int)> _poolSafetyNet =
+      Finalizer<(CeyxNativeBuffer, int)>(((CeyxNativeBuffer, int) armed) {
+        CeyxNativeBufferPool.shared.releaseFromFinalizer(armed.$1, armed.$2);
+      });
 
   /// Probes the output extent and checks out a buffer for it, SYNCHRONOUSLY.
   ///
@@ -965,6 +978,63 @@ class DngDecoderService {
     return _buffers.adoptUnpooled(malloc<Uint8>(bytes).address, bytes);
   }
 
+  /// Round-1 review F2: probe -> acquire -> decode-into, WITH the one-shot
+  /// resize retry the pooled route has always had (`kMsgResize`).
+  ///
+  /// The probe and the decode can disagree about the extent — that is precisely
+  /// what `DngBufferTooSmallException` reports, and the pool treats it as
+  /// routine. Without a retry here the same disagreement came out of the PUBLIC
+  /// synchronous API as a hard error, which would be a new way for a photo that
+  /// opens today to stop opening (contract R-A). The refusal carries native's
+  /// own extent, so the second attempt is sized exactly, and a second refusal
+  /// stays an error rather than looping.
+  ///
+  /// Returns the wire AND the buffer that backs it, because the caller decides
+  /// the buffer's fate: the zero-copy arm hands ownership to the DngImage, the
+  /// transferable arm copies out and returns it immediately.
+  ({List<Object?> wire, CeyxNativeBuffer buffer}) _decodeIntoPooledBuffer(
+    String filePath,
+    int? maxDim, {
+    required bool isRaw,
+  }) {
+    var buffer = _acquireForSync(filePath, maxDim, isRaw: isRaw);
+    try {
+      final wire = decodeIntoPointer(
+        filePath,
+        buffer.address,
+        buffer.capacity,
+        maxDim: maxDim,
+      );
+      return (wire: wire, buffer: buffer);
+    } on DngBufferTooSmallException catch (e) {
+      // The probe was wrong. Give the slot back before taking another, so a
+      // pool at its cap can reuse this very buffer for the retry.
+      _buffers.release(buffer);
+      buffer = _acquireExactly(e.requiredBytes);
+      try {
+        final wire = decodeIntoPointer(
+          filePath,
+          buffer.address,
+          buffer.capacity,
+          maxDim: maxDim,
+        );
+        return (wire: wire, buffer: buffer);
+      } catch (_) {
+        _buffers.release(buffer);
+        rethrow;
+      }
+    } catch (_) {
+      _buffers.release(buffer);
+      rethrow;
+    }
+  }
+
+  /// Checks out exactly [bytes], falling back to malloc + adoption when the
+  /// pool is at its cap — the synchronous caller cannot wait for a slot.
+  CeyxNativeBuffer _acquireExactly(int bytes) =>
+      _buffers.acquireOrNull(bytes) ??
+      _buffers.adoptUnpooled(malloc<Uint8>(bytes).address, bytes);
+
   /// WP2: probe -> pool acquire -> decode-into, replacing the dylib's
   /// allocating `dng_decode_and_process`. The public signature of [decode] is
   /// unchanged (R-C), only what allocates underneath it.
@@ -972,14 +1042,8 @@ class DngDecoderService {
     if (!_initialized) {
       initialize();
     }
-    final buffer = _acquireForSync(filePath, null, isRaw: isRaw);
-    try {
-      final wire = decodeIntoPointer(filePath, buffer.address, buffer.capacity);
-      return _imageFromPooledWire(wire);
-    } catch (_) {
-      _buffers.release(buffer);
-      rethrow;
-    }
+    final decoded = _decodeIntoPooledBuffer(filePath, null, isRaw: isRaw);
+    return _imageFromPooledWire(decoded.wire, decoded.buffer);
   }
 
   /// Generic-RAW twin of [_decodeZeroCopy].
@@ -1006,14 +1070,15 @@ class DngDecoderService {
   /// Builds the [DngImage] over a pool-owned address: a zero-copy view plus the
   /// pool safety net. NEVER a `NativeFinalizer` — the buffer belongs to the
   /// pool, and handing it to the dylib's free would take it away from the pool.
-  DngImage _imageFromPooledWire(List<Object?> wire) {
+  DngImage _imageFromPooledWire(List<Object?> wire, CeyxNativeBuffer buffer) {
     final address = wire[0] as int;
     final width = wire[1] as int;
     final height = wire[2] as int;
     final bytes = Pointer<Uint8>.fromAddress(
       address,
     ).asTypedList(width * height * 4);
-    _poolSafetyNet.attach(bytes, address, detach: bytes);
+    _poolSafetyNet.attach(bytes, (buffer, buffer.checkoutGeneration),
+        detach: bytes);
     return DngImage(
       rgbaData: bytes,
       width: width,
@@ -1021,7 +1086,14 @@ class DngDecoderService {
       decodeMs: wire[3] as double,
       processMs: wire[4] as double,
       nativeAddress: address,
-      onReleaseToPool: () => _buffers.tryReleaseByAddress(address),
+      onReleaseToPool: () {
+        // Round-1 review F1: DISARM before returning the buffer. Without this
+        // the net stays armed on a buffer the pool may hand to someone else,
+        // and a later collection of `bytes` reclaims it under its new owner.
+        _poolSafetyNet.detach(bytes);
+        CeyxNativeBufferPool.noteSafetyNetDetach();
+        _buffers.release(buffer);
+      },
     );
   }
 
@@ -1098,17 +1170,11 @@ class DngDecoderService {
     int? maxDim, {
     bool isRaw = false,
   }) {
-    final buffer = _acquireForSync(filePath, maxDim, isRaw: isRaw);
+    final decoded = _decodeIntoPooledBuffer(filePath, maxDim, isRaw: isRaw);
     try {
-      final wire = decodeIntoPointer(
-        filePath,
-        buffer.address,
-        buffer.capacity,
-        maxDim: maxDim,
-      );
-      return _transferableFromPooledWire(wire);
+      return _transferableFromPooledWire(decoded.wire);
     } finally {
-      _buffers.release(buffer);
+      _buffers.release(decoded.buffer);
     }
   }
 
@@ -1158,18 +1224,7 @@ class DngDecoderService {
     int? maxDim, {
     bool isRaw = false,
   }) {
-    final buffer = _acquireForSync(filePath, maxDim, isRaw: isRaw);
-    try {
-      return decodeIntoPointer(
-        filePath,
-        buffer.address,
-        buffer.capacity,
-        maxDim: maxDim,
-      );
-    } catch (_) {
-      _buffers.release(buffer);
-      rethrow;
-    }
+    return _decodeIntoPooledBuffer(filePath, maxDim, isRaw: isRaw).wire;
   }
 
   /// RAW twin of [_decodeDngToPointer]; see [_decodeRawZeroCopy].

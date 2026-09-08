@@ -84,6 +84,16 @@ class CeyxNativeBufferPool {
   @visibleForTesting
   int debugCheckedOut = 0;
 
+  /// Round-1 review F1: how many times an explicit release disarmed a safety
+  /// net. Asserted by the decode-side suites so "the release detaches" is a
+  /// mechanical fact rather than a claim — GC cannot be forced, but the detach
+  /// call can be counted.
+  @visibleForTesting
+  static int debugSafetyNetDetaches = 0;
+
+  /// Called by the two attach sites when they detach on explicit release.
+  static void noteSafetyNetDetach() => debugSafetyNetDetaches++;
+
   @visibleForTesting
   int debugExplicitReleases = 0;
 
@@ -192,6 +202,7 @@ class CeyxNativeBufferPool {
       // dylib's own free. `_returnToFreeList` already routes `!pooled` to
       // `_disposeBuffer`, and `_disposeBuffer` removes the entry, so this is
       // the only line that was missing.
+      buffer._checkoutGeneration++;
       _byAddress[buffer.address] = buffer;
       return buffer;
     }
@@ -199,6 +210,7 @@ class CeyxNativeBufferPool {
     final reused = _takeIdleFitting(bytes);
     if (reused != null) {
       debugCheckedOut++;
+      reused._checkoutGeneration++;
       return reused;
     }
 
@@ -237,6 +249,7 @@ class CeyxNativeBufferPool {
     debugAdoptions++;
     debugCheckedOut++;
     final buffer = CeyxNativeBuffer._(address, bytes, false);
+    buffer._checkoutGeneration++;
     _byAddress[address] = buffer;
     return buffer;
   }
@@ -256,6 +269,27 @@ class CeyxNativeBufferPool {
   /// `decode_pool.dart` when a pooled buffer was garbage-collected without an
   /// explicit [release]. Counted separately so a test can assert it never
   /// happened. Returns true if [address] was pool-owned.
+  /// Safety-net reclaim keyed on the BUFFER and the checkout it was armed for.
+  bool releaseFromFinalizer(CeyxNativeBuffer buffer, int generation) {
+    if (buffer.released) return false;
+    // Round-1 review F1: the buffer may have been released explicitly and then
+    // handed out AGAIN before this safety net was collected. The pool reuses
+    // instances, so identity says "same buffer" in both checkouts and cannot
+    // tell them apart; the generation can. Acting here would reclaim a buffer
+    // its new owner is still reading.
+    if (buffer.checkoutGeneration != generation) return false;
+    if (!identical(_byAddress[buffer.address], buffer)) return false;
+    debugFinalizerReleases++;
+    debugCheckedOut--;
+    buffer._released = true;
+    _returnToFreeList(buffer);
+    return true;
+  }
+
+  /// Looks up the live buffer for [address], or null when this pool does not
+  /// own it. Lets an attach site capture the buffer identity behind an address.
+  CeyxNativeBuffer? bufferFor(int address) => _byAddress[address];
+
   bool releaseByAddressFromFinalizer(int address) {
     final buffer = _byAddress[address];
     if (buffer == null || buffer.released) return false;
@@ -291,6 +325,7 @@ class CeyxNativeBufferPool {
         _waiting.remove(waiter);
         buffer._released = false;
         debugCheckedOut++;
+        buffer._checkoutGeneration++;
         waiter.completer.complete(buffer);
         return;
       }
@@ -310,6 +345,7 @@ class CeyxNativeBufferPool {
       if (fitting != null) {
         _waiting.removeFirst();
         debugCheckedOut++;
+        fitting._checkoutGeneration++;
         waiter.completer.complete(fitting);
         continue;
       }
@@ -341,6 +377,7 @@ class CeyxNativeBufferPool {
     // decode. Bucketing beyond "capacity >= bytes" is not justified until a
     // mixed-resolution folder is measured to thrash it.
     final buffer = CeyxNativeBuffer._(malloc<Uint8>(bytes).address, bytes, true);
+    buffer._checkoutGeneration++;
     _byAddress[buffer.address] = buffer;
     return buffer;
   }
@@ -384,6 +421,14 @@ class CeyxNativeBuffer {
   final bool pooled;
 
   bool _released = false;
+
+  int _checkoutGeneration = 0;
+
+  /// Increments on every checkout. The pool REUSES buffer instances
+  /// (`_takeIdleFitting` hands the same object back), so object identity cannot
+  /// distinguish one checkout from the next — this can. A safety net captured
+  /// during checkout N must not act during checkout N+1.
+  int get checkoutGeneration => _checkoutGeneration;
 
   /// True while this buffer is on the free list (or has been freed). Reading
   /// the memory of a released buffer is a use-after-free.

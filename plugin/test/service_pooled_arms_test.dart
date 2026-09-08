@@ -49,7 +49,16 @@ void main() {
       isTrue,
       reason: 'decode() must allocate through the Dart pool, not the dylib',
     );
+    // Round-1 review F1: the explicit release must DETACH the safety net, or a
+    // later collection of this typed list would reclaim a buffer that has since
+    // been handed to someone else.
+    final detachesBefore = CeyxNativeBufferPool.debugSafetyNetDetaches;
     image.releaseToPool();
+    expect(
+      CeyxNativeBufferPool.debugSafetyNetDetaches,
+      detachesBefore + 1,
+      reason: 'releaseToPool must disarm the safety net for this buffer',
+    );
     // A POOLED buffer stays pool-owned after release — it returns to the free
     // list rather than being freed — so the reclaim is asserted on the checkout
     // count, not on ownership.

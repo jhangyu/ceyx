@@ -147,7 +147,12 @@ void main() {
     expect(buffers.debugAdoptions, 1);
     expect(buffers.debugFinalizerReleases, 0);
 
+    // Round-1 review F1: the decode pool's explicit release must disarm the
+    // safety net too, not only the service's.
+    final detachesBefore = CeyxNativeBufferPool.debugSafetyNetDetaches;
     image.releaseToPool();
+    expect(CeyxNativeBufferPool.debugSafetyNetDetaches, detachesBefore + 1,
+        reason: 'releaseToPool must disarm the safety net for this buffer');
     expect(freed, <int>[image.nativeAddress]);
     expect(buffers.ownsAddress(image.nativeAddress), isFalse);
     malloc.free(Pointer<Uint8>.fromAddress(image.nativeAddress));

@@ -1343,8 +1343,9 @@ class CeyxDecodePool {
         final appliedOrientation = payload.length > 5
             ? payload[5] as int
             : 1;
+        final rgbaData = _wrapNativeRgba(address, width * height * 4, type);
         return DngImage(
-          rgbaData: _wrapNativeRgba(address, width * height * 4, type),
+          rgbaData: rgbaData,
           width: width,
           height: height,
           decodeMs: payload[3] as double,
@@ -1353,7 +1354,7 @@ class CeyxDecodePool {
           // WP6 explicit release entry. Null when no pool owns this address,
           // so `releaseToPool()` stays a safe no-op on every non-pooled route
           // rather than pretending to reclaim something.
-          onReleaseToPool: _releaseToPoolCallbackFor(address),
+          onReleaseToPool: _releaseToPoolCallbackFor(address, rgbaData),
           appliedOrientation: appliedOrientation,
         );
       case CeyxPoolJobType.encode:
@@ -1409,12 +1410,21 @@ class CeyxDecodePool {
     return bytes;
   }
 
-  /// WP6: the explicit end-of-consumption entry for [address], or null when no
-  /// pool owns it.
-  void Function()? _releaseToPoolCallbackFor(int address) {
+  /// WP6: the explicit end-of-consumption entry for a pool-owned frame, or null
+  /// when no pool owns it.
+  ///
+  /// Round-1 review F1: this DISARMS the safety net before returning the
+  /// buffer. Leaving it armed on a buffer the pool may hand to someone else is
+  /// how a later collection of [bytes] reclaims it under its new owner.
+  void Function()? _releaseToPoolCallbackFor(int address, Uint8List bytes) {
     final buffers = nativeBufferPool;
-    if (buffers == null || !buffers.ownsAddress(address)) return null;
-    return () => buffers.tryReleaseByAddress(address);
+    final buffer = buffers?.bufferFor(address);
+    if (buffers == null || buffer == null) return null;
+    return () {
+      _poolSafetyNet.detach(bytes);
+      CeyxNativeBufferPool.noteSafetyNetDetach();
+      buffers.release(buffer);
+    };
   }
 
   /// WP6 safety net. A pooled buffer is meant to come back through
@@ -1424,18 +1434,28 @@ class CeyxDecodePool {
   /// assert it never fired. It is attached ONLY for pool-owned addresses — a
   /// dylib-owned buffer keeps its existing `NativeFinalizer`, which frees, and
   /// no address is ever owned by both.
-  static final Finalizer<int> _poolSafetyNet = Finalizer<int>((address) {
-    CeyxDecodePool.nativeBufferPool?.releaseByAddressFromFinalizer(address);
-  });
+  /// Keyed on (buffer, the checkout it was armed for), not a bare address: the
+  /// pool reuses buffer instances, so after a release-and-reacquire an address
+  /// alone cannot tell "still mine" from "someone else's now" (round-1 F1).
+  static final Finalizer<(CeyxNativeBuffer, int)> _poolSafetyNet =
+      Finalizer<(CeyxNativeBuffer, int)>(((CeyxNativeBuffer, int) armed) {
+        CeyxDecodePool.nativeBufferPool?.releaseFromFinalizer(
+          armed.$1,
+          armed.$2,
+        );
+      });
 
   Uint8List _viewNativeRgba(int address, int length) {
     final ptr = Pointer<Uint8>.fromAddress(address);
     final buffers = nativeBufferPool;
-    if (buffers != null && buffers.ownsAddress(address)) {
+    final owned = buffers?.bufferFor(address);
+    if (buffers != null && owned != null) {
       // Pool-owned: NO NativeFinalizer (freeing it would take the buffer away
-      // from the pool). The safety net returns it instead.
+      // from the pool). The safety net returns it instead, and it is armed for
+      // THIS checkout only.
       final bytes = ptr.asTypedList(length);
-      _poolSafetyNet.attach(bytes, address, detach: bytes);
+      _poolSafetyNet.attach(bytes, (owned, owned.checkoutGeneration),
+          detach: bytes);
       return bytes;
     }
     if (debugNativeFree != null) {
