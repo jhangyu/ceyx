@@ -974,6 +974,48 @@ set(JPEG_VERSION_STRING \"62\")
         set(CMAKE_MODULE_PATH ${_dng_jpeg_shim_dir} ${CMAKE_MODULE_PATH})
     endif()
 
+    # PORTABLE-BASELINE (2026-09-08): RawSpeed3's CpuMarch.cmake compiles with
+    # `-march=native` unless BINARY_PACKAGE_BUILD is set
+    # (RawSpeed3/rawspeed/cmake/Modules/CpuMarch.cmake:3-9), and the
+    # BINARY_PACKAGE_BUILD block above is deliberately cross-only. That left
+    # every NATIVE build -- notably the Linux publish leg -- compiling RawSpeed3
+    # for the *builder's* CPU. The AVX-512-capable GitHub runner that produced
+    # the v0.1.19 Linux release baked EVEX-prefixed instructions into
+    # libdng_decoder_native.so (254 disassembly lines, all in rawspeed/pugixml
+    # symbols; see docs/logs/2026-09-08/), some of them reached during ELF
+    # static init -- so dlopen() SIGILLs on any machine without AVX-512.
+    #
+    # This is the "guard written on the motivating platform, not on the real
+    # precondition" family (lessons 2026-08-28): the real precondition is not
+    # "cross-compiling", it is "this artifact will run on machines other than
+    # the builder" -- which is true of EVERY artifact this project produces.
+    # So the portable baseline is set unconditionally here, not per-platform.
+    #
+    # Mechanism: CpuMarch.cmake is a no-op when RAWSPEED_MARCH is already
+    # DEFINED, so pre-defining it drives upstream through its own documented
+    # knob and needs no patch to the vendored tree. `-mtune=generic` is exactly
+    # what upstream's own binary-distribution branch selects (CpuMarch.cmake:27-35):
+    # tuning only, no ISA raise. MSVC is excluded -- it rejects both spellings
+    # and has no -march=native to begin with, so the hazard does not exist there.
+    #
+    # Written as CACHE INTERNAL ... FORCE, mirroring how CpuMarch.cmake itself
+    # stores the value (CpuMarch.cmake:38). A plain set() would NOT be enough:
+    # any build dir already configured before this fix carries a cached INTERNAL
+    # RAWSPEED_MARCH=-march=native, which is replayed as DEFINED at the top of
+    # every later configure -- so a `if(NOT DEFINED)` guard would silently keep
+    # the poisoned value. An explicit -DRAWSPEED_MARCH=<something> on the command
+    # line is still honoured: it lands in the cache as a non-"native" value and
+    # is preserved by the first branch below.
+    if(NOT MSVC)
+        if(DEFINED RAWSPEED_MARCH AND NOT RAWSPEED_MARCH MATCHES "native")
+            message(STATUS "RawSpeed3: honouring explicit RAWSPEED_MARCH=${RAWSPEED_MARCH}")
+        else()
+            set(RAWSPEED_MARCH "-mtune=generic" CACHE INTERNAL "" FORCE)
+            message(STATUS "RawSpeed3 portable baseline: RAWSPEED_MARCH=${RAWSPEED_MARCH} "
+                           "(no -march=native; published artifacts must run off the build machine)")
+        endif()
+    endif()
+
     # Builds the `rawspeed` static target from RawSpeed3's own (real) CMake
     # build. This library is never linked into any Halide/AOT target and is
     # only ever consumed via the glue below, never exposed as a standalone

@@ -366,6 +366,46 @@ jobs:
             exit 1
           fi
 
+      # PORTABLE-BASELINE GATE (2026-09-08). The v0.1.19 Linux release SIGILL'd
+      # at dlopen() on every machine without AVX-512: RawSpeed3's CpuMarch.cmake
+      # compiled with -march=native on native (non-cross) builds, so an
+      # AVX-512-capable runner baked 254 EVEX-encoded instruction lines into the
+      # published .so — some reached during ELF static init, before any of our
+      # code could feature-check anything. The compile-side fix is
+      # native/cmake/tests.cmake "PORTABLE-BASELINE" (+ the pinned Halide AOT
+      # target in cmake/halide_aot.cmake); THIS step is the mechanical gate that
+      # judges the ARTIFACT rather than the flags, so any future reintroduction
+      # (new subproject, new -march, new host-derived Halide target) is caught
+      # here instead of by a user.
+      #
+      # Red-proof: the same script exits 1 with evex_lines=254 on the published
+      # v0.1.19 .so, and 0 on libheif.so.1 from the same tarball
+      # (docs/logs/2026-09-08/avx512-gate-redproof-v0.1.19.txt and
+      # avx512-gate-positive-control.txt — both controls run before this gate
+      # was wired in).
+      #
+      # SCOPE: libdng_decoder_native.so only. libde265.so.0 legitimately carries
+      # AVX-512 behind its own cpuid dispatch (859 EVEX lines in
+      # transform_32x32_add_8_avx512) and must NOT be fed to this gate.
+      #
+      # The script disassembles to a FILE and scans it in Python — never
+      # `objdump | grep -q`, which under pipefail returns 141 on a successful
+      # match (SIGPIPE to objdump) and inverts the verdict (G-9/R-16).
+      - name: Assert no AVX-512 in the Linux .so (portable-baseline gate)
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          python3 native/scripts/assert_no_avx512.py \
+            native/build-linux/libdng_decoder_native.so \
+            --dump native/build-linux/avx512-gate-objdump.txt
+          rc=$?
+          set -e
+          echo "RC=${rc} (avx512 gate)"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::AVX-512 gate failed (rc=${rc}) for libdng_decoder_native.so — refusing to publish an artifact that SIGILLs on non-AVX-512 CPUs. rc=2 means the check could not run at all, which is equally disqualifying." >&2
+            exit 1
+          fi
+
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
       # G-E) — user-ordered CI build-integrity probe: does the just-built
       # .so contain the fused-orientation Halide kernels? Not a functional
