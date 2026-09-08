@@ -52,7 +52,7 @@ def run_one(binary, out_dir, threads, files, driver="test_concurrent_decode"):
         externally (the binary emits no timing) and completions_ms is
         derived from decode_<i>.raw dump mtimes in out_dir.
     driver="probe_concurrent_raw": production ARW/RAW route
-        (raw_decode_and_process, probe_concurrent_raw.cpp:48), usage
+        (raw_pipeline_decode_file_into, probe_concurrent_raw.cpp), usage
         `<binary> <threads> <file>...` (no out_dir argument); the binary
         prints its OWN `PROBE threads=N files=M wall_ms=W` line, which is
         used instead of external timing (matches native/tests/
@@ -146,7 +146,7 @@ def main():
                           "`<binary> <out_dir> <threads> <file>...`, external "
                           "timing, per-decode dump-based completions_ms. "
                           "probe_concurrent_raw: production ARW/RAW route "
-                          "(raw_decode_and_process), `<binary> <threads> "
+                          "(raw_pipeline_decode_file_into), `<binary> <threads> "
                           "<file>...`, self-reported wall_ms, NO "
                           "completions_ms (binary has no per-decode dump "
                           "mechanism — documented limitation, see "

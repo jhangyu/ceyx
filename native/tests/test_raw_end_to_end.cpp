@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "ceyx_decode_into.h"
 #include "dng_ffi_api.h"
 #include "dng_pipeline.h"
 #include "libraw_gpu_input_adapter.h"
@@ -777,21 +778,57 @@ int main(int argc, char** argv) {
                detail);
     }
 
-    // The DNG route must still work through the new entry point, unchanged.
+    // The DNG route must still work through the routing entry point, unchanged.
+    //
+    // WP5: was the legacy allocating RAW C ABI entry vs the legacy allocating
+    // DNG C ABI entry, both of which allocated from the native RGBA pool and are
+    // deleted by this work package. The PROPERTY under test is unchanged and is what the case name
+    // says: handing a DNG to the ROUTING entry must delegate to the DNG
+    // pipeline and produce the same extent as driving that pipeline directly.
+    // Post-WP5 the routing entry is ceyx_decode_into_buffer (it performs the
+    // route detection the legacy RAW entry used to perform), and the direct
+    // DNG entry is dng_pipeline_decode_to_rgb_into. Both write into buffers
+    // this test owns; nothing is released to any pool (invariant I1).
     {
-        DngResult* via_raw = raw_decode_and_process("image_samples/lossless_dng_sample.dng", 0);
-        DngResult* via_dng = dng_decode_and_process("image_samples/lossless_dng_sample.dng");
+        const char* kDngPath = "image_samples/lossless_dng_sample.dng";
         char detail[200];
-        const bool ok = via_raw && via_dng && via_raw->error_code == 0 &&
-                        via_dng->error_code == 0 &&
-                        via_raw->width == via_dng->width &&
-                        via_raw->height == via_dng->height;
+
+        // Direct DNG pipeline, and the extent both sides must agree on.
+        DngPipelineResult probe;
+        bool ok = dng_pipeline_probe_output_size(kDngPath, 0, probe) &&
+                  probe.error_code == 0 && probe.width != 0 && probe.height != 0;
+        int rawW = -1, rawH = -1, dngW = -1, dngH = -1;
+        if (ok) {
+            const size_t need =
+                static_cast<size_t>(probe.width) * probe.height * 4;
+            TestRgbaBuffer dngBuf(need);
+            TestRgbaBuffer rawBuf(need);
+
+            DngPipelineResult direct;
+            const bool dngOk =
+                dng_pipeline_decode_to_rgb_into(kDngPath, 0, dngBuf.ptr(),
+                                                dngBuf.size(), direct) &&
+                direct.error_code == 0 && direct.rgba_ptr == dngBuf.ptr();
+            if (dngOk) { dngW = static_cast<int>(direct.width);
+                         dngH = static_cast<int>(direct.height); }
+
+            // Routing entry: a DNG handed here must be delegated to the DNG
+            // pipeline rather than opened as a generic RAW.
+            DngResult* viaRouting = ceyx_decode_into_buffer(
+                kDngPath, 0, rawBuf.ptr(), rawBuf.size());
+            const bool rawOk = viaRouting && viaRouting->error_code == 0 &&
+                               viaRouting->rgba_data == rawBuf.ptr();
+            if (rawOk) { rawW = viaRouting->width; rawH = viaRouting->height; }
+            if (viaRouting) {
+                // I1: never let the caller-owned dst reach the free path.
+                viaRouting->rgba_data = nullptr;
+                dng_free_result(viaRouting);
+            }
+            ok = dngOk && rawOk && rawW == dngW && rawH == dngH;
+        }
         std::snprintf(detail, sizeof(detail), "raw=%dx%d dng=%dx%d",
-                      via_raw ? via_raw->width : -1, via_raw ? via_raw->height : -1,
-                      via_dng ? via_dng->width : -1, via_dng ? via_dng->height : -1);
+                      rawW, rawH, dngW, dngH);
         report("dng-delegation", nullptr, ok, detail);
-        if (via_raw) dng_free_result(via_raw);
-        if (via_dng) dng_free_result(via_dng);
     }
 
     // Forced native fallback on X-Trans too.

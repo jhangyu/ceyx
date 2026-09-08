@@ -113,20 +113,50 @@ void writeDims(const std::string &path, const DngPipelineResult &r) {
   std::fclose(fh);
 }
 
-// callerOwnedRawBuf: non-null iff decodeRouted took the RAW generic route via
-// raw_pipeline_decode_file_into with a test-owned malloc'd buffer (WP3 lead
-// deconfliction, 2026-09-07: the null-destination raw_pipeline_decode_file
-// call reaches the RGBA pool's OWNING checkout, which WP3 (N2, Task 3.3) is
-// proving unreachable; this is the last such test-side caller). That buffer
-// was never handed to any pool, so it must be freed directly, never released
-// through dng_rgba_output_release/dng_rgb_output_release.
-void releaseResult(DngPipelineResult &r, uint8_t *callerOwnedRawBuf = nullptr) {
-  if (callerOwnedRawBuf) {
-    std::free(callerOwnedRawBuf);
+// WP5 CONCURRENCY OWNERSHIP GAUGE — this is what replaces the process-wide
+// native RGBA pool checked-out-count leak assertion that used to run
+// after the thread join.
+//
+// Why the old assertion cannot simply be kept: it counted buffers checked out
+// of a pool that no longer exists. Under caller ownership the equivalent, and
+// strictly stronger, property is per-buffer rather than per-process:
+//   (1) every decode wrote into the address THIS test dispatched to it
+//       (g_ownershipViolations == 0), and
+//   (2) every dispatched address was reclaimed exactly once
+//       (g_reclaimed == g_dispatched).
+// A pool count of zero could not distinguish "no buffer was taken" from "one
+// was taken and returned", and could not see two decodes sharing one buffer at
+// all -- which is precisely the concurrency bug this gate exists to catch.
+//
+// The process-wide half of the original gauge's coverage is NOT dropped: it is
+// carried on the Dart side by CeyxNativeBufferPool.debugLiveAddresses /
+// debugTotalLiveAddresses (Task 2.5, committed as 4da9661), which counts live
+// addresses across every isolate. Native side = per-buffer identity and
+// reclaim-exactly-once; Dart side = process-wide live-address count. Together
+// they cover strictly more than the single native counter did.
+std::atomic<size_t> g_dispatched{0};
+std::atomic<size_t> g_reclaimed{0};
+std::atomic<size_t> g_ownershipViolations{0};
+
+// Both routes now hand back a TEST-OWNED malloc'd buffer (the RAW route via
+// raw_pipeline_decode_file_into, the DNG route via
+// dng_pipeline_decode_to_rgb_into). Neither was ever handed to a pool, so both
+// are freed directly. There is no longer a pool-release arm here at all --
+// deliberately, per invariant I1: releasing a caller-owned address into a
+// native pool is the exact corruption this campaign removes, so the code path
+// that could do it is gone rather than guarded.
+void releaseResult(DngPipelineResult &r, uint8_t *callerOwnedBuf = nullptr) {
+  if (callerOwnedBuf) {
+    if (r.rgba_ptr != nullptr && r.rgba_ptr != callerOwnedBuf) {
+      g_ownershipViolations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(callerOwnedBuf);
+    g_reclaimed.fetch_add(1, std::memory_order_relaxed);
     r.rgba_ptr = nullptr;
     return;
   }
-  if (r.rgba_ptr) dng_rgba_output_release(r.rgba_ptr);
+  // No caller buffer means the decode failed before one was dispatched; there
+  // is nothing to reclaim and nothing may be released to any pool.
   r.rgba_ptr = nullptr;
 }
 
@@ -152,7 +182,7 @@ void releaseResult(DngPipelineResult &r, uint8_t *callerOwnedRawBuf = nullptr) {
 // The RAW result is normalised into DngPipelineResult so writeRgb/writeDims/
 // releaseResult are shared verbatim. Ownership now DIFFERS by route: the DNG
 // branch hands back a pool-owned RGBA8 buffer released by
-// dng_rgba_output_release; the RAW branch (below) hands back a test-owned
+// the native RGBA pool; the RAW branch (below) hands back a test-owned
 // malloc'd buffer via raw_pipeline_decode_file_into (WP3 lead deconfliction,
 // 2026-09-07) that releaseResult must free() directly, never release to any
 // pool — callers thread outCallerBuf through to releaseResult to keep that
@@ -163,7 +193,7 @@ void releaseResult(DngPipelineResult &r, uint8_t *callerOwnedRawBuf = nullptr) {
 // outCallerBuf: set to the malloc'd buffer address when the RAW generic route
 // is taken, nullptr otherwise (including every failure path and the DNG
 // branch). Callers MUST pass the returned value through to releaseResult
-// (never dng_rgba_output_release it directly) and MUST NOT free it themselves
+// (never release it to any native pool directly) and MUST NOT free it themselves
 // on the success path — releaseResult owns that.
 bool decodeRouted(const char *path, DngPipelineResult &r,
                    uint8_t **outCallerBuf) {
@@ -214,12 +244,56 @@ bool decodeRouted(const char *path, DngPipelineResult &r,
     r.height = raw.height;
     r.error_code = 0;
     *outCallerBuf = buf;
+    g_dispatched.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
   // Probe failure falls through to the DNG path on purpose: the DNG decoder
   // produces the specific error, rather than this harness inventing one.
 #endif
-  return dng_pipeline_decode_to_rgb_sized(path, 0, r);
+  // WP5: was dng_pipeline_decode_to_rgb_sized(path, 0, r), whose rgba_ptr came
+  // from the native RGBA pool. With the pool retired, the DNG branch acquires
+  // its output the same way the RAW branch above already does: probe, malloc a
+  // TEST-OWNED buffer, decode into it. Both routes now return caller-owned
+  // memory, so releaseResult has exactly one ownership rule instead of two.
+  //
+  // The pixels are unchanged: _into runs the same sized decode with the same
+  // max_dim 0, it only writes them somewhere the test owns. R1-T4's frozen DNG
+  // colour baseline is validated against this binary and stays valid.
+  {
+    DngPipelineResult probe;
+    if (!dng_pipeline_probe_output_size(path, 0, probe) ||
+        probe.error_code != 0 || probe.width == 0 || probe.height == 0) {
+      r.error_code = probe.error_code != 0 ? probe.error_code : -2;
+      return false;
+    }
+    const size_t capacity =
+        static_cast<size_t>(probe.width) * static_cast<size_t>(probe.height) * 4;
+    uint8_t *buf = static_cast<uint8_t *>(std::malloc(capacity));
+    if (!buf) {
+      r.error_code = -12;   // allocation failure
+      return false;
+    }
+    if (!dng_pipeline_decode_to_rgb_into(path, 0, buf, capacity, r) ||
+        r.error_code != 0 || !r.rgba_ptr) {
+      std::free(buf);
+      r.rgba_ptr = nullptr;
+      return false;
+    }
+    if (r.rgba_ptr != buf) {
+      // A native allocation happened behind the decode; the whole point of the
+      // pool retirement is that this cannot occur. Fail loudly rather than
+      // leak or double-free.
+      std::fprintf(stderr,
+                   "[concurrent] DNG route did not use the caller's buffer\n");
+      std::free(buf);
+      r.rgba_ptr = nullptr;
+      r.error_code = -13;
+      return false;
+    }
+    *outCallerBuf = buf;
+    g_dispatched.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
 }
 
 } // namespace
@@ -439,15 +513,43 @@ int main(int argc, char **argv) {
   decodesDone.store(true, std::memory_order_release);
   if (warmer.joinable()) warmer.join();
 
-  // Pool leak check: every checkout must have been returned. A non-zero count
-  // here means a guard is missing on some exit path, which under concurrency
-  // is how the "two decodes share one buffer" bug also manifests.
-  // WP1 phase 3: narrowed to the RGBA gauge alone — the RGB8 checkout pool
-  // this used to also check is deleted in production; coverage of "no leaked
-  // checkout" is unchanged for the surviving RGBA pool.
-  const size_t rgbaOut = dng_rgba_output_checked_out_count();
-  if (rgbaOut != 0) {
-    std::fprintf(stderr, "[concurrent] pool leak rgba=%zu\n", rgbaOut);
+  // WP5 ownership gauge, replacing the RGBA pool's checked-out count (see the
+  // long note on g_dispatched above for why this is stronger, and for which
+  // half of the original coverage now lives on the Dart side).
+  //
+  // (1) Every decode wrote into the address this test dispatched to it. A
+  //     violation is how "two decodes share one buffer" manifests under
+  //     caller ownership -- the same bug the old pool-leak line was watching
+  //     for, observed directly instead of through a free-list count.
+  const size_t ownershipViolations =
+      g_ownershipViolations.load(std::memory_order_relaxed);
+  if (ownershipViolations != 0) {
+    std::fprintf(stderr, "[concurrent] buffer ownership violated: %zu decode(s) "
+                         "did not write into the caller's buffer\n",
+                 ownershipViolations);
+    failures.fetch_add(1);
+  }
+  // (2) Every dispatched buffer was reclaimed exactly once. Unequal counts mean
+  //     a leak (reclaimed < dispatched) or a double reclaim (reclaimed >
+  //     dispatched) on some exit path -- the property the old leak check owned.
+  const size_t dispatched = g_dispatched.load(std::memory_order_relaxed);
+  const size_t reclaimed = g_reclaimed.load(std::memory_order_relaxed);
+  if (dispatched != reclaimed) {
+    std::fprintf(stderr,
+                 "[concurrent] buffer reclaim mismatch: dispatched=%zu "
+                 "reclaimed=%zu\n",
+                 dispatched, reclaimed);
+    failures.fetch_add(1);
+  }
+  // Printed unconditionally so a run that dispatched NOTHING is visible rather
+  // than passing silently -- dispatched==reclaimed==0 satisfies the equality
+  // above, so the equality alone is not a sufficient gate.
+  std::fprintf(stderr, "[concurrent] buffers dispatched=%zu reclaimed=%zu "
+                       "ownership_violations=%zu\n",
+               dispatched, reclaimed, ownershipViolations);
+  if (dispatched == 0) {
+    std::fprintf(stderr, "[concurrent] no buffers were dispatched -- the "
+                         "ownership gauge observed nothing\n");
     failures.fetch_add(1);
   }
 

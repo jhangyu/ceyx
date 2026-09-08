@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "dng_ffi_api.h"
+#include "ceyx_decode_into.h"
 
 namespace {
 constexpr int kThreads = 5;
@@ -67,15 +68,44 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  // WP5: was the legacy allocating DNG C ABI entry per thread, which
+  // allocated each output
+  // from the native RGBA pool. Which entry drives the decode is incidental to
+  // this test -- it needs *a* concurrent decode to exercise the Metal queue
+  // pool -- so the migration is mechanical. Each thread now owns its own
+  // destination, which is also a better model of the production shape.
+  //
+  // The probe runs once, before the threads, and a failure FAILS the test
+  // rather than skipping it.
+  int32_t pw = 0, ph = 0;
+  const int32_t prc =
+      ceyx_probe_output_size(dng_file.c_str(), /*max_dim=*/0, &pw, &ph);
+  if (prc != 0 || pw <= 0 || ph <= 0) {
+    std::fprintf(stdout,
+                 "METAL_QUEUE_POOL probe failed rc=%d w=%d h=%d\n", prc, pw, ph);
+    return 2;
+  }
+  const size_t kDstBytes =
+      static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4;
+
   std::atomic<int> failures{0};
   std::vector<std::thread> pool;
   for (int t = 0; t < kThreads; ++t) {
     pool.emplace_back([&]() {
-      DngResult *r = dng_decode_and_process(dng_file.c_str());
-      if (!r || r->error_code != 0) {
+      std::vector<uint8_t> dst(kDstBytes, 0);
+      DngResult *r = ceyx_decode_into_buffer(dng_file.c_str(), /*max_dim=*/0,
+                                             dst.data(), dst.size());
+      // Ownership check, replacing the old implicit pool round-trip: the
+      // decode must have written into THIS thread's buffer.
+      if (!r || r->error_code != 0 || r->rgba_data != dst.data()) {
         failures.fetch_add(1);
       }
-      if (r) dng_free_result(r);
+      if (r) {
+        // Invariant I1: never let the caller-owned dst reach dng_free_result,
+        // which would release it into the still-live RGBA pool.
+        r->rgba_data = nullptr;
+        dng_free_result(r);
+      }
     });
   }
   for (auto &th : pool) th.join();

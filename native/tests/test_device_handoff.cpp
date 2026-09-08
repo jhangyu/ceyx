@@ -148,21 +148,47 @@ static size_t countOccurrences(const string& haystack, const char* needle) {
 }
 
 static DecodeOutput runDecode(const char* path) {
+    // WP5: was dng_pipeline_decode_to_rgb(path, result), whose rgba_ptr came
+    // from the native RGBA pool and had to be handed back with
+    // released back to that pool. The test now owns its destination, which is the
+    // production ownership model. The PSNR assertions below are untouched.
+    //
+    // A probe failure FAILS the case; it never skips it. A silently skipped
+    // case prints the same PASS total as one that executed.
+    DngPipelineResult probe;
+    if (!dng_pipeline_probe_output_size(path, /*max_dim=*/0, probe) ||
+        probe.error_code != 0 || probe.width == 0 || probe.height == 0) {
+        cerr << "  [decode FAIL] probe failed error_code=" << probe.error_code
+             << " w=" << probe.width << " h=" << probe.height << "\n";
+        return {};
+    }
+    const size_t dst_bytes =
+        static_cast<size_t>(probe.width) * static_cast<size_t>(probe.height) * 4;
+    std::vector<uint8_t> dst(dst_bytes, 0);
+
     DngPipelineResult result;
-    bool success = dng_pipeline_decode_to_rgb(path, result);
+    bool success = dng_pipeline_decode_to_rgb_into(path, /*max_dim=*/0,
+                                                   dst.data(), dst.size(),
+                                                   result);
     // WP1 phase 3: rgb_ptr is gone — RGB8 output no longer exists. The
     // pipeline always sets rgba_ptr now.
     const uint8_t* src = result.rgba_ptr;
-    size_t src_size = result.rgba_size;
-    const bool is_rgba = true;
     if (!success || result.error_code != 0 || !src) {
         cerr << "  [decode FAIL] error_code=" << result.error_code << "\n";
+        return {};
+    }
+    // WP5 ownership assertion, replacing the pool release below. The decode
+    // must have written into OUR buffer; if it did not, a native allocation
+    // happened behind it and the pool-retirement contract is broken.
+    if (src != dst.data()) {
+        cerr << "  [decode FAIL] rgba_ptr is not the caller's buffer "
+                "(a native allocation happened behind the decode)\n";
         return {};
     }
     DecodeOutput out;
     out.width = result.width;
     out.height = result.height;
-    if (is_rgba) {
+    {
         // Strip alpha: extract RGB from interleaved RGBA for PSNR comparison.
         const size_t total_px = static_cast<size_t>(result.width) * result.height;
         out.rgb.resize(total_px * 3);
@@ -171,14 +197,10 @@ static DecodeOutput runDecode(const char* path) {
             out.rgb[i * 3 + 1] = src[i * 4 + 1];
             out.rgb[i * 3 + 2] = src[i * 4 + 2];
         }
-    } else {
-        out.rgb.assign(src, src + src_size);
     }
-    // Release the pool buffer now that we have our own copy.
-    if (result.rgba_ptr) {
-        dng_rgba_output_release(result.rgba_ptr);
-        result.rgba_ptr = nullptr;
-    }
+    // No release: `dst` is caller-owned and dies with this scope. Releasing it
+    // to the pool would be exactly the invariant-I1 violation this campaign
+    // exists to make impossible.
     out.ok = true;
     return out;
 }

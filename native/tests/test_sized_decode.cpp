@@ -94,20 +94,47 @@ struct SizedResult {
 // Run the production sized decode and take an owned RGB copy.
 SizedResult decodeSized(const char *path, int32_t maxDim) {
     SizedResult out;
+
+    // WP5: was dng_pipeline_decode_to_rgb_sized(path, maxDim, result), whose
+    // rgba_ptr came from the native RGBA pool. The test now owns its
+    // destination. max_dim SEMANTICS ARE PRESERVED EXACTLY: the probe applies
+    // the same stage4MaximumSize() + dng_render_stage4_output_size() sizing
+    // rules as the sized decode, and _into takes the same max_dim, so every
+    // AC5 / AC5-D extent assertion below still means what it meant before.
+    //
+    // A probe failure FAILS the case; it never skips it.
+    DngPipelineResult probe;
+    if (!dng_pipeline_probe_output_size(path, maxDim, probe) ||
+        probe.error_code != 0 || probe.width == 0 || probe.height == 0) {
+        printf("  decode FAILED: probe error_code=%d w=%u h=%u\n",
+               probe.error_code, probe.width, probe.height);
+        return out;
+    }
+    const size_t dstBytes =
+        static_cast<size_t>(probe.width) * static_cast<size_t>(probe.height) * 4;
+    std::vector<uint8_t> dst(dstBytes, 0);
+
     DngPipelineResult result;
     const auto t0 = std::chrono::steady_clock::now();
-    const bool success =
-        dng_pipeline_decode_to_rgb_sized(path, maxDim, result);
+    const bool success = dng_pipeline_decode_to_rgb_into(
+        path, maxDim, dst.data(), dst.size(), result);
     out.wall_ms = std::chrono::duration<double, std::milli>(
                       std::chrono::steady_clock::now() - t0)
                       .count();
 
     const uint8_t *src = result.rgba_ptr;
     size_t srcBytes = result.rgba_size;
-    const bool isRgba = true;
     if (!success || result.error_code != 0 || !src || result.width == 0 ||
         result.height == 0) {
         printf("  decode FAILED: error_code=%d\n", result.error_code);
+        return out;
+    }
+    // WP5 ownership assertion, replacing the pool release below: the decode
+    // must have written into OUR buffer, i.e. no native allocation happened
+    // behind it.
+    if (src != dst.data()) {
+        printf("  decode FAILED: rgba_ptr is not the caller's buffer "
+               "(a native allocation happened behind the decode)\n");
         return out;
     }
 
@@ -117,13 +144,11 @@ SizedResult decodeSized(const char *path, int32_t maxDim) {
     const size_t px = static_cast<size_t>(result.width) * result.height;
     out.rgb.resize(px * 3);
     for (size_t i = 0; i < px; ++i) {
-        out.rgb[i * 3 + 0] = src[i * (isRgba ? 4 : 3) + 0];
-        out.rgb[i * 3 + 1] = src[i * (isRgba ? 4 : 3) + 1];
-        out.rgb[i * 3 + 2] = src[i * (isRgba ? 4 : 3) + 2];
+        out.rgb[i * 3 + 0] = src[i * 4 + 0];
+        out.rgb[i * 3 + 1] = src[i * 4 + 1];
+        out.rgb[i * 3 + 2] = src[i * 4 + 2];
     }
-    if (result.rgba_ptr) {
-        dng_rgba_output_release(result.rgba_ptr);
-    }
+    // No release: dst is caller-owned and dies with this scope (invariant I1).
     out.ok = true;
     return out;
 }

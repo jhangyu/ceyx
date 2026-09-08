@@ -4,15 +4,18 @@
 // called raw_pipeline_decode_file_into and filled DngResult::decode_ms/
 // process_ms from its RawPipelineResult, but never wrote that result into the
 // thread-local state raw_last_diagnostics()/raw_last_color_diagnostics() read
-// -- only raw_decode_and_process (raw_ffi_api.cpp) did that. So after a
-// decode-into call, those two legacy queries kept describing whichever
-// raw_decode_and_process call had last run on the thread (or "no decode has
+// -- only the legacy allocating RAW C ABI entry (raw_ffi_api.cpp) did that.
+// So after a decode-into call, those two legacy queries kept describing
+// whichever legacy-entry call had last run on the thread (or "no decode has
 // run" if none ever had): stale by construction, not merely by timing.
+// WP5 has since DELETED that legacy entry, so raw_record_decode_into_diagnostics
+// is now the sole writer of that thread-local state -- which makes this test's
+// freshness property load-bearing rather than merely corrective.
 //
 // Fix: raw_ffi_api.cpp now exposes raw_record_decode_into_diagnostics(),
 // which ceyx_decode_into_ffi.cpp calls with its own out.diag/out.color_diag
 // right after raw_pipeline_decode_file_into returns (success or failure,
-// mirroring raw_decode_and_process's own unconditional write).
+// mirroring the deleted legacy entry's own unconditional write).
 //
 // This test proves freshness, not just presence: it asserts raw_last_
 // diagnostics() reports NOTHING before any call is made on this (fresh

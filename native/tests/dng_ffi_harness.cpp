@@ -18,6 +18,7 @@ functions:
 */
 
 #include "dng_ffi_api.h"
+#include "ceyx_decode_into.h"
 
 #include <chrono>
 #include <cmath>
@@ -29,11 +30,43 @@ functions:
 #include <iostream>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace {
 
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
+
+// WP5: test-owned RGBA destination. Copied deliberately rather than shared
+// across translation units (Task 5.1 constraint) so this harness has no build
+// coupling to the other suites.
+class TestRgbaBuffer {
+public:
+  explicit TestRgbaBuffer(size_t bytes) : bytes_(bytes) {}
+  bool alloc() {
+    if (bytes_ == 0) return false;
+    storage_.assign(bytes_, 0);
+    return true;
+  }
+  uint8_t *ptr() { return storage_.data(); }
+  size_t size() const { return storage_.size(); }
+
+private:
+  size_t bytes_;
+  std::vector<uint8_t> storage_;
+};
+
+// WP5 / invariant I1: the result struct must be freed WITHOUT handing our
+// caller-owned destination to any native free path. Clearing rgba_data first
+// is mandatory, not tidiness — dng_free_result frees whatever it finds there,
+// and while the RGBA pool still exists that free is a pool release, i.e. a
+// Dart/caller-owned address donated to the pool's free list. Mirrors what
+// dng_decoder_service.dart does before its own dng_free_result call.
+void freeCallerOwnedResult(DngResult *result) {
+  if (!result) return;
+  result->rgba_data = nullptr;
+  dng_free_result(result);
+}
 
 void printUsage(const char *program) {
   std::cerr << "Usage: " << program
@@ -263,13 +296,47 @@ int main(int argc, char **argv) {
   }
 
   for (int run = 1; run <= repeatCount; ++run) {
+    // WP5: was the legacy allocating DNG C ABI entry, which allocated the output
+    // from the native RGBA pool. The harness now owns its output, which is
+    // the production ownership model this gate exists to check.
+    // A probe failure FAILS the case; it never skips it. A silently skipped
+    // case prints the same PASS total as one that executed.
+    int32_t pw = 0, ph = 0;
+    const int32_t prc = ceyx_probe_output_size(argv[1], /*max_dim=*/0, &pw, &ph);
+    if (prc != 0 || pw <= 0 || ph <= 0) {
+      std::cout << "[Contract] FAIL reason=probe_failed rc=" << prc
+                << " w=" << pw << " h=" << ph << "\n";
+      return 1;
+    }
+    TestRgbaBuffer buf(static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4);
+    if (!buf.alloc()) {
+      std::cout << "[Contract] FAIL reason=dst_alloc_failed bytes="
+                << (static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4)
+                << "\n";
+      return 1;
+    }
+
     const auto start = Clock::now();
-    DngResult *result = dng_decode_and_process(argv[1]);
+    DngResult *result =
+        ceyx_decode_into_buffer(argv[1], /*max_dim=*/0, buf.ptr(), buf.size());
     const auto end = Clock::now();
 
     size_t rgbaBytes = 0;
     if (!validateContract(result, &rgbaBytes)) {
-      dng_free_result(result);
+      freeCallerOwnedResult(result);
+      return 1;
+    }
+
+    // WP5 leak assertion, replacing dng_debug_pool_checked_out(). Under caller
+    // ownership the property "nothing leaked from the pool" is expressed as
+    // "the decode wrote into MY buffer", i.e. no pool buffer was ever
+    // allocated behind this decode. This is a stronger statement than the old
+    // count, because a count of zero is also what a leaked-then-released
+    // buffer produces.
+    if (result->rgba_data != buf.ptr()) {
+      std::cout << "[Pool] FAIL rgba_data is not the caller's buffer"
+                << " (a native allocation happened behind the decode)\n";
+      freeCallerOwnedResult(result);
       return 1;
     }
 
@@ -283,25 +350,13 @@ int main(int argc, char **argv) {
               << " err=" << result->error_code << "\n";
 
     if (saveRaw && !writeAndCompareRgb(*result, artifactDir, prefix)) {
-      dng_free_result(result);
+      freeCallerOwnedResult(result);
       return 1;
     }
-    dng_free_result(result);
-
-    // W5-#15 + 7.1: leak assertion — after freeing the result, the RGBA
-    // output pool must have zero checked-out buffers. A non-zero count means
-    // a checkout leaked (RAII guard or free path failed to return the
-    // buffer). WP1 phase 3: the RGB8 output pool this used to also check is
-    // deleted in production.
-    const size_t rgbaLeaked = dng_debug_pool_checked_out();
-    if (rgbaLeaked != 0) {
-      std::cout << "[Pool] FAIL rgba_checked_out=" << rgbaLeaked
-                << " (expected 0 after free)\n";
-      return 1;
-    }
+    freeCallerOwnedResult(result);
   }
 
-  std::cout << "[Pool] PASS rgba_checked_out=0 rgb_checked_out=0 after "
+  std::cout << "[Pool] PASS caller_owned_dst=1 native_allocations=0 after "
             << repeatCount << " run(s)\n";
   return 0;
 }

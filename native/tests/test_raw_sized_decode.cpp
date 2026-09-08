@@ -34,9 +34,11 @@
  * for any natural image, so the margin test is robust while still failing hard
  * on a crop.
  *
- * The decode under test is the real production C ABI (raw_decode_and_process),
- * linked from the shipped dylib, so the device-resident Stage3 handoff, the
- * scaled Stage4 dispatch and the RGBA pool are all exercised as shipped.
+ * The decode under test is the real production caller-buffer entry
+ * (raw_pipeline_decode_file_into), linked from the shipped dylib, so the
+ * device-resident Stage3 handoff and the scaled Stage4 dispatch are exercised
+ * as shipped. WP5: there is no longer an RGBA pool to exercise -- the caller
+ * owns the output, and this suite asserts exactly that.
  *
  * --simulate-crop feeds the crop reference itself as the "candidate": the
  * discriminator must then REJECT it (nonzero exit). That is the red half of the
@@ -63,6 +65,7 @@
 #include <vector>
 
 #include "raw_ffi_api.h"
+#include "raw_gpu_pipeline.h"
 
 namespace {
 
@@ -146,26 +149,59 @@ double psnrRgb(const Rgba& a, const Rgba& b) {
     return std::min(psnr, 99.0);
 }
 
+// WP5: was the legacy allocating RAW C ABI entry, which allocated its output
+// from the native RGBA pool and is deleted by this work package. This also
+// FIXES this suite: since WP3 collapsed RgbaCheckoutGuard to borrow-only, that
+// null-destination route was refused ("makeRgbaCheckout called with no
+// caller_dst", error -209), so the full-res decode failed and the whole gate
+// exited 1. The sizing semantics under test are unchanged -- the probe applies
+// the SAME scaledOutputExtent rule the GPU branches apply, and _into takes the
+// same max_long_edge -- so every extent and PSNR assertion below still means
+// what it meant.
 bool decodeRaw(const char* path, int max_dim, Rgba* out) {
-    DngResult* r = raw_decode_and_process(path, max_dim);
-    if (!r) {
-        std::fprintf(stderr, "  raw_decode_and_process returned NULL\n");
+    // Mirrors the production develop-parameter construction in raw_ffi_api.cpp.
+    RawDevelopParams develop{};
+    develop.exposure_ev = 0.0f;
+    develop.tone_curve_strength = 1.0f;
+    develop.output_space = kRawOutputColorSpaceSrgb;
+    develop.max_output_long_edge = static_cast<uint32_t>(max_dim < 0 ? 0 : max_dim);
+
+    uint32_t pw = 0, ph = 0;
+    const RawErrorCode prc = raw_pipeline_probe_output_size(
+        path, develop.max_output_long_edge, &pw, &ph);
+    if (prc != kRawSuccess || pw == 0 || ph == 0) {
+        std::fprintf(stderr, "  probe failed: rc=%d w=%u h=%u\n",
+                     static_cast<int>(prc), pw, ph);
         return false;
     }
-    bool ok = false;
-    if (r->error_code == 0 && r->rgba_data && r->width > 0 && r->height > 0) {
-        out->w = r->width;
-        out->h = r->height;
-        out->px.assign(r->rgba_data,
-                       r->rgba_data + static_cast<size_t>(r->width) * r->height * 4);
-        ok = true;
-    } else {
-        std::fprintf(stderr, "  decode failed: error_code=%d w=%d h=%d rgba=%p\n",
-                     r->error_code, r->width, r->height,
-                     static_cast<void*>(r->rgba_data));
+    std::vector<uint8_t> dst(static_cast<size_t>(pw) * ph * 4);
+
+    RawPipelineResult r{};
+    const RawErrorCode rc =
+        raw_pipeline_decode_file_into(path, develop, dst.data(), dst.size(), r);
+    if (rc != kRawSuccess) {
+        std::fprintf(stderr, "  decode failed: rc=%d w=%u h=%u\n",
+                     static_cast<int>(rc), r.width, r.height);
+        return false;
     }
-    dng_free_result(r);
-    return ok;
+    // Ownership check: the decode must have written into OUR buffer, i.e. no
+    // native allocation happened behind it.
+    if (r.rgba_ptr != dst.data()) {
+        std::fprintf(stderr, "  decode failed: rgba_ptr is not the caller's "
+                             "buffer (a native allocation happened behind it)\n");
+        return false;
+    }
+    if (r.width == 0 || r.height == 0) {
+        std::fprintf(stderr, "  decode failed: zero extent w=%u h=%u\n",
+                     r.width, r.height);
+        return false;
+    }
+    out->w = static_cast<int>(r.width);
+    out->h = static_cast<int>(r.height);
+    out->px.assign(r.rgba_ptr,
+                   r.rgba_ptr + static_cast<size_t>(r.width) * r.height * 4);
+    // No release: dst is caller-owned and dies with this scope (invariant I1).
+    return true;
 }
 
 // Returns: 0 pass, 1 fail. simulate_crop feeds the crop reference as the

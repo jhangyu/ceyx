@@ -25,8 +25,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "dng_ffi_api.h"
+#include "ceyx_decode_into.h"
 
 namespace {
 
@@ -94,7 +96,24 @@ int main(int argc, char** argv) {
         }
     }
 
-    DngResult* result = dng_decode_and_process(dngPath);
+    // WP5: was the legacy allocating DNG C ABI entry, which allocated the output from
+    // the native RGBA pool. This is colour-correctness coverage that was merely
+    // DRIVEN THROUGH the legacy entry, so it is migrated rather than retired;
+    // the B-R assertion below is untouched.
+    //
+    // A probe failure FAILS the case; it never skips it.
+    int32_t pw = 0, ph = 0;
+    const int32_t prc = ceyx_probe_output_size(dngPath, /*max_dim=*/0, &pw, &ph);
+    if (prc != 0 || pw <= 0 || ph <= 0) {
+        std::printf("[CFA COLOR] FAIL: probe rc=%d w=%d h=%d for %s\n",
+                    prc, pw, ph, dngPath);
+        return 1;
+    }
+    std::vector<uint8_t> dst(
+        static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4, 0);
+
+    DngResult* result = ceyx_decode_into_buffer(dngPath, /*max_dim=*/0,
+                                                dst.data(), dst.size());
     if (!result) {
         std::printf("[CFA COLOR] FAIL: decode returned null result for %s\n", dngPath);
         return 1;
@@ -104,6 +123,14 @@ int main(int argc, char** argv) {
         std::printf("[CFA COLOR] FAIL: decode error_code=%d w=%d h=%d rgba=%p\n",
                     result->error_code, result->width, result->height,
                     static_cast<void*>(result->rgba_data));
+        result->rgba_data = nullptr;   // invariant I1: never pool-release dst
+        dng_free_result(result);
+        return 1;
+    }
+    if (result->rgba_data != dst.data()) {
+        std::printf("[CFA COLOR] FAIL: rgba_data is not the caller's buffer "
+                    "(a native allocation happened behind the decode)\n");
+        result->rgba_data = nullptr;
         dng_free_result(result);
         return 1;
     }
@@ -119,6 +146,7 @@ int main(int argc, char** argv) {
                 m.samples, m.r, m.g, m.b, delta, minBminusR,
                 pass ? "PASS" : "FAIL");
 
+    result->rgba_data = nullptr;   // invariant I1: never pool-release dst
     dng_free_result(result);
     return pass ? 0 : 1;
 }

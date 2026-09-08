@@ -18,10 +18,18 @@
 #include <thread>
 #include <vector>
 
-// raw_ffi_api.h includes dng_ffi_api.h; the RAW route returns the SAME
-// DngResult layout (rgba_data / width / height / error_code / decode_ms /
-// process_ms) and is freed with dng_free_result(). Do not hand-roll the free.
+// raw_ffi_api.h includes dng_ffi_api.h.
+// WP5: the probe now drives raw_pipeline_decode_file_into (raw_gpu_pipeline.h)
+// with a thread-owned buffer, instead of the legacy allocating RAW C ABI
+// entry, which
+// allocated its output from the native RGBA pool and is deleted by this work
+// package. This also FIXES the probe: since WP3 collapsed RgbaCheckoutGuard to
+// borrow-only, the null-destination route this file used was refused with
+// "makeRgbaCheckout called with no caller_dst" (error -209), so every decode
+// failed and the binary exited 1. The measured property -- concurrent scaling
+// of the lock-free RAW path -- is unchanged and is now actually measurable.
 #include "raw_ffi_api.h"
+#include "raw_gpu_pipeline.h"
 
 int main(int argc, char **argv) {
   if (argc < 3) {
@@ -46,11 +54,31 @@ int main(int argc, char **argv) {
       for (;;) {
         const size_t i = next.fetch_add(1);
         if (i >= files.size()) return;
-        DngResult *r = raw_decode_and_process(files[i].c_str(), 0);
-        if (!r || r->error_code != 0) {
+        // Mirrors the production develop-parameter construction in
+        // raw_ffi_api.cpp exactly; max_dim 0 == full resolution.
+        RawDevelopParams develop{};
+        develop.exposure_ev = 0.0f;
+        develop.tone_curve_strength = 1.0f;
+        develop.output_space = kRawOutputColorSpaceSrgb;
+        develop.max_output_long_edge = 0u;
+
+        uint32_t pw = 0, ph = 0;
+        if (raw_pipeline_probe_output_size(files[i].c_str(), 0, &pw, &ph) !=
+                kRawSuccess ||
+            pw == 0 || ph == 0) {
+          failures.fetch_add(1);
+          continue;
+        }
+        std::vector<uint8_t> dst(static_cast<size_t>(pw) * ph * 4);
+        RawPipelineResult raw{};
+        const RawErrorCode rc = raw_pipeline_decode_file_into(
+            files[i].c_str(), develop, dst.data(), dst.size(), raw);
+        // rgba_ptr == dst.data() is the ownership check: no native allocation
+        // happened behind the decode. Nothing is released to any pool -- dst
+        // is thread-owned and dies with this iteration (invariant I1).
+        if (rc != kRawSuccess || raw.rgba_ptr != dst.data()) {
           failures.fetch_add(1);
         }
-        if (r) dng_free_result(r);
       }
     });
   }
