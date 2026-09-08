@@ -91,8 +91,14 @@ class RawDecodeException implements Exception {
   String toString() => 'RawDecodeException($errorCode $errorName): $message';
 }
 
-/// The loaded native library does not export `raw_decode_and_process`
-/// (an old dylib, or one built with `-DDNG_ENABLE_GENERIC_RAW=OFF`).
+/// The loaded native library cannot decode generic RAW: it does not export the
+/// decode-into pair (`ceyx_probe_output_size` + `ceyx_decode_into_buffer`).
+/// An old dylib, or one built with `-DDNG_ENABLE_GENERIC_RAW=OFF`.
+///
+/// WP5: the condition was previously stated in terms of the legacy allocating
+/// RAW entry. That entry is deleted, so the old wording described a state that
+/// is now true of EVERY build while RAW decoding works — it would have sent a
+/// reader hunting for a symbol whose absence is normal.
 ///
 /// Thrown instead of crashing, and instead of silently falling back to the
 /// DNG parser — a RAW file fed to the DNG parser fails with a misleading code.
@@ -103,6 +109,7 @@ class RawUnavailableException implements Exception {
 
   @override
   String toString() =>
-      'RawUnavailableException: the loaded native library does not export '
-      'raw_decode_and_process; cannot decode $filePath';
+      'RawUnavailableException: the loaded native library does not export the '
+      'decode-into pair (ceyx_probe_output_size + ceyx_decode_into_buffer); '
+      'cannot decode $filePath';
 }

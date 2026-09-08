@@ -236,7 +236,7 @@ typedef CeyxPoolWorkerEntry = void Function(List<Object?> bootstrap);
 /// The pool then takes ownership on exactly one of two mutually exclusive
 /// branches of [_completeJob]:
 /// * fresh generation → [_materialize] wraps it with
-///   `asTypedList(len, finalizer: dng_free_rgba_buffer)`; the buffer's lifetime
+///   `asTypedList(len, finalizer: <the pool's free entry>)`; the buffer's lifetime
 ///   becomes the typed list's lifetime and the engine frees it on GC;
 /// * stale generation (soft cancel) → the address is freed EXPLICITLY and no
 ///   finalizer is ever attached.
@@ -325,7 +325,7 @@ class CeyxDecodePool {
   /// where returns land; a native address is process-global but a Dart pool
   /// object is not. Null means "no pooled allocation on this route", which is
   /// the state whenever the worker's buffer is allocated by the dylib's own
-  /// decode entry (it owns the allocation and `dng_free_rgba_buffer` owns the
+  /// decode entry (it owned the allocation and the native free entry owned the
   /// free) — the pool then owns nothing and every code path below degrades to
   /// the pre-WP6 behaviour, unchanged.
   /// WP2: defaults to the process-wide pool rather than null. A null default
@@ -1389,7 +1389,7 @@ class CeyxDecodePool {
   }
 
   /// Zero-copy view over the worker's native RGBA buffer, taking ownership via
-  /// a `NativeFinalizer` bound to `dng_free_rgba_buffer`. Attached exactly
+  /// a `NativeFinalizer` bound to the pool's native free entry. Attached exactly
   /// once, by the only code path that ever touches this address.
   ///
   /// The `pool.materialize` event is retained here (FROZEN format) so the perf
@@ -1470,7 +1470,7 @@ class CeyxDecodePool {
     // through the seam is not evidence of an unowned production wrap.
     debugUnownedWraps++;
     // WP2 step 7: the `finalizer: _nativeFreePtr` argument that used to live
-    // here is DELETED along with `dng_free_rgba_buffer` itself (WP5). Choice
+    // here is DELETED along with the standalone RGBA free entry itself (WP5). Choice
     // recorded: a plain view guarded by the gauge, NOT a StateError. Throwing
     // would invent a new way for a photo to fail to open — the exact outcome
     // this campaign's contract forbids — for a state the gauge above proves
@@ -1500,7 +1500,7 @@ class CeyxDecodePool {
     debugUnownedWraps++;
   }
 
-  /// Symbol-table access to `dng_free_rgba_buffer` on the POOL's isolate (the
+  /// Symbol-table access to the native free entry on the POOL's isolate (the
   /// host's UI isolate in production).
   ///
   /// This opens the native library on the main isolate — previously only

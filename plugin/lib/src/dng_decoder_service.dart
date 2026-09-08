@@ -274,7 +274,7 @@ class DngDecoderService {
   /// Whether this service can perform a SIZED decode (cap the output long edge).
   ///
   /// WP5: this used to report "does the dylib export
-  /// `dng_decode_and_process_sized`". That entry is deleted, so the old
+  /// the legacy sized entry". That entry is deleted, so the old
   /// question answers "no" on every current build while sized decoding works —
   /// the same inverted-probe problem as [rawDecodeAvailable], and it was caught
   /// the same way: plugin/bin/prod_shape_probe.dart failed with
@@ -297,7 +297,7 @@ class DngDecoderService {
 
   /// Whether this service can decode a generic RAW file.
   ///
-  /// WP5: this used to report "does the dylib export `raw_decode_and_process`".
+  /// WP5: this used to report "does the dylib export the legacy RAW entry".
   /// That entry is deleted, so the old question now answers "no" on every
   /// current build while RAW decoding works perfectly — a capability probe that
   /// reports the OPPOSITE of the truth. It is re-pointed at the condition the
@@ -447,7 +447,7 @@ class DngDecoderService {
   /// [maxDim] is a REQUEST for a decode whose longest output edge is
   /// approximately [maxDim] pixels — it is silently ignored (falling back to
   /// today's full-resolution entry point) whenever the loaded native library
-  /// does not export `dng_decode_and_process_sized`, or when [maxDim] is
+  /// cannot size a decode, or when [maxDim] is
   /// null. Callers must read the returned [DngImage.width]/[DngImage.height]
   /// rather than assuming the request was honored.
   /// On the generic RAW route, `maxDim` is forwarded to the native `max_dim`
@@ -640,7 +640,7 @@ class DngDecoderService {
       }
       // Reused UNCHANGED. It clears result.rgbaData before returning, which is
       // what stops dng_free_result in the finally below from handing the
-      // CALLER's buffer to dng_rgba_output_release.
+      // CALLER's buffer to a native free path.
       //
       // `isRaw: false` is NOT a claim that the file is a DNG — this entry is
       // format-agnostic and Dart deliberately does not know the route
@@ -909,7 +909,7 @@ class DngDecoderService {
   /// happens on the success path. Ownership of that native allocation is
   /// transferred to a service-owned [NativeFinalizer]: when the [DngImage]
   /// (and therefore the Dart wrapper of the typed list) is garbage collected,
-  /// `dng_free_rgba_buffer` is invoked automatically on the native pointer.
+  /// the pool's finalizer is invoked automatically on the native pointer.
   /// The surrounding [DngResult] struct is always freed in `finally` via
   /// `dng_free_result`; on success its `rgbaData` field has been cleared so
   /// the struct teardown does not double-free the buffer.
@@ -1066,7 +1066,7 @@ class DngDecoderService {
       _buffers.adoptUnpooled(malloc<Uint8>(bytes).address, bytes);
 
   /// WP2: probe -> pool acquire -> decode-into, replacing the dylib's
-  /// allocating `dng_decode_and_process`. The public signature of [decode] is
+  /// allocating legacy DNG entry. The public signature of [decode] is
   /// unchanged (R-C), only what allocates underneath it.
   DngImage _decodeZeroCopy(String filePath, {bool isRaw = false}) {
     if (!_initialized) {
@@ -1083,7 +1083,7 @@ class DngDecoderService {
   /// stays a separate named method so [decode]'s route switch is unchanged.
   /// [RawUnavailableException] survives with its type intact — Halcyon may
   /// match on it — but its condition moves from "the dylib has no
-  /// raw_decode_and_process" to "the dylib has no decode-into pair", which is
+  /// the legacy RAW entry" to "the dylib has no decode-into pair", which is
   /// the entry this route now depends on.
   DngImage _decodeRawZeroCopy(String filePath) {
     if (!_initialized) {
@@ -1277,7 +1277,7 @@ class DngDecoderService {
         throw RawDecodeException(
           RawErrorCode.allocationFailed,
           RawErrorCode.name(RawErrorCode.allocationFailed),
-          'Native raw_decode_and_process returned null',
+          'Native RAW decode-into entry returned null',
         );
       }
       throw DngDecodeException(-1, 'Native function returned null');

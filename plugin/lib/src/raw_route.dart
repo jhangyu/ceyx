@@ -12,7 +12,7 @@
 /// unreachable from the app.
 library;
 
-/// Generic-RAW extensions handled by `raw_decode_and_process`.
+/// Generic-RAW extensions handled by the native RAW route.
 ///
 /// 'x3f' added in Phase 19 alongside the native router's FOVb magic
 /// (`raw_file_router.cpp`, P19 Task 4) — Foveon X3F.
@@ -36,10 +36,10 @@ const List<String> kSupportedDecodeExtensions = <String>[
 
 /// Which native entry point a path resolves to.
 enum DecodeRoute {
-  /// `dng_decode_and_process` / `dng_decode_and_process_sized`.
+  /// the native DNG route.
   dng,
 
-  /// `raw_decode_and_process`.
+  /// the native generic-RAW route.
   raw,
 
   /// No native entry point accepts this file.

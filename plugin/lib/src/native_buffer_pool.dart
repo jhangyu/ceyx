@@ -121,7 +121,7 @@ class CeyxNativeBufferPool {
 
   /// Addresses this pool currently considers checked out — pooled, unpooled
   /// oversize and adopted alike. The Dart-side replacement for the native
-  /// `dng_rgba_output_checked_out_count()` gauge, at the same strength.
+  /// native pool's checked-out-count gauge, at the same strength.
   ///
   /// DERIVED from [_byAddress], never maintained as a parallel set: two
   /// structures that must agree eventually disagree, and the disagreement

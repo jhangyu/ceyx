@@ -42,7 +42,7 @@ final class DngResult extends ffi.Struct {
 }
 
 /// C function signatures
-// WP5: `dng_free_rgba_buffer`'s typedef is gone with the symbol -- it had zero
+// WP5: the standalone RGBA free entry's typedef is gone with the symbol -- it had zero
 // remaining callers. The two allocating-decode typedefs are RETAINED, for the
 // same reason RawDecodeAndProcess* is: the current dylib no longer exports
 // these entries, but several tests load PINNED OLD dylibs that do, and these
@@ -212,8 +212,8 @@ class DngNativeBindings {
   //   1. Several tests load PINNED OLD dylibs that still export these symbols,
   //      and these lookups are how an old dylib is described. Deleting an
   //      export is not the same as deleting the ability to describe one --
-  //      exactly the rule already applied to `raw_decode_and_process`.
-  //   2. The unguarded `dng_decode_and_process` lookup used to throw inside
+  //      exactly the rule already applied to the guarded RAW entry below.
+  //   2. The unguarded legacy-DNG lookup used to throw inside
   //      this constructor when the symbol was missing, killing ALL decoding.
   //      That fragility is what made the native and Dart halves of this work
   //      package a single indivisible commit; guarding it removes the trap
@@ -268,10 +268,10 @@ class DngNativeBindings {
   dngFreeResultPtr;
 
   /// Guarded access to the generic RAW entry. Null when the loaded dylib does
-  /// not export `raw_decode_and_process`.
+  /// not export the legacy allocating RAW entry.
   RawDecodeAndProcessDart? get rawDecodeAndProcess => _rawDecodeAndProcess;
 
-  /// Whether the loaded dylib exports `raw_decode_and_process`.
+  /// Whether the loaded dylib exports the legacy allocating RAW entry.
   bool get rawDecodeAvailable => _rawDecodeAndProcess != null;
 
   /// Whether the loaded dylib exports `raw_last_diagnostics`.
@@ -358,7 +358,7 @@ class DngNativeBindings {
   int? recommendationClassPixels(int index) =>
       _dngDecodeRecommendationClassPixels?.call(index);
 
-  /// Diagnostics for the most recent `raw_decode_and_process` call observed
+  /// Diagnostics for the most recent RAW decode observed
   /// on the current OS thread.
   ///
   /// Native state is `thread_local` (raw_ffi_api.cpp:19), NOT per-isolate.
@@ -591,7 +591,7 @@ class DngNativeBindings {
   /// Load bindings from an explicit dylib path, bypassing the
   /// platform-specific candidate search in [load]. Useful for host apps with
   /// non-standard library layouts, and for tests that need to exercise the
-  /// guarded `dng_decode_and_process_sized` lookup against a specific dylib
+  /// guarded legacy sized-decode lookup against a specific dylib
   /// without depending on the app-bundle / script-relative search paths that
   /// only resolve at runtime.
   factory DngNativeBindings.fromPath(String path) =>
