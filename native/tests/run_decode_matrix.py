@@ -350,6 +350,8 @@ _CFA_COLOR_RE = re.compile(r"^\[CFA COLOR\]\s+(.*)\[(PASS|FAIL)\]\s*$")
 _DEFAULT_SIZED_DECODE_BIN = "native/build/test_sized_decode"
 # ceyx-gpu-orient productionization plan Task 5 / gate G-A.
 _DEFAULT_STAGE4_ORIENTED_BIN = "native/build/test_stage4_oriented"
+_DEFAULT_ABI_LAYOUT_BIN = "native/build/test_abi_layout"
+_DEFAULT_PRODUCTION_DYLIB = "native/build/libdng_decoder_native.dylib"
 _SIZED_OVERALL_RE = re.compile(r"^OVERALL=(PASS|FAIL)\s*$")
 _SIZED_HANDOFF_FAILED_MARKER = "8.2.2 device handoff Stage4 failed"
 
@@ -1357,6 +1359,104 @@ def _run_cfa_phase_case(cwd: Path, binary: Path) -> CfaCheckResult:
         name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
         status="PASS",
         detail="all four phases exact on both the Halide AOT kernel and the CPU reference",
+    )
+
+
+def _run_abi_layout_case(cwd: Path, binary: Path) -> CfaCheckResult:
+    """S-3: run test_abi_layout (native/tests/test_abi_layout.cpp), which pins
+    DngResult / CeyxStillResult / CeyxEncodeOptions / HeifResult offsets and
+    sizes at runtime (mirroring dng_bindings.dart's DngResult struct, per
+    project rule G-17). Requires exit 0 AND the 'ABI_LAYOUT_OK' marker —
+    exit code alone is not enough of a contract for a tool whose whole job is
+    asserting offsets (same rationale as the CFA-phase / sized-decode gates).
+    """
+    proc = subprocess.run(
+        [str(binary)],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = proc.stdout
+    ok = any(line.strip() == "ABI_LAYOUT_OK" for line in output.splitlines())
+    if proc.returncode != 0 or not ok:
+        print(output, end="" if output.endswith("\n") else "\n")
+        return CfaCheckResult(
+            name="ABI layout (DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult)",
+            status="FAIL",
+            detail=f"exit={proc.returncode} ok_marker={ok}",
+        )
+    print("[ABI LAYOUT GATE] ABI_LAYOUT_OK")
+    return CfaCheckResult(
+        name="ABI layout (DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult)",
+        status="PASS",
+        detail="every pinned struct offset/size and error-code value matched",
+    )
+
+
+def _run_orient_symbol_absence_case(
+    cwd: Path, dylib_path: Path, nm_out_path: Path
+) -> CfaCheckResult:
+    """S-2: assert the oracle-only orientation symbol never re-enters the
+    shipped production dylib (native/include/ceyx_orient.h's
+    CEYX_ORIENT_ORACLE_ONLY contract), with a positive control proving the
+    instrument can find symbols in this exact file.
+
+    CRITICAL: nm output is written to `nm_out_path` and searched in Python —
+    never `nm | grep -q` in a pipefail shell, where a FOUND symbol makes nm
+    die on SIGPIPE and inverts the check (see run_decode_matrix.py caller for
+    the red-state proof this was checked against).
+    """
+    name = "Orient symbol absence (ceyx_orient_rgba not in production dylib)"
+    if not dylib_path.exists():
+        return CfaCheckResult(
+            name=name, status="SKIP", detail=f"dylib not built: {dylib_path}"
+        )
+    proc = subprocess.run(
+        ["nm", "-gU", str(dylib_path)],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    nm_out_path.parent.mkdir(parents=True, exist_ok=True)
+    nm_out_path.write_text(proc.stdout, encoding="utf-8")
+    if proc.returncode != 0:
+        return CfaCheckResult(
+            name=name, status="FAIL",
+            detail=f"nm exit={proc.returncode}; see {nm_out_path}",
+        )
+    lines = nm_out_path.read_text(encoding="utf-8").splitlines()
+    forbidden_present = any("ceyx_orient_rgba" in line for line in lines)
+    control_present = any(
+        "ceyx_decode_into_buffer_oriented" in line for line in lines
+    )
+    if forbidden_present:
+        return CfaCheckResult(
+            name=name, status="FAIL",
+            detail=(
+                "ceyx_orient_rgba found exported in production dylib "
+                f"({dylib_path}); CEYX_ORIENT_ORACLE_ONLY violated. See {nm_out_path}"
+            ),
+        )
+    if not control_present:
+        return CfaCheckResult(
+            name=name, status="FAIL",
+            detail=(
+                "positive control ceyx_decode_into_buffer_oriented NOT found in "
+                f"{dylib_path} — the instrument cannot find symbols in this file, "
+                f"so the absence above is not trustworthy. See {nm_out_path}"
+            ),
+        )
+    print(
+        "[ORIENT SYMBOL GATE] ceyx_orient_rgba absent; "
+        "ceyx_decode_into_buffer_oriented present (positive control OK)"
+    )
+    return CfaCheckResult(
+        name=name, status="PASS",
+        detail="oracle symbol absent from shipped dylib; positive control present",
     )
 
 
@@ -2603,6 +2703,41 @@ def main() -> int:
         help="Disable the Stage4 oriented gate even if the default binary exists.",
     )
     ap.add_argument(
+        "--abi-layout-harness",
+        default="",
+        help=(
+            "S-3: test_abi_layout binary (relative to repo-root), pinning "
+            "DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult offsets and "
+            "sizes at runtime (project rule G-17). Auto-enabled when the default "
+            f"build output exists ({_DEFAULT_ABI_LAYOUT_BIN}); pass "
+            "--no-abi-layout-harness to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-abi-layout-harness",
+        action="store_true",
+        default=False,
+        help="Disable the ABI layout gate even if the default binary exists.",
+    )
+    ap.add_argument(
+        "--orient-symbol-absence-gate",
+        default="",
+        help=(
+            "S-2: production dylib path (relative to repo-root) to check for "
+            "absence of the oracle-only ceyx_orient_rgba symbol, with a positive "
+            "control (ceyx_decode_into_buffer_oriented) that must be present. "
+            "Auto-enabled when the default build output exists "
+            f"({_DEFAULT_PRODUCTION_DYLIB}); pass --no-orient-symbol-absence-gate "
+            "to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-orient-symbol-absence-gate",
+        action="store_true",
+        default=False,
+        help="Disable the orient symbol-absence gate even if the default dylib exists.",
+    )
+    ap.add_argument(
         "--bggr-sample",
         default="",
         help=(
@@ -3350,6 +3485,47 @@ def main() -> int:
             else:
                 cfa_results.append(
                     _run_stage4_oriented_case(root, stage4_oriented_bin, lossless, args.repeat)
+                )
+
+        # S-3: ABI layout gate. Same auto-enable/SKIP contract as the harnesses
+        # above: a gate nobody knows to invoke is a gate that silently stops
+        # being run, so it is registered here rather than left standalone.
+        requested_abi_layout = bool(args.abi_layout_harness)
+        if not args.no_abi_layout_harness:
+            abi_layout_bin = (
+                root / (args.abi_layout_harness or _DEFAULT_ABI_LAYOUT_BIN)
+            ).resolve()
+            if not abi_layout_bin.exists():
+                if requested_abi_layout:
+                    ap.error(f"ABI layout harness not found: {abi_layout_bin}")
+                print(f"[SKIP] ABI layout harness not built; skipping: {abi_layout_bin}")
+                cfa_results.append(CfaCheckResult(
+                    name="ABI layout (DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult)",
+                    status="SKIP",
+                    detail=f"binary not built: {abi_layout_bin}",
+                ))
+            else:
+                cfa_results.append(_run_abi_layout_case(root, abi_layout_bin))
+
+        # S-2: orient symbol-absence gate. Same auto-enable/SKIP contract.
+        requested_orient_symbol_gate = bool(args.orient_symbol_absence_gate)
+        if not args.no_orient_symbol_absence_gate:
+            orient_dylib = (
+                root / (args.orient_symbol_absence_gate or _DEFAULT_PRODUCTION_DYLIB)
+            ).resolve()
+            if not orient_dylib.exists():
+                if requested_orient_symbol_gate:
+                    ap.error(f"Production dylib not found: {orient_dylib}")
+                print(f"[SKIP] Production dylib not built; skipping orient symbol-absence gate: {orient_dylib}")
+                cfa_results.append(CfaCheckResult(
+                    name="Orient symbol absence (ceyx_orient_rgba not in production dylib)",
+                    status="SKIP",
+                    detail=f"dylib not built: {orient_dylib}",
+                ))
+            else:
+                nm_out_path = artifact_dir / "orient_symbol_nm_output.txt"
+                cfa_results.append(
+                    _run_orient_symbol_absence_case(root, orient_dylib, nm_out_path)
                 )
 
     if any(c.status == "FAIL" for c in cfa_results):

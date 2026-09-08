@@ -6,6 +6,7 @@
 
 #include "ceyx_encode_api.h"
 #include "ceyx_still_api.h"
+#include "dng_ffi_api.h"
 #include "heif_api.h"
 
 static int g_failures = 0;
@@ -89,6 +90,25 @@ int main() {
   expect_eq("kCeyxFormatHeic", kCeyxFormatHeic, 3);
   expect_eq("kCeyxFormatAvif", kCeyxFormatAvif, 4);
   expect_eq("kCeyxFormatJxl", kCeyxFormatJxl, 5);
+
+  // --- DngResult layout (S-3: mirrors dng_bindings.dart's DngResult) ------
+  // Field order per dng_ffi_api.h: rgba_data, width, height, error_code,
+  // decode_ms, process_ms. Dart mirror confirmed field-for-field identical
+  // in plugin/lib/src/dng_bindings.dart:25-42 (rgbaData, width, height,
+  // errorCode, decodeMs, processMs).
+  expect_eq("sizeof(DngResult)", (long long)sizeof(DngResult), 40);
+  expect_eq("offsetof(DngResult, rgba_data)",
+            (long long)offsetof(DngResult, rgba_data), 0);
+  expect_eq("offsetof(DngResult, width)",
+            (long long)offsetof(DngResult, width), 8);
+  expect_eq("offsetof(DngResult, height)",
+            (long long)offsetof(DngResult, height), 12);
+  expect_eq("offsetof(DngResult, error_code)",
+            (long long)offsetof(DngResult, error_code), 16);
+  expect_eq("offsetof(DngResult, decode_ms)",
+            (long long)offsetof(DngResult, decode_ms), 24);
+  expect_eq("offsetof(DngResult, process_ms)",
+            (long long)offsetof(DngResult, process_ms), 32);
 
   std::printf(g_failures == 0 ? "ABI_LAYOUT_OK\n" : "ABI_LAYOUT_FAILED\n");
   return g_failures == 0 ? 0 : 1;
