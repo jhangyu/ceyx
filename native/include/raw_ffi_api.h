@@ -101,7 +101,11 @@ typedef struct RawTimingDiagnostics {
     double   device_to_host_copy_ms; /* the copy-back half, reported separately for AC2 */
     double   auto_exposure_ms;       /* CPU auto-exposure estimator, plan §6.3 */
     double   gpu_submit_wait_ms;     /* gpu_process_ms - host_copy_ms, plan §6.2 item 3 */
-    uint32_t unified_memory_path_active;   /* 1 = zero-copy path taken this decode */
+    uint32_t unified_memory_path_active;   /* 1 = zero-copy path taken this decode.
+                                             * C2 (capability-gated zero-copy) has not
+                                             * landed yet: this field is always 0 today
+                                             * for every decode, not a per-decode signal
+                                             * that the zero-copy gate evaluated false. */
 } RawTimingDiagnostics;
 
 /* Timing diagnostics for the calling thread's most recent RAW decode.

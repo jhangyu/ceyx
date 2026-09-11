@@ -57,6 +57,17 @@ std::atomic<size_t> g_configured_lane_count{0};
 
 // [[maybe_unused]]: these three helpers serve the Metal body only; the portable
 // stub below compiles without them.
+// UNCONFIGURED DEFAULT (R2 N2, lead ruling docs/logs/2026-09-11/
+// gpu-copy-elimination-execution-contract.md "Rulings during execution"):
+// when nothing has called raw_persistent_device_arena_configure_lane_count(),
+// this deliberately returns the absolute ceiling rather than some smaller
+// number. That is safe because arenas are lazily allocated per ACTUALLY
+// DECODING thread (raw_persistent_device_arena_for_current_lane() only
+// creates one on that thread's first arena-eligible decode) — so resident
+// bytes scale with real concurrency, never with this budget. The ceiling
+// only bounds how many *distinct* lanes may hold an arena at once; it is not
+// a pre-allocation and an unconfigured process at low concurrency pays
+// nothing for the lanes it never uses.
 [[maybe_unused]] size_t lane_count_budget() {
   const size_t configured = g_configured_lane_count.load(std::memory_order_relaxed);
   if (configured == 0 || configured > kRawDeviceArenaMaximumLaneCount) {
@@ -265,6 +276,7 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *halide_buffer,
     if (storage.bound_halide_buffer != nullptr) {
       halide_metal_detach_buffer(nullptr, storage.bound_halide_buffer);
       storage.bound_halide_buffer = nullptr;
+      live_binding_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     const size_t allocation_byte_count =
@@ -326,6 +338,20 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *halide_buffer,
     }
   }
 
+  // R2.5 review S-2: the growth branch above (:276-280) already detaches and
+  // decrements when it drops the old binding to reallocate. This is the
+  // symmetric case for a rebind that reuses the SAME region without growing
+  // it (sufficient capacity already, or the wrap below is being retried) — a
+  // still-live binding here must be detached and decremented the same way,
+  // otherwise live_binding_count_ drifts permanently positive and
+  // raw_persistent_device_arena_release_all_lanes() refuses forever.
+  if (storage.bound_halide_buffer != nullptr &&
+      storage.bound_halide_buffer != halide_buffer) {
+    halide_metal_detach_buffer(nullptr, storage.bound_halide_buffer);
+    storage.bound_halide_buffer = nullptr;
+    live_binding_count_.fetch_sub(1, std::memory_order_relaxed);
+  }
+
   if (halide_metal_wrap_buffer(
           nullptr, halide_buffer,
           reinterpret_cast<uint64_t>(storage.metal_buffer)) != 0) {
@@ -338,6 +364,7 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *halide_buffer,
   }
 
   storage.bound_halide_buffer = halide_buffer;
+  live_binding_count_.fetch_add(1, std::memory_order_relaxed);
   g_binding_count.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
@@ -351,6 +378,7 @@ void RawPersistentDeviceArena::detach_region(halide_buffer_t *halide_buffer) {
     // (invariant I-D).
     halide_metal_detach_buffer(nullptr, halide_buffer);
     regions_[i].bound_halide_buffer = nullptr;
+    live_binding_count_.fetch_sub(1, std::memory_order_relaxed);
     return;
   }
 }
@@ -364,12 +392,17 @@ bool RawPersistentDeviceArena::owns_buffer(
   return false;
 }
 
+bool RawPersistentDeviceArena::has_live_binding() const {
+  return live_binding_count_.load(std::memory_order_relaxed) > 0;
+}
+
 void RawPersistentDeviceArena::release_all_regions() {
   for (size_t i = 0; i < kRawDeviceArenaRegionCount; ++i) {
     ArenaRegionStorage &storage = regions_[i];
     if (storage.bound_halide_buffer != nullptr) {
       halide_metal_detach_buffer(nullptr, storage.bound_halide_buffer);
       storage.bound_halide_buffer = nullptr;
+      live_binding_count_.fetch_sub(1, std::memory_order_relaxed);
     }
     if (storage.metal_buffer != nullptr) {
       release_metal_buffer(storage.metal_buffer);
@@ -465,27 +498,30 @@ void raw_persistent_device_arena_release_all_lanes() {
   // their owning threads, which is safe only because callers use this between
   // decodes to establish a known baseline (plan §2.2); it is not a concurrent
   // teardown path.
+  //
+  // QUIESCENCE GUARD (R2 N1): deleting another thread's arena while that
+  // thread still holds a live RawDeviceArenaRegionBinding would dangle the
+  // binding's pointer (its destructor would call detach_region on freed
+  // memory). Rather than resting on this comment alone, refuse the whole
+  // call mechanically whenever any lane reports has_live_binding(); the
+  // quiescent case (no in-flight decode) keeps exactly today's behaviour.
   std::lock_guard<std::mutex> guard(lane_map_lock());
   auto &map = lane_map();
+  for (const auto &entry : map) {
+    if (entry.second.arena != nullptr && entry.second.arena->has_live_binding()) {
+      std::fprintf(stderr,
+                   "[RawPersistentDeviceArena] event=release_all_lanes_refused "
+                   "reason=live_binding lane_identifier=0x%llx\n",
+                   static_cast<unsigned long long>(entry.first));
+      std::fflush(stderr);
+      return;
+    }
+  }
   for (auto &entry : map) {
     delete entry.second.arena;  // destructor releases the three regions
   }
   map.clear();
   g_live_lane_count.store(0, std::memory_order_relaxed);
-}
-
-bool raw_persistent_device_arena_owns_buffer(
-    const halide_buffer_t *halide_buffer) {
-  if (halide_buffer == nullptr) return false;
-  std::lock_guard<std::mutex> guard(lane_map_lock());
-  auto &map = lane_map();
-  for (const auto &entry : map) {
-    if (entry.second.arena != nullptr &&
-        entry.second.arena->owns_buffer(halide_buffer)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 }  // namespace ceyx
@@ -519,6 +555,8 @@ bool RawPersistentDeviceArena::owns_buffer(const halide_buffer_t *) const {
 
 void RawPersistentDeviceArena::release_all_regions() {}
 
+bool RawPersistentDeviceArena::has_live_binding() const { return false; }
+
 uint64_t RawPersistentDeviceArena::resident_device_bytes() const { return 0; }
 
 RawPersistentDeviceArena *raw_persistent_device_arena_for_current_lane() {
@@ -526,10 +564,6 @@ RawPersistentDeviceArena *raw_persistent_device_arena_for_current_lane() {
 }
 
 void raw_persistent_device_arena_release_all_lanes() {}
-
-bool raw_persistent_device_arena_owns_buffer(const halide_buffer_t *) {
-  return false;
-}
 
 }  // namespace ceyx
 

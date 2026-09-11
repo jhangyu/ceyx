@@ -1575,11 +1575,20 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 
     // Plan §5.3 (C3): route the twelve param buffers through the per-lane
     // upload cache instead of an unconditional host-dirty upload every
-    // decode. `render_parameter_cache_for_current_lane()` returns nullptr
-    // when no lane context exists (harness/direct callers) or on non-Metal
-    // targets, in which case every buffer below reports "not wrapped" and
-    // falls through to today's unconditional set_host_dirty() — the §5.5
-    // no-lane fallback, verbatim.
+    // decode. REAL gating condition (R1 review should-fix #1, lead ruling
+    // 2026-09-11): `render_parameter_cache_for_current_lane()` returns
+    // non-null whenever a Metal device exists — there is no "no lane
+    // context" fallback branch. The DNG route (runRenderStage4HalideAot,
+    // above) does not reach this function at all, but the DNG route DOES
+    // share the SAME underlying cache instance when it later calls
+    // runRenderStage4HalideAotFromDevice-style paths on the same thread as
+    // a RAW decode; this is by design, not an oversight — the cache is
+    // keyed per-lane, not per-route, and the alternating DNG/RAW same-thread
+    // interleaving invalidates stale entries content-correctly (proven by
+    // the matrix DNG SHA256 gates staying green across interleaved runs).
+    // On non-Metal targets (or if the cache lookup itself fails for any
+    // reason) `param_cache` is null and every buffer below reports "not
+    // wrapped", falling through to today's unconditional set_host_dirty().
     ceyx::RenderParameterUploadCache* param_cache =
         ceyx::render_parameter_cache_for_current_lane();
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
@@ -1825,11 +1834,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // (halide_stage2_ol2_device_handoff_copy_to_host) still need the data.
     // I-D: a wrapped/arena-owned buffer must be detached, never device-freed —
     // halide_device_free on an arena-wrapped handle would free the arena's
-    // MTLBuffer out from under the lane. raw_persistent_device_arena_owns_buffer
-    // is the mechanical test; when it is nullptr (no arena TU linked / no
-    // arena on this lane) it reports false and this reduces to today's free.
+    // MTLBuffer out from under the lane. R2 review S2: the global
+    // raw_persistent_device_arena_owns_buffer() scan is a cross-lane data
+    // race (it walks every lane's arena, not just this call's own). Use the
+    // in-scope persistent_device_arena parameter's owns_buffer() instead,
+    // which only inspects this lane's own arena; when the parameter is
+    // nullptr (no arena on this lane) this reduces to today's free.
     if (stage3_device_buf->device != 0 &&
-        !ceyx::raw_persistent_device_arena_owns_buffer(stage3_device_buf)) {
+        (persistent_device_arena == nullptr ||
+         !persistent_device_arena->owns_buffer(stage3_device_buf))) {
         halide_device_free(nullptr, stage3_device_buf);
     }
     auto t3_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()

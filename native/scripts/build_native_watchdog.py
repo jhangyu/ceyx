@@ -667,9 +667,24 @@ def main() -> int:
     native_needed = args.target != "none" and not args.build_web_app
     flutter_idle_timeout_sec = max(args.idle_timeout_sec, 300)
     if native_needed and not args.skip_configure:
-        vcpkg_prefix_arg = resolve_vcpkg_prefix_cmake_arg(native_dir)
-        if vcpkg_prefix_arg is None:
-            return 1
+        # R2.5-T6 (R1 parking item): a tree that is already configured (a
+        # prior successful cmake generation left CMakeCache.txt behind) does
+        # not need -DCMAKE_PREFIX_PATH re-supplied -- CMake persists it in
+        # the cache. Re-running `cmake -S -B` there is a cheap
+        # re-generation check, not a fresh configure, so it must not
+        # hard-fail on a missing vcpkg install it does not actually need.
+        # Smallest honest fix: only enforce the vcpkg precheck when there is
+        # no existing cache, i.e. when configure will do real work. If the
+        # cached tree turns out to be stale and genuinely needs vcpkg, the
+        # cmake command itself fails below and that failure is not swallowed.
+        cmake_cache_exists = (build_dir / "CMakeCache.txt").exists()
+        if cmake_cache_exists:
+            vcpkg_prefix_arg: list[str] = []
+        else:
+            resolved_vcpkg_prefix_arg = resolve_vcpkg_prefix_cmake_arg(native_dir)
+            if resolved_vcpkg_prefix_arg is None:
+                return 1
+            vcpkg_prefix_arg = resolved_vcpkg_prefix_arg
         # Perf fix (2026-07-04): explicit Release even though CMakeLists.txt now
         # defaults to it, so this stays correct if the cache already pinned a
         # different CMAKE_BUILD_TYPE from a prior configure.

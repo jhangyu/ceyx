@@ -16,6 +16,13 @@
 
 #include "libraw_frontend.h"       // RawForcedBackend only (test-only override)
 #include "raw_ffi_api.h"           // C4 (plan §6.4/§6.7): RawTimingDiagnostics
+// Negative-space note (round-1 review, 08-24-style): because raw_ffi_api.h is
+// included above, any file-local constant or macro declared in this header
+// that happens to share a name with one of raw_ffi_api.h's own top-level
+// names will collide at this translation unit's scope -- there is no
+// namespace boundary between the two. Nothing here does today; a future edit
+// adding a same-named file-local symbol is the failure mode this note exists
+// to head off.
 #include "raw_pipeline_contract.h"
 
 // Round 2 Task 2.6: colour-pipeline diagnostics that RawDecodeDiagnostics

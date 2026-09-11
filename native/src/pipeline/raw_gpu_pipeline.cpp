@@ -284,8 +284,16 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // and performs no copy of its own (Halide's copy_to_device is a no-op
     // when the buffer is not host-dirty).
     const double h2d_t0 = nowMs();
-    src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
     const double host_to_device_copy_ms = nowMs() - h2d_t0;
+    // R1 should-fix #6: a non-zero RC here means the upload itself failed, so
+    // the kernel below would read undefined/stale device memory. Fail via the
+    // existing kernel-failure path -- host_to_device_copy_ms stays a local
+    // that is never assigned into out.timing on this early return, so a
+    // failed copy is never reported as a measured duration.
+    if (h2d_rc != 0) {
+        return kRawErrKernelFailed;
+    }
     if (raw_bayer_demosaic(src_buf, red_x, red_y, black_buf,
                            computeInvRange(input), stage3) != 0) {
         return kRawErrKernelFailed;
@@ -472,8 +480,14 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     // C4 (plan §6.2 item 1): explicit host->device upload, timed. Same
     // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
     const double h2d_t0 = nowMs();
-    src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
     const double host_to_device_copy_ms = nowMs() - h2d_t0;
+    // R1 should-fix #6: same convention as runBayerBranch -- fail via the
+    // existing kernel-failure path on a non-zero RC, so host_to_device_copy_ms
+    // is never reported for a failed copy.
+    if (h2d_rc != 0) {
+        return kRawErrKernelFailed;
+    }
     if (raw_xtrans_demosaic(src_buf, cfa_buf, black_buf,
                             computeInvRange(input), stage3) != 0) {
         return kRawErrKernelFailed;
@@ -647,8 +661,14 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     // C4 (plan §6.2 item 1): explicit host->device upload, timed. Same
     // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
     const double h2d_t0 = nowMs();
-    src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
     const double host_to_device_copy_ms = nowMs() - h2d_t0;
+    // R1 should-fix #6: same convention as runBayerBranch -- fail via the
+    // existing kernel-failure path on a non-zero RC, so host_to_device_copy_ms
+    // is never reported for a failed copy.
+    if (h2d_rc != 0) {
+        return kRawErrKernelFailed;
+    }
     if (raw_linear_rgb_normalize(src_buf, black_buf,
                                  computeInvRangeLinearRgb(input), stage3) != 0) {
         return kRawErrKernelFailed;

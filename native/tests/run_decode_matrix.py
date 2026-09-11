@@ -124,6 +124,14 @@ class FfiRunResult:
     stage2_total_ms: Optional[float]
     contract_pass: bool
     rgb_match_pass: bool
+    # S-1 (round-2.5 review follow-up): True when the harness printed the
+    # honest "[FFI RGB MATCH] render: SKIP test_render_missing=..." line
+    # (RAW case only, no staged baseline exists for it) rather than an
+    # actual PASS/FAIL comparison. False for every DNG case (they always
+    # stage a baseline first). Lets summary-table rendering distinguish
+    # "skipped, gate still passed" from "failed" instead of collapsing both
+    # into the same FAIL token in the artifact of record.
+    rgb_match_skipped: bool = False
     opcode2_probe: dict[str, float] = field(default_factory=dict)
     # C4 (plan §6.5/§6.7): key=value pairs from the [RawTiming] line, when the
     # harness ran with CEYX_RAW_TIMING_LOG=1 against a generic RAW file. Empty
@@ -330,6 +338,15 @@ _FFI_RGB_MATCH_RE = re.compile(
     r"^\[FFI RGB MATCH\]\s+render:\s+byte_exact=(\d+)\s+"
     r"psnr=([0-9]+(?:\.[0-9]+)?)\s+dB\s+\[(PASS|FAIL)\]"
 )
+# R2.5-T6: the RAW-route FFI case has no staged Halide test-render baseline
+# (_stage_ffi_test_render is DNG-only), so dng_ffi_harness's
+# writeAndCompareRgb (dng_ffi_harness.cpp) prints this SKIP form instead of
+# the byte_exact/psnr form above when the expected render file is absent.
+# Treated as a pass by _run_ffi_case's caller for that case only -- DNG cases
+# always stage a baseline first and so never hit this branch.
+_FFI_RGB_MATCH_SKIP_RE = re.compile(
+    r"^\[FFI RGB MATCH\]\s+render:\s+SKIP\s+test_render_missing="
+)
 _HANDOFF_PSNR_RE = re.compile(
     r"^\s*PSNR\(handoff ON vs OFF\):\s*([0-9]+(?:\.[0-9]+)?)\s+"
     r"dB\s+\[(PASS|FAIL)\]"
@@ -340,6 +357,13 @@ _DEFAULT_ANDROID_TEST_DECODE = (
 )
 _DEFAULT_FFI_HARNESS = "native/build/dng_ffi_harness"
 _DEFAULT_DEVICE_HANDOFF_HARNESS = "native/build/test_device_handoff"
+# R2.5-T6 (plan §6.5/§6.7, R1 parking item): generic RAW-route FFI case.
+# dng_ffi_harness drives ceyx_decode_into_ffi.cpp, which routes by file
+# extension via raw_file_router (see native/src/ffi/ceyx_decode_into_ffi.cpp)
+# -- passing a .arw file exercises the RAW route through the same production
+# C ABI entry the DNG cases use, no separate harness needed. Sample lives
+# in-repo (image_samples/raw_sample.arw), unlike the external BGGR sample.
+_DEFAULT_RAW_FFI_SAMPLE = "image_samples/raw_sample.arw"
 _DEFAULT_ANDROID_FFI_HARNESS = (
     "native/build-android/android-arm64/dng_ffi_harness_android"
 )
@@ -921,7 +945,8 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
 
 
 def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
-                  env: dict[str, str], artifact_dir: Path) -> FfiRunResult:
+                  env: dict[str, str], artifact_dir: Path,
+                  require_rgb_match: bool = True) -> FfiRunResult:
     merged = os.environ.copy()
     merged.update(env)
     proc = subprocess.run(
@@ -942,6 +967,7 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
     contract_pass = False
     contract_failed = False
     rgb_match: Optional[re.Match[str]] = None
+    rgb_match_skipped = False
     for line in output.splitlines():
         m = _FFI_RUN_RE.match(line)
         if m:
@@ -953,6 +979,8 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         m = _FFI_RGB_MATCH_RE.match(line)
         if m:
             rgb_match = m
+        if _FFI_RGB_MATCH_SKIP_RE.match(line):
+            rgb_match_skipped = True
         m = _STAGE2_PROBE_RE.match(line)
         if m:
             stage2_probe = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
@@ -969,12 +997,17 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
     rgb_match_pass = bool(
         rgb_match and rgb_match.group(1) == "1" and rgb_match.group(3) == "PASS"
     )
+    # require_rgb_match=False is for the RAW-route case only (no staged
+    # Halide test-render baseline exists for it): a SKIP line there is the
+    # expected, honest outcome, not a defect. DNG cases keep the strict
+    # default and always stage a baseline first (_stage_ffi_test_render).
+    rgb_gate_pass = rgb_match_pass or (not require_rgb_match and rgb_match_skipped)
     if (
         proc.returncode != 0
         or not ffi_match
         or not contract_pass
         or contract_failed
-        or not rgb_match_pass
+        or not rgb_gate_pass
     ):
         raise RuntimeError(f"[FFI {sample_name}] exit={proc.returncode}\n{output}")
     return FfiRunResult(
@@ -992,6 +1025,7 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         stage2_total_ms=stage2_probe.get("total"),
         contract_pass=contract_pass,
         rgb_match_pass=rgb_match_pass,
+        rgb_match_skipped=rgb_match_skipped,
         opcode2_probe=opcode2_probe,
         raw_timing=raw_timing,
     )
@@ -1535,6 +1569,23 @@ def _fmt_db(v: Optional[float]) -> str:
     return f"{v:.2f}"
 
 
+def _ffi_rgb_match_cell(runs: "list[FfiRunResult]") -> str:
+    """S-1 (round-2.5 review follow-up): distinguish "no baseline to compare
+    against, honestly declared" from an actual FAIL in the summary table.
+    PASS iff every run actually byte-matched; SKIP iff every run instead hit
+    the harness's own "[FFI RGB MATCH] render: SKIP test_render_missing=..."
+    line (RAW case only -- see _run_ffi_case require_rgb_match); FAIL
+    otherwise (mixed, or an actual mismatch). Before this fix the RAW case's
+    honest SKIP collapsed into the same FAIL token as a real defect
+    (r25-close-ac7-matrix.txt:154).
+    """
+    if all(run.rgb_match_pass for run in runs):
+        return "PASS"
+    if all(run.rgb_match_skipped for run in runs):
+        return "SKIP"
+    return "FAIL"
+
+
 def _build_markdown(
     results: list[AggResult],
     ffi_results: list[FfiAggResult],
@@ -1635,7 +1686,7 @@ def _build_markdown(
                 f"| {_fmt_ms(r.stage2_opcode2_ms)} "
                 f"| {rgb_bytes} "
                 f"| {'PASS' if all(run.contract_pass for run in r.runs) else 'FAIL'} "
-                f"| {'PASS' if all(run.rgb_match_pass for run in r.runs) else 'FAIL'} |"
+                f"| {_ffi_rgb_match_cell(r.runs)} |"
             )
         L.append("")
 
@@ -2640,6 +2691,23 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--raw-ffi-sample",
+        default="",
+        help=(
+            "R2.5-T6 (plan §6.5, R1 parking item): generic RAW-route sample "
+            "(relative to repo-root) driven through the FFI harness "
+            "(--ffi-harness) with CEYX_RAW_TIMING_LOG=1, so [RawTiming] "
+            f"appears in matrix output. Default: {_DEFAULT_RAW_FFI_SAMPLE}. "
+            "In-repo, unlike --bggr-sample; prints SKIP if absent."
+        ),
+    )
+    ap.add_argument(
+        "--no-raw-ffi-case",
+        action="store_true",
+        default=False,
+        help="Disable the generic RAW-route FFI case even if the sample and FFI harness exist.",
+    )
+    ap.add_argument(
         "--no-ffi-harness",
         action="store_true",
         default=False,
@@ -3351,6 +3419,12 @@ def main() -> int:
     ):
         print(f"[SKIP] FFI harness binary not found; skipping: {default_ffi_bin}")
         args.ffi_harness = ""
+    # N-5 (round-2.5 review follow-up): the generic message above covers the
+    # DNG FFI cases; the RAW-route case shares the same harness binary but is
+    # its own case in the summary table, so it gets its own case-specific
+    # skip line rather than being silently folded into the DNG message.
+    if macos_enabled and not args.ffi_harness and not args.no_raw_ffi_case:
+        print("[SKIP] Generic RAW / FFI: harness binary not found")
 
     # handoff_results is initialized above (before the Android block) so
     # Android device-handoff results collected there survive into this
@@ -3419,6 +3493,65 @@ def main() -> int:
                     )
                     print(f"  [RawTiming] {fields}")
             ffi_results.append(FfiAggResult(sample_name=sample_name, runs=runs))
+
+        # R2.5-T6 (plan §6.5, R1 parking item): generic RAW-route FFI case,
+        # so [RawTiming] appears in matrix output. Same harness/ABI as the
+        # DNG cases above (routes by file extension, see
+        # native/src/ffi/ceyx_decode_into_ffi.cpp); the only difference is no
+        # staged Halide test-render baseline exists for RAW, so RGB-match is
+        # accepted as SKIP rather than required PASS (require_rgb_match=False).
+        if not args.no_raw_ffi_case:
+            requested_raw_ffi_sample = bool(args.raw_ffi_sample)
+            raw_ffi_sample = Path(args.raw_ffi_sample or _DEFAULT_RAW_FFI_SAMPLE)
+            if not raw_ffi_sample.is_absolute():
+                raw_ffi_sample = (root / raw_ffi_sample).resolve()
+            if not raw_ffi_sample.exists():
+                if requested_raw_ffi_sample:
+                    ap.error(f"RAW FFI sample not found: {raw_ffi_sample}")
+                print(f"[SKIP] RAW FFI sample not present; skipping generic-RAW FFI case: {raw_ffi_sample}")
+            else:
+                raw_ffi_env = {**ffi_env, "CEYX_RAW_TIMING_LOG": "1"}
+                raw_ffi_artifact_dir = matrix_current / "raw_ffi"
+                raw_ffi_artifact_dir.mkdir(parents=True, exist_ok=True)
+                raw_sample_name = "Generic RAW / FFI"
+                raw_runs: list[FfiRunResult] = []
+                for i in range(args.repeat):
+                    print(f"[FFI {i+1}/{args.repeat}] {raw_sample_name}")
+                    try:
+                        raw_run = _run_ffi_case(
+                            root, str(ffi_harness), raw_sample_name,
+                            str(raw_ffi_sample), raw_ffi_env,
+                            raw_ffi_artifact_dir, require_rgb_match=False,
+                        )
+                    except RuntimeError as exc:
+                        print(f"  ERROR: {exc}")
+                        raise SystemExit(1)
+                    raw_runs.append(raw_run)
+                    if raw_run.raw_timing:
+                        ordered_keys = (
+                            "host_to_device_copy_ms", "device_to_host_copy_ms",
+                            "host_copy_ms", "auto_exposure_ms", "gpu_submit_wait_ms",
+                            "gpu_process_ms", "raw_unpack_ms", "total_ms",
+                            "unified_memory_path_active",
+                        )
+                        fields = " ".join(
+                            f"{k}={raw_run.raw_timing[k]:.3f}"
+                            for k in ordered_keys if k in raw_run.raw_timing
+                        )
+                        print(f"  [RawTiming] {fields}")
+                    else:
+                        # N-4 (round-2.5 review follow-up): a missing
+                        # [RawTiming] line with CEYX_RAW_TIMING_LOG=1 set is
+                        # an instrumentation regression, not a SKIP
+                        # condition -- it must fail the case, not just warn
+                        # and let the case's PASS through untouched.
+                        print(
+                            f"  ERROR: {raw_sample_name} ran but emitted no "
+                            "[RawTiming] line (CEYX_RAW_TIMING_LOG=1 was set) "
+                            "-- instrumentation regression."
+                        )
+                        raise SystemExit(1)
+                ffi_results.append(FfiAggResult(sample_name=raw_sample_name, runs=raw_runs))
 
     # --- CFA phase gates (2026-08-16) ---
     # Same auto-enable pattern as the FFI / handoff harnesses: run when the

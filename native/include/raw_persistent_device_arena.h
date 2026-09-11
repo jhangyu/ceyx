@@ -66,6 +66,7 @@
 #ifndef RAW_PERSISTENT_DEVICE_ARENA_H
 #define RAW_PERSISTENT_DEVICE_ARENA_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -138,6 +139,14 @@ class RawPersistentDeviceArena {
   // Currently held device bytes across this lane's three regions.
   uint64_t resident_device_bytes() const;
 
+  // True when at least one region is currently wrapped onto a caller's
+  // halide_buffer_t (R2 N1). Read cross-thread, without the lane map lock, by
+  // raw_persistent_device_arena_release_all_lanes() to refuse a mid-decode
+  // release rather than dangling a live RawDeviceArenaRegionBinding; kept
+  // atomic for exactly that reason even though the owning lane never needs
+  // synchronisation to read or write its own bindings.
+  bool has_live_binding() const;
+
  private:
   struct ArenaRegionStorage {
     void *metal_buffer = nullptr;  // retained MTLBuffer, or nullptr
@@ -148,6 +157,10 @@ class RawPersistentDeviceArena {
 
   ArenaRegionStorage regions_[kRawDeviceArenaRegionCount];
   RawDecodeLaneIdentifier lane_identifier_ = 0;
+  // Count of regions with a non-null bound_halide_buffer. Updated only by the
+  // owning lane (bind_region/detach_region/release_all_regions), read
+  // cross-thread by has_live_binding(); see that method's comment.
+  std::atomic<int> live_binding_count_{0};
 };
 
 // The calling lane's arena, created on first use. nullptr is ALWAYS a legal
@@ -189,9 +202,11 @@ void raw_persistent_device_arena_configure_lane_count(size_t lane_count);
 // warmup baseline. Safe to call with no lanes alive.
 void raw_persistent_device_arena_release_all_lanes();
 
-// True when `halide_buffer` is bound to any live lane's region. Used by the
-// split-build free guard (plan §3.2).
-bool raw_persistent_device_arena_owns_buffer(const halide_buffer_t *halide_buffer);
+// R2.5 review S-3: the free-function raw_persistent_device_arena_owns_buffer()
+// (a lock-held scan across every lane's arena) was removed after the S-2
+// call-site fix left it with zero callers — it was itself the cross-lane data
+// race I-A forbids (S2, R2 review). Use
+// RawPersistentDeviceArena::owns_buffer() on the lane-local arena instead.
 
 // Counters (plan §2.6). All process-wide totals since process start.
 //

@@ -16,7 +16,7 @@
 #include <mutex>
 #include <unordered_map>
 
-#include <pthread.h>
+#include "raw_persistent_device_arena.h"
 
 namespace ceyx {
 namespace {
@@ -41,11 +41,12 @@ uint64_t fnv1a_64_digest(const unsigned char *bytes, size_t byte_length) {
 }  // namespace
 
 RenderParameterLaneIdentifier render_parameter_cache_current_lane_identifier() {
-  // Same derivation as dng_metal_context.cpp:220's sticky-queue key, so cache
-  // identity and queue identity cannot disagree (plan §8.2 hazard 1). When C1
-  // lands this becomes a call to
-  // raw_persistent_device_arena_current_lane_identifier().
-  return reinterpret_cast<RenderParameterLaneIdentifier>(pthread_self());
+  // Plan §5.5 mechanical swap, done (R2.5 item 3): C1 has landed, so the lane
+  // identifier comes from the arena's single definition instead of a second
+  // local derivation. Cache identity, arena identity and sticky-queue identity
+  // are now the same number by construction, not merely by agreement
+  // (plan §8.2 hazard 1).
+  return raw_persistent_device_arena_current_lane_identifier();
 }
 
 uint64_t render_parameter_uploads_performed() {
@@ -79,7 +80,10 @@ using ObjectiveCSendNewBuffer = void *(*)(void *, SEL, unsigned long,
 constexpr unsigned long kMetalResourceStorageModeSharedOptions = 0;
 
 void *allocate_metal_buffer(size_t byte_length) {
-  void *device = metal_shared_device_handle();
+  // ensure_created, not the plain accessor: this runs on the GPU decode path,
+  // where the device is about to be created anyway (see the WHY IT EXISTS note
+  // in dng_metal_context.h) — R2.5 item 2.
+  void *device = metal_shared_device_handle_ensure_created();
   if (!device || byte_length == 0) return nullptr;
   return reinterpret_cast<ObjectiveCSendNewBuffer>(objc_msgSend)(
       device, sel_registerName("newBufferWithLength:options:"),
@@ -107,6 +111,15 @@ std::mutex &lane_map_lock() {
   return *lock;
 }
 
+// DELIBERATE LEAK, TWO LAYERS (R2.5 nit): the map itself is leaked for the
+// static-destruction-order reason above, and the per-lane caches it holds are
+// never deleted at thread exit — a lane's cache outlives its thread and is
+// reclaimed only by process exit, exactly as the arena leaks its per-lane
+// device regions. pthread_t recycling is therefore harmless: a recycled
+// identifier may hand a new thread a previous thread's cache, but EVERY ENTRY
+// IS SERVED ONLY AFTER A CONTENT MEMCMP (see ensure_buffer_uploaded), so an
+// inherited entry is either byte-identical to what the new lane wants — correct
+// to reuse — or it misses and is replaced. Nothing lane-specific is inherited.
 std::unordered_map<RenderParameterLaneIdentifier,
                    RenderParameterUploadCache *> &lane_map() {
   static auto *map =
@@ -125,7 +138,6 @@ void RenderParameterUploadCache::reset_for_lane_teardown() {
   for (size_t i = 0; i < kRenderParameterBufferCount; ++i) {
     release_metal_buffer(entries_[i].metal_buffer);
     entries_[i].metal_buffer = nullptr;
-    entries_[i].metal_buffer_capacity = 0;
     entries_[i].byte_length = 0;
     entries_[i].content_digest = 0;
     entries_[i].retained_host_copy.clear();
@@ -151,6 +163,10 @@ void *RenderParameterUploadCache::ensure_buffer_uploaded(
   // (plan §5.5), so comparing against the caller's pointer would be a
   // use-after-free, and comparing against MTLBuffer contents would trust bytes
   // the GPU may legitimately never have received.
+  //
+  // A HIT HANDS BACK A BUFFER THE GPU MAY STILL BE READING, and that is fine:
+  // the hit path writes nothing. Only the miss path below writes, and it writes
+  // only into a buffer allocated in that same miss.
   if (entry.metal_buffer != nullptr && entry.byte_length == byte_length &&
       entry.retained_host_copy.size() == byte_length) {
     const uint64_t incoming_digest = fnv1a_64_digest(incoming, byte_length);
@@ -162,27 +178,36 @@ void *RenderParameterUploadCache::ensure_buffer_uploaded(
     }
   }
 
-  // Miss. Grow (or first-allocate) the device buffer when it cannot hold the
-  // bytes; a shrink keeps the existing allocation and simply uses less of it.
-  if (entry.metal_buffer == nullptr ||
-      entry.metal_buffer_capacity < byte_length) {
-    void *replacement = allocate_metal_buffer(byte_length);
-    if (!replacement) {
-      // No device buffer: leave the entry exactly as it was rather than
-      // half-updated, and let the caller take today's upload path.
-      return nullptr;
-    }
-    release_metal_buffer(entry.metal_buffer);
-    entry.metal_buffer = replacement;
-    entry.metal_buffer_capacity = byte_length;
+  // MISS — ALWAYS A FRESH BUFFER, NEVER AN IN-PLACE REWRITE (R1 review
+  // should-fix #2; invariant stated in full at the definition site, see
+  // WRITE-ONCE DEVICE BUFFERS in render_parameter_upload_cache.h).
+  //
+  // Rewriting entry.metal_buffer here would race the GPU on the failure path: a
+  // Stage4 that returned failure committed its command buffer without waiting
+  // for completion, so the previous decode's kernel may still be reading these
+  // parameter buffers when this decode misses. Allocating a fresh buffer cannot
+  // race — a committed command buffer retains every resource it references
+  // until completion, so the release below drops only this cache's reference
+  // and never frees or mutates bytes still in use.
+  void *replacement = allocate_metal_buffer(byte_length);
+  if (!replacement) {
+    // No device buffer: leave the entry exactly as it was rather than
+    // half-updated, and let the caller take today's upload path.
+    return nullptr;
   }
-
-  void *destination = metal_buffer_contents(entry.metal_buffer);
+  void *destination = metal_buffer_contents(replacement);
   if (!destination) {
+    // Same rule: the entry keeps its previous, still-valid contents, and the
+    // buffer we could not populate is released rather than published.
+    release_metal_buffer(replacement);
     return nullptr;
   }
   std::memcpy(destination, incoming, byte_length);
 
+  // Publish only after the bytes are in place, so a caller can never observe a
+  // buffer that the entry's digest/host copy does not describe.
+  release_metal_buffer(entry.metal_buffer);
+  entry.metal_buffer = replacement;
   entry.byte_length = byte_length;
   entry.content_digest = fnv1a_64_digest(incoming, byte_length);
   entry.retained_host_copy.assign(incoming, incoming + byte_length);
@@ -193,7 +218,15 @@ void *RenderParameterUploadCache::ensure_buffer_uploaded(
 
 RenderParameterUploadCache *render_parameter_cache_for_current_lane() {
   // No Metal device means no cache; nullptr is a legal answer everywhere.
-  if (metal_shared_device_handle() == nullptr) return nullptr;
+  //
+  // R2.5 item 2 (first-decode gap, same root cause as the arena's AC1 defect):
+  // the device is created lazily inside the first kernel dispatch, i.e. LATER
+  // in the decode than this gate. Gating on the plain accessor therefore
+  // answered "no cache" on a lane's very FIRST decode, so that decode uploaded
+  // all twelve parameters uncached — invisible to AC5, which measures
+  // post-warmup deltas, but one whole upload set per lane. ensure_created()
+  // does what this decode was going to do moments later anyway.
+  if (metal_shared_device_handle_ensure_created() == nullptr) return nullptr;
 
   const RenderParameterLaneIdentifier lane =
       render_parameter_cache_current_lane_identifier();

@@ -23,19 +23,28 @@
 // intent-derived key would serve stale uploads and produce wrong colours with
 // no failing test.
 //
-// LANE SCOPE (plan §5.2, §8.2 hazard 1): the cache is per lane, keyed on
+// LANE SCOPE (plan §5.2, §8.2 hazard 1): the cache is per lane, keyed on the
+// lane identifier C1's arena publishes
+// (raw_persistent_device_arena_current_lane_identifier(), itself
 // reinterpret_cast<uintptr_t>(pthread_self()) — the same derivation
-// dng_metal_context.cpp:220 uses for the sticky queue key, so cache identity
-// and queue identity cannot disagree by construction. A lane is
+// dng_metal_context.cpp:220 uses for the sticky queue key), so cache identity,
+// arena identity and queue identity cannot disagree by construction. A lane is
 // single-threaded, so the per-lane cache itself needs no synchronisation; only
 // the lane map does, and that lock is never held across GPU work.
 //
-// C1 INDEPENDENCE (plan §5.5): this slice lands before the persistent device
-// arena, so the lane identifier is computed locally here. When
-// raw_persistent_device_arena_current_lane_identifier() exists, the single call
-// inside render_parameter_cache_for_current_lane() is the only place to change;
-// the two agree by construction because the derivation is fixed, not just the
-// name.
+// WRITE-ONCE DEVICE BUFFERS (R2.5, R1 review should-fix #2): a cached MTLBuffer
+// is written exactly once — between its allocation and its first use — and is
+// NEVER rewritten. Every cache miss allocates a fresh MTLBuffer and drops this
+// cache's reference to the previous one. The hazard this removes is real and
+// failure-path only: a Stage4 that returns failure has committed its command
+// buffer WITHOUT waiting for completion, so that command buffer may still be
+// reading the parameter buffers when the next decode on the same lane misses.
+// Rewriting in place would race the GPU; allocating fresh cannot, because a
+// committed Metal command buffer retains every resource it references until it
+// completes, so the release below only drops OUR reference and never frees
+// bytes the GPU is still reading. Cost is bounded: misses are rare by design
+// (ten of the twelve buffers are byte-identical across decodes, plan §5.1) and
+// each parameter buffer is tiny.
 //
 // NULLPTR IS ALWAYS LEGAL: render_parameter_cache_for_current_lane() returns
 // nullptr on non-Metal targets, when no Metal device exists, or on allocation
@@ -49,11 +58,15 @@
 #include <cstdint>
 #include <vector>
 
+#include "raw_persistent_device_arena.h"
+
 namespace ceyx {
 
-// Lane identity, derived exactly as dng_metal_context.cpp:220 derives the
-// sticky-queue key. Replaced by W1's RawDecodeLaneIdentifier when C1 lands.
-using RenderParameterLaneIdentifier = uintptr_t;
+// Lane identity. C1 has landed, so this is now an alias of the arena's
+// RawDecodeLaneIdentifier and the accessor below simply forwards to
+// raw_persistent_device_arena_current_lane_identifier() (plan §5.5 mechanical
+// swap): one derivation, one definition, no chance of divergence.
+using RenderParameterLaneIdentifier = RawDecodeLaneIdentifier;
 
 RenderParameterLaneIdentifier render_parameter_cache_current_lane_identifier();
 
@@ -109,8 +122,11 @@ class RenderParameterUploadCache {
 
  private:
   struct CachedParameterBuffer {
-    void *metal_buffer = nullptr;       // retained MTLBuffer, or nullptr
-    size_t metal_buffer_capacity = 0;   // allocated length of metal_buffer
+    // Retained MTLBuffer, or nullptr. Written exactly once, immediately after
+    // allocation — see WRITE-ONCE DEVICE BUFFERS in the file header. A miss
+    // replaces this pointer; it never rewrites the buffer it points at, so its
+    // allocated length and `byte_length` are the same number by construction.
+    void *metal_buffer = nullptr;
     size_t byte_length = 0;             // bytes currently valid, 0 = empty
     uint64_t content_digest = 0;        // FNV-1a over those bytes
     std::vector<unsigned char> retained_host_copy;
@@ -121,6 +137,19 @@ class RenderParameterUploadCache {
 
 // The calling lane's cache, created on first use. nullptr is always a legal
 // answer — see the header comment.
+//
+// DELIBERATELY LEAKED (per-lane caches, R2.5 nit): a lane's cache is never
+// destroyed when its thread exits; the lane map holds it until the process
+// ends, exactly as the arena leaks its per-lane regions. This is safe under
+// pthread_t recycling — a recycled identifier hands the new thread the old
+// thread's cache, and that is harmless BECAUSE EVERY CACHE KEY IS
+// CONTENT-BASED: each entry is served only after its retained host copy
+// memcmp-matches the incoming bytes, so an inherited entry either matches the
+// new lane's bytes (and is correct to reuse) or misses (and is replaced). No
+// lane-specific state is inherited. The alternative — destroying caches at
+// thread exit — would run Metal releases from a thread-destructor while a
+// failed decode's command buffer may still reference those buffers, the very
+// hazard the write-once rule exists to avoid.
 RenderParameterUploadCache *render_parameter_cache_for_current_lane();
 
 // Counters, named exactly as plan §5.2 fixes them. AC5 reads the first; the

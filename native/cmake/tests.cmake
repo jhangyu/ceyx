@@ -339,6 +339,12 @@ add_executable(test_persistent_device_arena tests/test_persistent_device_arena.c
 target_include_directories(test_persistent_device_arena PRIVATE ${INC_DIR})
 target_link_libraries(test_persistent_device_arena PRIVATE dng_decoder_native)
 
+# Multi-lane RAW concurrency gate (R2.5): per-lane arena isolation under
+# concurrent generic-RAW decodes; prerequisite evidence for C2's under-load AC4.
+add_executable(test_concurrent_raw_decode tests/test_concurrent_raw_decode.cpp)
+target_include_directories(test_concurrent_raw_decode PRIVATE ${INC_DIR})
+target_link_libraries(test_concurrent_raw_decode PRIVATE dng_decoder_native)
+
 # -----------------------------------------------------------------------------
 # B1 fix (2026-08-26, round-1 review): the LibRaw/RawSpeed3 wiring below is NOT
 # a test dependency — it supplies dng_decoder_native's own usage requirements
