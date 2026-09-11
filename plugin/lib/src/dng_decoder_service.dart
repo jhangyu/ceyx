@@ -553,9 +553,9 @@ class DngDecoderService {
   ///
   /// Returns null when the dylib predates the entry, when this build has no
   /// decoder for the format (`kCeyxErrFormatUnsupportedInBuild`), or when the
-  /// probe fails — callers then fall back to the allocating route rather than
-  /// guessing a size. A guess would be sized wrong on the non-Bayer downgrade
-  /// (G4) or on a format whose geometry moves during unpack (R11.1).
+  /// probe fails — callers then fall back to the self-allocating adoption sink
+  /// rather than guessing a size. A guess would be sized wrong on the non-Bayer
+  /// downgrade (G4) or on a format whose geometry moves during unpack (R11.1).
   ///
   /// Must only be called on a worker isolate.
   /// Test seam: when set, [probeOutputSize] answers this instead of asking the
