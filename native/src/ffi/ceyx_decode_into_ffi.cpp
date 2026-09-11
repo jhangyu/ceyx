@@ -21,6 +21,7 @@
 #if defined(DNG_ENABLE_GENERIC_RAW)
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
+#include "raw_persistent_device_arena.h"  // R3-T4: kRawDeviceArenaAlignmentBytes
 #endif
 
 #if defined(_WIN32)
@@ -81,9 +82,16 @@ CEYX_FFI_EXPORT int32_t ceyx_probe_output_size(const char *file_path,
 // Phases 1 and 2. Returns true when the caller may proceed to phase 3; on
 // false, `result` already carries the error (and, on a capacity refusal, the
 // extent) and is ready to be returned to the caller as-is.
+//
+// `out_destination_is_page_aligned` (R3-T4, plan §4.3): a PROBE, never a
+// refusal. Always written before returning true (left at its caller-supplied
+// value -- typically zero-initialised false -- on any `false` return, since
+// no decode will use it then). May be null; the plain (non-generic-RAW-only)
+// callers of this function do not all need it.
 static bool ceyxDecodeIntoPrepare(const char *file_path, int32_t max_dim,
                                   const uint8_t *dst, size_t dst_capacity,
-                                  RawRoute *route, DngResult *result) {
+                                  RawRoute *route, DngResult *result,
+                                  bool *out_destination_is_page_aligned) {
   *route = kRawRouteUnknown;
   const RawErrorCode prc = raw_probe_file(file_path, route);
   if (prc != kRawSuccess) {
@@ -115,6 +123,25 @@ static bool ceyxDecodeIntoPrepare(const char *file_path, int32_t max_dim,
     result->error_code = kCeyxErrDstTooSmall;
     return false;
   }
+
+  // R3-T4 (plan §4.3): the alignment probe, immediately after the capacity
+  // check, in the one function both entries share. `newBufferWithBytesNoCopy:
+  // length:options:deallocator:` requires the pointer page-aligned AND the
+  // length a page multiple -- checked here with the SAME constant C1's arena
+  // asserts on its own allocations (kRawDeviceArenaAlignmentBytes), because
+  // the two must be checked by one rule (plan §3.1). This is a performance
+  // signal only: an unaligned destination degrades to the arena-staged copy
+  // path (plan §4.3 "Degradation path"), it never refuses the decode.
+#if defined(DNG_ENABLE_GENERIC_RAW)
+  if (out_destination_is_page_aligned) {
+    const auto address = reinterpret_cast<uintptr_t>(dst);
+    *out_destination_is_page_aligned =
+        (address % ceyx::kRawDeviceArenaAlignmentBytes == 0) &&
+        (dst_capacity % ceyx::kRawDeviceArenaAlignmentBytes == 0);
+  }
+#else
+  if (out_destination_is_page_aligned) *out_destination_is_page_aligned = false;
+#endif
   return true;
 }
 
@@ -130,6 +157,7 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
                                  RawRoute route, uint8_t *dst,
                                  size_t dst_capacity,
                                  int32_t exif_orientation,
+                                 bool destination_is_page_aligned,
                                  DngResult *result) {
   if (route == kRawRouteDng) {
     DngPipelineResult pipeline;
@@ -166,6 +194,12 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
   // Plan §1.4 (RAW side): a field on RawDevelopParams, not a new FFI entry —
   // develop is already constructed locally here on every call.
   develop.exif_orientation = exif_orientation;
+  // R3-T4 (plan §4.3): forwarded probe result; the pipeline reads this to
+  // decide whether the unified-wrapped destination path is even attemptable
+  // for this call (raw_pipeline_contract.h's field comment has the full
+  // contract). Never a refusal signal -- false just means the degraded/
+  // fallback destination shape is taken.
+  develop.caller_destination_is_page_aligned = destination_is_page_aligned;
 
   RawPipelineResult out;
   const RawErrorCode rc =
@@ -291,12 +325,14 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
   if (!result) return nullptr;
 
   RawRoute route = kRawRouteUnknown;
+  bool destination_is_page_aligned = false;
   if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
-                             result)) {
+                             result, &destination_is_page_aligned)) {
     return result;
   }
   ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
-                       /*exif_orientation=*/1, result);
+                       /*exif_orientation=*/1, destination_is_page_aligned,
+                       result);
   return result;
 }
 
@@ -308,8 +344,9 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   if (!result) return nullptr;
 
   RawRoute route = kRawRouteUnknown;
+  bool destination_is_page_aligned = false;
   if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
-                             result)) {
+                             result, &destination_is_page_aligned)) {
     return result;
   }
 
@@ -337,7 +374,7 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   // ever reaching it.
   dngRenderStage4ResetFailureReason();
   ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
-                       exif_orientation, result);
+                       exif_orientation, destination_is_page_aligned, result);
   if (result->error_code != 0) {
     // The read below is honest ONLY because of the reset immediately above:
     // many phase-3 failures (bad file, parse, OpcodeList2, the RAW

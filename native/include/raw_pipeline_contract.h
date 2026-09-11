@@ -288,6 +288,28 @@ typedef struct RawDevelopParams {
      * unoriented decode without editing those call sites; a raw memset(0)
      * also yields 0, which the kernel's select-chain treats as identity. */
     int32_t exif_orientation = 1;
+
+    /* R3-T4, GPU copy-elimination campaign (plan §4.3), contract version 6.
+     * Appended at the end on purpose: no existing field's offset changes.
+     *
+     * Set by ceyxDecodeIntoPrepare (ceyx_decode_into_ffi.cpp) from the
+     * CALLER'S destination pointer/capacity, before raw_pipeline_decode_
+     * file_into is ever called -- true iff `dst` is page-aligned (pointer %
+     * kRawDeviceArenaAlignmentBytes == 0) AND `dst_capacity` is a page
+     * multiple. This is a PROBE result forwarded as input, not an output:
+     * the pipeline reads it to decide whether the unified-wrapped
+     * (true zero-copy) destination path is even attemptable for this call,
+     * versus the unified-degraded fallback (arena dst + one final memcpy,
+     * plan §4.3 "Degradation path"). It carries no correctness meaning by
+     * itself -- an unaligned destination is a PERFORMANCE outcome, never a
+     * refusal (plan §4.3 "It is a probe, never a refusal").
+     *
+     * Default-member-initialised to false, which is always SAFE (it is
+     * exactly the unified-degraded / fallback behaviour every pre-C2 call
+     * already exhibited), so every existing `RawDevelopParams{}` /
+     * memset(0) call site keeps behaving byte-for-byte as before this field
+     * existed. */
+    bool caller_destination_is_page_aligned = false;
 } RawDevelopParams;
 
 /* Every field required by spec section 6.5. */

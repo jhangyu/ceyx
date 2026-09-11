@@ -190,6 +190,43 @@ int32_t ceyx_debug_persistent_device_arena_counters(
     uint64_t *out_resident_device_bytes,
     uint64_t *out_live_lane_count);
 
+/* ===================================================================== */
+/* C2 zero-copy capability-gate probe (R3-T4, GPU copy-elimination        */
+/* campaign, docs/logs/2026-09-11/plan-gpu-copy-elimination.md §4.5).      */
+/*                                                                        */
+/* DEBUG/PROBE API, same category as the two probes above: NOT part of     */
+/* the Dart-visible surface and nothing is added to DngResult. Defined in  */
+/* native/src/ffi/raw_ffi_api.cpp (this route's own FFI TU, rather than    */
+/* dng_ffi_api.cpp, which is outside this task's file ownership this       */
+/* round).                                                                */
+/*                                                                        */
+/* out_zero_copy_path_is_enabled / out_capability_override_state report    */
+/* the CURRENT gate state (plan §4.1.4's                                   */
+/* ceyx::ZeroCopyCapabilityStateSnapshot), not a per-decode delta --        */
+/* out_capability_override_state mirrors                                   */
+/* ceyx::ZeroCopyCapabilityOverrideState by value (0=none, 1=forced_off,   */
+/* 2=forced_on). The three counters are PROCESS-WIDE totals since process  */
+/* start, read as deltas by the gates exactly like the two probes above:   */
+/*   - out_destination_wrap_count: decodes that wrapped the caller's own   */
+/*     destination buffer (unified-wrapped path);                         */
+/*   - out_destination_alignment_degradation_count: decodes that hit the   */
+/*     alignment degradation (unified-degraded path: arena dst + one       */
+/*     final memcpy);                                                     */
+/*   - out_source_mosaic_wrap_count: decodes that wrapped the arena source */
+/*     region instead of letting Halide upload it.                        */
+/*                                                                        */
+/* Null-pointer convention (binding lead ruling, execution contract        */
+/* "Rulings during execution"): individual out-pointers may be null and    */
+/* are then skipped; returns 0 if at least one was filled, -1 only when    */
+/* ALL five are null. */
+/* ===================================================================== */
+int32_t ceyx_debug_zero_copy_capability_counters(
+    int32_t *out_zero_copy_path_is_enabled,
+    int32_t *out_capability_override_state,
+    uint64_t *out_destination_wrap_count,
+    uint64_t *out_destination_alignment_degradation_count,
+    uint64_t *out_source_mosaic_wrap_count);
+
 #ifdef __cplusplus
 }
 #endif

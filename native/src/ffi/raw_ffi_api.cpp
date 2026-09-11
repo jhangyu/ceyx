@@ -8,6 +8,25 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 
+// C2 zero-copy capability gate accessors (plan §4.1.4), defined by
+// impl-capability-opus in dng_metal_context.h/.cpp -- included for the
+// enabled/override half of ceyx_debug_zero_copy_capability_counters below.
+#include "dng_metal_context.h"
+
+// R3-T4: the three C2 wrap/degradation counters (plan §4.5). Declared here
+// rather than defined here -- they are incremented at the call sites that
+// actually perform the wrap (raw_gpu_pipeline.cpp for the source mosaic
+// wrap, dng_render_halide.cpp for the destination wrap / alignment
+// degradation), which are outside this task's file ownership this round.
+// Forward-declared so this probe compiles and links against whichever
+// translation unit ends up defining them; names and namespace are FROZEN by
+// plan §4.5 and must not be renamed at either end.
+namespace ceyx {
+uint64_t zero_copy_destination_wrap_count();
+uint64_t zero_copy_destination_alignment_degradation_count();
+uint64_t zero_copy_source_mosaic_wrap_count();
+}  // namespace ceyx
+
 // Same export decoration as src/dng_ffi_api.cpp, so this entry survives any
 // future visibility tightening on the dylib.
 #if defined(_WIN32)
@@ -102,6 +121,53 @@ void raw_record_decode_timing_diagnostics(const RawTimingDiagnostics* timing) {
     recorded.struct_size = static_cast<uint32_t>(sizeof(RawTimingDiagnostics));
     g_last_timing_diagnostics = recorded;
     g_have_timing_diagnostics = true;
+}
+
+// ---------------------------------------------------------------------------
+// R3-T4 -- C2 zero-copy capability-gate probe (plan §4.5). Debug/probe
+// surface only (see raw_ffi_api.h's contract comment): not Dart-visible,
+// nothing added to DngResult. State fields report the CURRENT gate state
+// (not a delta); the three counters are process-wide totals the gates read
+// as deltas across decodes, exactly like the arena/cache probes above.
+//
+// Null-pointer convention (execution contract "Rulings during execution"):
+// any out-pointer may be null and is then skipped; -1 only when all five
+// are null.
+// ---------------------------------------------------------------------------
+
+RAW_FFI_EXPORT int32_t ceyx_debug_zero_copy_capability_counters(
+    int32_t* out_zero_copy_path_is_enabled,
+    int32_t* out_capability_override_state,
+    uint64_t* out_destination_wrap_count,
+    uint64_t* out_destination_alignment_degradation_count,
+    uint64_t* out_source_mosaic_wrap_count) {
+    if (!out_zero_copy_path_is_enabled && !out_capability_override_state &&
+        !out_destination_wrap_count && !out_destination_alignment_degradation_count &&
+        !out_source_mosaic_wrap_count) {
+        return -1;
+    }
+    if (out_zero_copy_path_is_enabled || out_capability_override_state) {
+        const ceyx::ZeroCopyCapabilityStateSnapshot snapshot =
+            ceyx::zero_copy_capability_state_snapshot();
+        if (out_zero_copy_path_is_enabled) {
+            *out_zero_copy_path_is_enabled = snapshot.zero_copy_path_is_enabled ? 1 : 0;
+        }
+        if (out_capability_override_state) {
+            *out_capability_override_state =
+                static_cast<int32_t>(snapshot.capability_override_state);
+        }
+    }
+    if (out_destination_wrap_count) {
+        *out_destination_wrap_count = ceyx::zero_copy_destination_wrap_count();
+    }
+    if (out_destination_alignment_degradation_count) {
+        *out_destination_alignment_degradation_count =
+            ceyx::zero_copy_destination_alignment_degradation_count();
+    }
+    if (out_source_mosaic_wrap_count) {
+        *out_source_mosaic_wrap_count = ceyx::zero_copy_source_mosaic_wrap_count();
+    }
+    return 0;
 }
 
 }  // extern "C"

@@ -185,7 +185,30 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         // Parameter order fixed by plan section 4.2.2:
                                         // arena FIRST, any later C2 destination-wrap
                                         // parameter SECOND.
-                                        ceyx::RawPersistentDeviceArena* persistent_device_arena = nullptr);
+                                        ceyx::RawPersistentDeviceArena* persistent_device_arena = nullptr,
+                                        // Round 3 plan section 4.2.2 (C2):
+                                        // non-null means the caller has already
+                                        // created an MTLBuffer covering `dst`
+                                        // (id<MTLBuffer>, retained by the
+                                        // caller for the whole call). Stage4
+                                        // then wraps its output buffer around
+                                        // that MTLBuffer instead of letting
+                                        // Halide device-malloc, skips the
+                                        // device->host copy entirely and
+                                        // substitutes an explicit
+                                        // halide_device_sync at exactly the
+                                        // position the copy occupied (plan
+                                        // section 8.2 item 3 — that copy is the
+                                        // only GPU synchronisation point on
+                                        // this path, so removing it without the
+                                        // sync returns before the GPU has
+                                        // written the pixels).
+                                        // I-F: nullptr keeps every existing
+                                        // caller (including the DNG route)
+                                        // bit-identical. Order fixed by plan
+                                        // section 4.2.2: arena FIRST,
+                                        // destination wrap SECOND.
+                                        void* caller_destination_metal_buffer = nullptr);
 
 // Lead-assigned scope addition (2026-09-11, plan §6.2 item 1 — C4
 // device->host copy bracket). Owned by impl-2-sonnet alongside
@@ -195,6 +218,22 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 // impl-4-sonnet reads this from raw_gpu_pipeline.cpp right after the Stage4
 // call to fill out.timing.device_to_host_copy_ms.
 double runRenderStage4LastDeviceToHostCopyMilliseconds();
+
+// Round 3 (C2, plan §4.2.2): did the LAST call to
+// runRenderStage4HalideAotFromDevice on THIS thread actually use the caller's
+// destination MTLBuffer wrap (true zero-copy), as opposed to the arena or
+// today's path? Same thread_local + reset-at-entry discipline as the copy
+// bracket above, and for the same reason: overlapping decodes on other lanes
+// must not clobber this lane's reading.
+//
+// This is the per-decode signal; it is NOT the same thing as
+// ceyx::zero_copy_destination_wrap_count(), which is process-wide and
+// monotonic and therefore racy to attribute to a single decode. Reads false
+// when the caller passed no MTLBuffer AND when a wrap was refused — in both
+// cases that decode genuinely did not take the zero-copy path.
+// Consumed by raw_gpu_pipeline.cpp to fill
+// RawTimingDiagnostics.unified_memory_path_active.
+bool runRenderStage4LastCallerDestinationWrapWasUsed();
 
 // Needed by the LibRaw builder so "identity" is explicit, never uninitialised
 // (spec section 7.1.4). Signatures transcribed from dng_render_halide.cpp:663-667

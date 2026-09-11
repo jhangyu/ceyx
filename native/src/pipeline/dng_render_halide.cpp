@@ -154,6 +154,10 @@ functions:
 // cap follows the configured decode slot count.
 #include "dng_pipeline.h"
 #include "dng_render_params.h"
+// C2 (plan §4.5): zero_copy_note_destination_wrapped(). Declared for EVERY
+// platform, so this include needs no guard even though the wrap itself is
+// Metal-only.
+#include "dng_metal_context.h"
 #include "raw_persistent_device_arena.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
@@ -1005,6 +1009,75 @@ double runRenderStage4LastDeviceToHostCopyMilliseconds() {
     return g_last_device_to_host_copy_ms;
 }
 
+// C2 (plan §4.2.2): per-decode "the caller destination wrap was actually used"
+// signal, thread_local for exactly the reason the C4 bracket above is — an
+// overlapping decode on another lane must not clobber this lane's reading.
+// This is deliberately NOT derived from zero_copy_destination_wrap_count():
+// that counter is process-wide and monotonic, so reading it per decode is a
+// cross-lane race that would attribute another lane's wrap to this decode.
+// Set only at the wrap-SUCCESS point, so a refused wrap reports false — which
+// is the truth: that decode took the arena/copy path.
+static thread_local bool g_last_caller_destination_wrap_was_used = false;
+
+bool runRenderStage4LastCallerDestinationWrapWasUsed() {
+    return g_last_caller_destination_wrap_was_used;
+}
+
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+// C2 (plan §4.2.2, §8.2 hazard 5): RAII wrapper for the CALLER-supplied
+// destination MTLBuffer. The arena regions have RawDeviceArenaRegionBinding;
+// the caller-wrapped destination has no arena object, so it needs its own guard
+// in this translation unit. Same shape, same reason: a failure return that
+// skips the detach leaks the binding AND leaves the per-call
+// Halide::Runtime::Buffer destructor pointed at device memory it does not own.
+// I-D: detach, NEVER halide_device_free — the MTLBuffer belongs to the caller.
+struct CallerDestinationMetalBufferBinding {
+    halide_buffer_t* halide_buffer = nullptr;
+    bool bound = false;
+
+    CallerDestinationMetalBufferBinding(halide_buffer_t* buffer,
+                                        void* caller_metal_buffer) {
+        if (buffer == nullptr || caller_metal_buffer == nullptr) {
+            return;
+        }
+        // halide_metal_wrap_buffer requires device == 0 (HalideRuntimeMetal.h:
+        // "The dev field ... must be NULL when this routine is called"), i.e.
+        // bind BEFORE anything device-mallocs — same contract the arena's
+        // bind_region enforces.
+        // A refusal means the decode silently took the arena/copy path even
+        // though the caller offered a zero-copy destination. Lead ruling
+        // 2026-09-11: the three §4.5 counter names are frozen, so the refusal
+        // is observable through this pre-registered log line instead of a
+        // fourth counter. Unconditional (not verbose-gated), same discipline as
+        // the arena's [RawPersistentDeviceArena] line, because a gate that has
+        // to set an env var to see a silent degradation will not see it.
+        if (buffer->device != 0) {
+            fprintf(stderr, "zerocopy|ev=destination_wrap_refused|reason=device_nonzero\n");
+            return;
+        }
+        const int wrap_rc = halide_metal_wrap_buffer(
+            nullptr, buffer, reinterpret_cast<uint64_t>(caller_metal_buffer));
+        if (wrap_rc != 0) {
+            fprintf(stderr, "zerocopy|ev=destination_wrap_refused|reason=wrap_rc_%d\n", wrap_rc);
+            return;
+        }
+        halide_buffer = buffer;
+        bound = true;
+    }
+
+    ~CallerDestinationMetalBufferBinding() {
+        if (bound && halide_buffer != nullptr) {
+            halide_metal_detach_buffer(nullptr, halide_buffer);
+        }
+    }
+
+    CallerDestinationMetalBufferBinding(const CallerDestinationMetalBufferBinding&) = delete;
+    CallerDestinationMetalBufferBinding& operator=(const CallerDestinationMetalBufferBinding&) = delete;
+
+    explicit operator bool() const { return bound; }
+};
+#endif  // __APPLE__ && !DNG_FORCE_VULKAN
+
 bool runRenderStage4HalideAot(const uint16_t* src,
                               int src_w,
                               int src_h,
@@ -1335,7 +1408,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          uint8_t* dst,
                                          DecodeContext* ctx,
                                          int32_t exif_orientation,
-                                         ceyx::RawPersistentDeviceArena* persistent_device_arena) {
+                                         ceyx::RawPersistentDeviceArena* persistent_device_arena,
+                                         void* caller_destination_metal_buffer) {
     // Plan section 1.6: reset before any validation or early return, so a
     // direct caller of this runner sees kNone rather than a reason inherited
     // from an earlier call on this thread.
@@ -1349,6 +1423,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // Lead-assigned scope addition: reset the device->host copy bracket on
     // every entry, same discipline as the failure reason above.
     g_last_device_to_host_copy_ms = 0.0;
+    // Same reset discipline: a stale `true` from this lane's previous decode
+    // would report a zero-copy decode that never happened.
+    g_last_caller_destination_wrap_was_used = false;
 
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
@@ -1549,8 +1626,40 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // not landed yet). I-F: this is entirely gated on the parameter the caller
     // passed in; the DNG route always passes nullptr here (see the DNG-side
     // call site) and observes zero behaviour change.
+    //
+    // Round 3 plan §4.2.2 (C2): three-way, in priority order —
+    //   1. caller_destination_metal_buffer non-null: wrap the caller's own
+    //      MTLBuffer (true zero-copy; the kernel writes `dst` directly and the
+    //      copy_to_host below is replaced by halide_device_sync);
+    //   2. else an arena region (unified-degraded / fallback: no per-frame
+    //      device allocation, copy_to_host still runs);
+    //   3. else today's behaviour verbatim.
+    // Declared AFTER dst_rgba_buf so both guards destruct BEFORE it — the
+    // Buffer destructor must never see a device handle it does not own.
+    bool destination_is_caller_wrapped = false;
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+    std::optional<CallerDestinationMetalBufferBinding> dst_caller_binding;
+    if (caller_destination_metal_buffer != nullptr) {
+        dst_caller_binding.emplace(dst_rgba_buf.raw_buffer(),
+                                   caller_destination_metal_buffer);
+        destination_is_caller_wrapped = static_cast<bool>(*dst_caller_binding);
+        if (destination_is_caller_wrapped) {
+            // Plan §4.5 / lead ruling 2026-09-11: counted at the wrap-SUCCESS
+            // point, never where the buffer was merely passed — a refused wrap
+            // silently takes the arena path and must not read as a zero-copy
+            // decode (that refusal is observable through the
+            // zerocopy|ev=destination_wrap_refused line instead).
+            ceyx::zero_copy_note_destination_wrapped();
+            g_last_caller_destination_wrap_was_used = true;
+        }
+    }
+#else
+    // No halide_metal_wrap_buffer off Metal (plan §4.6): the parameter is
+    // accepted and ignored, so every caller compiles unchanged.
+    (void)caller_destination_metal_buffer;
+#endif
     std::optional<ceyx::RawDeviceArenaRegionBinding> dst_arena_binding;
-    if (persistent_device_arena != nullptr) {
+    if (!destination_is_caller_wrapped && persistent_device_arena != nullptr) {
         dst_arena_binding.emplace(persistent_device_arena, dst_rgba_buf.raw_buffer(),
                                    ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
                                    dst_rgba_buf.raw_buffer()->size_in_bytes());
@@ -1565,8 +1674,28 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // Round 2 plan §3.2 item 3 / §3.5: see the split-kernel arm's comment
     // above — same gating, same RAII detach-on-scope-exit discipline (I-D),
     // applied to the fused/macOS destination buffer instead.
+    //
+    // Round 3 plan §4.2.2 (C2): same three-way priority as the split arm above
+    // (caller MTLBuffer wrap → arena region → today's behaviour), and the same
+    // declaration-order rule (guards destruct before dst_buf).
+    bool destination_is_caller_wrapped = false;
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+    std::optional<CallerDestinationMetalBufferBinding> dst_caller_binding;
+    if (caller_destination_metal_buffer != nullptr) {
+        dst_caller_binding.emplace(dst_buf.raw_buffer(),
+                                   caller_destination_metal_buffer);
+        destination_is_caller_wrapped = static_cast<bool>(*dst_caller_binding);
+        if (destination_is_caller_wrapped) {
+            // See the split arm's comment: success point only.
+            ceyx::zero_copy_note_destination_wrapped();
+            g_last_caller_destination_wrap_was_used = true;
+        }
+    }
+#else
+    (void)caller_destination_metal_buffer;
+#endif
     std::optional<ceyx::RawDeviceArenaRegionBinding> dst_arena_binding;
-    if (persistent_device_arena != nullptr) {
+    if (!destination_is_caller_wrapped && persistent_device_arena != nullptr) {
         dst_arena_binding.emplace(persistent_device_arena, dst_buf.raw_buffer(),
                                    ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
                                    dst_buf.raw_buffer()->size_in_bytes());
@@ -1812,7 +1941,31 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // G-7: capture and check copy_to_host()'s return code.
     // Lead-assigned scope addition: bracket only, no change to the call or
     // its error handling. Plan §6.2 item 1's device->host boundary.
-    {
+    //
+    // C2 (plan §4.2.2, §4.3, §8.2 item 3): when the destination is the caller's
+    // own MTLBuffer the kernel already wrote the caller's pages, so the copy is
+    // skipped — but copy_to_host was ALSO the only GPU synchronisation point on
+    // this path (halide_metal_run only COMMITS; dng_metal_context.cpp:22-27).
+    // halide_device_sync therefore takes over that role at exactly the position
+    // the copy occupied. Without it the decode returns before the GPU has
+    // written the pixels: correct on an idle machine, torn under load.
+    if (destination_is_caller_wrapped) {
+        const int sync_rc = halide_device_sync(nullptr, dst_rgba_buf.raw_buffer());
+        if (sync_rc != 0) {
+            fprintf(stderr, "[Stage4] halide_device_sync failed rc=%d\n", sync_rc);
+            // Same class as a kernel/copy failure — the FFI layer reads this to
+            // report -403.
+            g_stage4_failure_reason = Stage4FailureReason::kKernel;
+            return false;
+        }
+        // Nothing owes a copy-back: the device and host bytes are the same
+        // bytes. Leaving device-dirty set would let a later copy re-introduce
+        // the transfer this slice exists to remove.
+        dst_rgba_buf.raw_buffer()->set_device_dirty(false);
+        // g_last_device_to_host_copy_ms stays at its entry value 0.0 — the C4
+        // bracket reports ~0 output copy on the wrapped path, which is the
+        // honest reading: no device->host copy ran.
+    } else {
         const double copy_t0 = nowMsForDeviceToHostCopyBracket();
         const int cth = dst_rgba_buf.copy_to_host();
         g_last_device_to_host_copy_ms = nowMsForDeviceToHostCopyBracket() - copy_t0;
@@ -1863,7 +2016,21 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // G-7: capture and check copy_to_host()'s return code.
     // Lead-assigned scope addition: bracket only, no change to the call or
     // its error handling. Plan §6.2 item 1's device->host boundary.
-    {
+    //
+    // C2 (plan §4.2.2, §4.3, §8.2 item 3): see the split arm's comment — the
+    // wrapped destination skips the copy and substitutes the explicit
+    // completion wait at exactly the position copy_to_host occupied, because
+    // that copy was this path's ONLY GPU synchronisation point.
+    if (destination_is_caller_wrapped) {
+        const int sync_rc = halide_device_sync(nullptr, dst_buf.raw_buffer());
+        if (sync_rc != 0) {
+            fprintf(stderr, "[Stage4] halide_device_sync failed rc=%d\n", sync_rc);
+            g_stage4_failure_reason = Stage4FailureReason::kKernel;
+            return false;
+        }
+        dst_buf.raw_buffer()->set_device_dirty(false);
+        // g_last_device_to_host_copy_ms stays 0.0 — no device->host copy ran.
+    } else {
         const double copy_t0 = nowMsForDeviceToHostCopyBracket();
         const int cth = dst_buf.copy_to_host();
         g_last_device_to_host_copy_ms = nowMsForDeviceToHostCopyBracket() - copy_t0;

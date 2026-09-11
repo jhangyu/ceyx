@@ -63,12 +63,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
 #include <pthread.h>
 
+#include <TargetConditionals.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 
@@ -82,9 +84,45 @@ struct halide_metal_command_queue;
 
 extern "C" void *MTLCreateSystemDefaultDevice(void);
 
+// C2 §4.1.1: macOS-only C entry point. Weak-imported so this TU also links (and
+// takes the single-device path) on platforms that do not provide it, e.g. the
+// iOS-style SDKs where MTLCreateSystemDefaultDevice is the only device source.
+#if TARGET_OS_OSX
+extern "C" void *MTLCopyAllDevices(void) __attribute__((weak_import));
+#endif
+
 namespace {
 
 using MsgSend = void *(*)(void *, SEL);
+
+// C2 §4.1.1 ABI TRAP: `hasUnifiedMemory` returns objc BOOL (signed char on
+// arm64), NOT a pointer. Invoking it through the `MsgSend` alias above would
+// read a full pointer-width register whose upper bits are undefined on some
+// ABIs, i.e. a garbage verdict that happens to look plausible. Every
+// BOOL-returning selector in this TU goes through this cast instead.
+using MsgSendBool = bool (*)(void *, SEL);
+using MsgSendUnsignedLong = unsigned long (*)(void *, SEL);
+using MsgSendObjectAtIndex = void *(*)(void *, SEL, unsigned long);
+using MsgSendConstCharPointer = const char *(*)(void *, SEL);
+
+// True when `object`'s class actually implements `selector`. hasUnifiedMemory
+// is macOS 10.15+ / iOS 13+; sending it blind to an older device object would
+// raise an unrecognized-selector exception rather than answer "not unified".
+bool object_responds_to_selector(void *object, SEL selector) {
+  if (!object) return false;
+  // objc/runtime.h types `id` as `struct objc_object *`, which a `void *` does
+  // not implicitly convert to in C++ — hence the explicit cast, the same reason
+  // the objc_msgSend calls in this TU go through reinterpret_cast'd function
+  // pointer types rather than the declared prototype.
+  Class object_class = object_getClass(reinterpret_cast<id>(object));
+  return class_getInstanceMethod(object_class, selector) != nullptr;
+}
+
+bool device_reports_unified_memory(void *device) {
+  SEL has_unified_memory = sel_registerName("hasUnifiedMemory");
+  if (!object_responds_to_selector(device, has_unified_memory)) return false;
+  return reinterpret_cast<MsgSendBool>(objc_msgSend)(device, has_unified_memory);
+}
 
 // INTENTIONALLY LEAKED (never destroyed). Halide's Metal teardown runs from
 // static destructors / atexit (halide_metal_device_release), i.e. AFTER
@@ -114,6 +152,139 @@ std::vector<void *> &queues() {
 
 void *g_device = nullptr;      // pool_lock()
 uint64_t g_round_robin = 0;    // pool_lock()
+
+// ---------------------------------------------------------------------------
+// C2 capability-gate state (plan §4.1.2). Single source of truth, all fields
+// guarded by pool_lock(), all written exactly once by run_capability_probe_locked()
+// except the override/mode pair, which set_zero_copy_capability_override_for_testing()
+// may re-resolve (mode only — never the device selection, never a second log line).
+// ---------------------------------------------------------------------------
+bool g_capability_probe_has_run = false;              // pool_lock()
+bool g_device_has_unified_memory = false;             // pool_lock()
+bool g_zero_copy_path_enabled = false;                // pool_lock()
+int g_devices_enumerated = 0;                         // pool_lock()
+ceyx::ZeroCopyCapabilityOverrideState g_capability_override_state =
+    ceyx::ZeroCopyCapabilityOverrideState::kNone;     // pool_lock()
+// Set by the in-process testing hook; makes it win over the environment
+// variable, which is otherwise read once at probe time.
+bool g_capability_override_set_explicitly = false;    // pool_lock()
+
+const char *override_state_name(ceyx::ZeroCopyCapabilityOverrideState state) {
+  switch (state) {
+    case ceyx::ZeroCopyCapabilityOverrideState::kForcedOff: return "forced_off";
+    case ceyx::ZeroCopyCapabilityOverrideState::kForcedOn: return "forced_on";
+    case ceyx::ZeroCopyCapabilityOverrideState::kNone: break;
+  }
+  return "none";
+}
+
+// CEYX_ZERO_COPY_CAPABILITY_OVERRIDE, plan §4.1.4. Read ONCE, at probe time —
+// never per decode, because a mode that can change between two kernels of one
+// decode is the same hazard the sticky-queue design above exists to prevent.
+ceyx::ZeroCopyCapabilityOverrideState read_capability_override_from_environment() {
+  const char *env = std::getenv("CEYX_ZERO_COPY_CAPABILITY_OVERRIDE");
+  if (!env || !env[0]) return ceyx::ZeroCopyCapabilityOverrideState::kNone;
+  if (std::strcmp(env, "forced_off") == 0) {
+    return ceyx::ZeroCopyCapabilityOverrideState::kForcedOff;
+  }
+  if (std::strcmp(env, "forced_on") == 0) {
+    return ceyx::ZeroCopyCapabilityOverrideState::kForcedOn;
+  }
+  // Any other value: use the probe (documented in §4.1.4 as "unset/any other").
+  return ceyx::ZeroCopyCapabilityOverrideState::kNone;
+}
+
+// Capability AND override resolved into the one effective mode. Called under
+// pool_lock().
+bool resolve_zero_copy_mode_locked() {
+  switch (g_capability_override_state) {
+    case ceyx::ZeroCopyCapabilityOverrideState::kForcedOff: return false;
+    case ceyx::ZeroCopyCapabilityOverrideState::kForcedOn: return true;
+    case ceyx::ZeroCopyCapabilityOverrideState::kNone: break;
+  }
+  return g_device_has_unified_memory;
+}
+
+// Called under pool_lock() with g_device already selected and retained.
+// Evaluates the capability once and emits the single pre-registered log line.
+void run_capability_probe_locked() {
+  if (g_capability_probe_has_run) return;
+  g_capability_probe_has_run = true;
+
+  g_device_has_unified_memory = device_reports_unified_memory(g_device);
+  if (!g_capability_override_set_explicitly) {
+    g_capability_override_state = read_capability_override_from_environment();
+  }
+  g_zero_copy_path_enabled = resolve_zero_copy_mode_locked();
+
+  const char *device_name = "unknown";
+  SEL name_selector = sel_registerName("name");
+  if (object_responds_to_selector(g_device, name_selector)) {
+    void *name_object =
+        reinterpret_cast<MsgSend>(objc_msgSend)(g_device, name_selector);
+    SEL utf8_selector = sel_registerName("UTF8String");
+    if (object_responds_to_selector(name_object, utf8_selector)) {
+      const char *utf8 = reinterpret_cast<MsgSendConstCharPointer>(objc_msgSend)(
+          name_object, utf8_selector);
+      if (utf8 && utf8[0]) device_name = utf8;
+    }
+  }
+
+  // Plan §4.1.3: unconditional (NOT behind DNG_METAL_QUEUE_LOG) — the
+  // acceptance gates grep for this line, and AC6's "gate forced off" evidence
+  // depends on reading the mode without setting an env var.
+  std::fprintf(stderr,
+               "zerocopy|ev=capability|device=%s|unified_memory=%d|"
+               "devices_enumerated=%d|mode=%s|override=%s\n",
+               device_name, g_device_has_unified_memory ? 1 : 0,
+               g_devices_enumerated,
+               g_zero_copy_path_enabled ? "unified" : "fallback",
+               override_state_name(g_capability_override_state));
+  std::fflush(stderr);
+}
+
+// C2 §4.1.1: prefer the integrated/unified device over the system default,
+// which on a dual-GPU Mac is typically the discrete one. Returns a device with
+// TWO retains owed to us (parity with the MTLCreateSystemDefaultDevice path
+// below, which is +1 from the constructor plus one explicit retain), or nullptr
+// when no unified device was found or enumeration is unavailable.
+// Called under pool_lock(); sets g_devices_enumerated.
+void *select_unified_device_locked() {
+#if TARGET_OS_OSX
+  if (MTLCopyAllDevices == nullptr) return nullptr;  // weak-import absent
+  void *devices = MTLCopyAllDevices();               // +1 NSArray
+  if (!devices) return nullptr;
+
+  void *selected = nullptr;
+  const unsigned long count = reinterpret_cast<MsgSendUnsignedLong>(objc_msgSend)(
+      devices, sel_registerName("count"));
+  g_devices_enumerated = static_cast<int>(count);
+  SEL object_at_index = sel_registerName("objectAtIndex:");
+  for (unsigned long i = 0; i < count; ++i) {
+    void *device = reinterpret_cast<MsgSendObjectAtIndex>(objc_msgSend)(
+        devices, object_at_index, i);
+    if (device_reports_unified_memory(device)) {
+      selected = device;
+      break;
+    }
+  }
+  if (selected) {
+    // The array owns the element; once we release the array the element could
+    // go away. Retain twice, matching the deliberate over-retain at the
+    // creation site below: an autorelease pool draining on a decode thread must
+    // never be able to take the process's device.
+    SEL retain = sel_registerName("retain");
+    reinterpret_cast<MsgSend>(objc_msgSend)(selected, retain);
+    reinterpret_cast<MsgSend>(objc_msgSend)(selected, retain);
+  }
+  reinterpret_cast<MsgSend>(objc_msgSend)(devices, sel_registerName("release"));
+  return selected;
+#else
+  // iOS-style single-device platforms: no enumeration API, probe the default
+  // device directly (plan §4.1.1). g_devices_enumerated is set by the caller.
+  return nullptr;
+#endif
+}
 
 int queue_cap() {
   // R4 item 1: the queue count FOLLOWS the configured decode slot count.
@@ -161,13 +332,22 @@ bool logging_enabled() {
 // never reports success with a null queue).
 bool ensure_device_locked() {
   if (!g_device) {
-    g_device = MTLCreateSystemDefaultDevice();
-    if (g_device) {
-      // MTLCreateSystemDefaultDevice returns +1; retain again so an autorelease
-      // pool draining on a decode thread can never take the process's device.
-      reinterpret_cast<MsgSend>(objc_msgSend)(g_device, sel_registerName("retain"));
+    // C2 §4.1.1: prefer an integrated/unified device over the system default.
+    g_device = select_unified_device_locked();  // already retained twice
+    if (!g_device) {
+      g_device = MTLCreateSystemDefaultDevice();
+      if (g_device) {
+        // MTLCreateSystemDefaultDevice returns +1; retain again so an autorelease
+        // pool draining on a decode thread can never take the process's device.
+        reinterpret_cast<MsgSend>(objc_msgSend)(g_device, sel_registerName("retain"));
+        if (g_devices_enumerated < 1) g_devices_enumerated = 1;
+      }
     }
   }
+  // C2 §2.3: the capability gate is decided HERE and nowhere else — this is
+  // already the one place the process device is created, so the probe inherits
+  // that once-ness for free.
+  if (g_device) run_capability_probe_locked();
   return g_device != nullptr;
 }
 
@@ -232,10 +412,59 @@ void *metal_shared_device_handle_ensure_created() {
   return g_device;
 }
 
+bool zero_copy_path_is_enabled() {
+  std::lock_guard<std::mutex> g(pool_lock());
+  // Creating the device here is the documented, intended side effect: every
+  // caller is on the GPU decode path (see the header). Answering "false,
+  // not probed yet" on a lane's first decode is precisely the R2 AC1 defect
+  // shape — a first decode silently taking a different path than every
+  // subsequent one.
+  if (!g_capability_probe_has_run) {
+    if (!ensure_device_locked()) {
+      // No Metal device at all: the fallback path is the only correct answer,
+      // and nothing has been probed, so a later call still retries.
+      return false;
+    }
+  }
+  return g_zero_copy_path_enabled;
+}
+
+bool metal_device_has_unified_memory() {
+  // Observational: never creates the device (same rule as
+  // metal_shared_device_handle()); answers false before any decode.
+  std::lock_guard<std::mutex> g(pool_lock());
+  return g_device_has_unified_memory;
+}
+
+void set_zero_copy_capability_override_for_testing(
+    ZeroCopyCapabilityOverrideState override_state) {
+  std::lock_guard<std::mutex> g(pool_lock());
+  g_capability_override_set_explicitly = true;
+  g_capability_override_state = override_state;
+  // Re-resolve the MODE ONLY. Device selection is untouched, and no second
+  // capability log line is emitted (plan §4.1.3: exactly one).
+  g_zero_copy_path_enabled = resolve_zero_copy_mode_locked();
+}
+
+ZeroCopyCapabilityStateSnapshot zero_copy_capability_state_snapshot() {
+  std::lock_guard<std::mutex> g(pool_lock());
+  ZeroCopyCapabilityStateSnapshot snapshot;
+  snapshot.capability_probe_has_run = g_capability_probe_has_run;
+  snapshot.device_has_unified_memory = g_device_has_unified_memory;
+  snapshot.zero_copy_path_is_enabled = g_zero_copy_path_enabled;
+  snapshot.devices_enumerated = g_devices_enumerated;
+  snapshot.capability_override_state = g_capability_override_state;
+  return snapshot;
+}
+
 }  // namespace ceyx
 
 extern "C" const char *ceyx_metal_queue_pool_v1(void) {
   return "ceyx_metal_queue_pool_v1";
+}
+
+extern "C" const char *ceyx_zero_copy_capability_marker(void) {
+  return "ceyx_zero_copy_capability_v1";
 }
 
 extern "C" int halide_metal_acquire_context(void *user_context,
@@ -322,4 +551,107 @@ extern "C" int halide_metal_release_context(void *user_context) {
   return 0;
 }
 
+#else  // !(__APPLE__ && !DNG_FORCE_VULKAN)
+
+// ---------------------------------------------------------------------------
+// Non-Metal builds (non-Apple, or DNG_FORCE_VULKAN). Plan §4.6: the C2
+// capability gate must still have a definition here, returning "fallback"
+// unconditionally, so that raw_gpu_pipeline.cpp contains NO `#if` — the branch
+// is a runtime bool on every platform and AC4's "both paths identical output"
+// stays a property of one source text. Vulkan has an equivalent capability
+// (halide_vulkan_wrap_* / VK_MEMORY_PROPERTY_HOST_VISIBLE); adopting it is
+// explicitly a later phase, not this slice.
+//
+// Everything else in this TU (the queue pool, the device accessors) remains
+// Metal-only, exactly as before.
+// ---------------------------------------------------------------------------
+
+#include "dng_metal_context.h"
+
+namespace ceyx {
+
+bool zero_copy_path_is_enabled() { return false; }
+
+bool metal_device_has_unified_memory() { return false; }
+
+void set_zero_copy_capability_override_for_testing(
+    ZeroCopyCapabilityOverrideState override_state) {
+  // No unified path exists to force on or off here; accepted and ignored so a
+  // shared test binary compiles and links on every platform.
+  (void)override_state;
+}
+
+ZeroCopyCapabilityStateSnapshot zero_copy_capability_state_snapshot() {
+  return ZeroCopyCapabilityStateSnapshot{};
+}
+
+}  // namespace ceyx
+
+extern "C" const char *ceyx_zero_copy_capability_marker(void) {
+  return "ceyx_zero_copy_capability_v1";
+}
+
 #endif  // __APPLE__ && !DNG_FORCE_VULKAN
+
+// ---------------------------------------------------------------------------
+// C2 counters (plan §4.5). OUTSIDE the platform guard on purpose: the increment
+// sites in raw_gpu_pipeline.cpp / dng_render_halide.cpp and the reader in
+// raw_ffi_api.cpp are all platform-agnostic source text, so the symbols must
+// exist on every build or those files would need an #if each. On non-Metal
+// builds nothing ever increments them and they read zero, which is the honest
+// answer there.
+// ---------------------------------------------------------------------------
+
+#include "dng_metal_context.h"
+
+#include <atomic>
+#include <cstdint>
+
+namespace {
+
+// Relaxed: diagnostic tallies only, never control flow, so they need no
+// ordering with respect to the decode work they count. Function-local statics
+// with constant initialisation — no init-order hazard, unlike the pool objects
+// above, because these are trivially constructible.
+std::atomic<uint64_t> g_zero_copy_destination_wrap_count{0};
+std::atomic<uint64_t> g_zero_copy_destination_alignment_degradation_count{0};
+std::atomic<uint64_t> g_zero_copy_source_mosaic_wrap_count{0};
+
+}  // namespace
+
+namespace ceyx {
+
+uint64_t zero_copy_destination_wrap_count() {
+  return g_zero_copy_destination_wrap_count.load(std::memory_order_relaxed);
+}
+
+void zero_copy_note_destination_wrapped() {
+  g_zero_copy_destination_wrap_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint64_t zero_copy_destination_alignment_degradation_count() {
+  return g_zero_copy_destination_alignment_degradation_count.load(
+      std::memory_order_relaxed);
+}
+
+void zero_copy_note_destination_alignment_degraded() {
+  g_zero_copy_destination_alignment_degradation_count.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+uint64_t zero_copy_source_mosaic_wrap_count() {
+  return g_zero_copy_source_mosaic_wrap_count.load(std::memory_order_relaxed);
+}
+
+void zero_copy_note_source_mosaic_wrapped() {
+  g_zero_copy_source_mosaic_wrap_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void reset_zero_copy_counters_for_testing() {
+  g_zero_copy_destination_wrap_count.store(0, std::memory_order_relaxed);
+  g_zero_copy_destination_alignment_degradation_count.store(
+      0, std::memory_order_relaxed);
+  g_zero_copy_source_mosaic_wrap_count.store(0, std::memory_order_relaxed);
+}
+
+}  // namespace ceyx

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 
 #include "HalideBuffer.h"
@@ -13,6 +14,13 @@
 #include "ceyx_orient.h"
 #include "dng_ffi_api.h"
 #include "dng_halide_device.h"
+// C2 (plan §4.1.4, §4.2.2, §4.3): the single capability-gate query
+// (ceyx::zero_copy_path_is_enabled()) and the shared MTLDevice accessor used
+// to wrap the caller's own destination memory as an MTLBuffer. Owned by
+// impl-capability-opus (native/src/pipeline/dng_metal_context.{h,cpp}); this
+// file only ever calls the published accessors, never re-derives the probe
+// (plan §4.1.2's "no second source of truth").
+#include "dng_metal_context.h"
 #include "dng_pipeline.h"
 #include "dng_render_params.h"
 #include "libraw_gpu_input_adapter.h"
@@ -30,7 +38,106 @@
 #include "raw_render_params_builder.h"
 #include "raw_xtrans_demosaic.h"
 
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
+
 namespace {
+
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+using ObjectiveCSendNewBufferNoCopy = void* (*)(void*, SEL, void*, unsigned long,
+                                                unsigned long, void*);
+using ObjectiveCSendReleaseNoArgument = void (*)(void*, SEL);
+// MTLResourceStorageModeShared | MTLResourceCPUCacheModeDefaultCache == 0,
+// same constant raw_persistent_device_arena.cpp uses for its own regions
+// (plan §3.1 "Storage mode").
+constexpr unsigned long kMetalResourceStorageModeSharedOptions = 0;
+#endif  // __APPLE__ && !DNG_FORCE_VULKAN
+
+// C2 (plan §4.2.2, §4.3): wraps the CALLER's own RGBA destination memory as an
+// MTLBuffer via newBufferWithBytesNoCopy:length:options:deallocator:, so
+// Stage4 can write the caller's bytes directly with zero device->host copy
+// (the unified-wrapped path). Metal-only, and constructed unconditionally so
+// every call site stays free of #ifdef (plan §4.6): on a non-Metal target, or
+// whenever the caller buffer fails the §4.3 page-alignment contract, or when
+// no Metal device exists yet, get() is nullptr and the caller falls back to
+// the arena's destination region (unified-degraded) -- never a decode
+// failure, exactly the alignment probe's "a probe, never a refusal" rule.
+// The deallocator block is passed NULL: this class never owns the caller's
+// memory, so Metal must not attempt to free it (Apple's documented contract
+// for a NULL deallocator on this selector).
+class CallerDestinationMetalBufferWrap {
+ public:
+    CallerDestinationMetalBufferWrap(uint8_t* dst, size_t byte_count) {
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+        if (dst == nullptr || byte_count == 0) return;
+        if ((reinterpret_cast<uintptr_t>(dst) % ceyx::kRawDeviceArenaAlignmentBytes) != 0 ||
+            (byte_count % ceyx::kRawDeviceArenaAlignmentBytes) != 0) {
+            return;
+        }
+        void* const device = ceyx::metal_shared_device_handle();
+        if (device == nullptr) return;
+        buffer_ = reinterpret_cast<ObjectiveCSendNewBufferNoCopy>(objc_msgSend)(
+            device,
+            sel_registerName("newBufferWithBytesNoCopy:length:options:deallocator:"),
+            dst, static_cast<unsigned long>(byte_count),
+            kMetalResourceStorageModeSharedOptions, nullptr);
+#else
+        (void)dst;
+        (void)byte_count;
+#endif
+    }
+
+    ~CallerDestinationMetalBufferWrap() {
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+        if (buffer_ != nullptr) {
+            reinterpret_cast<ObjectiveCSendReleaseNoArgument>(objc_msgSend)(
+                buffer_, sel_registerName("release"));
+        }
+#endif
+    }
+
+    CallerDestinationMetalBufferWrap(const CallerDestinationMetalBufferWrap&) = delete;
+    CallerDestinationMetalBufferWrap& operator=(const CallerDestinationMetalBufferWrap&) = delete;
+
+    void* get() const {
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+        return buffer_;
+#else
+        return nullptr;
+#endif
+    }
+
+ private:
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+    void* buffer_ = nullptr;
+#endif
+};
+
+// C2 (plan §4.2.1, §4.4): the arena's source-region host pointer to memcpy the
+// LibRaw plane into on the unified path, or nullptr to keep today's borrowed
+// wrap over `plane.data` (gate off, no arena for this lane, or the region
+// could not grow) -- an arena/gate miss is never a decode failure (plan
+// §3.4). ensure_region_host_pointer is the C2 read-side counterpart of
+// bind_region: same grow-on-demand and failure semantics, but returns the
+// region's CPU-visible (MTLStorageModeShared) pointer instead of wrapping a
+// halide_buffer_t, because the memcpy must land BEFORE construction of the
+// Halide source view (plan §4.2.1's "construct the ... Buffer over that arena
+// host pointer").
+void* acquireZeroCopySourceHost(ceyx::RawPersistentDeviceArena* arena,
+                                bool use_zero_copy, size_t required_bytes) {
+    if (!use_zero_copy || arena == nullptr) return nullptr;
+    void* const host = arena->ensure_region_host_pointer(
+        ceyx::RawDeviceArenaRegion::kSourceMosaicRegion, required_bytes);
+    // C2 (plan §4.5): counted per decode that actually took the unified
+    // source path, so a build with the arena silently disabled cannot pass
+    // this counter's non-zero expectation.
+    if (host != nullptr) {
+        ceyx::zero_copy_note_source_mosaic_wrapped();
+    }
+    return host;
+}
 
 double nowMs() {
     // There is no dng_now_ms() in this tree; include/dng_timing_utils.h only
@@ -225,13 +332,34 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         return kRawErrMetadataInvalid;
     }
 
+    // C2 (plan §4.1.4): the single capability-gate query. Computed once and
+    // reused for both the source and destination decisions below, never
+    // re-derived (plan §4.1.2).
+    const bool use_zero_copy = ceyx::zero_copy_path_is_enabled();
+    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+
+    // C2 (plan §4.2.1): on the unified path, memcpy the plane rows into the
+    // arena's source region BEFORE constructing the Halide view, so the
+    // view's host pointer IS the arena's shared-storage memory (true
+    // zero-copy from that point on). A null return (gate off, no lane arena,
+    // or the region could not grow) keeps today's borrowed wrap over
+    // `plane.data` -- structurally the same branch, just a different source
+    // pointer (plan §4.4: one branch per buffer, not a forked pipeline).
+    const size_t src_required_bytes = static_cast<size_t>(plane.row_stride_bytes) * h;
+    void* const zero_copy_src_host =
+        acquireZeroCopySourceHost(arena, use_zero_copy, src_required_bytes);
+    const uint16_t* src_host_ptr = static_cast<const uint16_t*>(plane.data);
+    if (zero_copy_src_host != nullptr) {
+        std::memcpy(zero_copy_src_host, plane.data, src_required_bytes);
+        src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
+    }
+
     // Borrowed, stride-aware wrap: no host copy (spec section 5.2.1).
     halide_dimension_t src_dims[2] = {
         {0, static_cast<int32_t>(w), 1, 0},
         {0, static_cast<int32_t>(h),
          static_cast<int32_t>(plane.row_stride_bytes / 2), 0}};
-    Halide::Runtime::Buffer<const uint16_t> src_buf(
-        static_cast<const uint16_t*>(plane.data), 2, src_dims);
+    Halide::Runtime::Buffer<const uint16_t> src_buf(src_host_ptr, 2, src_dims);
 
     const uint32_t bw = input.black.repeat_width ? input.black.repeat_width : 1;
     const uint32_t bh = input.black.repeat_height ? input.black.repeat_height : 1;
@@ -251,18 +379,20 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         Halide::Runtime::Buffer<uint16_t>::make_interleaved(
             static_cast<int>(w), static_cast<int>(h), 3);
 
-    // C1 (plan §3.2 item 1-2, §2.6): acquire this thread's lane arena once,
-    // then wrap the source mosaic and Stage3 intermediate onto their arena
-    // regions. Scope-lifetime bindings: they detach (RAII) at branch exit,
-    // i.e. AFTER the Stage4 call below returns, per plan §3.2's requirement
-    // that the RAII scope span the kernel calls. arena == nullptr and/or a
-    // failed bind_region() both leave the bindings falsy and the buffers
-    // exactly as they are today (plan §3.4 — arena absence is never a decode
-    // failure).
-    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+    // C1 (plan §3.2 item 1-2, §2.6): wrap the source mosaic and Stage3
+    // intermediate onto their arena regions (arena acquired above, shared
+    // with the C2 gate/memcpy decision). Scope-lifetime bindings: they detach
+    // (RAII) at branch exit, i.e. AFTER the Stage4 call below returns, per
+    // plan §3.2's requirement that the RAII scope span the kernel calls.
+    // arena == nullptr and/or a failed bind_region() both leave the bindings
+    // falsy and the buffers exactly as they are today (plan §3.4 — arena
+    // absence is never a decode failure). On the zero-copy path src_buf's
+    // host pointer is already the arena's own memory (set above), so this
+    // bind just attaches the SAME region's device counterpart -- no data
+    // movement here.
     ceyx::RawDeviceArenaRegionBinding src_arena_binding(
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
-        static_cast<size_t>(plane.row_stride_bytes) * h);
+        src_required_bytes);
     ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
         arena, stage3.raw_buffer(),
         ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
@@ -270,11 +400,19 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
 
     // GPU targets only upload an input whose host_dirty flag is set; without
     // these the kernel reads freshly device-malloc'd memory. Same handshake as
-    // src/raw_demosaic_reference.cpp:139-141. Unchanged by C1 (plan §3.2 item
-    // 1): set_host_dirty() stays on the fallback path — C1 changes where the
-    // bytes live, not how many times they move (plan §3.5 "Explicitly NOT
-    // changed by C1"); C2 is what removes this on the unified path.
-    src_buf.set_host_dirty();
+    // src/raw_demosaic_reference.cpp:139-141. C1 (plan §3.5 "Explicitly NOT
+    // changed by C1"): set_host_dirty() stays on the fallback path — C1
+    // changes where the bytes live, not how many times they move. C2 (plan
+    // §4.2.1 item 2): when the memcpy above actually landed the bytes in the
+    // arena's shared-storage memory, host and device are the SAME bytes, so
+    // marking either dirty would re-introduce a transfer that shared storage
+    // makes unnecessary -- both flags are cleared instead.
+    if (zero_copy_src_host != nullptr) {
+        src_buf.set_host_dirty(false);
+        src_buf.set_device_dirty(false);
+    } else {
+        src_buf.set_host_dirty();
+    }
     black_buf.set_host_dirty();
     stage3.set_host_dirty(false);
 
@@ -341,6 +479,57 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         return grc;
     }
 
+    // C2 (plan §4.2.2, §4.3): attempt to wrap the caller's OWN destination
+    // memory as an MTLBuffer, so Stage4 writes it directly (unified-wrapped)
+    // instead of the arena's destination region. Only attempted when the
+    // gate is on AND the probe forwarded via `develop` says the caller's
+    // buffer actually meets the page-alignment contract -- that probe is
+    // computed once, upstream, in ceyxDecodeIntoPrepare (plan §4.3 "the one
+    // place both entries share"). Constructed unconditionally so no call site
+    // needs #ifdef (plan §4.6); its own internal check is a second,
+    // structural guard against a wrap ever being attempted on memory that
+    // fails the contract. When neither the wrap is attempted nor it succeeds,
+    // Stage4 falls back to the arena's kDestinationRgba8Region
+    // (unified-degraded) or today's behaviour -- never a decode failure.
+    // Destroyed (RAII) after the Stage4 call returns on every exit path,
+    // including the failure return just below.
+    //
+    // Counters (plan §4.5, names per impl-capability-opus's dng_metal_context.h
+    // announcement): zero_copy_note_destination_alignment_degraded() marks
+    // the decode where the gate was ON but the destination could not be
+    // wrapped for alignment reasons -- the one decision this file is in a
+    // position to see (Stage4 cannot distinguish "degraded" from "plain
+    // fallback"; both arrive there as a null caller_destination_metal_buffer).
+    std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
+    if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+        // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
+        // LENGTH argument itself to be a page multiple (§4.3), not just the
+        // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
+        // count) is essentially never a multiple of kRawDeviceArenaAlignmentBytes,
+        // so passing it made this class's own internal length check reject
+        // the wrap on every decode, silently degrading regardless of how well
+        // aligned the caller's real buffer was -- no refusal ever reached
+        // Stage4 because the wrap was never attempted successfully here.
+        // out.caller_dst_capacity is what the alignment probe upstream
+        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
+        // before setting caller_destination_is_page_aligned, and
+        // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
+        // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
+        // MTLBuffer covers the full extent Stage4 will write.
+        dst_metal_wrap.emplace(rgba->get(), out.caller_dst_capacity);
+    } else if (use_zero_copy) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+    void* const caller_destination_metal_buffer =
+        dst_metal_wrap ? dst_metal_wrap->get() : nullptr;
+    if (use_zero_copy && caller_destination_metal_buffer == nullptr &&
+        dst_metal_wrap.has_value()) {
+        // The wrap was attempted (alignment probe said yes) but
+        // newBufferWithBytesNoCopy itself failed (e.g. no Metal device) --
+        // still a degraded decode, same counter.
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+
     // src extent (crop) vs dst extent (scaled): equal on the full-res path, so
     // the shared Stage4 takes the crop branch at
     // src/dng_render_halide.cpp:1261-1269, which does the raw->dim[i].min = 0
@@ -357,7 +546,8 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             params, rgba->get(),
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation,
-                                            arena)) {
+                                            arena,
+                                            caller_destination_metal_buffer)) {
         return kRawErrKernelFailed;
     }
 
@@ -377,6 +567,12 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
     out.timing.gpu_submit_wait_ms =
         out.diag.gpu_process_ms - out.timing.host_copy_ms;
+    // C2 (round-close audit): read on the same thread, immediately after the
+    // Stage4 call above. Reports "this decode wrote the caller's pages
+    // directly" -- false covers both "no buffer was passed" and "the wrap was
+    // attempted but refused", not a gate-state signal.
+    out.timing.unified_memory_path_active =
+        runRenderStage4LastCallerDestinationWrapWasUsed() ? 1u : 0u;
     out.width = oriented_w;
     out.height = oriented_h;
     out.rgba_size = rgba_bytes;
@@ -438,12 +634,25 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         return kRawErrMetadataInvalid;
     }
 
+    // C2 (plan §4.1.4): see runBayerBranch's identical comment.
+    const bool use_zero_copy = ceyx::zero_copy_path_is_enabled();
+    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+
+    // C2 (plan §4.2.1): see runBayerBranch's identical comment.
+    const size_t src_required_bytes = static_cast<size_t>(plane.row_stride_bytes) * h;
+    void* const zero_copy_src_host =
+        acquireZeroCopySourceHost(arena, use_zero_copy, src_required_bytes);
+    const uint16_t* src_host_ptr = static_cast<const uint16_t*>(plane.data);
+    if (zero_copy_src_host != nullptr) {
+        std::memcpy(zero_copy_src_host, plane.data, src_required_bytes);
+        src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
+    }
+
     halide_dimension_t src_dims[2] = {
         {0, static_cast<int32_t>(w), 1, 0},
         {0, static_cast<int32_t>(h),
          static_cast<int32_t>(plane.row_stride_bytes / 2), 0}};
-    Halide::Runtime::Buffer<const uint16_t> src_buf(
-        static_cast<const uint16_t*>(plane.data), 2, src_dims);
+    Halide::Runtime::Buffer<const uint16_t> src_buf(src_host_ptr, 2, src_dims);
 
     // The kernel indexes the tile as cfa(x % 6, y % 6) with dim 0 stride 1, so
     // the row-major descriptor array wraps directly (src/raw_demosaic_
@@ -459,19 +668,24 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         Halide::Runtime::Buffer<uint16_t>::make_interleaved(
             static_cast<int>(w), static_cast<int>(h), 3);
 
-    // C1 (plan §3.2, §2.6): same lane-arena acquire/bind as runBayerBranch —
-    // see that branch's comment for the full rationale. Structurally
-    // identical sibling per §3.5's change list.
-    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+    // C1 (plan §3.2, §2.6): same lane-arena bind as runBayerBranch — see that
+    // branch's comment for the full rationale. Structurally identical sibling
+    // per §3.5's change list. arena acquired above, shared with the C2 gate.
     ceyx::RawDeviceArenaRegionBinding src_arena_binding(
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
-        static_cast<size_t>(plane.row_stride_bytes) * h);
+        src_required_bytes);
     ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
         arena, stage3.raw_buffer(),
         ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
         static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
 
-    src_buf.set_host_dirty();
+    // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
+    if (zero_copy_src_host != nullptr) {
+        src_buf.set_host_dirty(false);
+        src_buf.set_device_dirty(false);
+    } else {
+        src_buf.set_host_dirty();
+    }
     cfa_buf.set_host_dirty();
     black_buf.set_host_dirty();
     stage3.set_host_dirty(false);
@@ -535,6 +749,37 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         return grc;
     }
 
+    // C2 (plan §4.2.2, §4.3): see runBayerBranch's identical comment -- same
+    // wrap attempt (gated on develop.caller_destination_is_page_aligned),
+    // same degraded-counter bookkeeping, same fallback shape, same RAII
+    // lifetime.
+    std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
+    if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+        // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
+        // LENGTH argument itself to be a page multiple (§4.3), not just the
+        // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
+        // count) is essentially never a multiple of kRawDeviceArenaAlignmentBytes,
+        // so passing it made this class's own internal length check reject
+        // the wrap on every decode, silently degrading regardless of how well
+        // aligned the caller's real buffer was -- no refusal ever reached
+        // Stage4 because the wrap was never attempted successfully here.
+        // out.caller_dst_capacity is what the alignment probe upstream
+        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
+        // before setting caller_destination_is_page_aligned, and
+        // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
+        // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
+        // MTLBuffer covers the full extent Stage4 will write.
+        dst_metal_wrap.emplace(rgba->get(), out.caller_dst_capacity);
+    } else if (use_zero_copy) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+    void* const caller_destination_metal_buffer =
+        dst_metal_wrap ? dst_metal_wrap->get() : nullptr;
+    if (use_zero_copy && caller_destination_metal_buffer == nullptr &&
+        dst_metal_wrap.has_value()) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+
     // Same shared Stage4 call as the Bayer branch: no second render path.
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
                                             1.0f / 65535.0f,
@@ -546,7 +791,8 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             params, rgba->get(),
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation,
-                                            arena)) {
+                                            arena,
+                                            caller_destination_metal_buffer)) {
         return kRawErrKernelFailed;
     }
 
@@ -559,6 +805,12 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
     out.timing.gpu_submit_wait_ms =
         out.diag.gpu_process_ms - out.timing.host_copy_ms;
+    // C2 (round-close audit): read on the same thread, immediately after the
+    // Stage4 call above. Reports "this decode wrote the caller's pages
+    // directly" -- false covers both "no buffer was passed" and "the wrap was
+    // attempted but refused", not a gate-state signal.
+    out.timing.unified_memory_path_active =
+        runRenderStage4LastCallerDestinationWrapWasUsed() ? 1u : 0u;
     out.width = oriented_w;
     out.height = oriented_h;
     out.rgba_size = rgba_bytes;
@@ -617,6 +869,22 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         return kRawErrMetadataInvalid;
     }
 
+    // C2 (plan §4.1.4): see runBayerBranch's identical comment.
+    const bool use_zero_copy = ceyx::zero_copy_path_is_enabled();
+    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+
+    // C2 (plan §4.2.1): see runBayerBranch's identical comment. row_stride_bytes
+    // already accounts for the three interleaved components, so the required
+    // byte count is the same row_stride_bytes*h shape as the mosaic branches.
+    const size_t src_required_bytes = static_cast<size_t>(plane.row_stride_bytes) * h;
+    void* const zero_copy_src_host =
+        acquireZeroCopySourceHost(arena, use_zero_copy, src_required_bytes);
+    const uint16_t* src_host_ptr = static_cast<const uint16_t*>(plane.data);
+    if (zero_copy_src_host != nullptr) {
+        std::memcpy(zero_copy_src_host, plane.data, src_required_bytes);
+        src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
+    }
+
     // Borrowed, stride-aware 3-D wrap: no host copy. row_stride_bytes comes
     // from the decoder's pitch and already accounts for the three components.
     halide_dimension_t src_dims[3] = {
@@ -624,8 +892,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         {0, static_cast<int32_t>(h),
          static_cast<int32_t>(plane.row_stride_bytes / 2), 0},
         {0, 3, 1, 0}};
-    Halide::Runtime::Buffer<const uint16_t> src_buf(
-        static_cast<const uint16_t*>(plane.data), 3, src_dims);
+    Halide::Runtime::Buffer<const uint16_t> src_buf(src_host_ptr, 3, src_dims);
 
     // Per-COMPONENT black, three entries. The kernel indexes black(c) with
     // c in {0,1,2}, matching the dst channel order. component_black[c] >=
@@ -641,19 +908,24 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         Halide::Runtime::Buffer<uint16_t>::make_interleaved(
             static_cast<int>(w), static_cast<int>(h), 3);
 
-    // C1 (plan §3.2, §2.6): same lane-arena acquire/bind as runBayerBranch —
-    // see that branch's comment for the full rationale. Structurally
-    // identical sibling per §3.5's change list.
-    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+    // C1 (plan §3.2, §2.6): same lane-arena bind as runBayerBranch — see that
+    // branch's comment for the full rationale. Structurally identical sibling
+    // per §3.5's change list. arena acquired above, shared with the C2 gate.
     ceyx::RawDeviceArenaRegionBinding src_arena_binding(
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
-        static_cast<size_t>(plane.row_stride_bytes) * h);
+        src_required_bytes);
     ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
         arena, stage3.raw_buffer(),
         ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
         static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
 
-    src_buf.set_host_dirty();
+    // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
+    if (zero_copy_src_host != nullptr) {
+        src_buf.set_host_dirty(false);
+        src_buf.set_device_dirty(false);
+    } else {
+        src_buf.set_host_dirty();
+    }
     black_buf.set_host_dirty();
     stage3.set_host_dirty(false);
 
@@ -716,6 +988,37 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         return grc;
     }
 
+    // C2 (plan §4.2.2, §4.3): see runBayerBranch's identical comment -- same
+    // wrap attempt (gated on develop.caller_destination_is_page_aligned),
+    // same degraded-counter bookkeeping, same fallback shape, same RAII
+    // lifetime.
+    std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
+    if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+        // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
+        // LENGTH argument itself to be a page multiple (§4.3), not just the
+        // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
+        // count) is essentially never a multiple of kRawDeviceArenaAlignmentBytes,
+        // so passing it made this class's own internal length check reject
+        // the wrap on every decode, silently degrading regardless of how well
+        // aligned the caller's real buffer was -- no refusal ever reached
+        // Stage4 because the wrap was never attempted successfully here.
+        // out.caller_dst_capacity is what the alignment probe upstream
+        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
+        // before setting caller_destination_is_page_aligned, and
+        // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
+        // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
+        // MTLBuffer covers the full extent Stage4 will write.
+        dst_metal_wrap.emplace(rgba->get(), out.caller_dst_capacity);
+    } else if (use_zero_copy) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+    void* const caller_destination_metal_buffer =
+        dst_metal_wrap ? dst_metal_wrap->get() : nullptr;
+    if (use_zero_copy && caller_destination_metal_buffer == nullptr &&
+        dst_metal_wrap.has_value()) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+
     // Same shared Stage4 call as the other two branches: no second render path.
     if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
                                             1.0f / 65535.0f,
@@ -727,7 +1030,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             params, rgba->get(),
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation,
-                                            arena)) {
+                                            arena,
+                                            caller_destination_metal_buffer)) {
         return kRawErrKernelFailed;
     }
 
@@ -740,6 +1044,12 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
     out.timing.gpu_submit_wait_ms =
         out.diag.gpu_process_ms - out.timing.host_copy_ms;
+    // C2 (round-close audit): read on the same thread, immediately after the
+    // Stage4 call above. Reports "this decode wrote the caller's pages
+    // directly" -- false covers both "no buffer was passed" and "the wrap was
+    // attempted but refused", not a gate-state signal.
+    out.timing.unified_memory_path_active =
+        runRenderStage4LastCallerDestinationWrapWasUsed() ? 1u : 0u;
     out.width = oriented_w;
     out.height = oriented_h;
     out.rgba_size = rgba_bytes;
@@ -1015,6 +1325,17 @@ RawErrorCode decodeFileImpl(const char* file_path,
     effective.tone_curve_strength = develop.tone_curve_strength;
     effective.output_space = develop.output_space;
     effective.exif_orientation = develop.exif_orientation;
+    // R3-T2 gate-17 root cause (real bug #2, this list's own documented
+    // failure mode): adapter.build() resets `effective` to
+    // RawDevelopParams{} internally, so the §4.3 alignment probe the caller
+    // passed in was silently dropping to its false default before
+    // runBayerBranch/runXTransBranch/runLinearRgbBranch ever saw it -- every
+    // decode through this entry point took the degraded destination path
+    // regardless of how aligned the caller's buffer actually was, exactly
+    // matching test_zero_copy_capability_paths's gate-13/14/17 symptom
+    // (destination_wrap_count delta 0, alignment_degradation delta nonzero).
+    effective.caller_destination_is_page_aligned =
+        develop.caller_destination_is_page_aligned;
     if (build_rc != kRawSuccess) {
         std::fprintf(stderr, "[RawPipeline] contract FAIL (%s: %s)\n",
                      raw_error_name(build_rc), reason);

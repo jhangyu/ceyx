@@ -125,6 +125,23 @@ class RawPersistentDeviceArena {
   // halide_metal_detach_buffer; NEVER halide_device_free (invariant I-D).
   void detach_region(halide_buffer_t *halide_buffer);
 
+  // R3-T2, C2 (plan §4.2.1, §4.3): read-side counterpart of bind_region, for
+  // callers that need to memcpy into the region's CPU-visible
+  // (MTLStorageModeShared) memory BEFORE constructing a halide_buffer_t over
+  // it -- bind_region only ever writes a halide_buffer's `device` field, never
+  // `host`, so there is no way to reach the region's own memory through it.
+  // Same grow-on-demand and failure semantics as bind_region: allocates the
+  // region on first use, reallocates (grows) it when `required_byte_count`
+  // exceeds its current size -- counted in the SAME allocation/growth
+  // counters bind_region uses, so AC1 and its growth accounting see one
+  // consistent history regardless of which entry point touched a region --
+  // and returns nullptr on any failure, in which case the caller proceeds
+  // with today's path exactly as a false bind_region() return would mean
+  // (plan §3.4: an arena failure is never a decode failure). Never allocates
+  // or grows for a required_byte_count of 0.
+  void *ensure_region_host_pointer(RawDeviceArenaRegion region,
+                                   size_t required_byte_count);
+
   // True when `halide_buffer` is currently bound to one of this arena's
   // regions. This is what lets the split-build explicit free at
   // dng_render_halide.cpp:1682-1684 decide mechanically rather than from a flag

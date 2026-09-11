@@ -369,6 +369,84 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *halide_buffer,
   return true;
 }
 
+void *RawPersistentDeviceArena::ensure_region_host_pointer(
+    RawDeviceArenaRegion region, size_t required_byte_count) {
+  if (required_byte_count == 0) return nullptr;
+  const size_t index = static_cast<size_t>(region);
+  if (index >= kRawDeviceArenaRegionCount) return nullptr;
+
+  ArenaRegionStorage &storage = regions_[index];
+  if (storage.unavailable) return nullptr;
+
+  if (storage.metal_buffer == nullptr ||
+      storage.byte_count < required_byte_count) {
+    const bool is_growth = storage.metal_buffer != nullptr;
+
+    // Same rule as bind_region's growth branch: a region carries at most one
+    // live binding, and it must be dropped before the memory under it goes
+    // away.
+    if (storage.bound_halide_buffer != nullptr) {
+      halide_metal_detach_buffer(nullptr, storage.bound_halide_buffer);
+      storage.bound_halide_buffer = nullptr;
+      live_binding_count_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    const size_t allocation_byte_count =
+        round_up_to_arena_alignment(required_byte_count);
+    void *replacement = allocate_metal_buffer(allocation_byte_count);
+    if (replacement == nullptr) {
+      release_metal_buffer(storage.metal_buffer);
+      g_resident_device_bytes.fetch_sub(storage.byte_count,
+                                       std::memory_order_relaxed);
+      storage.metal_buffer = nullptr;
+      storage.byte_count = 0;
+      storage.unavailable = true;
+      log_arena_event("binding_failure", lane_identifier_, region,
+                      required_byte_count);
+      return nullptr;
+    }
+
+    // Same alignment assertion as bind_region (plan §3.1): C2's
+    // caller-destination wrapping depends on the identical property, so both
+    // are checked by the one rule.
+    void *contents = metal_buffer_contents(replacement);
+    if (contents == nullptr ||
+        (reinterpret_cast<uintptr_t>(contents) %
+         kRawDeviceArenaAlignmentBytes) != 0) {
+      release_metal_buffer(replacement);
+      release_metal_buffer(storage.metal_buffer);
+      g_resident_device_bytes.fetch_sub(storage.byte_count,
+                                       std::memory_order_relaxed);
+      storage.metal_buffer = nullptr;
+      storage.byte_count = 0;
+      storage.unavailable = true;
+      log_arena_event("binding_failure", lane_identifier_, region,
+                      required_byte_count);
+      return nullptr;
+    }
+
+    release_metal_buffer(storage.metal_buffer);
+    g_resident_device_bytes.fetch_sub(storage.byte_count,
+                                     std::memory_order_relaxed);
+    storage.metal_buffer = replacement;
+    storage.byte_count = allocation_byte_count;
+    g_resident_device_bytes.fetch_add(allocation_byte_count,
+                                     std::memory_order_relaxed);
+
+    if (is_growth) {
+      g_growth_reallocation_count.fetch_add(1, std::memory_order_relaxed);
+      log_arena_event("growth_reallocation", lane_identifier_, region,
+                      allocation_byte_count);
+    } else {
+      g_allocation_count.fetch_add(1, std::memory_order_relaxed);
+      log_arena_event("allocation", lane_identifier_, region,
+                      allocation_byte_count);
+    }
+  }
+
+  return metal_buffer_contents(storage.metal_buffer);
+}
+
 void RawPersistentDeviceArena::detach_region(halide_buffer_t *halide_buffer) {
   if (halide_buffer == nullptr) return;
   for (size_t i = 0; i < kRawDeviceArenaRegionCount; ++i) {
@@ -548,6 +626,13 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *, RawDeviceArenaRegi
 }
 
 void RawPersistentDeviceArena::detach_region(halide_buffer_t *) {}
+
+// No MTLBuffer / shared-storage memory exists off Metal (plan §2.5): every
+// caller keeps today's behaviour verbatim.
+void *RawPersistentDeviceArena::ensure_region_host_pointer(
+    RawDeviceArenaRegion, size_t) {
+  return nullptr;
+}
 
 bool RawPersistentDeviceArena::owns_buffer(const halide_buffer_t *) const {
   return false;

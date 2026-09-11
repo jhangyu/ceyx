@@ -345,6 +345,36 @@ add_executable(test_concurrent_raw_decode tests/test_concurrent_raw_decode.cpp)
 target_include_directories(test_concurrent_raw_decode PRIVATE ${INC_DIR})
 target_link_libraries(test_concurrent_raw_decode PRIVATE dng_decoder_native)
 
+# R3-T4: C2 zero-copy capability-gate path gate -- forced-fallback (AC6) and
+# alignment-degraded (AC4 run 3) destination paths, both bit-exact-checked
+# against a natural-gate reference and both asserted via the
+# ceyx_debug_zero_copy_capability_counters probe. Same link shape as
+# test_concurrent_raw_decode above: calls only through raw_pipeline_decode_
+# file_into, never compiles dng_render_halide.cpp directly, so the round-2
+# handoff's "list render_parameter_upload_cache.cpp + raw_persistent_device_
+# arena.cpp + dng_metal_context.cpp" rule does not apply here -- one link
+# against the whole library covers it, same as its sibling gate.
+add_executable(test_zero_copy_capability_paths
+    tests/test_zero_copy_capability_paths.cpp)
+target_include_directories(test_zero_copy_capability_paths PRIVATE
+    ${INC_DIR} ${SRC_DIR}/pipeline)
+target_link_libraries(test_zero_copy_capability_paths PRIVATE dng_decoder_native)
+
+# R3-T4 close-out: under-load gate for the WRAPPED destination path
+# specifically (team-lead's final-round item) -- a sibling of
+# test_concurrent_raw_decode, not a rewrite of it (that target stays
+# untouched per this task's original instructions). Every lane here uses a
+# posix_memalign'd, page-aligned destination, so it is the driver that can
+# actually catch a missing/ineffective halide_device_sync fence under
+# concurrency (plan §8.2 item 3) -- test_concurrent_raw_decode's plain heap
+# buffers never reach the wrapped path at all. Same link shape as its
+# siblings above.
+add_executable(test_concurrent_raw_decode_wrapped
+    tests/test_concurrent_raw_decode_wrapped.cpp)
+target_include_directories(test_concurrent_raw_decode_wrapped PRIVATE
+    ${INC_DIR})
+target_link_libraries(test_concurrent_raw_decode_wrapped PRIVATE dng_decoder_native)
+
 # -----------------------------------------------------------------------------
 # B1 fix (2026-08-26, round-1 review): the LibRaw/RawSpeed3 wiring below is NOT
 # a test dependency — it supplies dng_decoder_native's own usage requirements
