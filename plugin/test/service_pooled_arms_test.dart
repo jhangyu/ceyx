@@ -5,7 +5,6 @@
 import 'dart:io';
 
 import 'package:ceyx/src/dng_decoder_service.dart';
-import 'package:ceyx/src/decode_pool.dart';
 import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -26,10 +25,6 @@ String? get _skipReason {
 
 void main() {
   tearDown(() {
-    // WP2 Task 2.4: the standing proof that no address reached the wrap site
-    // unowned by the pool — which is what makes deleting the dylib-free tail
-    // safe rather than merely plausible.
-    expect(CeyxDecodePool.debugUnownedWraps, 0);
     // WP2 Task 2.5: nothing may still be checked out anywhere on this isolate
     // when a test ends — the Dart-side replacement for the native
     // checked-out-count leak assertion.

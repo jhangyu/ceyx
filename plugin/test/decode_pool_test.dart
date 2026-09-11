@@ -330,12 +330,16 @@ void orientationWirePoolWorker(List<Object?> bootstrap) {
       poolPort.send(<Object?>[kMsgResult, requestId, 4, 4]);
       return;
     }
-    final buf = calloc<Uint8>(4 * 4 * 4);
+    // S2: reply with the POOL-OWNED destination address the dispatch supplied
+    // at index 6, exactly as the production pooled arm does. Replying with a
+    // privately allocated address would hand the pool a buffer it does not own,
+    // which is now the unowned-address StateError rather than a silent leak.
+    final destinationAddress = msg.length > 6 ? msg[6] as int : 0;
     final orientationAtIndex8 = msg.length > 8 ? msg[8] as int : -1;
     poolPort.send(<Object?>[
       kMsgResult,
       requestId,
-      buf.address,
+      destinationAddress,
       4,
       4,
       msg.length.toDouble(),
@@ -1334,8 +1338,8 @@ void main() {
     });
 
     tearDown(() {
-      CeyxDecodePool.nativeBufferPool?.debugDisposeIdle();
-      CeyxDecodePool.nativeBufferPool = null;
+      CeyxDecodePool.nativeBufferPool.debugDisposeIdle();
+      CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared;
       CeyxDecodePool.debugDecodeIntoAvailable = null;
     });
 
@@ -1380,28 +1384,37 @@ void main() {
     );
 
     test(
-      'TC-1092 (AC-4.2): a 5-element (old-worker) decode result materializes '
-      'appliedOrientation 1 without throwing',
+      'TC-1092 (AC-4.2, converted by S2/WP2.3): a five-element decode result '
+      'on the POOLED route materializes appliedOrientation 1 without throwing',
       () async {
-        // fakePointerPoolWorker's `fixed:` route replies with the pre-Task-4
-        // 5-element shape ([address, width, height, decodeMs, processMs]) and
-        // does not require the pooled statics set up by this group's setUp —
-        // it exercises the UNPOOLED route deliberately, since an "old worker"
-        // is exactly the fallback that must keep working.
-        CeyxDecodePool.nativeBufferPool?.debugDisposeIdle();
-        CeyxDecodePool.nativeBufferPool = null;
-        CeyxDecodePool.debugDecodeIntoAvailable = null;
-        pool = CeyxDecodePool(width: 1, entryPoint: fakePointerPoolWorker);
-        final buf = calloc<Uint8>(2 * 2 * 4);
-        try {
-          final image = await pool.decode(
-            'fixed:${buf.address}:2:2',
-            exifOrientation: 6,
-          );
-          expect(image.appliedOrientation, equals(1));
-        } finally {
-          calloc.free(buf);
-        }
+        // S2 conversion note. This case used to force the UNPOOLED route by
+        // clearing the pool static, which decision D2 makes unrepresentable. It is CONVERTED rather than deleted because the
+        // length-5 default it pins is still live production behaviour: the
+        // pooled unoriented arm replies with exactly five elements, so
+        // `_materialize`'s `payload.length > 5 ? payload[5] : 1` guard still
+        // has a real caller. The pre-check Part B demanded found that TC-1091
+        // above asserts only the dispatched MESSAGE lengths and the smuggled
+        // index-8 value — it never reads `appliedOrientation` — so deleting
+        // this case would have left the identity default uncovered.
+        //
+        // `orientationWirePoolWorker` always replies with five payload
+        // elements; requesting orientation 1 keeps the dispatch on the plain
+        // pooled shape, so the reply address is the pool-owned slot address.
+        pool = CeyxDecodePool(width: 1, entryPoint: orientationWirePoolWorker);
+        final image = await pool.decode(
+          'orient_wire_length_five.dng',
+          exifOrientation: 1,
+        );
+        expect(image.appliedOrientation, equals(1));
+        // The wrap site accepted the address, i.e. the pool owned it: an
+        // unowned address now throws StateError instead of leaking.
+        expect(image.nativeAddress, isNot(equals(0)));
+        // Returned, not leaked. NOT asserted against
+        // `debugTotalLiveAddresses`: that counter is process-wide and the
+        // sibling cases in this group hold checkouts of their own, so a zero
+        // there would be an assertion about the whole group's bookkeeping
+        // rather than about this decode.
+        image.releaseToPool();
       },
     );
 

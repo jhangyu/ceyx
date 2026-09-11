@@ -25,6 +25,31 @@ void main() {
   // AC7.1 / AC7.2 — reuse, not reallocation; explicit releases counted and
   // the safety-net finalizer never involved.
   // -------------------------------------------------------------------
+  // S3.0 attribution support: the byte sum behind the address gauge.
+  test(
+    'the live buffer byte total sums checked-out capacity and excludes '
+    'released buffers',
+    () async {
+      final pool = CeyxNativeBufferPool(maxBuffers: 4);
+      addTearDown(pool.debugDisposeIdle);
+      expect(pool.debugLiveBufferByteTotal, 0);
+
+      final first = await pool.acquire(1024);
+      final second = await pool.acquire(2048);
+      // Capacity, not the requested size: a reused slot can be wider than the
+      // request, and a memory ledger is asking what the memory costs.
+      expect(
+        pool.debugLiveBufferByteTotal,
+        equals(first.capacity + second.capacity),
+      );
+
+      pool.release(first);
+      expect(pool.debugLiveBufferByteTotal, equals(second.capacity));
+      pool.release(second);
+      expect(pool.debugLiveBufferByteTotal, 0);
+    },
+  );
+
   test(
     'TC-1060: a pooled buffer is reused, not reallocated',
     () async {
@@ -226,7 +251,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 1);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
 
       final slot = await buffers.acquire(2 * 2 * 4);
       final pool = CeyxDecodePool(width: 1, entryPoint: _addressWorker);
@@ -277,7 +302,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
 
@@ -325,7 +350,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
 
@@ -390,7 +415,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       CeyxDecodePool.debugNativeFree =
           (address) => calloc.free(Pointer<Uint8>.fromAddress(address));
@@ -454,7 +479,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
 
@@ -492,7 +517,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = false;
       addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
       // The degraded route makes the WORKER own its allocation, exactly as in
@@ -536,7 +561,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
 
@@ -578,7 +603,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       addTearDown(() => CeyxDecodePool.debugDecodeIntoAvailable = null);
 
@@ -637,7 +662,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(buffers.debugDisposeIdle);
       CeyxDecodePool.nativeBufferPool = buffers;
-      addTearDown(() => CeyxDecodePool.nativeBufferPool = null);
+      addTearDown(() => CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared);
       // Availability is TRUE: an OFF build still EXPORTS both symbols.
       CeyxDecodePool.debugDecodeIntoAvailable = true;
       CeyxDecodePool.debugNativeFree =

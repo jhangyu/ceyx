@@ -106,10 +106,6 @@ class ThrowingAcquirePool extends CeyxNativeBufferPool {
 
 void main() {
   tearDown(() {
-    // WP2 Task 2.4: the standing proof that no address reached the wrap site
-    // unowned by the pool — which is what makes deleting the dylib-free tail
-    // safe rather than merely plausible.
-    expect(CeyxDecodePool.debugUnownedWraps, 0);
     // WP2 Task 2.5: nothing may still be checked out anywhere on this isolate
     // when a test ends — the Dart-side replacement for the native
     // checked-out-count leak assertion.
@@ -127,7 +123,7 @@ void main() {
 
   tearDown(() async {
     await pool.dispose();
-    CeyxDecodePool.nativeBufferPool?.debugDisposeIdle();
+    CeyxDecodePool.nativeBufferPool.debugDisposeIdle();
     CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared;
     CeyxNativeBufferPool.debugFreeHook = null;
     CeyxDecodePool.debugDecodeIntoAvailable = null;
@@ -136,7 +132,7 @@ void main() {
   /// The single assertion every degradation path shares: the photo opened, and
   /// the address it opened onto is owned and reclaimable by the Dart pool.
   void expectServedByAdoption(DngImage image) {
-    final buffers = CeyxDecodePool.nativeBufferPool!;
+    final buffers = CeyxDecodePool.nativeBufferPool;
     expect(image.width, 2);
     expect(image.height, 2);
     expect(
