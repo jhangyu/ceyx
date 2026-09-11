@@ -31,6 +31,10 @@
 #define CEYX_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #endif
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>  // malloc_zone_pressure_relief
+#endif
+
 namespace {
 // R4 (gpu-copy-elimination campaign): the ONE physical alignment constant the
 // pool allocator, the arena (raw_persistent_device_arena.h) and the
@@ -79,6 +83,18 @@ CEYX_FFI_EXPORT void ceyx_pool_aligned_free(void *ptr) {
   _aligned_free(ptr);
 #else
   free(ptr);
+#endif
+}
+
+// Pool idle-shrink campaign: zone-wide sweep, see ceyx_decode_into.h for the
+// full contract. macOS-only mechanism (probe: ceyx/tmp/free-probe/verdict.md);
+// every other platform reports kCeyxPressureReliefUnsupported rather than a
+// fabricated 0-bytes-relieved.
+CEYX_FFI_EXPORT int64_t ceyx_pool_pressure_relief(void) {
+#if defined(__APPLE__)
+  return static_cast<int64_t>(malloc_zone_pressure_relief(nullptr, 0));
+#else
+  return kCeyxPressureReliefUnsupported;
 #endif
 }
 

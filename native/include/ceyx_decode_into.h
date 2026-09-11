@@ -119,6 +119,27 @@ void *ceyx_pool_aligned_alloc(size_t byte_count);
 /// elsewhere).
 void ceyx_pool_aligned_free(void *ptr);
 
+/// Pool idle-shrink campaign (2026-09-12): forces the allocator to release
+/// any freed-but-cached large blocks back to the OS, so a shrink batch of
+/// `ceyx_pool_aligned_free` calls actually drops process RSS instead of
+/// leaving pages parked in the allocator's reusable cache (probe evidence:
+/// ceyx/tmp/free-probe/verdict.md -- plain free() alone left ~32% of freed
+/// bytes resident as MALLOC_LARGE_REUSABLE on macOS). Call ONCE after a
+/// shrink batch completes, not per-free -- it is a zone-wide sweep, not a
+/// per-pointer operation, and `ptr`/`byte_count` play no part in it.
+///
+/// macOS: wraps `malloc_zone_pressure_relief(NULL, 0)` and returns the
+/// number of bytes the allocator reports as relieved (may be 0 if nothing
+/// was cached -- that is a normal "nothing to relieve" outcome, not a
+/// failure).
+/// Every other platform: no known equivalent exists (this pair's own
+/// probe was macOS-only; see verdict.md's platform note), so this is a
+/// documented no-op that returns kCeyxPressureReliefUnsupported rather than
+/// silently claiming 0 bytes were relieved -- 0 must stay distinguishable
+/// from "relieved nothing on a platform where relief actually ran".
+enum { kCeyxPressureReliefUnsupported = -1 };
+int64_t ceyx_pool_pressure_relief(void);
+
 #ifdef __cplusplus
 }
 #endif
