@@ -9,7 +9,7 @@ import 'package:ceyx/ceyx.dart';
 // ownership (plan A2.13), and the `show` keeps the import unambiguous against
 // the barrel above. Precedent: encode_service_test.dart:8.
 import 'package:ceyx/src/decode_pool.dart' show kMsgResize;
-import 'package:ffi/ffi.dart' show calloc;
+import 'package:ffi/ffi.dart' show calloc, malloc;
 import 'package:flutter_test/flutter_test.dart';
 
 /// WP6 Step 7.1-7.3: the fixed-slot native buffer pool.
@@ -712,6 +712,399 @@ void main() {
       expect(freed, isEmpty);
     },
   );
+
+  // -------------------------------------------------------------------
+  // AC-S1 (pool idle-shrink campaign) — shrink to floor after a quiet
+  // window, with hysteresis, never touching a checked-out buffer.
+  //
+  // Time is INJECTED (`CeyxNativeBufferPool.debugClock` + a manual timer
+  // factory): a test that slept through the real 5s window would assert the
+  // wall clock, not the policy.
+  // -------------------------------------------------------------------
+  group('AC-S1 idle shrink', () {
+    late DateTime fakeNow;
+
+    setUp(() {
+      fakeNow = DateTime.utc(2026, 9, 12, 12);
+      CeyxNativeBufferPool.debugClock = () => fakeNow;
+      CeyxNativeBufferPool.debugPressureReliefOverride = null;
+    });
+
+    tearDown(() {
+      CeyxNativeBufferPool.debugClock = DateTime.now;
+      CeyxNativeBufferPool.debugPressureReliefOverride = null;
+    });
+
+    /// Brings [pool] to `count` idle pooled buffers by checking them all out
+    /// at once (so the pool must really allocate `count` slots) and returning
+    /// them.
+    Future<void> fillIdle(CeyxNativeBufferPool pool, int count) async {
+      final held = <CeyxNativeBuffer>[];
+      for (var i = 0; i < count; i++) {
+        held.add(await pool.acquire(4096));
+      }
+      for (final b in held) {
+        pool.release(b);
+      }
+    }
+
+    test('TC-1250: shrink frees idle buffers down to the floor, once', () async {
+      var reliefCalls = 0;
+      CeyxNativeBufferPool.debugPressureReliefOverride = () {
+        reliefCalls++;
+        return 0;
+      };
+      final pool = CeyxNativeBufferPool(maxBuffers: 6, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 6);
+      expect(pool.debugIdleCount, 6);
+
+      final freed = pool.shrinkToFloor();
+
+      expect(freed, 4);
+      expect(pool.debugIdleCount, 2);
+      expect(pool.debugLiveBuffers, 2);
+      expect(pool.debugShrinkEvents, 1);
+      expect(pool.debugBuffersFreedByShrink, 4);
+      // EXACTLY once per batch, not once per freed buffer.
+      expect(reliefCalls, 1);
+      expect(pool.debugPressureReliefCalls, 1);
+
+      // Already at the floor: a second call frees nothing and is not an event.
+      expect(pool.shrinkToFloor(), 0);
+      expect(pool.debugShrinkEvents, 1);
+      expect(reliefCalls, 1);
+    });
+
+    test('TC-1251: a shrink never frees a checked-out buffer', () async {
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      final held = await pool.acquire(4096);
+      addTearDown(() => pool.release(held));
+
+      final freed = pool.shrinkToFloor();
+
+      // Refused outright: something is checked out, and a worker isolate may
+      // still be writing into it.
+      expect(freed, 0);
+      expect(pool.debugShrinkRefusals, 1);
+      expect(pool.debugShrinkEvents, 0);
+      expect(pool.debugLiveBuffers, 4);
+      expect(pool.debugLiveAddresses, contains(held.address));
+      expect(held.released, isFalse);
+    });
+
+    test('TC-1260: an adopted buffer counts as outstanding and blocks a shrink',
+        () async {
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      // The worker-allocated escape hatch: not pooled, occupies no slot, but
+      // it IS live RGBA a DngImage is still reading. Agreed ruling: strict —
+      // it counts as outstanding for both quiescence and the shrink guard.
+      final adopted = pool.adoptUnpooled(malloc<Uint8>(4096).address, 4096);
+      expect(pool.hasOutstandingCheckouts, isTrue);
+
+      expect(pool.shrinkToFloor(), 0);
+      expect(pool.debugShrinkRefusals, 1);
+      expect(pool.debugIdleCount, 4);
+
+      pool.release(adopted); // frees it: unpooled buffers are not idled
+      expect(pool.hasOutstandingCheckouts, isFalse);
+      expect(pool.shrinkToFloor(), 2);
+    });
+
+    test('TC-1261: every shrink batch either calls the relief or records a skip',
+        () async {
+      // Environment-independent: whether this host resolves the dylib decides
+      // WHICH counter moves, but exactly one of them must move, exactly once.
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+
+      expect(pool.shrinkToFloor(), 2);
+
+      expect(pool.debugPressureReliefCalls + pool.debugPressureReliefSkips, 1);
+    });
+
+    test('TC-1252: a shrink refuses while a waiter is queued', () async {
+      final pool = CeyxNativeBufferPool(maxBuffers: 2, idleFloor: 1);
+      addTearDown(pool.debugDisposeIdle);
+      final a = await pool.acquire(4096);
+      final b = await pool.acquire(4096);
+      final pending = pool.acquire(4096); // no slot: queues a waiter
+      expect(pool.debugWaiterCount, 1);
+
+      expect(pool.shrinkToFloor(), 0);
+      expect(pool.debugShrinkRefusals, 1);
+
+      pool.release(a);
+      final served = await pending;
+      pool.release(served);
+      pool.release(b);
+    });
+
+    test('TC-1253: demand regrows the pool to the cap after a shrink', () async {
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      expect(pool.shrinkToFloor(), 2);
+      expect(pool.debugLiveBuffers, 2);
+
+      final held = <CeyxNativeBuffer>[];
+      for (var i = 0; i < 4; i++) {
+        held.add(await pool.acquire(4096));
+      }
+      // Regrew to the cap with no waiting and no unpooled escape.
+      expect(pool.debugLiveBuffers, 4);
+      expect(pool.debugWaitsForCapacity, 0);
+      expect(pool.debugUnpooledAllocations, 0);
+      for (final b in held) {
+        pool.release(b);
+      }
+    });
+
+    test('TC-1254: a shrink invalidates the warm-up memo', () async {
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await pool.warmUpFor(4096);
+      expect(pool.debugWarmedBytes, 4096);
+      await fillIdle(pool, 4);
+
+      expect(pool.shrinkToFloor(), 2);
+
+      // The warmed pages went with the freed buffer, so the memo must not
+      // keep claiming they are committed.
+      expect(pool.debugWarmedBytes, isNull);
+      final before = pool.debugAllocations;
+      await pool.warmUpFor(4096);
+      expect(pool.debugWarmedBytes, 4096);
+      expect(pool.debugAllocations, greaterThanOrEqualTo(before));
+    });
+
+    test('TC-1255: the policy shrinks only after a full quiet window', () async {
+      final scheduler = _FakeTimerScheduler();
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      final policy = CeyxPoolShrinkPolicy(
+        pool,
+        quietWindow: const Duration(seconds: 5),
+        timerFactory: scheduler.create,
+      );
+      addTearDown(policy.dispose);
+
+      // Nothing armed until quiescence is asserted.
+      expect(policy.debugArmed, isFalse);
+      expect(pool.debugShrinkEvents, 0);
+
+      policy.onQuiescenceChanged(true);
+      expect(policy.debugArmed, isTrue);
+      expect(scheduler.last.duration, const Duration(seconds: 5));
+      // Window not elapsed yet: still no shrink.
+      expect(pool.debugShrinkEvents, 0);
+      expect(pool.debugIdleCount, 4);
+
+      fakeNow = fakeNow.add(const Duration(seconds: 5));
+      scheduler.fireLast();
+
+      expect(pool.debugShrinkEvents, 1);
+      expect(pool.debugIdleCount, 2);
+    });
+
+    test('TC-1256: activity during the window cancels the pending shrink',
+        () async {
+      final scheduler = _FakeTimerScheduler();
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      final policy = CeyxPoolShrinkPolicy(
+        pool,
+        quietWindow: const Duration(seconds: 5),
+        timerFactory: scheduler.create,
+      );
+      addTearDown(policy.dispose);
+
+      policy.onQuiescenceChanged(true);
+      final armed = scheduler.last;
+      policy.onQuiescenceChanged(false); // a decode started
+      expect(armed.isActive, isFalse);
+      expect(policy.debugArmed, isFalse);
+
+      // Even if a stale timer callback arrives, the shrink must not run.
+      // The clock is advanced FIRST so every other guard (the grow-restart
+      // window, the lockout) is satisfied and the only thing that can stop
+      // the shrink is the quiescence state itself — otherwise this assertion
+      // passes for a reason it is not testing (mutation M6 survived exactly
+      // that way).
+      fakeNow = fakeNow.add(const Duration(seconds: 30));
+      armed.forceFire();
+      expect(pool.debugShrinkEvents, 0);
+
+      // The window is CONTINUOUS: quiescence must restart it from scratch.
+      policy.onQuiescenceChanged(true);
+      expect(scheduler.last.duration, const Duration(seconds: 5));
+    });
+
+    test('TC-1257: a grow inside the window restarts it from the grow',
+        () async {
+      final scheduler = _FakeTimerScheduler();
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      final policy = CeyxPoolShrinkPolicy(
+        pool,
+        quietWindow: const Duration(seconds: 5),
+        timerFactory: scheduler.create,
+      );
+      addTearDown(policy.dispose);
+
+      policy.onQuiescenceChanged(true);
+      // 3s in, something allocated (warm-up, or a decode that came and went
+      // without the signal ever being observed false).
+      fakeNow = fakeNow.add(const Duration(seconds: 3));
+      // Bigger than the idle buffers' capacity (4096 rounds up to the 16384
+      // alignment), so this really ALLOCATES instead of reusing — a reuse is
+      // not a grow and would not move the hysteresis timestamp.
+      await pool.warmUpFor(32768);
+      fakeNow = fakeNow.add(const Duration(seconds: 2));
+      scheduler.fireLast();
+
+      // 5s of clock, but only 2s since the grow: rearmed for the remainder,
+      // no shrink yet.
+      expect(pool.debugShrinkEvents, 0);
+      expect(policy.debugArmed, isTrue);
+      expect(scheduler.last.duration, const Duration(seconds: 3));
+
+      fakeNow = fakeNow.add(const Duration(seconds: 3));
+      scheduler.fireLast();
+      expect(pool.debugShrinkEvents, 1);
+    });
+
+    test('TC-1258: after a shrink, no re-shrink within the grow lockout',
+        () async {
+      final scheduler = _FakeTimerScheduler();
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 1);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      // quietWindow deliberately SHORTER than the lockout, so the lockout is
+      // the binding rule and is observed on its own.
+      final policy = CeyxPoolShrinkPolicy(
+        pool,
+        quietWindow: const Duration(milliseconds: 100),
+        growLockout: const Duration(seconds: 1),
+        timerFactory: scheduler.create,
+      );
+      addTearDown(policy.dispose);
+
+      policy.onQuiescenceChanged(true);
+      fakeNow = fakeNow.add(const Duration(seconds: 30));
+      scheduler.fireLast();
+      expect(pool.debugShrinkEvents, 1);
+      expect(pool.debugIdleCount, 1);
+
+      // Demand regrows the pool, then the app goes quiet again immediately.
+      // TWO concurrent checkouts, because the pool is back at its floor of 1:
+      // the first acquire reuses the surviving buffer (not a grow), the second
+      // is the real allocation.
+      final first = await pool.acquire(4096);
+      final second = await pool.acquire(4096);
+      pool.release(first);
+      pool.release(second);
+      policy.onQuiescenceChanged(false);
+      policy.onQuiescenceChanged(true);
+      fakeNow = fakeNow.add(const Duration(milliseconds: 100));
+      scheduler.fireLast();
+
+      // Quiet window satisfied, but only 100ms since the grow: refused and
+      // rearmed for the remaining lockout.
+      expect(pool.debugShrinkEvents, 1);
+      expect(scheduler.last.duration, const Duration(milliseconds: 900));
+
+      fakeNow = fakeNow.add(const Duration(milliseconds: 900));
+      scheduler.fireLast();
+      expect(pool.debugShrinkEvents, 2);
+    });
+
+    test('TC-1259: a false quiescence re-check at fire time vetoes the shrink',
+        () async {
+      final scheduler = _FakeTimerScheduler();
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 4);
+      var quiescentNow = false;
+      final policy = CeyxPoolShrinkPolicy(
+        pool,
+        quietWindow: const Duration(seconds: 5),
+        timerFactory: scheduler.create,
+        isQuiescentNow: () => quiescentNow,
+      );
+      addTearDown(policy.dispose);
+
+      policy.onQuiescenceChanged(true);
+      fakeNow = fakeNow.add(const Duration(seconds: 5));
+      scheduler.fireLast();
+      // The pushed signal said quiet, the authoritative source says otherwise:
+      // the decode pool wins.
+      expect(pool.debugShrinkEvents, 0);
+      expect(pool.debugIdleCount, 4);
+
+      quiescentNow = true;
+      policy.onQuiescenceChanged(false);
+      policy.onQuiescenceChanged(true);
+      fakeNow = fakeNow.add(const Duration(seconds: 5));
+      scheduler.fireLast();
+      expect(pool.debugShrinkEvents, 1);
+    });
+  });
+}
+
+/// A [Timer] the test fires by hand, so the 5s/1s windows are asserted as
+/// policy rather than as elapsed wall-clock time.
+class _FakeTimer implements Timer {
+  _FakeTimer(this.duration, this._callback);
+
+  final Duration duration;
+  final void Function() _callback;
+  bool _active = true;
+
+  @override
+  bool get isActive => _active;
+
+  @override
+  int get tick => 0;
+
+  @override
+  void cancel() => _active = false;
+
+  /// Normal expiry: a cancelled timer does nothing.
+  void fire() {
+    if (!_active) return;
+    _active = false;
+    _callback();
+  }
+
+  /// Delivers the callback EVEN IF cancelled — models the real
+  /// already-queued-callback race, which the policy must survive.
+  void forceFire() {
+    _active = false;
+    _callback();
+  }
+}
+
+class _FakeTimerScheduler {
+  final List<_FakeTimer> timers = <_FakeTimer>[];
+
+  Timer create(Duration duration, void Function() callback) {
+    final timer = _FakeTimer(duration, callback);
+    timers.add(timer);
+    return timer;
+  }
+
+  _FakeTimer get last => timers.last;
+
+  void fireLast() => last.fire();
 }
 
 /// Stands in for the Step 7.4 worker: the RGBA output address is PRE-ACQUIRED

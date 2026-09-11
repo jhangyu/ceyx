@@ -35,7 +35,13 @@ class CeyxNativeBufferPool {
   CeyxNativeBufferPool({
     required this.maxBuffers,
     this.maxBufferBytes = _kDefaultMaxBufferBytes,
-  }) : assert(maxBuffers > 0, 'a pool with no slots is not a pool') {
+    int? idleFloor,
+  }) : idleFloor = idleFloor ?? maxBuffers,
+       assert(maxBuffers > 0, 'a pool with no slots is not a pool') {
+    assert(
+      this.idleFloor >= 0 && this.idleFloor <= maxBuffers,
+      'idleFloor must be within [0, maxBuffers]',
+    );
     _instances.add(WeakReference<CeyxNativeBufferPool>(this));
   }
 
@@ -57,11 +63,23 @@ class CeyxNativeBufferPool {
   /// Requests above this are served outside the pool.
   final int maxBufferBytes;
 
+  /// How many pooled buffers [shrinkToFloor] leaves behind. Defaults to
+  /// [maxBuffers], i.e. "never shrink" — every pre-existing construction of
+  /// this class keeps its old behaviour, and only the constructions that opt
+  /// in (the [shared] pool) can lose buffers to the idle shrink.
+  final int idleFloor;
+
   /// Process-wide instance. Sized to sit ABOVE the host's byte budget, so
   /// exhaustion is a backstop rather than the operating point:
   /// [debugWaitsForCapacity] > 0 in production means the two bounds disagree.
+  ///
+  /// `idleFloor: 2` is the idle-shrink campaign's user ruling: after 5s of
+  /// decode quiescence the 8 slots collapse to 2 (~192MB instead of ~771MB)
+  /// and demand regrows them for free through [acquireOrNull]'s
+  /// `_live < maxBuffers` branch.
   static final CeyxNativeBufferPool shared = CeyxNativeBufferPool(
     maxBuffers: 8,
+    idleFloor: 2,
   );
 
   /// Test seam: when set, every free this pool would perform routes here
@@ -70,6 +88,20 @@ class CeyxNativeBufferPool {
   /// `CeyxDecodePool.debugNativeFree`.
   @visibleForTesting
   static void Function(int address)? debugFreeHook;
+
+  /// Test seam for the wall clock the hysteresis timestamps are stamped with.
+  /// A test drives it forward explicitly rather than sleeping, so the 5s/1s
+  /// windows are asserted as logic, not as elapsed real time.
+  @visibleForTesting
+  static DateTime Function() debugClock = DateTime.now;
+
+  /// Test seam standing in for the native `ceyx_pool_pressure_relief` symbol
+  /// (macOS `malloc_zone_pressure_relief`) until the FFI binding lands. When
+  /// null, the binding is consulted; when the binding is also absent (a plain
+  /// Dart test process with no dylib) the relief is simply skipped — the
+  /// frees still happened, only the eager page return did not.
+  @visibleForTesting
+  static int Function()? debugPressureReliefOverride;
 
   // --- R4 (gpu-copy-elimination campaign): page-aligned pooled allocations --
   //
@@ -197,8 +229,21 @@ class CeyxNativeBufferPool {
   /// pool-owned instead of being freed behind the pool's back.
   final Map<int, CeyxNativeBuffer> _byAddress = <int, CeyxNativeBuffer>{};
 
+  int _checkedOut = 0;
+
+  /// Buffers currently checked out. Assignment is funnelled through this
+  /// setter so [onCheckoutChange] cannot be forgotten at one of the eight
+  /// sites that move it — a quiescence observer that misses one return is a
+  /// pool that never shrinks (or, worse, shrinks while borrowed).
   @visibleForTesting
-  int debugCheckedOut = 0;
+  int get debugCheckedOut => _checkedOut;
+
+  @visibleForTesting
+  set debugCheckedOut(int value) {
+    if (value == _checkedOut) return;
+    _checkedOut = value;
+    onCheckoutChange?.call();
+  }
 
   /// Round-1 review F1: how many times an explicit release disarmed a safety
   /// net. Asserted by the decode-side suites so "the release detaches" is a
@@ -279,8 +324,92 @@ class CeyxNativeBufferPool {
     return total;
   }
 
+  /// Shrink batches that actually freed something. A batch that found nothing
+  /// above the floor, or that refused because the pool was busy, does NOT
+  /// count — otherwise "the shrink fired" could not be distinguished from
+  /// "the shrink ran and did nothing".
+  @visibleForTesting
+  int debugShrinkEvents = 0;
+
+  @visibleForTesting
+  int debugBuffersFreedByShrink = 0;
+
+  /// Times the pressure-relief call actually reached a function (override or
+  /// binding). MUST be at most one per shrink batch.
+  @visibleForTesting
+  int debugPressureReliefCalls = 0;
+
+  /// Bytes the native relief reported reclaiming on its last call, or
+  /// [kCeyxPressureReliefUnsupported] (-1) on a platform/build without it.
+  /// Null before the first call that reached a function. A real 0 ("nothing
+  /// cached") stays distinguishable from -1 on purpose.
+  @visibleForTesting
+  int? debugLastPressureReliefResult;
+
+  /// Shrink batches that freed memory but found no relief symbol to call.
+  /// Non-zero on a release build means the dylib predates the symbol.
+  @visibleForTesting
+  int debugPressureReliefSkips = 0;
+
+  /// Shrink batches that refused because the pool was not idle
+  /// (`_waiting` non-empty or something still checked out).
+  @visibleForTesting
+  int debugShrinkRefusals = 0;
+
+  /// True while ANY buffer of this pool is checked out. The quiescence
+  /// predicate's buffer-side half: a borrowed buffer may still be written by a
+  /// worker isolate, so "no decode running" is not enough on its own.
+  ///
+  /// DERIVED from [_byAddress] (the same source as [debugLiveAddresses]),
+  /// deliberately NOT from the [debugCheckedOut] counter: two structures that
+  /// must agree eventually disagree, and this one gates freeing memory
+  /// somebody may be reading.
+  ///
+  /// RULING (agreed with the quiescence owner): adopted and oversize-unpooled
+  /// buffers COUNT as outstanding — no `pooled` filter here. Both register in
+  /// [_byAddress], both are live RGBA a `DngImage` is still reading, and an
+  /// in-flight degradation path is not "the app has stopped decoding".
+  /// [shrinkToFloor] would never free them anyway (it walks `_idle` only), but
+  /// quiescence is a broader signal than the shrink precondition, and the only
+  /// cost of being strict is that a shrink waits.
+  bool get hasOutstandingCheckouts =>
+      _byAddress.values.any((CeyxNativeBuffer b) => !b.released);
+
+  /// True while an acquirer is blocked waiting for capacity.
+  bool get hasWaiters => _waiting.isNotEmpty;
+
+  /// Notified whenever [debugCheckedOut] changes, so a quiescence observer
+  /// sees returns it cannot otherwise observe (a `DngImage.releaseToPool()`
+  /// never goes through the decode pool). Set by
+  /// `CeyxDecodePool`'s quiescence watch; null when nobody is watching.
+  void Function()? onCheckoutChange;
+
+  DateTime? _lastGrowAt;
+  DateTime? _lastShrinkAt;
+
+  /// When this pool last allocated a pooled buffer. The hysteresis rule
+  /// "after a grow, no shrink until a fresh quiet window" is enforced against
+  /// this by [CeyxPoolShrinkPolicy]; the pool only records the fact, it does
+  /// not hold policy (mirrors the mechanism/policy split `MemoryPressureTarget`
+  /// uses on the Halcyon side).
+  DateTime? get lastGrowAt => _lastGrowAt;
+
+  /// When [shrinkToFloor] last freed something.
+  DateTime? get lastShrinkAt => _lastShrinkAt;
+
+  /// The size [warmUpFor] last pre-committed, or null when the warm state has
+  /// been invalidated (including by a shrink). Test-visible so "the shrink
+  /// invalidated the warm" is a mechanical assertion.
+  @visibleForTesting
+  int? get debugWarmedBytes => _warmedBytes;
+
   @visibleForTesting
   int get debugIdleCount => _idle.length;
+
+  /// Live POOLED buffers (checked out + idle). Test-visible so a shrink's
+  /// effect on the bound is assertable without reaching into privates.
+  @visibleForTesting
+  int get debugLiveBuffers => _live;
 
   @visibleForTesting
   int get debugWaiterCount => _waiting.length;
@@ -522,6 +651,11 @@ class CeyxNativeBufferPool {
   }
 
   CeyxNativeBuffer _allocatePooled(int bytes) {
+    // Hysteresis input: any pooled allocation counts as a grow, including the
+    // resize-a-victim path (free one, allocate one). That path leaves `_live`
+    // unchanged, so calling it a grow is conservative — it delays a shrink,
+    // it never permits an early one.
+    _lastGrowAt = debugClock();
     _live++;
     debugAllocations++;
     debugCheckedOut++;
@@ -555,6 +689,82 @@ class CeyxNativeBufferPool {
     _freeAlignedOrMalloc(buffer.address, wasAligned: buffer.alignedAllocated);
   }
 
+  /// Releases idle pooled buffers until only [idleFloor] live pooled buffers
+  /// remain, and returns how many were freed.
+  ///
+  /// The production sibling of [debugDisposeIdle]: same traversal, same
+  /// refusal to touch anything checked out, but it stops at the floor and it
+  /// is safe to call on a live pool.
+  ///
+  /// REFUSES (frees nothing, returns 0) whenever the pool is not fully idle —
+  /// a queued waiter means someone is blocked on capacity this would destroy,
+  /// and a non-zero checkout means a decode may still be WRITING into a buffer
+  /// (workers run on other isolates and cannot see this free list, so
+  /// "it is on `_idle`" is the only safe predicate, and it is only safe when
+  /// nothing at all is outstanding).
+  ///
+  /// On a batch that freed something: invalidates the [warmUpFor] memo (the
+  /// warmed pages are gone with the buffer, so the next warm must really
+  /// re-commit) and calls the native pressure relief EXACTLY ONCE — plain
+  /// `free()` alone leaves an unpredictable reusable residue instead of
+  /// returning the pages (see the campaign's free-probe verdict).
+  int shrinkToFloor() {
+    // Reads the PRODUCTION predicates, not the `@visibleForTesting` counters:
+    // `hasOutstandingCheckouts` is derived from `_byAddress`, which is the
+    // authoritative ownership record, and the same two getters are what
+    // `CeyxDecodePool.isQuiescent` consults — one definition of "busy", not
+    // two that can drift.
+    if (hasWaiters || hasOutstandingCheckouts) {
+      debugShrinkRefusals++;
+      return 0;
+    }
+    var freed = 0;
+    while (_live > idleFloor && _idle.isNotEmpty) {
+      final victim = _idle.removeAt(0);
+      // Routed through _disposeBuffer so `_byAddress` stays the single owner
+      // and the finalizer generation guard's premise holds if this address is
+      // handed back by a later allocation.
+      _disposeBuffer(victim);
+      _live--;
+      freed++;
+    }
+    if (freed == 0) return 0;
+    _warmedBytes = null;
+    _lastShrinkAt = debugClock();
+    debugShrinkEvents++;
+    debugBuffersFreedByShrink += freed;
+    _pressureRelief();
+    return freed;
+  }
+
+  /// Deliberately does NOT fire [onCheckoutChange]: a shrink runs only when
+  /// nothing is checked out and frees only idle buffers, so the checked-out
+  /// set it reports is provably unchanged across the call. Firing anyway would
+  /// publish a quiescence "transition" that did not happen.
+  void _pressureRelief() {
+    final fn =
+        debugPressureReliefOverride ??
+        _resolveNativeBindings()?.ceyxPoolPressureRelief;
+    if (fn == null) {
+      // Silent in release BY DESIGN (an older dylib simply lacks the symbol;
+      // the frees still happened, only the eager page return did not), but a
+      // debug build says so — otherwise a shrink that returns far less RSS
+      // than expected looks identical to one that worked.
+      debugPressureReliefSkips++;
+      assert(() {
+        // ignore: avoid_print
+        print(
+          'CeyxNativeBufferPool: ceyx_pool_pressure_relief unavailable; '
+          'shrink freed memory but did not request an eager page return.',
+        );
+        return true;
+      }());
+      return;
+    }
+    debugLastPressureReliefResult = fn();
+    debugPressureReliefCalls++;
+  }
+
   /// Test-only: frees every idle buffer so a unit test leaves no native
   /// allocation behind. Checked-out buffers are NOT touched — freeing one would
   /// be the very use-after-free this pool exists to prevent.
@@ -567,6 +777,110 @@ class CeyxNativeBufferPool {
     _idle.clear();
   }
 }
+
+/// Creates the timer a [CeyxPoolShrinkPolicy] waits on. Injectable so a test
+/// drives the quiet window explicitly instead of sleeping through it.
+typedef PoolShrinkTimerFactory =
+    Timer Function(Duration duration, void Function() callback);
+
+/// Turns "the decoder has been quiet for a while" into
+/// [CeyxNativeBufferPool.shrinkToFloor].
+///
+/// Policy lives HERE, not in the pool: the pool knows how to free a buffer and
+/// when that is unsafe; it does not know what "idle" means. The quiescence
+/// signal is pushed in by whoever owns the decode queue (`CeyxDecodePool`),
+/// because a Halcyon-side queue-depth proxy cannot see a worker isolate that is
+/// still writing into a borrowed buffer — a false "quiescent" there is the
+/// frame-corruption path.
+class CeyxPoolShrinkPolicy {
+  CeyxPoolShrinkPolicy(
+    this.pool, {
+    this.quietWindow = kPoolShrinkQuietWindow,
+    this.growLockout = kPoolShrinkGrowLockout,
+    DateTime Function()? clock,
+    PoolShrinkTimerFactory? timerFactory,
+    bool Function()? isQuiescentNow,
+  }) : _clock = clock ?? (() => CeyxNativeBufferPool.debugClock()),
+       _timerFactory = timerFactory ?? Timer.new,
+       _isQuiescentNow = isQuiescentNow;
+
+  final CeyxNativeBufferPool pool;
+
+  /// How long quiescence must hold CONTINUOUSLY before a shrink fires.
+  final Duration quietWindow;
+
+  /// Minimum distance from the last grow before a pool that has ALREADY
+  /// shrunk once may shrink again. Guards the pathological oscillation where
+  /// demand regrows the pool and a stale quiet window immediately tears it
+  /// back down.
+  final Duration growLockout;
+
+  final DateTime Function() _clock;
+  final PoolShrinkTimerFactory _timerFactory;
+  final bool Function()? _isQuiescentNow;
+
+  bool _quiescent = false;
+  Timer? _timer;
+
+  @visibleForTesting
+  bool get debugArmed => _timer != null;
+
+  /// Level-triggered sink for the decode-side quiescence signal. Repeated
+  /// identical values are ignored, so the producer may re-assert freely; a
+  /// transition to false cancels any pending shrink outright (the window must
+  /// be CONTINUOUS, not cumulative).
+  void onQuiescenceChanged(bool quiescent) {
+    if (quiescent == _quiescent) return;
+    _quiescent = quiescent;
+    if (quiescent) {
+      _arm(quietWindow);
+    } else {
+      _cancel();
+    }
+  }
+
+  void _arm(Duration duration) {
+    _timer?.cancel();
+    _timer = _timerFactory(duration, _onWindowElapsed);
+  }
+
+  void _cancel() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void _onWindowElapsed() {
+    _timer = null;
+    if (!_quiescent) return;
+    // Re-confirm synchronously at fire time: a missed "false" edge would
+    // otherwise let a shrink run against a live decode.
+    if (_isQuiescentNow?.call() == false) return;
+
+    final grewAt = pool.lastGrowAt;
+    if (grewAt != null) {
+      final sinceGrow = _clock().difference(grewAt);
+      // After a grow, the quiet window restarts from the grow.
+      if (sinceGrow < quietWindow) {
+        _arm(quietWindow - sinceGrow);
+        return;
+      }
+      // After a shrink, no re-shrink within `growLockout` of a grow.
+      if (pool.lastShrinkAt != null && sinceGrow < growLockout) {
+        _arm(growLockout - sinceGrow);
+        return;
+      }
+    }
+    pool.shrinkToFloor();
+  }
+
+  void dispose() => _cancel();
+}
+
+/// Contract constant: 5s of continuous decode quiescence before a shrink.
+const Duration kPoolShrinkQuietWindow = Duration(seconds: 5);
+
+/// Contract constant: once shrunk, no re-shrink within 1s of a grow.
+const Duration kPoolShrinkGrowLockout = Duration(seconds: 1);
 
 /// One native allocation handed out by [CeyxNativeBufferPool].
 class CeyxNativeBuffer {
