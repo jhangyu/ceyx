@@ -667,23 +667,40 @@ def main() -> int:
     native_needed = args.target != "none" and not args.build_web_app
     flutter_idle_timeout_sec = max(args.idle_timeout_sec, 300)
     if native_needed and not args.skip_configure:
-        # R2.5-T6 (R1 parking item): a tree that is already configured (a
-        # prior successful cmake generation left CMakeCache.txt behind) does
-        # not need -DCMAKE_PREFIX_PATH re-supplied -- CMake persists it in
-        # the cache. Re-running `cmake -S -B` there is a cheap
-        # re-generation check, not a fresh configure, so it must not
-        # hard-fail on a missing vcpkg install it does not actually need.
-        # Smallest honest fix: only enforce the vcpkg precheck when there is
-        # no existing cache, i.e. when configure will do real work. If the
-        # cached tree turns out to be stale and genuinely needs vcpkg, the
-        # cmake command itself fails below and that failure is not swallowed.
+        # R2.5-T6 (R1 parking item): a tree that is already configured (a prior
+        # successful cmake generation left CMakeCache.txt behind) must not
+        # HARD-FAIL on a missing vcpkg install it does not actually need --
+        # re-running `cmake -S -B` there is a cheap re-generation check, not a
+        # fresh configure. That softening is preserved below: an unresolvable
+        # prefix is fatal only when there is no cache.
+        #
+        # 2026-09-12 CI fix: what R2.5-T6 must NOT do is *drop* the resolved
+        # -DCMAKE_PREFIX_PATH whenever a cache exists. CMake does persist the
+        # variable, but a CMakeCache.txt restored from an actions/cache entry
+        # was not necessarily written by a run that had the prefix, and a cache
+        # that lacks it lets find_package(WebP CONFIG) fall through to whatever
+        # else is on the system (on the macOS x86_64 leg: Homebrew's arm64
+        # webp, producing an x86_64 link failure). Re-supplying the arg on an
+        # already-configured tree is a no-op, so it is always passed when a
+        # prefix resolves.
         cmake_cache_exists = (build_dir / "CMakeCache.txt").exists()
-        if cmake_cache_exists:
+        resolved_vcpkg_prefix_arg = resolve_vcpkg_prefix_cmake_arg(native_dir)
+        if resolved_vcpkg_prefix_arg is None:
+            if not cmake_cache_exists:
+                return 1
+            # Cached tree, no resolvable prefix: proceed and let the cmake
+            # command below fail on its own if the cache is genuinely stale.
+            # The resolver already printed its [ERROR] block; say plainly that
+            # it is not fatal here, so the log does not read as a failure.
+            print(
+                "[INFO] The vcpkg-prefix error above is NOT fatal: "
+                f"{build_dir}/CMakeCache.txt exists, so this is a "
+                "re-generation check and CMake reuses the cached "
+                "CMAKE_PREFIX_PATH.",
+                file=sys.stderr,
+            )
             vcpkg_prefix_arg: list[str] = []
         else:
-            resolved_vcpkg_prefix_arg = resolve_vcpkg_prefix_cmake_arg(native_dir)
-            if resolved_vcpkg_prefix_arg is None:
-                return 1
             vcpkg_prefix_arg = resolved_vcpkg_prefix_arg
         # Perf fix (2026-07-04): explicit Release even though CMakeLists.txt now
         # defaults to it, so this stays correct if the cache already pinned a

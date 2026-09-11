@@ -11,9 +11,13 @@
 // raw_persistent_device_arena_allocation_count() below.
 //
 // LANE SCOPE (plan §2.1 Candidate A, §8.2 hazard 1): one arena per lane, keyed
-// on reinterpret_cast<uintptr_t>(pthread_self()) — the same derivation
-// dng_metal_context.cpp:220 uses for the sticky Metal queue key, and the same
-// one the C3 render-parameter cache already uses. Because the queue is bound to
+// on the calling thread's identity — on Apple that is bit-for-bit
+// reinterpret_cast<uintptr_t>(pthread_self()), the same derivation
+// dng_metal_context.cpp uses for the sticky Metal queue key, and the same one
+// the C3 render-parameter cache already uses (it calls this module). On Windows
+// the key is GetCurrentThreadId() instead, because clang-cl has no pthread at
+// all; that branch never coexists with Metal, so the invariant it would have to
+// preserve does not apply there. Because the queue is bound to
 // the thread and never rebound, keying the arena on the thread makes
 // arena-to-queue a 1:1 correspondence BY CONSTRUCTION rather than by review: a
 // region can never be written by a kernel on one queue while being read by a
@@ -74,8 +78,12 @@ struct halide_buffer_t;
 
 namespace ceyx {
 
-// Lane identity, derived exactly as dng_metal_context.cpp:220 derives the
-// sticky-queue key: reinterpret_cast<uintptr_t>(pthread_self()).
+// Lane identity. On POSIX targets it is the object representation of
+// pthread_self(), which for Apple's pointer-typed pthread_t is the exact value
+// dng_metal_context.cpp derives for its sticky-queue key
+// (reinterpret_cast<uintptr_t>(pthread_self())); on Windows it is
+// GetCurrentThreadId(). See the derivation's comment in
+// src/pipeline/raw_persistent_device_arena.cpp.
 using RawDecodeLaneIdentifier = uintptr_t;
 
 RawDecodeLaneIdentifier raw_persistent_device_arena_current_lane_identifier();

@@ -25,9 +25,10 @@
 //
 // LANE SCOPE (plan §5.2, §8.2 hazard 1): the cache is per lane, keyed on the
 // lane identifier C1's arena publishes
-// (raw_persistent_device_arena_current_lane_identifier(), itself
-// reinterpret_cast<uintptr_t>(pthread_self()) — the same derivation
-// dng_metal_context.cpp:220 uses for the sticky queue key), so cache identity,
+// (raw_persistent_device_arena_current_lane_identifier(), which on Apple is
+// value-identical to the reinterpret_cast<uintptr_t>(pthread_self()) that
+// dng_metal_context.cpp uses for the sticky queue key; see that function's own
+// comment for the Windows branch), so cache identity,
 // arena identity and queue identity cannot disagree by construction. A lane is
 // single-threaded, so the per-lane cache itself needs no synchronisation; only
 // the lane map does, and that lock is never held across GPU work.

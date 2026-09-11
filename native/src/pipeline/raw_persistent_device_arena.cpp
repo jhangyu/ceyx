@@ -24,10 +24,19 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 
+// Lane identity needs the platform's own thread-identity call. POSIX has
+// pthread_self(); Windows (clang-cl) has no <pthread.h> at all, so it uses
+// GetCurrentThreadId(). See raw_persistent_device_arena_current_lane_identifier()
+// below for why the two derivations are interchangeable here.
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <pthread.h>
+#endif
 
 #include "dng_pipeline_config.h"
 
@@ -111,10 +120,32 @@ std::atomic<size_t> g_configured_lane_count{0};
 }  // namespace
 
 RawDecodeLaneIdentifier raw_persistent_device_arena_current_lane_identifier() {
-  // Same derivation as dng_metal_context.cpp:220's sticky-queue key, so arena
+  // On Apple this must stay VALUE-IDENTICAL to dng_metal_context.cpp:475/541's
+  // sticky-queue key (reinterpret_cast<uintptr_t>(pthread_self())), so arena
   // identity and queue identity cannot disagree (plan §8.2 hazard 1). The C3
-  // render-parameter cache derives its lane key identically.
-  return reinterpret_cast<RawDecodeLaneIdentifier>(pthread_self());
+  // render-parameter cache derives its lane key by calling this function.
+  //
+  // PLATFORM SHAPE: reinterpret_cast is only legal here when pthread_t is a
+  // pointer type (Apple, glibc). On bionic pthread_t is `long`, an
+  // integral-to-integral reinterpret_cast, which is ill-formed; on Windows
+  // there is no pthread_t at all. So:
+  //   - Windows: the OS thread id, an integer already.
+  //   - Everything else: the object representation of pthread_self() copied
+  //     into the identifier. For a pointer-typed pthread_t that is bit-for-bit
+  //     the same value the reinterpret_cast produced, which is what preserves
+  //     the Apple invariant above; for an integral pthread_t it is the value
+  //     itself. Either way the only property the arena needs holds: distinct
+  //     live threads get distinct identifiers.
+#if defined(_WIN32)
+  return static_cast<RawDecodeLaneIdentifier>(::GetCurrentThreadId());
+#else
+  pthread_t self = pthread_self();
+  static_assert(sizeof(self) <= sizeof(RawDecodeLaneIdentifier),
+                "pthread_t must fit in RawDecodeLaneIdentifier");
+  RawDecodeLaneIdentifier identifier = 0;
+  std::memcpy(&identifier, &self, sizeof(self));
+  return identifier;
+#endif
 }
 
 uint64_t raw_persistent_device_arena_allocation_count() {
