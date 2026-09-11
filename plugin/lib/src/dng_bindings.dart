@@ -198,6 +198,21 @@ typedef CeyxDecodeIntoBufferOrientedDart =
       int exifOrientation,
     );
 
+// R4 (gpu-copy-elimination campaign): page-aligned allocator pair backing
+// CeyxNativeBufferPool's POOLED allocations (native/include/ceyx_decode_into.h
+// has the full contract). ADDITIVE — absent from every dylib built before
+// this campaign's Round 4, so the lookup MUST be guarded like every other
+// group above; a pool built against an older dylib falls back to ordinary
+// `malloc`, which keeps decoding correct and only forgoes the zero-copy wrap.
+typedef CeyxPoolAlignedAllocNative =
+    ffi.Pointer<ffi.Uint8> Function(ffi.Size byteCount);
+typedef CeyxPoolAlignedAllocDart =
+    ffi.Pointer<ffi.Uint8> Function(int byteCount);
+
+typedef CeyxPoolAlignedFreeNative =
+    ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
+typedef CeyxPoolAlignedFreeDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
+
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
@@ -252,6 +267,13 @@ class DngNativeBindings {
   // Native-rotation spec Task 3: guarded PER-SYMBOL, independent of the pair
   // above — see the typedef comment for why this must not be folded in.
   CeyxDecodeIntoBufferOrientedDart? _ceyxDecodeIntoBufferOriented;
+
+  // R4 (gpu-copy-elimination campaign): the pool's aligned allocator pair.
+  // Null TOGETHER, same rule as the WP10 pair above — they ship in one commit,
+  // and a dylib exposing an aligned alloc without a matching free (or vice
+  // versa) is a corrupt build, not a degraded one.
+  CeyxPoolAlignedAllocDart? _ceyxPoolAlignedAlloc;
+  CeyxPoolAlignedFreeDart? _ceyxPoolAlignedFree;
 
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
@@ -316,6 +338,19 @@ class DngNativeBindings {
   /// Guarded access to the R4 WP10 decode-into-caller-buffer entry. Null when
   /// the loaded dylib predates the entry. Format-agnostic, as above.
   CeyxDecodeIntoBufferDart? get ceyxDecodeIntoBuffer => _ceyxDecodeIntoBuffer;
+
+  /// Guarded access to the R4 page-aligned pool allocator. Null when the
+  /// loaded dylib predates it — `CeyxNativeBufferPool` falls back to ordinary
+  /// `malloc` in that case (see native/include/ceyx_decode_into.h).
+  CeyxPoolAlignedAllocDart? get ceyxPoolAlignedAlloc => _ceyxPoolAlignedAlloc;
+
+  /// Guarded access to the matching aligned free. Always non-null exactly
+  /// when [ceyxPoolAlignedAlloc] is (see the constructor's shared try block).
+  CeyxPoolAlignedFreeDart? get ceyxPoolAlignedFree => _ceyxPoolAlignedFree;
+
+  /// Whether this dylib exports the aligned allocator pair.
+  bool get poolAlignedAllocatorAvailable =>
+      _ceyxPoolAlignedAlloc != null && _ceyxPoolAlignedFree != null;
 
   /// True only when BOTH WP10 symbols resolved. Partial availability is a
   /// corrupt build and reports as unsupported, so the host falls back to the
@@ -505,6 +540,24 @@ class DngNativeBindings {
           >('ceyx_decode_into_buffer_oriented');
     } catch (_) {
       _ceyxDecodeIntoBufferOriented = null;
+    }
+
+    // R4 (gpu-copy-elimination campaign): the pool's aligned allocator pair.
+    // Its OWN try block, same reasoning as the oriented lookup above — a
+    // dylib predating this pair must not null out any of the groups already
+    // resolved.
+    try {
+      _ceyxPoolAlignedAlloc = _lib
+          .lookupFunction<CeyxPoolAlignedAllocNative, CeyxPoolAlignedAllocDart>(
+            'ceyx_pool_aligned_alloc',
+          );
+      _ceyxPoolAlignedFree = _lib
+          .lookupFunction<CeyxPoolAlignedFreeNative, CeyxPoolAlignedFreeDart>(
+            'ceyx_pool_aligned_free',
+          );
+    } catch (_) {
+      _ceyxPoolAlignedAlloc = null;
+      _ceyxPoolAlignedFree = null;
     }
 
     dngDecoderWarmupForSize = _lib

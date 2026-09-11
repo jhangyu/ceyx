@@ -1802,6 +1802,7 @@ add_executable(test_concurrent_decode tests/test_concurrent_decode.cpp
 target_include_directories(test_concurrent_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
+    ${SRC_DIR}/pipeline
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)

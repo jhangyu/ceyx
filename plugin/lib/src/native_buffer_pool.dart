@@ -5,6 +5,8 @@ import 'dart:ffi';
 import 'package:ffi/ffi.dart' show malloc;
 import 'package:meta/meta.dart';
 
+import 'dng_bindings.dart';
+
 /// A fixed-slot pool of native RGBA buffers.
 ///
 /// Exists so a ~97MB full-res frame stops being reclaimed on the Dart GC's
@@ -63,11 +65,114 @@ class CeyxNativeBufferPool {
   );
 
   /// Test seam: when set, every free this pool would perform routes here
-  /// instead of into `malloc.free`, and every allocation is still a real
-  /// `malloc` (so addresses are genuine). Mirrors
+  /// instead of into `malloc.free`/`ceyx_pool_aligned_free`, and every
+  /// allocation is still real (so addresses are genuine). Mirrors
   /// `CeyxDecodePool.debugNativeFree`.
   @visibleForTesting
   static void Function(int address)? debugFreeHook;
+
+  // --- R4 (gpu-copy-elimination campaign): page-aligned pooled allocations --
+  //
+  // The C2 zero-copy wrap only engages when the caller's destination pointer
+  // AND capacity are BOTH multiples of `_kAlignmentBytes` (the alignment
+  // probe in `ceyxDecodeIntoPrepare`, native/src/ffi/ceyx_decode_into_ffi.cpp,
+  // and the constant the C1 arena asserts on its own allocations,
+  // `kRawDeviceArenaAlignmentBytes`). `package:ffi`'s `malloc` has no aligned
+  // form, so POOLED allocations go through the native `ceyx_pool_aligned_alloc`
+  // / `ceyx_pool_aligned_free` pair (native/include/ceyx_decode_into.h) when
+  // the loaded dylib exports it, rounding the requested size UP to a
+  // `_kAlignmentBytes` multiple so the capacity half of the contract holds
+  // too. A dylib predating this pair falls back to ordinary `malloc` — the
+  // decode is still correct, it just never satisfies the alignment probe.
+  //
+  // ONLY pooled allocations take this path. Unpooled/oversize buffers
+  // (`acquireOrNull`'s `bytes > maxBufferBytes` branch) and adopted foreign
+  // pointers (`adoptUnpooled`) are UNCHANGED: an unaligned adopted pointer is
+  // legal input to the probe (it just answers false), and there is no
+  // "aligned adopt" concept to introduce.
+
+  /// Apple Silicon page size; matches `kRawDeviceArenaAlignmentBytes`
+  /// (native/include/raw_persistent_device_arena.h) and the alignment probe
+  /// constant — one physical number, checked by three call sites.
+  static const int _kAlignmentBytes = 16384;
+
+  static int _roundUpToAlignment(int bytes) {
+    final remainder = bytes % _kAlignmentBytes;
+    return remainder == 0 ? bytes : bytes + (_kAlignmentBytes - remainder);
+  }
+
+  /// Test-only override for the whole native-bindings resolution below: a
+  /// unit test that wants to exercise the aligned path against a FRESH build
+  /// (rather than whatever dylib the default search order finds) sets this
+  /// before constructing a pool. Mirrors the pattern
+  /// `wp10_activation_proof_test.dart` uses for `DngDecoderService`.
+  @visibleForTesting
+  static DngNativeBindings? debugNativeBindingsOverride;
+
+  static DngNativeBindings? _nativeBindings;
+  static bool _nativeBindingsAttempted = false;
+
+  /// Resolves (once) the dylib's aligned allocator pair, if it exports one.
+  /// A failure to load the library at all (no dylib on this host, or a plain
+  /// Dart unit-test process with no native library present) is NOT an error
+  /// here — it just means every pooled allocation takes the `malloc`
+  /// fallback, exactly like a dylib that predates the pair.
+  static DngNativeBindings? _resolveNativeBindings() {
+    final override = debugNativeBindingsOverride;
+    if (override != null) return override;
+    if (_nativeBindingsAttempted) return _nativeBindings;
+    _nativeBindingsAttempted = true;
+    try {
+      _nativeBindings = DngNativeBindings.load();
+    } catch (_) {
+      _nativeBindings = null;
+    }
+    return _nativeBindings;
+  }
+
+  /// Test-only: forces the next [_resolveNativeBindings] call to re-attempt
+  /// resolution rather than reuse a cached (possibly null) result. Needed
+  /// because [_nativeBindingsAttempted] is a process-wide latch and a test
+  /// that sets [debugNativeBindingsOverride] to null wants a clean slate for
+  /// the NEXT test rather than inheriting whatever the first resolution
+  /// attempt in this process found.
+  @visibleForTesting
+  static void debugResetNativeBindingsCache() {
+    _nativeBindings = null;
+    _nativeBindingsAttempted = false;
+  }
+
+  /// Allocates [bytes] (already rounded to [_kAlignmentBytes]) through the
+  /// native aligned allocator when available, else falls back to `malloc`.
+  /// Returns the raw address AND whether the aligned allocator produced it,
+  /// so the matching free routes to the right allocator family
+  /// ([_freeAlignedOrMalloc]) even if native-bindings resolution later
+  /// changes (it does not today, but the flag makes that safe regardless).
+  static (int address, bool wasAligned) _allocateAlignedAddress(int bytes) {
+    final bindings = _resolveNativeBindings();
+    final alloc = bindings?.ceyxPoolAlignedAlloc;
+    if (alloc != null) {
+      final ptr = alloc(bytes);
+      if (ptr != nullptr) return (ptr.address, true);
+      // Aligned allocation failed (OOM or a bad size) — fall through to the
+      // ordinary allocator rather than failing the whole pool.
+    }
+    return (malloc<Uint8>(bytes).address, false);
+  }
+
+  /// Frees an address obtained from [_allocateAlignedAddress], routing to
+  /// whichever allocator actually produced it (mismatched allocator/free is
+  /// the exact failure mode this pair is designed to avoid).
+  static void _freeAlignedOrMalloc(int address, {required bool wasAligned}) {
+    if (wasAligned) {
+      final free = _resolveNativeBindings()?.ceyxPoolAlignedFree;
+      if (free != null) {
+        free(Pointer<Uint8>.fromAddress(address));
+        return;
+      }
+    }
+    malloc.free(Pointer<Uint8>.fromAddress(address));
+  }
 
   final List<CeyxNativeBuffer> _idle = <CeyxNativeBuffer>[];
   final Queue<_Waiter> _waiting = Queue<_Waiter>();
@@ -409,10 +514,21 @@ class CeyxNativeBufferPool {
     _live++;
     debugAllocations++;
     debugCheckedOut++;
-    // ponytail: one malloc per POOL SLOT for the process lifetime, not one per
-    // decode. Bucketing beyond "capacity >= bytes" is not justified until a
-    // mixed-resolution folder is measured to thrash it.
-    final buffer = CeyxNativeBuffer._(malloc<Uint8>(bytes).address, bytes, true);
+    // ponytail: one allocation per POOL SLOT for the process lifetime, not one
+    // per decode. Bucketing beyond "capacity >= bytes" is not justified until
+    // a mixed-resolution folder is measured to thrash it.
+    //
+    // R4: rounded UP to the page-alignment contract (both halves — pointer
+    // AND capacity) so the C2 zero-copy wrap's alignment probe can engage on
+    // this buffer. See the block comment above [_kAlignmentBytes].
+    final rounded = _roundUpToAlignment(bytes);
+    final (address, wasAligned) = _allocateAlignedAddress(rounded);
+    final buffer = CeyxNativeBuffer._(
+      address,
+      rounded,
+      true,
+      alignedAllocated: wasAligned,
+    );
     buffer._checkoutGeneration++;
     _byAddress[buffer.address] = buffer;
     return buffer;
@@ -425,7 +541,7 @@ class CeyxNativeBufferPool {
       hook(buffer.address);
       return;
     }
-    malloc.free(Pointer<Uint8>.fromAddress(buffer.address));
+    _freeAlignedOrMalloc(buffer.address, wasAligned: buffer.alignedAllocated);
   }
 
   /// Test-only: frees every idle buffer so a unit test leaves no native
@@ -443,7 +559,12 @@ class CeyxNativeBufferPool {
 
 /// One native allocation handed out by [CeyxNativeBufferPool].
 class CeyxNativeBuffer {
-  CeyxNativeBuffer._(this.address, this.capacity, this.pooled);
+  CeyxNativeBuffer._(
+    this.address,
+    this.capacity,
+    this.pooled, {
+    this.alignedAllocated = false,
+  });
 
   /// Native address of the first byte. Process-global.
   final int address;
@@ -455,6 +576,12 @@ class CeyxNativeBuffer {
   /// False for an oversize buffer served outside the pool: its release frees
   /// rather than returns.
   final bool pooled;
+
+  /// R4: true when this buffer came from `ceyx_pool_aligned_alloc` rather
+  /// than `malloc` — determines which allocator [CeyxNativeBufferPool]
+  /// routes the matching free through. Always false for unpooled/adopted
+  /// buffers, which never take the aligned path.
+  final bool alignedAllocated;
 
   bool _released = false;
 

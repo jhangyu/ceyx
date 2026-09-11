@@ -48,12 +48,45 @@
 //   (c) destination_alignment_degradation_count delta == 0 for the same
 //       reason, from the other side.
 //
+//   Phase 4 (R4-T3, round-3 review finding S1 — THE ERROR-PATH fence test):
+//     phase 3 only ever exercises SUCCESSFUL wrapped decodes, so it cannot see
+//     the one exit the RAII design did not cover: the kernel-failure return.
+//     That return happens after halide_metal_run has already COMMITTED a
+//     command buffer writing the caller's pages; it used to detach the binding
+//     and hand an error back without waiting, after which the pipeline
+//     releases the caller's MTLBuffer and the caller is free to release or
+//     reuse the destination block — the GPU then writes memory that has been
+//     reclaimed. raw_ffi_api.h's lifetime contract promises the call "does not
+//     return until all GPU work against the buffer has completed", with no
+//     error-path exception.
+//
+//     A genuine nonzero AOT result nearly always surfaces BEFORE submission,
+//     so this window is not reachable by ordinary means — hence the
+//     TEST-ONLY hook dngRenderStage4SetKernelFailureInjectionArmed(), which
+//     makes an otherwise successful dispatch report failure at exactly that
+//     post-submission position. N concurrent lanes each run one injected
+//     decode into their own aligned destination and, the instant the call
+//     returns, (i) snapshot the destination and (ii) after a settling delay
+//     hash it again.
+//
+//     ASSERTIONS (d) every injected decode returned an ERROR -- proves the
+//     injection is actually armed, so (e)/(f) are not passing vacuously;
+//     (e) the snapshot taken immediately after the failing return hashes equal
+//     to the phase-1 reference -- i.e. the frame was already fully written at
+//     return, which is only true if the GPU was retired before returning (an
+//     unretired command buffer yields a torn/partial frame, exactly the
+//     signature phase 3's fence mutation produced);
+//     (f) the post-settling hash equals the immediate snapshot -- no bytes
+//     were written into the caller's pages AFTER the call returned, the
+//     direct use-after-release signal.
+//
 // Usage:
 //   test_concurrent_raw_decode_wrapped [--threads N] [--repeat R] [<raw_file>...]
 // Defaults: N=4, R=2, the 3-file in-repo corpus used by the sibling gate.
 // Exit 0 iff every assertion passed.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -175,6 +208,78 @@ DecodeOutcome decode_and_hash_wrapped(const char* path) {
         static_cast<size_t>(result.width) * result.height * 4u);
     outcome.ok = true;
   }
+  std::free(aligned_ptr);
+  return outcome;
+}
+
+// R4-T3 (S1): declared locally rather than by including dng_render_params.h,
+// which pulls in the Adobe DNG SDK headers this driver has no include path
+// for. The authoritative declaration lives at native/include/
+// dng_render_params.h; it is extern "C" with an `int` parameter precisely so
+// this mirror cannot silently diverge in mangling or ABI.
+extern "C" void dngRenderStage4SetKernelFailureInjectionArmed(int armed);
+extern "C" int dngRenderStage4KernelFailureInjectionIsArmed();
+
+struct InjectedFailureOutcome {
+  bool setup_ok = false;
+  bool decode_returned_error = false;
+  bool snapshot_matches_reference = false;
+  bool no_bytes_written_after_return = false;
+  uint64_t snapshot_hash = 0;
+  uint64_t settled_hash = 0;
+};
+
+// One wrapped-path decode with the post-submission kernel failure ARMED.
+// Everything up to raw_pipeline_decode_file_into is identical to
+// decode_and_hash_wrapped above; what differs is what happens after it
+// returns.
+InjectedFailureOutcome decode_with_injected_kernel_failure(
+    const char* path, uint64_t reference_hash) {
+  InjectedFailureOutcome outcome;
+  const RawDevelopParams develop = develop_params(/*destination_is_page_aligned=*/true);
+  uint32_t probe_width = 0, probe_height = 0;
+  if (raw_pipeline_probe_output_size(path, develop.max_output_long_edge,
+                                     &probe_width, &probe_height) !=
+          kRawSuccess ||
+      probe_width == 0 || probe_height == 0) {
+    return outcome;
+  }
+  const size_t pixel_bytes =
+      static_cast<size_t>(probe_width) * probe_height * 4u;
+  const size_t aligned_capacity = round_up_to_page(pixel_bytes);
+  void* aligned_ptr = nullptr;
+  if (posix_memalign(&aligned_ptr, ceyx::kRawDeviceArenaAlignmentBytes,
+                     aligned_capacity) != 0 ||
+      aligned_ptr == nullptr) {
+    return outcome;
+  }
+  uint8_t* aligned_dst = static_cast<uint8_t*>(aligned_ptr);
+  // Allocated BEFORE the decode so the snapshot after it is a bare memcpy --
+  // an allocation there would widen the post-return window this phase is
+  // trying to measure.
+  std::vector<uint8_t> snapshot(pixel_bytes, 0u);
+  outcome.setup_ok = true;
+
+  RawPipelineResult result{};
+  const RawErrorCode rc = raw_pipeline_decode_file_into(
+      path, develop, aligned_dst, aligned_capacity, result);
+  // The instant the call returns: per the FFI lifetime contract there is now
+  // no GPU work outstanding against these pages, error or not.
+  std::memcpy(snapshot.data(), aligned_dst, pixel_bytes);
+
+  outcome.decode_returned_error = (rc != kRawSuccess);
+  outcome.snapshot_hash = hash_bytes(snapshot.data(), pixel_bytes);
+  outcome.snapshot_matches_reference = (outcome.snapshot_hash == reference_hash);
+
+  // Settling window: generous relative to a single Stage4 dispatch, so a
+  // command buffer that was still in flight at return has certainly landed by
+  // now. If the destination changed during it, the GPU wrote pages the caller
+  // already owns again -- the use-after-release itself, not a proxy for it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  outcome.settled_hash = hash_bytes(aligned_dst, pixel_bytes);
+  outcome.no_bytes_written_after_return =
+      (outcome.settled_hash == outcome.snapshot_hash);
+
   std::free(aligned_ptr);
   return outcome;
 }
@@ -353,6 +458,93 @@ int main(int argc, char** argv) {
         "the degraded-path counter must stay at 0 -- every decode here is "
         "genuinely page-aligned, so degradation firing would mean the wrap "
         "silently failed under concurrent load specifically");
+
+  // Phase 4 (R4-T3 / S1): the ERROR-path fence test. See the header comment.
+  std::printf(
+      "[ConcurrentRawDecodeWrapped] phase 4: injecting post-submission Stage4 "
+      "kernel failures on the wrapped path (S1)\n");
+  dngRenderStage4SetKernelFailureInjectionArmed(1);
+  CHECK("kernel_failure_injection_armed",
+        dngRenderStage4KernelFailureInjectionIsArmed() == 1,
+        "the test-only hook must report armed, otherwise every phase-4 "
+        "assertion below would pass on ordinary successful decodes");
+
+  std::atomic<int> injected_setup_failures{0};
+  std::atomic<int> injected_decodes_that_did_not_error{0};
+  std::atomic<int> injected_torn_frames{0};
+  std::atomic<int> injected_late_writes{0};
+  std::atomic<int> injected_decodes{0};
+  std::vector<std::thread> injection_workers;
+  injection_workers.reserve(static_cast<size_t>(thread_count));
+  for (int t = 0; t < thread_count; ++t) {
+    injection_workers.emplace_back([&, t]() {
+      for (size_t i = 0; i < corpus.size(); ++i) {
+        const size_t index = (i + static_cast<size_t>(t)) % corpus.size();
+        const InjectedFailureOutcome outcome =
+            decode_with_injected_kernel_failure(corpus[index].c_str(),
+                                                reference_hashes[index]);
+        if (!outcome.setup_ok) {
+          injected_setup_failures.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        injected_decodes.fetch_add(1, std::memory_order_relaxed);
+        if (!outcome.decode_returned_error) {
+          injected_decodes_that_did_not_error.fetch_add(
+              1, std::memory_order_relaxed);
+        }
+        if (!outcome.snapshot_matches_reference) {
+          std::printf(
+              "[ConcurrentRawDecodeWrapped] thread %d S1 TORN FRAME AT ERROR "
+              "RETURN (%s) got=%016llx want=%016llx -- the destination was "
+              "not fully written when the failing call returned, i.e. GPU "
+              "work was still outstanding against the caller's pages\n",
+              t, corpus[index].c_str(),
+              (unsigned long long)outcome.snapshot_hash,
+              (unsigned long long)reference_hashes[index]);
+          injected_torn_frames.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!outcome.no_bytes_written_after_return) {
+          std::printf(
+              "[ConcurrentRawDecodeWrapped] thread %d S1 USE-AFTER-RETURN "
+              "WRITE (%s) snapshot=%016llx settled=%016llx -- the GPU wrote "
+              "the caller's pages AFTER the failing call returned\n",
+              t, corpus[index].c_str(),
+              (unsigned long long)outcome.snapshot_hash,
+              (unsigned long long)outcome.settled_hash);
+          injected_late_writes.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  for (auto& worker : injection_workers) worker.join();
+  dngRenderStage4SetKernelFailureInjectionArmed(0);
+
+  std::printf(
+      "[ConcurrentRawDecodeWrapped] phase 4 totals: injected_decodes=%d "
+      "not_errored=%d torn_frames=%d late_writes=%d setup_failures=%d\n",
+      injected_decodes.load(), injected_decodes_that_did_not_error.load(),
+      injected_torn_frames.load(), injected_late_writes.load(),
+      injected_setup_failures.load());
+
+  CHECK("injected_failure_decodes_ran", injected_setup_failures.load() == 0 &&
+            injected_decodes.load() ==
+                thread_count * static_cast<int>(corpus.size()),
+        "every phase-4 lane must have reached the decode call");
+  CHECK("injected_kernel_failure_surfaced_as_error",
+        injected_decodes.load() > 0 &&
+            injected_decodes_that_did_not_error.load() == 0,
+        "the injected post-submission failure must be reported as an error by "
+        "the FFI -- if any decode reported success the injection did not take "
+        "effect and the two assertions below prove nothing");
+  CHECK("error_return_frame_is_complete_S1",
+        injected_torn_frames.load() == 0,
+        "S1: a wrapped-destination decode that fails AFTER submission must "
+        "still retire the GPU before returning; a torn frame here means the "
+        "error path detached and returned with work in flight");
+  CHECK("no_gpu_writes_after_error_return_S1",
+        injected_late_writes.load() == 0,
+        "S1: nothing may be written into the caller's pages after the failing "
+        "call returns -- the caller is free to release them at that instant");
 
   std::printf("[ConcurrentRawDecodeWrapped] TOTAL failures=%d\n", failures);
   std::fflush(stdout);

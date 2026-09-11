@@ -103,6 +103,7 @@ functions:
 #include "dng_render_halide.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1023,6 +1024,35 @@ bool runRenderStage4LastCallerDestinationWrapWasUsed() {
     return g_last_caller_destination_wrap_was_used;
 }
 
+// R4-T3 (S1 proof): TEST-ONLY fault injection. The S1 hazard is the
+// kernel-failure return that happens AFTER halide_metal_run has already
+// committed a command buffer writing the caller's pages; a real nonzero AOT
+// result almost always means the failure surfaced BEFORE commit, which is why
+// the hazard is not reachable by ordinary means and why a check for it could
+// never be seen red without this hook. Arming it makes
+// runRenderStage4HalideAotFromDevice treat an otherwise SUCCESSFUL kernel
+// dispatch as failed, at exactly the post-submission position S1 describes.
+//
+// Process-wide (not thread_local) on purpose: the gate arms it once on the
+// main thread and then drives concurrent lanes, which is the only load under
+// which an unretired command buffer is observable at all.
+//
+// Disarmed (0) in every production configuration; nothing in the shipping
+// code path ever calls the setter.
+static std::atomic<int> g_stage4_kernel_failure_injection_is_armed{0};
+
+extern "C" void dngRenderStage4SetKernelFailureInjectionArmed(int armed) {
+    g_stage4_kernel_failure_injection_is_armed.store(armed != 0,
+                                                     std::memory_order_seq_cst);
+}
+
+extern "C" int dngRenderStage4KernelFailureInjectionIsArmed() {
+    return g_stage4_kernel_failure_injection_is_armed.load(
+               std::memory_order_seq_cst)
+               ? 1
+               : 0;
+}
+
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 // C2 (plan §4.2.2, §8.2 hazard 5): RAII wrapper for the CALLER-supplied
 // destination MTLBuffer. The arena regions have RawDeviceArenaRegionBinding;
@@ -1034,6 +1064,11 @@ bool runRenderStage4LastCallerDestinationWrapWasUsed() {
 struct CallerDestinationMetalBufferBinding {
     halide_buffer_t* halide_buffer = nullptr;
     bool bound = false;
+    // R4-T3 (S1, round-3 review): has the caller's in-flight GPU work already
+    // been retired for this binding? Set ONLY by the explicit
+    // halide_device_sync at the old copy_to_host position on the success path.
+    // While false, the destructor below must do the waiting itself.
+    bool gpu_work_was_retired = false;
 
     CallerDestinationMetalBufferBinding(halide_buffer_t* buffer,
                                         void* caller_metal_buffer) {
@@ -1065,8 +1100,31 @@ struct CallerDestinationMetalBufferBinding {
         bound = true;
     }
 
+    // R4-T3 (S1): called at the ONE success-path sync site, after
+    // halide_device_sync has returned 0. Anything else — a kernel-failure
+    // return, a sync that itself failed, or any future early exit added
+    // between the kernel call and the success sync — leaves this false and is
+    // therefore covered by the destructor's wait below.
+    void note_gpu_work_retired() { gpu_work_was_retired = true; }
+
     ~CallerDestinationMetalBufferBinding() {
         if (bound && halide_buffer != nullptr) {
+            // S1 (round-3 review, dng_render_halide.cpp kernel-failure return):
+            // detaching is NOT waiting. Once this binding detaches, the
+            // pipeline releases the caller's MTLBuffer and the FFI hands an
+            // error back to Dart, which is free to release or reuse the
+            // destination pool block — while a command buffer committed by
+            // halide_metal_run may still be writing those very pages
+            // (dng_metal_context.cpp:22-27: run only COMMITS). That is a
+            // use-after-release, not stale pixels. raw_ffi_api.h's lifetime
+            // contract promises "does not return until all GPU work against
+            // the buffer has completed" with NO error-path exception, so the
+            // wait is made structural here rather than being replicated at
+            // each return statement: every exit after the kernel call runs
+            // this destructor, including exits added in the future.
+            if (!gpu_work_was_retired) {
+                (void)halide_device_sync(nullptr, halide_buffer);
+            }
             halide_metal_detach_buffer(nullptr, halide_buffer);
         }
     }
@@ -1926,10 +1984,19 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          params.look_has_encoding,
                                          dst_buf.raw_buffer());
 #endif
+    // R4-T3 (S1 proof): test-only, disarmed in every production configuration.
+    // Placed HERE — after the dispatch above has already committed a Metal
+    // command buffer that writes the destination — because that is precisely
+    // the window S1 is about: a failure surfacing post-submission. Shadowing
+    // `result` keeps the injection from touching the kernel call itself.
+    const int injected_result =
+        dngRenderStage4KernelFailureInjectionIsArmed()
+            ? -32700  // arbitrary nonzero; the reason code reported is kKernel
+            : result;
     if (pipelineVerbose()) {
-        fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAotFromDevice)\n", result);
+        fprintf(stderr, "[Stage4-Diag] kernel result=%d (runRenderStage4HalideAotFromDevice)\n", injected_result);
     }
-    if (result != 0) {
+    if (injected_result != 0) {
         // Plan section 1.6: the FFI layer reads this to report -403.
         g_stage4_failure_reason = Stage4FailureReason::kKernel;
         return false;
@@ -1958,6 +2025,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
             g_stage4_failure_reason = Stage4FailureReason::kKernel;
             return false;
         }
+        // R4-T3 (S1): the wait has happened HERE, so the binding's destructor
+        // must not repeat it. Only reached on sync_rc == 0. Guarded by the
+        // same condition that declares the binding at all: off Metal
+        // `destination_is_caller_wrapped` is always false, so this block is
+        // unreachable there, but it must still COMPILE there.
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+        if (dst_caller_binding) dst_caller_binding->note_gpu_work_retired();
+#endif
         // Nothing owes a copy-back: the device and host bytes are the same
         // bytes. Leaving device-dirty set would let a later copy re-introduce
         // the transfer this slice exists to remove.
@@ -2028,6 +2103,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
             g_stage4_failure_reason = Stage4FailureReason::kKernel;
             return false;
         }
+        // R4-T3 (S1): see the split arm — the wait happened here, so the
+        // binding destructor's fallback wait is not repeated.
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+        if (dst_caller_binding) dst_caller_binding->note_gpu_work_retired();
+#endif
         dst_buf.raw_buffer()->set_device_dirty(false);
         // g_last_device_to_host_copy_ms stays 0.0 — no device->host copy ran.
     } else {

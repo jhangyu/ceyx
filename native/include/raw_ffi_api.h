@@ -93,7 +93,24 @@ int32_t raw_last_color_diagnostics(RawColorDiagnostics *out);
  * unattributed to either raw_unpack_ms or gpu_process_ms -- plan §6.3), and
  * the GPU submit/wait residue. gpu_submit_wait_ms is computed as
  * gpu_process_ms - host_copy_ms, never independently bracketed, so the parts
- * cannot drift out of agreement with the existing total. */
+ * cannot drift out of agreement with the existing total.
+ *
+ * ABI WARNING (round-4 review B2): "additive/struct_size-versioned" above
+ * describes THIS struct's own layout evolution (append-only, offsets never
+ * move). It does NOT make RawTimingDiagnostics freely extensible across a
+ * compiled boundary when it is embedded BY VALUE inside another struct that
+ * itself crosses that boundary -- RawPipelineResult (raw_gpu_pipeline.h)
+ * embeds `RawTimingDiagnostics timing{}` as a non-last member, so growing
+ * this struct shifts every RawPipelineResult member that follows it and
+ * changes RawPipelineResult's own sizeof. A binary built against an older
+ * header that declares `RawPipelineResult result{}` on its stack and passes
+ * &result into a NEWER dylib is a stack buffer overflow, not a compatible
+ * call -- this actually happened once in this round (test_concurrent_raw_
+ * decode_wrapped, RC=134 SIGABRT, until rebuilt in lockstep). Every producer
+ * AND every consumer of RawPipelineResult must be recompiled together
+ * whenever this struct's size changes; struct_size only protects callers
+ * that go through the free-standing raw_last_timing_diagnostics() getter
+ * below (which does honour it), not the embedded-by-value path. */
 typedef struct RawTimingDiagnostics {
     uint32_t struct_size;            /* sizeof(RawTimingDiagnostics) by the producer */
     double   host_copy_ms;           /* host->device + device->host, frame-sized buffers */
@@ -106,6 +123,19 @@ typedef struct RawTimingDiagnostics {
                                              * landed yet: this field is always 0 today
                                              * for every decode, not a per-decode signal
                                              * that the zero-copy gate evaluated false. */
+    /* R4-T4 S3 (round-4 review B1 fix), additive/struct_size-versioned like the
+     * rest of this struct -- NOT part of the frozen Dart-visible ABI list.
+     * Appended at the end on purpose: no existing field's offset changes.
+     *
+     * The C2 unified-path source memcpy (raw_gpu_pipeline.cpp, ~48MB/decode)
+     * runs BEFORE gpu_t0 opens, so it is deliberately kept OUT of
+     * host_to_device_copy_ms/host_copy_ms/gpu_submit_wait_ms -- folding it in
+     * there breaks the documented identity
+     * gpu_submit_wait_ms == gpu_process_ms - host_copy_ms (the copy is not
+     * inside the gpu_process_ms window it would be subtracted from). This
+     * field names that time on its own, additively, so it is finally
+     * attributed to something instead of being silently unattributed. */
+    double   source_mosaic_copy_milliseconds;
 } RawTimingDiagnostics;
 
 /* Timing diagnostics for the calling thread's most recent RAW decode.

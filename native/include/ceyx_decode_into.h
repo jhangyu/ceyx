@@ -84,6 +84,41 @@ DngResult *ceyx_decode_into_buffer_oriented(const char *file_path,
 /// its flag has zero readers. The symbol is still exported for ABI stability
 /// only -- calling it is a no-op.
 
+/// R4 (gpu-copy-elimination campaign, Round 4): a page-aligned allocator pair
+/// for the Dart-side pooled RGBA buffers. `package:ffi`'s `malloc` has no
+/// aligned form, and the C2 zero-copy wrap
+/// (`ceyxDecodeIntoPrepare`'s `out_destination_is_page_aligned` probe, this
+/// TU's .cpp) only ever answers true for a destination whose pointer AND
+/// capacity are BOTH multiples of the same page-size constant the arena uses
+/// (`kRawDeviceArenaAlignmentBytes` = 16384, `raw_persistent_device_arena.h`).
+/// Every buffer `CeyxNativeBufferPool` hands out as a POOLED allocation is
+/// meant to come from `ceyx_pool_aligned_alloc` and go back through
+/// `ceyx_pool_aligned_free` -- never `malloc`/`free`, since the two allocator
+/// families are not interchangeable (`posix_memalign`/`_aligned_malloc`
+/// memory must be freed by `free`/`_aligned_free`, not by a mismatched
+/// deallocator). Unpooled/oversize/adopted buffers are UNCHANGED by this pair
+/// -- they keep using ordinary `malloc`, because an unaligned adopted pointer
+/// is legal input to the alignment probe (it just answers false).
+///
+/// ALWAYS COMPILED (same TU as the rest of this header, no
+/// DNG_ENABLE_GENERIC_RAW guard): the alignment constant is a fixed number,
+/// not a generic-RAW-only concept, so these two symbols exist in every build
+/// configuration.
+///
+/// `ceyx_pool_aligned_alloc` rounds `byte_count` UP to the next 16384-byte
+/// multiple before allocating, so the returned capacity is itself a multiple
+/// of 16384 (the second half of the alignment contract). Returns NULL on
+/// failure or when `byte_count == 0`.
+void *ceyx_pool_aligned_alloc(size_t byte_count);
+
+/// Frees memory obtained from `ceyx_pool_aligned_alloc`. A NULL pointer is a
+/// no-op. MUST NOT be called on memory obtained from `malloc`/`calloc`, and
+/// `ceyx_pool_aligned_alloc` memory MUST NOT be freed with `free`/`malloc.free`
+/// -- the two allocators are platform-specific and not interchangeable
+/// (`_aligned_malloc`/`_aligned_free` on Windows, `posix_memalign`/`free`
+/// elsewhere).
+void ceyx_pool_aligned_free(void *ptr);
+
 #ifdef __cplusplus
 }
 #endif

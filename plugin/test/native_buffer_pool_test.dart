@@ -157,10 +157,16 @@ void main() {
     () async {
       final pool = CeyxNativeBufferPool(maxBuffers: 2);
       addTearDown(pool.debugDisposeIdle);
+      // R4: every pooled allocation is rounded UP to a 16384-byte multiple
+      // (the zero-copy alignment contract), so a request has to cross a
+      // 16384 boundary to actually exceed an idle buffer's real capacity --
+      // 64 and 4096 both round to the SAME 16384-byte slot and would
+      // legitimately be reused. 20000 rounds to 32768, which genuinely
+      // exceeds the first slot's rounded 16384 capacity.
       final small = await pool.acquire(64);
       pool.release(small);
-      final big = await pool.acquire(4096);
-      expect(big.capacity, greaterThanOrEqualTo(4096));
+      final big = await pool.acquire(20000);
+      expect(big.capacity, greaterThanOrEqualTo(20000));
       expect(big.address, isNot(small.address));
       pool.release(big);
     },

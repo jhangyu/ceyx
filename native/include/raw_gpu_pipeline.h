@@ -69,8 +69,21 @@ struct RawPipelineResult {
     uint32_t height = 0;
     RawDecodeDiagnostics diag{};
     RawColorPipelineDiagnostics color_diag{};
-    RawTimingDiagnostics timing{};  // C4 (plan §6.4/§6.7): host/device copy +
-                                     // auto-exposure sub-timings, additive
+    // C4 (plan §6.4/§6.7): host/device copy + auto-exposure sub-timings.
+    // ABI WARNING (round-4 review B2): embedded BY VALUE, and NOT the last
+    // member of this struct (error/caller_dst follow) -- RawTimingDiagnostics
+    // growing (e.g. R4-T4's source_mosaic_copy_milliseconds field) shifts
+    // every member below it and changes sizeof(RawPipelineResult) itself.
+    // RawPipelineResult is passed by pointer across the FFI/dylib boundary,
+    // so this is NOT freely extensible the way a struct_size-versioned
+    // out-param is: a binary compiled against an older header declaring
+    // `RawPipelineResult result{}` on its stack, then calling into a NEWER
+    // dylib built with a larger RawTimingDiagnostics, overflows that stack
+    // object (reproduced this round: test_concurrent_raw_decode_wrapped
+    // SIGABRT'd until rebuilt in lockstep with the dylib). Every producer AND
+    // consumer of RawPipelineResult must be recompiled together whenever
+    // RawTimingDiagnostics's size changes.
+    RawTimingDiagnostics timing{};
     RawErrorCode error = kRawSuccess;
 
     // WP10 (AMENDMENT 3 / A3.2): set by raw_pipeline_decode_file_into AFTER the

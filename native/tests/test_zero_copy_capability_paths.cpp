@@ -285,6 +285,16 @@ int main(int argc, char** argv) {
       ceyx::ZeroCopyCapabilityOverrideState::kForcedOff);
   const ZeroCopyCounters fallback_baseline = read_zero_copy_counters();
   bool fallback_ok = true;
+  // R4-T4 S4: captured so phase 3 below can compare the alignment-degraded
+  // path against a GENUINELY different path (the gate forced off) rather
+  // than against `reference_hashes`, which is itself decoded through a
+  // std::vector<uint8_t> destination (capacity w*h*4, not a
+  // kRawDeviceArenaAlignmentBytes multiple, and std::vector's allocation is
+  // not page-aligned either) -- i.e. reference_hashes already takes the
+  // unified-degraded path on this machine, so a direct compare there would
+  // silently be asserting "degraded == degraded" (determinism) rather than
+  // cross-path bit-exactness.
+  std::vector<uint64_t> forced_off_hashes(corpus.size(), 0);
   for (size_t i = 0; i < corpus.size(); ++i) {
     uint32_t probe_width = 0, probe_height = 0;
     if (raw_pipeline_probe_output_size(corpus[i].c_str(), 0, &probe_width,
@@ -305,6 +315,8 @@ int main(int argc, char** argv) {
           (unsigned long long)outcome.hash,
           (unsigned long long)reference_hashes[i]);
       fallback_ok = false;
+    } else {
+      forced_off_hashes[i] = outcome.hash;
     }
   }
   const ZeroCopyCounters fallback_after = read_zero_copy_counters();
@@ -333,7 +345,15 @@ int main(int argc, char** argv) {
 
   // ---------------------------------------------------------------------
   // Phase 3: alignment-degraded path (AC4 run 3 / AC6 second case).
+  // R4-T4 S4: compared against forced_off_hashes (phase 2, gate genuinely
+  // off), NOT reference_hashes (phase 1, which is itself unified-degraded
+  // on this machine -- see the comment at forced_off_hashes' declaration).
   // ---------------------------------------------------------------------
+  CHECK("forced_off_reference_available_for_phase3", fallback_ok,
+        "phase 3's cross-path comparison depends on phase 2 having produced "
+        "a genuinely-gate-off hash for every corpus file; if phase 2 failed "
+        "this phase cannot tell degraded-vs-different-path from "
+        "degraded-vs-itself");
   ceyx::set_zero_copy_capability_override_for_testing(
       ceyx::ZeroCopyCapabilityOverrideState::kNone);
   const ZeroCopyCounters degraded_baseline = read_zero_copy_counters();
@@ -361,13 +381,13 @@ int main(int argc, char** argv) {
           "and phase 3 is not exercising the degraded path it claims to");
     const DecodeOutcome outcome =
         decode_and_hash_into(corpus[i].c_str(), misaligned_dst, need);
-    if (!outcome.ok || outcome.hash != reference_hashes[i]) {
+    if (!outcome.ok || outcome.hash != forced_off_hashes[i]) {
       std::printf(
           "[ZeroCopyCapabilityPaths] alignment-degraded MISMATCH (%s) ok=%d "
           "got=%016llx want=%016llx\n",
           corpus[i].c_str(), outcome.ok,
           (unsigned long long)outcome.hash,
-          (unsigned long long)reference_hashes[i]);
+          (unsigned long long)forced_off_hashes[i]);
       degraded_ok = false;
     } else {
       ++degraded_decode_count;
@@ -376,7 +396,8 @@ int main(int argc, char** argv) {
   const ZeroCopyCounters degraded_after = read_zero_copy_counters();
   CHECK("alignment_degraded_hashes_match_reference", degraded_ok,
         "the unified-degraded path (arena dst + one final copy) must be "
-        "bit-exact with the AC4 baseline list");
+        "bit-exact with the gate-forced-off path (a genuinely different "
+        "code path than the degraded path itself, R4-T4 S4)");
   CHECK("alignment_degraded_count_equals_decode_count",
         degraded_after.destination_alignment_degradation_count -
                 degraded_baseline.destination_alignment_degradation_count ==

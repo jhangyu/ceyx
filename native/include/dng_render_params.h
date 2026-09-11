@@ -235,6 +235,20 @@ double runRenderStage4LastDeviceToHostCopyMilliseconds();
 // RawTimingDiagnostics.unified_memory_path_active.
 bool runRenderStage4LastCallerDestinationWrapWasUsed();
 
+// R4-T3 (S1 proof) — TEST-ONLY fault injection, never called by shipping code.
+// When armed, runRenderStage4HalideAotFromDevice treats an otherwise
+// successful Stage4 dispatch as a kernel failure at the post-submission
+// position described by round-3 review finding S1, so a gate can observe what
+// the wrapped-destination error path does while a committed command buffer is
+// still writing the caller's pages. Process-wide, not thread_local: the gate
+// arms once and then drives concurrent lanes.
+//
+// extern "C" so drivers can declare it locally without dragging this header's
+// Adobe DNG SDK dependencies into a test translation unit; `int` rather than
+// `bool` for the same ABI-stability reason.
+extern "C" void dngRenderStage4SetKernelFailureInjectionArmed(int armed);
+extern "C" int dngRenderStage4KernelFailureInjectionIsArmed();
+
 // Needed by the LibRaw builder so "identity" is explicit, never uninitialised
 // (spec section 7.1.4). Signatures transcribed from dng_render_halide.cpp:663-667
 // and :731 — note all four ints are by reference; the helper itself sets the

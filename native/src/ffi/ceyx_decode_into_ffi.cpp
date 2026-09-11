@@ -26,9 +26,63 @@
 
 #if defined(_WIN32)
 #define CEYX_FFI_EXPORT __declspec(dllexport)
+#include <malloc.h>  // _aligned_malloc / _aligned_free
 #else
 #define CEYX_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #endif
+
+namespace {
+// R4 (gpu-copy-elimination campaign): the ONE physical alignment constant the
+// pool allocator, the arena (raw_persistent_device_arena.h) and the
+// ceyxDecodeIntoPrepare probe below all agree on. Kept as a private literal
+// here (rather than including the arena header unconditionally) so this pair
+// stays compiled in every build configuration, including
+// DNG_ENABLE_GENERIC_RAW=OFF; the static_assert further down is what keeps it
+// from drifting out of sync with the arena's own constant whenever that
+// header IS available in this TU.
+constexpr size_t kCeyxPoolAlignmentBytes = 16384;
+}  // namespace
+
+#if defined(DNG_ENABLE_GENERIC_RAW)
+static_assert(kCeyxPoolAlignmentBytes == ceyx::kRawDeviceArenaAlignmentBytes,
+              "the pool allocator's alignment must match the arena's and the "
+              "ceyxDecodeIntoPrepare alignment probe's — one physical "
+              "constant, checked here whenever this TU has visibility into "
+              "the arena header");
+#endif
+
+extern "C" {
+
+// R4: page-aligned allocator pair for CeyxNativeBufferPool's POOLED
+// allocations (see ceyx_decode_into.h for the full contract). `byte_count` is
+// rounded UP to a kCeyxPoolAlignmentBytes multiple so the returned capacity
+// satisfies the alignment probe's capacity half as well as its pointer half.
+CEYX_FFI_EXPORT void *ceyx_pool_aligned_alloc(size_t byte_count) {
+  if (byte_count == 0) return nullptr;
+  const size_t rounded =
+      ((byte_count + kCeyxPoolAlignmentBytes - 1) / kCeyxPoolAlignmentBytes) *
+      kCeyxPoolAlignmentBytes;
+#if defined(_WIN32)
+  return _aligned_malloc(rounded, kCeyxPoolAlignmentBytes);
+#else
+  void *ptr = nullptr;
+  if (posix_memalign(&ptr, kCeyxPoolAlignmentBytes, rounded) != 0) {
+    return nullptr;
+  }
+  return ptr;
+#endif
+}
+
+CEYX_FFI_EXPORT void ceyx_pool_aligned_free(void *ptr) {
+  if (!ptr) return;
+#if defined(_WIN32)
+  _aligned_free(ptr);
+#else
+  free(ptr);
+#endif
+}
+
+}  // extern "C"
 
 extern "C" {
 
@@ -230,13 +284,15 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
                     "device_to_host_copy_ms=%.3f host_copy_ms=%.3f "
                     "auto_exposure_ms=%.3f gpu_submit_wait_ms=%.3f "
                     "gpu_process_ms=%.3f raw_unpack_ms=%.3f total_ms=%.3f "
-                    "unified_memory_path_active=%u\n",
+                    "unified_memory_path_active=%u "
+                    "source_mosaic_copy_milliseconds=%.3f\n",
                     out.timing.host_to_device_copy_ms,
                     out.timing.device_to_host_copy_ms,
                     out.timing.host_copy_ms, out.timing.auto_exposure_ms,
                     out.timing.gpu_submit_wait_ms, out.diag.gpu_process_ms,
                     out.diag.raw_unpack_ms, out.diag.total_ms,
-                    out.timing.unified_memory_path_active);
+                    out.timing.unified_memory_path_active,
+                    out.timing.source_mosaic_copy_milliseconds);
     }
   }
   result->decode_ms = out.diag.raw_unpack_ms;

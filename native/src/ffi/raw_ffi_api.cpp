@@ -1,8 +1,10 @@
 // Generic RAW C ABI. Reuses the FROZEN DngResult layout, so Dart bindings need
 // no struct change (spec section 12.2). error_code carries a RawErrorCode,
 // whose values (<= -201) are disjoint from DngErrorCode.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "dng_pipeline.h"
 #include "raw_ffi_api.h"
@@ -13,19 +15,12 @@
 // enabled/override half of ceyx_debug_zero_copy_capability_counters below.
 #include "dng_metal_context.h"
 
-// R3-T4: the three C2 wrap/degradation counters (plan §4.5). Declared here
-// rather than defined here -- they are incremented at the call sites that
-// actually perform the wrap (raw_gpu_pipeline.cpp for the source mosaic
-// wrap, dng_render_halide.cpp for the destination wrap / alignment
-// degradation), which are outside this task's file ownership this round.
-// Forward-declared so this probe compiles and links against whichever
-// translation unit ends up defining them; names and namespace are FROZEN by
-// plan §4.5 and must not be renamed at either end.
-namespace ceyx {
-uint64_t zero_copy_destination_wrap_count();
-uint64_t zero_copy_destination_alignment_degradation_count();
-uint64_t zero_copy_source_mosaic_wrap_count();
-}  // namespace ceyx
+// R4-T4 nit N1: the three C2 wrap/degradation counters (plan §4.5) are
+// already declared by the dng_metal_context.h include above -- this file
+// used to re-declare them here too, which is a silent-drift surface (any
+// future rename in dng_metal_context.h would not fail this translation unit
+// until link time). Removed; the include is the single declaration point.
+// Names and namespace remain FROZEN by plan §4.5.
 
 // Same export decoration as src/dng_ffi_api.cpp, so this entry survives any
 // future visibility tightening on the dylib.
@@ -82,7 +77,21 @@ RAW_FFI_EXPORT int32_t raw_last_color_diagnostics(RawColorDiagnostics* out) {
 RAW_FFI_EXPORT int32_t raw_last_timing_diagnostics(RawTimingDiagnostics* out) {
     if (!out) return -1;
     if (!g_have_timing_diagnostics) return -1;
-    *out = g_last_timing_diagnostics;
+    // R4-T4 B2 fix (round-4 review): honour out->struct_size instead of a
+    // blind `*out = ...` -- a caller built against an older, smaller
+    // RawTimingDiagnostics (e.g. before source_mosaic_copy_milliseconds was
+    // appended) sets out->struct_size to ITS sizeof before calling; writing
+    // this binary's full (larger) struct into that smaller caller-owned
+    // buffer would overrun it. Copying only min(caller's struct_size, this
+    // binary's sizeof) is what makes the "struct_size-versioned" framing in
+    // the header comment actually true for this cross-boundary getter, and
+    // it must be done at raw byte granularity (not struct assignment) since
+    // the copied length can now be smaller than sizeof(RawTimingDiagnostics).
+    const uint32_t caller_struct_size = out->struct_size;
+    const size_t copy_bytes = std::min<size_t>(
+        caller_struct_size, sizeof(RawTimingDiagnostics));
+    std::memcpy(out, &g_last_timing_diagnostics, copy_bytes);
+    out->struct_size = static_cast<uint32_t>(sizeof(RawTimingDiagnostics));
     return 0;
 }
 

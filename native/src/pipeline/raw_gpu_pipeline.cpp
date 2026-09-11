@@ -349,8 +349,34 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     void* const zero_copy_src_host =
         acquireZeroCopySourceHost(arena, use_zero_copy, src_required_bytes);
     const uint16_t* src_host_ptr = static_cast<const uint16_t*>(plane.data);
+    // R4-T4 S3: this memcpy runs before gpu_t0 opens below, so it was
+    // previously billed to NOTHING (not raw_unpack_ms, which is sampled
+    // before this function runs; not gpu_process_ms/host_to_device_copy_ms,
+    // which start after this line). Time it explicitly and report it on its
+    // OWN field, out.timing.source_mosaic_copy_milliseconds, set further
+    // down -- round-4 review B1: folding it into host_to_device_copy_ms
+    // broke the gpu_submit_wait_ms == gpu_process_ms - host_copy_ms identity
+    // (the memcpy is not inside the gpu_process_ms window it would have been
+    // subtracted from), so it stays additive and separate instead.
+    double source_memcpy_ms = 0.0;
     if (zero_copy_src_host != nullptr) {
-        std::memcpy(zero_copy_src_host, plane.data, src_required_bytes);
+        // R4-T4 S5: copy full rows for all but the last, and only the pixel
+        // bytes (w * sizeof(uint16_t)) for the last row, so the read never
+        // extends past the last pixel of `plane.data` -- row_stride_bytes
+        // can exceed w*2 (padding), and the previous full-stride*h memcpy
+        // read up to that padding on the final row, which is genuinely
+        // outside the pixel rectangle (no documented LibRaw allocation
+        // guarantee was found to cite instead).
+        const double memcpy_t0 = nowMs();
+        const size_t row_bytes = static_cast<size_t>(plane.row_stride_bytes);
+        const size_t last_row_bytes = static_cast<size_t>(w) * sizeof(uint16_t);
+        if (h > 1) {
+            std::memcpy(zero_copy_src_host, plane.data, row_bytes * (h - 1));
+        }
+        std::memcpy(static_cast<uint8_t*>(zero_copy_src_host) + row_bytes * (h - 1),
+                    static_cast<const uint8_t*>(plane.data) + row_bytes * (h - 1),
+                    last_row_bytes);
+        source_memcpy_ms = nowMs() - memcpy_t0;
         src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
     }
 
@@ -423,6 +449,11 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // when the buffer is not host-dirty).
     const double h2d_t0 = nowMs();
     const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    // R4-T4 S3 (round-4 review B1): NOT folding source_memcpy_ms in here --
+    // this bracket is the pure copy_to_device window, so
+    // gpu_submit_wait_ms == gpu_process_ms - host_copy_ms keeps holding.
+    // source_memcpy_ms is reported separately via
+    // out.timing.source_mosaic_copy_milliseconds below.
     const double host_to_device_copy_ms = nowMs() - h2d_t0;
     // R1 should-fix #6: a non-zero RC here means the upload itself failed, so
     // the kernel below would read undefined/stale device memory. Fail via the
@@ -561,6 +592,9 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // the identity gpu_submit_wait_ms == gpu_process_ms - host_copy_ms always
     // holds.
     out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    // R4-T4 S3 (round-4 review B1): named separately, never folded into
+    // host_to_device_copy_ms (see the h2d bracket comment above).
+    out.timing.source_mosaic_copy_milliseconds = source_memcpy_ms;
     out.timing.device_to_host_copy_ms =
         runRenderStage4LastDeviceToHostCopyMilliseconds();
     out.timing.host_copy_ms =
@@ -643,8 +677,21 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     void* const zero_copy_src_host =
         acquireZeroCopySourceHost(arena, use_zero_copy, src_required_bytes);
     const uint16_t* src_host_ptr = static_cast<const uint16_t*>(plane.data);
+    // R4-T4 S3/S5: see runBayerBranch's identical comment -- timed and
+    // reported on its own field below, last row copied short to avoid
+    // reading past the pixel rectangle.
+    double source_memcpy_ms = 0.0;
     if (zero_copy_src_host != nullptr) {
-        std::memcpy(zero_copy_src_host, plane.data, src_required_bytes);
+        const double memcpy_t0 = nowMs();
+        const size_t row_bytes = static_cast<size_t>(plane.row_stride_bytes);
+        const size_t last_row_bytes = static_cast<size_t>(w) * sizeof(uint16_t);
+        if (h > 1) {
+            std::memcpy(zero_copy_src_host, plane.data, row_bytes * (h - 1));
+        }
+        std::memcpy(static_cast<uint8_t*>(zero_copy_src_host) + row_bytes * (h - 1),
+                    static_cast<const uint8_t*>(plane.data) + row_bytes * (h - 1),
+                    last_row_bytes);
+        source_memcpy_ms = nowMs() - memcpy_t0;
         src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
     }
 
@@ -695,6 +742,7 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
     const double h2d_t0 = nowMs();
     const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    // R4-T4 S3 (round-4 review B1): see runBayerBranch's identical comment.
     const double host_to_device_copy_ms = nowMs() - h2d_t0;
     // R1 should-fix #6: same convention as runBayerBranch -- fail via the
     // existing kernel-failure path on a non-zero RC, so host_to_device_copy_ms
@@ -799,6 +847,9 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
     // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
     out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    // R4-T4 S3 (round-4 review B1): named separately, never folded into
+    // host_to_device_copy_ms (see the h2d bracket comment above).
+    out.timing.source_mosaic_copy_milliseconds = source_memcpy_ms;
     out.timing.device_to_host_copy_ms =
         runRenderStage4LastDeviceToHostCopyMilliseconds();
     out.timing.host_copy_ms =
@@ -880,8 +931,22 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     void* const zero_copy_src_host =
         acquireZeroCopySourceHost(arena, use_zero_copy, src_required_bytes);
     const uint16_t* src_host_ptr = static_cast<const uint16_t*>(plane.data);
+    // R4-T4 S3/S5: see runBayerBranch's identical comment. Last row copied
+    // short at w*3 components (3 interleaved channels per pixel here, unlike
+    // the mosaic branches' single component per pixel).
+    double source_memcpy_ms = 0.0;
     if (zero_copy_src_host != nullptr) {
-        std::memcpy(zero_copy_src_host, plane.data, src_required_bytes);
+        const double memcpy_t0 = nowMs();
+        const size_t row_bytes = static_cast<size_t>(plane.row_stride_bytes);
+        const size_t last_row_bytes =
+            static_cast<size_t>(w) * 3 * sizeof(uint16_t);
+        if (h > 1) {
+            std::memcpy(zero_copy_src_host, plane.data, row_bytes * (h - 1));
+        }
+        std::memcpy(static_cast<uint8_t*>(zero_copy_src_host) + row_bytes * (h - 1),
+                    static_cast<const uint8_t*>(plane.data) + row_bytes * (h - 1),
+                    last_row_bytes);
+        source_memcpy_ms = nowMs() - memcpy_t0;
         src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
     }
 
@@ -934,6 +999,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
     const double h2d_t0 = nowMs();
     const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    // R4-T4 S3 (round-4 review B1): see runBayerBranch's identical comment.
     const double host_to_device_copy_ms = nowMs() - h2d_t0;
     // R1 should-fix #6: same convention as runBayerBranch -- fail via the
     // existing kernel-failure path on a non-zero RC, so host_to_device_copy_ms
@@ -1038,6 +1104,9 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
     // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
     out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    // R4-T4 S3 (round-4 review B1): named separately, never folded into
+    // host_to_device_copy_ms (see the h2d bracket comment above).
+    out.timing.source_mosaic_copy_milliseconds = source_memcpy_ms;
     out.timing.device_to_host_copy_ms =
         runRenderStage4LastDeviceToHostCopyMilliseconds();
     out.timing.host_copy_ms =
@@ -1320,11 +1389,23 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // struct's current field set. Any FUTURE RawDevelopParams field will
     // vanish the same way unless it is added here too -- flagged as a
     // parking-lot risk, not fixed structurally in this task.
+    // R4-T4 S2: static_assert pinned immediately next to the restoration
+    // list -- adding a field? update the list below AND this size, or the
+    // build fails until you do. This bug has now bitten TWICE (exif_
+    // orientation historically, caller_destination_is_page_aligned this
+    // round) with no structural guard between them; this assert is that
+    // guard.
+    static_assert(sizeof(RawDevelopParams) == 36,
+                  "RawDevelopParams changed size: a field was added or "
+                  "removed. Update the caller-knob restoration list at "
+                  "raw_gpu_pipeline.cpp (this block) to include the new "
+                  "field, then update this literal to the new sizeof.");
     effective.max_output_long_edge = develop.max_output_long_edge;
     effective.exposure_ev = develop.exposure_ev;
     effective.tone_curve_strength = develop.tone_curve_strength;
     effective.output_space = develop.output_space;
     effective.exif_orientation = develop.exif_orientation;
+    effective.shadows = develop.shadows;
     // R3-T2 gate-17 root cause (real bug #2, this list's own documented
     // failure mode): adapter.build() resets `effective` to
     // RawDevelopParams{} internally, so the §4.3 alignment probe the caller
