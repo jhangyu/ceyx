@@ -1039,6 +1039,19 @@ bool runRenderStage4LastCallerDestinationWrapWasUsed() {
 //
 // Disarmed (0) in every production configuration; nothing in the shipping
 // code path ever calls the setter.
+//
+// Shipping decision recorded (round-4 review N-3): the setter/getter pair
+// below IS exported from the production dylib (nm confirms
+// `T _dngRenderStage4SetKernelFailureInjectionArmed`). It is not guarded
+// behind a test-build macro on purpose -- test_concurrent_raw_decode_wrapped
+// (native/tests/test_concurrent_raw_decode_wrapped.cpp) links this symbol
+// dynamically against the shipping dylib to drive the S1 red/green fault-
+// injection evidence chain, and a test-build guard would remove the symbol
+// from exactly the binary that evidence chain depends on. Default-armed
+// state is 0 and no production caller exists (verified: grep over native/,
+// plugin/, app/ finds no caller besides the test above and the header
+// declaration). Accepted risk: an exported switch that can make every
+// wrapped decode fail if some future caller mis-arms it in production.
 static std::atomic<int> g_stage4_kernel_failure_injection_is_armed{0};
 
 extern "C" void dngRenderStage4SetKernelFailureInjectionArmed(int armed) {

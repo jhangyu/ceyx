@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -1395,11 +1396,18 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // orientation historically, caller_destination_is_page_aligned this
     // round) with no structural guard between them; this assert is that
     // guard.
-    static_assert(sizeof(RawDevelopParams) == 36,
-                  "RawDevelopParams changed size: a field was added or "
-                  "removed. Update the caller-knob restoration list at "
-                  "raw_gpu_pipeline.cpp (this block) to include the new "
-                  "field, then update this literal to the new sizeof.");
+    static_assert(sizeof(RawDevelopParams) == 36 &&
+                      offsetof(RawDevelopParams,
+                               caller_destination_is_page_aligned) == 32,
+                  "RawDevelopParams changed size or its last field moved: a "
+                  "field was added, removed, or reordered. Update the "
+                  "caller-knob restoration list at raw_gpu_pipeline.cpp "
+                  "(this block) to include the new field, then update both "
+                  "the sizeof literal and the offsetof literal above. A "
+                  "same-size field appended after "
+                  "caller_destination_is_page_aligned would land in tail "
+                  "padding and stay silent under the sizeof check alone -- "
+                  "that is exactly the failure this offsetof check closes.");
     effective.max_output_long_edge = develop.max_output_long_edge;
     effective.exposure_ev = develop.exposure_ev;
     effective.tone_curve_strength = develop.tone_curve_strength;

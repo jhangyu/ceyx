@@ -140,8 +140,22 @@ typedef struct RawTimingDiagnostics {
 
 /* Timing diagnostics for the calling thread's most recent RAW decode.
  * Returns 0 on success, -1 when out is null or no decode has run yet
- * (mirrors raw_last_color_diagnostics's contract exactly). `struct_size` is
- * always valid on a successful (0) return. */
+ * (mirrors raw_last_color_diagnostics's contract exactly).
+ *
+ * `struct_size` is an INPUT, not an output-only field (round-4 review P-5):
+ * the caller MUST set out->struct_size to sizeof(RawTimingDiagnostics) (the
+ * caller's own compiled layout) before calling. The implementation copies
+ * min(caller struct_size, producer sizeof) bytes and writes the producer's
+ * actual size back into out->struct_size on return, so the versioning is
+ * genuinely honoured by this getter (unlike the embedded-by-value path in
+ * RawPipelineResult, which struct_size does NOT protect -- see the ABI
+ * warning on RawTimingDiagnostics above).
+ *
+ * A caller that zero-initialises `out` and skips setting struct_size before
+ * the call gets struct_size == 0 as input, which yields copy_bytes == 0 --
+ * an all-zero struct returned with RC == 0. Treat struct_size == 0 as a
+ * caller bug, not a valid "no decode yet" signal: callers must always set
+ * struct_size to their own sizeof(RawTimingDiagnostics) before calling. */
 int32_t raw_last_timing_diagnostics(struct RawTimingDiagnostics *out);
 
 /* Internal call, same binary, never looked up via dlsym/FFI -- deliberately

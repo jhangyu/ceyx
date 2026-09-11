@@ -170,6 +170,17 @@ class CeyxNativeBufferPool {
         free(Pointer<Uint8>.fromAddress(address));
         return;
       }
+      // This memory came from ceyx_pool_aligned_alloc (which is _aligned_malloc
+      // on Windows). Falling back to malloc.free here would be undefined
+      // behaviour on Windows and corrupt the CRT heap — never mix allocator
+      // families for aligned memory. Failing to resolve the paired free
+      // symbol means the native bindings are in an inconsistent state, so
+      // fail loudly rather than silently freeing with the wrong allocator.
+      throw StateError(
+        'ceyx_pool_aligned_free is unavailable but address $address was '
+        'allocated via ceyx_pool_aligned_alloc; refusing to free it with '
+        'malloc.free (undefined behaviour on Windows _aligned_malloc memory).',
+      );
     }
     malloc.free(Pointer<Uint8>.fromAddress(address));
   }
