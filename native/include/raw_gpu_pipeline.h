@@ -15,6 +15,7 @@
 #include <cstdint>
 
 #include "libraw_frontend.h"       // RawForcedBackend only (test-only override)
+#include "raw_ffi_api.h"           // C4 (plan §6.4/§6.7): RawTimingDiagnostics
 #include "raw_pipeline_contract.h"
 
 // Round 2 Task 2.6: colour-pipeline diagnostics that RawDecodeDiagnostics
@@ -33,6 +34,14 @@ struct RawColorPipelineDiagnostics {
     char     auto_exposure_reason[96] = {};  // matches RawAutoExposureResult::reason
     uint32_t matrix_route = 0;
     uint32_t vendor_curve_applied = 0;
+    // C4 (plan §6.2 item 2 / §6.3 / §6.7): wall time of the CPU auto-exposure
+    // estimator call inside LibRawGpuInputAdapter::build (raw_auto_exposure_
+    // estimate, libraw_gpu_input_adapter.cpp:576 CFA / :593 linear-RGB).
+    // Reports 0.0 when auto-exposure did not run (mode off, or a layout the
+    // adapter does not attempt). Internal-only: NOT forwarded by
+    // raw_ffi_api.cpp's RawColorDiagnostics conversion, read only by
+    // decodeFileImpl to fill RawPipelineResult::timing.auto_exposure_ms.
+    double   auto_exposure_estimator_ms = 0.0;
 };
 
 // Round 2 Task 2.6: reads back the diagnostics the most recent
@@ -53,6 +62,8 @@ struct RawPipelineResult {
     uint32_t height = 0;
     RawDecodeDiagnostics diag{};
     RawColorPipelineDiagnostics color_diag{};
+    RawTimingDiagnostics timing{};  // C4 (plan §6.4/§6.7): host/device copy +
+                                     // auto-exposure sub-timings, additive
     RawErrorCode error = kRawSuccess;
 
     // WP10 (AMENDMENT 3 / A3.2): set by raw_pipeline_decode_file_into AFTER the

@@ -168,6 +168,12 @@ functions:
 #include <arm_neon.h>
 #endif
 #include "dng_resample.h"
+#include "render_parameter_upload_cache.h"
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+// Plan §5.3 (C3): wrap cached MTLBuffers onto the twelve Stage4 param
+// buffers. Same guard dng_metal_context.cpp:53 uses for its Metal-only body.
+#include "HalideRuntimeMetal.h"
+#endif
 
 // NOTE: G2 (Round 2) — the Android/Vulkan Stage4 kernel now writes interleaved
 // RGBA8 directly (same dst layout as macOS; construct re-verified 0-error on
@@ -977,6 +983,27 @@ Stage4FailureReason dngRenderStage4LastFailureReason() {
     return g_stage4_failure_reason;
 }
 
+// Lead-assigned scope addition (2026-09-11, C4 device->host copy bracket):
+// thread_local so overlapping decodes on different lanes cannot clobber each
+// other's reading, same discipline as g_stage4_failure_reason above. Reset to
+// 0.0 at entry of every runRenderStage4HalideAotFromDevice call; set to the
+// measured elapsed ms only when a copy_to_host actually runs.
+static thread_local double g_last_device_to_host_copy_ms = 0.0;
+
+// There is no dng_now_ms() in this tree (raw_gpu_pipeline.cpp and
+// libraw_gpu_input_adapter.cpp each spell their own local nowMs() for the
+// same reason); this TU needs its own for the same monotonic-ms style.
+double nowMsForDeviceToHostCopyBracket() {
+    using Clock = std::chrono::high_resolution_clock;
+    return std::chrono::duration<double, std::milli>(
+               Clock::now().time_since_epoch())
+        .count();
+}
+
+double runRenderStage4LastDeviceToHostCopyMilliseconds() {
+    return g_last_device_to_host_copy_ms;
+}
+
 bool runRenderStage4HalideAot(const uint16_t* src,
                               int src_w,
                               int src_h,
@@ -1136,6 +1163,11 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 #else
     src_buf.set_host_dirty();
 #endif
+    // Plan §5.3 (C3): deliberately left unconditional here. This is the
+    // host-source entry (runRenderStage4HalideAot) — not on the generic RAW
+    // route, which only reaches runRenderStage4HalideAotFromDevice below.
+    // The param-cache wrap is applied there only; see that function for the
+    // mechanism if this entry ever needs it too.
     exp_buf.set_host_dirty();
     tone_buf.set_host_dirty();
     gamma_buf.set_host_dirty();
@@ -1312,6 +1344,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // nothing here executes and a stale reason would survive. Such readers must
     // call dngRenderStage4ResetFailureReason() themselves.
     g_stage4_failure_reason = Stage4FailureReason::kNone;
+    // Lead-assigned scope addition: reset the device->host copy bracket on
+    // every entry, same discipline as the failure reason above.
+    g_last_device_to_host_copy_ms = 0.0;
 
     if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
@@ -1513,18 +1548,98 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         Buffer<uint8_t>::make_interleaved(dst_rgba_fd, out_w_oriented, out_h_oriented, 4);
 #endif
 
-    exp_buf.set_host_dirty();
-    tone_buf.set_host_dirty();
-    gamma_buf.set_host_dirty();
-    cw_buf.set_host_dirty();
-    c2r_buf.set_host_dirty();
-    r2f_buf.set_host_dirty();
-    hs_table_buf.set_host_dirty();
-    hs_encode_buf.set_host_dirty();
-    hs_decode_buf.set_host_dirty();
-    look_table_buf.set_host_dirty();
-    look_encode_buf.set_host_dirty();
-    look_decode_buf.set_host_dirty();
+    // Plan §5.3 (C3): route the twelve param buffers through the per-lane
+    // upload cache instead of an unconditional host-dirty upload every
+    // decode. `render_parameter_cache_for_current_lane()` returns nullptr
+    // when no lane context exists (harness/direct callers) or on non-Metal
+    // targets, in which case every buffer below reports "not wrapped" and
+    // falls through to today's unconditional set_host_dirty() — the §5.5
+    // no-lane fallback, verbatim.
+    ceyx::RenderParameterUploadCache* param_cache =
+        ceyx::render_parameter_cache_for_current_lane();
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+    // RAII: cached MTLBuffers are owned by the cache, not by these per-call
+    // Buffer objects, so every buffer this call wrapped must be detached
+    // (not device-freed) on every return path below (kernel failure,
+    // copy_to_host failure, or success) — same discipline as §4.2.2.
+    struct ParamCacheDetachGuard {
+        halide_buffer_t* wrapped[12] = {};
+        int count = 0;
+        void add(halide_buffer_t* buf) { wrapped[count++] = buf; }
+        ~ParamCacheDetachGuard() {
+            for (int i = 0; i < count; ++i) {
+                halide_metal_detach_buffer(nullptr, wrapped[i]);
+            }
+        }
+    } param_cache_detach_guard;
+
+    auto wrap_param_buffer = [&](ceyx::RenderParameterBufferIdentity buffer_identity,
+                                  halide_buffer_t* raw) -> bool {
+        if (!param_cache) return false;
+        void* mtl_buffer = param_cache->ensure_buffer_uploaded(
+            buffer_identity, raw->host, raw->size_in_bytes());
+        if (mtl_buffer == nullptr) return false;
+        if (halide_metal_wrap_buffer(nullptr, raw,
+                                      reinterpret_cast<uint64_t>(mtl_buffer)) != 0) {
+            return false;
+        }
+        param_cache_detach_guard.add(raw);
+        return true;
+    };
+
+    // Identities fixed by plan §5.0's buffer table; stable across calls
+    // because AC5's cache-hit accounting is keyed on this ordering.
+    using Identity = ceyx::RenderParameterBufferIdentity;
+    const bool exp_wrapped = wrap_param_buffer(Identity::kExposureRamp, exp_buf.raw_buffer());
+    const bool tone_wrapped = wrap_param_buffer(Identity::kToneCurve, tone_buf.raw_buffer());
+    const bool gamma_wrapped = wrap_param_buffer(Identity::kEncodeGamma, gamma_buf.raw_buffer());
+    const bool cw_wrapped = wrap_param_buffer(Identity::kCameraWhite, cw_buf.raw_buffer());
+    const bool c2r_wrapped = wrap_param_buffer(Identity::kCameraToRgb, c2r_buf.raw_buffer());
+    const bool r2f_wrapped = wrap_param_buffer(Identity::kRgbToFinal, r2f_buf.raw_buffer());
+    const bool hs_table_wrapped =
+        wrap_param_buffer(Identity::kHueSaturationTable, hs_table_buf.raw_buffer());
+    const bool hs_encode_wrapped =
+        wrap_param_buffer(Identity::kHueSaturationEncode, hs_encode_buf.raw_buffer());
+    const bool hs_decode_wrapped =
+        wrap_param_buffer(Identity::kHueSaturationDecode, hs_decode_buf.raw_buffer());
+    const bool look_table_wrapped =
+        wrap_param_buffer(Identity::kLookTable, look_table_buf.raw_buffer());
+    const bool look_encode_wrapped =
+        wrap_param_buffer(Identity::kLookEncode, look_encode_buf.raw_buffer());
+    const bool look_decode_wrapped =
+        wrap_param_buffer(Identity::kLookDecode, look_decode_buf.raw_buffer());
+#else
+    (void)param_cache;
+    const bool exp_wrapped = false;
+    const bool tone_wrapped = false;
+    const bool gamma_wrapped = false;
+    const bool cw_wrapped = false;
+    const bool c2r_wrapped = false;
+    const bool r2f_wrapped = false;
+    const bool hs_table_wrapped = false;
+    const bool hs_encode_wrapped = false;
+    const bool hs_decode_wrapped = false;
+    const bool look_table_wrapped = false;
+    const bool look_encode_wrapped = false;
+    const bool look_decode_wrapped = false;
+#endif
+
+    // set_host_dirty(false) for a buffer this call bound to a cached,
+    // already-current MTLBuffer (the wrap IS the upload); set_host_dirty()
+    // (true) — today's unconditional behaviour — for everything else, so a
+    // cache miss or unavailable cache still uploads correctly.
+    exp_buf.set_host_dirty(!exp_wrapped);
+    tone_buf.set_host_dirty(!tone_wrapped);
+    gamma_buf.set_host_dirty(!gamma_wrapped);
+    cw_buf.set_host_dirty(!cw_wrapped);
+    c2r_buf.set_host_dirty(!c2r_wrapped);
+    r2f_buf.set_host_dirty(!r2f_wrapped);
+    hs_table_buf.set_host_dirty(!hs_table_wrapped);
+    hs_encode_buf.set_host_dirty(!hs_encode_wrapped);
+    hs_decode_buf.set_host_dirty(!hs_decode_wrapped);
+    look_table_buf.set_host_dirty(!look_table_wrapped);
+    look_encode_buf.set_host_dirty(!look_encode_wrapped);
+    look_decode_buf.set_host_dirty(!look_decode_wrapped);
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     dst_rgba_buf.set_host_dirty(false);
 #else
@@ -1661,8 +1776,12 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
     // G-7: capture and check copy_to_host()'s return code.
+    // Lead-assigned scope addition: bracket only, no change to the call or
+    // its error handling. Plan §6.2 item 1's device->host boundary.
     {
+        const double copy_t0 = nowMsForDeviceToHostCopyBracket();
         const int cth = dst_rgba_buf.copy_to_host();
+        g_last_device_to_host_copy_ms = nowMsForDeviceToHostCopyBracket() - copy_t0;
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
             // Plan section 1.6: same class as a kernel failure — the FFI layer
@@ -1698,8 +1817,12 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
 #else
     // G-7: capture and check copy_to_host()'s return code.
+    // Lead-assigned scope addition: bracket only, no change to the call or
+    // its error handling. Plan §6.2 item 1's device->host boundary.
     {
+        const double copy_t0 = nowMsForDeviceToHostCopyBracket();
         const int cth = dst_buf.copy_to_host();
+        g_last_device_to_host_copy_ms = nowMsForDeviceToHostCopyBracket() - copy_t0;
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
             // Plan section 1.6: same class as a kernel failure — the FFI layer

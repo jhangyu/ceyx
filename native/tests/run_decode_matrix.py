@@ -125,6 +125,10 @@ class FfiRunResult:
     contract_pass: bool
     rgb_match_pass: bool
     opcode2_probe: dict[str, float] = field(default_factory=dict)
+    # C4 (plan §6.5/§6.7): key=value pairs from the [RawTiming] line, when the
+    # harness ran with CEYX_RAW_TIMING_LOG=1 against a generic RAW file. Empty
+    # dict for DNG cases and for RAW cases run without that env var.
+    raw_timing: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -308,6 +312,12 @@ _EXPECTED_NATIVE_CONTRACT_STAGES = ("Stage1", "Stage2", "Stage3", "Stage4")
 _STAGE3_PROBE_RE = re.compile(r"^\[Stage3Probe\]\s*(.*)$")
 _STAGE2_PROBE_RE = re.compile(r"^\[Stage2SdkTiming\]\s*(.*)$")
 _OPCODE2_TIMING_RE = re.compile(r"^\[OpcodeList2Timing\]\s*(.*)$")
+# C4 (plan §6.5/§6.7): generic RAW route sub-timing line, emitted by
+# ceyx_decode_into_ffi.cpp when CEYX_RAW_TIMING_LOG=1. Parsed generically as
+# key=value pairs -- never by column position (plan §6.5) -- and printed per
+# RAW case in _run_ffi_case's caller. Off by default; empty on DNG cases and
+# on any RAW case that did not opt in via the env var.
+_RAW_TIMING_RE = re.compile(r"^\[RawTiming\]\s*(.*)$")
 _FFI_RUN_RE = re.compile(
     r"^\[FFI run \d+\]\s+ok=(\d+)\s+w=(\d+)\s+h=(\d+)\s+rgb_bytes=(\d+)\s+"
     r"decode_ms=([0-9]+(?:\.[0-9]+)?)\s+process_ms=([0-9]+(?:\.[0-9]+)?)\s+"
@@ -927,6 +937,7 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
     output = proc.stdout
     stage2_probe: dict[str, float] = {}
     opcode2_probe: dict[str, float] = {}
+    raw_timing: dict[str, float] = {}
     ffi_match: Optional[re.Match[str]] = None
     contract_pass = False
     contract_failed = False
@@ -948,6 +959,13 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         m = _OPCODE2_TIMING_RE.match(line)
         if m:
             _accumulate_opcode2_timing(opcode2_probe, m.group(1))
+        m = _RAW_TIMING_RE.match(line)
+        if m:
+            # C4 (plan §6.5): keys extracted by name via _KV_FLOAT_RE, never by
+            # column position. unified_memory_path_active is %u in the emitter
+            # but parses fine as a float here (0.0/1.0); callers that need the
+            # int form cast it back.
+            raw_timing = {k: float(v) for k, v in _KV_FLOAT_RE.findall(m.group(1))}
     rgb_match_pass = bool(
         rgb_match and rgb_match.group(1) == "1" and rgb_match.group(3) == "PASS"
     )
@@ -975,6 +993,7 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         contract_pass=contract_pass,
         rgb_match_pass=rgb_match_pass,
         opcode2_probe=opcode2_probe,
+        raw_timing=raw_timing,
     )
 
 
@@ -3377,11 +3396,28 @@ def main() -> int:
             for i in range(args.repeat):
                 print(f"[FFI {i+1}/{args.repeat}] {sample_name}")
                 try:
-                    runs.append(_run_ffi_case(root, str(ffi_harness), sample_name,
-                                              dng_path, ffi_env, ffi_artifact_dir))
+                    run = _run_ffi_case(root, str(ffi_harness), sample_name,
+                                        dng_path, ffi_env, ffi_artifact_dir)
                 except RuntimeError as exc:
                     print(f"  ERROR: {exc}")
                     raise SystemExit(1)
+                runs.append(run)
+                # C4 (plan §6.5/§6.7): print per RAW case only -- empty on DNG
+                # cases and on any RAW case run without CEYX_RAW_TIMING_LOG=1.
+                # Printed by key name in a fixed, pre-registered order so the
+                # gate artifacts stay greppable regardless of dict ordering.
+                if run.raw_timing:
+                    ordered_keys = (
+                        "host_to_device_copy_ms", "device_to_host_copy_ms",
+                        "host_copy_ms", "auto_exposure_ms", "gpu_submit_wait_ms",
+                        "gpu_process_ms", "raw_unpack_ms", "total_ms",
+                        "unified_memory_path_active",
+                    )
+                    fields = " ".join(
+                        f"{k}={run.raw_timing[k]:.3f}"
+                        for k in ordered_keys if k in run.raw_timing
+                    )
+                    print(f"  [RawTiming] {fields}")
             ffi_results.append(FfiAggResult(sample_name=sample_name, runs=runs))
 
     # --- CFA phase gates (2026-08-16) ---

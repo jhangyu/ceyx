@@ -206,6 +206,16 @@ const char *dng_metal_context_marker() {
   return "ceyx_metal_queue_pool_v1";
 }
 
+void *metal_shared_device_handle() {
+  // Pointer read only; the lock is released on return, long before the caller
+  // touches Metal (plan §8.2 hazard 4). Deliberately does NOT call
+  // ensure_device_locked(): creating the process device as a side effect of an
+  // inspection would move device creation off the decode path that owns it, so
+  // a caller that runs before any decode correctly sees nullptr.
+  std::lock_guard<std::mutex> g(pool_lock());
+  return g_device;
+}
+
 }  // namespace ceyx
 
 extern "C" const char *ceyx_metal_queue_pool_v1(void) {

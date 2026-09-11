@@ -83,6 +83,40 @@ typedef struct RawColorDiagnostics {
  * `struct_size` is always valid on a successful (0) return. */
 int32_t raw_last_color_diagnostics(RawColorDiagnostics *out);
 
+/* C4 (plan §6.4): sub-timing diagnostics channel, additive and separate from
+ * RawDecodeDiagnostics (frozen -- Dart-visible layout, spec section 12) and
+ * from RawColorDiagnostics above. New symbol, new struct, so no existing ABI
+ * moves and no Dart file is touched.
+ *
+ * Splits the single `gpu_process_ms` window (raw_gpu_pipeline.cpp gpu_t0/
+ * gpu_t1) into host<->device copy time, CPU auto-exposure time (previously
+ * unattributed to either raw_unpack_ms or gpu_process_ms -- plan §6.3), and
+ * the GPU submit/wait residue. gpu_submit_wait_ms is computed as
+ * gpu_process_ms - host_copy_ms, never independently bracketed, so the parts
+ * cannot drift out of agreement with the existing total. */
+typedef struct RawTimingDiagnostics {
+    uint32_t struct_size;            /* sizeof(RawTimingDiagnostics) by the producer */
+    double   host_copy_ms;           /* host->device + device->host, frame-sized buffers */
+    double   host_to_device_copy_ms; /* the upload half, reported separately for AC2 */
+    double   device_to_host_copy_ms; /* the copy-back half, reported separately for AC2 */
+    double   auto_exposure_ms;       /* CPU auto-exposure estimator, plan §6.3 */
+    double   gpu_submit_wait_ms;     /* gpu_process_ms - host_copy_ms, plan §6.2 item 3 */
+    uint32_t unified_memory_path_active;   /* 1 = zero-copy path taken this decode */
+} RawTimingDiagnostics;
+
+/* Timing diagnostics for the calling thread's most recent RAW decode.
+ * Returns 0 on success, -1 when out is null or no decode has run yet
+ * (mirrors raw_last_color_diagnostics's contract exactly). `struct_size` is
+ * always valid on a successful (0) return. */
+int32_t raw_last_timing_diagnostics(struct RawTimingDiagnostics *out);
+
+/* Internal call, same binary, never looked up via dlsym/FFI -- deliberately
+ * NOT RAW_FFI_EXPORT'd and not part of the Dart-visible surface, mirroring
+ * raw_record_decode_into_diagnostics below. Called unconditionally (success
+ * or failure) from the decode-INTO entry point so a failed decode still
+ * reports whatever sub-timings it accumulated before failing (plan §6.4). */
+void raw_record_decode_timing_diagnostics(const struct RawTimingDiagnostics *timing);
+
 /* R6 fix: wires the decode-INTO entry point (ceyx_decode_into_buffer's
  * generic-RAW arm, native/src/ffi/ceyx_decode_into_ffi.cpp) into the
  * thread-local diagnostics state the two queries above read, so they reflect
@@ -103,6 +137,27 @@ struct RawColorPipelineDiagnostics;
 void raw_record_decode_into_diagnostics(
     const RawDecodeDiagnostics *diag,
     const struct RawColorPipelineDiagnostics *color_diag);
+
+/* ===================================================================== */
+/* C3 render-parameter upload cache probe (R1-T1, GPU copy-elimination    */
+/* campaign, docs/logs/2026-09-11/plan-gpu-copy-elimination.md §5.2/§5.4). */
+/*                                                                        */
+/* DEBUG/PROBE API, in the same category as the pool live-address gauge:   */
+/* it is NOT part of the Dart-visible surface and adds nothing to          */
+/* DngResult. Defined in native/src/ffi/dng_ffi_api.cpp beside the         */
+/* existing FFI_EXPORT block (precedent: dng_decode_configured_slots).     */
+/*                                                                        */
+/* Reports the PROCESS-WIDE totals since process start. The gate reads     */
+/* deltas across decodes: same-settings repeat decode => uploads delta 0   */
+/* and cache-hits delta 12. Both counters are reported because zero        */
+/* uploads with zero hits means the caching code never ran at all, which   */
+/* is a different and much worse outcome than zero uploads with twelve     */
+/* hits. Returns 0 on success, -1 when BOTH out-pointers are null; either  */
+/* out-pointer alone may be null.                                          */
+/* ===================================================================== */
+int32_t ceyx_debug_render_parameter_cache_counters(
+    uint64_t *out_uploads_performed,
+    uint64_t *out_cache_hits);
 
 #ifdef __cplusplus
 }

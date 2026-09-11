@@ -36,6 +36,12 @@ thread_local RawDecodeDiagnostics g_last_diagnostics{};
 // construction, so it cannot double as "nothing recorded yet".
 thread_local RawColorDiagnostics g_last_color_diagnostics{};
 thread_local bool g_have_color_diagnostics = false;
+
+// C4 (plan §6.4/§6.7): mirrors g_last_color_diagnostics's lifecycle exactly,
+// including the separate boolean sentinel -- struct_size is never zero on a
+// recorded decode, so it cannot double as "nothing recorded yet" either.
+thread_local RawTimingDiagnostics g_last_timing_diagnostics{};
+thread_local bool g_have_timing_diagnostics = false;
 }
 
 extern "C" {
@@ -51,6 +57,13 @@ RAW_FFI_EXPORT int32_t raw_last_color_diagnostics(RawColorDiagnostics* out) {
     if (!out) return -1;
     if (!g_have_color_diagnostics) return -1;
     *out = g_last_color_diagnostics;
+    return 0;
+}
+
+RAW_FFI_EXPORT int32_t raw_last_timing_diagnostics(RawTimingDiagnostics* out) {
+    if (!out) return -1;
+    if (!g_have_timing_diagnostics) return -1;
+    *out = g_last_timing_diagnostics;
     return 0;
 }
 
@@ -77,6 +90,18 @@ void raw_record_decode_into_diagnostics(
         g_last_color_diagnostics = converted;
         g_have_color_diagnostics = true;
     }
+}
+
+// C4 (plan §6.4/§6.7): sole writer of the timing thread-local state, called
+// unconditionally (success or failure) from the decode-INTO entry point
+// alongside raw_record_decode_into_diagnostics. Not RAW_FFI_EXPORT'd --
+// internal, same-binary call only (see raw_ffi_api.h).
+void raw_record_decode_timing_diagnostics(const RawTimingDiagnostics* timing) {
+    if (!timing) return;
+    RawTimingDiagnostics recorded = *timing;
+    recorded.struct_size = static_cast<uint32_t>(sizeof(RawTimingDiagnostics));
+    g_last_timing_diagnostics = recorded;
+    g_have_timing_diagnostics = true;
 }
 
 }  // extern "C"

@@ -323,6 +323,17 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_raw_render_params PRIVATE ${DNG_LINUX_TEST_LIBS})
 endif()
 
+# GPU copy elimination campaign (plan docs/logs/2026-09-11): AC5 param-cache
+# counter gate and the AC4 reference-hash baseline driver. Both link the
+# production dylib and are driven locally, never in CI.
+add_executable(test_render_parameter_cache tests/test_render_parameter_cache.cpp)
+target_include_directories(test_render_parameter_cache PRIVATE ${INC_DIR})
+target_link_libraries(test_render_parameter_cache PRIVATE dng_decoder_native)
+
+add_executable(raw_corpus_hash_baseline tests/raw_corpus_hash_baseline.cpp)
+target_include_directories(raw_corpus_hash_baseline PRIVATE ${INC_DIR})
+target_link_libraries(raw_corpus_hash_baseline PRIVATE dng_decoder_native)
+
 # -----------------------------------------------------------------------------
 # B1 fix (2026-08-26, round-1 review): the LibRaw/RawSpeed3 wiring below is NOT
 # a test dependency — it supplies dng_decoder_native's own usage requirements
@@ -1615,7 +1626,13 @@ add_executable(test_device_handoff tests/test_device_handoff.cpp
     src/pipeline/dng_opcodelist2_halide.cpp
     src/pipeline/dng_mosaic_halide.cpp
     src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp)
+    src/pipeline/dng_render_halide.cpp
+    # C3 param cache (plan 2026-09-11): dng_render_halide.cpp now references the
+    # render-parameter upload cache, whose Metal body needs the shared device
+    # handle from dng_metal_context.cpp (production context; its absence here
+    # was already flagged as a coverage gap by the R2-T1 FINDING 3 note below).
+    src/pipeline/render_parameter_upload_cache.cpp
+    src/pipeline/dng_metal_context.cpp)
 target_include_directories(test_device_handoff PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -1681,7 +1698,9 @@ add_executable(test_stage4_oriented tests/test_stage4_oriented.cpp
     src/pipeline/dng_opcodelist2_halide.cpp
     src/pipeline/dng_mosaic_halide.cpp
     src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp)
+    src/pipeline/dng_render_halide.cpp
+    src/pipeline/render_parameter_upload_cache.cpp
+    src/pipeline/dng_metal_context.cpp)
 target_include_directories(test_stage4_oriented PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -1734,7 +1753,8 @@ add_executable(test_concurrent_decode tests/test_concurrent_decode.cpp
     src/pipeline/dng_opcodelist2_halide.cpp
     src/pipeline/dng_mosaic_halide.cpp
     src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp)
+    src/pipeline/dng_render_halide.cpp
+    src/pipeline/render_parameter_upload_cache.cpp)
 target_include_directories(test_concurrent_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -1925,7 +1945,9 @@ add_executable(test_sized_decode tests/test_sized_decode.cpp
     src/pipeline/dng_halide_device.cpp
     src/pipeline/dng_opcodelist2_halide.cpp
     src/pipeline/dng_mosaic_halide.cpp
-    src/pipeline/dng_warp_halide.cpp)
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/render_parameter_upload_cache.cpp
+    src/pipeline/dng_metal_context.cpp)
 target_include_directories(test_sized_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -2021,7 +2043,9 @@ add_executable(test_decode tests/test_decode.cpp
     src/pipeline/dng_opcodelist2_halide.cpp
     src/pipeline/dng_mosaic_halide.cpp
     src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp)
+    src/pipeline/dng_render_halide.cpp
+    src/pipeline/render_parameter_upload_cache.cpp
+    src/pipeline/dng_metal_context.cpp)
 target_include_directories(test_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}

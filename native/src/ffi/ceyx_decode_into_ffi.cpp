@@ -9,6 +9,7 @@
 #include "ceyx_decode_into.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 
 #include "ceyx_orient.h"
@@ -179,6 +180,31 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
   // this call is now the SOLE writer; recording unconditionally, before the
   // success check, is what makes the queries honest on a failed decode too.
   raw_record_decode_into_diagnostics(&out.diag, &out.color_diag);
+  // C4 (plan §6.4/§6.7): the timing recorder is called unconditionally,
+  // success or failure, beside raw_record_decode_into_diagnostics above, so a
+  // failed decode still reports whatever sub-timings it accumulated before
+  // failing.
+  raw_record_decode_timing_diagnostics(&out.timing);
+  if (const char *timing_log = std::getenv("CEYX_RAW_TIMING_LOG")) {
+    if (timing_log[0] == '1' && timing_log[1] == '\0') {
+      // Plan §6.5: fixed key=value format, %.3f for every _ms value, %u for
+      // counters, single prefix "[RawTiming] " -- gates grep by key name,
+      // never by column position. Off by default (env var unset emits
+      // nothing), so instrumentation cannot affect bit-exactness (AC4).
+      std::fprintf(stderr,
+                    "[RawTiming] host_to_device_copy_ms=%.3f "
+                    "device_to_host_copy_ms=%.3f host_copy_ms=%.3f "
+                    "auto_exposure_ms=%.3f gpu_submit_wait_ms=%.3f "
+                    "gpu_process_ms=%.3f raw_unpack_ms=%.3f total_ms=%.3f "
+                    "unified_memory_path_active=%u\n",
+                    out.timing.host_to_device_copy_ms,
+                    out.timing.device_to_host_copy_ms,
+                    out.timing.host_copy_ms, out.timing.auto_exposure_ms,
+                    out.timing.gpu_submit_wait_ms, out.diag.gpu_process_ms,
+                    out.diag.raw_unpack_ms, out.diag.total_ms,
+                    out.timing.unified_memory_path_active);
+    }
+  }
   result->decode_ms = out.diag.raw_unpack_ms;
   result->process_ms = out.diag.gpu_process_ms;
   if (rc != kRawSuccess) {

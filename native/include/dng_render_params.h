@@ -178,6 +178,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         // See runRenderStage4HalideAot above.
                                         int32_t exif_orientation = 1);
 
+// Lead-assigned scope addition (2026-09-11, plan §6.2 item 1 — C4
+// device->host copy bracket). Owned by impl-2-sonnet alongside
+// dng_render_halide.cpp's runRenderStage4HalideAotFromDevice, which is the
+// sole writer. Reset to 0.0 at entry of every call to that function; set to
+// the measured elapsed ms only when its copy_to_host actually runs.
+// impl-4-sonnet reads this from raw_gpu_pipeline.cpp right after the Stage4
+// call to fill out.timing.device_to_host_copy_ms.
+double runRenderStage4LastDeviceToHostCopyMilliseconds();
+
 // Needed by the LibRaw builder so "identity" is explicit, never uninitialised
 // (spec section 7.1.4). Signatures transcribed from dng_render_halide.cpp:663-667
 // and :731 — note all four ints are by reference; the helper itself sets the

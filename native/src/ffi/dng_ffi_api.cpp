@@ -12,6 +12,11 @@
 #include "dng_pipeline.h"
 // R4 item 1: kAbsoluteMaxDecodeSlots + the advisory recommendation helpers.
 #include "dng_pipeline_config.h"
+// R1-T1 (GPU copy-elimination C3): the render-parameter upload cache counters
+// behind ceyx_debug_render_parameter_cache_counters below, and the declaration
+// of that probe itself.
+#include "raw_ffi_api.h"
+#include "render_parameter_upload_cache.h"
 
 #if defined(_WIN32)
 #define FFI_EXPORT __declspec(dllexport)
@@ -226,6 +231,27 @@ FFI_EXPORT int64_t dng_decode_recommendation_class_pixels(int32_t index) {
   default:
     return 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// R1-T1 — C3 render-parameter upload cache probe.
+//
+// Debug/probe surface only (see the contract comment in raw_ffi_api.h): not
+// Dart-visible, nothing added to DngResult. The counters are process-wide
+// totals; the gate reads deltas across decodes and asserts on BOTH numbers,
+// because zero uploads with zero hits means the cache never executed.
+// ---------------------------------------------------------------------------
+
+FFI_EXPORT int32_t ceyx_debug_render_parameter_cache_counters(
+    uint64_t *out_uploads_performed, uint64_t *out_cache_hits) {
+  if (!out_uploads_performed && !out_cache_hits) return -1;
+  if (out_uploads_performed) {
+    *out_uploads_performed = ceyx::render_parameter_uploads_performed();
+  }
+  if (out_cache_hits) {
+    *out_cache_hits = ceyx::render_parameter_cache_hits();
+  }
+  return 0;
 }
 
 } // extern "C"

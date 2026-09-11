@@ -1,5 +1,6 @@
 #include "libraw_gpu_input_adapter.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -35,6 +36,17 @@ uint32_t lcmU32(uint32_t a, uint32_t b) {
     uint32_t x = a, y = b;
     while (y != 0) { const uint32_t t = x % y; x = y; y = t; }
     return (a / x) * b;
+}
+
+// C4 (plan §6.2 item 2): same monotonic clock idiom as raw_gpu_pipeline.cpp's
+// nowMs() -- there is no dng_now_ms() in this tree, so the read is spelled
+// out locally in each translation unit rather than sharing a helper across an
+// ownership boundary.
+double nowMs() {
+    using Clock = std::chrono::high_resolution_clock;
+    return std::chrono::duration<double, std::milli>(
+               Clock::now().time_since_epoch())
+        .count();
 }
 
 }  // namespace
@@ -93,19 +105,18 @@ extern "C" void raw_srgb_to_pcs_matrix(float out9[9]) {
 
 // Which branch of the section-1.5 route table produced camera_to_pcs.
 //
-// Declared here rather than in libraw_gpu_input_adapter.h because that header is
-// outside this change's file ownership. The two test files that consume it
-// (test_libraw_adapter.cpp, test_raw_render_params.cpp) mirror these three
-// values verbatim; test_libraw_adapter drives each branch and asserts the
-// returned route, so a future renumbering fails a test rather than silently
-// mislabelling a route in a diagnostic.
-// Plain `int`, not an enum, precisely BECAUSE the declaration has to be
-// duplicated in the test files: an enum return type would make the two
-// declarations mangle differently and fail at link time in a way that reads like
-// a missing symbol rather than a mismatched contract.
-constexpr int kRawCameraMatrixRouteNone = 0;
-constexpr int kRawCameraMatrixRouteRgbCam = 1;
-constexpr int kRawCameraMatrixRouteCamXyz = 2;
+// C4 (plan §6.4/§6.7) added `#include "raw_ffi_api.h"` to raw_gpu_pipeline.h
+// (for RawTimingDiagnostics), which this file already includes -- raw_ffi_api.h
+// is now transitively visible here and declares this exact
+// kRawCameraMatrixRoute{None,RgbCam,CamXyz} = {0,1,2} enum already (by design:
+// "kRawCameraMatrixRoute* mirrors (by value, 0/1/2) the private constants local
+// to libraw_gpu_input_adapter.cpp", raw_ffi_api.h's own comment). A local
+// `constexpr int` of the same names next to that now-visible enum is a
+// redefinition error, so the local trio is retired in favour of using the
+// mirrored enum directly -- same values, same call sites below, no behaviour
+// change. The two test files that consume these values
+// (test_libraw_adapter.cpp, test_raw_render_params.cpp) still mirror the
+// VALUES (0/1/2) verbatim, which is unaffected by where the names now live.
 
 int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
                                   uint32_t raw_color, uint32_t colors,
@@ -573,11 +584,16 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
             // required here.
             const uint32_t row_pitch_samples = static_cast<uint32_t>(
                 v.plane.row_stride_bytes / static_cast<int64_t>(sizeof(uint16_t)));
+            // C4 (plan §6.2 item 2): brackets the CFA estimator call only --
+            // the wb_gain/render_eval setup above and the black/colour-of-site
+            // derivation are per-image bookkeeping, not the estimator itself.
+            const double estimator_t0 = nowMs();
             est = raw_auto_exposure_estimate(
                 static_cast<const uint16_t*>(v.plane.data), v.raw_width, v.raw_height,
                 row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4, black3,
                 out_input->white_level[0], wb_gain, colour_of_site, pw, ph,
                 render_eval, render_eval_ctx);
+            g_adapter_color_diag.auto_exposure_estimator_ms = nowMs() - estimator_t0;
             attempted = true;
         } else if (layout.sample_model == kRawSampleModelLinearRgb &&
                    layout.components_per_pixel >= 1 &&
@@ -590,6 +606,9 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
             const uint32_t sample_width = v.plane.width * layout.components_per_pixel;
             const uint32_t row_pitch_samples = static_cast<uint32_t>(
                 v.plane.row_stride_bytes / static_cast<int64_t>(sizeof(uint16_t)));
+            // C4 (plan §6.2 item 2): same bracket as the CFA arm above, sibling
+            // estimator call for the linear-RGB layout.
+            const double estimator_t0 = nowMs();
             est = raw_auto_exposure_estimate(
                 static_cast<const uint16_t*>(v.plane.data), sample_width, v.plane.height,
                 row_pitch_samples, /*stride_x=*/4, /*stride_y=*/4,
@@ -597,6 +616,7 @@ RawErrorCode LibRawGpuInputAdapter::build(const LibRawFrontendContext& ctx,
                 /*colour_of_site=*/nullptr, /*pattern_w=*/0,
                 /*pattern_h=*/layout.components_per_pixel,
                 render_eval, render_eval_ctx);
+            g_adapter_color_diag.auto_exposure_estimator_ms = nowMs() - estimator_t0;
             attempted = true;
         }
 

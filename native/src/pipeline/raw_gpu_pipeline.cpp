@@ -252,6 +252,13 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     stage3.set_host_dirty(false);
 
     const double gpu_t0 = nowMs();
+    // C4 (plan §6.2 item 1): explicit host->device upload, timed. This is a
+    // re-attribution, not added work -- the kernel below finds src_buf clean
+    // and performs no copy of its own (Halide's copy_to_device is a no-op
+    // when the buffer is not host-dirty).
+    const double h2d_t0 = nowMs();
+    src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    const double host_to_device_copy_ms = nowMs() - h2d_t0;
     if (raw_bayer_demosaic(src_buf, red_x, red_y, black_buf,
                            computeInvRange(input), stage3) != 0) {
         return kRawErrKernelFailed;
@@ -319,6 +326,21 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     }
 
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
+    // C4 (plan §6.2/§6.4/§6.7): device_to_host_copy_ms is read back from
+    // dng_render_halide.cpp's own bracket around its copy_to_host call
+    // (impl-2-sonnet's accessor, dng_render_params.h) rather than bracketed
+    // here, since that call happens inside runRenderStage4HalideAotFromDevice
+    // itself -- out of this task's file ownership. host_copy_ms and
+    // gpu_submit_wait_ms are computed per the formula (plan §6.2 item 3) so
+    // the identity gpu_submit_wait_ms == gpu_process_ms - host_copy_ms always
+    // holds.
+    out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    out.timing.device_to_host_copy_ms =
+        runRenderStage4LastDeviceToHostCopyMilliseconds();
+    out.timing.host_copy_ms =
+        out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
+    out.timing.gpu_submit_wait_ms =
+        out.diag.gpu_process_ms - out.timing.host_copy_ms;
     out.width = oriented_w;
     out.height = oriented_h;
     out.rgba_size = rgba_bytes;
@@ -407,6 +429,11 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     stage3.set_host_dirty(false);
 
     const double gpu_t0 = nowMs();
+    // C4 (plan §6.2 item 1): explicit host->device upload, timed. Same
+    // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
+    const double h2d_t0 = nowMs();
+    src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    const double host_to_device_copy_ms = nowMs() - h2d_t0;
     if (raw_xtrans_demosaic(src_buf, cfa_buf, black_buf,
                             computeInvRange(input), stage3) != 0) {
         return kRawErrKernelFailed;
@@ -469,6 +496,14 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     }
 
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
+    // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
+    out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    out.timing.device_to_host_copy_ms =
+        runRenderStage4LastDeviceToHostCopyMilliseconds();
+    out.timing.host_copy_ms =
+        out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
+    out.timing.gpu_submit_wait_ms =
+        out.diag.gpu_process_ms - out.timing.host_copy_ms;
     out.width = oriented_w;
     out.height = oriented_h;
     out.rgba_size = rgba_bytes;
@@ -556,6 +591,11 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     stage3.set_host_dirty(false);
 
     const double gpu_t0 = nowMs();
+    // C4 (plan §6.2 item 1): explicit host->device upload, timed. Same
+    // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
+    const double h2d_t0 = nowMs();
+    src_buf.copy_to_device(dng_halide_gpu_device_interface());
+    const double host_to_device_copy_ms = nowMs() - h2d_t0;
     if (raw_linear_rgb_normalize(src_buf, black_buf,
                                  computeInvRangeLinearRgb(input), stage3) != 0) {
         return kRawErrKernelFailed;
@@ -618,6 +658,14 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     }
 
     out.diag.gpu_process_ms = nowMs() - gpu_t0;
+    // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
+    out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    out.timing.device_to_host_copy_ms =
+        runRenderStage4LastDeviceToHostCopyMilliseconds();
+    out.timing.host_copy_ms =
+        out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
+    out.timing.gpu_submit_wait_ms =
+        out.diag.gpu_process_ms - out.timing.host_copy_ms;
     out.width = oriented_w;
     out.height = oriented_h;
     out.rgba_size = rgba_bytes;
@@ -870,6 +918,13 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // happen before anything else on this thread calls build() again -- there
     // is nothing between here and the next build() call on this call path.
     out.color_diag = raw_adapter_last_color_diagnostics();
+    // C4 (plan §6.2 item 2 / §6.3): the estimator runs entirely inside
+    // adapter.build(), OUTSIDE both raw_unpack_ms (already captured above at
+    // out.diag = ctx.diagnostics()) and gpu_process_ms (gpu_t0 has not opened
+    // yet -- that happens inside raw_pipeline_decode_to_rgba below). This is
+    // therefore unattributed time being NAMED, not a subdivision of either
+    // existing window (plan §1.6/§6.3, ruled authoritative R-2026-09-11-1).
+    out.timing.auto_exposure_ms = out.color_diag.auto_exposure_estimator_ms;
     // The adapter owns the metadata half of RawDevelopParams; the develop knobs
     // stay the caller's. adapter.build() resets `effective` to
     // RawDevelopParams{} internally (libraw_gpu_input_adapter.cpp:333-335), so

@@ -34,6 +34,26 @@ int dng_metal_queue_cap();
 // Content marker; returns "ceyx_metal_queue_pool_v1".
 const char *dng_metal_context_marker();
 
+// The process-wide MTLDevice this pool owns, as an opaque handle, or nullptr
+// when no Metal device has been created yet (or the system has none).
+//
+// WHY IT EXISTS: C3 of the GPU copy-elimination campaign
+// (docs/logs/2026-09-11/plan-gpu-copy-elimination.md §5.5) allocates its own
+// small Stage4 parameter MTLBuffers and must allocate them from the SAME device
+// the decode queues were created from. The device is already held here, so C3's
+// entire prerequisite is this one accessor; C2 later adds its capability probe
+// and mode accessors beside it.
+//
+// The pool mutex is taken for the pointer read ONLY and released before the
+// caller does any Metal work, per this TU's no-lock-across-a-GPU-wait rule. The
+// device is retained for process lifetime, so the handle stays valid and the
+// caller must NOT release it. This function never CREATES the device: it
+// reports what a decode has already created, and answers nullptr before then.
+//
+// Apple-only definition; declared unconditionally so every platform can compile
+// a call site behind its own guard.
+void *metal_shared_device_handle();
+
 }  // namespace ceyx
 
 // C-ABI content marker, so a built binary can be proven to contain this pool by
