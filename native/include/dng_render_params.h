@@ -23,6 +23,7 @@
 #include "dng_pipeline_config.h"
 
 struct halide_buffer_t;
+namespace ceyx { class RawPersistentDeviceArena; }
 
 // Transcribed unchanged from dng_render_halide.cpp:369-407.
 struct RenderParams {
@@ -176,7 +177,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         DecodeContext* ctx = nullptr,
                                         // Productionization plan section 1.3 (Task 2).
                                         // See runRenderStage4HalideAot above.
-                                        int32_t exif_orientation = 1);
+                                        int32_t exif_orientation = 1,
+                                        // Round 2 plan section 3.5 / 4.2.2 (C1):
+                                        // caller-selected per-lane device arena.
+                                        // I-F: nullptr keeps every existing caller
+                                        // (including the DNG route) bit-identical.
+                                        // Parameter order fixed by plan section 4.2.2:
+                                        // arena FIRST, any later C2 destination-wrap
+                                        // parameter SECOND.
+                                        ceyx::RawPersistentDeviceArena* persistent_device_arena = nullptr);
 
 // Lead-assigned scope addition (2026-09-11, plan §6.2 item 1 — C4
 // device->host copy bracket). Owned by impl-2-sonnet alongside

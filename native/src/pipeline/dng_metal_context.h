@@ -54,6 +54,29 @@ const char *dng_metal_context_marker();
 // a call site behind its own guard.
 void *metal_shared_device_handle();
 
+// Same handle, but CREATES the process device when it does not exist yet.
+// Returns nullptr only when the system genuinely has no Metal device.
+//
+// WHY IT EXISTS (R2 AC1 root cause): the device is created lazily inside the
+// first kernel dispatch of a decode, i.e. LATER in the decode than C1's arena
+// first touch. The arena therefore saw a null device on a lane's very first
+// decode, answered "no arena", and that decode ran unarened — so the warmup
+// decode allocated nothing and the NEXT, smaller frame sized the regions, which
+// made the largest frame later grow all three. Observed as allocation=3 with
+// growth=3, where growth must be 0 after warmup.
+//
+// WHY THIS IS NOT THE SIDE EFFECT metal_shared_device_handle() REFUSES TO HAVE:
+// that accessor answers observational questions (probes, diagnostics) which must
+// not move device creation onto a non-decode path, and its contract is
+// unchanged. This variant is called ONLY from the GPU decode path, where device
+// creation is imminent and intended inside the same call — it moves the creation
+// slightly earlier within a decode that was going to create it regardless. Use
+// the plain accessor for anything observational.
+//
+// Same locking rule as above: the pool mutex covers creation and the pointer
+// read only, and is released before the caller does any Metal work.
+void *metal_shared_device_handle_ensure_created();
+
 }  // namespace ceyx
 
 // C-ABI content marker, so a built binary can be proven to contain this pool by

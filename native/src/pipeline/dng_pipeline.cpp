@@ -96,6 +96,7 @@ functions:
 #include "dng_render_halide.h"
 #include "dng_warp_halide.h"
 #include "dng_halide_device.h"
+#include "raw_persistent_device_arena.h"
 
 namespace {
 
@@ -433,6 +434,13 @@ void dng_decode_resize_slots(size_t n) {
   if (n < 1) n = 1;
   decodeSlotPool().resize(n);
   g_configured_slots.store(n, std::memory_order_relaxed);
+  // Round 2 plan §2.2 / §3.5: this is the single existing funnel for
+  // lane-width changes (its only caller is dng_ffi_api.cpp's
+  // dng_decode_configure_slots). C1's persistent device arena is budgeted
+  // here — configuration sets the ceiling, allocation happens lazily on each
+  // lane's first decode (§2.2, ruling R-2026-09-11-2). Do not add a second
+  // hook site elsewhere.
+  ceyx::raw_persistent_device_arena_configure_lane_count(n);
 }
 
 // Reports the CONFIGURED count (target_), not the container size. This is the

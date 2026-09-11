@@ -20,6 +20,13 @@
 #include "raw_contract_validate.h"
 #include "raw_file_router.h"
 #include "raw_linear_rgb_normalize.h"
+// C1 (plan §3.2, §2.6): per-lane persistent device arena. Owned by
+// impl-b1-opus (native/include/raw_persistent_device_arena.h,
+// native/src/pipeline/raw_persistent_device_arena.cpp). nullptr from
+// raw_persistent_device_arena_for_current_lane() is always a legal answer
+// (non-Metal target, lane ceiling, allocation failure) and every call site
+// below takes today's unwrapped path when it sees one (plan §3.4).
+#include "raw_persistent_device_arena.h"
 #include "raw_render_params_builder.h"
 #include "raw_xtrans_demosaic.h"
 
@@ -244,9 +251,29 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         Halide::Runtime::Buffer<uint16_t>::make_interleaved(
             static_cast<int>(w), static_cast<int>(h), 3);
 
+    // C1 (plan §3.2 item 1-2, §2.6): acquire this thread's lane arena once,
+    // then wrap the source mosaic and Stage3 intermediate onto their arena
+    // regions. Scope-lifetime bindings: they detach (RAII) at branch exit,
+    // i.e. AFTER the Stage4 call below returns, per plan §3.2's requirement
+    // that the RAII scope span the kernel calls. arena == nullptr and/or a
+    // failed bind_region() both leave the bindings falsy and the buffers
+    // exactly as they are today (plan §3.4 — arena absence is never a decode
+    // failure).
+    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+    ceyx::RawDeviceArenaRegionBinding src_arena_binding(
+        arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
+        static_cast<size_t>(plane.row_stride_bytes) * h);
+    ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
+        arena, stage3.raw_buffer(),
+        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
+        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
+
     // GPU targets only upload an input whose host_dirty flag is set; without
     // these the kernel reads freshly device-malloc'd memory. Same handshake as
-    // src/raw_demosaic_reference.cpp:139-141.
+    // src/raw_demosaic_reference.cpp:139-141. Unchanged by C1 (plan §3.2 item
+    // 1): set_host_dirty() stays on the fallback path — C1 changes where the
+    // bytes live, not how many times they move (plan §3.5 "Explicitly NOT
+    // changed by C1"); C2 is what removes this on the unified path.
     src_buf.set_host_dirty();
     black_buf.set_host_dirty();
     stage3.set_host_dirty(false);
@@ -321,7 +348,8 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
                                             /*ctx=*/nullptr,
-                                            develop.exif_orientation)) {
+                                            develop.exif_orientation,
+                                            arena)) {
         return kRawErrKernelFailed;
     }
 
@@ -423,6 +451,18 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         Halide::Runtime::Buffer<uint16_t>::make_interleaved(
             static_cast<int>(w), static_cast<int>(h), 3);
 
+    // C1 (plan §3.2, §2.6): same lane-arena acquire/bind as runBayerBranch —
+    // see that branch's comment for the full rationale. Structurally
+    // identical sibling per §3.5's change list.
+    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+    ceyx::RawDeviceArenaRegionBinding src_arena_binding(
+        arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
+        static_cast<size_t>(plane.row_stride_bytes) * h);
+    ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
+        arena, stage3.raw_buffer(),
+        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
+        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
+
     src_buf.set_host_dirty();
     cfa_buf.set_host_dirty();
     black_buf.set_host_dirty();
@@ -491,7 +531,8 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
                                             /*ctx=*/nullptr,
-                                            develop.exif_orientation)) {
+                                            develop.exif_orientation,
+                                            arena)) {
         return kRawErrKernelFailed;
     }
 
@@ -586,6 +627,18 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         Halide::Runtime::Buffer<uint16_t>::make_interleaved(
             static_cast<int>(w), static_cast<int>(h), 3);
 
+    // C1 (plan §3.2, §2.6): same lane-arena acquire/bind as runBayerBranch —
+    // see that branch's comment for the full rationale. Structurally
+    // identical sibling per §3.5's change list.
+    ceyx::RawPersistentDeviceArena* arena = ceyx::raw_persistent_device_arena_for_current_lane();
+    ceyx::RawDeviceArenaRegionBinding src_arena_binding(
+        arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
+        static_cast<size_t>(plane.row_stride_bytes) * h);
+    ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
+        arena, stage3.raw_buffer(),
+        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
+        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
+
     src_buf.set_host_dirty();
     black_buf.set_host_dirty();
     stage3.set_host_dirty(false);
@@ -653,7 +706,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             static_cast<int>(out_h),
                                             params, rgba->get(),
                                             /*ctx=*/nullptr,
-                                            develop.exif_orientation)) {
+                                            develop.exif_orientation,
+                                            arena)) {
         return kRawErrKernelFailed;
     }
 

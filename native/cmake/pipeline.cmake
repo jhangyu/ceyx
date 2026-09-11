@@ -87,7 +87,10 @@ endif()
 # EXCLUDE REGEX below is anchored with a ".*/" prefix (path-independent basename
 # match), so the resulting NATIVE_SOURCES set is unchanged by the move — verified
 # by target-dump diff in the acceptance step, not just by inspection.
-file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp")
+# CONFIGURE_DEPENDS (R2, GPU-copy-elimination campaign): without it a NEW .cpp
+# added under src/ is invisible to every --skip-configure build until someone
+# happens to reconfigure — the arena TU was silently absent from a full build.
+file(GLOB_RECURSE NATIVE_SOURCES CONFIGURE_DEPENDS "${SRC_DIR}/*.cpp")
 # W7-4 (TD-17): Exclude entire research/ subdirectory from production dylib.
 # Complements the Generator filter below — any new WarpUtils.cpp or helper
 # placed under src/research/ is automatically excluded without updating regex.

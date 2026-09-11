@@ -159,6 +159,33 @@ int32_t ceyx_debug_render_parameter_cache_counters(
     uint64_t *out_uploads_performed,
     uint64_t *out_cache_hits);
 
+/* ===================================================================== */
+/* C1 persistent device arena probe (R2-T1, GPU copy-elimination          */
+/* campaign, docs/logs/2026-09-11/plan-gpu-copy-elimination.md §2.6/§3.3). */
+/*                                                                        */
+/* DEBUG/PROBE API, same category as the cache probe above: NOT part of    */
+/* the Dart-visible surface and nothing is added to DngResult. Defined in  */
+/* native/src/ffi/dng_ffi_api.cpp beside the existing FFI_EXPORT block     */
+/* (precedent: dng_decode_configured_slots).                              */
+/*                                                                        */
+/* Reports PROCESS-WIDE totals since process start. AC1 is judged on the   */
+/* allocation-count delta across N post-warmup decodes being 0, with the   */
+/* growth count reported separately so a legitimate growth event is        */
+/* visible instead of failing AC1, and the binding count reported because  */
+/* an allocation delta of 0 produced by an arena that never ran is the     */
+/* "arena silently not used" failure, not a pass.                          */
+/*                                                                        */
+/* Null-pointer convention (binding lead ruling, round-1 handoff):         */
+/* individual out-pointers may be null and are then skipped; returns 0 if  */
+/* at least one was filled, -1 only when ALL are null.                     */
+/* ===================================================================== */
+int32_t ceyx_debug_persistent_device_arena_counters(
+    uint64_t *out_allocation_count,
+    uint64_t *out_growth_reallocation_count,
+    uint64_t *out_binding_count,
+    uint64_t *out_resident_device_bytes,
+    uint64_t *out_live_lane_count);
+
 #ifdef __cplusplus
 }
 #endif

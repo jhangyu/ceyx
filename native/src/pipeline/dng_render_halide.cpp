@@ -154,6 +154,7 @@ functions:
 // cap follows the configured decode slot count.
 #include "dng_pipeline.h"
 #include "dng_render_params.h"
+#include "raw_persistent_device_arena.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1333,7 +1334,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          const RenderParams& params,
                                          uint8_t* dst,
                                          DecodeContext* ctx,
-                                         int32_t exif_orientation) {
+                                         int32_t exif_orientation,
+                                         ceyx::RawPersistentDeviceArena* persistent_device_arena) {
     // Plan section 1.6: reset before any validation or early return, so a
     // direct caller of this runner sees kNone rather than a reason inherited
     // from an earlier call on this thread.
@@ -1539,6 +1541,20 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     uint8_t* dst_rgba_and = dst;
     Buffer<uint8_t> dst_rgba_buf =
         Buffer<uint8_t>::make_interleaved(dst_rgba_and, out_w_oriented, out_h_oriented, 4);
+    // Round 2 plan §3.2 item 3 / §3.5: when the caller supplied a persistent
+    // device arena, bind the destination's DEVICE side to the arena's
+    // kDestinationRgba8Region. The host side stays the caller's buffer (`dst`)
+    // unchanged; copy_to_host() below still runs — C1 only changes where the
+    // device bytes live, not how many transfers happen (that is C2's business,
+    // not landed yet). I-F: this is entirely gated on the parameter the caller
+    // passed in; the DNG route always passes nullptr here (see the DNG-side
+    // call site) and observes zero behaviour change.
+    std::optional<ceyx::RawDeviceArenaRegionBinding> dst_arena_binding;
+    if (persistent_device_arena != nullptr) {
+        dst_arena_binding.emplace(persistent_device_arena, dst_rgba_buf.raw_buffer(),
+                                   ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
+                                   dst_rgba_buf.raw_buffer()->size_in_bytes());
+    }
 #else
     // W7 (M-11): macOS generator outputs RGBA8. The caller's buffer is written
     // directly.
@@ -1546,6 +1562,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     uint8_t* dst_rgba_fd = dst;
     Buffer<uint8_t> dst_buf =
         Buffer<uint8_t>::make_interleaved(dst_rgba_fd, out_w_oriented, out_h_oriented, 4);
+    // Round 2 plan §3.2 item 3 / §3.5: see the split-kernel arm's comment
+    // above — same gating, same RAII detach-on-scope-exit discipline (I-D),
+    // applied to the fused/macOS destination buffer instead.
+    std::optional<ceyx::RawDeviceArenaRegionBinding> dst_arena_binding;
+    if (persistent_device_arena != nullptr) {
+        dst_arena_binding.emplace(persistent_device_arena, dst_buf.raw_buffer(),
+                                   ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
+                                   dst_buf.raw_buffer()->size_in_bytes());
+    }
 #endif
 
     // Plan §5.3 (C3): route the twelve param buffers through the per-lane
@@ -1798,7 +1823,13 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // deliberately do NOT free: the lossless fallback
     // (demosaic_warp_rectilinear_halide_finish) and the lossy restore
     // (halide_stage2_ol2_device_handoff_copy_to_host) still need the data.
-    if (stage3_device_buf->device != 0) {
+    // I-D: a wrapped/arena-owned buffer must be detached, never device-freed —
+    // halide_device_free on an arena-wrapped handle would free the arena's
+    // MTLBuffer out from under the lane. raw_persistent_device_arena_owns_buffer
+    // is the mechanical test; when it is nullptr (no arena TU linked / no
+    // arena on this lane) it reports false and this reduces to today's free.
+    if (stage3_device_buf->device != 0 &&
+        !ceyx::raw_persistent_device_arena_owns_buffer(stage3_device_buf)) {
         halide_device_free(nullptr, stage3_device_buf);
     }
     auto t3_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()

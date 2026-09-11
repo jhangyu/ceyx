@@ -17,6 +17,9 @@
 // of that probe itself.
 #include "raw_ffi_api.h"
 #include "render_parameter_upload_cache.h"
+// R2-T1 (GPU copy-elimination C1): the persistent device arena counters behind
+// ceyx_debug_persistent_device_arena_counters below.
+#include "raw_persistent_device_arena.h"
 
 #if defined(_WIN32)
 #define FFI_EXPORT __declspec(dllexport)
@@ -250,6 +253,49 @@ FFI_EXPORT int32_t ceyx_debug_render_parameter_cache_counters(
   }
   if (out_cache_hits) {
     *out_cache_hits = ceyx::render_parameter_cache_hits();
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// R2-T1 — C1 persistent device arena probe.
+//
+// Debug/probe surface only (see the contract comment in raw_ffi_api.h): not
+// Dart-visible, nothing added to DngResult. Process-wide totals; AC1 reads the
+// allocation-count delta, the growth count separately (a growth event must stay
+// visible instead of failing AC1), and the binding count as the guard against
+// an allocation delta of 0 produced by an arena that never ran.
+//
+// Null-pointer convention (round-1 handoff): any out-pointer may be null and is
+// then skipped; -1 only when all five are null.
+// ---------------------------------------------------------------------------
+
+FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
+    uint64_t *out_allocation_count, uint64_t *out_growth_reallocation_count,
+    uint64_t *out_binding_count, uint64_t *out_resident_device_bytes,
+    uint64_t *out_live_lane_count) {
+  if (!out_allocation_count && !out_growth_reallocation_count &&
+      !out_binding_count && !out_resident_device_bytes &&
+      !out_live_lane_count) {
+    return -1;
+  }
+  if (out_allocation_count) {
+    *out_allocation_count = ceyx::raw_persistent_device_arena_allocation_count();
+  }
+  if (out_growth_reallocation_count) {
+    *out_growth_reallocation_count =
+        ceyx::raw_persistent_device_arena_growth_reallocation_count();
+  }
+  if (out_binding_count) {
+    *out_binding_count = ceyx::raw_persistent_device_arena_binding_count();
+  }
+  if (out_resident_device_bytes) {
+    *out_resident_device_bytes =
+        ceyx::raw_persistent_device_arena_resident_device_bytes();
+  }
+  if (out_live_lane_count) {
+    *out_live_lane_count = static_cast<uint64_t>(
+        ceyx::raw_persistent_device_arena_live_lane_count());
   }
   return 0;
 }
