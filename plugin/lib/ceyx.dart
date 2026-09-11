@@ -22,7 +22,17 @@ export 'src/dng_decoder_service.dart'
         CeyxOrientationContractException;
 
 // WP6: the fixed-slot native buffer pool and its explicit release entry.
-export 'src/native_buffer_pool.dart' show CeyxNativeBufferPool, CeyxNativeBuffer;
+// Idle-shrink campaign: the policy type and its two contract constants are
+// exported so a host can INSPECT or override the schedule — NOT because a host
+// has to assemble one. `CeyxDecodePool` wires the default itself, which is
+// what keeps the idle shrink zero-change for host apps.
+export 'src/native_buffer_pool.dart'
+    show
+        CeyxNativeBufferPool,
+        CeyxNativeBuffer,
+        CeyxPoolShrinkPolicy,
+        kPoolShrinkQuietWindow,
+        kPoolShrinkGrowLockout;
 
 export 'src/decode_pool.dart'
     show
@@ -77,11 +87,13 @@ export 'src/encode_service.dart'
 export 'src/codec_format.dart' show CeyxImageFormat;
 
 export 'src/still_error_codes.dart'
-    show CeyxStillErrorCode, CeyxStillDecodeException, CeyxStillUnavailableException;
+    show
+        CeyxStillErrorCode,
+        CeyxStillDecodeException,
+        CeyxStillUnavailableException;
 
 export 'src/still_decoder_service.dart'
     show CeyxStillImage, CeyxStillProbe, CeyxStillDecoderService;
-
 
 /// Marker for the vendored binaries, so a build can be traced back to a
 /// specific drop of the native library.

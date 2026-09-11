@@ -462,6 +462,186 @@ class CeyxDecodePool {
   /// Jobs admitted-but-not-yet-dispatched.
   int get queuedCount => _queue.length;
 
+  /// True ONLY when no decode work of any kind is outstanding AND no pooled
+  /// buffer is checked out anywhere.
+  ///
+  /// This is the trigger source for the idle buffer-pool shrink. It is
+  /// deliberately STRICT — a false "quiescent" while a worker isolate can
+  /// still write into a borrowed buffer is the one way the shrink can corrupt
+  /// a frame — so it answers false on every state that is not provably empty:
+  ///
+  /// * [_byKey] — the SUPERSET of admitted work. Neither [queuedCount] nor
+  ///   [inFlightCount] covers `_prepareAndEnqueue`: between the `await` on the
+  ///   size probe and the `_queue.add` a decode job lives in `_byKey` alone,
+  ///   and it may ALREADY hold a buffer acquired at [_prepareAndEnqueue]'s
+  ///   `nativeBufferPool.acquire`. `_byKey` is checked first for that reason.
+  /// * [_queue] / [_byRequestId] / a worker's `currentJob` — the three states
+  ///   an admitted job passes through. Redundant with `_byKey` by
+  ///   construction; kept because "redundant" is a claim about invariants and
+  ///   the cost of being wrong here is a corrupted frame, not a slow one.
+  /// * the buffer pool's own checkouts — NOT implied by "no decode running".
+  ///   On success a slot is deliberately NOT released when the job completes
+  ///   (see [_completeJob]); ownership passes to the `DngImage`, which returns
+  ///   it at `releaseToPool()` — arbitrarily later. The synchronous
+  ///   `DngDecoderService.decode` route borrows without going through this
+  ///   pool at all. Either one can hold a buffer while this pool is idle.
+  ///
+  ///   Counted here for `adoptUnpooled` and oversize escapes TOO, deliberately
+  ///   (team ruling, this campaign): an adopted address is memory a WORKER
+  ///   ISOLATE allocated and wrote on the self-allocating fallback, owned by
+  ///   the resulting `DngImage` until `releaseToPool()`. `shrinkToFloor` would
+  ///   never free such a buffer (it walks the idle list, and an unpooled
+  ///   buffer is disposed rather than idled on return), but quiescence is not
+  ///   only a shrink precondition — it means "the app has stopped decoding",
+  ///   and a degradation path in flight is not that. The only cost of counting
+  ///   it is that a shrink waits.
+  /// * the buffer pool's waiters — a queued acquirer means capacity is already
+  ///   spoken for; shrinking under it would free what someone is blocked on.
+  ///
+  /// A disposed pool with nothing outstanding IS quiescent: there is no work
+  /// and no borrowed memory, which is exactly what the shrink needs to know.
+  bool get isQuiescent {
+    if (_byKey.isNotEmpty) return false;
+    if (_queue.isNotEmpty) return false;
+    if (_byRequestId.isNotEmpty) return false;
+    for (final worker in _workers) {
+      if (worker.currentJob != null) return false;
+    }
+    final buffers = nativeBufferPool;
+    if (buffers != null &&
+        (buffers.hasOutstandingCheckouts || buffers.hasWaiters)) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Broadcast notification of [isQuiescent] TRANSITIONS, the seam the idle
+  /// shrink timer consumes: `true` = became quiescent (start the 5s timer),
+  /// `false` = left quiescence (cancel it).
+  ///
+  /// No initial event is emitted — read [isQuiescent] once on subscribe.
+  /// Consumers MUST re-read [isQuiescent] before acting on a `true` event:
+  /// the event says "was quiescent when observed", and the timer they arm
+  /// fires seconds later.
+  ///
+  /// Edges are observed from two sides, because neither alone is complete:
+  /// this pool's own job bookkeeping, and the buffer pool's checkout hook
+  /// (a buffer returned by `DngImage.releaseToPool()` is invisible here).
+  /// The buffer hook is installed on first listener and removed on last
+  /// cancel, so a pool nobody watches costs nothing.
+  Stream<bool> get quiescenceChanges => _quiescenceController.stream;
+
+  late final StreamController<bool> _quiescenceController =
+      StreamController<bool>.broadcast(
+        onListen: _attachQuiescenceWatch,
+        onCancel: _detachQuiescenceWatch,
+      );
+
+  /// Last value PUBLISHED on [quiescenceChanges]; seeded from the live
+  /// predicate on subscribe so the first emission is a real transition rather
+  /// than an echo of the current state.
+  bool? _lastPublishedQuiescence;
+  bool _quiescenceNoteScheduled = false;
+  CeyxNativeBufferPool? _watchedBufferPool;
+
+  /// The default idle-shrink policy for whatever buffer pool this decode pool
+  /// is currently using, and the reason a host app needs no wiring at all.
+  ///
+  /// OWNERSHIP: this decode pool owns the policy and the subscription that
+  /// feeds it. Nothing else may cancel that subscription — cancelling the last
+  /// listener is what uninstalls the buffer pool's checkout hook, and a policy
+  /// left alive without that hook would stop seeing buffers RETURNED outside a
+  /// decode and could arm a shrink against live memory. Both are torn down
+  /// together, in [dispose] or when the buffer pool is swapped.
+  ///
+  /// ACTIVATION is a property of CONFIGURATION, not of identity: a policy is
+  /// created only for a buffer pool whose `idleFloor < maxBuffers`, i.e. one
+  /// that was actually built to shrink. `CeyxNativeBufferPool.shared` is (per
+  /// this campaign's ruling) the only such pool in production, while the
+  /// default constructor leaves `idleFloor == maxBuffers`. That is deliberate
+  /// on two counts: a pool that cannot shrink never arms a pointless timer,
+  /// and the whole existing test suite — which builds its own pools — keeps
+  /// running with no live timer and no behaviour change.
+  ///
+  /// BINDING happens on first submit rather than in the constructor, because
+  /// [nativeBufferPool] is a static the host assigns AFTER constructing the
+  /// pool; binding at construction would capture null forever. A later swap of
+  /// [nativeBufferPool] is honoured — the old policy is disposed and a new one
+  /// built against the new pool.
+  @visibleForTesting
+  CeyxPoolShrinkPolicy? get debugShrinkPolicy => _shrinkPolicy;
+
+  CeyxPoolShrinkPolicy? _shrinkPolicy;
+  CeyxNativeBufferPool? _shrinkPolicyPool;
+  StreamSubscription<bool>? _shrinkSubscription;
+
+  void _ensureShrinkPolicy() {
+    final buffers = nativeBufferPool;
+    if (identical(buffers, _shrinkPolicyPool)) return;
+    _teardownShrinkPolicy();
+    if (buffers == null) return;
+    if (buffers.idleFloor >= buffers.maxBuffers) return;
+    _shrinkPolicyPool = buffers;
+    final policy = CeyxPoolShrinkPolicy(
+      buffers,
+      // The policy re-confirms synchronously at fire time. It reads THIS
+      // getter rather than trusting the last edge it was handed, so a dropped
+      // notification degrades into "no shrink", never into "shrink anyway".
+      isQuiescentNow: () => isQuiescent,
+    );
+    _shrinkPolicy = policy;
+    _shrinkSubscription = quiescenceChanges.listen(policy.onQuiescenceChanged);
+    // The stream is transition-only and emits nothing on subscribe, so the
+    // policy is handed the current level once, here.
+    policy.onQuiescenceChanged(isQuiescent);
+  }
+
+  void _teardownShrinkPolicy() {
+    unawaited(_shrinkSubscription?.cancel());
+    _shrinkSubscription = null;
+    _shrinkPolicy?.dispose();
+    _shrinkPolicy = null;
+    _shrinkPolicyPool = null;
+  }
+
+  void _attachQuiescenceWatch() {
+    _lastPublishedQuiescence = isQuiescent;
+    final buffers = nativeBufferPool;
+    if (buffers == null) return;
+    _watchedBufferPool = buffers;
+    buffers.onCheckoutChange = _noteQuiescenceMayHaveChanged;
+  }
+
+  void _detachQuiescenceWatch() {
+    final watched = _watchedBufferPool;
+    if (watched != null &&
+        identical(watched.onCheckoutChange, _noteQuiescenceMayHaveChanged)) {
+      watched.onCheckoutChange = null;
+    }
+    _watchedBufferPool = null;
+    _lastPublishedQuiescence = null;
+  }
+
+  /// Called from every site that can change the answer. Coalesced onto a
+  /// microtask so a burst of bookkeeping (release, remove, dispatch) publishes
+  /// ONE edge computed from the settled state, not an intermediate one — the
+  /// intermediate states of `_completeJob` in particular pass through
+  /// "everything empty" before the next job is dispatched.
+  void _noteQuiescenceMayHaveChanged() {
+    if (_quiescenceNoteScheduled) return;
+    if (!_quiescenceController.hasListener) return;
+    _quiescenceNoteScheduled = true;
+    scheduleMicrotask(() {
+      _quiescenceNoteScheduled = false;
+      if (_quiescenceController.isClosed) return;
+      if (!_quiescenceController.hasListener) return;
+      final now = isQuiescent;
+      if (now == _lastPublishedQuiescence) return;
+      _lastPublishedQuiescence = now;
+      _quiescenceController.add(now);
+    });
+  }
+
   /// The current generation. Results from older generations are discarded.
   int get generation => _generation;
 
@@ -501,10 +681,9 @@ class CeyxDecodePool {
   ///
   /// Ruling r-6: for DISPLAY ONLY. No code path may clamp the user's setting
   /// against these values.
-  List<int>? get nativeRecommendations =>
-      _nativeRecommendations == null
-          ? null
-          : List<int>.unmodifiable(_nativeRecommendations!);
+  List<int>? get nativeRecommendations => _nativeRecommendations == null
+      ? null
+      : List<int>.unmodifiable(_nativeRecommendations!);
 
   void _setNativeSlotTarget(int value) {
     if (value == _nativeSlotTarget) return;
@@ -565,6 +744,12 @@ class CeyxDecodePool {
       exifOrientation: exifOrientation,
     );
     _byKey[key] = job;
+    // Admission is the ONLY way to leave quiescence, so this note is what
+    // cancels a pending shrink timer. `_ensureShrinkPolicy` runs AFTER it, so
+    // a policy created on the very first submit is handed `false` as its
+    // opening level rather than arming a window this job is about to break.
+    _noteQuiescenceMayHaveChanged();
+    _ensureShrinkPolicy();
     if (type == CeyxPoolJobType.decode && _pooledRouteEnabled) {
       // WP10: the slot is acquired HERE, on the pool's own isolate, because
       // that is where CeyxNativeBufferPool's free list lives. Preparation is
@@ -772,10 +957,7 @@ class CeyxDecodePool {
 
   /// Convenience wrapper: embedded preview JPEG, or null when there is none.
   /// A discarded probe also returns null (there is nothing to show anyway).
-  Future<Uint8List?> probePreviewJpeg(
-    String path, {
-    int? generation,
-  }) async {
+  Future<Uint8List?> probePreviewJpeg(String path, {int? generation}) async {
     final outcome = await submit(
       CeyxPoolJobType.probe,
       path,
@@ -825,9 +1007,7 @@ class CeyxDecodePool {
     _byKey[job.key] = job;
     _queue.add(job);
     _pump();
-    return job.completer.future.then(
-      (outcome) => outcome.value! as Uint8List,
-    );
+    return job.completer.future.then((outcome) => outcome.value! as Uint8List);
   }
 
   // Synthetic per-call discriminator so every encode submission gets its own
@@ -853,6 +1033,13 @@ class CeyxDecodePool {
       _releaseSlot(job);
       job.completeError(CeyxPoolUnavailableException('pool disposed'));
     }
+    // Policy first: it must not outlive the checkout hook it depends on.
+    _teardownShrinkPolicy();
+    // The watch is torn down rather than notified: every job above was failed
+    // and every slot returned, so a disposed pool is trivially quiescent and
+    // an edge nobody can act on is noise.
+    _detachQuiescenceWatch();
+    if (!_quiescenceController.isClosed) await _quiescenceController.close();
   }
 
   // --- internals ---------------------------------------------------------
@@ -887,6 +1074,10 @@ class CeyxDecodePool {
     } finally {
       _pumping = false;
     }
+    // Every completion, worker loss and enqueue path funnels through `_pump`,
+    // so noting here covers the whole family without decorating each site.
+    // The note is microtask-coalesced, so a nested pump costs nothing.
+    _noteQuiescenceMayHaveChanged();
   }
 
   _PoolWorker? _idleReadyWorker() {
@@ -991,25 +1182,25 @@ class CeyxDecodePool {
           job.exifOrientation != 1 &&
           job.probedWidth != null &&
           job.probedHeight != null)
-        // Productionization plan Task 9: probed extent riding at indices 9/10
-        // — only ever appended alongside orientation (index 8), never alone.
-        ...<Object?>[
-          encodeArgs,
-          slot.address,
-          slot.capacity,
-          job.exifOrientation,
-          job.probedWidth,
-          job.probedHeight,
-        ]
-      else if (slot != null && job.exifOrientation != 1)
-        ...<Object?>[
-          encodeArgs,
-          slot.address,
-          slot.capacity,
-          job.exifOrientation,
-        ]
-      else if (slot != null)
-        ...<Object?>[encodeArgs, slot.address, slot.capacity]
+      // Productionization plan Task 9: probed extent riding at indices 9/10
+      // — only ever appended alongside orientation (index 8), never alone.
+      ...<Object?>[
+        encodeArgs,
+        slot.address,
+        slot.capacity,
+        job.exifOrientation,
+        job.probedWidth,
+        job.probedHeight,
+      ] else if (slot != null && job.exifOrientation != 1) ...<Object?>[
+        encodeArgs,
+        slot.address,
+        slot.capacity,
+        job.exifOrientation,
+      ] else if (slot != null) ...<Object?>[
+        encodeArgs,
+        slot.address,
+        slot.capacity,
+      ]
       // No slot: byte-for-byte the pre-WP10 shape (length 5, or 6 for encode).
       else if (encodeArgs != null)
         encodeArgs,
@@ -1182,7 +1373,12 @@ class CeyxDecodePool {
         _completeJob(worker, raw[1] as int, raw.sublist(2), null);
         return;
       case kMsgError:
-        _completeJob(worker, raw[1] as int, null, raw.length > 2 ? raw[2] : null);
+        _completeJob(
+          worker,
+          raw[1] as int,
+          null,
+          raw.length > 2 ? raw[2] : null,
+        );
         return;
       // WP10. MUST stay ahead of `default:`, which calls _onWorkerLost — an
       // unhandled resize would kill the worker that just correctly refused an
@@ -1340,9 +1536,7 @@ class CeyxDecodePool {
         // Native-rotation spec Task 4: appliedOrientation rides at result
         // index 5, behind the same widening guard idiom; a pre-Task-4 (or
         // 5-element) payload from an older worker defaults to identity.
-        final appliedOrientation = payload.length > 5
-            ? payload[5] as int
-            : 1;
+        final appliedOrientation = payload.length > 5 ? payload[5] as int : 1;
         final rgbaData = _wrapNativeRgba(address, width * height * 4, type);
         return DngImage(
           rgbaData: rgbaData,
@@ -1454,8 +1648,10 @@ class CeyxDecodePool {
       // from the pool). The safety net returns it instead, and it is armed for
       // THIS checkout only.
       final bytes = ptr.asTypedList(length);
-      _poolSafetyNet.attach(bytes, (owned, owned.checkoutGeneration),
-          detach: bytes);
+      _poolSafetyNet.attach(bytes, (
+        owned,
+        owned.checkoutGeneration,
+      ), detach: bytes);
       return bytes;
     }
     if (debugNativeFree != null) {
@@ -1562,9 +1758,7 @@ class CeyxDecodePool {
       // Past the cap the pool runs narrower ON PURPOSE and never silently
       // resurrects a slot through the lazy-spawn path.
       _respawnCapped = true;
-      logger(
-        'pool|RESPAWN_CAP_REACHED|running narrower|workers=$workerCount',
-      );
+      logger('pool|RESPAWN_CAP_REACHED|running narrower|workers=$workerCount');
       // A surviving worker may be idle and able to take the queue right now;
       // only a pool with NO live worker left has to fail it. `_pump` is safe
       // here (this is a port event, not a `_pump` re-entry) and is guarded
@@ -1822,9 +2016,7 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
     // occupies index 5 with an explicit null so its dstAddress/dstCapacity keep
     // fixed indices 6/7 (see _dispatch). Hence the `?` — an unconditional cast
     // would throw on every pooled decode.
-    final encodeArgs = message.length > 5
-        ? message[5] as List<Object?>?
-        : null;
+    final encodeArgs = message.length > 5 ? message[5] as List<Object?>? : null;
     try {
       switch (type) {
         case CeyxPoolJobType.probe:
@@ -1878,7 +2070,12 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
             } on DngBufferTooSmallException catch (e) {
               // The prediction was stale. Report the extent native gave us so
               // the pool re-acquires exactly, rather than guessing again.
-              poolPort.send(<Object?>[kMsgResize, requestId, e.width, e.height]);
+              poolPort.send(<Object?>[
+                kMsgResize,
+                requestId,
+                e.width,
+                e.height,
+              ]);
             }
           } else if (dstAddress != 0 && service.decodeIntoBufferAvailable) {
             try {
@@ -1892,7 +2089,12 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
             } on DngBufferTooSmallException catch (e) {
               // The prediction was stale. Report the extent native gave us so
               // the pool re-acquires exactly, rather than guessing again.
-              poolPort.send(<Object?>[kMsgResize, requestId, e.width, e.height]);
+              poolPort.send(<Object?>[
+                kMsgResize,
+                requestId,
+                e.width,
+                e.height,
+              ]);
             }
           } else {
             // WP2: this arm used to call the service's pointer-transfer entry,
