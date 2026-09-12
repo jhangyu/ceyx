@@ -486,27 +486,7 @@ jobs:
       # not a binary property -- read from plugin/android/build.gradle, not
       # from the .so files this leg just built.
       - name: Measure and emit the minimum runtime floor (S-F1)
-        run: |
-          python3 native/scripts/read_min_runtime.py \
-            --gradle plugin/android/build.gradle \
-            --platform android \
-            --out min_runtime.txt
-          echo "READ_MIN_RUNTIME_RC=$?"
-          cat min_runtime.txt
-
-          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
-          # just-declared floor and ceyx's own min_runtime_expected.toml.
-          set +e
-          python3 native/scripts/assert_min_runtime_matches_declared.py \
-            --emitted min_runtime.txt \
-            --declared native/deps/min_runtime_expected.toml \
-            --platform android
-          RC=$?
-          set -e
-          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            exit "${RC}"
-          fi
+        run: python3 native/scripts/ci.py min-runtime --platform android
 
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`

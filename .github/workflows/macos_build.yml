@@ -652,20 +652,7 @@ jobs:
       # without updating codec_expectations.toml.
       - name: Assert full codec capability vector via probe (G1, native leg)
         if: matrix.cross == 'false'
-        run: |
-          set +e
-          mkdir -p native/scripts/deps/probe
-          python3 native/scripts/codec_capability_probe.py "$DYLIB" \
-            --expect jpeg:encode=1 --expect jpeg:decode=0 \
-            --expect webp:encode=1 --expect webp:decode=1 \
-            --expect heic:encode=1 --expect heic:decode=1 \
-            --expect avif:encode=1 --expect avif:decode=1 \
-            --expect jxl:encode=1 --expect jxl:decode=1 \
-            --json-out native/scripts/deps/probe/capability.json
-          rc=$?
-          set -e
-          echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
-          exit "${rc}"
+        run: python3 native/scripts/ci.py capability-vector --platform macos --kind codec --dylib-path "$DYLIB" --expect jpeg:encode=1 --expect jpeg:decode=0 --expect webp:encode=1 --expect webp:decode=1 --expect heic:encode=1 --expect heic:decode=1 --expect avif:encode=1 --expect avif:decode=1 --expect jxl:encode=1 --expect jxl:decode=1 --json-out native/scripts/deps/probe/capability.json
 
       # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, macos-arm64 leg.
       # Vector transcribed from native/deps/codec_expectations.toml
@@ -674,16 +661,7 @@ jobs:
       # option Z, WI-5): ENABLE_LCMS is forced OFF, lcms2 is dead code.
       - name: Assert build capability vector via probe (S-E2, native leg)
         if: matrix.cross == 'false'
-        run: |
-          set +e
-          python3 native/scripts/codec_capability_probe.py "$DYLIB" \
-            --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 \
-            --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 \
-            --json-out native/scripts/deps/probe/capability_build.json
-          rc=$?
-          set -e
-          echo "BUILD_CAPABILITY_PROBE_RC=${rc}"
-          exit "${rc}"
+        run: python3 native/scripts/ci.py capability-vector --platform macos --kind build --dylib-path "$DYLIB" --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 --json-out native/scripts/deps/probe/capability_build.json
 
       # Cross leg: cannot dlopen a foreign-arch (x86_64) dylib from this
       # arm64 host process, so the achievable proof is the compile-time one —
@@ -705,7 +683,7 @@ jobs:
       - name: Assert codec capability vector via configure log (G1, cross leg)
         if: matrix.cross == 'true'
         run: |
-          set +e
+          python3 native/scripts/ci.py capability-vector --platform macos --kind codec --source configure-log --log-path cross_stage2_build.log
           # LEDGER VECTOR (macos-x86_64), transcribed from
           # native/deps/codec_expectations.toml -- kept INSIDE this step
           # (not in the comment block above the `- name:` header) so
@@ -716,14 +694,6 @@ jobs:
           # jpeg:encode=1 jpeg:decode=0
           # webp:encode=1 webp:decode=1 heic:encode=1 heic:decode=1
           # avif:encode=0 avif:decode=0 jxl:encode=1 jxl:decode=1
-          grep -q -- "-- JXL: static" cross_stage2_build.log
-          rc=$?
-          set -e
-          echo "ASSERT cross-leg JXL enabled RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::cross_stage2_build.log does not show '-- JXL: static ...' from cmake/jxl.cmake's success branch; the x86_64 cross-compile configure may not have enabled JXL." >&2
-            exit 1
-          fi
 
       # WI-5 step 5.4 (S-E2), macos-x86_64 cross leg: this leg cannot dlopen
       # a foreign-arch artifact (same reason the codec vector above uses
@@ -741,6 +711,7 @@ jobs:
       - name: Assert build capability vector via probe (S-E2, cross leg)
         if: matrix.cross == 'true'
         run: |
+          python3 native/scripts/ci.py capability-vector --platform macos --kind build --source configure-log --log-path cross_stage2_build.log
           # LEDGER VECTOR (macos-x86_64.capabilities), transcribed from
           # native/deps/codec_expectations.toml -- kept INSIDE this step
           # (not the comment block above the `- name:` header) so
@@ -749,15 +720,7 @@ jobs:
           # "native leg" capability step (same SF2-family fix as the codec
           # cross-leg step above).
           # OPENMP=1 HEIF=1 WEBP=1 JXL=1 RAW=1
-          set +e
-          grep -q -- "\[ceyx\] LCMS2: disabled (OQ-N4 option Z)" cross_stage2_build.log
-          rc=$?
-          set -e
-          echo "ASSERT cross-leg ICC=0 RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::cross_stage2_build.log does not show the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line -- ENABLE_LCMS may not be forced OFF on this leg." >&2
-            exit 1
-          fi
+          # LEDGER VECTOR ICC=0 -- literal token kept for render_expectations.py's static per-step scan; the assertion itself now runs inside ci.py capability-vector (pre-migration this token was satisfied incidentally by the "ASSERT cross-leg ICC=0 RC=" echo).
 
       # G3 fix (task #9): macOS had no FFI export-symbol assertion at all,
       # unlike Linux (AC-L5) and Windows (AC-W4) — a definition missing
@@ -908,51 +871,7 @@ jobs:
       # alone -- the macOS pin comment records the OpenMP runtime, not the
       # decoder, as what actually sets the macOS 15 floor.
       - name: Measure and emit the minimum runtime floor (S-F1)
-        run: |
-          ARTIFACT_ARGS=()
-          for f in "${ARTIFACT_DIR}"/native/*.dylib; do
-            ARTIFACT_ARGS+=(--artifact "$f")
-          done
-          python3 native/scripts/read_min_runtime.py \
-            "${ARTIFACT_ARGS[@]}" \
-            --platform macos \
-            --out "${ARTIFACT_DIR}/min_runtime.txt"
-          echo "READ_MIN_RUNTIME_RC=$?"
-          cat "${ARTIFACT_DIR}/min_runtime.txt"
-
-          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
-          # just-measured floor and ceyx's own declaration.
-          #
-          # RESOLVED 2026-09-12 (CI run 34697591379). The risk previously
-          # flagged here -- that the single [macos] value (15.0), measured on
-          # the arm64 NATIVE leg's group, would report false drift on the
-          # x86_64 CROSS leg -- MATERIALISED exactly as predicted: that leg
-          # measured 14.0 and went red while arm64 passed. The fix taken is
-          # the per-arch declaration this comment itself named as the correct
-          # shape, NOT lowering the arm64 value and NOT skipping the gate on
-          # x86_64: min_runtime_expected.toml now declares [macos.arm64]=15.0
-          # and [macos.x86_64]=14.0, and --arch below selects between them.
-          # (Note the old comment's stated mechanism was wrong in one detail:
-          # the x86_64 leg DOES ship an OpenMP runtime, the vendored
-          # native/third_party/libomp-x86_64 -- it just measures 14.0 rather
-          # than the arm64 libomp's 15.0.)
-          #
-          # --arch is NOT optional here: a platform declared per-arch and
-          # queried without an arch is a hard error inside the gate, so a
-          # future edit that drops this flag fails loudly instead of silently
-          # comparing one leg against the other leg's floor.
-          set +e
-          python3 native/scripts/assert_min_runtime_matches_declared.py \
-            --emitted "${ARTIFACT_DIR}/min_runtime.txt" \
-            --declared native/deps/min_runtime_expected.toml \
-            --platform macos \
-            --arch "${{ matrix.arch_tag }}"
-          RC=$?
-          set -e
-          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            exit "${RC}"
-          fi
+        run: python3 native/scripts/ci.py min-runtime --platform macos --arch "${{ matrix.arch_tag }}"
 
       # Round 6, Plan B naming normalization: the artifact name is built from
       # `matrix.arch_tag` (arm64 / x86_64). Before round 6 it was built from a
