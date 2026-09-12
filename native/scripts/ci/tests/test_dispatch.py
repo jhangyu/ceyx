@@ -111,16 +111,28 @@ class TestArchGate(unittest.TestCase):
     def test_min_runtime_macos_with_arch_is_accepted_by_argparse(self):
         # Push 6 (WI-16b): min-runtime is no longer P0-scaffolding for
         # macOS -- it must get PAST arg parsing AND past `_not_yet()` into
-        # ci/minruntime.py itself. On this dev machine there is no staged
-        # macOS .dylib, so the module fails cleanly (a handled RC, not the
-        # P0 "not implemented yet" message and not an argparse SystemExit).
-        buf_err = io.StringIO()
-        with redirect_stderr(buf_err):
+        # ci/minruntime.py itself. Spied rather than actually invoked: this
+        # dev host has no staged macOS .dylib, so a real call spawns real
+        # `read_min_runtime.py`/`assert_min_runtime_matches_declared.py`
+        # child processes that print real `READ_MIN_RUNTIME_RC=1`/
+        # `MIN_RUNTIME_DRIFT_RC=1`/`MIN_RUNTIME_DRIFT_RESULT=FAIL` marker
+        # text -- `redirect_stderr` alone does not catch it (these are
+        # stdout-level `report.rc`/`report.marker` writes), and even a full
+        # `redirect_stdout` would not stop an inherited-fd child's own
+        # argparse errors from reaching the real job log. That marker text
+        # leaked into a GREEN `nativetests` CI run (push-6 AC-2 finding),
+        # where it registered as unlisted `+N` additions. A spy proves
+        # dispatch reached `ci.minruntime.min_runtime` without executing
+        # anything.
+        import ci.minruntime as minruntime_module
+        from unittest import mock
+
+        with mock.patch.object(minruntime_module, "min_runtime", return_value=0) as mocked:
             rc = ci_entrypoint.main(
                 ["min-runtime", "--platform", "macos", "--arch", "arm64"]
             )
-        self.assertIsInstance(rc, int)
-        self.assertNotIn("not implemented yet", buf_err.getvalue())
+        self.assertEqual(rc, 0)
+        mocked.assert_called_once_with("macos", "arm64")
 
 
 class TestPushThreeDispatch(unittest.TestCase):
