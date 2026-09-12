@@ -148,9 +148,24 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--kind", required=True, choices=["codec", "build"])
     cv.add_argument("--source", default=None, choices=["probe", "configure-log"])
 
-    _add_platform_command(sub, "stage", "stage the built artifact + companions")
-    _add_platform_command(sub, "assert-staged-group", "assert the staged atomic group")
-    _add_platform_command(sub, "dt-needed", "assert the DT_NEEDED import closure")
+    def _stage_extra(sp):
+        sp.add_argument("--artifact-dir", required=True)
+        sp.add_argument("--native-dir", required=True)
+
+    def _staged_group_extra(sp):
+        sp.add_argument("--artifact-dir", required=True)
+
+    def _dt_needed_extra(sp):
+        sp.add_argument("--artifact-dir", required=True)
+        sp.add_argument("--runner-temp", required=True)
+
+    _add_platform_command(sub, "stage", "stage the built artifact + companions", _stage_extra)
+    _add_platform_command(
+        sub, "assert-staged-group", "assert the staged atomic group", _staged_group_extra
+    )
+    _add_platform_command(
+        sub, "dt-needed", "assert the DT_NEEDED import closure", _dt_needed_extra
+    )
     _add_platform_command(sub, "assert-vcpkg-artefacts", "assert vcpkg produced artefacts")
 
     vb = sub.add_parser("vcpkg-baseline", help="resolve and export the vcpkg baseline")
@@ -189,6 +204,56 @@ def dispatch(args: argparse.Namespace) -> int:
             ["--baseline", args.baseline, "--candidate", args.candidate]
             + (["--leg", args.leg] if args.leg else [])
         )
+    # Push 3 (WI-7/WI-8) wires these eight commands for Linux ONLY -- the
+    # other legs' twins land in later pushes (verify-artifact: WI-19/20/21,
+    # push 7). Falling through to `_not_yet()` for any other --platform
+    # keeps this push honest instead of calling into a module against
+    # `targets.py` data (e.g. macOS's `artifact_path: None`) that push 3
+    # never populated for it.
+    _linux_only_commands = {
+        "verify-artifact",
+        "import-closure",
+        "min-runtime",
+        "assert-exports",
+        "assert-no-avx512",
+        "stage",
+        "assert-staged-group",
+        "dt-needed",
+    }
+    if args.command in _linux_only_commands and getattr(args, "platform", None) != "linux":
+        return _not_yet(args.command)
+    if args.command == "verify-artifact":
+        import ci.verify_artifact as verify_artifact
+
+        return verify_artifact.verify_artifact(args.platform, args.arch)
+    if args.command == "import-closure":
+        import ci.verify_artifact as verify_artifact
+
+        return verify_artifact.import_closure(args.platform)
+    if args.command == "min-runtime":
+        import ci.verify_artifact as verify_artifact
+
+        return verify_artifact.min_runtime(args.platform, args.arch)
+    if args.command == "assert-exports":
+        import ci.verify_artifact as verify_artifact
+
+        return verify_artifact.assert_exports(args.platform, args.arch)
+    if args.command == "assert-no-avx512":
+        import ci.verify_artifact as verify_artifact
+
+        return verify_artifact.assert_no_avx512(args.platform)
+    if args.command == "stage":
+        import ci.stage as stage
+
+        return stage.stage(args.platform, args.artifact_dir, args.native_dir)
+    if args.command == "assert-staged-group":
+        import ci.stage as stage
+
+        return stage.assert_staged_group(args.platform, args.artifact_dir)
+    if args.command == "dt-needed":
+        import ci.dt_needed as dt_needed
+
+        return dt_needed.dt_needed(args.platform, args.artifact_dir, args.runner_temp)
     if args.command in _PLATFORM_COMMANDS or args.command in _PLATFORMLESS_COMMANDS:
         return _not_yet(args.command)
     return 2

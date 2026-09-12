@@ -117,6 +117,108 @@ class TestArchGate(unittest.TestCase):
         self.assertEqual(rc, 2)  # _not_yet(), not an argparse SystemExit
 
 
+class TestPushThreeDispatch(unittest.TestCase):
+    """End-to-end: invoke through main(argv) exactly as CI/a laptop would,
+    not through direct module imports -- a dispatcher verified only through
+    imports has never been run (push-2 lesson)."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp = Path(self._tmpdir.name)
+
+    def test_stage_and_assert_staged_group_end_to_end(self):
+        import ci.targets as targets
+
+        native_dir = self.tmp / "native_out"
+        dist_dir_name = targets.spec("linux")["dist_dir"].split("/")[-1]
+        dist_dir = native_dir / dist_dir_name
+        dist_dir.mkdir(parents=True)
+        # Real declared companions for linux, per shipped_files.toml, faked
+        # as zero-byte placeholders -- stage() only copies bytes, it never
+        # inspects content.
+        import read_shipped_files
+
+        entry = read_shipped_files.load_declaration()["linux"]
+        for name in [entry["decoder"], *entry["companions"]]:
+            (dist_dir / name).write_bytes(b"")
+
+        artifact_dir = self.tmp / "artifact"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ci_entrypoint.main(
+                [
+                    "stage",
+                    "--platform",
+                    "linux",
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--native-dir",
+                    str(native_dir),
+                ]
+            )
+        self.assertEqual(rc, 0)
+        staged = artifact_dir / "native" / entry["decoder"]
+        self.assertTrue(staged.exists())
+
+        buf2 = io.StringIO()
+        with redirect_stdout(buf2):
+            rc2 = ci_entrypoint.main(
+                [
+                    "assert-staged-group",
+                    "--platform",
+                    "linux",
+                    "--artifact-dir",
+                    str(artifact_dir),
+                ]
+            )
+        self.assertEqual(rc2, 0)
+        self.assertIn("ATOMIC_GROUP_COMPLETE=1", buf2.getvalue())
+        self.assertIn("SHARED_LIB_COUNT=1", buf2.getvalue())
+
+    def test_stage_missing_required_flags_is_argparse_error_not_traceback(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(["stage", "--platform", "linux"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_dt_needed_end_to_end_missing_artifact_is_handled_not_traceback(self):
+        # No staged .so present: run.run_to_file/readelf against a missing
+        # path must surface as a handled failure through the CLI, not an
+        # unhandled exception -- this exercises the real dispatch call shape.
+        artifact_dir = self.tmp / "artifact_missing"
+        (artifact_dir / "native").mkdir(parents=True)
+        runner_temp = self.tmp / "runner_temp"
+        runner_temp.mkdir()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ci_entrypoint.main(
+                [
+                    "dt-needed",
+                    "--platform",
+                    "linux",
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--runner-temp",
+                    str(runner_temp),
+                ]
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("DT_NEEDED", buf.getvalue())
+
+    def test_verify_artifact_missing_binary_is_handled_end_to_end(self):
+        # verify-artifact against a platform whose declared artifact_path
+        # doesn't exist on this machine must fail cleanly through `file`,
+        # not raise -- exercises the real dispatch path for a command that
+        # takes no extra flags at all.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ci_entrypoint.main(["verify-artifact", "--platform", "linux"])
+        self.assertEqual(rc, 1)
+
+
 class TestPackageImportResolution(unittest.TestCase):
     def test_package_import_resolves_to_package_not_entrypoint(self):
         # native/scripts/ci.py and the package native/scripts/ci/ share a
