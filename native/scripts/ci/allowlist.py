@@ -181,4 +181,12 @@ GRANDFATHERED_SHELL_FILES: tuple = (
     "plugin/tool/run_prod_shape_probe.sh",
 )
 
-ALLOWLIST_SIZE_EXPECTED: int = len(MUST_STAY)
+# Deliberately a LITERAL, never `len(MUST_STAY)`. `len(X) != len(X)` is
+# tautologically false, so deriving this value from the tuple it is meant
+# to check makes the ratchet's own size-pin assertion incapable of ever
+# failing -- anyone could add entries back to MUST_STAY and this check
+# would stay green, which is exactly the loosening the ratchet exists to
+# make visible (module docstring above, and markerdiff.py's assertion-vs-
+# observability split). Every push that shrinks MUST_STAY must update this
+# literal in the same diff -- that edit IS the two-line reviewable pin.
+ALLOWLIST_SIZE_EXPECTED: int = 113
