@@ -106,13 +106,20 @@ OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
 #
 # Each ratchet updates its own ledger entry's `line` in the same commit that
 # shrinks the allowlist, in principle -- coordinated through the leader per
-# push, same discipline as the allowlist itself. WI-9 (push 3, 09756d35)
-# was the first ratchet, 119 -> 113; this entry's update landed one commit
-# late (a follow-up in this same push, not in 09756d35 itself) because the
-# handoff of the new value crossed a leadership rotation. Both commits are
-# in push 3 and neither has been pushed, so the campaign-visible state is
-# still consistent -- noted here so the one-commit gap is not read as if
-# the same-commit invariant held.
+# push, same discipline as the allowlist itself. In practice this entry's
+# update has landed as its own follow-up commit both times so far, not in
+# the same commit as the allowlist edit itself:
+#   - WI-9 (push 3, 09756d35): 119 -> 113, ledger updated one commit later
+#     after a leadership-rotation handoff gap.
+#   - WI-12 (push 4, 2c491e9a): 113 -> 109 (four orientation MUST_STAY
+#     entries retired as their steps became one-line Python calls),
+#     ledger updated in a scheduled follow-up commit per the leader's
+#     explicit sequencing (impl-6 -> impl-7's ratchet -> this entry ->
+#     freeze), so no live mismatch window existed this time.
+# All commits for a given push stay unpushed until the leader freezes and
+# adjudicates, so the campaign-visible (pushed) state is always consistent
+# -- noted here so the in-tree commit gap is not read as if the
+# same-commit invariant held.
 #
 # A listed marker that later disappears is NOT specially exempted: a
 # negative delta (`-N`) is ALWAYS a hard FAIL, for every marker, with no
@@ -137,7 +144,7 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=113", "push 3 / WI-9 (09756d35)"),
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=109", "push 4 / WI-12 (2c491e9a)"),
     _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
 )
 
