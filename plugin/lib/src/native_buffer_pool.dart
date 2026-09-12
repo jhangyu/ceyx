@@ -384,6 +384,20 @@ class CeyxNativeBufferPool {
   /// `CeyxDecodePool`'s quiescence watch; null when nobody is watching.
   void Function()? onCheckoutChange;
 
+  /// Notified when [shrinkToFloor] COMPLETES a batch that actually freed
+  /// buffers, with the number of buffers freed.
+  ///
+  /// Fires exactly once per such batch, as the last thing the shrink does:
+  /// after every buffer has been freed and after the native pressure relief
+  /// ran. It never fires on the refusal path (waiters or outstanding
+  /// checkouts), nor on an already-at-the-floor call that freed nothing — so
+  /// a listener may treat every call as "pages just came back".
+  ///
+  /// Unlike [onCheckoutChange], no ceyx code ever assigns this: the host
+  /// application is its single writer (Halcyon couples its Windows
+  /// working-set trim to it). Called plainly, so the callback MUST NOT throw.
+  void Function(int freedBuffers)? onShrink;
+
   DateTime? _lastGrowAt;
   DateTime? _lastShrinkAt;
 
@@ -734,6 +748,10 @@ class CeyxNativeBufferPool {
     debugShrinkEvents++;
     debugBuffersFreedByShrink += freed;
     _pressureRelief();
+    // LAST statement by design: a listener must observe a completed shrink,
+    // pages already returned. Reached only past the `freed == 0` early exit
+    // and never on the refusal path above.
+    onShrink?.call(freed);
     return freed;
   }
 
