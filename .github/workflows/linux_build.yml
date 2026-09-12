@@ -618,34 +618,7 @@ jobs:
       # interpreted so a nonzero RC still leaves all four bits legible in the
       # uploaded artifact.
       - name: Compile + run functional capability probe (CI-T3)
-        run: |
-          set -e
-          DIST="$GITHUB_WORKSPACE/native/third_party/heif-dist-linux"
-          PROBE_DIR="$GITHUB_WORKSPACE/native/scripts/deps/probe"
-          clang \
-            -I"$DIST/include" \
-            -L"$DIST/lib" \
-            -Wl,-rpath,"$DIST/lib" \
-            -o "$PROBE_DIR/probe_codecs" \
-            "$PROBE_DIR/probe_codecs.c" \
-            -lheif
-          file "$PROBE_DIR/probe_codecs"
-          # Same transitivity gap as the G1 step above: -Wl,-rpath here only
-          # covers probe_codecs's OWN direct dependency (libheif.so.1), not
-          # libheif's own dependency on libde265.so.0 under a non-transitive
-          # DT_RUNPATH linker default. Belt-and-braces LD_LIBRARY_PATH.
-          export LD_LIBRARY_PATH="$DIST/lib:${LD_LIBRARY_PATH:-}"
-          set +e
-          "$PROBE_DIR/probe_codecs" > "$PROBE_DIR/probe_codecs.txt" 2>&1
-          RC=$?
-          set -e
-          echo "PROBE_CODECS_RC=${RC}" | tee -a "$PROBE_DIR/probe_codecs.txt"
-          cat "$PROBE_DIR/probe_codecs.txt"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::probe_codecs exited ${RC} (nonzero bits = missing capabilities)"
-            exit "${RC}"
-          fi
-          echo "A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0"
+        run: python3 native/scripts/ci.py codec-probe --platform linux --workspace "$GITHUB_WORKSPACE"
 
       - name: Stage native artifacts
         # Companions added (task #18, 2026-09-01): since the Linux leg
