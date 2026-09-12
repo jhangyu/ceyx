@@ -202,3 +202,121 @@ def test_cli_malformed_file_nonzero_exit_no_empty_value(tmp_path, monkeypatch, c
     assert not out.exists()
     err = capsys.readouterr().err
     assert "READ_MIN_RUNTIME_RC=1" in err
+
+
+# ---------------------------------------------------------------------------
+# OUTPUT-SHAPE + ROUND-TRIP (added 2026-09-13, CI run 34704260152).
+#
+# Everything above this line tests the READERS against input fixtures. Nothing
+# tested the SHAPE of what the CLI emits, which is why linux could emit
+# "MIN_RUNTIME_linux=GLIBC_2.35" against a declared "2.35" for four rounds --
+# the mismatch was only reachable by a real containerised Linux build.
+# The asserter compares group(2) verbatim (never normalises, by design), so the
+# emitter's spelling IS the contract. These two classes pin it.
+# ---------------------------------------------------------------------------
+import re  # noqa: E402
+
+import assert_min_runtime_matches_declared as amr  # noqa: E402
+
+VALUE_LINE_RE = re.compile(r"^MIN_RUNTIME_(\w+)=(.+)$", re.M)
+
+
+def _emit(monkeypatch, tmp_path, argv_tail, name="min_runtime.txt"):
+    """Run the real CLI and return (emitted_path, value_line_payload)."""
+    out = tmp_path / name
+    monkeypatch.setattr(sys, "argv",
+                        ["read_min_runtime.py", "--out", str(out)] + argv_tail)
+    rc = rmr.main()
+    assert rc == 0, f"emitter failed for {argv_tail}"
+    text = out.read_text()
+    m = VALUE_LINE_RE.search(text)
+    assert m, f"no MIN_RUNTIME_<os>= line in:\n{text}"
+    return out, m.group(2)
+
+
+def _all_four(tmp_path):
+    """argv tails for every platform, each backed by a real fixture."""
+    dylib = tmp_path / "libfoo.dylib"
+    dylib.write_bytes(_macho64_with_build_version(15, 0))
+    dll = tmp_path / "decoder.dll"
+    dll.write_bytes(_pe_with_subsystem_version(6, 0, plus=True))
+    dump = tmp_path / "dynsyms.txt"
+    dump.write_text(LINUX_DUMP)
+    gradle = tmp_path / "build.gradle"
+    gradle.write_text("android {\n    minSdk = 21\n}\n")
+    return {
+        "macos": (["--artifact", str(dylib), "--platform", "macos"], "15.0"),
+        "windows": (["--artifact", str(dll), "--platform", "windows"], "6.0"),
+        "linux": (["--artifact", str(dump), "--platform", "linux"], "2.38"),
+        "android": (["--gradle", str(gradle), "--platform", "android"], "21"),
+    }
+
+
+def test_emitted_value_is_bare_on_every_platform(tmp_path, monkeypatch):
+    """(a) No platform may prefix its value. A bare version string is what the
+    toml schema documents and what the asserter string-compares."""
+    for platform, (tail, expected) in _all_four(tmp_path).items():
+        _, payload = _emit(monkeypatch, tmp_path, tail, f"{platform}.txt")
+        assert payload == expected, f"{platform}: emitted {payload!r}"
+        assert not re.match(r"^[A-Za-z]", payload), (
+            f"{platform}: value {payload!r} carries an alphabetic prefix "
+            f"(this is exactly the GLIBC_ defect)")
+        assert re.match(r"^[0-9][0-9.]*$", payload), (
+            f"{platform}: value {payload!r} is not a bare version string")
+
+
+def test_linux_breakdown_keeps_its_symbol_prefixes(tmp_path, monkeypatch):
+    """The fix must NOT strip the prefixes from the indented breakdown lines --
+    those name real symbol-version strings and stay informational."""
+    dump = tmp_path / "dynsyms.txt"
+    dump.write_text(LINUX_DUMP)
+    out, payload = _emit(monkeypatch, tmp_path,
+                         ["--artifact", str(dump), "--platform", "linux"])
+    text = out.read_text()
+    assert payload == "2.38"
+    assert "  GLIBC_2.38" in text
+    assert any("GLIBCXX_" in l for l in text.splitlines()[1:])
+
+
+def test_round_trip_emitter_into_asserter_all_platforms(tmp_path, monkeypatch, capsys):
+    """(b) The class of test that would have caught this without a CI round:
+    feed the emitter's own output straight into the drift asserter."""
+    declared = tmp_path / "min_runtime_expected.toml"
+    declared.write_text(
+        '[macos.arm64]\nvalue = "15.0"\n\n'
+        '[macos.x86_64]\nvalue = "14.0"\n\n'
+        '[windows]\nvalue = "6.0"\n\n'
+        '[linux]\nvalue = "2.38"\n\n'
+        '[android]\nvalue = "21"\n'
+    )
+    for platform, (tail, _expected) in _all_four(tmp_path).items():
+        emitted, _ = _emit(monkeypatch, tmp_path, tail, f"rt_{platform}.txt")
+        argv = ["assert_min_runtime_matches_declared.py",
+                "--emitted", str(emitted), "--declared", str(declared),
+                "--platform", platform]
+        if platform == "macos":
+            argv += ["--arch", "arm64"]
+        monkeypatch.setattr(sys, "argv", argv)
+        rc = amr.main()
+        out = capsys.readouterr().out
+        assert rc == 0, f"round-trip FAILED for {platform}: {out}"
+        assert "MIN_RUNTIME_DRIFT_RESULT=PASS" in out
+
+
+def test_round_trip_detects_a_real_drift(tmp_path, monkeypatch, capsys):
+    """Positive control: the round-trip must be able to FAIL, or it proves
+    nothing. Declare a floor the emitter does not measure."""
+    declared = tmp_path / "min_runtime_expected.toml"
+    declared.write_text('[linux]\nvalue = "2.35"\n')  # emitter measures 2.38
+    dump = tmp_path / "dynsyms.txt"
+    dump.write_text(LINUX_DUMP)
+    emitted, payload = _emit(monkeypatch, tmp_path,
+                             ["--artifact", str(dump), "--platform", "linux"])
+    assert payload == "2.38"
+    monkeypatch.setattr(sys, "argv", [
+        "assert_min_runtime_matches_declared.py", "--emitted", str(emitted),
+        "--declared", str(declared), "--platform", "linux",
+    ])
+    rc = amr.main()
+    assert rc == 1
+    assert "MIN_RUNTIME_DRIFT_RESULT=FAIL" in capsys.readouterr().out

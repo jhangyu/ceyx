@@ -227,7 +227,21 @@ def main() -> int:
             if len(args.artifact) != 1:
                 raise ValueError("--artifact (exactly one dump file) is required for linux")
             value, breakdown = linux_min_runtime(Path(args.artifact[0]))
-            lines = [f"MIN_RUNTIME_linux=GLIBC_{value}"] + [f"  {b}" for b in breakdown]
+            # BARE version string, like the macos/windows/android branches.
+            # This used to emit "GLIBC_{value}", making linux the only platform
+            # with a prefixed value, and it broke the drift gate on the first
+            # containerised build that ever reached it (CI run 34704260152:
+            # measured "GLIBC_2.35" vs declared "2.35" -- same number, two
+            # spellings). The declaration is the side that matches the
+            # documented contract: min_runtime_expected.toml's schema comment
+            # defines the value as "the same shape read_min_runtime.py emits
+            # (e.g. '15.0', '2.35', '21')", and publish_release.py copies those
+            # declared values into artifacts.lock for Halcyon's pin-refresh, so
+            # the bare form is what crosses the repo boundary too.
+            # The GLIBC_/GLIBCXX_/CXXABI_ prefixes stay on the indented
+            # breakdown lines, which are informational and name real
+            # symbol-version strings.
+            lines = [f"MIN_RUNTIME_linux={value}"] + [f"  {b}" for b in breakdown]
         else:  # android
             if not args.gradle:
                 raise ValueError("--gradle is required for android")
