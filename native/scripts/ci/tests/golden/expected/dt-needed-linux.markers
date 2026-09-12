@@ -1,0 +1,4 @@
+== Level 1: decoder's own NEEDED (expect libheif.so.1) ==
+RC=0 (DT_NEEDED libheif.so.1 in <TMP>
+== Level 2: libheif.so.1's own NEEDED (expect libde265.so.0, transitive) ==
+RC=0 (DT_NEEDED libde265.so.0 in <TMP>
