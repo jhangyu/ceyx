@@ -126,10 +126,76 @@ jobs:
           BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
           echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      # actions/setup-python@v5 was REMOVED from this leg (2026-09-12, CI run
+      # 34703203982). It does not build an interpreter -- it resolves a prebuilt
+      # CPython from /opt/hostedtoolcache, bind-mounted into the container as
+      # /__t from the ubuntu-24.04 HOST. That binary is linked against the
+      # host's glibc 2.38 while this container is glibc 2.35, so the first step
+      # that actually RAN python died with:
+      #   python: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not
+      #   found (required by /__t/Python/3.11.16/x64/lib/libpython3.11.so.1.0)
+      # The action itself reported "Successfully set up CPython (3.11.16)" and
+      # went GREEN, because it only edits PATH and never executes what it
+      # installed -- a step that "installs Python" that cannot fail on a Python
+      # that cannot run.
+      #
+      # This is STRUCTURAL, not a flake: every hosted-tool-cache artefact on an
+      # ubuntu-24.04 host targets glibc >= 2.38, so no python-version value can
+      # fix it. The glibc-floor decoupling the container exists for is exactly
+      # what makes the host's toolcache unusable here.
+      #
+      # INVARIANT (leave-behind b): this leg must never consume /__t binaries.
+      # Anything under /opt/hostedtoolcache inherits the HOST's glibc, not the
+      # container's. The liveness step below enforces it mechanically.
+      #
+      # Why a real 3.11 and not the container's system python3: python3.10 is
+      # what ubuntu:22.04 ships, but `tomllib` is stdlib only from 3.11 and 11
+      # files under native/scripts import it (9 without a tomli fallback),
+      # including deps/manifest.py and deps/assertions.py which the very next
+      # step imports. Using 3.10 would just move the red a few steps later.
+      #
+      # Why deadsnakes and not stock 22.04: MEASURED -- stock jammy's
+      # python3.11 candidate is 3.11.0~rc1-1~22.04.1, a RELEASE CANDIDATE.
+      # deadsnakes provides 3.11.15-1+jammy1, an actual stable release, which
+      # is what a build toolchain should run. gpg-agent is installed alongside
+      # software-properties-common because without it add-apt-repository exits
+      # non-zero (measured) and would abort this step.
+      #
+      # Why a venv rather than update-alternatives: the venv's bin/ supplies
+      # BOTH `python` and `python3`, so every existing call site in this file
+      # keeps working unchanged, while /usr/bin/python3 stays 3.10 so apt's own
+      # python tooling is untouched. It also brings a working pip via ensurepip
+      # (measured: pip 24.0), avoiding the get-pip/distutils dance.
+      - name: Provision Python 3.11 inside the container (no hostedtoolcache)
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends software-properties-common gpg-agent
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update
+          apt-get install -y --no-install-recommends python3.11 python3.11-venv
+          python3.11 -m venv /opt/ceyx-py311
+          echo "/opt/ceyx-py311/bin" >> "$GITHUB_PATH"
+
+      # Leave-behind (a): EXECUTE the interpreter right after provisioning.
+      # The round-3 failure existed because the provisioning step never ran what
+      # it installed; this step exists so a dead interpreter can never report
+      # green again. It runs AFTER the step above, so $GITHUB_PATH has taken
+      # effect and this validates the PATH wiring too, not just the binary.
+      - name: Verify the interpreter is alive and not from hostedtoolcache
+        run: |
+          RESOLVED="$(command -v python3)"
+          echo "python3 resolves to: ${RESOLVED}"
+          case "${RESOLVED}" in
+            /__t/*|/opt/hostedtoolcache/*)
+              echo "::error::python3 resolved to ${RESOLVED}, a hostedtoolcache binary. Those are linked against the ubuntu-24.04 host's glibc 2.38 and cannot run in this glibc 2.35 container (CI run 34703203982)." >&2
+              exit 1
+              ;;
+          esac
+          python -V
+          python3 -V
+          python -c "import sys, tomllib, json; assert sys.version_info[:2] >= (3, 11), sys.version; print('interpreter alive:', sys.version.split()[0], '| tomllib+json OK')"
+          python -m pip --version
 
       - name: Install pytest for deps suite
         run: python -m pip install --disable-pip-version-check pytest
