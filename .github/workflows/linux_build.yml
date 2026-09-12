@@ -636,7 +636,13 @@ jobs:
         run: |
           ls -la "${ARTIFACT_DIR}/native"
           EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform linux --all | tr ' ' '\n' | sort)"
-          STAGED_SET="$(cd "${ARTIFACT_DIR}/native" && ls -1 libdng_decoder_native.so libheif.so.1 libde265.so.0 2>/dev/null | sort)"
+          # STAGED_SET enumerates the DIRECTORY'S ACTUAL CONTENTS filtered by
+          # the shared-object naming convention (.so / .so.N), never a
+          # second hard-coded file list -- a hard-coded list here would be
+          # exactly the drift class this item removes and would make a
+          # staged-but-undeclared extra file invisible (the 2026-09-01
+          # incident's direction).
+          STAGED_SET="$(cd "${ARTIFACT_DIR}/native" && ls -1 | grep -E '\.so(\.[0-9]+)*$' | sort)"
           echo "EXPECTED_SET:"
           echo "${EXPECTED_SET}"
           echo "STAGED_SET:"
