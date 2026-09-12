@@ -11,6 +11,7 @@
 // No LibRaw type appears in this header: callers get a plain-C view. That is
 // what keeps the GPU boundary decoder-agnostic (spec section 2.5).
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 

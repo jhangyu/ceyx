@@ -5,6 +5,7 @@
  * 3, 4.1, 9). Pure: no allocation, no decoder dependency, no GPU dependency.
  * Must be callable before any host or device allocation happens. */
 
+#include <cstddef>
 #include <stdio.h>
 
 #include "raw_pipeline_contract.h"

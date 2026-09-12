@@ -7,6 +7,7 @@
 // allowed here: a second camera lookup, demosaic, tone, gamma, or a full-frame
 // rotation (spec section 6.4.4). No branch on backend or camera vendor.
 
+#include <cstddef>
 #include "libraw_frontend.h"
 #include "raw_pipeline_contract.h"
 
