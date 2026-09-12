@@ -397,9 +397,10 @@ void *metal_shared_device_handle() {
 }
 
 void *metal_shared_device_handle_ensure_created() {
-  // The decode-path variant: it DOES create the device, because its only caller
-  // is C1's arena first touch, which runs inside a decode that is about to
-  // dispatch a kernel and would have created the device a moment later anyway
+  // The decode-path variant: it DOES create the device, because its callers
+  // (C1's arena first touch, and render_parameter_upload_cache.cpp's Metal
+  // buffer allocator) run inside a decode that is about to dispatch a kernel
+  // and would have created the device a moment later anyway
   // (halide_metal_acquire_context above takes this same ensure_device_locked()
   // path). See dng_metal_context.h for why this is not the inspection side
   // effect the plain accessor refuses to have.

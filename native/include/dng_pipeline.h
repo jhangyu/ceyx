@@ -83,11 +83,10 @@ size_t dng_decode_physical_slot_count();
 
 // Lock-free, side-effect-free read of the configured slot count.
 //
-// For callers already holding their own mutex on a per-decode path — the Metal
-// queue pool (dng_metal_context.cpp, inside pool_lock()) and
-// Stage4ScratchPool::release (dng_render_halide.cpp, inside its mutex_). The
-// locking accessor above would nest the slot-pool mutex underneath theirs AND
-// could construct the entire pool as a side effect of a bookkeeping question.
+// For callers already holding their own mutex on a per-decode path — e.g. the
+// Metal queue pool (dng_metal_context.cpp, inside pool_lock()). The locking
+// accessor above would nest the slot-pool mutex underneath theirs AND could
+// construct the entire pool as a side effect of a bookkeeping question.
 size_t dng_decode_slot_count_relaxed();
 
 // Round 5 review F2: the same bound observed from OUTSIDE the pool's

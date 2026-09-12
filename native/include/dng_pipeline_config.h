@@ -53,13 +53,9 @@
 //        Deprecated / experimental flags retained for A/B parity research.
 //        Do NOT consult in production paths; default builds compile these out
 //        unless their dedicated diagnostic CMake option is enabled.
-//        Envs: DNG_WARP_PRECOMPUTED_COORDS — historically consumed by the
-//              precomputed-coords WarpRectilinear DIAG bridge in
-//              dng_warp_halide.cpp. That bridge has been removed from the
-//              production decode path; no source consults this env anymore.
-//              The src/research/ generators (RectilinearWarpStrictFloatGenerator /
-//              RectilinearWarpDebugGenerator) and their opt-in CMake option/target
-//              are retained for standalone A/B research only.
+//        The src/research/ generators (RectilinearWarpStrictFloatGenerator /
+//        RectilinearWarpDebugGenerator) and their opt-in CMake option/target
+//        are retained for standalone A/B research only.
 //
 // Notes:
 //   * Diagnostic and Research envs are intentionally NOT loaded by

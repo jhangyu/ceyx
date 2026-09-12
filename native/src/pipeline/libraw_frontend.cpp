@@ -142,8 +142,10 @@ void LibRawFrontendContext::set_cancel_hook(int (*poll)(void*), void* user_data)
 bool LibRawFrontendContext::is_open() const { return impl_->open; }
 
 const LibRawRawView& LibRawFrontendContext::raw_view() const {
-    // Contract violation to call this while closed (spec section 5.1.5):
-    // assert in debug, zeroed view in release.
+    // Calling this while closed is a caller error: assert in debug, zeroed view
+    // in release (recycle() resets impl_->view to LibRawRawView{}). Not stated in
+    // docs/spec/raw_pipeline_contract_spec.md — the spec's §5.1 owner model covers
+    // view lifetime vs GPU completion, not the open/closed precondition here.
     assert(impl_->open && "raw_view() called on a closed LibRawFrontendContext");
     return impl_->view;
 }

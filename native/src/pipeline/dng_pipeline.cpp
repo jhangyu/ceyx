@@ -410,10 +410,9 @@ size_t dng_stage3_workspace_registrations() {
 // R4 item 1. Published copy of the configured slot count, readable WITHOUT
 // taking the pool mutex and without constructing the pool.
 //
-// This exists because two consumers read the slot count from inside their own
-// locks on a per-decode path: the Metal queue pool (dng_metal_context.cpp,
-// inside pool_lock()) and Stage4ScratchPool's release (dng_render_halide.cpp,
-// inside its mutex_). Calling the pool accessor from there would nest a second
+// This exists because consumers read the slot count from inside their own
+// locks on a per-decode path — e.g. the Metal queue pool (dng_metal_context.cpp,
+// inside pool_lock()). Calling the pool accessor from there would nest a second
 // mutex under theirs AND could construct the whole slot pool as a side effect
 // of asking a bookkeeping question. An atomic gives the same liveness with
 // neither hazard.
