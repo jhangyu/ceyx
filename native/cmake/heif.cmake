@@ -6,6 +6,17 @@
 #
 # Included (not add_subdirectory'd) from native/CMakeLists.txt, after
 # cmake/ffi.cmake, so dng_decoder_native already exists as a target.
+#
+# CEYX_SHIPPED_<PLATFORM>_DECODER / _COMPANIONS (WI-15 step 15.2): the file
+# names each staging branch below copies are read from the generated
+# native/cmake/shipped_files.cmake, itself derived from the single
+# declaration native/deps/shipped_files.toml -- never hard-coded here. The
+# per-platform STAGING MECHANISM (dylib @rpath vs DLL search-order vs .so
+# $ORIGIN rpath vs unversioned Android names) stays branch-specific below,
+# by design (rootcause-native-capability.md Item H); only the file names
+# come from the declaration.
+include(${CMAKE_CURRENT_LIST_DIR}/shipped_files.cmake)
+
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
 if(DNG_ENABLE_HEIF)
@@ -196,13 +207,22 @@ if(DNG_ENABLE_HEIF)
         #     reach the app bundle. Staging here is what makes that free.
         # copy_if_different, so an unchanged dist does not retrigger the
         # downstream Flutter build every time.
+        # heif.cmake stages only the two libheif-stack members of
+        # CEYX_SHIPPED_MACOS_COMPANIONS (libjpeg.8.dylib/libomp.dylib are the
+        # other two staging mechanisms named in shipped_files.toml's macos
+        # `source` field: pipeline.cmake's bundle_macos_dylib_deps.py and
+        # tests.cmake's libomp vendoring, respectively) -- filter the
+        # declared list down to the ones this branch is responsible for
+        # rather than hard-coding their names.
+        list(GET CEYX_SHIPPED_MACOS_COMPANIONS 1 _ceyx_heif_dylib_name)
+        list(GET CEYX_SHIPPED_MACOS_COMPANIONS 2 _ceyx_de265_dylib_name)
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libheif.1.dylib"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.1.dylib"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_heif_dylib_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_dylib_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libde265.0.dylib"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.0.dylib"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_de265_dylib_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_dylib_name}"
             COMMENT "Staging libheif/libde265 next to dng_decoder_native")
     elseif(WIN32)
         # Stage the two DLLs NEXT TO the built decoder DLL. Windows resolves an
@@ -226,13 +246,21 @@ if(DNG_ENABLE_HEIF)
         # bundled-library list and windows_build.yml's staging step consume, so
         # all three ship the same set by construction rather than by three
         # hand-maintained lists happening to agree.
+        # This branch stages only the two libheif-stack members
+        # (CEYX_SHIPPED_WINDOWS_COMPANIONS[0..1]); libomp140.x86_64.dll
+        # (index 2, OQ-N2) is WI-4's own staging addition, landing in WI-4's
+        # commits -- see shipped_files.toml's Windows entry comment and the
+        # plan's "Two ruling-driven sequencing constraints" note. Do not add
+        # its copy_if_different here.
+        list(GET CEYX_SHIPPED_WINDOWS_COMPANIONS 0 _ceyx_heif_dll_name)
+        list(GET CEYX_SHIPPED_WINDOWS_COMPANIONS 1 _ceyx_de265_dll_name)
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/bin/heif.dll"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/heif.dll"
+                    "${HEIF_DIST_DIR}/bin/${_ceyx_heif_dll_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_dll_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/bin/libde265.dll"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.dll"
+                    "${HEIF_DIST_DIR}/bin/${_ceyx_de265_dll_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_dll_name}"
             COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
     elseif(ANDROID)
         # Stage the two UNVERSIONED .so files NEXT TO the built decoder .so
@@ -248,13 +276,15 @@ if(DNG_ENABLE_HEIF)
         # desktop requires one), so staging here next to dng_decoder_native
         # -- which is also what the packaging step below copies into the
         # artifact/jniLibs set -- is sufficient for the loader to find them.
+        list(GET CEYX_SHIPPED_ANDROID_COMPANIONS 0 _ceyx_heif_so_name)
+        list(GET CEYX_SHIPPED_ANDROID_COMPANIONS 1 _ceyx_de265_so_name)
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libheif.so"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.so"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_heif_so_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_so_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libde265.so"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.so"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_de265_so_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_so_name}"
             COMMENT "Staging libheif.so/libde265.so next to dng_decoder_native")
     elseif(UNIX AND NOT APPLE)
         # Stage the two versioned .so files NEXT TO the built decoder .so
@@ -279,13 +309,15 @@ if(DNG_ENABLE_HEIF)
         # DT_NEEDED lookup actually needs to find -- staging the unversioned
         # symlink target alone, without the versioned name present, would
         # fail to resolve.
+        list(GET CEYX_SHIPPED_LINUX_COMPANIONS 0 _ceyx_heif_so_versioned_name)
+        list(GET CEYX_SHIPPED_LINUX_COMPANIONS 1 _ceyx_de265_so_versioned_name)
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libheif.so.1"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.so.1"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_heif_so_versioned_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_so_versioned_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libde265.so.0"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.so.0"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_de265_so_versioned_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_so_versioned_name}"
             COMMENT "Staging libheif.so.1/libde265.so.0 next to dng_decoder_native")
     endif()
 else()
