@@ -166,7 +166,8 @@ mechanically by `native/scripts/verify_raw_provenance.py`.
   applications and the Go/C++ wrappers are MIT, and none of them are built or
   shipped.
 - Linkage: **dynamic**. Built as a separate shared library `libheif.1.dylib`,
-  vendored by `native/scripts/fetch_heif_deps.sh` into
+  vendored by `python3 native/scripts/build_deps.py --component heif-stack`
+  (the legacy `fetch_heif_deps.sh` shell script was deleted) into
   `native/third_party/heif-dist/` and staged next to
   `libdng_decoder_native.dylib`. `@rpath/libheif.1.dylib` install name.
 
@@ -180,16 +181,76 @@ mechanically by `native/scripts/verify_raw_provenance.py`.
 - Linkage: **dynamic**. Built as `libde265.0.dylib`, `@rpath/libde265.0.dylib`
   install name, `ENABLE_ENCODER=OFF` (decode-only).
 
-### Why dynamic linking (libheif/libde265)
+## kvazaar
 
-Both libraries are LGPL-3.0-or-later. Shipping them as separate, replaceable
-`.dylib` files satisfies LGPL-3 section 4(d)(1) directly: a user can replace
-`libheif.1.dylib` / `libde265.0.dylib` in `<App>.app/Contents/Frameworks/` with
-their own build. Static linking into `dng_decoder_native` is deliberately NOT
-done, because it would trigger section 4(d)(0)'s duty to ship relinkable object
-files with every release. No encoder is built — `WITH_X265=OFF` (x265 is
-GPL-2.0), `WITH_AOM_ENCODER=OFF`, `ENABLE_ENCODER=OFF` — so nothing GPL-2.0
-enters the binary. Complete corresponding source is the tarball at the URL and
-SHA-256 above, built with the flags in
-`native/scripts/fetch_heif_deps.sh` and
+- Used for: HEVC encoding, statically linked into the shipped `libheif` (not a
+  separate library file) so `.heic` files can be produced, not just read.
+- Version: **2.3.1**
+- Source: <https://github.com/ultravideo/kvazaar/releases/download/v2.3.1/kvazaar-2.3.1.tar.gz>
+- SHA-256: `2510b8ecc2bf384bbc7b8fc2756bbfa8a8c173b57634c8dfdd8bea6733e56c46`
+- License: **BSD-3-Clause**.
+- Linkage: **static**, built as `libkvazaar.a` and linked into `libheif`
+  (`ENABLE_PLUGIN_LOADING=OFF`, so every enabled codec compiles directly into
+  `libheif` rather than being dlopen-ed from a plugin directory).
+
+## aom (libaom)
+
+- Used for: AV1 encode and decode, i.e. AVIF import and export. Statically
+  linked into the shipped `libheif`.
+- Version: **3.12.1**
+- Source: <https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz>
+- SHA-256: `9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e`
+- License: **BSD-2-Clause AND Alliance-for-Open-Media-Patent-License-1.0**. The
+  patent grant is a separate document layered on top of the BSD-2 copyright
+  license, not a substitute for it — the vendored licence files include both
+  `LICENSE*` (BSD-2) and `PATENTS*` (the AOM patent grant) for this reason.
+- Linkage: **static**, built as `libaom.a` and linked into `libheif`.
+
+## libwebp
+
+- Used for: WebP still-image decode (`CeyxStillDecoderService`) and encode
+  (`CeyxEncodeService`, gated by `CEYX_ENABLE_WEBP`).
+- Version: **1.6.0**
+- License: **BSD-3-Clause**.
+- Linkage: **static**, on every desktop platform (`native/cmake/encode.cmake`,
+  `find_package(WebP CONFIG)`).
+
+## libjxl
+
+- Used for: JPEG XL still-image decode (`CeyxStillDecoderService`) and encode
+  (`CeyxEncodeService`, gated by `CEYX_ENABLE_JXL`).
+- Version: **0.12.0**
+- Source: <https://github.com/libjxl/libjxl.git> (tag `v0.12.0`, built from
+  source with its `third_party/brotli`, `third_party/highway` and
+  `third_party/skcms` submodules; no upstream release tarball packages those
+  submodules, so the pin is the tag/commit rather than a tarball SHA-256).
+- License: **BSD-3-Clause**.
+- Linkage: **static** (`native/cmake/jxl.cmake`).
+
+### Why dynamic linking (libheif/libde265) and static linking (kvazaar/aom/libwebp/libjxl)
+
+libheif and libde265 are LGPL-3.0-or-later. Shipping them as separate,
+replaceable `.dylib` files satisfies LGPL-3 section 4(d)(1) directly: a user
+can replace `libheif.1.dylib` / `libde265.0.dylib` in
+`<App>.app/Contents/Frameworks/` with their own build. Static linking of
+libheif/libde265 into `dng_decoder_native` is deliberately NOT done, because
+it would trigger section 4(d)(0)'s duty to ship relinkable object files with
+every release.
+
+kvazaar and aom are the encoders that make the shipped `libheif` build
+encode-capable (`WITH_KVAZAAR=ON`, `WITH_AOM_ENCODER=ON`); both are
+permissively licensed, so linking them statically into `libheif` creates no
+source-availability obligation beyond the existing LGPL-3 one for
+libheif/libde265 itself. `WITH_X265=OFF` stays off — x265 is GPL-2.0, and
+letting it in would contaminate the whole binary; `aom_codec_av1_cx`/
+`aom_codec_av1_dx` and `kvz_api_get` are asserted present, and `x265_encoder`
+is asserted absent, by the build's own symbol checks (`native/scripts/deps/
+heif.py`). libwebp and libjxl are independent static dependencies (not part
+of the HEIF stack) linked in for their own encode/decode paths; both are
+permissively licensed and carry no linkage restrictions either way.
+
+Complete corresponding source for the HEIF-stack components is the tarballs
+at the URLs and hashes above, built with the flags recorded in
+`native/scripts/deps/heif.py` (Python carrier; the legacy
+`fetch_heif_deps.sh` shell script was deleted) and
 `native/third_party/heif-dist/PROVENANCE.md`.

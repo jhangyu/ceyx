@@ -48,8 +48,9 @@ figure in [Performance](#performance).*
   same GPU core regardless of whether the file was a DNG, a Bayer RAW, an X-Trans RAW or
   a Foveon X3F.
 - **Zero-copy at the Dart boundary.** Decoded RGBA buffers cross into Dart as a view over
-  native memory with no `memcpy`, released by a `NativeFinalizer` when the Dart wrapper is
-  collected.
+  a caller-supplied native buffer with no `memcpy`. The buffer comes from and returns to a
+  Dart-side pool (`CeyxNativeBufferPool`) via an explicit release call; a `NativeFinalizer`
+  is attached only as a safety net for callers that forget to release.
 - **Engine separated from application.** This repository is the reusable engine and
   plugin; a separate application consumes it under real product constraints.
 
@@ -128,6 +129,41 @@ The DNG route uses its own demosaic kernel (`DngDemosaicWarpGenerator`, fused wi
 lens warp) rather than `RawBayerDemosaicGenerator` — the two Bayer demosaic
 implementations are separate code, not a shared kernel.
 
+### Still images: decode and encode
+
+Ceyx is not RAW-only. Three additional Dart services in `plugin/lib/` cover ordinary
+still-image formats: `HeifDecoderService`, `CeyxStillDecoderService` and
+`CeyxEncodeService`.
+
+**Decode** (`CeyxStillDecoderService`, native `still_ffi_api.cpp`) covers HEIC, AVIF,
+WebP and JPEG XL, detected by a header probe rather than a file extension — the ISO-BMFF
+`ftyp` brand distinguishes AVIF from the HEIC family. JPEG is deliberately reported
+unsupported (`ceyx_still_decode_supports(kCeyxFormatJpeg)` returns 0): this surface has
+no libjpeg decode arm, and Flutter's own engine already decodes JPEG, so answering "yes"
+here would be a lie the capability model can't afford. `HeifDecoderService` is the
+narrower HEIC-specific path over the same libheif stack; `CeyxStillDecoderService` is the
+general one. Both expose `probeOnWorker` (dimensions without a full decode) and
+`decodeOnWorker(path, {maxDim})` on a worker isolate, returning Dart-owned RGBA8. Unlike
+EXIF-tagged JPEG, container transforms (rotation/mirroring) are applied *during* decode,
+so the returned orientation is always 1 and the pixels are already display-ready.
+
+**Encode** (`CeyxEncodeService`, native `encode_ffi_api.cpp`) takes RGBA8 in and produces
+encoded bytes on a worker isolate, with optional EXIF/XMP/ICC metadata passthrough.
+Per-format availability is a compile-time build gate, queried at runtime via
+`CeyxEncodeService.supports(CeyxImageFormat)`:
+
+| Format | Availability gate |
+|---|---|
+| JPEG | Always — libjpeg-turbo is linked on every platform |
+| WebP | `CEYX_ENABLE_WEBP` |
+| JPEG XL | `CEYX_ENABLE_JXL` |
+| HEIC / AVIF | Only if the bundled libheif carries an encoder for that codec |
+
+A missing symbol (older dylib) throws `CeyxEncodeUnavailableException`; a symbol that
+exists but whose codec was excluded from this platform's build returns
+`CeyxEncodeErrorCode.unsupported` instead. The two are deliberately distinct so a host
+app can tell "this build can never do it" from "ask again after checking `supports()`".
+
 ## Camera coverage
 
 Camera support for the generic RAW route comes from the vendored RawSpeed3 camera
@@ -179,7 +215,15 @@ Minolta.
 | 1 | Parse metadata, decompress Bayer tiles (LJPEG) | Adobe DNG SDK + libjpeg |
 | 2 | OpcodeList2: linearization, black subtraction, pre-demosaic lens correction | Adobe DNG SDK / Halide opcode kernels |
 | 3 | Demosaic Bayer→RGB, fused with `WarpRectilinear` (OpcodeList3) | Halide AOT (Metal / Vulkan) |
-| 4 | Camera→sRGB matrix, tone mapping, 8-bit RGBA encode | Halide AOT (Metal / Vulkan) |
+| 4 | Camera→sRGB matrix, tone mapping, fused EXIF orientation, 8-bit RGBA encode | Halide AOT (Metal / Vulkan) |
+
+EXIF orientation is applied by permuting the OUTPUT coordinate back to the unoriented
+coordinate before any pixel math runs (`DngRenderGenerator.cpp`), so it costs no extra pass
+and no extra buffer. The kernel decides nothing about orientation: the host computes six
+int32 affine coefficients (`ceyx_orient_affine_coeffs()`, `native/include/ceyx_orient.h`)
+from the EXIF value, and the kernel evaluates one integer affine expression with no
+orientation comparison or branch anywhere inside it. Decoded output is therefore
+display-ready, which is why the still-image services report orientation `1` downstream.
 
 ### End-to-end dataflow
 
@@ -189,10 +233,12 @@ flowchart LR
     B --> C[["Stage 2: OpcodeList2 linearize, black subtract, lens correct"]]
     C --> D{{"Stage 3: demosaic + fused WarpRectilinear"}}
     D --> E{{"Stage 4: colour matrix, tone map, RGBA8 encode"}}
-    E --> F[["extern C dng_decode_and_process"]]
-    F --> G[("dart:ffi DngResult")]
+    E --> F[["extern C ceyx_decode_into_buffer_oriented"]]
+    Z[("Dart: CeyxNativeBufferPool caller-allocated dst buffer")] -->|"dst pointer + capacity"| F
+    F --> G[("dart:ffi DngResult: status + metrics, no pixel data")]
     G --> H[["DngDecoderService"]]
-    H --> I[("Zero-copy Uint8List view")]
+    F -.->|"decode fills dst in place"| I[("Zero-copy Uint8List view over that same dst buffer")]
+    H --> I
     I --> J(["Flutter widget"])
 
     classDef input fill:#e2e8f0,stroke:#94a3b8,stroke-width:2px,color:#1e293b
@@ -205,11 +251,13 @@ flowchart LR
     class B,C cpu
     class D,E gpu
     class F,G ffi
-    class H,I,J dart
+    class Z,H,I,J dart
 ```
 
 <sub>**Colour** — amber: CPU (Adobe DNG SDK) · sky: GPU (Halide AOT) · violet: FFI boundary · emerald: Dart/Flutter<br/>
-**Shape** — parallelogram: file input · subroutine box: library/API call · hexagon: GPU kernel · cylinder: memory buffer · stadium: UI terminal</sub>
+**Shape** — parallelogram: file input · subroutine box: library/API call · hexagon: GPU kernel · cylinder: memory buffer · stadium: UI terminal<br/>
+The destination buffer is allocated Dart-side and never allocated by the native library —
+native code fills it in place; `DngResult` carries only status and timing, not pixel data.</sub>
 
 ### Dual-frontend routing
 
@@ -276,6 +324,19 @@ One gotcha is load-bearing here: after `src_buf.crop()`, callers must mutate
 `raw_buffer()->dim.min = 0` to match the generator's hard-coded `clamp(x, 0, ext-1)`.
 Using `set_min` or `translate` instead triggers a `device_deallocate`.
 
+Three further copy eliminations landed on the **generic RAW route** since this section was
+first written. A per-lane persistent device arena (`raw_persistent_device_arena.cpp`) holds
+per-thread-lane device-memory regions for the source mosaic, the Stage 3 RGB16 intermediate
+and the RGBA8 destination, allocated lazily at the size actually needed and grown per lane
+rather than reallocated on every decode. On unified-memory devices, a runtime capability
+probe lets Stage 4 wrap the caller's own destination buffer as device memory directly, so
+the kernel writes straight into the Dart-side pooled buffer and `halide_device_sync` takes
+over the synchronisation role `copy_to_host` used to serve. A render-parameter upload cache
+avoids re-uploading the twelve Stage 4 parameter buffers when they're unchanged from the
+previous decode. Two qualifiers: the DNG route passes a null arena and is unaffected, and
+every failure path on the generic route degrades to the pre-existing copying behaviour —
+these are optimisations, not requirements.
+
 ### Halide AOT generators
 
 All GPU kernels are compiled ahead of time at CMake build time — nothing is JIT compiled
@@ -311,26 +372,61 @@ native/src/ffi/dng_ffi_api.cpp   (extern "C")
 at 12, `error_code` at 16, `decode_ms` at 24 and `process_ms` at 32, enforced by
 `static_assert` in `native/include/dng_ffi_api.h`. The Dart mirror in `dng_bindings.dart`
 must match field-for-field; that pairing is what "byte-exact struct" means in practice.
+`rgba_data` now always points at a buffer the *caller* supplied — the library never
+allocates full-resolution RGBA output on any path (see "Caller-owned buffers" below).
 
-**Guarded symbol lookup.** Newer exports such as `dng_decode_and_process_sized` and the
-generic-RAW entry `raw_decode_and_process` are looked up inside `try`/`catch`, and the
-corresponding capability getter reports `false` rather than throwing when an older dylib
-lacks the symbol. Adding native entry points therefore does not break older bundles.
+**Guarded symbol lookup.** Every native entry point is looked up inside `try`/`catch`, and
+the corresponding capability getter reports `false` rather than throwing when a dylib
+lacks the symbol. This cuts both ways:
 
-**Zero-copy path.** The native `rgba_data` pointer is wrapped as a Dart `Uint8List` view
-via `asTypedList` — no `memcpy` on the success path. Ownership then passes to a
-`NativeFinalizer` bound to `dng_free_rgba_buffer`, so the native allocation is released
-when the Dart wrapper is garbage collected. The surrounding `DngResult` struct is freed in
-a `finally` block, with `rgbaData` cleared first so the buffer cannot be double-freed.
+- **Genuinely optional capability.** The generic-RAW entry `raw_decode_and_process` is
+  absent on dylibs built without RAW support, so `rawDecodeAvailable` gates it correctly.
+- **Legacy symbol, kept only for old-dylib tests.** `dng_decode_and_process`,
+  `dng_decode_and_process_sized` and the debug counter `dng_debug_pool_checked_out` are
+  entries every current dylib has deleted; they stay lookup-guarded only so the
+  symbol-absence regression tests can still load old pinned dylibs that export them. A
+  capability getter named after one of these legacy symbols answers "no" on every current
+  build even though the feature it used to gate (sized decoding, RAW decoding) works fine
+  through the current entry point — the actual availability check is re-pointed at
+  `ceyx_decode_into_buffer`/`decodeIntoBufferAvailable` instead of the deleted symbol.
 
-**Worker-isolate path.** Because a finalizer-backed view cannot safely cross isolate
-boundaries, `decodeOnWorker` copies into Dart-owned bytes and moves them with
-`TransferableTypedData`, freeing the native result inside the worker isolate.
+**Caller-owned buffers, zero-copy on success.** The native decode-into entries
+(`ceyx_decode_into_buffer` family) write RGBA output into a buffer the Dart side supplies
+— the library allocates nothing and frees nothing on the RGBA path. That buffer comes
+from a fixed-slot Dart-side pool, `CeyxNativeBufferPool` (`plugin/lib/src/
+native_buffer_pool.dart`): `acquire` hands out a native allocation immediately reusable
+after `release`, sized generously enough (256MB default cap) that a full-resolution frame
+is served from the pool rather than allocated fresh each decode. Requests above the cap
+are served outside the pool and simply freed on release. The result `Uint8List` is a
+zero-copy view over that buffer via `asTypedList` — no `memcpy` on the success path — and
+the *intended* return route is an explicit `DngImage.releaseToPool()` call that hands the
+buffer straight back to the free list. A `NativeFinalizer` is still attached, but only as
+a safety net for callers that forget to release explicitly; in normal operation
+`debugFinalizerReleases` stays at zero, and a non-zero value in a test is treated as a
+defect, not an expected code path. The surrounding `DngResult` struct (not the RGBA data)
+is still freed via `dng_free_result` in a `finally` block.
 
-**Pooled allocation.** RGBA output buffers are checked out of a pool rather than freshly
-allocated per decode, avoiding page-fault cost on warm repeated decodes. Debug counters
-(`dng_debug_pool_checked_out`, `dng_debug_rgb_pool_checked_out`) expose outstanding
-checkouts for leak detection in test harnesses.
+**Worker-isolate path.** A pool-backed buffer is tied to the isolate that acquired it and
+cannot safely cross an isolate boundary, so `decodeOnWorker` copies into Dart-owned bytes
+and moves them with `TransferableTypedData`, returning the pooled buffer to its isolate's
+pool before the worker isolate exits.
+
+**Idle shrink and OS-level memory return.** The shared pool does not just sit at its
+fixed slot count forever: after a tunable period of continuous decode quiescence (5s in
+production), `shrinkToFloor` releases idle slots down to a configurable `idleFloor`
+(2 slots in production, versus 8 normally held). Demand regrows the pool for free
+through the normal `acquire` path when decoding resumes.
+
+`ceyx_pool_pressure_relief` — a native FFI entry — then asks the allocator to actually
+return that freed memory to the OS rather than keep it in a process-level free list. The
+mechanism, and what it returns, is platform-specific:
+
+| Platform | Mechanism | Return value |
+|---|---|---|
+| Apple (macOS/iOS) | `malloc_zone_pressure_relief` | Actually returns pages to the OS |
+| Linux (glibc) | `malloc_trim(0)` | Actually returns pages to the OS |
+| Windows | Nothing — pooled buffers are large enough that `_aligned_free` already hands pages back at release time; the process-wide working-set trim is implemented one layer up, in the host app (Halcyon wires it to the pool's `onShrink` callback) | Deliberately returns `0`, not "unsupported" |
+| musl / Android (bionic) | No equivalent mechanism exists | Explicit "unsupported" sentinel, not a silent zero |
 
 ---
 
@@ -392,40 +488,74 @@ interchangeable. The warmed matrix numbers are reproduced with:
 python3 native/tests/run_decode_matrix.py --repeat 3
 ```
 
+One caveat before comparing these figures against a downstream app's numbers: this table
+times a **lossless DNG through the DNG SDK route**, where Stages 1–2 are SDK parse and
+linearisation. A Sony ARW takes the generic-RAW route instead (RawSpeed3/LibRaw unpack
+into the Halide GPU pipeline), which is a different amount of work on a different file —
+on the same M3 Ultra, 2026-09-12, that route measured 72.9–76.6 ms end-to-end via the FFI
+harness. Neither number is wrong; they are not the same measurement.
+
 ### macOS (Metal)
 
-| Measurement | Value | Date / build |
+Warmed matrix on a 24 MP DNG, Apple M3 Ultra (28 cores), macOS 15.6.1, measured
+2026-09-12 at commit `3a00692`. Each figure is a range across two full `--repeat 3` runs on
+the *same* binary, on an otherwise idle machine:
+
+| Measurement | Value | Previously published |
 |---|---|---|
-| Stage 3 fused, lossless | ~143 ms | 2026-06-13, commit `e40ed7b` |
-| Stage 4, lossless | ~31–34 ms | 2026-06-13, commit `e40ed7b` |
-| Stage 3, lossy | 0.0 ms | 2026-06-13, commit `e40ed7b` |
-| Stage 4, lossy | ~39 ms | 2026-06-13, commit `e40ed7b` |
-| End-to-end, lossless (24 MP) | ~177 ms | 2026-07-05 |
-| End-to-end, lossy (24 MP) | ~105 ms | 2026-07-05 |
+| Stage 3 fused, lossless | 76–81 ms | ~143 ms (2026-06-13, `e40ed7b`) |
+| Stage 4, lossless | 46–50 ms | ~31–34 ms (2026-06-13, `e40ed7b`) |
+| Stage 3, lossy | 0.0 ms (SDK YCbCr passthrough) | 0.0 ms |
+| Stage 4, lossy | 46–48 ms | ~39 ms (2026-06-13, `e40ed7b`) |
+| End-to-end, lossless (24 MP) | 160–171 ms | ~177 ms (2026-07-05) |
+| End-to-end, lossy (24 MP) | 141–143 ms | ~105 ms (2026-07-05) |
 
-> The repository does not record a chip model for the 2026-06/2026-07 macOS measurements
-> above — only "Apple Silicon". Do not assume they were taken on the same machine as the
-> demo screenshot.
+> The two columns are not a before/after. The 2026-06/2026-07 rows record no chip model —
+> only "Apple Silicon" — so they differ from the current column by hardware and by code at
+> the same time, and the two causes cannot be separated. The right column exists only so
+> the previously published figures stay traceable; the left column is the current baseline.
+>
+> The re-baseline was taken because the DNG Stage 3/4 scratch allocator was rebuilt onto a
+> per-decode arena on 2026-09-04 (`7d99c3f9`, replacing the singleton
+> `Stage3WorkspacePool`), with the decode-mutex removal it belongs to continuing through
+> 2026-09-05 — changes that land squarely on the code these rows time. Correctness gates
+> passed identically in every run: lossless Stage 3 102.71 dB, Stage 4 79.90 dB, all lossy
+> stages 999 dB.
+>
+> The ranges are not decoration. Two runs of the same binary on the same idle machine, 26
+> minutes apart, differed by up to 10% on the lossless path, and individual repeats inside
+> one run have been seen to span 43.6–58.1 ms for a Stage 4 whose three-repeat mean was
+> 45.8 ms. Treat any single figure here as accurate to roughly ±10%, and do not read a
+> difference of that size — in either direction — as a code change.
 
-Separately, the demo-app screenshot at the top of this README is a **cold first decode
-inside the GUI app**: 6000×4000 lossless DNG, 291 ms total, on an Apple M3 Ultra running
-macOS 15.6.1 (release build, 2026-08-26). It is not comparable to the warmed matrix
-numbers without accounting for warmup state.
+See the demo screenshot caption above for the cold-app-start figure (291 ms) — it is not
+comparable to the warmed matrix numbers below without accounting for warmup state.
 
 ### Android (Vulkan) — Adreno 750, Vulkan 1.3.128
 
-| Measurement | Value | Note |
-|---|---|---|
-| Cold first decode | 905.2 ms | down from 1353.7 ms (−33%) |
-| Warm decode | 653 ms | steady state, caches populated |
-| App-cold | 518–530 ms | fresh process, warm on-disk pipeline cache |
-| Pipeline warmup | ~1050 ms | down from ~6153 ms (−83%) |
-| Second-launch warmup | 141 ms | down from ~1500 ms, via persistent `VkPipelineCache` |
+| Measurement | Value | Measured | Note |
+|---|---|---|---|
+| Cold first decode | 905.2 ms | 2026-06-13 | down from 1353.7 ms (−33%) |
+| Warm decode | 653 ms | 2026-06-13 | steady state, caches populated |
+| Pipeline warmup | ~1050 ms | 2026-06-13 | down from ~6153 ms (−83%) |
+| App-cold | 518–530 ms | 2026-07-05 | fresh process, warm on-disk pipeline cache |
+| Second-launch warmup | 141 ms | 2026-07-05 | down from ~1500 ms, via persistent `VkPipelineCache` |
+
+> Unlike the macOS table, this one has not been re-baselined, and cannot be from here: no
+> Android device is attached to the machine these README figures were verified on. The
+> dates above are the original measurement runs, all on the same Adreno 750 device.
+>
+> One later change is known to touch this path: the Stage 4 render kernels
+> (`DngRenderGenerator.cpp`, shared between the Metal and Vulkan backends) absorbed EXIF
+> orientation into the kernel after these runs. Whether that moved steady-state timing on
+> this device is simply unknown — it is stated here rather than guessed at.
 
 ### Stage-level and per-format detail
 
-- Stage 1 Huffman decode, warm: 87.9 ± 3.8 ms — 74.0% of the warm pipeline total. CPU-side
-  decompression, not GPU work, is the dominant cost.
+- Stage 1, warm: 87.9 ± 3.8 ms on the Adreno 750 device, 2026-07-05 — 28.2% of that run's
+  312 ms warm pipeline. Within Stage 1 itself, Huffman decode (`DecodeLosslessJPEG`) is
+  74.0% of the wall time across 8 saturated threads, so CPU-side decompression, not GPU
+  work, is what Stage 1 costs.
 - Stage 4 `repack_src` elimination: 686 ms → 33 ms.
 - **Fujifilm X-T5 RAF (40 MP): 1231 ms decompress, against 293 ms for an X-T3 RAF.** The
   gap is an upstream capability gap, not a dispatch problem: the pinned RawSpeed3 revision
@@ -481,9 +611,8 @@ The Adobe DNG SDK reference, however, is compiled by Apple clang with its defaul
 `m00*A + m01*B + m02*C` into an `fma` — observed on 200000 of 200000 evaluations. So the
 reference uses fused arithmetic that the GPU cannot emit, and the ~1 ULP difference
 discretizes into sparse ±1 LSB pixel errors at the 8-bit encode step `g*255 + 0.5`.
-Unmitigated, this caps Stage 4 at 99.6199 dB.
-
-Trying to *disable* FMA on the GPU is a dead end: Metal never fuses in the first place.
+Unmitigated, this caps Stage 4 at 99.6199 dB — and disabling FMA on the GPU side is not
+an available lever, since Metal never fuses to begin with.
 
 **Mitigation shipped.** The SDK reference itself is pinned to library-level
 `-ffp-contract=off`, combined with `strict_float` on the Metal side. Library-level is
@@ -583,11 +712,24 @@ system bundle the native library — CocoaPods embeds the dylib into
 `<App>.app/Contents/Frameworks/` on macOS, Gradle packs the `.so` into the APK on Android.
 
 Import `package:ceyx/ceyx.dart`; do not reach into `package:ceyx/src/...`. The public
-surface exports `DngDecoderService`, `DngImage`, `DngErrorCode`, `DngDecodeException`,
-the routing helpers (`DecodeRoute`, `decodeRouteForPath`, `kSupportedDecodeExtensions`),
-the generic-RAW error types (`RawErrorCode`, `RawDecodeException`,
-`RawUnavailableException`) and the diagnostic enums (`RawDiagnostics`, `RawFrontend`,
-`RawDecoderBackend`, `RawGpuBackend`, `RawSampleModel`).
+surface, grouped by area:
+
+- **RAW decode**: `DngDecoderService`, `DngImage`, `DngErrorCode`, `DngDecodeException`,
+  the routing helpers (`DecodeRoute`, `decodeRouteForPath`, `kSupportedDecodeExtensions`),
+  the generic-RAW error types (`RawErrorCode`, `RawDecodeException`,
+  `RawUnavailableException`) and the diagnostic enums (`RawDiagnostics`, `RawFrontend`,
+  `RawDecoderBackend`, `RawGpuBackend`, `RawSampleModel`).
+- **Still decode**: `HeifDecoderService`, `HeifImage`, `HeifProbeResult`,
+  `HeifErrorCode`/`HeifDecodeException`/`HeifUnavailableException` for HEIC; the general
+  `CeyxStillDecoderService`, `CeyxStillImage`, `CeyxStillProbe` and
+  `CeyxStillErrorCode`/`CeyxStillDecodeException`/`CeyxStillUnavailableException` for
+  HEIC/AVIF/WebP/JPEG XL.
+- **Encode**: `CeyxEncodeService`, `CeyxImageFormat`, `CeyxEncodeErrorCode`,
+  `CeyxEncodeException`/`CeyxEncodeUnavailableException`.
+- **Buffer/decode pool**: `CeyxNativeBufferPool`, `CeyxNativeBuffer` and
+  `CeyxPoolShrinkPolicy`, plus `CeyxDecodePool` and its job/outcome types. These are
+  exported so a host can inspect or override the shrink schedule, not because a host must
+  assemble one — `CeyxDecodePool` wires the default itself.
 
 ### Minimal example
 
@@ -642,25 +784,31 @@ dart run bin/benchmark_preview.dart image_samples/lossless_dng_sample.dng
 flutter test
 ```
 
-`run_decode_matrix.py` auto-enables two additional harness cases whenever their binaries
+`run_decode_matrix.py` auto-enables three additional harness cases whenever their binaries
 exist — no flag needed:
 
 ```bash
 python3 native/scripts/build_native_watchdog.py --skip-configure --target dng_ffi_harness
 python3 native/scripts/build_native_watchdog.py --skip-configure --target test_device_handoff
+python3 native/scripts/build_native_watchdog.py --skip-configure --target test_abi_layout
 python3 native/tests/run_decode_matrix.py --repeat 3
 ```
 
 - `dng_ffi_harness` drives the production `extern "C"` entry point
-  (`dng_decode_and_process`) directly, gating the contract checks and a byte-exact RGB
+  (`ceyx_decode_into_buffer`) directly, gating the contract checks and a byte-exact RGB
   match.
-- `test_device_handoff` calls `decode_to_rgb` directly and gates device-handoff PSNR
-  (handoff on versus off) for the fused Stage 3 → Stage 4 path.
+- `test_device_handoff` calls `dng_pipeline_decode_to_rgb_into` directly and gates
+  device-handoff PSNR (handoff on versus off) for the fused Stage 3 → Stage 4 path.
+- `test_abi_layout` pins every offset/size in `DngResult`, `CeyxStillResult`,
+  `CeyxEncodeOptions` and `HeifResult` (S-3), and the matrix separately asserts against
+  the shipped dylib that the oracle-only `ceyx_orient_rgba` symbol never re-enters the
+  production build (S-2), with a positive control proving the `nm` check itself works.
 
-> **Coverage caveat.** Without both binaries built, `run_decode_matrix.py` exercises only
-> the internal test path — it does not gate the public FFI entry point or the device
-> handoff. This is not a "CPU fallback": no CPU render path exists. Build both targets
-> before treating a green matrix as coverage of the FFI and device-handoff paths.
+> **Coverage caveat.** Without all three binaries built, `run_decode_matrix.py` exercises
+> only the internal test path — it does not gate the public FFI entry point, the device
+> handoff, or the pinned ABI layout. This is not a "CPU fallback": no CPU render path
+> exists. Build all three targets before treating a green matrix as coverage of the FFI,
+> device-handoff and ABI-layout paths.
 
 ### Third-party provenance gate
 
@@ -700,6 +848,12 @@ in `docs/legal/THIRD_PARTY_LICENSES.md`.
 | libjpeg-turbo | IJG + modified 3-clause BSD (SIMD sources zlib-licensed) | Statically linked on every platform |
 | zlib | zlib License | System zlib on macOS/Android; built from source on Windows |
 | x3f-tools (Foveon X3F) | BSD-3-Clause | Bundled inside the vendored LibRaw tree |
+| libheif | LGPL-3.0-or-later | Dynamically linked (`libheif.1.dylib` / `.so` / `heif.dll`), built by `python3 native/scripts/build_deps.py --component heif-stack` — kept out-of-process from `dng_decoder_native` to satisfy LGPL-3 §4(d)(1) |
+| libde265 | LGPL-3.0-or-later | Dynamically linked, decode-only (`ENABLE_ENCODER=OFF`); HEVC intra decode behind libheif |
+| kvazaar | BSD-3-Clause | HEVC encoder, statically linked into the shipped libheif (not a separate library file) |
+| aom | BSD-2-Clause AND Alliance-for-Open-Media-Patent-License-1.0 | AV1 encode+decode, statically linked into libheif; the patent grant is separate from BSD-2, which is why the build vendors `PATENTS*` alongside `LICENSE*` |
+| libwebp | BSD-3-Clause | Statically linked when `CEYX_ENABLE_WEBP` |
+| libjxl | BSD-3-Clause | Statically linked when `CEYX_ENABLE_JXL` |
 
 Exact pinned revisions and applied patch hashes are recorded in
 `native/third_party/libraw/PROVENANCE.md` and gated by `verify_raw_provenance.py`.

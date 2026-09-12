@@ -7,6 +7,10 @@
 ///             into `<App>.app/Contents/Frameworks/`.
 /// * Android — Gradle packs `android/src/main/jniLibs/<abi>/
 ///             libdng_decoder_native.so` into the APK.
+/// * Windows — CMake globs `windows/Libraries/*.dll` into the build output
+///             directory next to the exe.
+/// * Linux   — CMake globs `linux/Libraries/*.so*` and installs them
+///             alongside the executable.
 ///
 /// Host apps should depend on this package rather than on `ceyx_example`:
 /// `ceyx_example` is a Flutter *app* project whose harness dependencies
@@ -94,7 +98,3 @@ export 'src/still_error_codes.dart'
 
 export 'src/still_decoder_service.dart'
     show CeyxStillImage, CeyxStillProbe, CeyxStillDecoderService;
-
-/// Marker for the vendored binaries, so a build can be traced back to a
-/// specific drop of the native library.
-const String dngNativeLibraryTag = 'ceyx-0.1.0';
