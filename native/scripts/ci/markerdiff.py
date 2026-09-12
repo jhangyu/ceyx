@@ -105,8 +105,14 @@ OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
 # its count away would let ten entries be added back unnoticed.
 #
 # Each ratchet updates its own ledger entry's `line` in the same commit that
-# shrinks the allowlist (WI-9 is first: 119 -> 113) -- coordinated through
-# the leader per push, same discipline as the allowlist itself.
+# shrinks the allowlist, in principle -- coordinated through the leader per
+# push, same discipline as the allowlist itself. WI-9 (push 3, 09756d35)
+# was the first ratchet, 119 -> 113; this entry's update landed one commit
+# late (a follow-up in this same push, not in 09756d35 itself) because the
+# handoff of the new value crossed a leadership rotation. Both commits are
+# in push 3 and neither has been pushed, so the campaign-visible state is
+# still consistent -- noted here so the one-commit gap is not read as if
+# the same-commit invariant held.
 #
 # A listed marker that later disappears is NOT specially exempted: a
 # negative delta (`-N`) is ALWAYS a hard FAIL, for every marker, with no
@@ -131,7 +137,7 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=119", "push 2 / b88c41a4"),
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=113", "push 3 / WI-9 (09756d35)"),
     _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
 )
 
