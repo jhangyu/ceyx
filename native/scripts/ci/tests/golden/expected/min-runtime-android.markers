@@ -1,0 +1,7 @@
+MIN_RUNTIME_android=21
+SOURCE=gradle-declaration
+READ_MIN_RUNTIME_RC=0
+MIN_RUNTIME_android=21
+SOURCE=gradle-declaration
+MIN_RUNTIME_DRIFT_RESULT=PASS (measured=21, declared=21 from [android])
+MIN_RUNTIME_DRIFT_RC=0

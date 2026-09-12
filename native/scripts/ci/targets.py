@@ -113,6 +113,7 @@ TARGETS: dict = {
         "requires_arch": False,
         "expected_companions": ("libheif.so.1", "libde265.so.0"),
         "declaration_platform": "linux",
+        "min_runtime_source": "dump",
     },
     "windows": {
         "artifact_path": "native/build-windows/dng_decoder_native.dll",
@@ -131,6 +132,7 @@ TARGETS: dict = {
         "requires_arch": False,
         "expected_companions": ("heif.dll", "libde265.dll"),
         "declaration_platform": "windows",
+        "min_runtime_source": "binary",
     },
     "macos": {
         "artifact_path": None,
@@ -149,6 +151,7 @@ TARGETS: dict = {
         "requires_arch": True,
         "expected_companions": ("libheif.1.dylib", "libde265.0.dylib"),
         "declaration_platform": "macos",
+        "min_runtime_source": "binary",
     },
     "android": {
         "artifact_path": None,
@@ -167,6 +170,7 @@ TARGETS: dict = {
         "requires_arch": False,
         "expected_companions": (),
         "declaration_platform": "android",
+        "min_runtime_source": "declaration",
     },
 }
 
@@ -188,6 +192,7 @@ REQUIRED_KEYS = (
     "requires_arch",
     "expected_companions",
     "declaration_platform",
+    "min_runtime_source",
 )
 
 

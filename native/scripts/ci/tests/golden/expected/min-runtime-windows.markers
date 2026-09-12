@@ -1,0 +1,5 @@
+MIN_RUNTIME_windows=10.0
+READ_MIN_RUNTIME_RC=0
+MIN_RUNTIME_windows=10.0
+MIN_RUNTIME_DRIFT_RESULT=PASS (measured=10.0, declared=10.0 from [windows])
+MIN_RUNTIME_DRIFT_RC=0
