@@ -9,6 +9,7 @@ not invoke `gh`; it captures the argv publish_release_assets would run.
 from __future__ import annotations
 
 from deps import publish
+from deps.publish import build_artifacts_lock
 
 
 def _fake_run(recorded):
@@ -52,3 +53,20 @@ def test_prerelease_does_not_get_latest_flag(tmp_path, monkeypatch):
     create_argv = recorded[1]
     assert "--prerelease" in create_argv
     assert "--latest" not in create_argv
+
+
+def test_build_artifacts_lock_embeds_min_runtime_when_given(tmp_path):
+    """WI-14 step 14.4: a min_runtime value passed in is embedded verbatim."""
+    asset = tmp_path / "dng_decoder_native-windows-x86_64.tar.gz"
+    asset.write_bytes(b"x")
+    lock = build_artifacts_lock([asset], {asset.name: "6.0"})
+    assert lock["assets"][asset.name]["min_runtime"] == "6.0"
+
+
+def test_build_artifacts_lock_omits_min_runtime_key_when_not_given(tmp_path):
+    """A dist asset with no map entry gets no min_runtime key at all --
+    never a null placeholder."""
+    asset = tmp_path / "heif-dist-windows-x86_64.tar.gz"
+    asset.write_bytes(b"x")
+    lock = build_artifacts_lock([asset], {})
+    assert "min_runtime" not in lock["assets"][asset.name]
