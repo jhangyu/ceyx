@@ -117,6 +117,50 @@ def test_elf_unknown_needed_fails(tmp_path, monkeypatch, capsys):
     assert "IMPORT libvulkan.so.1 -> MISSING" in out
 
 
+# TRANSCRIBED VERBATIM from `readelf -d` on the RELEASED v0.1.23 linux asset
+# (downloaded by tag, archive + member sha256 verified against
+# scripts/ceyx_release_pin.json before reading; tmp/verify/linux/shipped_dtneeded.txt).
+# The locally rebuilt .so produces the identical set, which is what establishes
+# that libjpeg/libz/libgomp are the status quo rather than a new regression.
+ELF_DUMP_LINUX_SHIPPED = (
+    " Dynamic section at offset 0x1000 contains 30 entries:\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libjpeg.so.8]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libheif.so.1]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libz.so.1]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libgomp.so.1]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libstdc++.so.6]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]\n"
+    " 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-x86-64.so.2]\n"
+)
+
+
+def test_elf_linux_shipped_v0123_needed_set_passes(tmp_path, monkeypatch, capsys):
+    """Regression for the WI-4 gate's third unmeasured platform: the real
+    shipped Linux decoder imports libjpeg.so.8 / libz.so.1 / libgomp.so.1."""
+    dump = _write(tmp_path, "readelf_dynamic.txt", ELF_DUMP_LINUX_SHIPPED)
+    staged = _stage(tmp_path, ["libheif.so.1"])
+    rc, out, err = _invoke(monkeypatch, [
+        "--dump", str(dump), "--staged-dir", str(staged),
+        "--declaration", str(DECLARATION), "--platform", "linux", "--format", "elf",
+    ], capsys)
+    assert rc == 0
+    for name in ("libjpeg.so.8", "libz.so.1", "libgomp.so.1"):
+        assert f"IMPORT {name} -> OS_ALLOWLIST" in out
+    assert "IMPORT libheif.so.1 -> STAGED" in out
+    assert "IMPORT_CLOSURE_RESULT=PASS" in out
+
+
+def test_linux_additions_did_not_leak_to_other_platforms():
+    """The three additions are Linux ELF sonames; they must not appear in the
+    android or windows allowlists (android has its own libz.so spelling)."""
+    for name in ("libjpeg.so.8", "libz.so.1", "libgomp.so.1"):
+        assert name in aic.LINUX_OS_ALLOWLIST
+        assert name not in aic.ANDROID_OS_ALLOWLIST
+        assert name not in aic.WINDOWS_OS_ALLOWLIST
+
+
 # TRANSCRIBED VERBATIM from the android/arm64-v8a leg of CI run 34697591379
 # (tmp/verify/ci-fail-20260912-220022.log:3444-3451) -- the decoder's REAL
 # DT_NEEDED set, in the order the gate printed it. libvulkan.so was the entry

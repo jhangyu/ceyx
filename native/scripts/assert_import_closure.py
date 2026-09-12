@@ -68,6 +68,26 @@ LINUX_OS_ALLOWLIST = frozenset({
     "libstdc++.so.6",
     "libgcc_s.so.1",
     "ld-linux-x86-64.so.2",
+    # Measured entries (2026-09-12). Decided by STATUS-QUO evidence, not taste:
+    # the RELEASED v0.1.23 linux asset was downloaded by tag, its archive
+    # sha256 verified byte-exact against scripts/ceyx_release_pin.json
+    # (5e71cd5e...8ef3) and its member .so against the pin's library digest
+    # (35c4151a...7b1c), then `readelf -d` read directly. That shipped .so
+    # ALREADY declares exactly these three imports -- so they are the promise
+    # the Linux asset has always made, and this gate (new in WI-4) is simply
+    # seeing them for the first time. It is therefore a gate gap, NOT a
+    # regression in the artifact. Evidence: tmp/verify/linux/shipped_fetch.txt,
+    # shipped_dtneeded.txt.
+    #   libjpeg.so.8  -- from the leg's own `libjpeg-dev` apt package.
+    #   libz.so.1     -- from `zlib1g-dev`.
+    #   libgomp.so.1  -- GCC's OpenMP runtime; CEYX_ENABLE_DESKTOP_OPENMP is ON
+    #                    for linux desktop (cmake/openmp_policy.cmake).
+    # PARKED for a post-campaign user decision (team-lead, 2026-09-12):
+    # statically linking libjpeg on Linux, since libjpeg.so.8 is the one entry
+    # here that is a distro PACKAGE rather than a base-system library.
+    "libjpeg.so.8",
+    "libz.so.1",
+    "libgomp.so.1",
 })
 
 ANDROID_OS_ALLOWLIST = frozenset({
