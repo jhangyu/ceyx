@@ -7,8 +7,12 @@ import 'dart:typed_data';
 import 'package:ceyx/ceyx.dart';
 
 /// Phase 18 acceptance harness (spec §5 criterion 1) for the generic RAW
-/// route: dimensions, first-pixel checksum, native diagnostics, and RGBA pool
-/// accounting.
+/// route: dimensions, first-pixel checksum, and RGBA pool accounting.
+///
+/// The per-decode "native diagnostics" phase this harness used to print was
+/// removed with the Dart-side RAW diagnostics surface itself (5f602e7e); the
+/// getter it read no longer exists, so the claim is dropped here rather than
+/// left advertising output the tool cannot produce.
 ///
 /// Run order is deliberate. The worker path frees its native buffer in a
 /// `finally`, so the pool assertion after it is DETERMINISTIC and is the hard
@@ -113,21 +117,6 @@ Future<void> main(List<String> args) async {
       sw.stop();
       print('[ZEROCOPY] dart_total_ms=${sw.elapsedMilliseconds}');
       _assertValidImage(image, 'zero-copy decode');
-      final diag = service.lastRawDiagnostics;
-      if (diag == null) {
-        _fail('lastRawDiagnostics returned null after a same-isolate decode');
-      }
-      print(
-        '[DIAG] frontend=${diag!.frontend} '
-        'unpack_backend=${diag.unpackBackend} '
-        'gpu=${diag.gpuBackend} '
-        'sample_model=${diag.sampleModel} '
-        'cfa=${diag.cfaRepeatWidth}x${diag.cfaRepeatHeight} '
-        'unpack_ms=${diag.rawUnpackMs.toStringAsFixed(2)} '
-        'gpu_ms=${diag.gpuProcessMs.toStringAsFixed(2)} '
-        'total_ms=${diag.totalMs.toStringAsFixed(2)} '
-        'repack_bytes=${diag.rawRepackBytes}',
-      );
     }
 
     zeroCopyPhase();
