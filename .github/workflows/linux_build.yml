@@ -486,159 +486,22 @@ jobs:
             --idle-timeout-sec 180
 
       - name: Verify Linux artifact (AC-L2/L3/L4/L5)
-        # AC-L2: file reports an ELF shared object.
-        # AC-L3: nm -D finds halide_vulkan_device_interface (the built binary
-        #        genuinely contains the Vulkan runtime, not just "build ok").
-        # AC-L4: ldd shows no libvulkan entry (dlopen-not-link decision held).
-        # Every check self-captures its own RC on the following line; the
-        # step's own green status is NOT trusted as evidence.
+        # AC-L2/L3/L4 (file / nm -D vulkan symbol / ldd no-libvulkan) +
+        # S-B3 import-closure gate. Migrated to native/scripts/ci/verify_artifact.py
+        # (WI-7, pyci python-ization campaign); logic unchanged, only the
+        # carrier moved -- see that module's docstring for the two ported-as-is
+        # pre-existing gaps (C-G4).
         working-directory: ${{ github.workspace }}
-        run: |
-          SO="native/build-linux/libdng_decoder_native.so"
-
-          # NOTE on RC handling: `run:` executes under `bash -eo pipefail`, so a
-          # failing command aborts the shell before any trailing `echo "RC=$?"`
-          # could run — such an RC line could only ever print 0 and would read
-          # like false evidence. Each check below is wrapped in `set +e`/`set -e`
-          # so the RC line captures the command's OWN exit code, and nm/ldd are
-          # de-pipelined (output to a file, then grep the file) so pipefail
-          # cannot turn the grep's SIGPIPE-to-nm into a bogus 141 on success.
-
-          echo "== AC-L2: file =="
-          set +e
-          file "$SO"
-          rc=$?
-          set -e
-          echo "RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::file '$SO' failed (rc=${rc}); the Linux .so is missing." >&2
-            exit 1
-          fi
-
-          echo "== AC-L3: nm -D halide_vulkan_device_interface =="
-          nm -D "$SO" > nm_dynsyms.txt
-          set +e
-          grep halide_vulkan_device_interface nm_dynsyms.txt
-          rc=$?
-          set -e
-          echo "RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::halide_vulkan_device_interface not found in $SO — Vulkan runtime absent from the binary (AC-L3)." >&2
-            exit 1
-          fi
-
-          echo "== AC-L4: ldd (expect NO libvulkan) =="
-          set +e
-          ldd "$SO" > ldd_out.txt
-          rc=$?
-          set -e
-          cat ldd_out.txt
-          echo "RC=${rc}"
-          if grep -q 'libvulkan' ldd_out.txt; then
-            echo "::error::libvulkan appears in ldd output — link-time Vulkan dependency regressed (D4)." >&2
-            exit 1
-          fi
-
-          # WI-4 step 4.4 (S-B3): import-closure gate against DT_NEEDED, a
-          # SEPARATE capture from ldd_out.txt above. DT_NEEDED is the
-          # declared dependency set; ldd is the resolved transitive closure
-          # and would fold in host glibc paths that are not this artifact's
-          # own declared imports, so a fresh `readelf -d` capture is used
-          # instead of reusing ldd_out.txt.
-          echo "== S-B3: readelf DT_NEEDED import-closure gate =="
-          readelf -d "$SO" > readelf_dynamic.txt
-          cat readelf_dynamic.txt
-          set +e
-          python3 native/scripts/assert_import_closure.py \
-            --dump readelf_dynamic.txt \
-            --staged-dir native/build-linux \
-            --declaration native/deps/shipped_files.toml \
-            --platform linux \
-            --format elf
-          RC=$?
-          set -e
-          echo "IMPORT_CLOSURE_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::import-closure gate failed for $SO — see IMPORT ... -> MISSING lines above." >&2
-            exit "${RC}"
-          fi
-
-          # WI-14 step 14.2 (S-F1): the maximum GLIBC_x.y/GLIBCXX_x.y.z/
-          # CXXABI_x.y.z version reference in the dynamic symbol table.
-          # SEPARATE capture from readelf_dynamic.txt above (that is `-d`,
-          # the dependency section; this is `--dyn-syms`, the versioned
-          # symbol table) -- never a pipe, parsed from the file.
-          readelf --dyn-syms "$SO" > readelf_dynsyms.txt
-          python3 native/scripts/read_min_runtime.py \
-            --artifact readelf_dynsyms.txt \
-            --platform linux \
-            --out min_runtime.txt
-          echo "READ_MIN_RUNTIME_RC=$?"
-          cat min_runtime.txt
-
-          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
-          # just-measured floor and ceyx's own declaration (step 14.5's
-          # containerised build is what makes this leg's measured value
-          # match the declared 2.35 target -- see min_runtime_expected.toml's
-          # [linux] reason field).
-          set +e
-          python3 native/scripts/assert_min_runtime_matches_declared.py \
-            --emitted min_runtime.txt \
-            --declared native/deps/min_runtime_expected.toml \
-            --platform linux
-          RC=$?
-          set -e
-          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            exit "${RC}"
-          fi
-
-          # AC-L5 (2026-08-30): the FFI export surface is actually present.
-          #
-          # Why this gate exists: src/ffi/encode_ffi_api.cpp originally defined
-          # its ceyx_encode_* entries with no export attribute, unlike
-          # dng_ffi_api.cpp's FFI_EXPORT. On this platform default visibility
-          # hides that mistake completely — the symbols export anyway — so
-          # neither Linux nor macOS could have caught it; only the Windows DLL
-          # would have shipped without them, failing at a user's Dart lookup
-          # rather than in CI. "The .so exists and is non-zero" was the entire
-          # prior contract, and it cannot see a missing export.
-          #
-          # ceyx_decode_into_buffer_oriented is the POSITIVE CONTROL: it is
-          # always compiled and always CEYX_FFI_EXPORT'd with no per-platform
-          # guard (native/src/ffi/ceyx_decode_into_ffi.cpp:1-8, :277), so if
-          # it is ever absent the check itself is broken (wrong file, wrong
-          # nm flags) rather than the build being at fault. A gate that can
-          # only ever pass is not evidence.
-          # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
-          #
-          # ceyx_encode_webp_rgba8 is deliberately NOT gated: cmake/encode.cmake
-          # compiles it to return kCeyxEncodeErrUnsupported when no vendored
-          # libwebp dist is present (the case on this runner) and the symbol
-          # still exists. Presence is the contract; capability is not.
-          #
-          # nm_dynsyms.txt was written de-pipelined by AC-L3 above; grepping the
-          # FILE (never `nm | grep -q`) is what keeps pipefail from turning nm's
-          # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
-          #
-          # WI-13 (S-G2): the two-name allowlist loop is replaced by the
-          # Dart-derived manifest (native/deps/export_manifest.toml) via
-          # native/scripts/assert_exports.py. The script matches ELF
-          # dynamic-symbol lines by name with the same ` T ` type filter
-          # this loop used, so the check does not weaken.
-          echo "== AC-L5: required FFI exports present in .so =="
-          set +e
-          python3 native/scripts/assert_exports.py \
-            --manifest native/deps/export_manifest.toml \
-            --platform linux \
-            --dump nm_dynsyms.txt
-          RC=$?
-          set -e
-          echo "ASSERT_EXPORTS_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::assert_exports.py reported missing/absent symbol(s) in $SO — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
-            exit "${RC}"
-          fi
+        run: python3 native/scripts/ci.py verify-artifact --platform linux
+      - name: Import-closure gate (S-B3)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py import-closure --platform linux
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py min-runtime --platform linux
+      - name: Assert required FFI exports present in .so (AC-L5)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-exports --platform linux
 
       # PORTABLE-BASELINE GATE (2026-09-08). The v0.1.19 Linux release SIGILL'd
       # at dlopen() on every machine without AVX-512: RawSpeed3's CpuMarch.cmake
@@ -667,18 +530,7 @@ jobs:
       # match (SIGPIPE to objdump) and inverts the verdict (G-9/R-16).
       - name: Assert no AVX-512 in the Linux .so (portable-baseline gate)
         working-directory: ${{ github.workspace }}
-        run: |
-          set +e
-          python3 native/scripts/assert_no_avx512.py \
-            native/build-linux/libdng_decoder_native.so \
-            --dump native/build-linux/avx512-gate-objdump.txt
-          rc=$?
-          set -e
-          echo "RC=${rc} (avx512 gate)"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::AVX-512 gate failed (rc=${rc}) for libdng_decoder_native.so — refusing to publish an artifact that SIGILLs on non-AVX-512 CPUs. rc=2 means the check could not run at all, which is equally disqualifying." >&2
-            exit 1
-          fi
+        run: python3 native/scripts/ci.py assert-no-avx512 --platform linux
 
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
       # G-E) — user-ordered CI build-integrity probe: does the just-built
@@ -889,74 +741,20 @@ jobs:
         # either one from the artifact/release asset produces a bundle that
         # fails to dlopen on the consumer's machine with an error naming only
         # the decoder -- the exact Windows DLL-trio failure mode, Linux
-        # variant. NOT `|| true`: a missing companion here must fail the
-        # step, not silently ship an incomplete group.
-        #
-        # WI-15 step 15.2: the file list is read from the single declaration
-        # native/deps/shipped_files.toml (via read_shipped_files.py) instead
-        # of hard-coded, so this step cannot drift from it.
-        run: |
-          mkdir -p "${ARTIFACT_DIR}/native"
-          LINUX_FILES="$(python3 native/scripts/read_shipped_files.py --platform linux --all)"
-          for f in ${LINUX_FILES}; do
-            cp "${NATIVE_DIR}/build-linux/${f}" "${ARTIFACT_DIR}/native/"
-          done
-          ls -la "${ARTIFACT_DIR}/native"
-
-      - name: Fail if no shared library was produced
-        run: |
-          # POSIX sh: this containerised job runs every step under `sh -e {0}`
-          # (dash), which has no `shopt`, no arrays and no ${#arr[@]}. Round 6
-          # (run 34706875811) died here with `shopt: not found`, exit 127,
-          # AFTER the artifact had in fact been staged correctly. Count with
-          # a glob loop instead; an unmatched glob stays literal in sh, so
-          # test the path with -e rather than relying on nullglob.
-          count=0
-          for lib in "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so; do
-            [ -e "$lib" ] || continue
-            count=$((count + 1))
-          done
-          echo "SHARED_LIB_COUNT=${count}"
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; the Linux build did not emit the expected artifact." >&2
-            exit 1
-          fi
+        # variant. Migrated to native/scripts/ci/stage.py (WI-8); the
+        # round-6 POSIX shell (glob loop counting) is RETIRED, not
+        # translated -- see that module's docstring.
+        run: python3 native/scripts/ci.py stage --platform linux --artifact-dir "${ARTIFACT_DIR}" --native-dir "${NATIVE_DIR}"
 
       # ATOMIC-GROUP GATE (task #18), mirrors windows_build.yml's "Assert the
       # Windows DLL trio is complete" step for this leg's shared-library
-      # group. Counts the staged copy in ${ARTIFACT_DIR}/native -- the
-      # directory that is actually uploaded -- so the instrument can see the
-      # failure it exists to catch.
-      #
-      # WI-15 step 15.2 (S-H1): EXPECTED_SET comes from the declaration
-      # (native/deps/shipped_files.toml via read_shipped_files.py);
-      # STAGED_SET is enumerated from what actually landed in
-      # ${ARTIFACT_DIR}/native. Both are printed unconditionally (not just
-      # on failure) so a green run leaves positive evidence the comparison
-      # ran, closing the 2026-09-01 "Linux HEIF staging silently absent"
-      # gap this item exists to remove -- previously nothing here would have
-      # caught a completely empty companion set the way an --expect-based
-      # instrument elsewhere in this repo has been shown to.
+      # group. Folds the former "Fail if no shared library was produced" +
+      # "Assert the Linux shared-lib group is complete" steps into one
+      # `assert-staged-group` call (native/scripts/ci/stage.py, WI-8/9) --
+      # same emission order (SHARED_LIB_COUNT -> EXPECTED_SET/STAGED_SET ->
+      # ATOMIC_GROUP_COMPLETE), same short-circuit on a zero count.
       - name: Assert the Linux shared-lib group is complete (atomic group)
-        run: |
-          ls -la "${ARTIFACT_DIR}/native"
-          EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform linux --all | tr ' ' '\n' | sort)"
-          # STAGED_SET enumerates the DIRECTORY'S ACTUAL CONTENTS filtered by
-          # the shared-object naming convention (.so / .so.N), never a
-          # second hard-coded file list -- a hard-coded list here would be
-          # exactly the drift class this item removes and would make a
-          # staged-but-undeclared extra file invisible (the 2026-09-01
-          # incident's direction).
-          STAGED_SET="$(cd "${ARTIFACT_DIR}/native" && ls -1 | grep -E '\.so(\.[0-9]+)*$' | sort)"
-          echo "EXPECTED_SET:"
-          echo "${EXPECTED_SET}"
-          echo "STAGED_SET:"
-          echo "${STAGED_SET}"
-          if [ "${EXPECTED_SET}" != "${STAGED_SET}" ]; then
-            echo "::error::Linux staged set does not match the shipped_files.toml declaration." >&2
-            exit 1
-          fi
-          echo "ATOMIC_GROUP_COMPLETE=1 (EXPECTED_SET == STAGED_SET)"
+        run: python3 native/scripts/ci.py assert-staged-group --platform linux --artifact-dir "${ARTIFACT_DIR}"
 
       # DT_NEEDED verification (AC1; fixed post-run-33455862800 diagnosis,
       # task #18 follow-up). ORIGINAL BUG: this step asserted BOTH
@@ -980,35 +778,10 @@ jobs:
       # on a SUCCESSFUL match under `set -o pipefail` (grep exits first,
       # readelf dies of SIGPIPE, pipeline reports 141).
       - name: Verify DT_NEEDED references the staged HEIF companions
-        run: |
-          SO="${ARTIFACT_DIR}/native/libdng_decoder_native.so"
-          HEIF_SO="${ARTIFACT_DIR}/native/libheif.so.1"
-
-          echo "== Level 1: decoder's own NEEDED (expect libheif.so.1) =="
-          readelf -d "$SO" > "${RUNNER_TEMP}/dt_needed_decoder.txt"
-          cat "${RUNNER_TEMP}/dt_needed_decoder.txt"
-          set +e
-          grep -F "libheif.so.1" "${RUNNER_TEMP}/dt_needed_decoder.txt"
-          rc=$?
-          set -e
-          echo "RC=${rc} (DT_NEEDED libheif.so.1 in ${SO})"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::${SO} has no DT_NEEDED entry for libheif.so.1 — the staged companion would never be loaded." >&2
-            exit 1
-          fi
-
-          echo "== Level 2: libheif.so.1's own NEEDED (expect libde265.so.0, transitive) =="
-          readelf -d "$HEIF_SO" > "${RUNNER_TEMP}/dt_needed_heif.txt"
-          cat "${RUNNER_TEMP}/dt_needed_heif.txt"
-          set +e
-          grep -F "libde265.so.0" "${RUNNER_TEMP}/dt_needed_heif.txt"
-          rc=$?
-          set -e
-          echo "RC=${rc} (DT_NEEDED libde265.so.0 in ${HEIF_SO})"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::${HEIF_SO} has no DT_NEEDED entry for libde265.so.0 — the HEVC decoder linkage is UNVERIFIED, refusing to publish." >&2
-            exit 1
-          fi
+        # Migrated to native/scripts/ci/dt_needed.py (WI-8/9); same two
+        # de-pipelined levels (decoder -> libheif.so.1 -> libde265.so.0),
+        # same RC lines, same error text.
+        run: python3 native/scripts/ci.py dt-needed --platform linux --artifact-dir "${ARTIFACT_DIR}" --runner-temp "${RUNNER_TEMP}"
 
       # Round 6, Plan B: the artifact name is now the SINGLE naming decision
       # this workflow makes. It is also the release asset stem — the publish
