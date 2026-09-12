@@ -1,0 +1,1 @@
+# intentionally empty: verify-dart emits no markers; contract is the job exit code

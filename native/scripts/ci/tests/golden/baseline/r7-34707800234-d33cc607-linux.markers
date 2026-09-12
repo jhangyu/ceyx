@@ -1,0 +1,41 @@
+HOME=<WS>
+GITHUB_ACTIONS=true
+CI=true
+PATH=<WS>:<WS>:<WS>:<WS>:/sbin:/bin
+VCPKG_INSTALL_RC=0
+== AC-L2: file ==
+RC=0
+== AC-L3: nm -D halide_vulkan_device_interface ==
+RC=0
+== AC-L4: ldd (expect NO libvulkan) ==
+RC=0
+== S-B3: readelf DT_NEEDED import-closure gate ==
+IMPORT_CLOSURE_RESULT=PASS
+IMPORT_CLOSURE_RC=0
+READ_MIN_RUNTIME_RC=0
+READ_MIN_RUNTIME_RC=0
+MIN_RUNTIME_DRIFT_RESULT=PASS (measured=2.35, declared=2.35 from [linux])
+MIN_RUNTIME_DRIFT_RC=0
+== AC-L5: required FFI exports present in .so ==
+EXPORTS_RESULT=PASS
+EXPORTS_CHECKED=35
+ASSERT_EXPORTS_RC=0
+RC=0 (avx512 gate)
+STRINGS_TOOL=strings STRINGS_RC=0
+RC=0 (symbol literal: dng_render_stage4_split)
+RC=0 (string: orient_a_x)
+RC=0 (string: orient_b_x)
+RC=0 (string: orient_c_x)
+RC=0 (string: orient_a_y)
+RC=0 (string: orient_b_y)
+RC=0 (string: orient_c_y)
+CODEC_CAPABILITY_PROBE_RC=0
+BUILD_CAPABILITY_PROBE_RC=0
+PROBE_CODECS_RC=0
+PROBE_CODECS_RC=0
+SHARED_LIB_COUNT=1
+ATOMIC_GROUP_COMPLETE=1 (EXPECTED_SET == STAGED_SET)
+== Level 1: decoder's own NEEDED (expect libheif.so.1) ==
+RC=0 (DT_NEEDED libheif.so.1 in <WS>)
+== Level 2: libheif.so.1's own NEEDED (expect libde265.so.0, transitive) ==
+RC=0 (DT_NEEDED libde265.so.0 in <WS>)

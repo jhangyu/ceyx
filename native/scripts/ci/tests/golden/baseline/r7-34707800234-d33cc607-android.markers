@@ -1,0 +1,28 @@
+BUILD_RC=0
+ANDROID_COMPANION_GROUP_COMPLETE=1
+NM_RC=0
+EXPORTS_RESULT=PASS
+EXPORTS_CHECKED=35
+ASSERT_EXPORTS_RC=0
+NM_RC=0 STRINGS_RC=0
+RC=0 (symbol: dng_render_stage4)
+RC=0 (symbol: dng_render_stage4_split)
+RC=0 (string: orient_a_x)
+RC=0 (string: orient_b_x)
+RC=0 (string: orient_c_x)
+RC=0 (string: orient_a_y)
+RC=0 (string: orient_b_y)
+RC=0 (string: orient_c_y)
+READELF_RC=0
+STL_SHARED_LOG_RC=1 STL_STATIC_LOG_RC=0
+DT_NEEDED_HAS_LIBCXX_SHARED_RC=1
+CLOSURE_RESULT=ok
+DT_NEEDED_CLOSURE_RC=0
+IMPORT_CLOSURE_RESULT=PASS
+IMPORT_CLOSURE_RC=0
+SOURCE=gradle-declaration
+READ_MIN_RUNTIME_RC=0
+READ_MIN_RUNTIME_RC=0
+SOURCE=gradle-declaration
+MIN_RUNTIME_DRIFT_RESULT=PASS (measured=21, declared=21 from [android])
+MIN_RUNTIME_DRIFT_RC=0

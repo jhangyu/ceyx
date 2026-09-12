@@ -1,0 +1,43 @@
+DEPS_PYTEST_RC=0
+OMP_RUNTIME_DLL=<WS> Files/Microsoft Visual Studio<WS>
+OMP_RUNTIME_RC=0
+VULKAN_SDK=<WS>1.3.290.0
+SHA_RC=0
+== installed zlib (complete) ==
+CONFIGURE_RC=0
+BUILD_RC=0
+== file ==
+== size (bytes) ==
+DLL_SIZE_BYTES=10035712
+== AC-W4: exported FFI symbols ==
+DUMPBIN_RC=0
+EXPORTS_RESULT=PASS
+EXPORTS_CHECKED=35
+ASSERT_EXPORTS_RC=0
+== Step 4: import table ==
+DEPENDENTS_RC=0
+== Step 4: full import-closure gate (S-B1) ==
+IMPORT_CLOSURE_RESULT=PASS
+IMPORT_CLOSURE_RC=0
+== Step 4: heif.dll's own import table (transitive libde265) ==
+HEIF_DEPENDENTS_RC=0
+STRINGS_TOOL=llvm-strings STRINGS_RC=0
+RC=0 (symbol literal: dng_render_stage4_split)
+RC=0 (string: orient_a_x)
+RC=0 (string: orient_b_x)
+RC=0 (string: orient_c_x)
+RC=0 (string: orient_a_y)
+RC=0 (string: orient_b_y)
+RC=0 (string: orient_c_y)
+CODEC_CAPABILITY_PROBE_RC=0
+BUILD_CAPABILITY_PROBE_RC=0
+PROBE_CODECS_RC=0
+PROBE_CODECS_RC=0
+PROVENANCE=linker-default
+READ_MIN_RUNTIME_RC=0
+READ_MIN_RUNTIME_RC=0
+PROVENANCE=linker-default
+MIN_RUNTIME_DRIFT_RESULT=PASS (measured=6.0, declared=6.0 from [windows])
+MIN_RUNTIME_DRIFT_RC=0
+EXPECTED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll libomp140.x86_64.dll
+STAGED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll libomp140.x86_64.dll 
