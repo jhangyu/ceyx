@@ -14,7 +14,7 @@ set(CEYX_SHIPPED_LINUX_DECODER "libdng_decoder_native.so")
 set(CEYX_SHIPPED_LINUX_COMPANIONS "libheif.so.1;libde265.so.0")
 
 set(CEYX_SHIPPED_MACOS_DECODER "libdng_decoder_native.dylib")
-set(CEYX_SHIPPED_MACOS_COMPANIONS "liblcms2.2.dylib;libjpeg.8.dylib;libheif.1.dylib;libde265.0.dylib;libomp.dylib")
+set(CEYX_SHIPPED_MACOS_COMPANIONS "libjpeg.8.dylib;libheif.1.dylib;libde265.0.dylib;libomp.dylib")
 
 set(CEYX_SHIPPED_WINDOWS_DECODER "dng_decoder_native.dll")
 set(CEYX_SHIPPED_WINDOWS_COMPANIONS "heif.dll;libde265.dll;libomp140.x86_64.dll")

@@ -126,32 +126,27 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
     # `vendored_libraries` (the actual downstream consumer) exactly, not
     # just macos_build.yml's own copy of the same list, so both sides of the
     # requirement are pinned to one source of truth.
+    # FIVE dylibs, not six (WI-5, OQ-N4 option Z, user ruling 2026-09-12):
+    # liblcms2.2.dylib is removed from the required set -- lcms2 is dead
+    # code on every platform (ceyx never calls dcraw_process, the only
+    # caller of LibRaw's ICC apply_profile()), ENABLE_LCMS is forced OFF,
+    # and native/deps/shipped_files.toml's [macos].companions no longer
+    # lists it.
     ("dng_decoder_native", "macos", "arm64"): frozenset(
         {
             "libdng_decoder_native.dylib",
-            "liblcms2.2.dylib",
             "libjpeg.8.dylib",
             "libheif.1.dylib",
             "libde265.0.dylib",
             "libomp.dylib",
         }
     ),
-    # x86_64: WIDENED TO THE SAME SIX (2026-09-01, user ruling): the interim
-    # decoder-only key above this comment recorded an unresolved assumption
-    # (OpenMP genuinely could not be built on this leg at the time). That
-    # gap is closed -- the OMP-CROSS-FIX / OMP-BINARY-SOURCE / LCMS2-X86_64 /
-    # JPEG-X86_64 chain (native repo commits 2c40d17..dd91eea) vendors and
-    # correctly wires all three previously-missing companions on the Intel
-    # leg, verified via macos_build.yml's three-gate staging check
-    # (architecture, reachability, and path-convention -- the last of which
-    # exists specifically because of a real defect, run 33472670989, an
-    # unresolved-token install name that would have shipped a companion
-    # nothing could actually load). The user ruled the Intel artifact must
-    # carry the same six files as Apple Silicon; this key now matches.
+    # x86_64: same five-file set as Apple Silicon (2026-09-01, user ruling,
+    # amended by WI-5's lcms2 removal above -- both legs still carry the
+    # same companion set as each other, now five instead of six).
     ("dng_decoder_native", "macos", "x86_64"): frozenset(
         {
             "libdng_decoder_native.dylib",
-            "liblcms2.2.dylib",
             "libjpeg.8.dylib",
             "libheif.1.dylib",
             "libde265.0.dylib",

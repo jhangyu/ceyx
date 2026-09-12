@@ -198,6 +198,20 @@ jobs:
             exit 1
           fi
 
+      # WI-5 step 5.4 (S-E2): android-arm64-v8a has NO runnable capability
+      # instrument in CI (ledger `instrument = "none (accepted gap)"`,
+      # codec_expectations.toml [android-arm64-v8a.capabilities]) -- the
+      # cross-compiled AArch64 artifact cannot be dlopen'd from the x86_64
+      # runner and there is no emulator gate. Every capability cell is an
+      # honest, permanently-accepted zero for the same documented reason.
+      # A silent skip is a FAIL per the campaign's instrument discipline
+      # (2026-08-25 lesson: a silently-skipped gate looks identical to a
+      # fully-checked green one), so this step prints an explicit SKIP line.
+      - name: Assert build capability vector via probe (S-E2)
+        shell: bash
+        run: |
+          echo "CAPABILITY_PROBE SKIP (android: no runnable instrument, ledger instrument=\"none (accepted gap)\")"
+
       - name: Stage native artifacts
         # A-T8-FIX: multi-.so packaging. cmake/heif.cmake's ANDROID branches
         # (HEIF companions + the unconditional libc++_shared.so block) stage

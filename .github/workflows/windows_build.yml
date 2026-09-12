@@ -765,6 +765,27 @@ jobs:
           echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, windows-x86_64
+      # leg. Vector transcribed from native/deps/codec_expectations.toml
+      # [windows-x86_64.capabilities]. ICC=0 on every leg (OQ-N4 option Z,
+      # WI-5): ENABLE_LCMS is forced OFF; nothing sourced lcms2 for Windows
+      # in the first place (zero lcms2 branches outside tests.cmake), so
+      # this leg moves from "silently non-deterministic" to "explicitly OFF"
+      # by the same forced value.
+      - name: Assert build capability vector via probe (S-E2)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          python3 native/scripts/codec_capability_probe.py "native/build-windows/dng_decoder_native.dll" \
+            --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 \
+            --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 \
+            --json-out native/scripts/deps/probe/capability_build.json
+          rc=$?
+          set -e
+          echo "BUILD_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
       # CI-T3 (task #11 spec, native/scripts/tmp/ci-t3-probe-codecs-step-spec.md
       # section 1): functional capability-bitmask probe against the committed
       # Windows HEIF dist (native/third_party/heif-dist-windows). Compiles

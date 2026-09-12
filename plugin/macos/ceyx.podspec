@@ -21,12 +21,14 @@ package:ceyx_example can dlopen it without a dev-machine CMake build tree.
   s.platform = :osx, '11.0'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 
-  # libdng_decoder_native.dylib links liblcms2/libjpeg (LibRaw's colour
-  # management + JPEG deps) via find_package(), which resolves to Homebrew on
-  # the build machine. native/cmake/pipeline.cmake's POST_BUILD step vendors
-  # those two next to the dylib and repoints all three to @rpath/<name>, so
-  # once CocoaPods embeds all three in Frameworks/ the loader resolves them
-  # without requiring Homebrew on the host machine.
+  # libdng_decoder_native.dylib links libjpeg (JPEG deps) via find_package(),
+  # which resolves to Homebrew on the build machine.
+  # native/cmake/pipeline.cmake's POST_BUILD step vendors it next to the
+  # dylib and repoints both to @rpath/<name>, so once CocoaPods embeds both
+  # in Frameworks/ the loader resolves them without requiring Homebrew on
+  # the host machine. (lcms2 no longer appears here: OQ-N4 option Z, WI-5,
+  # 2026-09-12 -- ENABLE_LCMS is forced OFF, so the decoder never links
+  # lcms2 on any platform.)
   #
   # Phase 2 (HEIC): libheif/libde265 are built by
   # native/scripts/build_deps.py build heif-stack with CMAKE_INSTALL_NAME_DIR=@rpath, so

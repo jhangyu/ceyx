@@ -207,50 +207,15 @@ jobs:
       # select it while yasm is present) and because other vendored deps in this
       # tree may still expect it on PATH; removing it is not necessary to fix
       # this failure.
-      # little-cms2 (CI-T11 MACOS-DEPS-DETERMINISM, 2026-09-01, user ruling
-      # 6a): previously NOT installed here. LibRaw's
-      # native/third_party/libraw-cmake/CMakeLists.txt:143-166 probes it via
-      # a plain, non-REQUIRED `find_package(LCMS2)` — if absent, the
-      # configure silently proceeds with LCMS_SUPPORT_CAN_BE_COMPILED=false
-      # and LibRaw builds WITHOUT ICC colour-management support, with no
-      # error, just a "Libraw will be compiled with LCMS support ... NO"
-      # configure-log line. A run on 2026-08-31 (run 33343548641, evidence in
-      # native/scripts/tmp/ci-t11-lcms2-evidence.txt, gitignored) found the
-      # macos-14 runner image had little-cms2 preinstalled at that time, so
-      # this had not yet manifested — but that is a fact about a runner-image
-      # snapshot, not a guarantee (images are updated by GitHub without this
-      # repo's involvement). Installing it explicitly here, the same way
-      # jpeg-turbo already is, makes ICC colour-management support (and
-      # therefore liblcms2.2.dylib's presence for the six-dylib release
-      # asset, see the "Stage native artifact" step below) a DECLARED
-      # dependency of this workflow rather than an accident of the runner
-      # image's current package set. "little-cms2" is Homebrew's canonical
-      # formula name (confirmed via `brew info little-cms2`); "lcms2" is
-      # only an alias, so the canonical name is used here to not depend on
-      # the alias continuing to resolve.
-      #
-      # BREW, NOT VENDORED — deliberate, and not the same choice this repo
-      # made for libomp two sections below. Compare the two: libomp is
-      # vendored (native/third_party/libomp, see tests.cmake's "Desktop
-      # OpenMP" block) because Apple clang ships NO libomp at all — the
-      # dependency is categorically absent from the toolchain, Homebrew
-      # `brew --prefix libomp` is documented there as printing a plausible
-      # path even when NOT installed (a measured false-positive footgun),
-      # and OpenMP's ABI is stable enough that a single committed arm64
-      # dylib is a reasonable one-time cost. lcms2 has none of those
-      # properties: it is a normal, actively-maintained, widely-bottled
-      # Homebrew formula with no equivalent false-positive hazard in
-      # `find_package(LCMS2)` (CMake's own FindLCMS2 either finds a real
-      # instance or reports not-found, LibRaw's CMakeLists.txt:145 checks
-      # `LCMS2_FOUND` off that, not a printed prefix path). Vendoring it
-      # would trade a one-line dependency declaration for an ongoing
-      # maintenance burden (security patches, ICC-engine correctness fixes)
-      # this project has no reason to take on for a library this common —
-      # `brew install little-cms2` is the proportionate fix for THIS gap.
+      # lcms2 is deliberately NOT installed here (OQ-N4 option Z, WI-5,
+      # 2026-09-12): ENABLE_LCMS is forced OFF in native/cmake/tests.cmake
+      # on every platform -- lcms2 is dead code, reachable only through
+      # LibRaw's dcraw_process(), which ceyx never calls. No lcms2
+      # dependency, vendored tree, or shipped dylib remains.
       - name: Install build prerequisites (Homebrew)
         run: |
           brew update
-          brew install cmake ninja jpeg-turbo little-cms2 nasm yasm
+          brew install cmake ninja jpeg-turbo nasm yasm
 
       - name: Cache vendored Halide v21 distribution
         id: cache-halide
@@ -557,24 +522,28 @@ jobs:
             --target dng_decoder_native \
             --idle-timeout-sec 180 2>&1 | tee "${{ github.workspace }}/native_build_native_arm64.log"
 
-          # CI-T11 (MACOS-ASSET): this is the mechanical instrument for the
-          # "does lcms2 exist at CI staging time" question
-          # (docs/logs/2026-09-01/ci-t11-findings.md) — a build-time fact,
-          # captured as a log line, not inferred from a local dev build (this
-          # dev machine's Homebrew state is not evidence for what the CI
-          # runner image provides). Configure log grepped from a saved file,
-          # not piped directly to grep, so a zero-match `grep -q` cannot
-          # itself trip SIGPIPE against a still-writing producer (2026-08-28
-          # ledger: `nm | grep -q` under pipefail dies on early grep exit).
+          # WI-5 (OQ-N4 option Z, 2026-09-12): lcms2 is dead code on every
+          # platform and ENABLE_LCMS is now forced OFF, so the former
+          # "LCMS support ... YES" assertion here would always fail post-
+          # removal by design -- it asserted the wrong thing. The
+          # replacement instrument asserts the intended NEGATIVE: the
+          # configure log must carry the disabled-status line
+          # (native/cmake/tests.cmake's forced-OFF block), proving the
+          # removal actually took effect on this runner rather than
+          # ENABLE_LCMS silently staying ON. Configure log grepped from a
+          # saved file, not piped directly to grep, so a zero-match
+          # `grep -q` cannot itself trip SIGPIPE against a still-writing
+          # producer (2026-08-28 ledger: `nm | grep -q` under pipefail dies
+          # on early grep exit).
           set +e
-          grep -q "Libraw will be compiled with LCMS support .................... YES" \
+          grep -q "\[ceyx\] LCMS2: disabled (OQ-N4 option Z)" \
             "${{ github.workspace }}/native_build_native_arm64.log"
           LCMS_RC=$?
           set -e
           echo "LCMS_CONFIGURE_RC=${LCMS_RC}"
           if [ "${LCMS_RC}" -ne 0 ]; then
-            echo "::error::LibRaw's configure did not report LCMS support as YES on this runner — liblcms2.2.dylib will not be produced, and the release asset would silently ship without ICC colour management (a capability regression versus the currently-committed dylibs). See native_build_native_arm64.log for the actual 'Libraw will be compiled with LCMS support' line." >&2
-            grep "Libraw will be compiled with LCMS support" "${{ github.workspace }}/native_build_native_arm64.log" || echo "(line not found in log at all)"
+            echo "::error::configure did not print the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line — ENABLE_LCMS may not be forced OFF on this runner, or the configure step was silently skipped. See native_build_native_arm64.log." >&2
+            grep "LCMS2" "${{ github.workspace }}/native_build_native_arm64.log" || echo "(no LCMS2 line found in log at all)"
             exit 1
           fi
 
@@ -736,6 +705,24 @@ jobs:
           echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, macos-arm64 leg.
+      # Vector transcribed from native/deps/codec_expectations.toml
+      # [macos-arm64.capabilities] -- render_expectations.py --check proves
+      # this has not drifted from the ledger. ICC=0 on every leg (OQ-N4
+      # option Z, WI-5): ENABLE_LCMS is forced OFF, lcms2 is dead code.
+      - name: Assert build capability vector via probe (S-E2, native leg)
+        if: matrix.cross == 'false'
+        run: |
+          set +e
+          python3 native/scripts/codec_capability_probe.py "$DYLIB" \
+            --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 \
+            --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 \
+            --json-out native/scripts/deps/probe/capability_build.json
+          rc=$?
+          set -e
+          echo "BUILD_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
       # Cross leg: cannot dlopen a foreign-arch (x86_64) dylib from this
       # arm64 host process, so the achievable proof is the compile-time one —
       # the SAME configure that produced this dylib printed cmake/jxl.cmake's
@@ -773,6 +760,40 @@ jobs:
           echo "ASSERT cross-leg JXL enabled RC=${rc}"
           if [ "${rc}" -ne 0 ]; then
             echo "::error::cross_stage2_build.log does not show '-- JXL: static ...' from cmake/jxl.cmake's success branch; the x86_64 cross-compile configure may not have enabled JXL." >&2
+            exit 1
+          fi
+
+      # WI-5 step 5.4 (S-E2), macos-x86_64 cross leg: this leg cannot dlopen
+      # a foreign-arch artifact (same reason the codec vector above uses
+      # configure-log), so its capability vector is asserted from the
+      # configure log too -- ledger's `instrument = "configure-log"`
+      # (codec_expectations.toml [macos-x86_64.capabilities]). Interaction
+      # with step 5.2b: the old lcms2 arch-guard's own "[ceyx] LCMS2: ..."
+      # status line was deleted with the rest of that apparatus, so the
+      # forced-OFF replacement one-liner (native/cmake/tests.cmake) prints
+      # its own "[ceyx] LCMS2: disabled (OQ-N4 option Z)" line -- otherwise
+      # this leg's ICC evidence would degrade into proving a negative
+      # (absence of a line is also what a silently-skipped configure
+      # produces).
+      # LEDGER VECTOR (macos-x86_64.capabilities): ICC=0 OPENMP=1 HEIF=1 WEBP=1 JXL=1 RAW=1
+      - name: Assert build capability vector via probe (S-E2, cross leg)
+        if: matrix.cross == 'true'
+        run: |
+          # LEDGER VECTOR (macos-x86_64.capabilities), transcribed from
+          # native/deps/codec_expectations.toml -- kept INSIDE this step
+          # (not the comment block above the `- name:` header) so
+          # render_expectations.py's capabilities_step_anchor scan
+          # attributes these tokens to THIS step, not the preceding
+          # "native leg" capability step (same SF2-family fix as the codec
+          # cross-leg step above).
+          # OPENMP=1 HEIF=1 WEBP=1 JXL=1 RAW=1
+          set +e
+          grep -q -- "\[ceyx\] LCMS2: disabled (OQ-N4 option Z)" cross_stage2_build.log
+          rc=$?
+          set -e
+          echo "ASSERT cross-leg ICC=0 RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::cross_stage2_build.log does not show the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line -- ENABLE_LCMS may not be forced OFF on this leg." >&2
             exit 1
           fi
 
