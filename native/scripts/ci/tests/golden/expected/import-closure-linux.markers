@@ -1,0 +1,7 @@
+== S-B3: readelf DT_NEEDED import-closure gate ==
+Dynamic section at offset 0x1000 contains 2 entries:
+ 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]
+IMPORT libc.so.6 -> OS_ALLOWLIST
+IMPORT_CLOSURE_RESULT=PASS
+IMPORT_CLOSURE PASS (linux): 1 imports, 0 staged companions
+IMPORT_CLOSURE_RC=0

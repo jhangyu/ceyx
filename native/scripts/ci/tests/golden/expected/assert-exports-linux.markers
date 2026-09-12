@@ -1,0 +1,5 @@
+== AC-L5: required FFI exports present in .so ==
+SYMBOL foo -> PRESENT
+EXPORTS_RESULT=PASS
+EXPORTS_CHECKED=1
+ASSERT_EXPORTS_RC=0
