@@ -137,7 +137,7 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         baseline = "EXPORTS_RESULT=PASS\n"
         candidate = (
             "EXPORTS_RESULT=PASS\n"
-            "SHELL_ALLOWLIST_SIZE=106\n"
+            "SHELL_ALLOWLIST_SIZE=95\n"
             "SHELL_PROHIBITION_RESULT=PASS\n"
         )
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
@@ -148,10 +148,10 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         # Same lines, but the leg does not match any ledger entry -- the
         # ledger is scoped, not global.
         baseline = "EXPORTS_RESULT=PASS\n"
-        candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=106\n"
+        candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=95\n"
         rc, deltas = markerdiff.diff(baseline, candidate, leg="linux")
         self.assertNotEqual(rc, 0)
-        self.assertIn("+1 SHELL_ALLOWLIST_SIZE=106", deltas)
+        self.assertIn("+1 SHELL_ALLOWLIST_SIZE=95", deltas)
 
     def test_unlisted_marker_addition_still_fails(self):
         baseline = "EXPORTS_RESULT=PASS\n"
@@ -165,27 +165,27 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         # simulates a later state where it has "graduated" into the
         # anchor) and vanishes from the candidate, that is a `-N` -- never
         # suppressed, regardless of the ledger.
-        baseline = "SHELL_ALLOWLIST_SIZE=106\n"
+        baseline = "SHELL_ALLOWLIST_SIZE=95\n"
         candidate = ""
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
         self.assertNotEqual(rc, 0)
-        self.assertIn("-1 SHELL_ALLOWLIST_SIZE=106", deltas)
+        self.assertIn("-1 SHELL_ALLOWLIST_SIZE=95", deltas)
 
     def test_ledger_value_changed_is_a_hard_failure_not_forgiven(self):
         # This is the assertion-class proof: only the EXACT ledger line is
         # forgiven. A different (stale/unratcheted) value for the same key
-        # is an ordinary unlisted addition and still fails -- 109 is the
-        # PRE-WI-15 value, no longer on the ledger now that it reads 106.
+        # is an ordinary unlisted addition and still fails -- 106 is the
+        # PRE-WI-18 value, no longer on the ledger now that it reads 95.
         baseline = "EXPORTS_RESULT=PASS\n"
-        candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=109\n"
+        candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=106\n"
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
         self.assertNotEqual(rc, 0)
-        self.assertIn("+1 SHELL_ALLOWLIST_SIZE=109", deltas)
+        self.assertIn("+1 SHELL_ALLOWLIST_SIZE=106", deltas)
 
     def test_expected_addition_report_lines_names_both_entries(self):
         lines = markerdiff.expected_addition_report_lines("nativetests")
         joined = "\n".join(lines)
-        self.assertIn("SHELL_ALLOWLIST_SIZE=106", joined)
+        self.assertIn("SHELL_ALLOWLIST_SIZE=95", joined)
         self.assertIn("SHELL_PROHIBITION_RESULT=PASS", joined)
 
     def test_expected_addition_report_lines_empty_for_other_leg(self):

@@ -324,11 +324,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--log-path", default="cross_stage2_build.log")
 
     # capability-vector carries NO --arch (same shape as codec-probe):
-    # capability.capability_vector() accepts `arch` for CLI-shape
-    # uniformity but never reads it (verified against all three legs'
-    # real invocations, capability.py module docstring) -- exposing an
-    # argparse flag the module ignores is exactly the accept-and-ignore
-    # posture rejected for codec-probe's --dist-dir; not repeating it here.
+    # capability.capability_vector() has no `arch` parameter at all (WI-16a
+    # R2, commit 36ceb53c deleted it -- an earlier revision offered it "for
+    # CLI-shape uniformity, unused by the module", which was itself the
+    # accept-and-ignore posture rejected for codec-probe's --dist-dir, and
+    # was corrected rather than kept once flagged).
     cv = _add_platform_command(
         sub,
         "capability-vector",

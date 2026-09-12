@@ -123,6 +123,15 @@ OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
 #     impl-9's macOS+windows YAML + ratchet -> this entry). Value taken
 #     from `check_shell_prohibition.py`'s own live emission, not from
 #     impl-9's projection or the leader's report of it.
+#   - WI-17/WI-18 (push 6, 3ecb8f6a / bf7f17b7): 106 -> 95 (eleven
+#     capability-vector/min-runtime MUST_STAY entries retired across all
+#     four legs as their steps became one-line `capability-vector`/
+#     `min-runtime` calls), ledger updated in this follow-up commit.
+#     Value taken from `check_shell_prohibition.py`'s own live emission at
+#     the frozen tip, not from any projection reported by any teammate --
+#     two separate projections (10 -> 96, then a corrected 11 -> 95) were
+#     given for this ratchet before the number was actually read off the
+#     producer.
 # All commits for a given push stay unpushed until the leader freezes and
 # adjudicates, so the campaign-visible (pushed) state is always consistent
 # -- noted here so the in-tree commit gap is not read as if the
@@ -151,7 +160,7 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=106", "push 5 / WI-15 (6f3880ba)"),
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=95", "push 6 / WI-18 (bf7f17b7)"),
     _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
 )
 
