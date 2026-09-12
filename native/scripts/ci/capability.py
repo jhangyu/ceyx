@@ -69,12 +69,17 @@ because two per-arch matrix legs build into different paths resolved only
 at runtime by the caller -- this module does not re-derive that path, the
 caller (the workflow's `$DYLIB`, forwarded by `ci.py`) passes it in.
 
-`arch` is accepted for CLI-shape uniformity with the other `ci.py`
-subcommands (the C-G9 family) but is not read anywhere in this module:
-neither leg's real `codec_capability_probe.py` invocation passes `--arch`
-today (verified by grepping all three legs) -- macOS's per-arch identity is
-already fully carried by which matrix job is running (a different `$DYLIB`
-value, a different `matrix.cross`), not by an extra flag to this probe.
+NO `arch` PARAMETER (leader ruling 2026-09-13, applying push 5's `codec-probe`
+precedent here too): neither leg's real `codec_capability_probe.py`
+invocation passes `--arch` today (verified by grepping all three legs) --
+macOS's per-arch identity is already fully carried by which matrix job is
+running (a different `$DYLIB` value, a different `matrix.cross`), not by an
+extra flag to this probe. An accept-and-ignore parameter is a promise this
+module does not keep, not CLI-shape uniformity; `ci.py`'s `capability-vector`
+subcommand is wired with `_add_platform_command(with_arch=False)`, the same
+shape `codec-probe` already uses. If a future leg needs `--arch`, add the
+parameter back with the file:line of the caller that will pass it -- do not
+re-add it speculatively.
 """
 
 from __future__ import annotations
@@ -132,7 +137,6 @@ _CONFIGURE_LOG_CHECK = {
 def capability_vector(
     platform: str,
     kind: str,
-    arch: str | None = None,
     source: str = "probe",
     dylib_path: str | None = None,
     expect: list[str] | None = None,
