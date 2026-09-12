@@ -82,11 +82,34 @@ jobs:
       #
       # No `sudo` here: GitHub Actions container jobs run as root by default
       # and a minimal ubuntu:22.04 image ships no sudo binary at all.
-      - name: Install git into the container (pre-checkout, WI-14 step 14.5)
+      #
+      # python3 added 2026-09-12 (CI run 34702307604). With checkout fixed, the
+      # leg advanced to the next step and died there: "Derive vcpkg baseline
+      # from vcpkg.json" runs `python3 -c` at :101, but in a bare
+      # ubuntu:22.04 the first interpreter would otherwise arrive two steps
+      # LATER (actions/setup-python@v5), so the step exited 127
+      # "python3: not found".
+      #
+      # Fixed HERE rather than by moving that step after Set up Python, and the
+      # step order is deliberately left alone. Reason: setup-python@v5 has never
+      # successfully run in this container, and its hosted-tool-cache CPython
+      # can depend on libs a bare image lacks. Installing a system python3
+      # up front makes the baseline step independent of whether setup-python
+      # works, and gives setup-python a saner base if it needs one -- i.e. it
+      # removes a dependency instead of reordering around one.
+      #
+      # `python3`, NOT `python3-minimal`: MEASURED in this exact image --
+      # python3-minimal (122 KB) omits the stdlib `json` module and that step's
+      # command dies with "ModuleNotFoundError: No module named 'json'", which
+      # would simply have been the next red. With full python3 the step's real
+      # command returns the baseline with RC=0.
+      - name: Install git + python3 into the container (pre-checkout, WI-14 step 14.5)
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates
+          apt-get install -y --no-install-recommends git ca-certificates python3
           git --version
+          python3 --version
+          python3 -c "import json; print('json module OK')"
 
       - name: Checkout
         uses: actions/checkout@v4
