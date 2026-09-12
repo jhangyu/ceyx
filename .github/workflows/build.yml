@@ -248,9 +248,23 @@ jobs:
         with:
           submodules: recursive
 
-      # WI-6 (pyci push 2): selftest is the FIRST step of this job, ahead of
-      # every other guard, mirroring Halcyon's ci.yml. It exercises the new
-      # native/scripts/ci package's own dispatch/report/run primitives
+      # WI-6 fix (push-2 gate defect): provisioning the pinned interpreter
+      # must happen BEFORE any guard runs, not after. ci_conventions_check.py
+      # imports stdlib `tomllib`, which only exists from Python 3.11 -- this
+      # step used to sit below all six guards, so every guard (including
+      # that one) ran on whatever `python3` the runner image happens to
+      # default to, not the pinned 3.11. Moved here so every `python3`
+      # invocation in this job -- guard or build step -- runs under the
+      # same deterministic interpreter, rather than depending on an
+      # unverified runner default.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # WI-6 (pyci push 2): selftest is the FIRST *guard* of this job, ahead
+      # of every other guard, mirroring Halcyon's ci.yml. It exercises the
+      # new native/scripts/ci package's own dispatch/report/run primitives
       # in-process; a break here means every guard below it is running on
       # top of a broken foundation, so it fails fastest and first.
       - name: ci.py selftest (dispatch + report + run primitives)
@@ -313,11 +327,6 @@ jobs:
         run: |
           BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
           echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
       - name: Install build prerequisites (Homebrew)
         run: |
