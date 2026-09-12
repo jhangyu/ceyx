@@ -219,6 +219,88 @@ class TestPushThreeDispatch(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class TestOrientationDispatch(unittest.TestCase):
+    """Push 4: assert-orientation is a genuine three-algorithm dispatch
+    (macos/android/linux+windows), with platform-scoped flags rejected
+    rather than silently ignored on the wrong platform."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp = Path(self._tmpdir.name)
+
+    def test_macos_missing_dylib_path_is_argparse_error(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    ["assert-orientation", "--platform", "macos", "--arch", "arm64"]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_android_missing_artifact_dir_or_ndk_home_is_argparse_error(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    ["assert-orientation", "--platform", "android", "--ndk-home", "/x"]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_linux_rejects_macos_and_android_only_flags(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    ["assert-orientation", "--platform", "linux", "--dylib-path", "/x"]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_macos_rejects_android_only_flags(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "assert-orientation",
+                        "--platform",
+                        "macos",
+                        "--arch",
+                        "arm64",
+                        "--dylib-path",
+                        "/x",
+                        "--artifact-dir",
+                        "/y",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_linux_end_to_end_missing_binary_is_handled_not_traceback(self):
+        # Exercises the real dispatch path with no platform-specific flags
+        # at all (linux takes none) -- a missing strings tool or missing
+        # artifact must fail cleanly through the module, not raise.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ci_entrypoint.main(["assert-orientation", "--platform", "linux"])
+        self.assertEqual(rc, 1)
+
+    def test_android_end_to_end_missing_so_is_handled_not_traceback(self):
+        artifact_dir = self.tmp / "artifact_empty"
+        (artifact_dir / "native").mkdir(parents=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ci_entrypoint.main(
+                [
+                    "assert-orientation",
+                    "--platform",
+                    "android",
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--ndk-home",
+                    str(self.tmp / "ndk"),
+                ]
+            )
+        self.assertEqual(rc, 1)
+
+
 class TestPackageImportResolution(unittest.TestCase):
     def test_package_import_resolves_to_package_not_entrypoint(self):
         # native/scripts/ci.py and the package native/scripts/ci/ share a

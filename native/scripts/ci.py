@@ -114,6 +114,38 @@ def _enforce_arch_requirement(parser: argparse.ArgumentParser, args: argparse.Na
         parser.error(f"--arch is not accepted for --platform {args.platform!r}")
 
 
+def _enforce_orientation_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """assert-orientation only: --dylib-path is required for --platform
+    macos and rejected elsewhere; --artifact-dir/--ndk-home are required
+    together for --platform android and rejected elsewhere. Same
+    reject-don't-silently-ignore posture as C-G9's --arch handling --
+    the module (orientation.py) already refuses to run with a missing
+    required parameter (ValueError), so the CLI refusing a WRONG one is
+    the same discipline applied on the way in."""
+    if args.command != "assert-orientation":
+        return
+    platform = args.platform
+    dylib_path = args.dylib_path
+    artifact_dir = args.artifact_dir
+    ndk_home = args.ndk_home
+
+    if platform == "macos":
+        if dylib_path is None:
+            parser.error("--dylib-path is required for --platform macos")
+        if artifact_dir is not None or ndk_home is not None:
+            parser.error("--artifact-dir/--ndk-home are not accepted for --platform macos")
+    elif platform == "android":
+        if artifact_dir is None or ndk_home is None:
+            parser.error("--artifact-dir and --ndk-home are both required for --platform android")
+        if dylib_path is not None:
+            parser.error("--dylib-path is not accepted for --platform android")
+    else:
+        if dylib_path is not None or artifact_dir is not None or ndk_home is not None:
+            parser.error(
+                f"--dylib-path/--artifact-dir/--ndk-home are not accepted for --platform {platform!r}"
+            )
+
+
 def _add_platform_command(sub, name: str, help_text: str, extra=None):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
@@ -139,7 +171,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_platform_command(sub, "min-runtime", "assert min-runtime drift")
     _add_platform_command(sub, "assert-exports", "assert exported FFI symbols")
     _add_platform_command(sub, "assert-no-avx512", "assert no AVX-512 codepath")
-    _add_platform_command(sub, "assert-orientation", "assert orientation capability")
+
+    def _orientation_extra(sp):
+        # Platform-specific, not global: --dylib-path is macOS-only,
+        # --artifact-dir/--ndk-home are android-only. All three are
+        # optional at the argparse level and enforced post-parse by
+        # _enforce_orientation_flags() (same pattern as C-G9's --arch),
+        # because orientation.assert_orientation() itself raises
+        # ValueError on a missing per-platform-required one rather than
+        # silently doing nothing -- a flag accepted-and-ignored on the
+        # wrong platform would give a caller no signal that it did
+        # nothing, so wrong-platform flags are REJECTED, not ignored.
+        sp.add_argument("--dylib-path", default=None)
+        sp.add_argument("--artifact-dir", default=None)
+        sp.add_argument("--ndk-home", default=None)
+
+    _add_platform_command(
+        sub, "assert-orientation", "assert orientation capability", _orientation_extra
+    )
     _add_platform_command(sub, "codec-probe", "run the functional codec probe")
 
     cv = _add_platform_command(
@@ -254,6 +303,16 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.dt_needed as dt_needed
 
         return dt_needed.dt_needed(args.platform, args.artifact_dir, args.runner_temp)
+    if args.command == "assert-orientation":
+        import ci.orientation as orientation
+
+        return orientation.assert_orientation(
+            args.platform,
+            arch=args.arch,
+            dylib_path=args.dylib_path,
+            artifact_dir=args.artifact_dir,
+            ndk_home=args.ndk_home,
+        )
     if args.command in _PLATFORM_COMMANDS or args.command in _PLATFORMLESS_COMMANDS:
         return _not_yet(args.command)
     return 2
@@ -281,6 +340,7 @@ def main(argv=None) -> int:
         return 2
     if args.command in _PLATFORM_COMMANDS:
         _enforce_arch_requirement(parser, args)
+        _enforce_orientation_flags(parser, args)
     return dispatch(args)
 
 
