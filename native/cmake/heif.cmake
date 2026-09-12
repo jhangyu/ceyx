@@ -296,6 +296,26 @@ if(DNG_ENABLE_HEIF)
         # that a feature silently degrades -- the honest-OFF pattern this
         # tree uses for libomp on macOS (tests.cmake:715-726) is the WRONG
         # shape for this case.
+        # GUARD THE GUARD (2026-09-12, CI run 34697591379). This block is a
+        # FATAL check protecting the shipped artifact, and in CMake a bare
+        # `if(<undefined>)` FAILS OPEN: the name evaluates false and the whole
+        # protection disappears with no diagnostic whatsoever. That is exactly
+        # what happened -- CEYX_ENABLE_DESKTOP_OPENMP was defined in
+        # cmake/tests.cmake, which native/CMakeLists.txt includes AFTER this
+        # file, so this block never ran, OpenMP was still enabled and linked,
+        # and the DLL shipped importing a runtime that was never staged. The
+        # policy now lives in cmake/openmp_policy.cmake (included first); this
+        # assertion makes any future reordering fail loudly instead of
+        # silently reopening the same hole.
+        if(NOT DEFINED CEYX_ENABLE_DESKTOP_OPENMP)
+            message(FATAL_ERROR
+                "CEYX_ENABLE_DESKTOP_OPENMP is not defined at cmake/heif.cmake's "
+                "Windows staging block. It is set by cmake/openmp_policy.cmake, "
+                "which native/CMakeLists.txt must include BEFORE this file. "
+                "Refusing to treat an undefined policy as OFF: that silently "
+                "skips staging the OpenMP runtime the decoder imports, producing "
+                "a DLL that cannot load (CI run 34697591379).")
+        endif()
         if(CEYX_ENABLE_DESKTOP_OPENMP)
             if(NOT _ceyx_omp_dll_name)
                 message(FATAL_ERROR
@@ -304,17 +324,50 @@ if(DNG_ENABLE_HEIF)
                     "is malformed.")
             endif()
             get_filename_component(_ceyx_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+
+            # SEARCH PATHS (widened 2026-09-12). The original search looked only
+            # beside clang-cl. The workflow's independent "Locate the OpenMP
+            # runtime DLL" step ran that same search on the real runner and
+            # reported OMP_RUNTIME_DLL=ABSENT, so the file is NOT in
+            # C:/Program Files/LLVM/bin on a GitHub windows runner.
+            #
+            # The name in the decoder's import table is the decisive clue:
+            # libomp140.x86_64.dll is the VISUAL STUDIO redistributable spelling
+            # of the LLVM OpenMP runtime (shipped as the VC OpenMP.LLVM redist
+            # component), not the LLVM installer's own spelling (plain
+            # libomp.dll). clang-cl linked against the VS-provided import
+            # library, so the runtime to ship is the VS one, and it lives under
+            # the VC redist tree rather than next to the compiler.
+            #
+            # CONFIDENCE, stated honestly: the VS redist layout below is
+            # inferred from the import name + the measured absence beside
+            # clang-cl; it has NOT been observed on the runner, because the job
+            # died before this block could ever execute. If the glob is wrong,
+            # the FATAL below fires with the full search list printed -- a loud,
+            # diagnosable failure that hands the next round the exact directory
+            # listing it needs. That is the intended behaviour; it is NOT
+            # acceptable to make this degrade quietly or to disable OpenMP.
+            file(GLOB _ceyx_vs_omp_dirs
+                "C:/Program Files/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.OpenMP.LLVM"
+                "C:/Program Files (x86)/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.OpenMP.LLVM")
+            set(_ceyx_omp_search_paths
+                "${_ceyx_clang_bin_dir}"
+                "C:/Program Files/LLVM/bin"
+                ${_ceyx_vs_omp_dirs})
             find_file(CEYX_WIN_OMP_RUNTIME
                 NAMES "${_ceyx_omp_dll_name}"
-                HINTS "${_ceyx_clang_bin_dir}" "C:/Program Files/LLVM/bin")
+                HINTS ${_ceyx_omp_search_paths})
             if(NOT CEYX_WIN_OMP_RUNTIME)
                 message(FATAL_ERROR
-                    "${_ceyx_omp_dll_name} not found next to the clang-cl "
-                    "toolchain (searched ${_ceyx_clang_bin_dir} and "
-                    "C:/Program Files/LLVM/bin). The Windows decoder imports "
+                    "${_ceyx_omp_dll_name} not found. Searched: "
+                    "${_ceyx_omp_search_paths}. The Windows decoder imports "
                     "this DLL directly (OQ-N2 ruled SHIP); an artifact "
                     "staged without it will fail to load, so this is a "
-                    "configure-time FATAL, not a degrade.")
+                    "configure-time FATAL, not a degrade. Do NOT resolve this "
+                    "by turning OpenMP off -- that ships a silently slower "
+                    "decoder. Resolve it by locating the real runtime (it is "
+                    "the Visual Studio 'OpenMP.LLVM' redist component) and "
+                    "adding its directory to the search list above.")
             endif()
             message(STATUS "OpenMP runtime for staging: ${CEYX_WIN_OMP_RUNTIME}")
         endif()

@@ -139,18 +139,53 @@ jobs:
       # 0 even when absent) so its output is legible on a leg where the
       # actual staging step (native/cmake/heif.cmake, WI-4 step 4.2) is what
       # fails. The FATAL gate on absence lives in that CMake step, not here.
+      #
+      # WIDENED 2026-09-12 (CI run 34697591379 reported OMP_RUNTIME_DLL=ABSENT
+      # here). Searching only beside clang-cl was too narrow: the import name
+      # libomp140.x86_64.dll is the VISUAL STUDIO redistributable spelling of
+      # the LLVM OpenMP runtime (the LLVM installer's own copy is plain
+      # libomp.dll), so the file to ship lives under the VC redist tree, not in
+      # LLVM/bin. This step now searches both and, when it still finds nothing,
+      # prints a real directory survey -- the ABSENT line alone told the last
+      # round nothing about WHERE to look next. Kept as an OBSERVATION (always
+      # exits 0); the FATAL gate stays in native/cmake/heif.cmake so the
+      # failure surfaces at the place that actually stages the file.
       - name: Locate the OpenMP runtime DLL
         shell: bash
         run: |
+          OMP_DLL_NAME="libomp140.x86_64.dll"
           CLANG_CL_BIN="$(command -v clang-cl || echo "/c/Program Files/LLVM/bin/clang-cl.exe")"
           LLVM_BIN_DIR="$(dirname "$CLANG_CL_BIN")"
+
           OMP_RUNTIME_DLL="ABSENT"
-          if [ -f "${LLVM_BIN_DIR}/libomp140.x86_64.dll" ]; then
-            OMP_RUNTIME_DLL="${LLVM_BIN_DIR}/libomp140.x86_64.dll"
+          # Ordered candidates: beside the compiler first, then the VS redist.
+          for d in "${LLVM_BIN_DIR}" "/c/Program Files/LLVM/bin"; do
+            if [ -f "${d}/${OMP_DLL_NAME}" ]; then
+              OMP_RUNTIME_DLL="${d}/${OMP_DLL_NAME}"
+              break
+            fi
+          done
+          if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
+            # `find` rather than a glob: the VS version/edition components of
+            # the path are not knowable ahead of time on a hosted runner.
+            FOUND="$(find "/c/Program Files/Microsoft Visual Studio" \
+                          "/c/Program Files (x86)/Microsoft Visual Studio" \
+                          -name "${OMP_DLL_NAME}" -print 2>/dev/null | head -n 1)"
+            if [ -n "$FOUND" ]; then
+              OMP_RUNTIME_DLL="$FOUND"
+            fi
           fi
+
           OMP_RUNTIME_RC=0
           if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
             OMP_RUNTIME_RC=1
+            # Diagnostic survey, printed ONLY on absence. This is what the
+            # previous round lacked: name every copy of any libomp* on the
+            # image so the next fix can be aimed rather than guessed.
+            echo "--- no ${OMP_DLL_NAME} found; surveying all libomp* on the image ---"
+            find "/c/Program Files" "/c/Program Files (x86)" \
+                 -name "libomp*" -print 2>/dev/null | head -n 50 || true
+            echo "--- end survey ---"
           fi
           echo "OMP_RUNTIME_DLL=${OMP_RUNTIME_DLL}"
           echo "OMP_RUNTIME_RC=${OMP_RUNTIME_RC}"

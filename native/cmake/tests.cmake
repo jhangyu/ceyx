@@ -437,37 +437,33 @@ if(DNG_ENABLE_GENERIC_RAW)
     endif()
 
     # --- Desktop OpenMP (RAW decode accel round, 2026-08-27) ---------------
-    # User ruling: OpenMP ON for desktop (macOS/Linux/Windows), OFF for mobile
-    # (iOS/Android) per the P17 five-platform policy.
+    # MOVED OUT 2026-09-12 (CI run 34697591379). The base policy computation
+    # that used to live here -- `if(ANDROID OR IOS) OFF else() ON` -- now lives
+    # in cmake/openmp_policy.cmake, which native/CMakeLists.txt includes BEFORE
+    # every consumer. It was wrong for it to live here for two independent
+    # reasons, both of which silently disarmed heif.cmake's Windows
+    # OpenMP-runtime staging (and its FATAL guard) rather than failing:
+    #   1. ORDERING: tests.cmake is included AFTER heif.cmake, so the variable
+    #      did not exist when heif.cmake read it.
+    #   2. SCOPE: this point is nested inside `if(NOT DNG_HOST_GENERATORS_ONLY)`
+    #      -> `if(DNG_ENABLE_GENERIC_RAW)`, so the project-wide policy was also
+    #      hostage to two unrelated feature flags.
+    # What REMAINS here is only the Apple-specific NARROWING below (probe for a
+    # real libomp binary, honest-OFF if absent) -- a refinement of the policy,
+    # not a competing definition of it.
     #
-    # OMP-CROSS-FIX (2026-09-01): this used to also gate OFF on DNG_CROSS_BUILD,
-    # on the premise that "cross-compiling" implies "cannot build/link OpenMP
-    # for the target arch". That premise is false for this project's ONLY
-    # DNG_CROSS_BUILD=ON desktop leg (macOS x86_64, built on an arm64 runner):
-    # DNG_CROSS_BUILD exists solely to skip Halide's two-stage AOT generator
-    # scheme (the arm64 host cannot EXECUTE x86_64 generator binaries — see
-    # halide_aot.cmake), not because the toolchain cannot compile/link x86_64
-    # code. Apple clang on this host accepts -arch x86_64 for ordinary
-    # compile+link (no execution of target-arch code required to build a
-    # library), so RawSpeed3/LibRaw's OpenMP-guarded loops are exactly as
-    # buildable for the x86_64 leg as for the native arm64 leg, PROVIDED an
-    # x86_64 libomp is available (see the vendored/brew search below — a
-    # missing binary still degrades to OFF via the explicit "no libomp found"
-    # branch, never a silent skip). The true mobile precondition is ANDROID/IOS
-    # (no OpenMP runtime in those NDK/iOS-SDK toolchains at all), which is
-    # exactly what remains here.
-    #
-    # This unlocks parallelism that already exists in the vendored trees but
-    # was compiled out: RawSpeed3's FujiDecompressor `#pragma omp parallel`
-    # plus LibRaw's remaining `#pragma omp parallel for` loops. NOTE: LibRaw's
-    # Fuji strip decode (src/decoders/fuji_compressed.cpp) no longer depends on
-    # OpenMP at all -- round-2 patch 09 (2026-08-28) replaced its OpenMP branch
-    # with an unconditional std::thread pool on every platform, so the Fuji
-    # path stays parallel even on mobile and any OpenMP-less toolchain.
-    if(ANDROID OR IOS)
-        set(CEYX_ENABLE_DESKTOP_OPENMP OFF)
-    else()
-        set(CEYX_ENABLE_DESKTOP_OPENMP ON)
+    # Assert rather than assume: an undefined guard variable FAILS OPEN in
+    # CMake (empty name evaluates false), which is exactly the silent-skip
+    # failure mode this whole change exists to remove.
+    if(NOT DEFINED CEYX_ENABLE_DESKTOP_OPENMP)
+        message(FATAL_ERROR
+            "CEYX_ENABLE_DESKTOP_OPENMP is not defined at cmake/tests.cmake. "
+            "It is set by cmake/openmp_policy.cmake, which native/CMakeLists.txt "
+            "must include BEFORE this file. Someone reordered or removed that "
+            "include. Failing loudly instead of defaulting: a false-y undefined "
+            "value silently turns OpenMP off AND skips the Windows OpenMP "
+            "runtime staging + its FATAL check, shipping an unloadable DLL "
+            "(CI run 34697591379).")
     endif()
 
     if(CEYX_ENABLE_DESKTOP_OPENMP AND APPLE)

@@ -149,6 +149,16 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/pipeline.cmake)
 # =============================================================================
 set(HALIDE_DIR ${THIRD_PARTY_DIR}/halide)
 
+# MUST be included BEFORE heif.cmake (and before tests.cmake, its other
+# consumer). CEYX_ENABLE_DESKTOP_OPENMP is a project-wide policy that used to
+# be computed inside tests.cmake -- i.e. AFTER heif.cmake, which reads it --
+# so heif.cmake's Windows OpenMP-runtime staging block tested an undefined
+# name, evaluated false, and silently skipped both the staging and its own
+# FATAL_ERROR guard (CI run 34697591379). Do not reorder this below any
+# consumer; both consumers now also assert the variable is DEFINED, so a
+# reordering fails loudly at configure time instead of silently disarming.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/openmp_policy.cmake)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generators.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/halide_aot.cmake)
