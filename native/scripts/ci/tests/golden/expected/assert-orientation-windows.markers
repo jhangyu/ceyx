@@ -1,0 +1,8 @@
+STRINGS_TOOL=llvm-strings STRINGS_RC=0
+RC=0 (symbol literal: dng_render_stage4_split)
+RC=0 (string: orient_a_x)
+RC=0 (string: orient_b_x)
+RC=0 (string: orient_c_x)
+RC=0 (string: orient_a_y)
+RC=0 (string: orient_b_y)
+RC=0 (string: orient_c_y)
