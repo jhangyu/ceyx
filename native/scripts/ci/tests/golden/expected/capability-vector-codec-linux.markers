@@ -1,0 +1,12 @@
+OK        jpeg:encode want=1 got=1
+OK        jpeg:decode want=0 got=0
+OK        webp:encode want=1 got=1
+OK        webp:decode want=1 got=1
+OK        heic:encode want=1 got=1
+OK        heic:decode want=1 got=1
+OK        avif:encode want=1 got=1
+OK        avif:decode want=1 got=1
+OK        jxl:encode want=1 got=1
+OK        jxl:decode want=1 got=1
+all 10 capability expectations hold
+CODEC_CAPABILITY_PROBE_RC=0
