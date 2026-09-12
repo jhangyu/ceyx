@@ -65,15 +65,23 @@ that gap on Linux. macOS ships no such belt-and-braces line (divergence 3
 above); this asymmetry is a real, if inconsistent, fact about today's two
 legs, ported as-is rather than "fixed" into false symmetry.
 
+BIT CONVENTION (probe_codecs.c, all three legs alike): bit0=HEVC-ENC,
+bit1=AV1-ENC, bit2=HEVC-DEC, bit3=AV1-DEC; a SET bit means that capability
+is ABSENT -- so a fully-capable dist (kvazaar for HEVC encode, aom for
+AV1 encode/decode, libde265 for HEVC decode, per Spec 3.2) is expected to
+return RC=0, and any set bit is a real defect, not a partial pass.
+
 Output contract, all three legs identical: the probe's stdout+stderr is
-captured to `<probe_dir>/probe_codecs.txt`, then `PROBE_CODECS_RC=<n>` is
-BOTH appended to that file AND printed immediately (the `tee -a` behaviour),
-then the whole file is printed again (the `cat` replay) -- this is why
-`PROBE_CODECS_RC=<n>` appears in the emission list TWICE per run (C-G1);
-`markerdiff.py`'s multiset comparison depends on this exact count. On
-nonzero: `::error::probe_codecs exited <n> (nonzero bits = missing
-capabilities)` on STDOUT, not stderr (the original has no `>&2`). On zero,
-the verbatim tail line:
+captured to `<probe_dir>/probe_codecs.txt` BEFORE its exit code is
+interpreted, so a nonzero RC still leaves all four bits legible in the
+uploaded artifact rather than just a hypothesis about which ones failed.
+Then `PROBE_CODECS_RC=<n>` is BOTH appended to that file AND printed
+immediately (the `tee -a` behaviour), then the whole file is printed again
+(the `cat` replay) -- this is why `PROBE_CODECS_RC=<n>` appears in the
+emission list TWICE per run (C-G1); `markerdiff.py`'s multiset comparison
+depends on this exact count. On nonzero: `::error::probe_codecs exited <n>
+(nonzero bits = missing capabilities)` on STDOUT, not stderr (the original
+has no `>&2`). On zero, the verbatim tail line:
 `A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0`
 
 The compiler is resolved through `tools.resolve("cc", platform)` with a
