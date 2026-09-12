@@ -293,20 +293,20 @@ jobs:
             cat android_so_dynsyms.txt || true
             exit 1
           fi
-          missing=""
-          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8; do
-            set +e
-            grep -q "${sym}" android_so_dynsyms.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} ${sym}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in ${SO}:${missing} — the .so does not export the FFI surface Dart looks up." >&2
-            exit 1
+          # WI-13 (S-G2): the two-name allowlist loop is replaced by the
+          # Dart-derived manifest (native/deps/export_manifest.toml) via
+          # native/scripts/assert_exports.py, --platform android.
+          set +e
+          python3 native/scripts/assert_exports.py \
+            --manifest native/deps/export_manifest.toml \
+            --platform android \
+            --dump android_so_dynsyms.txt
+          RC=$?
+          set -e
+          echo "ASSERT_EXPORTS_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::assert_exports.py reported missing/absent symbol(s) in ${SO} — the .so does not export the FFI surface Dart looks up." >&2
+            exit "${RC}"
           fi
 
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,

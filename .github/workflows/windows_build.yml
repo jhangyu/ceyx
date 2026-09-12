@@ -502,26 +502,27 @@ jobs:
           fi
           echo "-- first 60 lines of the export listing --"
           head -60 dll_exports.txt
-          missing=""
-          # The four heif_* entries were added when the HEIF route was enabled
-          # on Windows -- they are exported only because
-          # src/ffi/heif_ffi_api.cpp applies FFI_EXPORT (__declspec(dllexport))
-          # to each definition. Without that, every check above still passes and
-          # Dart's lookupFunction fails on the user's machine instead.
-          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8 \
-                     heif_probe heif_decode_rgba heif_release heif_error_name; do
-            set +e
-            grep -w "${sym}" dll_exports.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} ${sym}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in $DLL:${missing} — the DLL does not export the FFI surface Dart looks up. On Windows this needs __declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ (see dng_ffi_api.cpp and heif_ffi_api.cpp)." >&2
-            exit 1
+          # WI-13 (S-G2): the six-name allowlist loop is replaced by the
+          # Dart-derived manifest (native/deps/export_manifest.toml) via
+          # native/scripts/assert_exports.py. The four heif_* entries are
+          # still covered -- they are the manifest's "heif" guarded group,
+          # present only because src/ffi/heif_ffi_api.cpp applies FFI_EXPORT
+          # (__declspec(dllexport)) to each definition; absent that, every
+          # check above still passes and Dart's lookupFunction fails on the
+          # user's machine instead. The manifest's mandatory (ungrouped) set
+          # still carries ceyx_decode_into_buffer_oriented as this leg's own
+          # positive control, same role the six-name loop gave it.
+          set +e
+          python3 native/scripts/assert_exports.py \
+            --manifest native/deps/export_manifest.toml \
+            --platform windows \
+            --dump dll_exports.txt
+          RC=$?
+          set -e
+          echo "ASSERT_EXPORTS_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::assert_exports.py reported missing/absent symbol(s) in $DLL — the DLL does not export the FFI surface Dart looks up. On Windows this needs __declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ (see dng_ffi_api.cpp and heif_ffi_api.cpp)." >&2
+            exit "${RC}"
           fi
 
           # --- Step-4 load gate: the DLLs this decoder needs at load time ---
