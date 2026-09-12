@@ -905,9 +905,19 @@ jobs:
 
       - name: Fail if no shared library was produced
         run: |
-          shopt -s nullglob
-          libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
-          if [ ${#libs[@]} -eq 0 ]; then
+          # POSIX sh: this containerised job runs every step under `sh -e {0}`
+          # (dash), which has no `shopt`, no arrays and no ${#arr[@]}. Round 6
+          # (run 34706875811) died here with `shopt: not found`, exit 127,
+          # AFTER the artifact had in fact been staged correctly. Count with
+          # a glob loop instead; an unmatched glob stays literal in sh, so
+          # test the path with -e rather than relying on nullglob.
+          count=0
+          for lib in "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so; do
+            [ -e "$lib" ] || continue
+            count=$((count + 1))
+          done
+          echo "SHARED_LIB_COUNT=${count}"
+          if [ "${count}" -eq 0 ]; then
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; the Linux build did not emit the expected artifact." >&2
             exit 1
           fi
