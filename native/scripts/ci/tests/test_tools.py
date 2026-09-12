@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from unittest import mock
 
 from .. import tools
+
+
+def _report_module():
+    """Returns the actual `report` module object that `tools.py`'s relative
+    `from . import report` binds at call time.
+
+    The `ci` package is importable under two module identities depending on
+    what's on `sys.path` first: `ci.*` (native/scripts as the top-level dir,
+    what `ci.py selftest` sets up) or `native.scripts.ci.*` (repo root as the
+    top-level dir, what `python3 -m unittest discover` from the repo root
+    sets up). A relative import always binds the copy under `tools`'s own
+    `__package__`; patching a HARD-CODED absolute string (e.g. `"ci.report"`)
+    silently patches the *other* copy under the other identity -- no
+    exception, the mock is just never called. Looking the module up via
+    `tools.__package__` makes the patch target identity-agnostic.
+    """
+    return sys.modules[f"{tools.__package__}.report"]
 
 
 class FakeTargets:
@@ -84,7 +102,7 @@ class ResolveOrReportTests(unittest.TestCase):
         fake = FakeTargets({"linux": {"strings_tools": ("strings",)}})
         with mock.patch.object(tools, "targets", fake):
             with mock.patch.object(tools.shutil, "which", return_value=None):
-                with mock.patch("ci.report.error") as mock_error:
+                with mock.patch.object(_report_module(), "error") as mock_error:
                     result = tools.resolve_or_report(
                         "strings", "linux", "custom error text"
                     )
