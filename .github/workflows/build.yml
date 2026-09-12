@@ -248,6 +248,14 @@ jobs:
         with:
           submodules: recursive
 
+      # WI-6 (pyci push 2): selftest is the FIRST step of this job, ahead of
+      # every other guard, mirroring Halcyon's ci.yml. It exercises the new
+      # native/scripts/ci package's own dispatch/report/run primitives
+      # in-process; a break here means every guard below it is running on
+      # top of a broken foundation, so it fails fastest and first.
+      - name: ci.py selftest (dispatch + report + run primitives)
+        run: python3 native/scripts/ci.py selftest
+
       # R7 fix (2026-09-06/07 incident): a cmake source-file reference can
       # exist on the AUTHOR's disk (local configure green) while being
       # untracked by git (CI checkout doesn't have it, configure dies with
@@ -271,6 +279,32 @@ jobs:
       # Python, no toolchain provisioning needed.
       - name: Guard CI workflows against test execution (compile-only policy)
         run: python3 native/scripts/ci/check_no_test_execution_in_ci.py
+
+      # WI-6 (pyci push 2), consuming WI-4: every `run:` step body across all
+      # four leg workflows must eventually be pure Python (or on the
+      # printed, size-pinned MUST_STAY allowlist). Same cheap-first-step
+      # placement as the two guards above.
+      - name: Guard — shell prohibition (CI logic must be Python)
+        run: python3 native/scripts/ci/check_shell_prohibition.py
+
+      # WI-6 (pyci push 2): re-points check_workflow_bashisms.py's value from
+      # "find any bashism anywhere" (its original purpose) to "police the
+      # residual must-stay shell only" now that check_shell_prohibition.py
+      # (above) owns the broader ban -- WI-25 (push 4) does the re-pointing
+      # edit; this WI only adds the missing invocation.
+      - name: Guard — workflow bashisms (residual must-stay shell only)
+        run: python3 native/scripts/check_workflow_bashisms.py
+
+      # WI-6 (pyci push 2): ci_conventions_check.py carries 10 rules / 29
+      # test cases and had ZERO CI invocation as of d33cc607 -- the same
+      # "tested but never run" condition Halcyon's ci.yml comment describes
+      # ("these 21 cases existed for months with nothing executing them, and
+      # four of them were red the whole time"). C6 is this migration's own
+      # compensation for the parked `publish` job migration (plan D1): it
+      # ties the 12-name `required=` list at build.yml:550-563 to the union
+      # of every leg's canonical `upload-artifact` name.
+      - name: Guard — CI conventions C1-C10
+        run: python3 native/scripts/ci_conventions_check.py
 
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here
