@@ -1,0 +1,48 @@
+# min_runtime_expected.toml -- ceyx's own declared minimum-runtime floor per
+# platform (WI-14 step 14.4, S-F3).
+#
+# Spec: Halcyon/docs/logs/2026-09-12/platform-parity-plan.md, WI-14 step 14.4.
+#
+# The pin lives in the *Halcyon* repo, which ceyx's own CI does not check
+# out, so ceyx cannot compare its leg's measured floor against the pin
+# directly. This file is ceyx's own copy of "what the floor is supposed to
+# be" -- each leg (once step 14.2's workflow wiring lands, deferred to the
+# team-lead's handover this round) asserts `measured == declared` against
+# this file, and the publish job copies these values into artifacts.lock for
+# Halcyon's pin-refresh to compare against in turn (14.3). A floor change
+# without a declaration update here fails inside ceyx CI; a floor change
+# without a pin update fails at the Halcyon refresh boundary; neither alone
+# satisfies S-F3.
+#
+# Schema, per platform table [<platform>]:
+#   value       = "<version string>"  -- the declared floor, same shape
+#                                         native/scripts/read_min_runtime.py
+#                                         emits (e.g. "15.0", "2.35", "21").
+#   measured_on = "<YYYY-MM-DD>"       -- the date this value was measured or
+#                                         last reviewed.
+#   reason      = "<one line>"        -- why this value, and what set it.
+#
+# Red proof (S-F3, ceyx half): edit one value below and re-run the leg's
+# drift-gate step; it must fail naming both the measured and declared
+# values. Archived at docs/logs/<date>/wi14-sf3-red-ceyx.txt once the
+# workflow wiring lands.
+
+[macos]
+value       = "15.0"
+measured_on = "2026-09-12"
+reason      = "Group MAXIMUM across the whole shipped companion set, not the decoder alone -- measured directly against the real committed artifacts in this tree (plugin/macos/Libraries/libdng_decoder_native.dylib=14.0, plugin/macos/Libraries/libomp.dylib=15.0) via native/scripts/read_min_runtime.py, docs/logs/2026-09-12/wi14-sf1-green-macos.txt. Confirms the pin comment's own claim (ceyx_release_pin.json:111-119): the bundled OpenMP runtime, not the decoder, sets the real macOS floor."
+
+[windows]
+value       = "6.0"
+measured_on = "2026-09-12"
+reason      = "PE PROVENANCE=linker-default (rootcause-native-capability.md Item F: 'MajorOSystemVersion 6 / MajorSubsystemVersion 6 -- the linker default (Vista-era), which is a default, not a verified floor'). This is NOT a measured requirement -- it is the value read_min_runtime.py's windows reader flags with PROVENANCE=linker-default precisely because no build step has ever set it deliberately. Declared here as the CURRENT state so the drift gate has a baseline to compare against; revisit if a future step deliberately raises /SUBSYSTEM's minimum OS version."
+
+[linux]
+value       = "2.35"
+measured_on = "2026-09-12"
+reason      = "OQ-N3 RULED (user, 2026-09-12): support as many Linux versions as possible without losing current capabilities. TODAY's shipped .so (built on the unpinned ubuntu-latest image) actually measures GLIBC_2.38 -- this declared value of 2.35 is the WI-14 step 14.5 TARGET (container: ubuntu:22.04 on runs-on: ubuntu-24.04), not yet the measured value of any artifact that has actually shipped. Accepting evidence per the plan is the first containerised leg's measured MIN_RUNTIME_linux value, not this declaration alone -- do not treat this file's presence as proof the container build has run."
+
+[android]
+value       = "21"
+measured_on = "2026-09-12"
+reason      = "plugin/android/build.gradle:18 minSdk = 21 -- a DECLARED floor (SOURCE=gradle-declaration in read_min_runtime.py's output), not a binary property. Confirmed via a real read of the committed file: docs/logs/2026-09-12/wi14-sf1-green-android.txt."
