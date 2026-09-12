@@ -2407,6 +2407,16 @@ if(DNG_STAGE4_SPLIT_KERNEL)
 endif()
 # --- end Task 11 ---
 
+# --- win-parity plan P1: pressure-relief capability probe (AC1) ------------
+# Modelled on orient_capability_probe above: dlopen's a library path given on
+# argv at runtime instead of linking dng_decoder_native directly, so the same
+# binary can probe a fresh build or an older fixture (negative control).
+add_executable(pressure_relief_capability_probe tests/pressure_relief_capability_probe.cpp)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    target_link_libraries(pressure_relief_capability_probe PRIVATE ${CMAKE_DL_LIBS})
+endif()
+# --- end win-parity plan P1 ---
+
 endif() # NOT DNG_CROSS_BUILD (test targets)
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY (entire runtime section)
