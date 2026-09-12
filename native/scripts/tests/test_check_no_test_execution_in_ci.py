@@ -92,6 +92,29 @@ def test_pip_install_naming_pytest_is_not_an_invocation():
     assert guard.classify_pytest_line(line) == "not-a-pytest-line"
 
 
+# --- leader review, push 2: compound-command hole in the pip-install exclusion ---
+
+
+def test_pip_install_prefix_does_not_hide_a_compound_violation():
+    for sep in ("&&", ";", "||", "|"):
+        line = f"pip install pytest {sep} python3 -m pytest native/tests/decode/ -q"
+        assert guard.classify_pytest_line(line) == "violation", line
+
+
+def test_real_install_lines_still_pass():
+    assert guard.classify_pytest_line(
+        "python3 -m pip install --disable-pip-version-check pytest"
+    ) == "not-a-pytest-line"
+    assert guard.classify_pytest_line(
+        "python -m pip install --disable-pip-version-check pytest"
+    ) == "not-a-pytest-line"
+
+
+def test_compound_line_mixing_exempt_and_forbidden_paths_is_a_violation():
+    line = "python3 -m pytest native/scripts/deps/ -q && python3 -m pytest native/tests/decode/ -q"
+    assert guard.classify_pytest_line(line) == "violation"
+
+
 def test_printed_exemption_block_states_the_ruling_not_a_pending_review(capsys):
     guard.main()
     out = capsys.readouterr().out

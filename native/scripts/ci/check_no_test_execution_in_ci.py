@@ -202,15 +202,20 @@ def iter_run_lines(text):
         i += 1
 
 
-def classify_pytest_line(line):
-    """Classifies a single `run:` body line for the UR-1 test-suite rule.
+# Shell clause separators: `&&`, `||`, `;`, `|`. A pip-install exclusion (or
+# a path-prefix exemption) must apply to the CLAUSE it appears in, not the
+# whole line -- otherwise `pip install pytest && pytest tests/decode/ -q`
+# hides a real violation behind an unrelated, legitimately-exempt install
+# clause on the same line (leader review, push 2: "a rule whose detection
+# has a gap exactly where nobody is looking").
+_CLAUSE_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
 
-    Returns "not-a-pytest-line" (not a test-suite invocation at all),
-    "allowed" (invocation, but exempted by path prefix or by the named
-    literal call-site list), or "violation" (invocation outside the
-    exemption -- this guard must FAIL it).
-    """
-    stripped = line.strip()
+_VERDICT_RANK = {"violation": 2, "allowed": 1, "not-a-pytest-line": 0}
+
+
+def _classify_pytest_clause(clause):
+    """Classifies a single shell CLAUSE (already split on &&/||/;/|)."""
+    stripped = clause.strip()
     if not stripped or stripped.startswith("#"):
         return "not-a-pytest-line"
     if not TEST_SUITE_INVOCATION_RE.search(stripped):
@@ -230,6 +235,22 @@ def classify_pytest_line(line):
             return "allowed"
 
     return "violation"
+
+
+def classify_pytest_line(line):
+    """Classifies a single `run:` body line for the UR-1 test-suite rule.
+
+    The line is split into shell clauses on `&&`/`||`/`;`/`|` first, each
+    clause is classified independently, and the WORST verdict wins
+    (violation > allowed > not-a-pytest-line) -- so a forbidden invocation
+    cannot hide behind an exempt clause sharing the same line, and an exempt
+    path-prefix in one clause cannot launder a forbidden path in another.
+
+    Returns "not-a-pytest-line", "allowed", or "violation".
+    """
+    clauses = _CLAUSE_SPLIT_RE.split(line)
+    verdicts = [_classify_pytest_clause(clause) for clause in clauses]
+    return max(verdicts, key=lambda v: _VERDICT_RANK[v])
 
 
 def _resolve_argv0_basename(node):
