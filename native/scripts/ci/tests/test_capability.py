@@ -1,10 +1,16 @@
 """Unit tests for native/scripts/ci/capability.py (WI-16a).
 
-`_probe.main` is mocked throughout (no real dlopen, no real built library
-required) except the two dlopen-failure-path tests, which reuse the real
-script against a nonexistent path -- the same "instrument itself could not
-run" error surface `native/scripts/tests/test_codec_capability_probe.py`
-already covers, exercised here through capability.py's wrapper instead.
+macOS/windows: `_probe.main` is mocked (in-process call, no real dlopen).
+Linux: `run.run` is mocked (subprocess call, see module docstring
+divergence-2 correction -- an in-process `LD_LIBRARY_PATH` mutation cannot
+affect a dlopen already made by this same process, proven by a docker
+reproduction before the fix; linux therefore launches
+`codec_capability_probe.py` as a fresh process with an explicit `env`, the
+one mechanism that actually works). The two dlopen-failure-path tests reuse
+the REAL script (real subprocess on linux, real in-process call otherwise)
+against a nonexistent path -- the same "instrument itself could not run"
+error surface `native/scripts/tests/test_codec_capability_probe.py` already
+covers, exercised here through capability.py's wrapper.
 
 Android is NOT a capability-vector leg (pinned below, and by a repo-wide
 grep asserting no workflow calls this module's CLI for android) -- tested
@@ -15,12 +21,14 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from .. import capability as cap
+from .. import run as run_module
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _GOLDEN_DIR = Path(__file__).resolve().parent / "golden" / "expected"
@@ -63,6 +71,33 @@ def _fake_probe_main_ok(argv):
         i += 1
     print(f"all {n} capability expectations hold")
     return 0
+
+
+def _fake_probe_stdout_ok(argv):
+    """Same OK-path text as _fake_probe_main_ok, but as a captured string
+    (what a subprocess's stdout would contain) rather than printed live --
+    used for linux's run.run() mock, since linux invokes the probe as a
+    subprocess argv list `[sys.executable, str(_PROBE_SCRIPT), *real_argv]`."""
+    lines = []
+    n = 0
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--expect":
+            fmt, rest = argv[i + 1].split(":", 1)
+            direction, want = rest.split("=", 1)
+            lines.append(f"{'OK':9s} {fmt}:{direction} want={want} got={want}")
+            n += 1
+        elif argv[i] == "--expect-cap":
+            name, want = argv[i + 1].split("=", 1)
+            lines.append(f"{'OK':9s} capability:{name} want={want} got={want}")
+            n += 1
+        i += 1
+    lines.append(f"all {n} capability expectations hold")
+    return "\n".join(lines) + "\n"
+
+
+def _fake_run_ok(argv, cwd=None, env=None):
+    return run_module.RunResult(argv=list(argv), returncode=0, stdout=_fake_probe_stdout_ok(argv))
 
 
 class AndroidNegativeSpaceTests(unittest.TestCase):
@@ -148,17 +183,19 @@ class ProbePlumbingTests(unittest.TestCase):
     marker, json-out directory creation) with `_probe.main` mocked."""
 
     def test_linux_sets_ld_library_path(self):
-        with mock.patch.object(cap._probe, "main", return_value=0) as fake_main, \
-             mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("LD_LIBRARY_PATH", None)
+        """Linux passes LD_LIBRARY_PATH via the SUBPROCESS's env= dict (not
+        an os.environ mutation -- see module docstring divergence-2
+        correction), so this asserts the env dict `run.run()` was actually
+        called with, not the parent process's own os.environ."""
+        with mock.patch.object(run_module, "run", side_effect=_fake_run_ok) as fake_run:
             rc, out, _err = _emit(
                 cap.capability_vector, "linux", "codec", expect=["jpeg:encode=1"]
             )
-            self.assertEqual(rc, 0)
-            self.assertIn("native/third_party/heif-dist-linux/lib",
-                          os.environ.get("LD_LIBRARY_PATH", ""))
-            self.assertIn("CODEC_CAPABILITY_PROBE_RC=0", out)
-        fake_main.assert_called_once()
+        self.assertEqual(rc, 0)
+        self.assertIn("CODEC_CAPABILITY_PROBE_RC=0", out)
+        fake_run.assert_called_once()
+        env = fake_run.call_args.kwargs["env"]
+        self.assertIn("native/third_party/heif-dist-linux/lib", env.get("LD_LIBRARY_PATH", ""))
 
     def test_windows_sets_no_library_path_var(self):
         # Windows relies on DLL colocation, not an env var (module docstring
@@ -200,27 +237,38 @@ class ProbePlumbingTests(unittest.TestCase):
                          "native/scripts/deps/probe/capability.json")
 
     def test_linux_has_no_json_out_flag_when_not_given(self):
-        with mock.patch.object(cap._probe, "main", return_value=0) as fake_main:
+        with mock.patch.object(run_module, "run", side_effect=_fake_run_ok) as fake_run:
             cap.capability_vector("linux", "codec", expect=["jpeg:encode=1"])
-        argv = fake_main.call_args[0][0]
+        argv = fake_run.call_args[0][0]
         self.assertNotIn("--json-out", argv)
 
+    def test_linux_argv_is_python_plus_probe_script_plus_real_args(self):
+        with mock.patch.object(run_module, "run", side_effect=_fake_run_ok) as fake_run:
+            cap.capability_vector("linux", "codec", expect=["jpeg:encode=1"])
+        argv = fake_run.call_args[0][0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertTrue(argv[1].endswith("codec_capability_probe.py"))
+        self.assertIn("--expect", argv)
+
     def test_rc_marker_name_codec(self):
-        with mock.patch.object(cap._probe, "main", return_value=0):
+        with mock.patch.object(run_module, "run", side_effect=_fake_run_ok):
             _rc, out, _err = _emit(
                 cap.capability_vector, "linux", "codec", expect=["jpeg:encode=1"]
             )
         self.assertIn("CODEC_CAPABILITY_PROBE_RC=0", out)
 
     def test_rc_marker_name_build(self):
-        with mock.patch.object(cap._probe, "main", return_value=0):
+        with mock.patch.object(run_module, "run", side_effect=_fake_run_ok):
             _rc, out, _err = _emit(
                 cap.capability_vector, "linux", "build", expect_cap=["ICC=0"]
             )
         self.assertIn("BUILD_CAPABILITY_PROBE_RC=0", out)
 
     def test_nonzero_rc_propagates(self):
-        with mock.patch.object(cap._probe, "main", return_value=1):
+        def _fake_run_fail(argv, cwd=None, env=None):
+            return run_module.RunResult(argv=list(argv), returncode=1, stdout="", stderr="boom")
+
+        with mock.patch.object(run_module, "run", side_effect=_fake_run_fail):
             rc, out, _err = _emit(
                 cap.capability_vector, "linux", "codec", expect=["jpeg:encode=1"]
             )
@@ -229,19 +277,30 @@ class ProbePlumbingTests(unittest.TestCase):
 
 
 class DlopenFailureTests(unittest.TestCase):
-    """Real (unmocked) codec_capability_probe.main() against a nonexistent
+    """Real (unmocked) codec_capability_probe.py against a nonexistent
     library -- the instrument-could-not-run path, same shape
     native/scripts/tests/test_codec_capability_probe.py already covers for
-    the underlying script, exercised here through the wrapper."""
+    the underlying script. Linux exercises this through a REAL subprocess
+    (capability.py's actual mechanism, not a fake), which also incidentally
+    proves the subprocess plumbing itself works end-to-end, not just its
+    argv construction."""
 
-    def test_missing_library_exits_nonzero(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            rc, _out, err = _emit(
-                cap.capability_vector, "linux", "codec",
-                expect=["jpeg:encode=1"],
-            )
+    def test_missing_library_exits_nonzero_linux_real_subprocess(self):
+        rc, _out, err = _emit(
+            cap.capability_vector, "linux", "codec",
+            expect=["jpeg:encode=1"],
+        )
         # targets.spec("linux")["artifact_path"] won't exist in this test
-        # environment either, so this exercises the same dlopen-failure path.
+        # environment either, so this exercises the same dlopen-failure path,
+        # for real, via the actual subprocess capability.py spawns.
+        self.assertEqual(rc, 1)
+        self.assertIn("dlopen failed", err)
+
+    def test_missing_library_exits_nonzero_macos(self):
+        rc, _out, err = _emit(
+            cap.capability_vector, "macos", "codec",
+            dylib_path="/nonexistent/lib.dylib", expect=["jpeg:encode=1"],
+        )
         self.assertEqual(rc, 1)
         self.assertIn("dlopen failed", err)
 
@@ -323,6 +382,9 @@ class GoldenEmissionTests(unittest.TestCase):
     one of them."""
 
     def _run(self, platform, kind, **kwargs):
+        if platform == "linux":
+            with mock.patch.object(run_module, "run", side_effect=_fake_run_ok):
+                return _emit(cap.capability_vector, platform, kind, **kwargs)
         with mock.patch.object(cap._probe, "main", side_effect=_fake_probe_main_ok):
             return _emit(cap.capability_vector, platform, kind, **kwargs)
 

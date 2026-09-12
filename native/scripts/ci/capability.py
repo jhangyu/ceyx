@@ -52,7 +52,7 @@ designed:
 2. **Linux re-exports `LD_LIBRARY_PATH` before BOTH probe calls**
    (linux_build.yml:576,600) -- the same non-transitive `DT_RUNPATH`
    belt-and-braces gap `codec_probe.py`'s `_run_probe_linux` already
-   documents for the compiled functional probe, ported as-is here for the
+   documents for the compiled functional probe, ported here for the
    dlopen-based capability probe. macOS/windows set no equivalent env var
    for these steps (macOS relies on `-Wl,-rpath` baked in at decoder link
    time; windows relies on `heif.dll`/`libde265.dll` already being staged
@@ -62,6 +62,33 @@ designed:
    `_FIXED_DIST_DIR` is local rather than in `targets.py` (D2): no other
    module needs it, and `targets.py` has exactly one owner this push
    (impl-pyci-5-sonnet, WI-16b).
+
+   **CORRECTED 2026-09-13 (push-6 CI red, run 34721267799, linux/x86_64
+   Vulkan: `dlopen failed ... libde265.so.0: cannot open shared object
+   file`) -- the ORIGINAL "mutating os.environ takes effect on the next
+   dlopen in this same process" claim was FALSE, not ported-as-is
+   reasoning.** glibc's dynamic loader parses `LD_LIBRARY_PATH` from the
+   environment exactly ONCE, at process startup (`_dl_init_paths`, called
+   during early process init) -- a later `os.environ["LD_LIBRARY_PATH"]
+   = ...` mutation from Python does not change the loader's already-built
+   search-path list, so a subsequent `ctypes.CDLL()` in that SAME process
+   never sees it. Proven by a docker (`ubuntu:22.04`) reproduction before
+   this fix, not assumed: a two-shared-library fixture where the dependent
+   is resolvable only via `LD_LIBRARY_PATH` (a) FAILS when
+   `LD_LIBRARY_PATH` is set via `os.environ` inside the running process,
+   (b) SUCCEEDS when the identical value is set on the environment BEFORE
+   process start (matching the original pre-migration YAML's shell-level
+   `export`), and (c) SUCCEEDS when a NEW process is launched with an
+   explicit `env=` dict (matching `codec_probe.py:_run_probe_linux`'s
+   proven-green mechanism -- a fresh process's `_dl_init_paths` runs
+   against the argument's own env block). Linux's `_probe_check` therefore
+   runs `codec_capability_probe.py` as a **subprocess** with an explicit
+   `env`, not an in-process `_probe.main()` call -- the only platform that
+   needs `LD_LIBRARY_PATH` is the only one now paying the subprocess cost;
+   macOS-native and windows have no env-var need and keep the in-process
+   call (`_probe.main()`, zero new process, per the plan's "consumes
+   codec_capability_probe (imported)" framing -- still true for those two
+   platforms).
 
 The macOS-native `dylib_path` requirement mirrors `orientation.py`'s own
 `dylib_path` parameter: macOS's `artifact_path` is `None` in `targets.py`
@@ -88,18 +115,22 @@ import os
 import sys
 from pathlib import Path
 
-from . import report, targets
+from . import report, run, targets
 
 # native/scripts/codec_capability_probe.py is a sibling top-level script
-# (not part of this package) exposing a programmatic `main(argv)` entry
-# point -- imported directly (like verify_artifact.py's `assert_exports`),
-# not shelled out to, so this module reuses its exact parsing/printing/
-# JSON logic in-process instead of re-implementing it (zero risk of the
-# reimplementation silently drifting from the original's emitted text).
+# (not part of this package). macOS-native/windows import its `main(argv)`
+# entry point directly and call it in-process (like verify_artifact.py's
+# `assert_exports`) -- zero risk of a reimplementation drifting from the
+# original's emitted text. Linux instead runs it as a SUBPROCESS via
+# `_PROBE_SCRIPT` below (see module docstring, divergence 2 correction):
+# an in-process call cannot pick up a post-startup `LD_LIBRARY_PATH`
+# mutation, so it is the one platform that needs a fresh process.
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import codec_capability_probe as _probe  # noqa: E402
+
+_PROBE_SCRIPT = _SCRIPTS_DIR / "codec_capability_probe.py"
 
 # WI-16-local fact, not a targets.py entry (D2: exactly one targets.py owner
 # per push, and no other module needs this) -- mirrors codec_probe.py's own
@@ -196,7 +227,9 @@ def capability_vector(
             )
         lib_path = targets.spec(platform)["artifact_path"]
 
-    return _probe_check(platform, kind, lib_path, expect or [], expect_cap or [], json_out)
+    return _probe_check(
+        platform, kind, lib_path, expect or [], expect_cap or [], json_out, workspace
+    )
 
 
 def _probe_check(
@@ -206,19 +239,10 @@ def _probe_check(
     expect: list[str],
     expect_cap: list[str],
     json_out: str | None,
+    workspace: str = ".",
 ) -> int:
     if json_out:
         Path(json_out).parent.mkdir(parents=True, exist_ok=True)
-
-    if platform == "linux":
-        # Belt-and-braces LD_LIBRARY_PATH (see module docstring, divergence
-        # 2): mutating os.environ here (not a local dict) is deliberate --
-        # glibc's dynamic loader re-consults LD_LIBRARY_PATH on every dlopen
-        # call from this same process, so this takes effect for the ctypes
-        # CDLL() call codec_capability_probe.main() is about to make.
-        os.environ["LD_LIBRARY_PATH"] = (
-            f"{_LINUX_HEIF_LIB_DIR_REL}:" + os.environ.get("LD_LIBRARY_PATH", "")
-        )
 
     argv = [lib_path]
     for e in expect:
@@ -228,9 +252,34 @@ def _probe_check(
     if json_out:
         argv += ["--json-out", json_out]
 
-    rc = _probe.main(argv)
+    if platform == "linux":
+        rc = _run_probe_linux_subprocess(argv, workspace)
+    else:
+        rc = _probe.main(argv)
+
     report.rc(_RC_MARKER[kind], rc)
     return rc
+
+
+def _run_probe_linux_subprocess(argv: list[str], workspace: str) -> int:
+    """Belt-and-braces `LD_LIBRARY_PATH` (module docstring, divergence 2
+    correction): a NEW process's own `_dl_init_paths` parses the env block
+    it is launched with, unlike an in-process mutation after this parent
+    has already started -- the same reason `codec_probe.py`'s
+    `_run_probe_linux` launches `probe_codecs` as a subprocess rather than
+    dlopen'ing in-process. `_probe_check` prints the child's own stdout
+    verbatim (same lines `codec_capability_probe.main()` would have printed
+    if called in-process) so the emitted marker text is unchanged."""
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = (
+        f"{_LINUX_HEIF_LIB_DIR_REL}:" + env.get("LD_LIBRARY_PATH", "")
+    )
+    result = run.run([sys.executable, str(_PROBE_SCRIPT), *argv], cwd=workspace, env=env)
+    if result.stdout:
+        report.plain(result.stdout.rstrip("\n"))
+    if result.stderr:
+        print(result.stderr.rstrip("\n"), file=sys.stderr, flush=True)
+    return result.returncode
 
 
 def _configure_log_check(kind: str, workspace: str, log_path: str) -> int:
