@@ -77,6 +77,16 @@ ANDROID_OS_ALLOWLIST = frozenset({
     "liblog.so",
     "libz.so",
     "libc++_shared.so",
+    # Measured entry (2026-09-12, CI run 34697591379, android/arm64-v8a leg):
+    # the decoder's real DT_NEEDED set names libvulkan.so. native/cmake/
+    # ffi.cmake:104-110 (the ANDROID branch) resolves the NDK's libvulkan with
+    # find_library() and hard-links it into dng_decoder_native, FATAL-ing when
+    # absent -- so this import is deliberate, not accidental. libvulkan.so is
+    # an Android PLATFORM library (guaranteed from API 24; plugin/android/
+    # build.gradle declares minSdk 21 but ffi.cmake's own message pins the
+    # Vulkan requirement at android-24), never shipped inside an app, so it
+    # belongs on the OS allowlist rather than in the staged set.
+    "libvulkan.so",
 })
 
 ALLOWLISTS = {
