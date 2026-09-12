@@ -63,7 +63,6 @@ MUST_STAY: tuple = (
     Entry('android_build.yml', 'Stage native artifacts', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Fail if the required Android .so set is incomplete (A-T8-FIX atomic group)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert required FFI exports present in Android .so (G6)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('android_build.yml', 'Assert fused-orientation kernel signals present in Android .so (Task 11 / G-E)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert decoder DT_NEEDED matches the resolved Android STL (A-T8-FIX libc++_shared handling)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert DT_NEEDED closure across the packaged Android .so set (Task 11 follow-up)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Measure and emit the minimum runtime floor (S-F1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -114,7 +113,6 @@ MUST_STAY: tuple = (
     Entry('linux_build.yml', 'Assert the vcpkg libwebp artefact (static)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Build HEIF stack (libheif + libde265 + kvazaar + aom, Python carrier)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Build dng_decoder_native for Linux (Vulkan, single-stage host)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('linux_build.yml', 'Assert fused-orientation kernel signals present in Linux .so (Task 11 / G-E)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Assert full codec capability vector via probe (G1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Assert build capability vector via probe (S-E2)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Compile + run functional capability probe (CI-T3)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -131,7 +129,6 @@ MUST_STAY: tuple = (
     Entry('macos_build.yml', 'Build host Halide generators + x86_64 AOT (cross stage 1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Cross-compile dng_decoder_native for x86_64 (cross stage 2)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Verify dylib was produced and has the expected architecture', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('macos_build.yml', 'Build + run orientation capability probe (Task 11 / G-E)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Assert full codec capability vector via probe (G1, native leg)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Assert build capability vector via probe (S-E2, native leg)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Assert codec capability vector via configure log (G1, cross leg)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -161,7 +158,6 @@ MUST_STAY: tuple = (
     Entry('windows_build.yml', 'Build dng_decoder_native', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Diagnose build failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Verify Windows artifact', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Assert full codec capability vector via probe (G1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Assert build capability vector via probe (S-E2)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Compile + run functional capability probe (CI-T3)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -189,4 +185,4 @@ GRANDFATHERED_SHELL_FILES: tuple = (
 # make visible (module docstring above, and markerdiff.py's assertion-vs-
 # observability split). Every push that shrinks MUST_STAY must update this
 # literal in the same diff -- that edit IS the two-line reviewable pin.
-ALLOWLIST_SIZE_EXPECTED: int = 113
+ALLOWLIST_SIZE_EXPECTED: int = 109
