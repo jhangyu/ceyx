@@ -69,14 +69,6 @@ export 'src/raw_route.dart'
 export 'src/raw_error_codes.dart'
     show RawErrorCode, RawDecodeException, RawUnavailableException;
 
-export 'src/raw_bindings.dart'
-    show
-        RawDiagnostics,
-        RawFrontend,
-        RawDecoderBackend,
-        RawGpuBackend,
-        RawSampleModel;
-
 export 'src/heif_decoder_service.dart'
     show HeifImage, HeifProbeResult, HeifDecoderService;
 

@@ -103,10 +103,6 @@ void main() {
       expect(image.width, greaterThan(0));
       expect(image.height, greaterThan(0));
       expect(image.rgbaData.length, image.width * image.height * 4);
-      // Diagnostics are thread_local and this decode ran on THIS isolate.
-      final diag = service.lastRawDiagnostics;
-      expect(diag, isNotNull);
-      expect(diag!.totalMs, greaterThan(0));
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );

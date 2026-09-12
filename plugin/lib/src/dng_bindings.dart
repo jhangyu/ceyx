@@ -257,7 +257,6 @@ class DngNativeBindings {
   // has it, and this guarded lookup is how that dylib is described. Deleting an
   // export is not the same as deleting the ability to describe an older one.
   RawDecodeAndProcessDart? _rawDecodeAndProcess;
-  RawLastDiagnosticsDart? _rawLastDiagnostics;
 
   // R4 item 1: guarded slot-configuration entries. Null together — they ship
   // as one group, so a dylib exposing some but not all is a corrupt build and
@@ -310,9 +309,6 @@ class DngNativeBindings {
 
   /// Whether the loaded dylib exports the legacy allocating RAW entry.
   bool get rawDecodeAvailable => _rawDecodeAndProcess != null;
-
-  /// Whether the loaded dylib exports `raw_last_diagnostics`.
-  bool get rawDiagnosticsAvailable => _rawLastDiagnostics != null;
 
   /// Guarded access to the legacy allocating decode entry. Null on any dylib
   /// built after WP5 retired it; non-null only for a pinned older dylib.
@@ -415,30 +411,6 @@ class DngNativeBindings {
   int? recommendationClassPixels(int index) =>
       _dngDecodeRecommendationClassPixels?.call(index);
 
-  /// Diagnostics for the most recent RAW decode observed
-  /// on the current OS thread.
-  ///
-  /// Native state is `thread_local` (raw_ffi_api.cpp:19), NOT per-isolate.
-  /// If a decode ran on a worker isolate, reading this from another isolate
-  /// is unreliable in either direction — depending on OS thread reuse it may
-  /// return null, the worker's values, or an earlier decode's values from
-  /// this same thread. Provenance is not verifiable from Dart. A failed
-  /// decode does not clear this state, so it can also surface an earlier
-  /// successful decode's diagnostics. Returns null when the symbol is
-  /// absent, or when native reports -1 (no decode has run on this thread
-  /// yet).
-  RawDiagnostics? lastRawDiagnostics() {
-    final fn = _rawLastDiagnostics;
-    if (fn == null) return null;
-    final scratch = calloc<RawDecodeDiagnostics>();
-    try {
-      if (fn(scratch) != 0) return null;
-      return RawDiagnostics.fromStruct(scratch.ref);
-    } finally {
-      calloc.free(scratch);
-    }
-  }
-
   /// The resolved native library, so sibling binding sets (HEIF) can attach to
   /// the SAME image instead of re-running the candidate search and possibly
   /// loading a different copy.
@@ -485,15 +457,6 @@ class DngNativeBindings {
       // Symbol absent -> rawDecodeAvailable stays false and the service
       // throws RawUnavailableException instead of crashing.
       _rawDecodeAndProcess = null;
-    }
-
-    try {
-      _rawLastDiagnostics = _lib
-          .lookupFunction<RawLastDiagnosticsNative, RawLastDiagnosticsDart>(
-            'raw_last_diagnostics',
-          );
-    } catch (_) {
-      _rawLastDiagnostics = null;
     }
 
     // R4 item 1. One try block for all four on purpose: they are added by the

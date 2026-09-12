@@ -6,7 +6,6 @@ import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
 import 'native_buffer_pool.dart';
-import 'raw_bindings.dart';
 import 'raw_error_codes.dart';
 import 'raw_route.dart';
 
@@ -360,24 +359,6 @@ class DngDecoderService {
   int nativeRecommendationClassPixels(int index) {
     if (!_initialized) initialize();
     return _bindings.recommendationClassPixels(index) ?? -1;
-  }
-
-  /// Diagnostics for the most recent generic-RAW decode observed on the
-  /// current OS thread.
-  ///
-  /// Native state is `thread_local` (raw_ffi_api.cpp:19), NOT per-isolate.
-  /// After [decodeOnWorker], reading this on the calling isolate is
-  /// unreliable in either direction: depending on OS thread reuse, it may
-  /// return null, the worker's values, or — if this thread previously ran a
-  /// decode itself — an unrelated earlier decode's values. Provenance is not
-  /// verifiable from Dart, so callers must not rely on this after a worker
-  /// decode. Also note a failed decode does not clear the native scratch
-  /// state, so a subsequent read can still surface an earlier successful
-  /// decode's diagnostics. Only a same-isolate read taken immediately after a
-  /// successful [decode] call is meaningful.
-  RawDiagnostics? get lastRawDiagnostics {
-    if (!_initialized) initialize();
-    return _bindings.lastRawDiagnostics();
   }
 
   /// RGBA pool buffers currently checked out process-wide; 0 when everything

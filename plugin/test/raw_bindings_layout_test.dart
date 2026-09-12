@@ -5,11 +5,8 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_bindings.dart';
-import 'package:ceyx/src/raw_bindings.dart';
 
-/// Guards the C<->Dart layout of RawDecodeDiagnostics
-/// (native/include/raw_pipeline_contract.h:189-202) and the
-/// guarded lookup of the RAW symbols.
+/// Guards the guarded lookup of the RAW symbols.
 ///
 /// flutter test runs with cwd == package root (plugin/), so all
 /// paths below are resolved relative to Directory.current.
@@ -48,18 +45,11 @@ void main() {
     }
   });
 
-  test('RawDecodeDiagnostics matches the C layout (sizeOf == 64)', () {
-    // 8 x 4-byte fields (0..28) + 3 doubles (32, 40, 48) + int64 (56).
-    expect(ffi.sizeOf<RawDecodeDiagnostics>(), 64);
-  });
-
   test(
-    'lastRawDiagnostics reports the libraw frontend and metal GPU after a '
-    'RAF decode',
+    'a RAF decode through the native RAW entry frees its pool buffer',
     () {
       final bindings = DngNativeBindings.fromPath(dylibPath);
       expect(bindings.rawDecodeAvailable, isTrue);
-      expect(bindings.rawDiagnosticsAvailable, isTrue);
       expect(bindings.poolStatsAvailable, isTrue);
 
       // Drive the native entry directly — this suite must stand alone,
@@ -80,14 +70,6 @@ void main() {
         malloc.free(pathPtr);
       }
 
-      final diag = bindings.lastRawDiagnostics();
-      expect(diag, isNotNull);
-      expect(diag!.frontend, RawFrontend.libraw);
-      expect(diag.gpuBackend, RawGpuBackend.metal);
-      expect(diag.sampleModel, RawSampleModel.cfa);
-      expect(diag.totalMs, greaterThan(0));
-      expect(diag.rawUnpackMs, greaterThan(0));
-
       // Everything freed above -> the pool must be empty again.
       expect(bindings.poolCheckedOut(), 0);
     },
@@ -106,7 +88,6 @@ void main() {
 
       expect(bindings.rawDecodeAvailable, isFalse);
       expect(bindings.rawDecodeAndProcess, isNull);
-      expect(bindings.lastRawDiagnostics(), isNull);
       // Every DNG binding still resolves — that is what the guard buys.
       expect(bindings.dngDecodeAndProcess, isNotNull);
     },
