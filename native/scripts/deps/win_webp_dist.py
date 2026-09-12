@@ -4,11 +4,10 @@
 Migration ruling (2026-09-01, contract item 11 / ENTRY-POINT RULE,
 ``docs/logs/2026-09-01/contract-windows-codec-round.md``): the Windows
 libwebp dist build MIGRATES into this carrier module, exposed as
-``build_deps.py build webp-stack``. ``build_libwebp_dist_windows.sh`` stays
-in the tree until the carrier-built dist is proven green on a Windows
-runner (round 3) -- it is NOT deleted by this change; this round's proof is
-the transcription tests below plus ``webp_dist_windows.yml``'s rewire to
-call this module, not a local run (this host cannot build a Windows PE).
+``build_deps.py build webp-stack``. ``build_libwebp_dist_windows.sh`` was
+DELETED (round 3) once the carrier-built dist was proven green on a
+Windows runner; its transcription test is frozen in
+``win_webp_dist_test.py``.
 
 WEBP_VERSION below MUST equal ``native/vcpkg/vcpkg.json``'s libwebp override
 ("version": "1.6.0") -- see ``build_libwebp_dist_windows.sh``'s own header
