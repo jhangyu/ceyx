@@ -116,6 +116,13 @@ OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
 #     ledger updated in a scheduled follow-up commit per the leader's
 #     explicit sequencing (impl-6 -> impl-7's ratchet -> this entry ->
 #     freeze), so no live mismatch window existed this time.
+#   - WI-15 (push 5, 6f3880ba): 109 -> 106 (three codec-probe MUST_STAY
+#     entries retired -- linux/macos/windows CI-T3/D4-R-7 -- as their
+#     steps became one-line `codec-probe` calls), ledger updated in this
+#     follow-up commit per the leader's sequencing (impl-7's linux YAML ->
+#     impl-9's macOS+windows YAML + ratchet -> this entry). Value taken
+#     from `check_shell_prohibition.py`'s own live emission, not from
+#     impl-9's projection or the leader's report of it.
 # All commits for a given push stay unpushed until the leader freezes and
 # adjudicates, so the campaign-visible (pushed) state is always consistent
 # -- noted here so the in-tree commit gap is not read as if the
@@ -144,7 +151,7 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=109", "push 4 / WI-12 (2c491e9a)"),
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=106", "push 5 / WI-15 (6f3880ba)"),
     _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
 )
 
