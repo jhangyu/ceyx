@@ -697,7 +697,9 @@ class DngNativeBindings {
   /// We ask the loader instead, via `dladdr` on a symbol of the freshly opened
   /// library, and only fall back to path arithmetic.
   static String _resolvedImagePath(ffi.DynamicLibrary lib, String candidate) {
-    final viaLoader = _imagePathViaDladdr(lib);
+    final viaLoader = Platform.isWindows
+        ? _imagePathViaGetModuleFileName(lib)
+        : _imagePathViaDladdr(lib);
     if (viaLoader != null) return viaLoader;
     if (!candidate.contains('/')) return candidate;
     try {
@@ -710,7 +712,6 @@ class DngNativeBindings {
   /// Resolve the on-disk path of an opened library via `dladdr` (POSIX only).
   /// Returns null if anything goes wrong — this is diagnostics, never fatal.
   static String? _imagePathViaDladdr(ffi.DynamicLibrary lib) {
-    if (Platform.isWindows) return null;
     ffi.Pointer<ffi.Pointer<ffi.Void>>? info;
     try {
       // Any symbol belonging to the library identifies its image.
@@ -748,6 +749,145 @@ class DngNativeBindings {
     }
   }
 
+  /// Resolve the on-disk path of an opened library on Windows via
+  /// `GetModuleHandleExW` + `GetModuleFileNameW` (win32 only). Returns null
+  /// on any failure — this is diagnostics, never fatal, same contract as
+  /// [_imagePathViaDladdr].
+  static String? _imagePathViaGetModuleFileName(ffi.DynamicLibrary lib) {
+    const getModuleHandleExFlagFromAddress = 0x00000004;
+    const getModuleHandleExFlagUnchangedRefcount = 0x00000002;
+    ffi.Pointer<ffi.IntPtr>? hModule;
+    ffi.Pointer<ffi.Uint16>? buffer;
+    try {
+      // Any symbol belonging to the library identifies its image.
+      ffi.Pointer<ffi.Void>? probe;
+      for (final symbol in const [
+        'ceyx_decode_into_buffer',
+        'dng_free_buffer',
+      ]) {
+        try {
+          probe = lib.lookup<ffi.Void>(symbol);
+          break;
+        } catch (_) {
+          continue;
+        }
+      }
+      if (probe == null) return null;
+
+      final kernel32 = ffi.DynamicLibrary.open('kernel32.dll');
+      final getModuleHandleExW = kernel32.lookupFunction<
+          ffi.Int32 Function(ffi.Uint32, ffi.Pointer<ffi.Void>,
+              ffi.Pointer<ffi.IntPtr>),
+          int Function(int, ffi.Pointer<ffi.Void>,
+              ffi.Pointer<ffi.IntPtr>)>('GetModuleHandleExW');
+      final getModuleFileNameW = kernel32.lookupFunction<
+          ffi.Uint32 Function(
+              ffi.IntPtr, ffi.Pointer<ffi.Uint16>, ffi.Uint32),
+          int Function(
+              int, ffi.Pointer<ffi.Uint16>, int)>('GetModuleFileNameW');
+
+      hModule = calloc<ffi.IntPtr>();
+      final ok = getModuleHandleExW(
+        getModuleHandleExFlagFromAddress |
+            getModuleHandleExFlagUnchangedRefcount,
+        probe.cast<ffi.Void>(),
+        hModule,
+      );
+      if (ok == 0) return null;
+
+      const bufferLength = 32768;
+      buffer = calloc<ffi.Uint16>(bufferLength);
+      final len =
+          getModuleFileNameW(hModule.value, buffer, bufferLength);
+      if (len == 0) return null;
+      return String.fromCharCodes(buffer.asTypedList(len));
+    } catch (_) {
+      return null;
+    } finally {
+      if (hModule != null) calloc.free(hModule);
+      if (buffer != null) calloc.free(buffer);
+    }
+  }
+
+  /// Platform-specific native library file name.
+  static String _libraryFileName() {
+    if (Platform.isMacOS) return 'libdng_decoder_native.dylib';
+    if (Platform.isWindows) return 'dng_decoder_native.dll';
+    return 'libdng_decoder_native.so';
+  }
+
+  /// Build the ordered candidate list for [fileName] on the current
+  /// platform. One control flow for every platform, with per-platform
+  /// *data* only (WI-11, S-C1/S-C2).
+  ///
+  /// Priority:
+  ///   1. System default (bare file name — OS-native search, e.g.
+  ///      DYLD_LIBRARY_PATH / PATH / LD_LIBRARY_PATH)
+  ///   2. Executable-relative — production distribution location:
+  ///      macOS app bundle Frameworks/ (`$execDir/../Frameworks/<name>`,
+  ///      kept verbatim from the pre-WI-11 macOS-only path); elsewhere
+  ///      `$execDir/<name>`, which is where Flutter places
+  ///      `PLUGIN_BUNDLED_LIBRARIES` on Windows, plus a Linux-only
+  ///      `$execDir/lib/<name>` variant for the `lib/`-relative layout.
+  ///   3. `DNG_NATIVE_BUILD_DIR` env override — CI / custom build
+  ///      directories. Not Apple-specific: it is a property of the build,
+  ///      not of the OS, so every platform honours it when set.
+  ///   4. Platform.script-relative — `dart run` from repo root.
+  ///
+  /// 2026-08-21 (D1): the former candidate 5, a pair of absolute
+  /// $HOME/project/... dev paths gated behind DNG_DEV_FALLBACK, is gone.
+  static List<String> _candidatesFor(
+    String fileName, {
+    Map<String, String>? environment,
+  }) {
+    final env = environment ?? Platform.environment;
+    final execDir = File(Platform.resolvedExecutable).parent.path;
+
+    // Resolve the script-relative candidates (repo layout). When running
+    // `dart run bin/benchmark_*.dart` the script is at
+    // <repo>/app/bin/benchmark_*.dart → parent = <repo>/app/bin, and
+    // native/ sits at the repo root (2026-08-26 layout move), so the repo
+    // root is TWO levels up: ../../native/{dist,build}.
+    final scriptDir = Platform.script.toFilePath(windows: false);
+    final scriptParent = File(scriptDir).parent.path;
+    final scriptRelativeDist =
+        File('$scriptParent/../../native/dist/$fileName').path;
+    final scriptRelativeBuild =
+        File('$scriptParent/../../native/build/$fileName').path;
+
+    // DNG_NATIVE_BUILD_DIR env override (path to the CMake build
+    // directory). Read once above the platform switch so every platform
+    // honours it (WI-11 step 11.2, S-C2).
+    final nativeBuildDir = env['DNG_NATIVE_BUILD_DIR'];
+
+    return [
+      // 1. System default
+      fileName,
+      // 2. Executable-relative (app bundle / plugin-bundled location)
+      if (Platform.isMacOS)
+        '$execDir/../Frameworks/$fileName'
+      else ...[
+        '$execDir/$fileName',
+        if (Platform.isLinux) '$execDir/lib/$fileName',
+      ],
+      // 3. Env override: DNG_NATIVE_BUILD_DIR (CI / custom build dir)
+      if (nativeBuildDir != null) '$nativeBuildDir/$fileName',
+      // 4a. Script-relative: dist artifact (dart run scenario)
+      scriptRelativeDist,
+      // 4b. Script-relative: CMake build cache (dart run scenario)
+      scriptRelativeBuild,
+    ];
+  }
+
+  /// Test-only entry point for [_candidatesFor]. Not part of the public API
+  /// and not exported by the package barrel; same pattern and justification
+  /// as [openFirstForTesting].
+  static List<String> candidatesForTesting(
+    String fileName, {
+    Map<String, String>? environment,
+  }) =>
+      _candidatesFor(fileName, environment: environment);
+
   /// Load the native library based on the current platform
   factory DngNativeBindings() => DngNativeBindings.load();
 
@@ -755,62 +895,15 @@ class DngNativeBindings {
   factory DngNativeBindings.load() {
     final ffi.DynamicLibrary lib;
 
-    if (Platform.isMacOS) {
-      final execDir = File(Platform.resolvedExecutable).parent.path;
-
-      // W7-6 (TD-18): dylib loader path 3/4 hardened.
-      // Priority:
-      //   1. System default (DYLD_LIBRARY_PATH) — no path prefix needed
-      //   2. App bundle Frameworks/ — production distribution, populated by the
-      //      `ceyx` plugin pod (see plugin/README.md)
-      //   3. DNG_NATIVE_BUILD_DIR env override — CI / custom build directories
-      //   4. Platform.script-relative — dart run from repo root (e.g. dart run bin/*)
-      //
-      // 2026-08-21 (D1): the former candidate 5, a pair of absolute
-      // $HOME/project/... dev paths gated behind DNG_DEV_FALLBACK, is gone.
-      // Host apps now get the dylib bundled into Frameworks/ by the plugin, so
-      // candidate 2 covers what the dev fallback used to paper over, and
-      // candidate 4 still covers `dart run` inside this repo.
-
-      // Resolve paths 4a/4b relative to the script entry point (repo layout).
-      final scriptDir = Platform.script.toFilePath(windows: false);
-      final scriptParent = File(scriptDir).parent.path;
-      // When running `dart run bin/benchmark_*.dart` the script is at
-      // <repo>/app/bin/benchmark_*.dart → parent = <repo>/app/bin, and
-      // native/ now sits at the repo root (2026-08-26 layout move), so the
-      // repo root is TWO levels up: ../../native/{dist,build}.
-      final scriptRelativeDist =
-          File('$scriptParent/../../native/dist/libdng_decoder_native.dylib')
-              .path;
-      final scriptRelativeBuild =
-          File('$scriptParent/../../native/build/libdng_decoder_native.dylib')
-              .path;
-
-      // DNG_NATIVE_BUILD_DIR env override (path to the CMake build directory).
-      final nativeBuildDir =
-          Platform.environment['DNG_NATIVE_BUILD_DIR'];
-
-      lib = _openFirst([
-        // 1. System default (DYLD_LIBRARY_PATH)
-        'libdng_decoder_native.dylib',
-        // 2. App bundle Frameworks directory
-        '$execDir/../Frameworks/libdng_decoder_native.dylib',
-        // 3. Env override: DNG_NATIVE_BUILD_DIR (CI / custom build dir)
-        if (nativeBuildDir != null)
-          '$nativeBuildDir/libdng_decoder_native.dylib',
-        // 4a. Script-relative: dist artifact (dart run scenario)
-        scriptRelativeDist,
-        // 4b. Script-relative: CMake build cache (dart run scenario)
-        scriptRelativeBuild,
-      ]);
-    } else if (Platform.isWindows) {
-      lib = ffi.DynamicLibrary.open('dng_decoder_native.dll');
-    } else if (Platform.isLinux) {
-      lib = ffi.DynamicLibrary.open('libdng_decoder_native.so');
-    } else if (Platform.isAndroid) {
-      lib = ffi.DynamicLibrary.open('libdng_decoder_native.so');
-    } else if (Platform.isIOS) {
+    if (Platform.isIOS) {
+      // iOS statically links the native library — no candidate list to
+      // search, this is a data difference the WI-11 clause permits.
       lib = ffi.DynamicLibrary.process();
+    } else if (Platform.isMacOS ||
+        Platform.isWindows ||
+        Platform.isLinux ||
+        Platform.isAndroid) {
+      lib = _openFirst(_candidatesFor(_libraryFileName()));
     } else {
       throw UnsupportedError(
         'DngNativeBindings: unsupported platform ${Platform.operatingSystem}',

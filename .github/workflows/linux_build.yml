@@ -596,14 +596,16 @@ jobs:
         # the decoder -- the exact Windows DLL-trio failure mode, Linux
         # variant. NOT `|| true`: a missing companion here must fail the
         # step, not silently ship an incomplete group.
+        #
+        # WI-15 step 15.2: the file list is read from the single declaration
+        # native/deps/shipped_files.toml (via read_shipped_files.py) instead
+        # of hard-coded, so this step cannot drift from it.
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
-          cp "${NATIVE_DIR}/build-linux/libdng_decoder_native.so" \
-            "${ARTIFACT_DIR}/native/"
-          cp "${NATIVE_DIR}/build-linux/libheif.so.1" \
-            "${ARTIFACT_DIR}/native/"
-          cp "${NATIVE_DIR}/build-linux/libde265.so.0" \
-            "${ARTIFACT_DIR}/native/"
+          LINUX_FILES="$(python3 native/scripts/read_shipped_files.py --platform linux --all)"
+          for f in ${LINUX_FILES}; do
+            cp "${NATIVE_DIR}/build-linux/${f}" "${ARTIFACT_DIR}/native/"
+          done
           ls -la "${ARTIFACT_DIR}/native"
 
       - name: Fail if no shared library was produced
@@ -620,16 +622,36 @@ jobs:
       # group. Counts the staged copy in ${ARTIFACT_DIR}/native -- the
       # directory that is actually uploaded -- so the instrument can see the
       # failure it exists to catch.
+      #
+      # WI-15 step 15.2 (S-H1): EXPECTED_SET comes from the declaration
+      # (native/deps/shipped_files.toml via read_shipped_files.py);
+      # STAGED_SET is enumerated from what actually landed in
+      # ${ARTIFACT_DIR}/native. Both are printed unconditionally (not just
+      # on failure) so a green run leaves positive evidence the comparison
+      # ran, closing the 2026-09-01 "Linux HEIF staging silently absent"
+      # gap this item exists to remove -- previously nothing here would have
+      # caught a completely empty companion set the way an --expect-based
+      # instrument elsewhere in this repo has been shown to.
       - name: Assert the Linux shared-lib group is complete (atomic group)
         run: |
           ls -la "${ARTIFACT_DIR}/native"
-          for f in libdng_decoder_native.so libheif.so.1 libde265.so.0; do
-            if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
-              echo "::error::atomic group member missing: ${f}" >&2
-              exit 1
-            fi
-          done
-          echo "ATOMIC_GROUP_COMPLETE=1"
+          EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform linux --all | tr ' ' '\n' | sort)"
+          # STAGED_SET enumerates the DIRECTORY'S ACTUAL CONTENTS filtered by
+          # the shared-object naming convention (.so / .so.N), never a
+          # second hard-coded file list -- a hard-coded list here would be
+          # exactly the drift class this item removes and would make a
+          # staged-but-undeclared extra file invisible (the 2026-09-01
+          # incident's direction).
+          STAGED_SET="$(cd "${ARTIFACT_DIR}/native" && ls -1 | grep -E '\.so(\.[0-9]+)*$' | sort)"
+          echo "EXPECTED_SET:"
+          echo "${EXPECTED_SET}"
+          echo "STAGED_SET:"
+          echo "${STAGED_SET}"
+          if [ "${EXPECTED_SET}" != "${STAGED_SET}" ]; then
+            echo "::error::Linux staged set does not match the shipped_files.toml declaration." >&2
+            exit 1
+          fi
+          echo "ATOMIC_GROUP_COMPLETE=1 (EXPECTED_SET == STAGED_SET)"
 
       # DT_NEEDED verification (AC1; fixed post-run-33455862800 diagnosis,
       # task #18 follow-up). ORIGINAL BUG: this step asserted BOTH

@@ -879,7 +879,15 @@ jobs:
           cp "$DYLIB" "${ARTIFACT_DIR}/native/"
           NATIVE_DYLIB_DIR="$(dirname "$DYLIB")"
           DYLIB_BASENAME="$(basename "$DYLIB")"
-          COMPANIONS="liblcms2.2.dylib libjpeg.8.dylib libheif.1.dylib libde265.0.dylib libomp.dylib"
+          # WI-15 step 15.2: the companion list is read from the single
+          # declaration native/deps/shipped_files.toml (via
+          # read_shipped_files.py) rather than hard-coded here, so this
+          # gate cannot drift from the declaration. As of this commit the
+          # declaration already reflects OQ-N4 (lcms2 dropped, four
+          # companions) -- WI-5 lands the matching staging/build removal
+          # separately; this gate simply stops asserting a file WI-5 is
+          # about to stop shipping.
+          COMPANIONS="$(python3 native/scripts/read_shipped_files.py --platform macos --companions)"
           for companion in ${COMPANIONS}; do
             if [ ! -f "${NATIVE_DYLIB_DIR}/${companion}" ]; then
               echo "::error::expected companion dylib ${companion} not found in ${NATIVE_DYLIB_DIR} — the release asset would ship the decoder without a dependency the podspec vendors." >&2
