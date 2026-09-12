@@ -645,9 +645,9 @@ int main(int argc, char **argv) {
   }
 
   // WP1 phase 3: the "Stage4 scratch free list never exceeds its cap" check
-  // (Plan Task 7 AC) is deleted, not migrated — it covered Stage4ScratchPool,
-  // the RGB8-legacy scratch pool, which no longer exists on any platform
-  // (it was already a declared SIZE_MAX skip on macOS/Metal). There is no
+  // (Plan Task 7 AC) is deleted, not migrated — it covered the RGB8-legacy
+  // per-decode scratch pool, which no longer exists on any platform (it was
+  // already a declared SIZE_MAX skip on macOS/Metal). There is no
   // replacement coverage because there is no replacement feature.
 
   // R4 item 1: state the bound explicitly rather than leaving it to be

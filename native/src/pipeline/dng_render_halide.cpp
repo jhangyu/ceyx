@@ -151,8 +151,8 @@ functions:
 #include "dng_matrix.h"
 #include "dng_pixel_buffer.h"
 #include "dng_pipeline_config.h"
-// R4 item 1: dng_decode_slot_count_relaxed() — Stage4ScratchPool's free-list
-// cap follows the configured decode slot count.
+// R4 item 1: dng_decode_slot_count_relaxed() — reads the configured decode
+// slot count for per-decode buffer bookkeeping.
 #include "dng_pipeline.h"
 #include "dng_render_params.h"
 // C2 (plan §4.5): zero_copy_note_destination_wrapped(). Declared for EVERY
@@ -213,141 +213,6 @@ bool pipelineVerbose() {
 // RGB8 output no longer exists (WP1 phase 3); the fused production path
 // D2Hs straight into the caller's RGBA buffer.
 
-// W4-1: persistent, non-zero-initialised scratch for the Stage4 strip path. The
-// previous `std::vector<T>(N)` re-allocated and zero-filled large buffers on
-// every decode (a wasted full-buffer memset plus thousands of fresh page
-// faults). Stage4ScratchPool hands out reusable, uninitialised storage and only
-// grows when a larger frame arrives. A mutex-guarded free-list keeps this
-// race-free under the concurrent-decode convention used elsewhere in this file
-// (ConcurrentDngHost). Every consumer writes each element before reading it, so
-// skipping zero-init is safe.
-template <typename T>
-class Stage4ScratchPool {
-public:
-    // Checked-out lease: owns a buffer for the duration of one decode and
-    // returns it to the pool on destruction.
-    class Lease {
-    public:
-        Lease(Stage4ScratchPool* owner, std::unique_ptr<T[]> buf, size_t cap)
-            : owner_(owner), buf_(std::move(buf)), cap_(cap) {}
-        Lease(Lease&& other) noexcept
-            : owner_(other.owner_), buf_(std::move(other.buf_)), cap_(other.cap_) {
-            other.owner_ = nullptr;
-        }
-        Lease& operator=(Lease&&) = delete;
-        Lease(const Lease&) = delete;
-        Lease& operator=(const Lease&) = delete;
-        ~Lease() {
-            if (owner_) {
-                owner_->release(std::move(buf_), cap_);
-            }
-        }
-        T* data() const { return buf_.get(); }
-
-    private:
-        Stage4ScratchPool* owner_;
-        std::unique_ptr<T[]> buf_;
-        size_t cap_;
-    };
-
-    Lease acquire(size_t count) {
-        std::unique_ptr<T[]> buf;
-        size_t cap = 0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            // Mutex rework (plan Task 7): best-fit scan, not back()-only. With
-            // a single-entry free list (all this ever held under serialised
-            // decodes) the two are identical; with the multi-entry list that
-            // concurrency produces, back()-only misses a usable buffer sitting
-            // anywhere else and allocates fresh instead. Mirrors the scan
-            // the Stage4 output path already uses (dng_pipeline.cpp).
-            size_t bestIdx = free_.size();
-            size_t bestCap = SIZE_MAX;
-            for (size_t i = 0; i < free_.size(); ++i) {
-                if (free_[i].cap >= count && free_[i].cap < bestCap) {
-                    bestIdx = i;
-                    bestCap = free_[i].cap;
-                }
-            }
-            if (bestIdx < free_.size()) {
-                buf = std::move(free_[bestIdx].buf);
-                cap = free_[bestIdx].cap;
-                free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(bestIdx));
-            }
-        }
-        if (!buf || cap < count) {
-            buf.reset(new T[count]);  // no value-init -> no memset
-            cap = count;
-        }
-        return Lease(this, std::move(buf), cap);
-    }
-
-private:
-    struct Slot {
-        std::unique_ptr<T[]> buf;
-        size_t cap;
-    };
-    void release(std::unique_ptr<T[]> buf, size_t cap) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Mutex rework (plan Task 7): was uncapped. Under serialised decodes
-        // the list never held more than one entry, so this was invisible;
-        // under concurrency it grows to the high-water simultaneous-decode
-        // count and never shrinks. Cap tracks the decode slot count (the
-        // configured lane width, via decode_context.h's pool), which is the
-        // real bound on how many buffers can be outstanding at once.
-        //
-        // R4 item 1: this used to be a hardcoded 4 that had to be kept in sync
-        // by hand with the (then also hardcoded) decode slot cap — the comment
-        // here said "if that changes, this changes with it", which is exactly
-        // the coupling that silently re-serialised an 8-lane pool down to 4
-        // buffers. It now READS the configured count instead. The relaxed
-        // reader is mandatory: we hold mutex_ right now, and the locking
-        // accessor would nest the pool mutex under it and could construct the
-        // slot pool as a side effect.
-        const size_t cap_now = free_cap();
-        if (free_.size() >= cap_now) {
-            size_t largest = 0;
-            for (size_t i = 1; i < free_.size(); ++i) {
-                if (free_[i].cap > free_[largest].cap) largest = i;
-            }
-            if (cap > free_[largest].cap) return;  // incoming is largest: drop it
-            free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(largest));
-        }
-        free_.push_back({std::move(buf), cap});
-        if (free_.size() > freeHighWater_) freeHighWater_ = free_.size();
-    }
-    mutable std::mutex mutex_;
-    std::vector<Slot> free_;
-    size_t freeHighWater_ = 0;
-
- public:
-    // Task 7 gate accessor: the largest the free list ever got. Asserting on
-    // this rather than on the instantaneous size means the gate cannot pass
-    // just because it sampled at a quiet moment.
-    size_t free_high_water() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return freeHighWater_;
-    }
-    // R4 item 1: was `static constexpr size_t free_cap() { return 4; }`. It is
-    // now a runtime read of the configured decode slot count, so it can no
-    // longer be static or constexpr — callers that stored it as a compile-time
-    // constant must re-read it per use (there were none outside this class;
-    // the gate in test_concurrent_decode.cpp reads it through
-    // dng_stage4_scratch_free_cap()).
-    //
-    // Floored at 1: a zero cap would make release() drop every buffer and
-    // defeat the pool entirely.
-    size_t free_cap() const {
-        const size_t n = dng_decode_slot_count_relaxed();
-        return n < 1 ? 1 : n;
-    }
-};
-
-// WP1 phase 3: the RGBA8-scratch alias and its two Task 7 gate accessors
-// are deleted — the class above (Stage4ScratchPool) has no remaining
-// instantiation and is now dead code, left in place since it is unnamed
-// by this task's removal list.
-
 }  // namespace (reopened below)
 
 namespace {
@@ -358,12 +223,12 @@ namespace {
 #endif
 
 #if !defined(DNG_STAGE4_SPLIT_KERNEL)
-// Task 7: Stage4ScratchPool (and therefore its capped free list) is compiled
-// only when DNG_STAGE4_SPLIT_KERNEL is defined — the Android/Windows layout.
-// On this build the pool does not exist, so there is nothing to bound and no
-// gate evidence to produce. SIZE_MAX is the "not compiled here" answer, which
-// the concurrent gate prints as an explicit skip: a plain 0 would be
-// indistinguishable from "the cap held", i.e. a green light for an
+// Task 7: the per-decode scratch pool this gate targeted only ever existed
+// when DNG_STAGE4_SPLIT_KERNEL is defined (the Android/Windows layout) and is
+// gone entirely now (WP1 phase 3). On this build there is nothing to bound
+// and no gate evidence to produce. SIZE_MAX is the "not compiled here"
+// answer, which the concurrent gate prints as an explicit skip: a plain 0
+// would be indistinguishable from "the cap held", i.e. a green light for an
 // unobservable configuration.
 }  // namespace (reopened below)
 

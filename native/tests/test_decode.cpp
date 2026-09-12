@@ -1158,8 +1158,8 @@ StagePSNR testDNG(dng_host& host,
         vector<uint8_t> rgbaScratch(rgbaScratchSize, 0);
 
 #if defined(__ANDROID__)
-        // R3-4: prime the Android Stage4 host scratch pool (Stage4ScratchPool /
-        // stage4DstScratch() in dng_render_halide.cpp) with an untimed throwaway
+        // R3-4: prime the Android Stage4 host scratch pool (dng_render_halide.cpp)
+        // with an untimed throwaway
         // render before the Stage4 timer starts below. The matrix binary spawns
         // a fresh process per repeat, so without this warm-up pass the pool's
         // very first acquire()+D2H write happens inside the timed Stage4 window
