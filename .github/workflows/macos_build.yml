@@ -961,22 +961,30 @@ jobs:
           # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
           # just-measured floor and ceyx's own declaration.
           #
-          # FLAGGED RISK (not silently assumed correct): min_runtime_expected.toml's
-          # single [macos] value (15.0) was measured against the arm64 NATIVE
-          # leg's group, which includes libomp.dylib. The x86_64 CROSS leg
-          # does not ship libomp.dylib at all (DNG_CROSS_BUILD turns desktop
-          # OpenMP off, per native/cmake/tests.cmake) -- its measured group
-          # max may legitimately be lower (decoder-only, ~14.0), which this
-          # single-value gate would then report as drift on that leg alone.
-          # This is flagged for team-lead review rather than silently
-          # special-cased; if the x86_64 leg goes red on this check for that
-          # reason, the fix is either a per-arch declaration or an
-          # arch-specific skip, not a change to the arm64 value.
+          # RESOLVED 2026-09-12 (CI run 34697591379). The risk previously
+          # flagged here -- that the single [macos] value (15.0), measured on
+          # the arm64 NATIVE leg's group, would report false drift on the
+          # x86_64 CROSS leg -- MATERIALISED exactly as predicted: that leg
+          # measured 14.0 and went red while arm64 passed. The fix taken is
+          # the per-arch declaration this comment itself named as the correct
+          # shape, NOT lowering the arm64 value and NOT skipping the gate on
+          # x86_64: min_runtime_expected.toml now declares [macos.arm64]=15.0
+          # and [macos.x86_64]=14.0, and --arch below selects between them.
+          # (Note the old comment's stated mechanism was wrong in one detail:
+          # the x86_64 leg DOES ship an OpenMP runtime, the vendored
+          # native/third_party/libomp-x86_64 -- it just measures 14.0 rather
+          # than the arm64 libomp's 15.0.)
+          #
+          # --arch is NOT optional here: a platform declared per-arch and
+          # queried without an arch is a hard error inside the gate, so a
+          # future edit that drops this flag fails loudly instead of silently
+          # comparing one leg against the other leg's floor.
           set +e
           python3 native/scripts/assert_min_runtime_matches_declared.py \
             --emitted "${ARTIFACT_DIR}/min_runtime.txt" \
             --declared native/deps/min_runtime_expected.toml \
-            --platform macos
+            --platform macos \
+            --arch "${{ matrix.arch_tag }}"
           RC=$?
           set -e
           echo "MIN_RUNTIME_DRIFT_RC=${RC}"

@@ -22,15 +22,42 @@
 #                                         last reviewed.
 #   reason      = "<one line>"        -- why this value, and what set it.
 #
+# PER-ARCH TABLES (added 2026-09-12, CI run 34697591379). A platform whose
+# floor is arch-dependent declares `[<platform>.<arch>]` subtables INSTEAD of
+# a top-level `value`, with <arch> spelled as the canonical key in
+# native/deps/arch_map.toml (arm64 / x86_64 / ...). Consumers then MUST pass
+# an arch. The two forms are mutually exclusive on purpose: a platform
+# carrying both a scalar `value` and arch subtables would let a consumer that
+# forgot to pass an arch silently read the wrong floor, so
+# native/scripts/assert_min_runtime_matches_declared.py:resolve_declared()
+# REJECTS that shape, and rejects an arch-tabled platform queried without an
+# arch, instead of falling back to a default.
+#
 # Red proof (S-F3, ceyx half): edit one value below and re-run the leg's
 # drift-gate step; it must fail naming both the measured and declared
 # values. Archived at docs/logs/<date>/wi14-sf3-red-ceyx.txt once the
 # workflow wiring lands.
 
-[macos]
+# macOS is ARCH-DEPENDENT: the floor is the group MAXIMUM over the shipped
+# companion set, and the two legs ship different companion sets. The arm64
+# NATIVE leg bundles libomp.dylib (LC_BUILD_VERSION 15.0), which sets its
+# floor; the x86_64 CROSS leg builds against the vendored
+# native/third_party/libomp-x86_64, whose LC_BUILD_VERSION is 14.0. The single
+# scalar this table used to carry was measured on arm64 only, and sent the
+# x86_64 leg red on its first real run (CI run 34697591379, macOS/x86_64:
+# "measured MIN_RUNTIME_macos=14.0 != declared ...[macos].value=15.0"). Per
+# the ruling written into .github/workflows/macos_build.yml's own drift-gate
+# comment, the fix is a per-arch declaration -- NOT lowering the arm64 value
+# to 14.0, and NOT skipping the gate on x86_64.
+[macos.arm64]
 value       = "15.0"
 measured_on = "2026-09-12"
 reason      = "Group MAXIMUM across the whole shipped companion set, not the decoder alone -- measured directly against the real committed artifacts in this tree (plugin/macos/Libraries/libdng_decoder_native.dylib=14.0, plugin/macos/Libraries/libomp.dylib=15.0) via native/scripts/read_min_runtime.py, docs/logs/2026-09-12/wi14-sf1-green-macos.txt. Confirms the pin comment's own claim (ceyx_release_pin.json:111-119): the bundled OpenMP runtime, not the decoder, sets the real macOS floor."
+
+[macos.x86_64]
+value       = "14.0"
+measured_on = "2026-09-12"
+reason      = "Group MAXIMUM measured on the x86_64 CROSS leg of CI run 34697591379 (tmp/verify/ci-fail-20260912-220022.log:12684-12689 plus that step's companion breakdown): libdng_decoder_native.dylib=14.0, libomp.dylib=14.0 (the vendored native/third_party/libomp-x86_64, log:11492-11494), libjpeg.8.dylib=14.0, libheif/libde265=11.0 -> group max 14.0. Lower than arm64's 15.0 solely because this leg's OpenMP runtime is a different binary, not because the decoder itself is more permissive."
 
 [windows]
 value       = "6.0"

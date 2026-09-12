@@ -65,6 +65,10 @@ NATIVE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = NATIVE_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from assert_min_runtime_matches_declared import (  # noqa: E402
+    DeclarationError,
+    resolve_declared,
+)
 from deps.publish import (  # noqa: E402
     PublishError,
     build_artifacts_lock,
@@ -207,15 +211,21 @@ def min_runtime_for_asset(
     if item["component"] != DECODER_COMPONENT:
         return None
     platform = item["platform"]
-    table = declared.get(platform)
-    if table is None or "value" not in table:
+    # Resolution -- including the per-arch [macos.arm64]/[macos.x86_64] shape
+    # added 2026-09-12 -- lives in assert_min_runtime_matches_declared, so the
+    # publish job and each leg's drift gate cannot drift apart about which
+    # floor an asset carries. item["arch"] is already canonicalised by
+    # normalize_arch(); a platform declared per-arch raises rather than
+    # guessing when the item carries no arch.
+    try:
+        return resolve_declared(declared, platform, item.get("arch"))
+    except DeclarationError as exc:
         raise ManifestError(
-            f"decoder asset {item['asset_name']!r} (platform={platform!r}) has "
-            f"no matching [{platform}] entry in {MIN_RUNTIME_EXPECTED_PATH} -- "
-            "refusing to write a lock entry with a silently missing "
-            "min_runtime key."
-        )
-    return table["value"]
+            f"decoder asset {item['asset_name']!r} (platform={platform!r}, "
+            f"arch={item.get('arch')!r}) cannot be resolved against "
+            f"{MIN_RUNTIME_EXPECTED_PATH}: {exc} -- refusing to write a lock "
+            "entry with a silently missing or wrong min_runtime key."
+        ) from exc
 
 
 def normalize_arch(arch: str, arch_map: Dict[str, Any]) -> str:

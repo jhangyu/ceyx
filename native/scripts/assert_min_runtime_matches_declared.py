@@ -35,6 +35,60 @@ except ModuleNotFoundError:  # pragma: no cover
 EMITTED_RE = re.compile(r"^MIN_RUNTIME_(\w+)=(.+)$")
 
 
+class DeclarationError(Exception):
+    """The declaration file cannot be resolved to exactly one floor."""
+
+
+def resolve_declared(declared_data, platform, arch=None):
+    """The declared floor for ``platform`` (and ``arch`` where the platform
+    declares per-arch subtables). Single source of this resolution rule --
+    publish_release.py imports it rather than reimplementing it, so the two
+    consumers cannot drift apart.
+
+    Two accepted shapes, deliberately MUTUALLY EXCLUSIVE:
+      [macos]        value = "15.0"    -- arch-independent floor
+      [macos.arm64]  value = "15.0"    -- arch-dependent floor
+      [macos.x86_64] value = "14.0"
+
+    Never falls back. A platform that declares per-arch tables and is queried
+    without an arch RAISES, because guessing here is exactly how the x86_64
+    leg silently compared itself against the arm64 floor (CI 34697591379).
+    """
+    table = declared_data.get(platform)
+    if table is None:
+        raise DeclarationError(f"no [{platform}] entry")
+    arch_tables = {k: v for k, v in table.items() if isinstance(v, dict)}
+    has_scalar = "value" in table
+
+    if arch_tables and has_scalar:
+        raise DeclarationError(
+            f"[{platform}] declares BOTH a scalar value and per-arch subtables "
+            f"({', '.join(sorted(arch_tables))}) -- ambiguous; a consumer that "
+            f"omits the arch would silently read the wrong floor. Declare one "
+            f"form or the other."
+        )
+    if arch_tables:
+        if arch is None:
+            raise DeclarationError(
+                f"[{platform}] is declared PER-ARCH ({', '.join(sorted(arch_tables))}) "
+                f"but no arch was supplied -- pass --arch."
+            )
+        sub = arch_tables.get(arch)
+        if sub is None:
+            raise DeclarationError(
+                f"[{platform}] has no [{platform}.{arch}] entry (declared arches: "
+                f"{', '.join(sorted(arch_tables))}) -- add a measured entry rather "
+                f"than falling back to another arch's floor."
+            )
+        if "value" not in sub:
+            raise DeclarationError(f"[{platform}.{arch}] has no 'value' key")
+        return sub["value"]
+
+    if not has_scalar:
+        raise DeclarationError(f"[{platform}] has no 'value' key and no per-arch subtables")
+    return table["value"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -43,6 +97,10 @@ def main() -> int:
     ap.add_argument("--declared", required=True,
                      help="path to native/deps/min_runtime_expected.toml")
     ap.add_argument("--platform", required=True)
+    ap.add_argument("--arch", default=None,
+                     help="canonical arch key (arm64 / x86_64, per "
+                          "native/deps/arch_map.toml). REQUIRED for a platform "
+                          "whose declaration is per-arch, e.g. macos.")
     args = ap.parse_args()
 
     emitted_path = Path(args.emitted)
@@ -65,20 +123,27 @@ def main() -> int:
     declared_path = Path(args.declared)
     with declared_path.open("rb") as fh:
         declared_data = tomllib.load(fh)
-    table = declared_data.get(args.platform)
-    if table is None or "value" not in table:
+    try:
+        declared = resolve_declared(declared_data, args.platform, args.arch)
+    except DeclarationError as exc:
         print("MIN_RUNTIME_DRIFT_RESULT=FAIL", file=sys.stderr)
-        print(f"error: {declared_path} has no [{args.platform}].value entry", file=sys.stderr)
+        print(f"error: {declared_path}: {exc}", file=sys.stderr)
         return 1
-    declared = table["value"]
 
+    # Name the key that was ACTUALLY read, not the key the caller's flags
+    # suggest: passing --arch to an arch-independent platform must not make
+    # the log claim a [platform.arch] table that does not exist.
+    _table = declared_data[args.platform]
+    _is_per_arch = any(isinstance(v, dict) for v in _table.values())
+    key = f"[{args.platform}.{args.arch}]" if _is_per_arch else f"[{args.platform}]"
     if measured != declared:
         print("MIN_RUNTIME_DRIFT_RESULT=FAIL")
         print(f"error: measured MIN_RUNTIME_{args.platform}={measured} != "
-              f"declared {declared_path}::[{args.platform}].value={declared}", file=sys.stderr)
+              f"declared {declared_path}::{key}.value={declared}", file=sys.stderr)
         return 1
 
-    print(f"MIN_RUNTIME_DRIFT_RESULT=PASS (measured={measured}, declared={declared})")
+    print(f"MIN_RUNTIME_DRIFT_RESULT=PASS (measured={measured}, "
+          f"declared={declared} from {key})")
     return 0
 
 
