@@ -42,9 +42,46 @@ Patterns treated as test EXECUTION:
     read back a bitmask of codec support; it is not a functional/perf test
     and predates this guard. Excluded by exact basename, not by file.
 
+WI-5 (2026-09-13) extends this guard with two more scan surfaces, both
+following the same no-silent-caps rule -- an exemption is only real if it is
+named and printed, never a quiet filter:
+
+  (a) UR-1 DETECTION + EXEMPTION -- a `python[3]? -m pytest|unittest ...`,
+      bare `pytest ...`, or `native/tests/run_dist_equivalence.py` line is
+      now a recognized test-SUITE invocation (previously invisible to this
+      guard entirely -- P3 proved that by running its own regex objects
+      against the literal workflow lines and finding none of them contained
+      "pytest"). It is ALLOWED only when every path-shaped argument on the
+      line starts with `native/scripts/deps/`, or the line is one of the
+      three USER-RULED (2026-09-13) call sites in `ALLOWED_TEST_SUITE_CALLS`
+      (the deps suite legitimately runs in CI on Linux/Windows; the D6
+      layer-1 argv-equivalence check on macOS is not a pytest invocation at
+      all but is exempted by the same named mechanism). Anything else --
+      including a bare `pytest -q` with no path argument -- FAILS.
+
+  (b) the Python side of the migration itself, `native/scripts/ci/**.py`,
+      gains an AST scan: any `subprocess.*` call outside `run.py` is
+      `[subprocess-outside-run]`, and any `run.run()`/`run_to_file()`/
+      `capture()` call whose argv[0] statically resolves to a `test_`/
+      `probe_` name is held to the identical `ALLOWED_CAPABILITY_PROBES`
+      rule the YAML scan already uses. An argv[0] this scan cannot
+      statically resolve (a variable, a dynamically-built path) is reported
+      as `UNRESOLVED` rather than silently passed.
+
+      CARRY-3 (leader ruling, 2026-09-13): `check_cmake_sources_tracked.py`
+      already imports `subprocess` and predates this migration entirely --
+      its last change, commit `2a5f28db` ("guard cmake source references
+      against untracked files", 2026-09-07), is a `git merge-base
+      --is-ancestor` verified ancestor of this campaign's `d33cc607`
+      baseline. It is not migrated logic, so it is named in
+      `GRANDFATHERED_SUBPROCESS_FILES` with its reason and provenance commit
+      and printed every run -- never silently path-filtered, which would
+      also exempt every FUTURE file dropped into the same directory.
+
 Usage: python3 native/scripts/ci/check_no_test_execution_in_ci.py
 Zero args; paths derived from this file's own location.
 """
+import ast
 import re
 import sys
 from pathlib import Path
@@ -84,6 +121,54 @@ ALLOWED_CAPABILITY_PROBES = {"probe_codecs"}
 RUN_INLINE_RE = re.compile(r"^\s*run:\s*(.+)$")
 RUN_BLOCK_RE = re.compile(r"^\s*run:\s*[|>][+-]?\s*$")
 
+# --- WI-5(a): UR-1 test-suite invocation detection + exemption ---
+
+PYTHON_SCAN_ROOTS = ("native/scripts/ci",)
+
+# UR-1 part (a) -- DETECTION. Until this pattern exists the guard cannot see
+# a pytest/unittest invocation at all (see module docstring).
+TEST_SUITE_INVOCATION_RE = re.compile(
+    r"(?<![\w./-])(?:python3?|py)\s+-m\s+(?:pytest|unittest)\b"
+    r"|(?<![\w./-])pytest\b"
+    r"|(?<![\w./-])[\w./$-]*run_dist_equivalence\.py\b"
+)
+
+# A line naming `pytest`/`unittest` as a package being INSTALLED (`pip
+# install ... pytest`) is not an invocation -- excluded the same way
+# SOURCE_OR_LOG_SUFFIXES excludes a filename reference from the binary
+# first-token rule above. Without this, `windows_build.yml:89` /
+# `linux_build.yml:201` ("Install pytest for deps suite") would be flagged
+# as a bare `pytest` invocation by the second alternative above, which is a
+# false positive this guard must not introduce.
+PIP_INSTALL_RE = re.compile(r"(?<![\w./-])pip\s+install\b")
+
+# UR-1 part (b) -- EXEMPTION, named + printed, scoped by PATH ARGUMENT (not
+# command name) so a suite outside native/scripts/deps/ can never inherit
+# it. USER RULING 2026-09-13 -- detected, then exempted by name; a test
+# suite outside these paths FAILS this guard.
+ALLOWED_TEST_SUITE_PATH_PREFIXES = ("native/scripts/deps/",)
+ALLOWED_TEST_SUITE_CALLS = (
+    ("linux_build.yml", "Deps manifest/render/execute/heif test suite + no-shell lint",
+     "python3 -m pytest native/scripts/deps/ -q"),
+    ("windows_build.yml", "Run deps unit suite (native Windows Python)",
+     "python -m pytest native/scripts/deps/ -q"),
+    ("macos_build.yml", "D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)",
+     "native/tests/run_dist_equivalence.py"),
+)
+
+# --- WI-5(b): CARRY-3 grandfathered subprocess-outside-run exemption ---
+# See module docstring. Named + printed every run, never a silent filter.
+GRANDFATHERED_SUBPROCESS_FILES = (
+    (
+        "native/scripts/ci/check_cmake_sources_tracked.py",
+        "pre-existing guard predating this migration (commit 2a5f28db, "
+        "2026-09-07, verified ancestor of baseline d33cc607) -- not "
+        "migrated logic, CARRY-3",
+    ),
+)
+
+RUN_PRIMITIVE_ATTRS = ("run", "run_to_file", "capture")
+
 
 def iter_run_lines(text):
     """Yields (line_no, line_text) for every line that is part of a `run:`
@@ -117,6 +202,143 @@ def iter_run_lines(text):
         i += 1
 
 
+def classify_pytest_line(line):
+    """Classifies a single `run:` body line for the UR-1 test-suite rule.
+
+    Returns "not-a-pytest-line" (not a test-suite invocation at all),
+    "allowed" (invocation, but exempted by path prefix or by the named
+    literal call-site list), or "violation" (invocation outside the
+    exemption -- this guard must FAIL it).
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return "not-a-pytest-line"
+    if not TEST_SUITE_INVOCATION_RE.search(stripped):
+        return "not-a-pytest-line"
+    if PIP_INSTALL_RE.search(stripped):
+        return "not-a-pytest-line"
+
+    path_tokens = [tok.strip("\"'\\") for tok in stripped.split() if "/" in tok]
+    if path_tokens and all(
+        any(tok.startswith(prefix) for prefix in ALLOWED_TEST_SUITE_PATH_PREFIXES)
+        for tok in path_tokens
+    ):
+        return "allowed"
+
+    for _workflow, _step_name, literal in ALLOWED_TEST_SUITE_CALLS:
+        if literal in stripped:
+            return "allowed"
+
+    return "violation"
+
+
+def _resolve_argv0_basename(node):
+    """Statically resolves an argv[0] AST node to its basename string, or
+    returns None if it cannot be resolved without executing the program.
+
+    Handles: a plain string literal, an f-string whose final segment is a
+    literal (the dynamic prefix is irrelevant to the basename), a
+    `Path(...) / "name"` join, and a `str(...)` wrapper around any of the
+    above.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value).name
+    if isinstance(node, ast.JoinedStr) and node.values:
+        last = node.values[-1]
+        if isinstance(last, ast.Constant) and isinstance(last.value, str):
+            tail = last.value
+            return Path(tail).name if "/" in tail or "\\" in tail else tail
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        if isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+            return node.right.value
+        return None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "str" and node.args:
+        return _resolve_argv0_basename(node.args[0])
+    return None
+
+
+def _source_line(source_lines, lineno):
+    if 1 <= lineno <= len(source_lines):
+        return source_lines[lineno - 1].strip()
+    return ""
+
+
+def scan_python_sources(roots):
+    """AST scan of every `*.py` file under `roots` (repo-relative). Returns
+    `(failures, allowed, unresolved)`, each a list of
+    `(file_rel, line_no, label_or_basename, snippet)` tuples.
+
+    Two rules (WI-5(b)):
+      * `subprocess.*` anywhere outside `run.py` is `[subprocess-outside-run]`,
+        except the files named in `GRANDFATHERED_SUBPROCESS_FILES` (printed,
+        not silent).
+      * `run.run()`/`run.run_to_file()`/`run.capture()` calls have their
+        argv[0] resolved and held to the same test_/probe_ +
+        ALLOWED_CAPABILITY_PROBES rule the YAML scan uses; an unresolvable
+        argv[0] is reported, not silently passed.
+    """
+    grandfathered = dict(GRANDFATHERED_SUBPROCESS_FILES)
+    failures = []
+    allowed = []
+    unresolved = []
+
+    for root_rel in roots:
+        root = REPO_ROOT / root_rel
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            rel = str(path.relative_to(REPO_ROOT))
+            source = path.read_text(encoding="utf-8")
+            source_lines = source.splitlines()
+            try:
+                tree = ast.parse(source, filename=str(path))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+
+                if (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "subprocess"
+                    and path.name != "run.py"
+                ):
+                    snippet = _source_line(source_lines, node.lineno)
+                    if rel in grandfathered:
+                        allowed.append((rel, node.lineno, "subprocess-outside-run (grandfathered)", snippet))
+                    else:
+                        failures.append((rel, node.lineno, "subprocess-outside-run", snippet))
+
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in RUN_PRIMITIVE_ATTRS
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id != "subprocess"
+                ):
+                    snippet = _source_line(source_lines, node.lineno)
+                    if not node.args or not isinstance(node.args[0], (ast.List, ast.Tuple)) or not node.args[0].elts:
+                        unresolved.append((rel, node.lineno, snippet))
+                        continue
+                    argv0_node = node.args[0].elts[0]
+                    basename = _resolve_argv0_basename(argv0_node)
+                    if basename is None:
+                        unresolved.append((rel, node.lineno, snippet))
+                        continue
+                    if not TEST_OR_PROBE_BINARY_RE.match(basename):
+                        continue
+                    if basename in ALLOWED_CAPABILITY_PROBES:
+                        allowed.append((rel, node.lineno, basename, snippet))
+                    else:
+                        failures.append((rel, node.lineno, "direct test/probe binary execution", snippet))
+
+    return failures, allowed, unresolved
+
+
 def main():
     if not WORKFLOWS_DIR.is_dir():
         print(f"[FAIL] workflow directory not found: {WORKFLOWS_DIR}")
@@ -130,6 +352,7 @@ def main():
     checked_lines = 0
     failures = []   # (file_rel, line_no, label, line_text)
     allowed = []    # (file_rel, line_no, binary_name, line_text)
+    test_suite_allowed = []  # (file_rel, line_no, line_text)
 
     for wf in workflow_files:
         wf_rel = wf.relative_to(REPO_ROOT)
@@ -143,6 +366,12 @@ def main():
             for label, pattern in SUBSTRING_PATTERNS:
                 if pattern.search(line_text):
                     failures.append((str(wf_rel), line_no, label, stripped))
+
+            verdict = classify_pytest_line(line_text)
+            if verdict == "allowed":
+                test_suite_allowed.append((str(wf_rel), line_no, stripped))
+            elif verdict == "violation":
+                failures.append((str(wf_rel), line_no, "test-suite execution", stripped))
 
             first_token = stripped.split()[0]
             candidate = FIRST_TOKEN_STRIP_RE.sub("", first_token)
@@ -180,17 +409,61 @@ def main():
         print("[check_no_test_execution_in_ci] 0 capability-probe "
               "exemptions used.")
 
+    # UR-1 (b): the named exemption list is printed EVERY run, pass or fail,
+    # so a settled policy never reads as a pending one.
+    print(f"[check_no_test_execution_in_ci] ALLOWED_TEST_SUITE_CALLS "
+          f"({len(ALLOWED_TEST_SUITE_CALLS)} declared, USER RULING "
+          "2026-09-13 -- detected, then exempted by name; a test suite "
+          "outside these paths FAILS this guard):")
+    for workflow, step_name, literal in ALLOWED_TEST_SUITE_CALLS:
+        print(f"  {workflow} :: {step_name} -- {literal}")
+
+    if test_suite_allowed:
+        print(f"[check_no_test_execution_in_ci] {len(test_suite_allowed)} "
+              "test-suite invocation(s) ALLOWED at scan time:")
+        for wf_rel, line_no, stripped in test_suite_allowed:
+            print(f"  {wf_rel}:{line_no}: {stripped}")
+    else:
+        print("[check_no_test_execution_in_ci] 0 test-suite invocations "
+              "matched at scan time.")
+
+    # WI-5(b): the Python side of the migration itself.
+    py_failures, py_allowed, py_unresolved = scan_python_sources(PYTHON_SCAN_ROOTS)
+    failures.extend(py_failures)
+
+    print(f"[check_no_test_execution_in_ci] GRANDFATHERED_SUBPROCESS_FILES "
+          f"({len(GRANDFATHERED_SUBPROCESS_FILES)} declared, CARRY-3, "
+          "pre-existing files predating this migration -- not migrated "
+          "logic):")
+    for file_rel, reason in GRANDFATHERED_SUBPROCESS_FILES:
+        print(f"  {file_rel} -- {reason}")
+
+    if py_allowed:
+        print(f"[check_no_test_execution_in_ci] {len(py_allowed)} Python-side "
+              "call(s) ALLOWED (grandfathered subprocess use or an "
+              "ALLOWED_CAPABILITY_PROBES basename):")
+        for file_rel, line_no, label, snippet in py_allowed:
+            print(f"  {file_rel}:{line_no}: [{label}] {snippet}")
+
+    if py_unresolved:
+        print(f"[check_no_test_execution_in_ci] {len(py_unresolved)} "
+              "UNRESOLVED argv[0] reference(s) (reported, not silently "
+              "passed -- a static resolver cannot prove these safe):")
+        for file_rel, line_no, snippet in py_unresolved:
+            print(f"  UNRESOLVED {file_rel}:{line_no}: {snippet}")
+
     if failures:
         print(f"[FAIL] {len(failures)} test-execution reference(s) found in "
-              "CI workflow(s) -- ceyx CI is compile-only by user decree "
-              "(2026-09-07). Building a test target/binary is fine; running "
-              "one is not:")
-        for wf_rel, line_no, label, line_text in failures:
-            print(f"  {wf_rel}:{line_no}: [{label}] {line_text}")
+              "CI workflow(s)/Python CI package -- ceyx CI is compile-only "
+              "by user decree (2026-09-07). Building a test target/binary "
+              "is fine; running one is not:")
+        for file_rel, line_no, label, line_text in failures:
+            print(f"  {file_rel}:{line_no}: [{label}] {line_text}")
         return 1
 
     print("[check_no_test_execution_in_ci] PASS -- no test-execution "
-          "commands found in any CI workflow `run:` step.")
+          "commands found in any CI workflow `run:` step or the Python CI "
+          "package.")
     return 0
 
 
