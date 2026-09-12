@@ -109,14 +109,25 @@ def _requires_arch(platform: str) -> bool:
 def _enforce_arch_requirement(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """C-G9, enforced post-parse: --arch is required for a platform that
     needs it, and rejected for one that doesn't. Applied to every command
-    carrying both --platform and --arch (i.e. every _PLATFORM_COMMANDS
-    entry). `parser.error()` prints usage and calls `sys.exit(2)`, matching
-    argparse's own native validation-failure shape.
+    carrying both --platform and --arch. `parser.error()` prints usage and
+    calls `sys.exit(2)`, matching argparse's own native validation-failure
+    shape.
+
+    Applicability is tested by PRESENCE of the `--arch` attribute
+    (`"arch" not in vars(args)`), not by its VALUE being `None` --
+    `getattr(args, "arch", None) is None` cannot distinguish "this command's
+    parser never defined --arch at all" (codec-probe: no --arch parameter
+    exists, C-G9 never applies) from "this command's parser defined --arch
+    and the caller omitted it" (min-runtime on macOS: that IS the violation
+    C-G9 exists to catch). Collapsing those two cases is exactly what made
+    `codec-probe --platform macos` demand a flag the module has no
+    parameter for -- a value-based check cannot see the difference; a
+    presence check can.
     """
-    if not hasattr(args, "platform"):
+    if not hasattr(args, "platform") or "arch" not in vars(args):
         return
     requires = _requires_arch(args.platform)
-    arch = getattr(args, "arch", None)
+    arch = args.arch
     if requires and arch is None:
         parser.error(f"--arch is required for --platform {args.platform!r}")
     if not requires and arch is not None:
@@ -180,10 +191,11 @@ def _enforce_codec_probe_flags(parser: argparse.ArgumentParser, args: argparse.N
         parser.error(f"--dist-dir is not accepted for --platform {platform!r}")
 
 
-def _add_platform_command(sub, name: str, help_text: str, extra=None):
+def _add_platform_command(sub, name: str, help_text: str, extra=None, with_arch: bool = True):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
-    sp.add_argument("--arch", default=None)
+    if with_arch:
+        sp.add_argument("--arch", default=None)
     if extra:
         extra(sp)
     return sp
@@ -240,7 +252,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--workspace", required=True)
         sp.add_argument("--dist-dir", default=None)
 
-    _add_platform_command(sub, "codec-probe", "run the functional codec probe", _codec_probe_extra)
+    # codec-probe carries NO --arch at all (same shape as stage/dt-needed):
+    # codec_probe.codec_probe() has no arch parameter, and the macOS
+    # per-arch distinction lives entirely in --dist-dir (the workflow's own
+    # matrix value), not in an --arch flag C-G9 would otherwise enforce.
+    _add_platform_command(
+        sub, "codec-probe", "run the functional codec probe", _codec_probe_extra, with_arch=False
+    )
 
     cv = _add_platform_command(
         sub, "capability-vector", "read/derive the codec or build capability vector"

@@ -316,12 +316,66 @@ class TestCodecProbeDispatch(unittest.TestCase):
         self.tmp = Path(self._tmpdir.name)
 
     def test_macos_missing_dist_dir_is_argparse_error(self):
+        # Regression pin: codec-probe carries NO --arch parameter at all
+        # (codec_probe() has no such argument), so this must fail naming
+        # --dist-dir specifically -- not --arch, which is what the generic
+        # C-G9 helper wrongly demanded before _add_platform_command grew
+        # `with_arch=False` and _enforce_arch_requirement grew a
+        # presence-based (not value-based) applicability check.
+        buf = io.StringIO()
         with self.assertRaises(SystemExit) as ctx:
-            with redirect_stderr(io.StringIO()):
+            with redirect_stderr(buf):
                 ci_entrypoint.main(
                     ["codec-probe", "--platform", "macos", "--workspace", str(self.tmp)]
                 )
         self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--dist-dir is required", buf.getvalue())
+        self.assertNotIn("--arch", buf.getvalue())
+
+    def test_codec_probe_has_no_arch_flag_at_all(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "codec-probe",
+                        "--platform",
+                        "macos",
+                        "--workspace",
+                        str(self.tmp),
+                        "--dist-dir",
+                        "x",
+                        "--arch",
+                        "arm64",
+                    ]
+                )
+        # argparse's own "unrecognized arguments" error, not C-G9's --
+        # codec-probe's parser never defines --arch, so passing it is a
+        # plain argparse failure, distinct from the C-G9 accept/reject path.
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_macos_with_dist_dir_reaches_the_module_not_argparse(self):
+        # The fixed shape: supplying --dist-dir (and no --arch at all) must
+        # get PAST argument parsing entirely and into codec_probe.py itself
+        # -- proven by main() returning normally (no SystemExit at all,
+        # i.e. no argparse rejection) rather than the pre-fix behaviour of
+        # a SystemExit(2) demanding --arch.
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(
+                [
+                    "codec-probe",
+                    "--platform",
+                    "macos",
+                    "--workspace",
+                    str(self.tmp),
+                    "--dist-dir",
+                    "x",
+                ]
+            )
+        self.assertIsInstance(rc, int)  # no SystemExit raised -- past argparse
+        self.assertNotIn("--dist-dir", buf_err.getvalue())
+        self.assertNotIn("--arch", buf_err.getvalue())
 
     def test_linux_rejects_dist_dir(self):
         with self.assertRaises(SystemExit) as ctx:
