@@ -13,8 +13,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # native/scripts/
 
 from ci import markerdiff, stage  # noqa: E402
+from ci import run as ci_run  # noqa: E402
 
 _GOLDEN_DIR = Path(__file__).resolve().parent / "golden" / "expected"
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_CI_ENTRYPOINT = _REPO_ROOT / "native" / "scripts" / "ci.py"
 
 
 def _emit(fn, *args, **kwargs):
@@ -157,6 +160,71 @@ class TestAssertStagedGroup(unittest.TestCase):
         emitted = markerdiff.extract(out)
         golden = (_GOLDEN_DIR / "assert-staged-group-linux.markers").read_text(encoding="utf-8")
         self.assertEqual(emitted, golden.splitlines())
+
+
+class TestStageBareScriptInvocation(unittest.TestCase):
+    """Owed item (leader ruling on WI-8 signoff): a genuine subprocess
+    invocation of ``python3 native/scripts/ci.py stage ...`` -- the exact
+    call shape linux_build.yml uses (WI-9, plan:1083/1085) -- not merely an
+    in-process call through ``ci_entrypoint.main()``. The rationale is
+    deliberately NOT delegated to the WI-9-dependency wiring commit's own
+    tests (which import ``ci_entrypoint`` and call ``main()`` in-process):
+    the author of the calling code is the worst person to be the sole
+    tester that the call works, and a module verified only through imports
+    has never actually been run (the exact defect that held push 2 for a
+    round). Routed through ``ci.run.run()``, NOT a raw ``subprocess.run()``
+    call in this file: `check_no_test_execution_in_ci.py`'s WI-5(b) AST
+    scan flags any `subprocess.*` call under `native/scripts/ci/**.py`
+    outside `run.py` as `[subprocess-outside-run]` regardless of whether
+    the file is a test -- unlike the sibling shell-prohibition lint, this
+    scan does NOT exempt `test_*.py` (found by running the guard locally
+    after a first draft used raw `subprocess.run` directly; see
+    tmp/verify/pyci-wi8-e2e-pytest.txt for the RED capture)."""
+
+    def _run_ci(self, *argv: str):
+        return ci_run.run([sys.executable, str(_CI_ENTRYPOINT), *argv], cwd=str(_REPO_ROOT))
+
+    def test_stage_and_assert_staged_group_bare_script(self) -> None:
+        base = Path(tempfile.mkdtemp())
+        native_dir = base / "native"
+        (native_dir / "build-linux").mkdir(parents=True)
+        artifact_dir = base / "artifacts"
+
+        import read_shipped_files
+
+        entry = read_shipped_files.load_declaration()["linux"]
+        for name in [entry["decoder"], *entry["companions"]]:
+            (native_dir / "build-linux" / name).write_bytes(b"")
+
+        result = self._run_ci(
+            "stage", "--platform", "linux",
+            "--artifact-dir", str(artifact_dir),
+            "--native-dir", str(native_dir),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((artifact_dir / "native" / entry["decoder"]).exists())
+
+        result2 = self._run_ci(
+            "assert-staged-group", "--platform", "linux",
+            "--artifact-dir", str(artifact_dir),
+        )
+        self.assertEqual(result2.returncode, 0, result2.stderr)
+        self.assertIn("ATOMIC_GROUP_COMPLETE=1 (EXPECTED_SET == STAGED_SET)", result2.stdout)
+        self.assertIn("SHARED_LIB_COUNT=1", result2.stdout)
+
+    def test_stage_bare_script_missing_source_exits_nonzero(self) -> None:
+        base = Path(tempfile.mkdtemp())
+        native_dir = base / "native"
+        (native_dir / "build-linux").mkdir(parents=True)
+        artifact_dir = base / "artifacts"
+        # No files written -- every declared source is missing.
+        result = self._run_ci(
+            "stage", "--platform", "linux",
+            "--artifact-dir", str(artifact_dir),
+            "--native-dir", str(native_dir),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::declared shipped file", result.stderr)
 
 
 if __name__ == "__main__":
