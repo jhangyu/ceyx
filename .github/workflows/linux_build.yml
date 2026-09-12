@@ -558,33 +558,7 @@ jobs:
       # native/deps/codec_expectations.toml; render_expectations.py --check
       # mechanically proves they have not drifted from the ledger.
       - name: Assert full codec capability vector via probe (G1)
-        run: |
-          SO="native/build-linux/libdng_decoder_native.so"
-          # LINUX-HEIF (round 3, 2nd failure layer, run 33454974377):
-          # dng_decoder_native.so's own $ORIGIN RPATH (ffi.cmake, task #18)
-          # resolves libheif.so.1 -- staged beside it in build-linux/ -- fine,
-          # but that RPATH does not transitively help libheif.so.1 find
-          # libde265.so.0: modern ld defaults to --enable-new-dtags, which
-          # emits a non-transitive DT_RUNPATH rather than the old transitive
-          # DT_RPATH, and heif.py's build_libheif()/build_libde265() give
-          # libheif.so.1 no RPATH of its own pointing at $ORIGIN. Exporting
-          # LD_LIBRARY_PATH here is the CI-only fallback that makes the
-          # dlopen()-based probe resolve regardless of that transitivity gap
-          # -- the shipped-artifact equivalent of this same gap is why task
-          # #18 (ship libheif.so/libde265.so with the Linux plugin) is a
-          # pre-tag blocker; this line does not fix the shipped bundle.
-          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/native/third_party/heif-dist-linux/lib:${LD_LIBRARY_PATH:-}"
-          set +e
-          python3 native/scripts/codec_capability_probe.py "$SO" \
-            --expect jpeg:encode=1 --expect jpeg:decode=0 \
-            --expect webp:encode=1 --expect webp:decode=1 \
-            --expect heic:encode=1 --expect heic:decode=1 \
-            --expect avif:encode=1 --expect avif:decode=1 \
-            --expect jxl:encode=1 --expect jxl:decode=1
-          rc=$?
-          set -e
-          echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
-          exit "${rc}"
+        run: python3 native/scripts/ci.py capability-vector --platform linux --kind codec --expect jpeg:encode=1 --expect jpeg:decode=0 --expect webp:encode=1 --expect webp:decode=1 --expect heic:encode=1 --expect heic:decode=1 --expect avif:encode=1 --expect avif:decode=1 --expect jxl:encode=1 --expect jxl:decode=1
 
       # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, linux-x86_64
       # leg. Vector transcribed from native/deps/codec_expectations.toml
@@ -595,17 +569,7 @@ jobs:
       # and FindLCMS2 silently degraded, so the prior ICC value here was a
       # runner-image accident.
       - name: Assert build capability vector via probe (S-E2)
-        run: |
-          SO="native/build-linux/libdng_decoder_native.so"
-          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/native/third_party/heif-dist-linux/lib:${LD_LIBRARY_PATH:-}"
-          set +e
-          python3 native/scripts/codec_capability_probe.py "$SO" \
-            --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 \
-            --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1
-          rc=$?
-          set -e
-          echo "BUILD_CAPABILITY_PROBE_RC=${rc}"
-          exit "${rc}"
+        run: python3 native/scripts/ci.py capability-vector --platform linux --kind build --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1
 
       # CI-T3 (task #11 spec; LINUX-HEIF round 3 adds the previously-held
       # Linux leg): functional capability-bitmask probe against the dist the
