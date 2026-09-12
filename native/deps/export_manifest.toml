@@ -63,10 +63,6 @@ id          = "raw"
 expected_on = []
 
 [[group]]
-id          = "raw_diagnostics"
-expected_on = ["macos", "linux", "windows", "android"]
-
-[[group]]
 id          = "sized_decode"
 expected_on = []
 
@@ -325,11 +321,4 @@ name       = "raw_decode_and_process"
 platforms  = "all"
 group      = "raw"
 source     = ""
-dart_sites = ["plugin/lib/src/dng_bindings.dart"]
-
-[[symbol]]
-name       = "raw_last_diagnostics"
-platforms  = "all"
-group      = "raw_diagnostics"
-source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]

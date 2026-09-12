@@ -123,7 +123,6 @@ def test_every_guarded_symbol_has_a_non_empty_group():
         "dng_decode_and_process_sized",
         "dng_debug_pool_checked_out",
         "raw_decode_and_process",
-        "raw_last_diagnostics",
         "dng_decode_configure_slots",
         "ceyx_probe_output_size",
         "ceyx_decode_into_buffer_oriented",

@@ -77,7 +77,6 @@ KNOWN_GROUP_IDS = {
     "dng_decode_and_process": "legacy_decode",
     "dng_debug_pool_checked_out": "debug_pool",
     "raw_decode_and_process": "raw",
-    "raw_last_diagnostics": "raw_diagnostics",
     "ceyx_probe_output_size": "wp10_decode_into_buffer",
     "ceyx_decode_into_buffer_oriented": "oriented",
     "ceyx_pool_aligned_alloc": "pool_aligned",
