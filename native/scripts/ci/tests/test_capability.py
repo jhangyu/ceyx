@@ -203,13 +203,14 @@ class ProbePlumbingTests(unittest.TestCase):
         # test_macos_run_env_has_no_library_path_var pins macOS's absence.
         before = os.environ.get("LD_LIBRARY_PATH")
         with mock.patch.object(cap._probe, "main", return_value=0):
-            cap.capability_vector("windows", "build", expect_cap=["ICC=0"])
+            _emit(cap.capability_vector, "windows", "build", expect_cap=["ICC=0"])
         after = os.environ.get("LD_LIBRARY_PATH")
         self.assertEqual(before, after)
 
     def test_macos_uses_dylib_path_not_targets_artifact(self):
         with mock.patch.object(cap._probe, "main", return_value=0) as fake_main:
-            cap.capability_vector(
+            _emit(
+                cap.capability_vector,
                 "macos", "codec", dylib_path="/tmp/fake.dylib", expect=["jpeg:encode=1"]
             )
         argv = fake_main.call_args[0][0]
@@ -220,14 +221,16 @@ class ProbePlumbingTests(unittest.TestCase):
         with mock.patch.object(cap._probe, "main", return_value=0):
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_json = str(Path(tmp) / "out" / "capability.json")
-                cap.capability_vector(
+                _emit(
+                    cap.capability_vector,
                     "windows", "codec", expect=["jpeg:encode=1"], json_out=tmp_json
                 )
                 self.assertTrue(Path(tmp_json).parent.is_dir())
 
     def test_json_out_flag_forwarded_to_probe_argv(self):
         with mock.patch.object(cap._probe, "main", return_value=0) as fake_main:
-            cap.capability_vector(
+            _emit(
+                cap.capability_vector,
                 "windows", "codec", expect=["jpeg:encode=1"],
                 json_out="native/scripts/deps/probe/capability.json",
             )
@@ -238,13 +241,13 @@ class ProbePlumbingTests(unittest.TestCase):
 
     def test_linux_has_no_json_out_flag_when_not_given(self):
         with mock.patch.object(run_module, "run", side_effect=_fake_run_ok) as fake_run:
-            cap.capability_vector("linux", "codec", expect=["jpeg:encode=1"])
+            _emit(cap.capability_vector, "linux", "codec", expect=["jpeg:encode=1"])
         argv = fake_run.call_args[0][0]
         self.assertNotIn("--json-out", argv)
 
     def test_linux_argv_is_python_plus_probe_script_plus_real_args(self):
         with mock.patch.object(run_module, "run", side_effect=_fake_run_ok) as fake_run:
-            cap.capability_vector("linux", "codec", expect=["jpeg:encode=1"])
+            _emit(cap.capability_vector, "linux", "codec", expect=["jpeg:encode=1"])
         argv = fake_run.call_args[0][0]
         self.assertEqual(argv[0], sys.executable)
         self.assertTrue(argv[1].endswith("codec_capability_probe.py"))
