@@ -322,16 +322,19 @@ def dispatch(args: argparse.Namespace) -> int:
             ["--baseline", args.baseline, "--candidate", args.candidate]
             + (["--leg", args.leg] if args.leg else [])
         )
-    # Push 3 (WI-7/WI-8) wires these eight commands for Linux ONLY -- the
+    # Push 3 (WI-7/WI-8) wires seven of these commands for Linux ONLY -- the
     # other legs' twins land in later pushes (verify-artifact: WI-19/20/21,
     # push 7). Falling through to `_not_yet()` for any other --platform
     # keeps this push honest instead of calling into a module against
     # `targets.py` data (e.g. macOS's `artifact_path: None`) that push 3
-    # never populated for it.
+    # never populated for it. `min-runtime` is NOT one of them as of push 6
+    # (WI-16b): `ci/minruntime.py` was generalised to all four platforms via
+    # `targets.spec(platform)["min_runtime_source"]`, so it dispatches to its
+    # own module below regardless of platform, same as `assert-orientation`
+    # and `codec-probe` before it.
     _linux_only_commands = {
         "verify-artifact",
         "import-closure",
-        "min-runtime",
         "assert-exports",
         "assert-no-avx512",
         "stage",
@@ -349,9 +352,9 @@ def dispatch(args: argparse.Namespace) -> int:
 
         return verify_artifact.import_closure(args.platform)
     if args.command == "min-runtime":
-        import ci.verify_artifact as verify_artifact
+        import ci.minruntime as minruntime
 
-        return verify_artifact.min_runtime(args.platform, args.arch)
+        return minruntime.min_runtime(args.platform, args.arch)
     if args.command == "assert-exports":
         import ci.verify_artifact as verify_artifact
 

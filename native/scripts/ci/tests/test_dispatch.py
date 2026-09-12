@@ -109,12 +109,18 @@ class TestArchGate(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
     def test_min_runtime_macos_with_arch_is_accepted_by_argparse(self):
-        # Not yet implemented (P0), but must get PAST arg parsing to the
-        # "not implemented" path, not fail as an argparse error.
-        rc = ci_entrypoint.main(
-            ["min-runtime", "--platform", "macos", "--arch", "arm64"]
-        )
-        self.assertEqual(rc, 2)  # _not_yet(), not an argparse SystemExit
+        # Push 6 (WI-16b): min-runtime is no longer P0-scaffolding for
+        # macOS -- it must get PAST arg parsing AND past `_not_yet()` into
+        # ci/minruntime.py itself. On this dev machine there is no staged
+        # macOS .dylib, so the module fails cleanly (a handled RC, not the
+        # P0 "not implemented yet" message and not an argparse SystemExit).
+        buf_err = io.StringIO()
+        with redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(
+                ["min-runtime", "--platform", "macos", "--arch", "arm64"]
+            )
+        self.assertIsInstance(rc, int)
+        self.assertNotIn("not implemented yet", buf_err.getvalue())
 
 
 class TestPushThreeDispatch(unittest.TestCase):
@@ -439,6 +445,65 @@ class TestCodecProbeDispatch(unittest.TestCase):
                 ["codec-probe", "--platform", "linux", "--workspace", str(self.tmp)]
             )
         self.assertNotEqual(rc, 0)
+
+
+class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
+    """Push 6, WI-16b's follow-on: `min-runtime` dispatches to the new
+    `ci/minruntime.py` (four-platform `min_runtime_source` dispatch), not
+    the old linux-only `ci/verify_artifact.py:min_runtime`, and is no
+    longer gated by `_linux_only_commands` -- pinning both the widening
+    (non-linux platforms now reach the module) and that the widening is
+    narrow (a genuinely-still-linux-only sibling command is untouched)."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp = Path(self._tmpdir.name)
+
+    def test_windows_min_runtime_reaches_module_not_not_yet(self):
+        # No staged .dll on this machine: the module must fail cleanly
+        # (missing artifact), never emit `_not_yet()`'s P0-scaffolding
+        # message -- proves dispatch reached ci/minruntime.py at all.
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(["min-runtime", "--platform", "windows"])
+        self.assertNotIn("not implemented yet", buf_err.getvalue())
+        self.assertIsInstance(rc, int)
+
+    def test_android_min_runtime_reaches_module_not_not_yet(self):
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(["min-runtime", "--platform", "android"])
+        self.assertNotIn("not implemented yet", buf_err.getvalue())
+        self.assertIsInstance(rc, int)
+
+    def test_macos_min_runtime_reaches_module_not_not_yet(self):
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(
+                ["min-runtime", "--platform", "macos", "--arch", "arm64"]
+            )
+        self.assertNotIn("not implemented yet", buf_err.getvalue())
+        self.assertIsInstance(rc, int)
+
+    def test_a_still_linux_only_sibling_command_is_still_rejected_off_platform(self):
+        # Narrowness check: removing `min-runtime` from `_linux_only_commands`
+        # must not have widened (or accidentally emptied) the set itself --
+        # `import-closure` is still a genuinely linux-only module (no other
+        # platform's twin exists yet, WI-19/20/21 land those in push 7) and
+        # takes no extra required flags, so this isolates the
+        # `_linux_only_commands` gate itself from any command-specific
+        # required-flag argparse error.
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = ci_entrypoint.main(["import-closure", "--platform", "windows"])
+        self.assertEqual(rc, 2)
+        self.assertIn("not implemented yet", buf.getvalue())
 
 
 class TestPackageImportResolution(unittest.TestCase):
