@@ -20,6 +20,7 @@ from unittest import mock
 # identity-order-dependent and must not be used under ci/tests/.
 from .. import check_shell_prohibition as guard
 from .. import allowlist
+from .. import run as ci_run
 
 
 ONE_LINE_WORKFLOW = """\
@@ -168,6 +169,28 @@ class TestGuardMatchesRealRepo(unittest.TestCase):
         # patterns are extension-exact, not "contains .sh".
         for pattern in guard._SHELL_GLOB_PATTERNS:
             self.assertFalse(str(guard.__file__).endswith(pattern.lstrip("*")))
+
+
+class TestBareScriptInvocation(unittest.TestCase):
+    """Round-2 signoff blocker: every prior test invoked the guard by
+    IMPORTING it, so a defect that only manifests when the module is run as
+    a bare script (no parent package -- relative imports hard-fail) was
+    invisible to all 73 of them. `.github/workflows/build.yml` invokes it
+    exactly this way:
+
+        run: python3 native/scripts/ci/check_shell_prohibition.py
+
+    This test shells out to that EXACT command via `ci.run.run()` (the
+    sanctioned subprocess path, list argv, shell=False) and would fail if
+    the dual-mode import guard (`if not __package__: ... else: ...` at the
+    top of check_shell_prohibition.py) were ever removed or broken again.
+    """
+
+    def test_bare_script_invocation_matches_ci_exactly(self):
+        script = guard.REPO_ROOT / "native" / "scripts" / "ci" / "check_shell_prohibition.py"
+        result = ci_run.run(["python3", str(script)], cwd=guard.REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SHELL_PROHIBITION_RESULT=PASS", result.stdout)
 
 
 if __name__ == "__main__":

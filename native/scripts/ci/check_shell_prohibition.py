@@ -38,17 +38,46 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
 
-# Relative imports, not `import ci.allowlist`/`import ci.workflow_scan`:
-# this package is importable under TWO module identities (`ci.*` when
-# native/scripts is the top-level dir, as `ci.py selftest` sets up, and
-# `native.scripts.ci.*` when the repo root is -- e.g. `python3 -m unittest
-# discover -s native/scripts/ci/tests -t .`). An absolute `import ci.x`
-# binds whichever identity happened to be resolved first and is therefore
-# import-order-dependent; a relative import resolves against THIS module's
-# own real package at runtime under either identity (push-1 gate finding,
-# tmp/verify/pyci-push1-gate-VERDICT.md).
-from . import allowlist  # noqa: E402
-from . import workflow_scan  # noqa: E402
+# Dual-mode import, deliberately -- read this before changing it.
+#
+# This module is invoked TWO different ways and both must work:
+#   (a) as a bare script -- `python3 native/scripts/ci/check_shell_prohibition.py`,
+#       which is exactly what .github/workflows/build.yml's "verify-native-tests"
+#       job runs. A bare script has NO parent package (`__package__` is "" or
+#       None) -- Python puts the script's OWN directory (native/scripts/ci/) on
+#       sys.path[0], not native/scripts/, so `ci` is not importable as a
+#       package from there, and a *relative* import (`from . import x`) is a
+#       hard `ImportError: attempted relative import with no known parent
+#       package` in this mode. There is no such thing as a relative import
+#       with no package.
+#   (b) as a package member -- imported by `ci.py selftest`'s in-process
+#       discovery (identity `ci.*`), OR by `python3 -m unittest discover
+#       -s native/scripts/ci/tests -t .` (identity `native.scripts.ci.*`).
+#       Here a *relative* import is required, not merely permitted: an
+#       absolute `import ci.x` binds whichever identity happened to load
+#       first in THIS PROCESS and silently succeeds against the wrong copy
+#       of the module for any OTHER identity active in the same process
+#       (push-1's near-miss, tmp/verify/pyci-push1-gate-VERDICT.md -- a
+#       `mock.patch("ci.report.error")` bound to a different module object
+#       than the one the code under test actually imported).
+#
+# These two failure modes point in OPPOSITE directions (absolute imports
+# break (b), relative imports break (a)), so the fix is not "pick one" but
+# "detect which mode this run is in and import accordingly". `__package__`
+# is the discriminator: it is falsy ONLY for a bare-script run, in every
+# package-member mode it is a real (possibly empty-string-for-top-level-only
+# in unusual layouts, but never here) dotted name. This does NOT reintroduce
+# the push-1 defect: that defect was two DIFFERENT identities of the SAME
+# module coexisting in ONE process; a bare-script invocation is always a
+# brand-new interpreter process with exactly one identity for this module
+# (whatever `import ci.x` resolves to right here, right now), so there is no
+# second copy for anything to disagree with.
+if not __package__:
+    import ci.allowlist as allowlist  # noqa: E402
+    import ci.workflow_scan as workflow_scan  # noqa: E402
+else:
+    from . import allowlist  # noqa: E402
+    from . import workflow_scan  # noqa: E402
 
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
@@ -84,7 +113,10 @@ def _git_ignored_relpaths(repo_root: Path, candidates: list) -> set:
     """
     if not candidates:
         return set()
-    from . import run as ci_run  # relative -- see the import-order note above
+    if not __package__:
+        import ci.run as ci_run  # noqa
+    else:
+        from . import run as ci_run  # noqa
 
     probe = ci_run.run(["git", "-C", os.fspath(repo_root), "rev-parse", "--is-inside-work-tree"])
     if probe.returncode != 0:
