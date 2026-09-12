@@ -474,34 +474,54 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         self.addCleanup(self._tmpdir.cleanup)
         self.tmp = Path(self._tmpdir.name)
 
-    def test_windows_min_runtime_reaches_module_not_not_yet(self):
-        # No staged .dll on this machine: the module must fail cleanly
-        # (missing artifact), never emit `_not_yet()`'s P0-scaffolding
-        # message -- proves dispatch reached ci/minruntime.py at all.
-        buf_out = io.StringIO()
-        buf_err = io.StringIO()
-        with redirect_stdout(buf_out), redirect_stderr(buf_err):
-            rc = ci_entrypoint.main(["min-runtime", "--platform", "windows"])
-        self.assertNotIn("not implemented yet", buf_err.getvalue())
-        self.assertIsInstance(rc, int)
+    def _assert_dispatches_to_minruntime_not_verify_artifact(self, argv, expected_call):
+        # `assertNotIn("not implemented yet", ...)` / `assertIsInstance(rc,
+        # int)` were proved too weak to guard this: repointing dispatch at
+        # the old `ci.verify_artifact.min_runtime` twin left the windows
+        # variant of this test GREEN (that twin doesn't crash for windows,
+        # returns a plausible int, prints no "not implemented yet" text --
+        # the assertions cannot tell the twin from the real module). The
+        # android/macos variants happened to ERROR under that same
+        # regression, but only because `verify_artifact.min_runtime`'s
+        # `_artifact_path()` returns `None` off-linux and `run.run_to_file`
+        # chokes on it -- a coincidence of the TWIN's internals, not a
+        # property of the test, and a future None-handling tidy-up there
+        # would silently convert those into windows' same blind spot. A
+        # spy on BOTH modules is the only two-sided check that actually
+        # states "reaches the new module, not the twin": real dispatch is
+        # never executed, so no live child process runs (no marker leak,
+        # matching the earlier fix in this same class) and no platform-
+        # specific crash shape can hide the answer.
+        from unittest import mock
 
-    def test_android_min_runtime_reaches_module_not_not_yet(self):
-        buf_out = io.StringIO()
-        buf_err = io.StringIO()
-        with redirect_stdout(buf_out), redirect_stderr(buf_err):
-            rc = ci_entrypoint.main(["min-runtime", "--platform", "android"])
-        self.assertNotIn("not implemented yet", buf_err.getvalue())
-        self.assertIsInstance(rc, int)
+        import ci.minruntime as minruntime_module
+        import ci.verify_artifact as verify_artifact_module
 
-    def test_macos_min_runtime_reaches_module_not_not_yet(self):
-        buf_out = io.StringIO()
-        buf_err = io.StringIO()
-        with redirect_stdout(buf_out), redirect_stderr(buf_err):
-            rc = ci_entrypoint.main(
-                ["min-runtime", "--platform", "macos", "--arch", "arm64"]
-            )
-        self.assertNotIn("not implemented yet", buf_err.getvalue())
-        self.assertIsInstance(rc, int)
+        with mock.patch.object(
+            minruntime_module, "min_runtime", return_value=0
+        ) as mocked_new, mock.patch.object(
+            verify_artifact_module, "min_runtime", return_value=0
+        ) as mocked_old:
+            rc = ci_entrypoint.main(argv)
+        self.assertEqual(rc, 0)
+        mocked_new.assert_called_once_with(*expected_call)
+        mocked_old.assert_not_called()
+
+    def test_windows_min_runtime_reaches_minruntime_not_verify_artifact(self):
+        self._assert_dispatches_to_minruntime_not_verify_artifact(
+            ["min-runtime", "--platform", "windows"], ("windows", None)
+        )
+
+    def test_android_min_runtime_reaches_minruntime_not_verify_artifact(self):
+        self._assert_dispatches_to_minruntime_not_verify_artifact(
+            ["min-runtime", "--platform", "android"], ("android", None)
+        )
+
+    def test_macos_min_runtime_reaches_minruntime_not_verify_artifact(self):
+        self._assert_dispatches_to_minruntime_not_verify_artifact(
+            ["min-runtime", "--platform", "macos", "--arch", "arm64"],
+            ("macos", "arm64"),
+        )
 
     def test_a_still_linux_only_sibling_command_is_still_rejected_off_platform(self):
         # Narrowness check: removing `min-runtime` from `_linux_only_commands`
