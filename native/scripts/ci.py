@@ -87,6 +87,14 @@ _PLATFORM_COMMANDS = (
 # be one to schedule.
 _CODEC_PROBE_PLATFORMS = frozenset({"linux", "macos", "windows"})
 
+# Same PERMANENT shape as `_CODEC_PROBE_PLATFORMS`: android has no
+# capability-vector leg at all (capability.py's own docstring --
+# android_build.yml:216's S-E2 step is a single `echo` SKIP line, not a
+# `codec_capability_probe.py` call), verified by two independent greps
+# before capability.py was written. There is no android twin scheduled,
+# ever -- do not merge this with `_linux_only_commands` below.
+_CAPABILITY_VECTOR_PLATFORMS = frozenset({"linux", "macos", "windows"})
+
 # Subcommands that never take --platform at all.
 _PLATFORMLESS_COMMANDS = (
     "selftest",
@@ -191,6 +199,44 @@ def _enforce_codec_probe_flags(parser: argparse.ArgumentParser, args: argparse.N
         parser.error(f"--dist-dir is not accepted for --platform {platform!r}")
 
 
+def _enforce_capability_vector_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """capability-vector only: `--source configure-log` is accepted ONLY
+    for `--platform macos` (the cross leg -- capability.py's own
+    docstring/ValueError), and rejects `--dylib-path`/`--json-out` with it
+    (the cross leg's configure-log check writes no JSON and needs no
+    dylib path at all). `--source probe` (the default) requires
+    `--dylib-path` for macOS (its `artifact_path` is `None` in targets.py,
+    mirroring orientation.py's macOS shape) and rejects it for every other
+    platform. Same reject-not-ignore posture as C-G9/_enforce_orientation_
+    flags/_enforce_codec_probe_flags: capability.capability_vector() itself
+    already raises ValueError on each of these, so this is an earlier,
+    cleaner argparse-layer rejection -- not a redundant one, both stay.
+    Deliberately does NOT enforce `--platform` itself (android's permanent
+    exclusion is handled in dispatch(), mirroring `_CODEC_PROBE_PLATFORMS`,
+    not here -- this function only concerns the source/dylib-path/json-out
+    combination, which is orthogonal to which platforms exist at all)."""
+    if args.command != "capability-vector":
+        return
+    platform = args.platform
+    source = args.source
+    dylib_path = args.dylib_path
+    json_out = args.json_out
+
+    if source == "configure-log":
+        if platform != "macos":
+            parser.error("--source configure-log is only accepted for --platform macos")
+        if dylib_path is not None:
+            parser.error("--dylib-path is not accepted with --source configure-log")
+        if json_out is not None:
+            parser.error("--json-out is not accepted with --source configure-log")
+    else:  # source == "probe" (the default)
+        if platform == "macos":
+            if dylib_path is None:
+                parser.error("--dylib-path is required for --platform macos --source probe")
+        elif dylib_path is not None:
+            parser.error(f"--dylib-path is not accepted for --platform {platform!r}")
+
+
 def _add_platform_command(sub, name: str, help_text: str, extra=None, with_arch: bool = True):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
@@ -260,11 +306,38 @@ def build_parser() -> argparse.ArgumentParser:
         sub, "codec-probe", "run the functional codec probe", _codec_probe_extra, with_arch=False
     )
 
+    def _capability_vector_extra(sp):
+        # `--dylib-path`: macOS-only (source=probe), same shape as
+        # assert-orientation's macOS flag -- macOS's `artifact_path` is
+        # `None` in targets.py (two per-arch matrix legs), so the caller
+        # passes the real path in. `--expect`/`--expect-cap`: repeatable,
+        # forwarded to codec_capability_probe.py verbatim (C-G18: these
+        # tokens stay in YAML so render_expectations.py's step_anchor scan
+        # can attribute them to the calling step). `--json-out`: present
+        # on macOS-native/windows callers, absent on linux (capability.py
+        # docstring divergence 1) -- optional here, not a targets.py fact.
+        sp.add_argument("--dylib-path", default=None)
+        sp.add_argument("--expect", action="append", default=[])
+        sp.add_argument("--expect-cap", action="append", default=[])
+        sp.add_argument("--json-out", default=None)
+        sp.add_argument("--workspace", default=".")
+        sp.add_argument("--log-path", default="cross_stage2_build.log")
+
+    # capability-vector carries NO --arch (same shape as codec-probe):
+    # capability.capability_vector() accepts `arch` for CLI-shape
+    # uniformity but never reads it (verified against all three legs'
+    # real invocations, capability.py module docstring) -- exposing an
+    # argparse flag the module ignores is exactly the accept-and-ignore
+    # posture rejected for codec-probe's --dist-dir; not repeating it here.
     cv = _add_platform_command(
-        sub, "capability-vector", "read/derive the codec or build capability vector"
+        sub,
+        "capability-vector",
+        "read/derive the codec or build capability vector",
+        _capability_vector_extra,
+        with_arch=False,
     )
     cv.add_argument("--kind", required=True, choices=["codec", "build"])
-    cv.add_argument("--source", default=None, choices=["probe", "configure-log"])
+    cv.add_argument("--source", default="probe", choices=["probe", "configure-log"])
 
     def _stage_extra(sp):
         sp.add_argument("--artifact-dir", required=True)
@@ -406,6 +479,32 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.codec_probe as codec_probe
 
         return codec_probe.codec_probe(args.platform, args.workspace, dist_dir=args.dist_dir)
+    if args.command == "capability-vector":
+        # `_CAPABILITY_VECTOR_PLATFORMS` is PERMANENT, same shape as
+        # `_CODEC_PROBE_PLATFORMS`: android has no capability-vector step
+        # at all (capability.py docstring; android_build.yml:216 is an
+        # honest SKIP echo, not a probe call) -- not "not yet migrated".
+        if args.platform not in _CAPABILITY_VECTOR_PLATFORMS:
+            print(
+                f"::error::capability-vector has no --platform {args.platform!r} leg -- "
+                "android has no capability-vector step, permanently "
+                "(capability.py docstring: its S-E2 step is an honest SKIP echo)",
+                file=sys.stderr,
+            )
+            return 2
+        import ci.capability as capability
+
+        return capability.capability_vector(
+            args.platform,
+            args.kind,
+            source=args.source,
+            dylib_path=args.dylib_path,
+            expect=args.expect,
+            expect_cap=args.expect_cap,
+            json_out=args.json_out,
+            workspace=args.workspace,
+            log_path=args.log_path,
+        )
     if args.command in _PLATFORM_COMMANDS or args.command in _PLATFORMLESS_COMMANDS:
         return _not_yet(args.command)
     return 2
@@ -435,6 +534,7 @@ def main(argv=None) -> int:
         _enforce_arch_requirement(parser, args)
         _enforce_orientation_flags(parser, args)
         _enforce_codec_probe_flags(parser, args)
+        _enforce_capability_vector_flags(parser, args)
     return dispatch(args)
 
 

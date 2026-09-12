@@ -505,6 +505,135 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("not implemented yet", buf.getvalue())
 
+    def test_min_runtime_dispatch_calls_minruntime_module_not_verify_artifact(self):
+        # The regression this whole class exists to prevent: a behavioural
+        # test on linux alone cannot distinguish `ci.minruntime.min_runtime`
+        # from `ci.verify_artifact.min_runtime` -- same name, same
+        # signature, both produce a plausible-looking int on linux. Spy on
+        # BOTH modules' attributes directly so a future wrong import (a
+        # revert, a merge conflict resolved the wrong way) fails loudly
+        # here instead of silently reproducing the exact bug this task
+        # fixed.
+        from unittest import mock
+
+        import ci.minruntime as minruntime_module
+        import ci.verify_artifact as verify_artifact_module
+
+        with mock.patch.object(
+            minruntime_module, "min_runtime", return_value=0
+        ) as mocked_new, mock.patch.object(
+            verify_artifact_module, "min_runtime", return_value=0
+        ) as mocked_old:
+            rc = ci_entrypoint.main(["min-runtime", "--platform", "linux"])
+        self.assertEqual(rc, 0)
+        mocked_new.assert_called_once_with("linux", None)
+        mocked_old.assert_not_called()
+
+
+class TestCapabilityVectorDispatch(unittest.TestCase):
+    """Push 6: capability-vector is a three-leg command (linux/macos/windows,
+    same PERMANENT android exclusion shape as codec-probe), no --arch flag
+    at all, with `--source configure-log` accepted only for macOS and
+    `--dylib-path` required for macOS's `source=probe` (default) leg --
+    enforced at the CLI layer in addition to capability.py's own
+    ValueErrors, mirroring _enforce_orientation_flags/_enforce_codec_probe_
+    flags."""
+
+    def test_android_is_rejected_permanently_not_via_not_yet(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = ci_entrypoint.main(
+                ["capability-vector", "--platform", "android", "--kind", "codec"]
+            )
+        self.assertEqual(rc, 2)
+        self.assertNotIn("not implemented yet", buf.getvalue())
+        self.assertIn("no capability-vector step", buf.getvalue())
+
+    def test_capability_vector_has_no_arch_flag_at_all(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "capability-vector",
+                        "--platform",
+                        "linux",
+                        "--kind",
+                        "codec",
+                        "--arch",
+                        "x86_64",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_macos_probe_missing_dylib_path_is_argparse_error(self):
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(buf):
+                ci_entrypoint.main(
+                    ["capability-vector", "--platform", "macos", "--kind", "codec"]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--dylib-path is required", buf.getvalue())
+
+    def test_configure_log_rejects_non_macos(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "capability-vector",
+                        "--platform",
+                        "linux",
+                        "--kind",
+                        "codec",
+                        "--source",
+                        "configure-log",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_configure_log_rejects_dylib_path(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "capability-vector",
+                        "--platform",
+                        "macos",
+                        "--kind",
+                        "codec",
+                        "--source",
+                        "configure-log",
+                        "--dylib-path",
+                        "x",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_linux_probe_reaches_module_not_not_yet(self):
+        # No staged .so on this machine: the module's own probe must fail
+        # cleanly (missing artifact), never emit `_not_yet()`'s
+        # P0-scaffolding message -- proves dispatch reached
+        # ci/capability.py, same discriminator shape as the codec-probe/
+        # orientation dispatch tests. A real --expect token is supplied so
+        # the failure is capability.py's artifact-missing path, not
+        # codec_capability_probe.py's own inner argparse usage error.
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(
+                [
+                    "capability-vector",
+                    "--platform",
+                    "linux",
+                    "--kind",
+                    "codec",
+                    "--expect",
+                    "HEIF:decode",
+                ]
+            )
+        self.assertNotIn("not implemented yet", buf_err.getvalue())
+        self.assertIsInstance(rc, int)
+
 
 class TestPackageImportResolution(unittest.TestCase):
     def test_package_import_resolves_to_package_not_entrypoint(self):
