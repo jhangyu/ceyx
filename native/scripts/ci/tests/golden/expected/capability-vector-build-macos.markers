@@ -1,8 +1,0 @@
-OK        capability:ICC want=0 got=0
-OK        capability:OPENMP want=1 got=1
-OK        capability:HEIF want=1 got=1
-OK        capability:WEBP want=1 got=1
-OK        capability:JXL want=1 got=1
-OK        capability:RAW want=1 got=1
-all 6 capability expectations hold
-BUILD_CAPABILITY_PROBE_RC=0
