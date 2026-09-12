@@ -84,6 +84,57 @@ _WORKSPACE_PATH_RE = re.compile(
 #     plan forbids -- it would erase the baseline's value as a fixed point.
 OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
 
+# EXPECTED_ADDITIONS ledger: a named, printed record of markers that a
+# SPECIFIC push deliberately introduced (a new guard printing a new marker
+# for the first time). AC-2's "zero deltas" contract would otherwise fail
+# every push that adds a guard, for succeeding at its own job -- push 2
+# introduced SHELL_ALLOWLIST_SIZE and SHELL_PROHIBITION_RESULT on the
+# `nativetests` leg and neither exists in the r7/d33cc607 baseline, so both
+# show up as `+1` with no corresponding baseline line.
+#
+# This is NOT the same relief as OBSERVABILITY_MARKERS: an observability
+# entry tolerates the VALUE varying forever (nothing in this repo controls
+# it). Here the repository controls the value completely -- each entry
+# records the EXACT full normalized line a push introduced, and only that
+# exact line is treated as an expected addition. A different value for the
+# same key (e.g. a wrong/unratcheted SHELL_ALLOWLIST_SIZE) is NOT on the
+# ledger and therefore still FAILS as an ordinary unlisted addition -- this
+# is what keeps SHELL_ALLOWLIST_SIZE an ASSERTION marker with a deliberately
+# updated expected value, not an observability marker: the allowlist ratchet
+# is the entire point of the shell-prohibition guard (WI-4), and normalising
+# its count away would let ten entries be added back unnoticed.
+#
+# Each ratchet updates its own ledger entry's `line` in the same commit that
+# shrinks the allowlist (WI-9 is first: 119 -> 113) -- coordinated through
+# the leader per push, same discipline as the allowlist itself.
+#
+# A listed marker that later disappears is NOT specially exempted: a
+# negative delta (`-N`) is ALWAYS a hard FAIL, for every marker, with no
+# exception -- that is the one invariant AC-2 exists to hold, and this
+# ledger only ever suppresses a `+N` match against its own EXACT recorded
+# line, never a `-N`.
+#
+# Rejected alternatives (do not re-propose):
+#   - re-baselining from the new green run: discards the d33cc607 anchor,
+#     which is the only thing that makes "nothing pre-existing disappeared"
+#     provable; the test plan forbids normalising a diff away this way.
+#   - a blanket `+N` tolerance for any new marker: would hide a duplicated
+#     `print`/`tee` defect (the exact shape C-G1 exists to catch) behind the
+#     same relief meant for a single, named, reviewed addition.
+class _ExpectedAddition:
+    __slots__ = ("leg", "line", "source")
+
+    def __init__(self, leg: str, line: str, source: str) -> None:
+        self.leg = leg
+        self.line = line
+        self.source = source
+
+
+EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=119", "push 2 / b88c41a4"),
+    _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
+)
+
 _KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")
 
 
@@ -123,7 +174,7 @@ def counts(lines: list[str]) -> collections.Counter:
     return collections.Counter(lines)
 
 
-def diff(baseline_text: str, candidate_text: str) -> tuple[int, list[str]]:
+def diff(baseline_text: str, candidate_text: str, leg: str | None = None) -> tuple[int, list[str]]:
     """Multiset-diffs the marker lines extracted from ``baseline_text``
     against ``candidate_text``. Returns ``(rc, report_lines)`` where
     ``rc != 0`` iff any token's occurrence count differs.
@@ -158,10 +209,20 @@ def diff(baseline_text: str, candidate_text: str) -> tuple[int, list[str]]:
 
     baseline_counts = counts(baseline_assertion)
     candidate_counts = counts(candidate_assertion)
+    ledger_lines_for_leg = {
+        entry.line for entry in EXPECTED_ADDITIONS if leg is not None and entry.leg == leg
+    }
     all_tokens = set(baseline_counts) | set(candidate_counts)
     deltas = []
     for token in sorted(all_tokens):
         delta = candidate_counts[token] - baseline_counts[token]
+        if delta > 0 and token in ledger_lines_for_leg:
+            # An expected addition: this exact line is on the ledger for
+            # this leg, and it is a POSITIVE delta (a `-N` is never
+            # suppressed, per the invariant above). Reported separately by
+            # the caller via expected_addition_report_lines(), not counted
+            # here.
+            continue
         if delta != 0:
             sign = "+" if delta > 0 else "-"
             deltas.append(f"{sign}{abs(delta)} {token}")
@@ -186,20 +247,34 @@ def observability_report_lines() -> list[str]:
     ]
 
 
+def expected_addition_report_lines(leg: str | None) -> list[str]:
+    """Returns one printable line per EXPECTED_ADDITIONS ledger entry scoped
+    to ``leg``, for visibility in the marker-diff output -- printed on every
+    run regardless of whether the addition is currently present, exactly
+    like observability_report_lines()."""
+    return [
+        f"EXPECTED_ADDITION {entry.line} @ {entry.leg} -- {entry.source}"
+        for entry in EXPECTED_ADDITIONS
+        if leg is not None and entry.leg == leg
+    ]
+
+
 def main(argv=None) -> int:
     from . import report
 
     parser = argparse.ArgumentParser(prog="marker-diff")
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--candidate", required=True)
-    parser.add_argument("--leg", default="")
+    parser.add_argument("--leg", default=None)
     args = parser.parse_args(argv)
 
     baseline_text = Path(args.baseline).read_text(encoding="utf-8")
     candidate_text = Path(args.candidate).read_text(encoding="utf-8")
-    rc, deltas = diff(baseline_text, candidate_text)
+    rc, deltas = diff(baseline_text, candidate_text, leg=args.leg)
 
     for line in observability_report_lines():
+        report.plain(line)
+    for line in expected_addition_report_lines(args.leg):
         report.plain(line)
     for line in deltas:
         report.plain(line)

@@ -128,6 +128,78 @@ class ObservabilityMarkerTests(unittest.TestCase):
             c_path.unlink(missing_ok=True)
 
 
+class ExpectedAdditionsLedgerTests(unittest.TestCase):
+    """WI-follow-up: a push that ADDS a guard/marker must not fail AC-2 for
+    succeeding at its own job, while an unlisted addition or any removal
+    still must."""
+
+    def test_ledger_addition_is_not_a_delta_for_matching_leg(self):
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = (
+            "EXPORTS_RESULT=PASS\n"
+            "SHELL_ALLOWLIST_SIZE=119\n"
+            "SHELL_PROHIBITION_RESULT=PASS\n"
+        )
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
+        self.assertEqual(rc, 0)
+        self.assertEqual(deltas, [])
+
+    def test_ledger_addition_still_a_delta_for_non_matching_leg(self):
+        # Same lines, but the leg does not match any ledger entry -- the
+        # ledger is scoped, not global.
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=119\n"
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="linux")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("+1 SHELL_ALLOWLIST_SIZE=119", deltas)
+
+    def test_unlisted_marker_addition_still_fails(self):
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\nSOME_NEW_MARKER=1\n"
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("+1 SOME_NEW_MARKER=1", deltas)
+
+    def test_listed_marker_disappearing_is_a_hard_failure(self):
+        # If a ledger line was already present in the baseline (i.e. this
+        # simulates a later state where it has "graduated" into the
+        # anchor) and vanishes from the candidate, that is a `-N` -- never
+        # suppressed, regardless of the ledger.
+        baseline = "SHELL_ALLOWLIST_SIZE=119\n"
+        candidate = ""
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("-1 SHELL_ALLOWLIST_SIZE=119", deltas)
+
+    def test_ledger_value_changed_is_a_hard_failure_not_forgiven(self):
+        # This is the assertion-class proof: only the EXACT ledger line is
+        # forgiven. A different (unratcheted) value for the same key is an
+        # ordinary unlisted addition and still fails.
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=113\n"
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("+1 SHELL_ALLOWLIST_SIZE=113", deltas)
+
+    def test_expected_addition_report_lines_names_both_entries(self):
+        lines = markerdiff.expected_addition_report_lines("nativetests")
+        joined = "\n".join(lines)
+        self.assertIn("SHELL_ALLOWLIST_SIZE=119", joined)
+        self.assertIn("SHELL_PROHIBITION_RESULT=PASS", joined)
+
+    def test_expected_addition_report_lines_empty_for_other_leg(self):
+        self.assertEqual(markerdiff.expected_addition_report_lines("linux"), [])
+
+    def test_observability_split_unaffected_by_ledger(self):
+        # Regression pin: the ledger addition must not interact with the
+        # observability split built earlier.
+        baseline = "DLL_SIZE_BYTES=10035712\n"
+        candidate = "DLL_SIZE_BYTES=10049536\n"
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="windows")
+        self.assertEqual(rc, 0)
+        self.assertEqual(deltas, [])
+
+
 class MainCliTests(unittest.TestCase):
     def test_main_prints_pass_for_identical_files(self, ):
         import io
