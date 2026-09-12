@@ -182,14 +182,50 @@ jobs:
         # `sudo` is resolved conditionally rather than deleted outright so this
         # step also keeps working if the leg is ever moved back to a non-root
         # hosted runner.
+        #
+        # gcc-12/g++-12 (2026-09-12, measured): ubuntu:22.04's default compiler
+        # is gcc 11.4.0, and RawSpeed3 hard-errors at configure time --
+        # "GNU C compiler version 11.4.0 is too old and is unsupported.
+        #  Version 12+ is required" (rawspeed/cmake/compiler-versions.cmake:34).
+        # The hosted ubuntu-24.04 runner shipped a new enough gcc; the container
+        # does not, so it is installed explicitly. gcc-12 is available from
+        # 22.04's own repositories and does NOT move the glibc floor: with
+        # gcc-12 selected, `ldd --version` in this image still reports
+        # GLIBC 2.35, so the WI-14 step 14.5 floor ruling is preserved exactly.
+        # CC/CXX are NOT exported job-wide -- they are set only on the decoder
+        # build step, which is the only consumer that needs 12+ (vcpkg and the
+        # HEIF stack were both verified building fine with the default gcc-11).
         run: |
           if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
             zip unzip pkg-config file \
+            gcc-12 g++-12 \
             cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools \
             nasm yasm git curl python3 python3-pip ca-certificates
+
+      # WI-14 step 14.5 follow-up (2026-09-12, measured): ubuntu:22.04's apt
+      # cmake is 3.22.1, but the vendored Halide 21 distribution's own
+      # HalideConfig.cmake opens with `cmake_minimum_required(VERSION 3.28)`,
+      # so configure dies with "CMake 3.28 or higher is required. You are
+      # running version 3.22.1" before anything is compiled. The hosted
+      # ubuntu-24.04 runner had a new enough cmake; the container does not.
+      #
+      # Installed through pip rather than adding the Kitware APT repository:
+      # this leg already uses pip (the pytest step above), so this is the
+      # existing channel rather than a second package source to maintain.
+      # A FLOOR is pinned, not an exact version -- the constraint is Halide's
+      # 3.28 minimum, and pinning an exact build would silently rot.
+      # pip's cmake lands in the setup-python scripts dir, which precedes
+      # /usr/bin on PATH, so it shadows the apt cmake that the step above
+      # still installs for any tooling that looks for /usr/bin/cmake.
+      - name: Provide CMake >= 3.28 for Halide 21 (container has 3.22)
+        run: |
+          python -m pip install --disable-pip-version-check "cmake>=3.28"
+          cmake --version
+          python3 -c "import subprocess,sys;v=subprocess.run(['cmake','--version'],capture_output=True,text=True).stdout.split()[2];parts=tuple(int(x) for x in v.split('.')[:2]);sys.exit(0 if parts>=(3,28) else 1)" \
+            || { echo '::error::cmake on PATH is older than 3.28; Halide 21 will not configure.'; exit 1; }
 
       - name: Cache vendored Halide v21 distribution (host, Linux)
         uses: actions/cache@v4
@@ -336,6 +372,14 @@ jobs:
         # reserved for macOS's own dylib dist (see that branch's comment for
         # why the two must not share a path).
         working-directory: ${{ github.workspace }}
+        # CC/CXX are scoped to THIS step on purpose (2026-09-12). RawSpeed3,
+        # which only this step builds, refuses gcc < 12; vcpkg and the HEIF
+        # stack above were both verified building fine with the container's
+        # default gcc-11, so they are deliberately left alone rather than
+        # having the whole job's compiler swapped underneath them.
+        env:
+          CC: gcc-12
+          CXX: g++-12
         run: |
           # The watchdog locates the vcpkg prefix ITSELF (via CEYX_VCPKG_PREFIX,
           # else a default path) and injects -DCMAKE_PREFIX_PATH; that resolver
