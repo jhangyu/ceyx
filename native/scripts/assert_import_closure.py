@@ -105,6 +105,16 @@ def parse_pe_dump(text: str) -> list[str]:
         # itself must never be counted as an import of itself).
         if "Dump of file" in line:
             continue
+        # STOP at the Export Table (llvm-objdump/objdump -p print the
+        # decoder's own export table after its import tables): a real fetch
+        # of the current v0.1.23 release (U-10) proved this is not
+        # theoretical -- "DLL name: dng_decoder_native.dll" in the export
+        # table header matched the same import-line pattern, self-matching
+        # the dumped file (the same self-match shape as the header strip
+        # above, one layer deeper). Import tables are always emitted before
+        # the export table by both tools, so a hard stop here is safe.
+        if line.strip().startswith("Export Table:"):
+            break
         m = PE_IMPORT_RE.match(line)
         if m:
             names.append(m.group(1))

@@ -139,6 +139,28 @@ def test_garbage_dump_is_unverified(tmp_path, monkeypatch, capsys):
     assert "IMPORT_CLOSURE_RESULT=UNVERIFIED" in out
 
 
+def test_pe_export_table_self_match_not_counted_as_import(tmp_path, monkeypatch, capsys):
+    """U-10 real-fetch regression: objdump/llvm-objdump -p print the export
+    table's "DLL name: <self>" line AFTER the import tables, using the same
+    "DLL name:" shape the import parser matches -- caught against the real
+    v0.1.23 fetched dng_decoder_native.dll, which self-matched as an
+    unresolved import of itself before the Export Table stop was added."""
+    dump = _write(tmp_path, "dump.txt", PE_DUMP_CLEAN + (
+        "\nExport Table:\n"
+        " DLL name: dng_decoder_native.dll\n"
+        " Ordinal base: 1\n"
+        "       1   0x1e40  ceyx_decode_into_buffer\n"
+    ))
+    staged = _stage(tmp_path, ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"])
+    rc, out, err = _invoke(monkeypatch, [
+        "--dump", str(dump), "--staged-dir", str(staged),
+        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+    ], capsys)
+    assert rc == 0
+    assert "dng_decoder_native.dll" not in out
+    assert "IMPORT_CLOSURE_RESULT=PASS" in out
+
+
 def test_missing_dump_file_is_unverified(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, [])
     rc, out, err = _invoke(monkeypatch, [
