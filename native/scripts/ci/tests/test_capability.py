@@ -310,55 +310,88 @@ class ConfigureLogTests(unittest.TestCase):
 
 
 class GoldenEmissionTests(unittest.TestCase):
-    """One golden per platform per kind (6 total): linux/macos(native)/
-    windows x codec/build. macOS's cross-leg configure-log path has its own
-    dedicated tests above (ConfigureLogTests) rather than a golden fixture,
-    since it is a different algorithm with different output shape, not a
-    variant of the same emission this fixture family captures."""
+    """One golden per distinct emission SHAPE (leader ruling 2026-09-13,
+    extending WI-10/R1's precedent to this WI): linux / macos-native /
+    windows x codec/build via source="probe" (6), PLUS macos-cross x
+    codec/build via source="configure-log" (2) -- eight total. The cross
+    leg is a genuinely different algorithm with a disjoint marker
+    vocabulary (no CODEC_CAPABILITY_PROBE_RC/BUILD_CAPABILITY_PROBE_RC at
+    all), so it gets its own goldens rather than relying on the named
+    literal-match unit tests alone: a golden pins the WHOLE emission
+    (content, count, order), which the individual `assertIn` tests above
+    cannot -- a dropped/duplicated/reordered line would still pass every
+    one of them."""
 
     def _run(self, platform, kind, **kwargs):
         with mock.patch.object(cap._probe, "main", side_effect=_fake_probe_main_ok):
             return _emit(cap.capability_vector, platform, kind, **kwargs)
 
+    def _golden(self, name):
+        path = _GOLDEN_DIR / f"{name}.markers"
+        text = path.read_text(encoding="utf-8")
+        self.assertGreater(len(text), 0, f"{path} must be non-zero bytes")
+        self.assertGreater(len(text.splitlines()), 0, f"{path} must be non-zero lines")
+        return text
+
     def test_codec_golden_linux(self):
         rc, out, _err = self._run("linux", "codec", expect=_CODEC_EXPECT)
         self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "capability-vector-codec-linux.markers").read_text(encoding="utf-8")
-        self.assertEqual(out, expected)
+        self.assertEqual(out, self._golden("capability-vector-codec-linux"))
 
     def test_build_golden_linux(self):
         rc, out, _err = self._run("linux", "build", expect_cap=_BUILD_EXPECT_CAP)
         self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "capability-vector-build-linux.markers").read_text(encoding="utf-8")
-        self.assertEqual(out, expected)
+        self.assertEqual(out, self._golden("capability-vector-build-linux"))
 
-    def test_codec_golden_macos(self):
+    def test_codec_golden_macos_native(self):
         rc, out, _err = self._run(
             "macos", "codec", dylib_path="/tmp/fake.dylib", expect=_CODEC_EXPECT
         )
         self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "capability-vector-codec-macos.markers").read_text(encoding="utf-8")
-        self.assertEqual(out, expected)
+        self.assertEqual(out, self._golden("capability-vector-codec-macos-native"))
 
-    def test_build_golden_macos(self):
+    def test_build_golden_macos_native(self):
         rc, out, _err = self._run(
             "macos", "build", dylib_path="/tmp/fake.dylib", expect_cap=_BUILD_EXPECT_CAP
         )
         self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "capability-vector-build-macos.markers").read_text(encoding="utf-8")
-        self.assertEqual(out, expected)
+        self.assertEqual(out, self._golden("capability-vector-build-macos-native"))
 
     def test_codec_golden_windows(self):
         rc, out, _err = self._run("windows", "codec", expect=_CODEC_EXPECT)
         self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "capability-vector-codec-windows.markers").read_text(encoding="utf-8")
-        self.assertEqual(out, expected)
+        self.assertEqual(out, self._golden("capability-vector-codec-windows"))
 
     def test_build_golden_windows(self):
         rc, out, _err = self._run("windows", "build", expect_cap=_BUILD_EXPECT_CAP)
         self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "capability-vector-build-windows.markers").read_text(encoding="utf-8")
-        self.assertEqual(out, expected)
+        self.assertEqual(out, self._golden("capability-vector-build-windows"))
+
+    def test_codec_golden_macos_cross(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "cross_stage2_build.log").write_text(
+                "-- JXL: static\n", encoding="utf-8"
+            )
+            rc, out, _err = _emit(
+                cap.capability_vector, "macos", "codec",
+                source="configure-log", workspace=tmp,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, self._golden("capability-vector-codec-macos-cross"))
+
+    def test_build_golden_macos_cross(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "cross_stage2_build.log").write_text(
+                "[ceyx] LCMS2: disabled (OQ-N4 option Z)\n", encoding="utf-8"
+            )
+            rc, out, _err = _emit(
+                cap.capability_vector, "macos", "build",
+                source="configure-log", workspace=tmp,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, self._golden("capability-vector-build-macos-cross"))
 
 
 if __name__ == "__main__":
