@@ -23,6 +23,17 @@ regeneration procedure can be PROVED (a regenerated fixture piped through
     has no job-name column -- every line is already in scope, so no
     filtering happens (detected by the first non-blank line's leading field
     not matching any known job name).
+
+CARRY-4 (leader ruling, 2026-09-13): a leg that legitimately emits zero
+markers (e.g. `dart analyze` -- static analysis, no marker/RC/banner output
+at all, contract is the job's own exit code) prints ONE documented comment
+line instead of nothing. This is generator output, not a hand-authored
+exception: a genuinely empty 0-byte baseline is indistinguishable from a
+failed capture (this campaign produced one this week), and a WI-28 AC
+carve-out for "this one leg doesn't have to regenerate byte-identically"
+would be a carve-out for precisely the hardest-to-verify case. Making the
+placeholder a first-class output of THIS script means all nine baselines
+regenerate identically via the same one-liner, no exceptions.
 """
 
 from __future__ import annotations
@@ -48,6 +59,23 @@ LEG_TO_JOB_NAME = {
 }
 
 _KNOWN_JOB_NAMES = frozenset(LEG_TO_JOB_NAME.values())
+
+# Human-readable label used only in the zero-marker placeholder comment (see
+# CARRY-4 above); defaults to the leg name itself when a leg has no more
+# familiar label. "verify-dart" matches the workflow job id in
+# `.github/workflows/build.yml`, preserving the exact wording plan Q4
+# originally specified for this leg.
+_ZERO_MARKER_LABEL = {
+    "dartanalyze": "verify-dart",
+}
+
+
+def zero_marker_placeholder(leg: str) -> str:
+    """The single documented comment line emitted for a leg whose FULL job
+    log contains no marker lines at all -- a first-class generator output,
+    not a hand-edited exception (CARRY-4)."""
+    label = _ZERO_MARKER_LABEL.get(leg, leg)
+    return f"# intentionally empty: {label} emits no markers; contract is the job exit code"
 
 
 def _select_leg_text(log_text: str, leg: str) -> str:
@@ -78,8 +106,12 @@ def main(argv=None) -> int:
 
     log_text = Path(args.log).read_text(encoding="utf-8")
     leg_text = _select_leg_text(log_text, args.leg)
-    for line in markerdiff.extract(leg_text):
-        print(line)
+    marker_lines = markerdiff.extract(leg_text)
+    if marker_lines:
+        for line in marker_lines:
+            print(line)
+    else:
+        print(zero_marker_placeholder(args.leg))
     return 0
 
 
