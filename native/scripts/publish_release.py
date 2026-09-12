@@ -75,6 +75,23 @@ from deps.publish import (  # noqa: E402
 )
 
 ARCH_MAP_PATH = NATIVE_DIR / "deps" / "arch_map.toml"
+MIN_RUNTIME_EXPECTED_PATH = NATIVE_DIR / "deps" / "min_runtime_expected.toml"
+
+# WI-14 step 14.4 ruling (team-lead, 2026-09-12): "let the publish job copy
+# the declared values into artifacts.lock" -- the publish job checks out
+# this repo at the release ref, so it reads native/deps/min_runtime_expected.toml
+# directly from the tree rather than re-measuring or plumbing a value through
+# artifact uploads. This is sound provenance because every leg's own S-F3
+# drift gate (native/scripts/assert_min_runtime_matches_declared.py) already
+# asserted measured == declared before the publish job ever runs: a floor
+# change without updating this declaration fails inside that leg's CI, so
+# the declared value IS the measured value at any green publish.
+#
+# Only native decoder builds (component "dng_decoder_native") get a
+# min_runtime key -- the dist archives (heif-dist-*, libjxl-dist-*,
+# libwebp-dist-*) are not runtime-loadable artifacts Halcyon's pin tracks a
+# floor for.
+DECODER_COMPONENT = "dng_decoder_native"
 
 # Component/platform combinations that must ship as a single atomic archive
 # containing (at least) a fixed set of required files (round-6 contract:
@@ -126,32 +143,27 @@ ATOMIC_REQUIRED_FILES: Dict[tuple, frozenset] = {
     # `vendored_libraries` (the actual downstream consumer) exactly, not
     # just macos_build.yml's own copy of the same list, so both sides of the
     # requirement are pinned to one source of truth.
+    # FIVE dylibs, not six (WI-5, OQ-N4 option Z, user ruling 2026-09-12):
+    # liblcms2.2.dylib is removed from the required set -- lcms2 is dead
+    # code on every platform (ceyx never calls dcraw_process, the only
+    # caller of LibRaw's ICC apply_profile()), ENABLE_LCMS is forced OFF,
+    # and native/deps/shipped_files.toml's [macos].companions no longer
+    # lists it.
     ("dng_decoder_native", "macos", "arm64"): frozenset(
         {
             "libdng_decoder_native.dylib",
-            "liblcms2.2.dylib",
             "libjpeg.8.dylib",
             "libheif.1.dylib",
             "libde265.0.dylib",
             "libomp.dylib",
         }
     ),
-    # x86_64: WIDENED TO THE SAME SIX (2026-09-01, user ruling): the interim
-    # decoder-only key above this comment recorded an unresolved assumption
-    # (OpenMP genuinely could not be built on this leg at the time). That
-    # gap is closed -- the OMP-CROSS-FIX / OMP-BINARY-SOURCE / LCMS2-X86_64 /
-    # JPEG-X86_64 chain (native repo commits 2c40d17..dd91eea) vendors and
-    # correctly wires all three previously-missing companions on the Intel
-    # leg, verified via macos_build.yml's three-gate staging check
-    # (architecture, reachability, and path-convention -- the last of which
-    # exists specifically because of a real defect, run 33472670989, an
-    # unresolved-token install name that would have shipped a companion
-    # nothing could actually load). The user ruled the Intel artifact must
-    # carry the same six files as Apple Silicon; this key now matches.
+    # x86_64: same five-file set as Apple Silicon (2026-09-01, user ruling,
+    # amended by WI-5's lcms2 removal above -- both legs still carry the
+    # same companion set as each other, now five instead of six).
     ("dng_decoder_native", "macos", "x86_64"): frozenset(
         {
             "libdng_decoder_native.dylib",
-            "liblcms2.2.dylib",
             "libjpeg.8.dylib",
             "libheif.1.dylib",
             "libde265.0.dylib",
@@ -170,6 +182,40 @@ def load_arch_map(path: Path = ARCH_MAP_PATH) -> Dict[str, Any]:
         raise ManifestError(f"arch_map.toml not found: {path}")
     with path.open("rb") as fh:
         return tomllib.load(fh)
+
+
+def load_min_runtime_expected(path: Path = MIN_RUNTIME_EXPECTED_PATH) -> Dict[str, Any]:
+    if not path.is_file():
+        raise ManifestError(f"min_runtime_expected.toml not found: {path}")
+    with path.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def min_runtime_for_asset(
+    item: Dict[str, Any], declared: Dict[str, Any]
+) -> Optional[str]:
+    """The declared min_runtime value for a plan ``item``'s asset, or
+    ``None`` when this asset type carries no floor at all (a dist archive,
+    not a decoder build).
+
+    Raises :class:`ManifestError` -- never returns ``None`` -- when the item
+    IS a decoder build but its platform has no entry in the declaration:
+    per the WI-14 step 14.4 ruling, a lock entry silently missing its
+    min_runtime key is exactly the "documentation updated in one place,
+    consumer not" failure this campaign exists to remove.
+    """
+    if item["component"] != DECODER_COMPONENT:
+        return None
+    platform = item["platform"]
+    table = declared.get(platform)
+    if table is None or "value" not in table:
+        raise ManifestError(
+            f"decoder asset {item['asset_name']!r} (platform={platform!r}) has "
+            f"no matching [{platform}] entry in {MIN_RUNTIME_EXPECTED_PATH} -- "
+            "refusing to write a lock entry with a silently missing "
+            "min_runtime key."
+        )
+    return table["value"]
 
 
 def normalize_arch(arch: str, arch_map: Dict[str, Any]) -> str:
@@ -370,6 +416,8 @@ def run_publish(args: argparse.Namespace) -> int:
     work_dir = Path(args.staging_dir)
     package_dir = work_dir / "package"
     archive_paths: List[Path] = []
+    declared_min_runtime = load_min_runtime_expected()
+    min_runtime_by_asset: Dict[str, str] = {}
 
     for item in plan:
         dist_dir = item["dist_dir"]
@@ -381,13 +429,17 @@ def run_publish(args: argparse.Namespace) -> int:
         archive_path = package_dist(dist_dir, package_dir, item["asset_name"])
         archive_paths.append(archive_path)
         print(f"[publish_release] packaged {item['asset_name']} <- {dist_dir}")
+        value = min_runtime_for_asset(item, declared_min_runtime)
+        if value is not None:
+            min_runtime_by_asset[archive_path.name] = value
 
-    lock = build_artifacts_lock(archive_paths)
+    lock = build_artifacts_lock(archive_paths, min_runtime_by_asset)
     lock_path = work_dir / "artifacts.lock"
     write_artifacts_lock(lock, lock_path)
     print(f"[publish_release] wrote lock: {lock_path}")
     for name, entry in sorted(lock["assets"].items()):
-        print(f"  {name}: sha256={entry['sha256']} size={entry['size']}")
+        min_runtime_note = f" min_runtime={entry['min_runtime']}" if "min_runtime" in entry else ""
+        print(f"  {name}: sha256={entry['sha256']} size={entry['size']}{min_runtime_note}")
 
     if args.dry_run:
         print("[publish_release] --dry-run: skipping upload/download-back verify")

@@ -34,7 +34,7 @@ import hashlib
 import json
 import tarfile
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - import style depends on how the caller invokes us
     from .run import run
@@ -74,21 +74,38 @@ def package_dist(dist_dir: Path, out_dir: Path, asset_name: str) -> Path:
     return archive_path
 
 
-def build_artifacts_lock(asset_paths: Sequence[Path]) -> Dict[str, Any]:
+def build_artifacts_lock(
+    asset_paths: Sequence[Path],
+    min_runtime_by_asset: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """Compute the SHA-256 lock entries for ``asset_paths``.
 
     Returns a dict shaped ``{"assets": {filename: {"sha256": ..., "size":
     ...}}}`` -- a flat, order-independent structure so re-running publish
     with a different asset ordering does not spuriously change the lock.
+
+    ``min_runtime_by_asset`` (WI-14 step 14.4, "let the publish job copy the
+    declared values into artifacts.lock"), when given, maps an asset
+    filename to its declared minimum-runtime floor. When the CALLER decides
+    an asset requires a min_runtime entry (a native decoder build) but the
+    map has no value for it, the caller must not silently omit the key --
+    see :func:`native.scripts.publish_release.min_runtime_for_asset`, which
+    raises rather than returning ``None`` for that case. This function
+    itself only writes what it is given: a key present in the map is
+    embedded verbatim; a key absent from the map is left out of the lock
+    entry entirely (never written as ``null``).
     """
     assets: Dict[str, Any] = {}
     for path in asset_paths:
         if not path.is_file():
             raise PublishError(f"asset does not exist: {path}")
-        assets[path.name] = {
+        entry: Dict[str, Any] = {
             "sha256": _sha256_file(path),
             "size": path.stat().st_size,
         }
+        if min_runtime_by_asset and path.name in min_runtime_by_asset:
+            entry["min_runtime"] = min_runtime_by_asset[path.name]
+        assets[path.name] = entry
     return {"assets": assets}
 
 

@@ -153,9 +153,11 @@ endif()
 
 if(APPLE)
     # This dylib ships inside distributed app bundles; find_package()-resolved
-    # deps (lcms2, libjpeg-turbo) point at absolute Homebrew paths that only
-    # exist on this dev machine. Vendor them next to the built dylib and
-    # repoint load commands at @rpath so the bundle is self-contained.
+    # deps (libjpeg-turbo) point at absolute Homebrew paths that only exist on
+    # this dev machine. Vendor them next to the built dylib and repoint load
+    # commands at @rpath so the bundle is self-contained. (lcms2 no longer
+    # appears here: OQ-N4 option Z, WI-5, 2026-09-12 -- ENABLE_LCMS is forced
+    # OFF, so this dylib never links lcms2 on any platform.)
     add_custom_command(TARGET dng_decoder_native POST_BUILD
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos_dylib_deps.py
                 $<TARGET_FILE:dng_decoder_native>

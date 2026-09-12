@@ -131,6 +131,32 @@ jobs:
           echo "clang-cl: $CLANG_CL"
           "$CLANG_CL" --version
 
+      # WI-4 step 4.1 (S-B1/OQ-N2 ruled SHIP): the decoder's own import table
+      # names libomp140.x86_64.dll (rootcause-native-capability.md Item B), so
+      # an artifact shipped without it fails to load on a machine lacking the
+      # LLVM redistributable. This step only LOCATES the file next to the
+      # clang-cl install just verified above; it stays an observation (exits
+      # 0 even when absent) so its output is legible on a leg where the
+      # actual staging step (native/cmake/heif.cmake, WI-4 step 4.2) is what
+      # fails. The FATAL gate on absence lives in that CMake step, not here.
+      - name: Locate the OpenMP runtime DLL
+        shell: bash
+        run: |
+          CLANG_CL_BIN="$(command -v clang-cl || echo "/c/Program Files/LLVM/bin/clang-cl.exe")"
+          LLVM_BIN_DIR="$(dirname "$CLANG_CL_BIN")"
+          OMP_RUNTIME_DLL="ABSENT"
+          if [ -f "${LLVM_BIN_DIR}/libomp140.x86_64.dll" ]; then
+            OMP_RUNTIME_DLL="${LLVM_BIN_DIR}/libomp140.x86_64.dll"
+          fi
+          OMP_RUNTIME_RC=0
+          if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
+            OMP_RUNTIME_RC=1
+          fi
+          echo "OMP_RUNTIME_DLL=${OMP_RUNTIME_DLL}"
+          echo "OMP_RUNTIME_RC=${OMP_RUNTIME_RC}"
+          echo "$OMP_RUNTIME_DLL" > omp_runtime_path.txt
+          exit 0
+
       # Unlike Linux (where the Halide Vulkan runtime dlopen's libvulkan.so.1),
       # native/cmake/ffi.cmake's WIN32 branch LINKS the loader import library
       # vulkan-1.lib and hard-fails configure without it, so the SDK is a real
@@ -585,20 +611,27 @@ jobs:
             exit 1
           fi
 
-          echo "== Step 4: dependency DLLs staged beside the decoder =="
-          stage_missing=""
-          for dep in heif.dll libde265.dll; do
-            if [ -f "native/build-windows/${dep}" ]; then
-              echo "STAGED ${dep} OK ($(wc -c < "native/build-windows/${dep}") bytes)"
-            else
-              echo "STAGED ${dep} MISSING"
-              stage_missing="${stage_missing} ${dep}"
-            fi
-          done
-          if [ -n "${stage_missing}" ]; then
-            echo "::error::missing dependency DLL(s) beside the decoder:${stage_missing} — cmake/heif.cmake's WIN32 POST_BUILD staging did not run, or the dist lacks them. A package shipped like this fails at DynamicLibrary.open with an error naming only dng_decoder_native.dll." >&2
-            ls -la native/build-windows || true
-            exit 1
+          # WI-4 step 4.3 (S-B1): full import-closure gate, replacing the
+          # two-name file-existence loop this step used to run. Every import
+          # in the decoder's table must resolve to either the Windows OS
+          # allowlist or a file actually staged beside the decoder --
+          # dumpbin/llvm-objdump output was already captured above into
+          # dll_dependents_body.txt (header-stripped), so this reads that
+          # file, never a pipe.
+          echo "== Step 4: full import-closure gate (S-B1) =="
+          set +e
+          python3 native/scripts/assert_import_closure.py \
+            --dump dll_dependents_body.txt \
+            --staged-dir native/build-windows \
+            --declaration native/deps/shipped_files.toml \
+            --platform windows \
+            --format pe
+          RC=$?
+          set -e
+          echo "IMPORT_CLOSURE_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::import-closure gate failed for $DLL — see IMPORT ... -> MISSING lines above. A package shipped like this fails at DynamicLibrary.open with an error naming only dng_decoder_native.dll." >&2
+            exit "${RC}"
           fi
 
           # Second level: heif.dll must really carry the HEVC decoder with it.
@@ -765,6 +798,27 @@ jobs:
           echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, windows-x86_64
+      # leg. Vector transcribed from native/deps/codec_expectations.toml
+      # [windows-x86_64.capabilities]. ICC=0 on every leg (OQ-N4 option Z,
+      # WI-5): ENABLE_LCMS is forced OFF; nothing sourced lcms2 for Windows
+      # in the first place (zero lcms2 branches outside tests.cmake), so
+      # this leg moves from "silently non-deterministic" to "explicitly OFF"
+      # by the same forced value.
+      - name: Assert build capability vector via probe (S-E2)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          python3 native/scripts/codec_capability_probe.py "native/build-windows/dng_decoder_native.dll" \
+            --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 \
+            --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 \
+            --json-out native/scripts/deps/probe/capability_build.json
+          rc=$?
+          set -e
+          echo "BUILD_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
       # CI-T3 (task #11 spec, native/scripts/tmp/ci-t3-probe-codecs-step-spec.md
       # section 1): functional capability-bitmask probe against the committed
       # Windows HEIF dist (native/third_party/heif-dist-windows). Compiles
@@ -819,11 +873,45 @@ jobs:
           # a failure here must stop the job.
           cp native/build-windows/heif.dll      artifacts/native/
           cp native/build-windows/libde265.dll  artifacts/native/
+          # WI-4 step 4.5 (OQ-N2 ruled SHIP): the OpenMP runtime is the 4th
+          # shipped-file-group member (native/deps/shipped_files.toml
+          # [windows].companions) -- staged by heif.cmake's WIN32 branch
+          # next to the built DLL, so it must travel into artifacts/native/
+          # the same way the other two dynamic companions do.
+          cp native/build-windows/libomp140.x86_64.dll artifacts/native/
           # The import library is only produced when the linker sees exports;
           # copy it when present so downstream consumers can link against it.
           cp native/build-windows/dng_decoder_native.lib artifacts/native/ 2>/dev/null || \
             echo "::notice::dng_decoder_native.lib not present (import library not emitted); DLL-only artifact."
           ls -la artifacts/native
+
+      # WI-14 step 14.2 (S-F1): measure the floor of the file that actually
+      # ships (the decoder DLL, PE subsystem version).
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/read_min_runtime.py \
+            --artifact artifacts/native/dng_decoder_native.dll \
+            --platform windows \
+            --out artifacts/min_runtime.txt
+          echo "READ_MIN_RUNTIME_RC=$?"
+          cat artifacts/min_runtime.txt
+
+          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
+          # just-measured floor and ceyx's own declaration. The pin
+          # comparison (Halcyon half) happens separately at pin-refresh time.
+          set +e
+          python3 native/scripts/assert_min_runtime_matches_declared.py \
+            --emitted artifacts/min_runtime.txt \
+            --declared native/deps/min_runtime_expected.toml \
+            --platform windows
+          RC=$?
+          set -e
+          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            exit "${RC}"
+          fi
 
       # ATOMIC-GROUP GATE. Preserved verbatim in intent from the deleted
       # "Name the release assets" step, but with two round-6 changes:
@@ -840,32 +928,30 @@ jobs:
       #      different directory would be an instrument that cannot see the
       #      failure it exists to catch.
       #
-      # Red line (contract): the Windows DLL trio travels as one atomic group
-      # everywhere, so all three ship inside the SINGLE
-      # dng_decoder_native-windows-x86_64 artifact/asset rather than as three
+      # Red line (contract): the Windows shipped-file group travels as one
+      # atomic group everywhere, so every member ships inside the SINGLE
+      # dng_decoder_native-windows-x86_64 artifact/asset rather than as
       # independently-fetchable assets.
-      - name: Assert the Windows DLL trio is complete (atomic group)
+      #
+      # WI-4 step 4.6 / WI-15: the member list is no longer hard-coded here
+      # (a hard-coded "trio"/count is exactly the drift WI-15 removes) -- it
+      # is read from native/deps/shipped_files.toml via
+      # native/scripts/read_shipped_files.py, the one declaration WI-4 step
+      # 4.2/4.5 and this step now share. Renamed from "...DLL trio..." to
+      # "...shipped-file group..." because "trio" bakes a count into a name.
+      - name: Assert the Windows shipped-file group is complete (atomic group)
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           ls -la artifacts/native
-          # De-pipelined: `ls | wc -l` is fine here (no early-exiting consumer),
-          # but the count is captured with set +e so its own RC is visible.
-          set +e
-          DLL_COUNT=$(ls artifacts/native/*.dll | wc -l | tr -d ' ')
-          rc=$?
-          set -e
-          echo "STAGED_DLL_COUNT=${DLL_COUNT} RC=${rc}"
-          if [ "${DLL_COUNT}" -ne 3 ]; then
-            echo "::error::expected exactly 3 staged DLLs (dng_decoder_native, heif, libde265), found ${DLL_COUNT}." >&2
+          EXPECTED_DLL_SET=$(python3 native/scripts/read_shipped_files.py --platform windows --all | tr ' ' '\n' | sort | tr '\n' ' ')
+          echo "EXPECTED_DLL_SET=${EXPECTED_DLL_SET}"
+          STAGED_DLL_SET=$(cd artifacts/native && ls *.dll | sort | tr '\n' ' ')
+          echo "STAGED_DLL_SET=${STAGED_DLL_SET}"
+          if [ "$(echo "${EXPECTED_DLL_SET}" | xargs)" != "$(echo "${STAGED_DLL_SET}" | xargs)" ]; then
+            echo "::error::staged Windows DLL set does not match native/deps/shipped_files.toml's declaration — expected [${EXPECTED_DLL_SET}], found [${STAGED_DLL_SET}]." >&2
             exit 1
           fi
-          for dll in dng_decoder_native.dll heif.dll libde265.dll; do
-            if [ ! -f "artifacts/native/${dll}" ]; then
-              echo "::error::atomic group member missing: ${dll}" >&2
-              exit 1
-            fi
-          done
 
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`
