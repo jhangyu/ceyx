@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys
+import importlib
 import unittest
 from unittest import mock
 
@@ -22,8 +22,16 @@ def _report_module():
     silently patches the *other* copy under the other identity -- no
     exception, the mock is just never called. Looking the module up via
     `tools.__package__` makes the patch target identity-agnostic.
+
+    Uses `importlib.import_module`, NOT a `sys.modules` subscript: `tools.py`
+    imports `report` lazily (inside `resolve_or_report`, at call time), so a
+    bare `sys.modules[...]` lookup only succeeds if some OTHER module has
+    already imported it first -- true in a full-suite run (test_report.py
+    runs first) but false when this file is run in isolation, which raises
+    `KeyError` instead of testing anything. `import_module` imports-or-
+    returns-cached, so it resolves correctly regardless of run order.
     """
-    return sys.modules[f"{tools.__package__}.report"]
+    return importlib.import_module(f"{tools.__package__}.report")
 
 
 class FakeTargets:
