@@ -65,15 +65,28 @@ class TestStage(unittest.TestCase):
         self.assertFalse((artifact_dir / "native" / "libheif.so.1").exists())
 
     def test_emission_matches_golden(self) -> None:
+        """stage() emits no `MARKER=value` lines -- the golden fixture is a
+        deliberately-empty-of-markers file (see its own comment header, non-
+        zero bytes/lines so this is distinguishable from a failed/absent
+        capture). ``assertEqual([], [])`` alone would be a can't-fail
+        assertion (it would stay green even if the extractor regressed to
+        returning [] unconditionally), so this also positively asserts the
+        listing content stage() is supposed to print -- if stage() silently
+        stopped printing anything, THIS assertion catches it."""
         native_dir, artifact_dir = self._dirs()
         (native_dir / "build-linux" / "libdng_decoder_native.so").write_bytes(b"\x7fELF")
         with mock.patch.object(stage, "declared_names", lambda p: ["libdng_decoder_native.so"]):
             rc, out, _ = _emit(stage.stage, "linux", str(artifact_dir), str(native_dir))
         self.assertEqual(rc, 0)
-        emitted = markerdiff.extract(out)
+
         golden = (_GOLDEN_DIR / "stage-linux.markers").read_text(encoding="utf-8")
-        expected = golden.splitlines() if golden.strip() else []
+        self.assertGreater(len(golden.encode("utf-8")), 0, "golden fixture must not be 0 bytes")
+        expected = [ln for ln in golden.splitlines() if not ln.startswith("#")]
+        emitted = markerdiff.extract(out)
         self.assertEqual(emitted, expected)
+
+        # Positive assertion: the listing itself must actually be there.
+        self.assertIn("libdng_decoder_native.so", out)
 
 
 class TestAssertStagedGroup(unittest.TestCase):

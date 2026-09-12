@@ -1,0 +1,5 @@
+# stage() intentionally emits NO `MARKER=value` lines -- its only
+# observable output today is the `ls -la` listing of the staged directory
+# (plain text, not a marker). This comment line makes that deliberate
+# absence distinguishable from an empty/failed capture (non-zero bytes,
+# non-zero lines); test_stage.py strips comment lines before comparing.
