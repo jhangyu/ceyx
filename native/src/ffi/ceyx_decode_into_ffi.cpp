@@ -91,9 +91,12 @@ CEYX_FFI_EXPORT void ceyx_pool_aligned_free(void *ptr) {
 }
 
 // Pool idle-shrink + win-parity campaigns: per-platform eager page return.
-// macOS sweeps its malloc zones; glibc Linux returns the heap top and free'd
-// mmap'd chunks via malloc_trim. Windows returns 0, not -1, BY DECISION —
-// see ceyx_decode_into.h for the reasoning.
+// macOS sweeps its malloc zones. glibc Linux's malloc_trim only covers the
+// heap top and fastbins -- the pooled ~97MB blocks are mmap'd (well above
+// mmap_threshold) and are already returned to the OS by munmap() at free()
+// time, not by this call; malloc_trim here reclaims residual small-heap
+// memory. Windows returns 0, not -1, BY DECISION — see ceyx_decode_into.h
+// for the reasoning.
 CEYX_FFI_EXPORT int64_t ceyx_pool_pressure_relief(void) {
 #if defined(__APPLE__)
   return static_cast<int64_t>(malloc_zone_pressure_relief(nullptr, 0));

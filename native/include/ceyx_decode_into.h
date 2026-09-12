@@ -139,7 +139,12 @@ void ceyx_pool_aligned_free(void *ptr);
 /// glibc Linux (`__linux__ && __GLIBC__`): wraps `malloc_trim(0)`, which
 /// returns 1 when it released memory back to the OS and 0 when it found
 /// nothing to release. Both are mapped straight through (1/0 -> 1/0): both
-/// mean "the mechanism ran", which is the contract's ">= 0" half. musl and
+/// mean "the mechanism ran", which is the contract's ">= 0" half. `malloc_trim`
+/// does NOT return the pooled ~97MB blocks -- those are mmap'd (well above
+/// glibc's mmap_threshold) and glibc already munmap()s them straight back to
+/// the OS at `free()`/`ceyx_pool_aligned_free()` time, before this function is
+/// ever called. `malloc_trim` here only reclaims what free() itself doesn't:
+/// the heap-top and fastbin memory left behind by everything else. musl and
 /// bionic (Android's NDK libc) define `__linux__` but not `__GLIBC__`, so
 /// they fall through to the unsupported arm below, not this one.
 ///
