@@ -70,6 +70,64 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(text.count("PROBE_CODECS_RC=0"), 2)
 
 
+class ObservabilityMarkerTests(unittest.TestCase):
+    """WI-splits: DLL_SIZE_BYTES value tolerated, presence/count still asserted."""
+
+    def test_observability_value_change_is_not_a_delta(self):
+        baseline = "DLL_SIZE_BYTES=10035712\n"
+        candidate = "DLL_SIZE_BYTES=10049536\n"
+        rc, deltas = markerdiff.diff(baseline, candidate)
+        self.assertEqual(rc, 0)
+        self.assertEqual(deltas, [])
+
+    def test_observability_marker_absent_is_a_failure(self):
+        baseline = "DLL_SIZE_BYTES=10035712\nEXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\n"
+        rc, deltas = markerdiff.diff(baseline, candidate)
+        self.assertNotEqual(rc, 0)
+        self.assertTrue(any("DLL_SIZE_BYTES" in d for d in deltas))
+
+    def test_observability_marker_double_count_is_a_failure(self):
+        baseline = "DLL_SIZE_BYTES=10035712\n"
+        candidate = "DLL_SIZE_BYTES=10049536\nDLL_SIZE_BYTES=99999999\n"
+        rc, deltas = markerdiff.diff(baseline, candidate)
+        self.assertNotEqual(rc, 0)
+        self.assertTrue(any("DLL_SIZE_BYTES" in d for d in deltas))
+
+    def test_assertion_marker_value_change_still_fails(self):
+        # regression pin: the split must not silently swallow non-observability keys
+        baseline = "EXPORTS_CHECKED=35\n"
+        candidate = "EXPORTS_CHECKED=36\n"
+        rc, deltas = markerdiff.diff(baseline, candidate)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("-1 EXPORTS_CHECKED=35", deltas)
+        self.assertIn("+1 EXPORTS_CHECKED=36", deltas)
+
+    def test_main_prints_observability_block_naming_dll_size_bytes(self):
+        import io
+        import contextlib
+
+        baseline = "DLL_SIZE_BYTES=10035712\n"
+        candidate = "DLL_SIZE_BYTES=10049536\n"
+        b_path = Path(__file__).parent / "_tmp_obs_baseline.markers"
+        c_path = Path(__file__).parent / "_tmp_obs_candidate.markers"
+        b_path.write_text(baseline, encoding="utf-8")
+        c_path.write_text(candidate, encoding="utf-8")
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = markerdiff.main(
+                    ["--baseline", str(b_path), "--candidate", str(c_path)]
+                )
+            self.assertEqual(rc, 0)
+            output = buf.getvalue()
+            self.assertIn("DLL_SIZE_BYTES", output)
+            self.assertIn("MARKER_DIFF_RESULT=PASS", output)
+        finally:
+            b_path.unlink(missing_ok=True)
+            c_path.unlink(missing_ok=True)
+
+
 class MainCliTests(unittest.TestCase):
     def test_main_prints_pass_for_identical_files(self, ):
         import io

@@ -56,6 +56,43 @@ _WORKSPACE_PATH_RE = re.compile(
     r"|[A-Za-z]:\\\\?(?:[\w.\-]+\\\\?)+)"  # Windows absolute path
 )
 
+# OBSERVABILITY markers: named, printed allowlist. These are markers whose
+# VALUE can legitimately vary across a green run for reasons outside this
+# repository (e.g. two-toolset drift in a linker's byte-for-byte output) --
+# presence and occurrence COUNT are still asserted strictly; only the value
+# is tolerated. Everything not in this set is an ASSERTION marker: full line
+# (value included) is compared, no tolerance.
+#
+# Growing this list is a reviewable two-line diff with a reason string --
+# same discipline as allowlist.py's MUST_STAY set (WI-4). No marker may ever
+# be silently classified.
+#
+# DLL_SIZE_BYTES: push-1 AC-2 windows capture showed
+#   -1 DLL_SIZE_BYTES=10035712 / +1 DLL_SIZE_BYTES=10049536
+# while `git diff d33cc607..ef141b3a` touched zero CMake/C++/vcpkg/workflow
+# files the Windows build reads, and EXPORTS_RESULT/EXPORTS_CHECKED/
+# PROBE_CODECS_RC on the same run were unchanged -- the exported surface and
+# codec capability are identical; only a linked DLL's byte count moved,
+# consistent with MSVC toolset drift on the runner image. AC-2 as originally
+# specified could never read all-green because of this marker.
+#
+# Rejected alternatives (do not re-propose):
+#   - a tolerance band (e.g. +/-1%): arbitrary threshold, masks small real
+#     regressions, invites endless argument about the number.
+#   - per-run re-baselining: copying the candidate over the baseline to make
+#     the diff pass, which is exactly the evidence-destroying move the test
+#     plan forbids -- it would erase the baseline's value as a fixed point.
+OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
+
+_KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")
+
+
+def _marker_key(line: str) -> str | None:
+    """Returns the NAME in a normalized `NAME=value` marker line, or None
+    for lines with no such key (e.g. `::error::...`, `== title ==`)."""
+    m = _KEY_RE.match(line)
+    return m.group(1) if m else None
+
 
 def normalize(line: str) -> str:
     """Replaces tempdir-shaped absolute paths with ``<TMP>`` and other
@@ -89,11 +126,38 @@ def counts(lines: list[str]) -> collections.Counter:
 def diff(baseline_text: str, candidate_text: str) -> tuple[int, list[str]]:
     """Multiset-diffs the marker lines extracted from ``baseline_text``
     against ``candidate_text``. Returns ``(rc, report_lines)`` where
-    ``rc != 0`` iff any token's occurrence count differs. Each delta line is
-    ``+N <token>`` (candidate has N more) or ``-N <token>`` (candidate has N
-    fewer), sorted for deterministic output."""
-    baseline_counts = counts(extract(baseline_text))
-    candidate_counts = counts(extract(candidate_text))
+    ``rc != 0`` iff any token's occurrence count differs.
+
+    Two comparison classes (see OBSERVABILITY_MARKERS above):
+    - ASSERTION markers (the default): compared as full normalized lines,
+      value/digits included -- unchanged behavior from before the split.
+    - OBSERVABILITY markers: compared by KEY occurrence COUNT only -- a
+      candidate with the same count of e.g. `DLL_SIZE_BYTES=...` lines as
+      the baseline passes regardless of the value(s); a candidate missing
+      the marker entirely, or with a different count, still FAILS. This is
+      classification by marker NAME before values are looked at, not a
+      value-level tolerance.
+
+    Each delta line is ``+N <token>`` (candidate has N more) or
+    ``-N <token>`` (candidate has N fewer), sorted for deterministic output.
+    """
+    baseline_lines = extract(baseline_text)
+    candidate_lines = extract(candidate_text)
+
+    def split(lines: list[str]) -> tuple[list[str], collections.Counter]:
+        assertion_lines = [
+            ln for ln in lines if _marker_key(ln) not in OBSERVABILITY_MARKERS
+        ]
+        observability_keys = collections.Counter(
+            k for ln in lines if (k := _marker_key(ln)) in OBSERVABILITY_MARKERS
+        )
+        return assertion_lines, observability_keys
+
+    baseline_assertion, baseline_obs = split(baseline_lines)
+    candidate_assertion, candidate_obs = split(candidate_lines)
+
+    baseline_counts = counts(baseline_assertion)
+    candidate_counts = counts(candidate_assertion)
     all_tokens = set(baseline_counts) | set(candidate_counts)
     deltas = []
     for token in sorted(all_tokens):
@@ -101,8 +165,25 @@ def diff(baseline_text: str, candidate_text: str) -> tuple[int, list[str]]:
         if delta != 0:
             sign = "+" if delta > 0 else "-"
             deltas.append(f"{sign}{abs(delta)} {token}")
+
+    all_obs_keys = set(baseline_obs) | set(candidate_obs)
+    for key in sorted(all_obs_keys):
+        delta = candidate_obs[key] - baseline_obs[key]
+        if delta != 0:
+            sign = "+" if delta > 0 else "-"
+            deltas.append(f"{sign}{abs(delta)} {key}=<OBSERVABILITY>")
+
     rc = 1 if deltas else 0
     return rc, deltas
+
+
+def observability_report_lines() -> list[str]:
+    """Returns one printable line per observability marker in force, for
+    visibility in the marker-diff output (not just as an internal set)."""
+    return [
+        f"OBSERVABILITY_MARKER {name} -- count-only, value tolerated"
+        for name in sorted(OBSERVABILITY_MARKERS)
+    ]
 
 
 def main(argv=None) -> int:
@@ -118,6 +199,8 @@ def main(argv=None) -> int:
     candidate_text = Path(args.candidate).read_text(encoding="utf-8")
     rc, deltas = diff(baseline_text, candidate_text)
 
+    for line in observability_report_lines():
+        report.plain(line)
     for line in deltas:
         report.plain(line)
     report.marker("MARKER_DIFF_RESULT", "FAIL" if rc else "PASS")
