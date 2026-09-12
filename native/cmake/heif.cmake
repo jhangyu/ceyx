@@ -261,14 +261,64 @@ if(DNG_ENABLE_HEIF)
         # bundled-library list and windows_build.yml's staging step consume, so
         # all three ship the same set by construction rather than by three
         # hand-maintained lists happening to agree.
-        # This branch stages only the two libheif-stack members
-        # (CEYX_SHIPPED_WINDOWS_COMPANIONS[0..1]); libomp140.x86_64.dll
-        # (index 2, OQ-N2) is WI-4's own staging addition, landing in WI-4's
-        # commits -- see shipped_files.toml's Windows entry comment and the
-        # plan's "Two ruling-driven sequencing constraints" note. Do not add
-        # its copy_if_different here.
-        list(GET CEYX_SHIPPED_WINDOWS_COMPANIONS 0 _ceyx_heif_dll_name)
-        list(GET CEYX_SHIPPED_WINDOWS_COMPANIONS 1 _ceyx_de265_dll_name)
+        # WI-4 step 4.2: CEYX_SHIPPED_WINDOWS_COMPANIONS now has THREE members
+        # (heif.dll, libde265.dll, libomp140.x86_64.dll -- OQ-N2 ruled SHIP).
+        # Looked up BY NAME PREFIX, not by positional list(GET ... N), so a
+        # future change to the declared list's order or length cannot
+        # silently pick the wrong companion -- the same trap the APPLE branch
+        # above already dodges this way (round-1 commit 791888ac), and the
+        # plan's known round-2 parking-lot trap for this exact branch.
+        set(_ceyx_heif_dll_name "")
+        set(_ceyx_de265_dll_name "")
+        set(_ceyx_omp_dll_name "")
+        foreach(_ceyx_companion IN LISTS CEYX_SHIPPED_WINDOWS_COMPANIONS)
+            if(_ceyx_companion MATCHES "^heif\\.")
+                set(_ceyx_heif_dll_name "${_ceyx_companion}")
+            elseif(_ceyx_companion MATCHES "^libde265\\.")
+                set(_ceyx_de265_dll_name "${_ceyx_companion}")
+            elseif(_ceyx_companion MATCHES "^libomp140\\.")
+                set(_ceyx_omp_dll_name "${_ceyx_companion}")
+            endif()
+        endforeach()
+        if(NOT _ceyx_heif_dll_name OR NOT _ceyx_de265_dll_name)
+            message(FATAL_ERROR
+                "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
+                "is missing a heif.*/libde265.* entry -- native/deps/shipped_files.toml "
+                "is malformed.")
+        endif()
+
+        # The OpenMP runtime ships with the LLVM toolchain, not the HEIF
+        # dist, so it is resolved with find_file at configure time rather
+        # than transcribed from HEIF_DIST_DIR. When desktop OpenMP is
+        # enabled on Windows the decoder ALREADY IMPORTS this DLL (its own
+        # import table names it -- rootcause-native-capability.md Item B),
+        # so "not found" here means the artifact will be unloadable, not
+        # that a feature silently degrades -- the honest-OFF pattern this
+        # tree uses for libomp on macOS (tests.cmake:715-726) is the WRONG
+        # shape for this case.
+        if(CEYX_ENABLE_DESKTOP_OPENMP)
+            if(NOT _ceyx_omp_dll_name)
+                message(FATAL_ERROR
+                    "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
+                    "is missing a libomp140.* entry -- native/deps/shipped_files.toml "
+                    "is malformed.")
+            endif()
+            get_filename_component(_ceyx_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+            find_file(CEYX_WIN_OMP_RUNTIME
+                NAMES "${_ceyx_omp_dll_name}"
+                HINTS "${_ceyx_clang_bin_dir}" "C:/Program Files/LLVM/bin")
+            if(NOT CEYX_WIN_OMP_RUNTIME)
+                message(FATAL_ERROR
+                    "${_ceyx_omp_dll_name} not found next to the clang-cl "
+                    "toolchain (searched ${_ceyx_clang_bin_dir} and "
+                    "C:/Program Files/LLVM/bin). The Windows decoder imports "
+                    "this DLL directly (OQ-N2 ruled SHIP); an artifact "
+                    "staged without it will fail to load, so this is a "
+                    "configure-time FATAL, not a degrade.")
+            endif()
+            message(STATUS "OpenMP runtime for staging: ${CEYX_WIN_OMP_RUNTIME}")
+        endif()
+
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${HEIF_DIST_DIR}/bin/${_ceyx_heif_dll_name}"
@@ -277,6 +327,13 @@ if(DNG_ENABLE_HEIF)
                     "${HEIF_DIST_DIR}/bin/${_ceyx_de265_dll_name}"
                     "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_dll_name}"
             COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
+        if(CEYX_ENABLE_DESKTOP_OPENMP AND CEYX_WIN_OMP_RUNTIME)
+            add_custom_command(TARGET dng_decoder_native POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${CEYX_WIN_OMP_RUNTIME}"
+                        "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_omp_dll_name}"
+                COMMENT "Staging ${_ceyx_omp_dll_name} (OpenMP runtime, OQ-N2) next to dng_decoder_native")
+        endif()
     elseif(ANDROID)
         # Stage the two UNVERSIONED .so files NEXT TO the built decoder .so
         # (A-T8-FIX, 2026-09-01). Unlike the Linux desktop branch below,
