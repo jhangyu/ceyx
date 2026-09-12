@@ -822,31 +822,7 @@ jobs:
       - name: Compile + run functional capability probe (CI-T3)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: |
-          set -e
-          DIST="$GITHUB_WORKSPACE/native/third_party/heif-dist-windows"
-          PROBE_DIR="$GITHUB_WORKSPACE/native/scripts/deps/probe"
-          clang-cl \
-            -I"$DIST/include" \
-            "$PROBE_DIR/probe_codecs.c" \
-            "$DIST/lib/heif.lib" \
-            -o "$PROBE_DIR/probe_codecs.exe"
-          cp "$DIST/bin/heif.dll" "$PROBE_DIR/heif.dll"
-          cp "$DIST/bin/libde265.dll" "$PROBE_DIR/libde265.dll"
-          set +e
-          "$PROBE_DIR/probe_codecs.exe" > "$PROBE_DIR/probe_codecs.txt" 2>&1
-          RC=$?
-          set -e
-          # Stdout captured to the artifact file BEFORE the exit code is
-          # interpreted (R7): a nonzero exit still leaves all four bits
-          # legible in the uploaded artifact, never just a hypothesis.
-          echo "PROBE_CODECS_RC=${RC}" | tee -a "$PROBE_DIR/probe_codecs.txt"
-          cat "$PROBE_DIR/probe_codecs.txt"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::probe_codecs exited ${RC} (nonzero bits = missing capabilities)"
-            exit "${RC}"
-          fi
-          echo "A-CAP-HEVC-ENC / A-CAP-AV1-ENC / A-CAP-HEVC-DEC / A-CAP-AV1-DEC all present: RC=0"
+        run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE"
 
       - name: Stage native artifacts
         shell: bash
