@@ -22,6 +22,17 @@ mirroring Halcyon `phases.py:70-85`:
    `[stale-allowlist]` failure -- the ratchet's own safety catch: without
    this, a migrated step's leftover entry rots invisibly instead of being
    forced out in the same commit that migrates it.
+4. Rule 4 (WI-4b, `[obsolete-allowlist]`): the other half of the same
+   safety catch. Rule 3's `[stale-allowlist]` only fires when a step's
+   `- name:` no longer exists at all; a migrated step keeps its exact name
+   and changes only its BODY (shell -> one-line `python3`), so
+   `[stale-allowlist]` stays silent while the allowlist keeps a permission
+   for shell that is gone. For every allowlist entry whose step DOES still
+   exist: if that step's body is already compliant (exactly one code line
+   matching Rule 1's `PYTHON_BODY_RE`), the exemption is dead and it is an
+   `[obsolete-allowlist]` failure naming the step and instructing the
+   ratchet. This converts "remember to ratchet after a migration" from
+   scheduling discipline into a mechanical check.
 
 Run with: python3 native/scripts/ci/check_shell_prohibition.py
 """
@@ -199,6 +210,44 @@ def _rule3_allowlist_is_loud(failures: list, matched_entries: set, workflow_file
         )
 
 
+def _steps_by_key(workflow_files) -> dict:
+    """(workflow, step_name) -> the step's RunStep, for every `run:` step
+    that currently exists in any workflow file. Used by
+    `check_obsolete_entries` (WI-4b); built once in `main()`, independent
+    of Rule 1/Rule 3's own internal loops so this does not risk changing
+    either rule's existing behaviour or text."""
+    steps = {}
+    for path in workflow_files:
+        text = path.read_text()
+        for step in workflow_scan.iter_run_steps(text, path.name):
+            steps[(step.workflow, step.step_name)] = step
+    return steps
+
+
+def check_obsolete_entries(steps_by_key: dict, entries) -> list:
+    """WI-4b, Rule 4: for every allowlist entry whose step still EXISTS,
+    flag it if that step's body is already a compliant one-line `python3`
+    call -- the exemption it grants is dead. An entry whose step no longer
+    exists at all is Rule 3's `[stale-allowlist]` concern, not this one;
+    the two rules are deliberately disjoint (this function is silent on a
+    missing step) so neither masks the other."""
+    failures: list = []
+    for entry in entries:
+        step = steps_by_key.get((entry.workflow, entry.step_name))
+        if step is None:
+            continue
+        code = workflow_scan.code_lines(step)
+        compliant = len(code) == 1 and bool(PYTHON_BODY_RE.match(code[0]))
+        if not compliant:
+            continue
+        failures.append(
+            f"{step.workflow}:{step.start_line}: [obsolete-allowlist] '{step.step_name}' is "
+            "already a one-line python3 body; its exemption is dead. Remove the entry and "
+            "decrement ALLOWLIST_SIZE_EXPECTED (ratchet)."
+        )
+    return failures
+
+
 def main(argv=None, repo_root: Path = REPO_ROOT, workflows_dir=None) -> int:
     failures: list = []
     workflows_dir = workflows_dir if workflows_dir is not None else (repo_root / ".github" / "workflows")
@@ -207,6 +256,7 @@ def main(argv=None, repo_root: Path = REPO_ROOT, workflows_dir=None) -> int:
     matched_entries = _rule1_run_bodies(failures, workflow_files)
     _rule2_no_new_shell_files(failures, repo_root)
     _rule3_allowlist_is_loud(failures, matched_entries, workflow_files)
+    failures.extend(check_obsolete_entries(_steps_by_key(workflow_files), allowlist.MUST_STAY))
 
     if failures:
         for f in failures:

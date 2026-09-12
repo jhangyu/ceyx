@@ -171,6 +171,90 @@ class TestGuardMatchesRealRepo(unittest.TestCase):
             self.assertFalse(str(guard.__file__).endswith(pattern.lstrip("*")))
 
 
+class TestObsoleteAllowlistEntries(unittest.TestCase):
+    """WI-4b, Rule 4 (`[obsolete-allowlist]`): the other half of the
+    stale-allowlist safety catch. A migrated step keeps its exact
+    `- name:` and only its BODY changes (shell -> one-line `python3`), so
+    Rule 3's `[stale-allowlist]` (which fires only when the step no longer
+    EXISTS) stays silent while the allowlist keeps a dead exemption."""
+
+    def test_obsolete_entry_is_flagged(self):
+        """A stubbed allowlist entry naming a step whose body is ALREADY a
+        compliant one-line python3 call must fail with [obsolete-allowlist]."""
+        fake_entry = allowlist.Entry("x.yml", "One-liner", "test fixture")
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", ONE_LINE_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", (fake_entry,)), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 1
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 1)
+            combined = out.getvalue() + err.getvalue()
+            self.assertIn("[obsolete-allowlist]", combined)
+            self.assertIn("One-liner", combined)
+
+    def test_genuine_shell_entry_is_not_flagged(self):
+        """FALSE-POSITIVE PIN: the same allowlisted step name, but with a
+        genuine multi-line shell body, must NOT be flagged -- without this,
+        [obsolete-allowlist] could "pass" by flagging every entry and the
+        next real ratchet would be unreadable."""
+        fake_entry = allowlist.Entry("bad.yml", "Multi-line shell step", "test fixture")
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("bad.yml", THREE_LINE_BASH_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", (fake_entry,)), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 1
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
+            self.assertNotIn("[obsolete-allowlist]", out.getvalue() + err.getvalue())
+
+    def test_stale_and_obsolete_are_distinct(self):
+        """A step that no longer exists at all must yield [stale-allowlist],
+        never [obsolete-allowlist] -- the two rules must not mask each
+        other."""
+        fake_entry = allowlist.Entry(
+            "nonexistent.yml", "A step that does not exist", "test fixture"
+        )
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", ONE_LINE_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", (fake_entry,)), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 1
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 1)
+            combined = out.getvalue() + err.getvalue()
+            self.assertIn("[stale-allowlist]", combined)
+            self.assertNotIn("[obsolete-allowlist]", combined)
+
+    def test_must_stay_entries_are_never_obsolete(self):
+        """The C-G14 permanent entries (and every other real MUST_STAY
+        entry) must not trip Rule 4 against the real repo: they are
+        genuinely multi-line shell, so this pins that Rule 4 agrees with
+        Rule 1's own classification of the same bodies."""
+        real_repo_root = guard.REPO_ROOT
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = guard.main(repo_root=real_repo_root)
+        combined = out.getvalue() + err.getvalue()
+        self.assertNotIn(
+            "[obsolete-allowlist]", combined,
+            "a real allowlist entry is stranded -- ratchet it, do not weaken this test",
+        )
+        self.assertEqual(rc, 0, combined)
+
+
 class TestBareScriptInvocation(unittest.TestCase):
     """Round-2 signoff blocker: every prior test invoked the guard by
     IMPORTING it, so a defect that only manifests when the module is run as
