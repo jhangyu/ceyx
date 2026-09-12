@@ -144,25 +144,49 @@ jobs:
         # native/scripts/build_deps.py. The rest of this set has identical
         # package names on 22.04, so this addition is additive-only.
         #
-        # The `sudo` that used to prefix these two lines is gone (2026-09-12).
-        # The previous comment here flagged it as UNVERIFIED and asked that it
-        # not be "fixed" preemptively before a real containerised run was
-        # observed. Status of that condition, stated honestly: CI run
-        # 34697591379 was the first containerised run, and it died at
-        # `actions/checkout` (no git in the image) BEFORE reaching this step --
-        # so this step has still never executed, and the sudo failure was NOT
-        # directly observed. It is changed anyway because the pre-checkout step
-        # added above now establishes the same fact by construction: it runs
-        # `apt-get` with no sudo in this exact image, so if the job gets past
-        # checkout at all, root-without-sudo is proven, and a `sudo` here
-        # could then only fail ("sudo: command not found"), never help.
-        # `sudo` is used conditionally rather than deleted outright so this
+        # The `sudo` that used to prefix these two lines is gone (2026-09-12),
+        # and `zip unzip` were added. Both facts are MEASURED, not reasoned:
+        # the leg was reproduced locally in the identical image
+        # (`docker run --platform linux/amd64 ubuntu:22.04`, artifacts under
+        # tmp/verify/linux/). That run showed, in the bare image:
+        #   - no `git`      -> the pre-checkout step above exists for this
+        #   - no `sudo`, uid 0 -> a `sudo` prefix here could only fail
+        #                         ("sudo: command not found"), never help
+        #   - no `zip`/`unzip` -> vcpkg's bootstrap-vcpkg.sh aborts with
+        #                         "Could not find zip. Please install it ..."
+        #                         (RC=1, no vcpkg binary produced), which would
+        #                         have been the NEXT red on this leg once
+        #                         checkout was fixed. `tar` and `curl` ARE
+        #                         present in the base image and are not added.
+        #   - no `pkg-config`  -> the layer after THAT: with zip/unzip present,
+        #                         bootstrap succeeds and `vcpkg install` gets as
+        #                         far as libwebp, then fails in
+        #                         vcpkg_fixup_pkgconfig with "Could not find
+        #                         pkg-config. Please install it via your package
+        #                         manager" (VCPKG_INSTALL_RC=1). Added only
+        #                         after observing that failure, not on suspicion.
+        #   - no `file`        -> the layer after THAT: the HEIF-stack carrier
+        #                         (native/scripts/deps) shells out to `file`
+        #                         when verifying the built dist and dies with
+        #                         FileNotFoundError: [Errno 2] ... 'file'
+        #                         AFTER libheif has already installed, so the
+        #                         build looks nearly done when it fails.
+        # Enumerated rather than guessed one-at-a-time: the external tools the
+        # deps carrier and the assertion scripts actually invoke are
+        # ar/cmake/file/git/ldd/nm/objdump/readelf/strip (plus the macOS-only
+        # otool/lipo/install_name_tool). Of those, `file` was the only one
+        # missing from this image. patchelf/meson/autoconf/libtool are also
+        # absent but are NOT referenced by this repo, so they are NOT added.
+        # The hosted runner image preinstalled all of these, which is why the
+        # container migration needed them enumerated explicitly.
+        # `sudo` is resolved conditionally rather than deleted outright so this
         # step also keeps working if the leg is ever moved back to a non-root
         # hosted runner.
         run: |
           if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
+            zip unzip pkg-config file \
             cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools \
             nasm yasm git curl python3 python3-pip ca-certificates
