@@ -65,6 +65,29 @@ jobs:
       # available as an ordinary environment variable inside `run:` steps, so
       # the paths are composed there instead.
     steps:
+      # MUST RUN BEFORE actions/checkout (CI run 34697591379, this leg's first
+      # real containerised run, died here). `container: ubuntu:22.04` is a bare
+      # base image with NO git. actions/checkout falls back to downloading a
+      # tarball through the REST API when git < 2.18 is absent from PATH, and
+      # that fallback mode REJECTS `submodules:` outright:
+      #   "Input 'submodules' not supported when falling back to download
+      #    using the GitHub REST API"
+      # So the leg failed at step 1 and never built anything. Installing git in
+      # the existing "Install build prerequisites (apt)" step below cannot help
+      # -- that step runs AFTER checkout, which is the ordering bug.
+      #
+      # Kept minimal on purpose: only what checkout itself needs (git, plus CA
+      # certificates for the HTTPS fetch). The full build prerequisite set
+      # stays in its own step below, unchanged.
+      #
+      # No `sudo` here: GitHub Actions container jobs run as root by default
+      # and a minimal ubuntu:22.04 image ships no sudo binary at all.
+      - name: Install git into the container (pre-checkout, WI-14 step 14.5)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+          git --version
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -121,20 +144,25 @@ jobs:
         # native/scripts/build_deps.py. The rest of this set has identical
         # package names on 22.04, so this addition is additive-only.
         #
-        # RESIDUAL RISK, disclosed not hidden (S-F4): no container was
-        # actually spun up and built in during baseline selection. This
-        # `sudo` invocation is UNVERIFIED inside a bare `container:` job --
-        # GitHub Actions container jobs run as root by default and a minimal
-        # `ubuntu:22.04` base image does not ship a `sudo` binary, which
-        # would make this line fail outright rather than degrade. Left
-        # unchanged pending the first real containerised run per the plan's
-        # own accepting-evidence clause (the measured MIN_RUNTIME_linux value
-        # from that run, not this YAML diff, is what closes S-F4) -- do not
-        # "fix" this preemptively without first observing whether it is
-        # actually a problem on the real image.
+        # The `sudo` that used to prefix these two lines is gone (2026-09-12).
+        # The previous comment here flagged it as UNVERIFIED and asked that it
+        # not be "fixed" preemptively before a real containerised run was
+        # observed. Status of that condition, stated honestly: CI run
+        # 34697591379 was the first containerised run, and it died at
+        # `actions/checkout` (no git in the image) BEFORE reaching this step --
+        # so this step has still never executed, and the sudo failure was NOT
+        # directly observed. It is changed anyway because the pre-checkout step
+        # added above now establishes the same fact by construction: it runs
+        # `apt-get` with no sudo in this exact image, so if the job gets past
+        # checkout at all, root-without-sudo is proven, and a `sudo` here
+        # could then only fail ("sudo: command not found"), never help.
+        # `sudo` is used conditionally rather than deleted outright so this
+        # step also keeps working if the leg is ever moved back to a non-root
+        # hosted runner.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
             cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools \
             nasm yasm git curl python3 python3-pip ca-certificates
