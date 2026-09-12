@@ -349,21 +349,24 @@ jobs:
           # nm_dynsyms.txt was written de-pipelined by AC-L3 above; grepping the
           # FILE (never `nm | grep -q`) is what keeps pipefail from turning nm's
           # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
+          #
+          # WI-13 (S-G2): the two-name allowlist loop is replaced by the
+          # Dart-derived manifest (native/deps/export_manifest.toml) via
+          # native/scripts/assert_exports.py. The script matches ELF
+          # dynamic-symbol lines by name with the same ` T ` type filter
+          # this loop used, so the check does not weaken.
           echo "== AC-L5: required FFI exports present in .so =="
-          missing=""
-          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8; do
-            set +e
-            grep -E " T ${sym}\$" nm_dynsyms.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} ${sym}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in $SO:${missing} — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
-            exit 1
+          set +e
+          python3 native/scripts/assert_exports.py \
+            --manifest native/deps/export_manifest.toml \
+            --platform linux \
+            --dump nm_dynsyms.txt
+          RC=$?
+          set -e
+          echo "ASSERT_EXPORTS_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::assert_exports.py reported missing/absent symbol(s) in $SO — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
+            exit "${RC}"
           fi
 
       # PORTABLE-BASELINE GATE (2026-09-08). The v0.1.19 Linux release SIGILL'd

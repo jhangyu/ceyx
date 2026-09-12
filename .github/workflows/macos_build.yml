@@ -786,6 +786,13 @@ jobs:
       # the build regressed. Output to a file, then grepped, same
       # pipefail-avoidance reasoning as above.
       # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
+      #
+      # WI-13 (S-G4): the hand-kept three-name allowlist loop is replaced by
+      # the Dart-derived manifest (native/deps/export_manifest.toml) and
+      # native/scripts/assert_exports.py, so macOS gains the SAME
+      # manifest-driven check as the other three legs, not a parallel one.
+      # The manifest's mandatory set still carries
+      # ceyx_decode_into_buffer_oriented as its own positive control.
       - name: Assert required FFI exports present in dylib (G3)
         run: |
           set +e
@@ -798,21 +805,15 @@ jobs:
             cat dylib_exports.txt || true
             exit 1
           fi
-          missing=""
-          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8 ceyx_encode_webp_rgba8; do
-            set +e
-            grep -q "${sym}" dylib_exports.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} ${sym}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in $DYLIB:${missing} — the dylib does not export the FFI surface Dart looks up." >&2
-            exit 1
-          fi
+          set +e
+          python3 native/scripts/assert_exports.py \
+            --manifest native/deps/export_manifest.toml \
+            --platform macos \
+            --dump dylib_exports.txt
+          RC=$?
+          set -e
+          echo "ASSERT_EXPORTS_RC=${RC}"
+          exit "${RC}"
 
       # CI-T11 (MACOS-ASSET, user ruling 4a / contract AC9, 2026-09-01): the
       # release asset used to carry only the decoder itself. Five downstream
