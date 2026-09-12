@@ -28,7 +28,7 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py assert-exports    --platform P [--arch A]
     python3 native/scripts/ci.py assert-no-avx512  --platform P
     python3 native/scripts/ci.py assert-orientation --platform P
-    python3 native/scripts/ci.py codec-probe       --platform P
+    python3 native/scripts/ci.py codec-probe       --platform P --workspace W [--dist-dir D]
     python3 native/scripts/ci.py capability-vector --platform P --kind codec|build [--source probe|configure-log]
     python3 native/scripts/ci.py stage             --platform P
     python3 native/scripts/ci.py assert-staged-group --platform P
@@ -77,6 +77,15 @@ _PLATFORM_COMMANDS = (
     "dt-needed",
     "assert-vcpkg-artefacts",
 )
+
+# The three platforms `codec-probe` supports, PERMANENTLY -- android has no
+# `probe_codecs` step at all (codec_probe.py docstring; plan WI-13's
+# negative-space AC), unlike `_linux_only_commands` in dispatch() below,
+# which names platforms whose twin modules simply have not landed YET and
+# is expected to shrink as later pushes add them. This set is not expected
+# to ever change: there is no android twin scheduled, and there never will
+# be one to schedule.
+_CODEC_PROBE_PLATFORMS = frozenset({"linux", "macos", "windows"})
 
 # Subcommands that never take --platform at all.
 _PLATFORMLESS_COMMANDS = (
@@ -146,6 +155,31 @@ def _enforce_orientation_flags(parser: argparse.ArgumentParser, args: argparse.N
             )
 
 
+def _enforce_codec_probe_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """codec-probe only: --dist-dir is required for --platform macos
+    (its HEIF dist is a per-arch matrix value, workflow context rather
+    than a platform fact -- codec_probe.py's own docstring) and rejected
+    everywhere else. Same reject-don't-silently-ignore posture as C-G9's
+    --arch and _enforce_orientation_flags's per-platform flags: an
+    optional-but-unenforced flag would accept a workflow typo/copy-paste
+    (e.g. --dist-dir passed to the linux leg) and silently do nothing,
+    giving the caller zero signal. codec_probe.codec_probe() itself
+    already validates this exact rule in both directions (see
+    `_validate_dist_dir` there), so this is a second, earlier rejection
+    point -- an argparse usage error instead of a gate failure -- not a
+    redundant one; both stay."""
+    if args.command != "codec-probe":
+        return
+    platform = args.platform
+    dist_dir = args.dist_dir
+
+    if platform == "macos":
+        if dist_dir is None:
+            parser.error("--dist-dir is required for --platform macos")
+    elif dist_dir is not None:
+        parser.error(f"--dist-dir is not accepted for --platform {platform!r}")
+
+
 def _add_platform_command(sub, name: str, help_text: str, extra=None):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
@@ -189,7 +223,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_platform_command(
         sub, "assert-orientation", "assert orientation capability", _orientation_extra
     )
-    _add_platform_command(sub, "codec-probe", "run the functional codec probe")
+
+    def _codec_probe_extra(sp):
+        # macOS-only: its HEIF dist directory is a per-arch matrix value
+        # (workflow context, not a platform fact -- codec_probe.py's own
+        # docstring, divergence 1), so it cannot live in targets.py and is
+        # passed in explicitly instead, exactly like android's --ndk-home
+        # on assert-orientation. Optional at the argparse level and
+        # enforced post-parse by _enforce_codec_probe_flags() (same
+        # reject-not-ignore posture as C-G9/_enforce_orientation_flags):
+        # codec_probe.codec_probe() itself already validates this in both
+        # directions (ValueError-free, returns exit code 2 + report.error),
+        # so the CLI layer applying the same check is a second, earlier
+        # rejection point (an argparse usage error vs. a gate failure),
+        # not a redundant one -- both stay.
+        sp.add_argument("--workspace", required=True)
+        sp.add_argument("--dist-dir", default=None)
+
+    _add_platform_command(sub, "codec-probe", "run the functional codec probe", _codec_probe_extra)
 
     cv = _add_platform_command(
         sub, "capability-vector", "read/derive the codec or build capability vector"
@@ -313,6 +364,27 @@ def dispatch(args: argparse.Namespace) -> int:
             artifact_dir=args.artifact_dir,
             ndk_home=args.ndk_home,
         )
+    if args.command == "codec-probe":
+        # `_CODEC_PROBE_PLATFORMS` is a PERMANENT set, unlike
+        # `_linux_only_commands` above: android is not a "not yet migrated"
+        # gap awaiting a future twin -- it has no `probe_codecs` step at
+        # all (codec_probe.py's own docstring; plan WI-13's negative-space
+        # AC). Reusing `_linux_only_commands`'s scaffold-and-shrink shape
+        # here would encode a lie a future reader could "fix" by building
+        # an android leg that must never exist (the same stale-meaning
+        # failure C-G6 warns against for orientation). The rejection
+        # message below therefore does NOT say "not yet implemented".
+        if args.platform not in _CODEC_PROBE_PLATFORMS:
+            print(
+                f"::error::codec-probe has no --platform {args.platform!r} leg -- "
+                "android has no probe_codecs step to migrate, permanently "
+                "(codec_probe.py docstring, plan WI-13 negative-space AC)",
+                file=sys.stderr,
+            )
+            return 2
+        import ci.codec_probe as codec_probe
+
+        return codec_probe.codec_probe(args.platform, args.workspace, dist_dir=args.dist_dir)
     if args.command in _PLATFORM_COMMANDS or args.command in _PLATFORMLESS_COMMANDS:
         return _not_yet(args.command)
     return 2
@@ -341,6 +413,7 @@ def main(argv=None) -> int:
     if args.command in _PLATFORM_COMMANDS:
         _enforce_arch_requirement(parser, args)
         _enforce_orientation_flags(parser, args)
+        _enforce_codec_probe_flags(parser, args)
     return dispatch(args)
 
 

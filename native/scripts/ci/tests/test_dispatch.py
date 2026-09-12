@@ -301,6 +301,92 @@ class TestOrientationDispatch(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class TestCodecProbeDispatch(unittest.TestCase):
+    """Push 5: codec-probe is a three-leg command (linux/macos/windows) with
+    a macOS-only --dist-dir, enforced in both directions at the CLI layer
+    (mirroring _enforce_orientation_flags) in addition to codec_probe.py's
+    own in-module validation -- and android is rejected permanently, not
+    via `_linux_only_commands`'s temporary "not yet implemented" shape."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp = Path(self._tmpdir.name)
+
+    def test_macos_missing_dist_dir_is_argparse_error(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    ["codec-probe", "--platform", "macos", "--workspace", str(self.tmp)]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_linux_rejects_dist_dir(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "codec-probe",
+                        "--platform",
+                        "linux",
+                        "--workspace",
+                        str(self.tmp),
+                        "--dist-dir",
+                        "x",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_windows_rejects_dist_dir(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(
+                    [
+                        "codec-probe",
+                        "--platform",
+                        "windows",
+                        "--workspace",
+                        str(self.tmp),
+                        "--dist-dir",
+                        "x",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_missing_workspace_is_argparse_error_not_traceback(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stderr(io.StringIO()):
+                ci_entrypoint.main(["codec-probe", "--platform", "linux"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_android_is_rejected_permanently_not_via_not_yet(self):
+        # android has no probe_codecs step at all -- this must NOT be the
+        # `_not_yet()` P0-scaffolding message ("not implemented yet"),
+        # which would wrongly invite building an android twin later.
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = ci_entrypoint.main(
+                ["codec-probe", "--platform", "android", "--workspace", str(self.tmp)]
+            )
+        self.assertEqual(rc, 2)
+        self.assertNotIn("not implemented yet", buf.getvalue())
+        self.assertIn("no probe_codecs step", buf.getvalue())
+
+    def test_linux_end_to_end_missing_dist_is_handled_not_traceback(self):
+        # No HEIF dist tree at all in this empty workspace: the compiler
+        # invocation (or tool resolution) must fail cleanly through the
+        # module, never raise -- exercises the real dispatch call shape.
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            rc = ci_entrypoint.main(
+                ["codec-probe", "--platform", "linux", "--workspace", str(self.tmp)]
+            )
+        self.assertNotEqual(rc, 0)
+
+
 class TestPackageImportResolution(unittest.TestCase):
     def test_package_import_resolves_to_package_not_entrypoint(self):
         # native/scripts/ci.py and the package native/scripts/ci/ share a
