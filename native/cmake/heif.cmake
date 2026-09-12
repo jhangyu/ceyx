@@ -6,6 +6,17 @@
 #
 # Included (not add_subdirectory'd) from native/CMakeLists.txt, after
 # cmake/ffi.cmake, so dng_decoder_native already exists as a target.
+#
+# CEYX_SHIPPED_<PLATFORM>_DECODER / _COMPANIONS (WI-15 step 15.2): the file
+# names each staging branch below copies are read from the generated
+# native/cmake/shipped_files.cmake, itself derived from the single
+# declaration native/deps/shipped_files.toml -- never hard-coded here. The
+# per-platform STAGING MECHANISM (dylib @rpath vs DLL search-order vs .so
+# $ORIGIN rpath vs unversioned Android names) stays branch-specific below,
+# by design (rootcause-native-capability.md Item H); only the file names
+# come from the declaration.
+include(${CMAKE_CURRENT_LIST_DIR}/shipped_files.cmake)
+
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
 if(DNG_ENABLE_HEIF)
@@ -196,13 +207,37 @@ if(DNG_ENABLE_HEIF)
         #     reach the app bundle. Staging here is what makes that free.
         # copy_if_different, so an unchanged dist does not retrigger the
         # downstream Flutter build every time.
+        # heif.cmake stages only the two libheif-stack members of
+        # CEYX_SHIPPED_MACOS_COMPANIONS (liblcms2.2.dylib/libjpeg.8.dylib/
+        # libomp.dylib are the other staging mechanisms named in
+        # shipped_files.toml's macos `source` field: pipeline.cmake's
+        # bundle_macos_dylib_deps.py and tests.cmake's libomp vendoring
+        # respectively) -- looked up BY NAME PREFIX, not by a positional
+        # index, so a future change to the declared list's ORDER or LENGTH
+        # (e.g. WI-5 removing liblcms2.2.dylib) cannot silently pick the
+        # wrong companion the way a hard-coded `list(GET ... 1/2)` would.
+        set(_ceyx_heif_dylib_name "")
+        set(_ceyx_de265_dylib_name "")
+        foreach(_ceyx_companion IN LISTS CEYX_SHIPPED_MACOS_COMPANIONS)
+            if(_ceyx_companion MATCHES "^libheif\\.")
+                set(_ceyx_heif_dylib_name "${_ceyx_companion}")
+            elseif(_ceyx_companion MATCHES "^libde265\\.")
+                set(_ceyx_de265_dylib_name "${_ceyx_companion}")
+            endif()
+        endforeach()
+        if(NOT _ceyx_heif_dylib_name OR NOT _ceyx_de265_dylib_name)
+            message(FATAL_ERROR
+                "CEYX_SHIPPED_MACOS_COMPANIONS (${CEYX_SHIPPED_MACOS_COMPANIONS}) "
+                "is missing a libheif.*/libde265.* entry -- native/deps/shipped_files.toml "
+                "is malformed.")
+        endif()
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libheif.1.dylib"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.1.dylib"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_heif_dylib_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_dylib_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libde265.0.dylib"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.0.dylib"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_de265_dylib_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_dylib_name}"
             COMMENT "Staging libheif/libde265 next to dng_decoder_native")
     elseif(WIN32)
         # Stage the two DLLs NEXT TO the built decoder DLL. Windows resolves an
@@ -226,14 +261,79 @@ if(DNG_ENABLE_HEIF)
         # bundled-library list and windows_build.yml's staging step consume, so
         # all three ship the same set by construction rather than by three
         # hand-maintained lists happening to agree.
+        # WI-4 step 4.2: CEYX_SHIPPED_WINDOWS_COMPANIONS now has THREE members
+        # (heif.dll, libde265.dll, libomp140.x86_64.dll -- OQ-N2 ruled SHIP).
+        # Looked up BY NAME PREFIX, not by positional list(GET ... N), so a
+        # future change to the declared list's order or length cannot
+        # silently pick the wrong companion -- the same trap the APPLE branch
+        # above already dodges this way (round-1 commit 791888ac), and the
+        # plan's known round-2 parking-lot trap for this exact branch.
+        set(_ceyx_heif_dll_name "")
+        set(_ceyx_de265_dll_name "")
+        set(_ceyx_omp_dll_name "")
+        foreach(_ceyx_companion IN LISTS CEYX_SHIPPED_WINDOWS_COMPANIONS)
+            if(_ceyx_companion MATCHES "^heif\\.")
+                set(_ceyx_heif_dll_name "${_ceyx_companion}")
+            elseif(_ceyx_companion MATCHES "^libde265\\.")
+                set(_ceyx_de265_dll_name "${_ceyx_companion}")
+            elseif(_ceyx_companion MATCHES "^libomp140\\.")
+                set(_ceyx_omp_dll_name "${_ceyx_companion}")
+            endif()
+        endforeach()
+        if(NOT _ceyx_heif_dll_name OR NOT _ceyx_de265_dll_name)
+            message(FATAL_ERROR
+                "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
+                "is missing a heif.*/libde265.* entry -- native/deps/shipped_files.toml "
+                "is malformed.")
+        endif()
+
+        # The OpenMP runtime ships with the LLVM toolchain, not the HEIF
+        # dist, so it is resolved with find_file at configure time rather
+        # than transcribed from HEIF_DIST_DIR. When desktop OpenMP is
+        # enabled on Windows the decoder ALREADY IMPORTS this DLL (its own
+        # import table names it -- rootcause-native-capability.md Item B),
+        # so "not found" here means the artifact will be unloadable, not
+        # that a feature silently degrades -- the honest-OFF pattern this
+        # tree uses for libomp on macOS (tests.cmake:715-726) is the WRONG
+        # shape for this case.
+        if(CEYX_ENABLE_DESKTOP_OPENMP)
+            if(NOT _ceyx_omp_dll_name)
+                message(FATAL_ERROR
+                    "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
+                    "is missing a libomp140.* entry -- native/deps/shipped_files.toml "
+                    "is malformed.")
+            endif()
+            get_filename_component(_ceyx_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+            find_file(CEYX_WIN_OMP_RUNTIME
+                NAMES "${_ceyx_omp_dll_name}"
+                HINTS "${_ceyx_clang_bin_dir}" "C:/Program Files/LLVM/bin")
+            if(NOT CEYX_WIN_OMP_RUNTIME)
+                message(FATAL_ERROR
+                    "${_ceyx_omp_dll_name} not found next to the clang-cl "
+                    "toolchain (searched ${_ceyx_clang_bin_dir} and "
+                    "C:/Program Files/LLVM/bin). The Windows decoder imports "
+                    "this DLL directly (OQ-N2 ruled SHIP); an artifact "
+                    "staged without it will fail to load, so this is a "
+                    "configure-time FATAL, not a degrade.")
+            endif()
+            message(STATUS "OpenMP runtime for staging: ${CEYX_WIN_OMP_RUNTIME}")
+        endif()
+
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/bin/heif.dll"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/heif.dll"
+                    "${HEIF_DIST_DIR}/bin/${_ceyx_heif_dll_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_dll_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/bin/libde265.dll"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.dll"
+                    "${HEIF_DIST_DIR}/bin/${_ceyx_de265_dll_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_dll_name}"
             COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
+        if(CEYX_ENABLE_DESKTOP_OPENMP AND CEYX_WIN_OMP_RUNTIME)
+            add_custom_command(TARGET dng_decoder_native POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${CEYX_WIN_OMP_RUNTIME}"
+                        "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_omp_dll_name}"
+                COMMENT "Staging ${_ceyx_omp_dll_name} (OpenMP runtime, OQ-N2) next to dng_decoder_native")
+        endif()
     elseif(ANDROID)
         # Stage the two UNVERSIONED .so files NEXT TO the built decoder .so
         # (A-T8-FIX, 2026-09-01). Unlike the Linux desktop branch below,
@@ -248,13 +348,15 @@ if(DNG_ENABLE_HEIF)
         # desktop requires one), so staging here next to dng_decoder_native
         # -- which is also what the packaging step below copies into the
         # artifact/jniLibs set -- is sufficient for the loader to find them.
+        list(GET CEYX_SHIPPED_ANDROID_COMPANIONS 0 _ceyx_heif_so_name)
+        list(GET CEYX_SHIPPED_ANDROID_COMPANIONS 1 _ceyx_de265_so_name)
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libheif.so"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.so"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_heif_so_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_so_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libde265.so"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.so"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_de265_so_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_so_name}"
             COMMENT "Staging libheif.so/libde265.so next to dng_decoder_native")
     elseif(UNIX AND NOT APPLE)
         # Stage the two versioned .so files NEXT TO the built decoder .so
@@ -279,13 +381,15 @@ if(DNG_ENABLE_HEIF)
         # DT_NEEDED lookup actually needs to find -- staging the unversioned
         # symlink target alone, without the versioned name present, would
         # fail to resolve.
+        list(GET CEYX_SHIPPED_LINUX_COMPANIONS 0 _ceyx_heif_so_versioned_name)
+        list(GET CEYX_SHIPPED_LINUX_COMPANIONS 1 _ceyx_de265_so_versioned_name)
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libheif.so.1"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libheif.so.1"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_heif_so_versioned_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_heif_so_versioned_name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${HEIF_DIST_DIR}/lib/libde265.so.0"
-                    "$<TARGET_FILE_DIR:dng_decoder_native>/libde265.so.0"
+                    "${HEIF_DIST_DIR}/lib/${_ceyx_de265_so_versioned_name}"
+                    "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_so_versioned_name}"
             COMMENT "Staging libheif.so.1/libde265.so.0 next to dng_decoder_native")
     endif()
 else()

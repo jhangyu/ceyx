@@ -30,18 +30,69 @@ DEFAULT_WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # <format>:<direction>=<0|1>, e.g. "heic:encode=1".
 _EXPECT_TOKEN_RE = re.compile(r"\b([a-z0-9_]+:[a-z0-9_]+=[01])\b")
 
+# WI-5: matches the tokens codec_capability_probe.py's --expect-cap flag
+# accepts: <NAME>=<0|1>, e.g. "ICC=0". Restricted to the KNOWN capability
+# names (not a bare "any uppercase identifier" pattern) -- workflow files are
+# full of unrelated uppercase shell VAR=VAL assignments (RC=0, RC=1, and
+# other steps' own env vars), and a generic pattern collides with all of
+# them the moment a leg's capability step has no unique step_anchor to
+# scope the scan to.
+_EXPECT_CAP_TOKEN_RE = re.compile(r"\b(ICC|OPENMP|HEIF|WEBP|JXL|RAW)=([01])\b")
+
 
 class LedgerError(Exception):
     """The ledger file is malformed or violates the reason/owner rule."""
 
 
+def _load_expect_table(leg, table, key):
+    """Shared validator for both `[<leg>.expect]` and `[<leg>.capabilities]`.
+
+    Same schema rules for both (codec_expectations.toml's header, WI-5 plan
+    step 5.3): a bare 1 needs no annotation, every 0 must be a table with
+    non-empty `reason` and `owner`, rejected at load time otherwise.
+    """
+    raw = table.get(key, {})
+    parsed = {}
+    for pair, entry in raw.items():
+        if isinstance(entry, bool):
+            raise LedgerError(f"leg {leg!r} {key} {pair!r}: boolean is not a valid expectation")
+        if isinstance(entry, int):
+            if entry == 1:
+                parsed[pair] = 1
+            elif entry == 0:
+                raise LedgerError(
+                    f"leg {leg!r} {key} {pair!r}: a bare 0 is rejected -- every 0 "
+                    f"must carry a sibling reason and owner, e.g. "
+                    f'{{ value = 0, reason = "...", owner = "..." }}'
+                )
+            else:
+                raise LedgerError(f"leg {leg!r} {key} {pair!r}: value must be 0 or 1, got {entry}")
+        elif isinstance(entry, dict):
+            value = entry.get("value")
+            if value != 0:
+                raise LedgerError(
+                    f"leg {leg!r} {key} {pair!r}: table form is only valid for value = 0, "
+                    f"got value = {value!r}"
+                )
+            reason = entry.get("reason")
+            owner = entry.get("owner")
+            if not reason or not isinstance(reason, str):
+                raise LedgerError(f"leg {leg!r} {key} {pair!r}: 0 entry missing non-empty 'reason'")
+            if not owner or not isinstance(owner, str):
+                raise LedgerError(f"leg {leg!r} {key} {pair!r}: 0 entry missing non-empty 'owner'")
+            parsed[pair] = 0
+        else:
+            raise LedgerError(f"leg {leg!r} {key} {pair!r}: unrecognised entry type {type(entry)}")
+    return parsed
+
+
 def load_ledger(path=None):
-    """Parse and validate the ledger. Returns {leg: {"instrument": str, "workflow": str, "expect": {pair: int}}}.
+    """Parse and validate the ledger. Returns {leg: {"instrument": str, "workflow": str, "expect": {pair: int}, "capabilities": {name: int}}}.
 
     Every `0` cell must be a table carrying non-empty `reason` and `owner`
-    strings, or this raises LedgerError. The returned `expect` dict values
-    are plain ints (0 or 1); reason/owner are validation-only metadata, not
-    part of the CLI vector.
+    strings, or this raises LedgerError. The returned `expect`/`capabilities`
+    dict values are plain ints (0 or 1); reason/owner are validation-only
+    metadata, not part of the CLI vector.
 
     `workflow` is the leg's own workflow filename under .github/workflows/
     (e.g. "windows_build.yml") -- required so `check()` can compare each
@@ -62,43 +113,15 @@ def load_ledger(path=None):
             raise LedgerError(f"leg {leg!r} is missing required key 'instrument'")
         if "workflow" not in table:
             raise LedgerError(f"leg {leg!r} is missing required key 'workflow'")
-        expect_raw = table.get("expect", {})
-        expect = {}
-        for pair, entry in expect_raw.items():
-            if isinstance(entry, bool):
-                raise LedgerError(f"leg {leg!r} pair {pair!r}: boolean is not a valid expectation")
-            if isinstance(entry, int):
-                if entry == 1:
-                    expect[pair] = 1
-                elif entry == 0:
-                    raise LedgerError(
-                        f"leg {leg!r} pair {pair!r}: a bare 0 is rejected -- every 0 "
-                        f"must carry a sibling reason and owner, e.g. "
-                        f'{{ value = 0, reason = "...", owner = "..." }}'
-                    )
-                else:
-                    raise LedgerError(f"leg {leg!r} pair {pair!r}: value must be 0 or 1, got {entry}")
-            elif isinstance(entry, dict):
-                value = entry.get("value")
-                if value != 0:
-                    raise LedgerError(
-                        f"leg {leg!r} pair {pair!r}: table form is only valid for value = 0, "
-                        f"got value = {value!r}"
-                    )
-                reason = entry.get("reason")
-                owner = entry.get("owner")
-                if not reason or not isinstance(reason, str):
-                    raise LedgerError(f"leg {leg!r} pair {pair!r}: 0 entry missing non-empty 'reason'")
-                if not owner or not isinstance(owner, str):
-                    raise LedgerError(f"leg {leg!r} pair {pair!r}: 0 entry missing non-empty 'owner'")
-                expect[pair] = 0
-            else:
-                raise LedgerError(f"leg {leg!r} pair {pair!r}: unrecognised entry type {type(entry)}")
+        expect = _load_expect_table(leg, table, "expect")
+        capabilities = _load_expect_table(leg, table, "capabilities")
         legs[leg] = {
             "instrument": table["instrument"],
             "workflow": table["workflow"],
             "step_anchor": table.get("step_anchor"),
+            "capabilities_step_anchor": table.get("capabilities_step_anchor", table.get("step_anchor")),
             "expect": expect,
+            "capabilities": capabilities,
         }
     return legs
 
@@ -113,6 +136,19 @@ def render(leg, ledger=None):
         value = legs[leg]["expect"][pair]
         fragment.append("--expect")
         fragment.append(f"{pair}={value}")
+    return fragment
+
+
+def render_capabilities(leg, ledger=None):
+    """Return the sorted list of '--expect-cap', '<name>=<val>' argv fragments for `leg` (WI-5)."""
+    legs = ledger if ledger is not None else load_ledger()
+    if leg not in legs:
+        raise LedgerError(f"unknown leg {leg!r}; known legs: {', '.join(sorted(legs))}")
+    fragment = []
+    for name in sorted(legs[leg]["capabilities"]):
+        value = legs[leg]["capabilities"][name]
+        fragment.append("--expect-cap")
+        fragment.append(f"{name}={value}")
     return fragment
 
 
@@ -162,6 +198,37 @@ def _tokens_in_file(path, step_anchor=None):
     tokens = set()
     for match in _EXPECT_TOKEN_RE.finditer(text):
         tokens.add(match.group(1))
+    return tokens
+
+
+def _capability_tokens_in_file(path, step_anchor=None):
+    """Return the NAME=VAL build-capability token set found in a single
+    workflow file (WI-5). Same step_anchor slicing as _tokens_in_file --
+    a leg with no step_anchor gets a whole-file scan.
+    """
+    text = pathlib.Path(path).read_text()
+    if step_anchor is not None:
+        headers = list(_STEP_HEADER_RE.finditer(text))
+        start = None
+        indent = ""
+        start_idx = -1
+        for i, h in enumerate(headers):
+            if step_anchor in h.group(0):
+                start = h.start()
+                indent = h.group(1)
+                start_idx = i
+                break
+        if start is None:
+            return set()
+        end = len(text)
+        for h in headers[start_idx + 1:]:
+            if len(h.group(1)) <= len(indent):
+                end = h.start()
+                break
+        text = text[start:end]
+    tokens = set()
+    for match in _EXPECT_CAP_TOKEN_RE.finditer(text):
+        tokens.add(match.group(0))
     return tokens
 
 
@@ -231,6 +298,28 @@ def check(ledger=None, workflows_dir=None):
             disagreements.append(
                 f"leg {leg!r} ledger claims {token!r} but its workflow {workflow_name!r} does not assert it"
             )
+
+        # WI-5 (S-E2): same per-leg, two-directional comparison for the
+        # build-capability vector. Uses `capabilities_step_anchor`, NOT the
+        # codec `step_anchor` -- the macos legs' capability steps' names
+        # also contain the "native leg"/"cross leg" substrings (so the two
+        # steps read side by side, plan step 5.4), which would otherwise
+        # make the codec anchor match the EARLIER codec step's header and
+        # clip the scan before ever reaching the capability step's own
+        # tokens (the SF2 hazard one level down; see the ledger's
+        # capabilities_step_anchor comment). Legs without a dedicated
+        # capabilities_step_anchor fall back to step_anchor (or None, i.e.
+        # whole-file scan) via load_ledger's default.
+        cap_leg_tokens = {f"{name}={value}" for name, value in table.get("capabilities", {}).items()}
+        cap_wf_tokens = _capability_tokens_in_file(wf_path, step_anchor=table.get("capabilities_step_anchor"))
+        for token in sorted(cap_wf_tokens - cap_leg_tokens):
+            disagreements.append(
+                f"leg {leg!r} workflow {workflow_name!r} asserts capability {token!r} but the ledger leg does not claim it"
+            )
+        for token in sorted(cap_leg_tokens - cap_wf_tokens):
+            disagreements.append(
+                f"leg {leg!r} ledger claims capability {token!r} but its workflow {workflow_name!r} does not assert it"
+            )
     return disagreements
 
 
@@ -238,6 +327,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--leg", metavar="LEG_ID", help="Print the --expect argv fragment for this leg")
+    ap.add_argument("--capabilities", action="store_true",
+                    help="With --leg, print the --expect-cap build-capability argv fragment (WI-5) instead of the codec --expect fragment")
     ap.add_argument("--check", action="store_true",
                     help="Compare the ledger against .github/workflows/*.yml and exit 1 on disagreement")
     ap.add_argument("--ledger", metavar="PATH", default=None, help="Ledger path (default: %(default)s)")
@@ -247,6 +338,8 @@ def main(argv=None):
 
     if not args.leg and not args.check:
         ap.error("one of --leg or --check is required")
+    if args.capabilities and not args.leg:
+        ap.error("--capabilities requires --leg")
 
     try:
         legs = load_ledger(args.ledger)
@@ -257,7 +350,7 @@ def main(argv=None):
     rc = 0
     if args.leg:
         try:
-            fragment = render(args.leg, ledger=legs)
+            fragment = render_capabilities(args.leg, ledger=legs) if args.capabilities else render(args.leg, ledger=legs)
         except LedgerError as exc:
             print(f"::error::{exc}", file=sys.stderr)
             return 1

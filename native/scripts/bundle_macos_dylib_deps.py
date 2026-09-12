@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Make a macOS shared library self-contained by vendoring its Homebrew deps.
 
-dng_decoder_native links liblcms2/libjpeg-turbo (LibRaw's colour management +
-JPEG deps) via find_package(), which on this host resolves to absolute
-/opt/homebrew paths. That's fine for local test binaries (run on a dev
-machine that has Homebrew), but the shared library ships inside distributed
-app bundles -- a machine without Homebrew installed at those exact paths
-can't load it.
+dng_decoder_native links libjpeg-turbo (JPEG deps) via find_package(), which
+on this host resolves to absolute /opt/homebrew paths. That's fine for local
+test binaries (run on a dev machine that has Homebrew), but the shared
+library ships inside distributed app bundles -- a machine without Homebrew
+installed at those exact paths can't load it. (lcms2 no longer appears here:
+OQ-N4 option Z, WI-5, 2026-09-12 -- ENABLE_LCMS is forced OFF, so this dylib
+never links lcms2 on any platform.)
 
 Copies any Homebrew-path dependency next to the target dylib, rewrites its
 own install name to @rpath/<name>, and repoints the target's load command at

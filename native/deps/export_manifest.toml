@@ -1,0 +1,335 @@
+# export_manifest.toml -- GENERATED FILE, do not hand-edit.
+#
+# Derived from the Dart lookupFunction/lookup call sites in
+# plugin/lib/src/*.dart by native/scripts/gen_export_manifest.py
+# (WI-13, platform-parity-plan.md step 13.1). Regenerate with:
+#   python3 native/scripts/gen_export_manifest.py
+# native/scripts/tests/test_gen_export_manifest.py's --check test
+# asserts this file is up to date with the Dart source, so it
+# cannot drift from what the bindings actually look up.
+#
+# `platforms = "all"` is written explicitly on every record -- an
+# absent field is a schema error, not a default (the
+# four-places-drift lesson applies to schemas too).
+#
+# `group = ""` means mandatory (looked up unconditionally). A
+# non-empty group means the lookup sits inside a guarded try/catch
+# cluster (S-G3) -- see KNOWN_GROUP_IDS in the generator for the
+# plan-named ids and the derivation rule for the rest.
+#
+# [[group]] declares, per guarded cluster, which legs are expected
+# to have it (S-G3's expected_on). Default is all four legs --
+# assert_exports.py turns an ABSENT on an expecting leg into a
+# failure, never a silent degrade. EXCEPTION: legacy/backward-compat
+# groups (legacy_decode, debug_pool, sized_decode, raw) get an EMPTY
+# expected_on -- their own Dart comments say they are absent from
+# every CURRENT dylib and exist only for pinned OLD dylibs loaded by
+# symbol-absence tests, so ABSENT there is never a failure.
+
+[[group]]
+id          = "debug_pool"
+expected_on = []
+
+[[group]]
+id          = "encode"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "encode_v2"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "heif"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "legacy_decode"
+expected_on = []
+
+[[group]]
+id          = "oriented"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "pool_aligned"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "pool_pressure_relief"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "raw"
+expected_on = []
+
+[[group]]
+id          = "raw_diagnostics"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "sized_decode"
+expected_on = []
+
+[[group]]
+id          = "slot_config"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "still"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
+id          = "wp10_decode_into_buffer"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[symbol]]
+name       = "ceyx_decode_into_buffer"
+platforms  = "all"
+group      = "wp10_decode_into_buffer"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_decode_into_buffer_oriented"
+platforms  = "all"
+group      = "oriented"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_error_name"
+platforms  = "all"
+group      = "encode"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_free"
+platforms  = "all"
+group      = "encode"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_jpeg_rgba8"
+platforms  = "all"
+group      = "encode"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_rgba8"
+platforms  = "all"
+group      = "encode_v2"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings_v2.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_supports"
+platforms  = "all"
+group      = "encode_v2"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings_v2.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_webp_rgba8"
+platforms  = "all"
+group      = "encode"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_pool_aligned_alloc"
+platforms  = "all"
+group      = "pool_aligned"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_pool_aligned_free"
+platforms  = "all"
+group      = "pool_aligned"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_pool_pressure_relief"
+platforms  = "all"
+group      = "pool_pressure_relief"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_probe_output_size"
+platforms  = "all"
+group      = "wp10_decode_into_buffer"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_still_decode_rgba"
+platforms  = "all"
+group      = "still"
+source     = "native/src/ffi/still_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/still_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_still_decode_supports"
+platforms  = "all"
+group      = "still"
+source     = "native/src/ffi/still_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/still_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_still_error_name"
+platforms  = "all"
+group      = "still"
+source     = "native/src/ffi/still_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/still_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_still_probe"
+platforms  = "all"
+group      = "still"
+source     = "native/src/ffi/still_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/still_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_still_release"
+platforms  = "all"
+group      = "still"
+source     = "native/src/ffi/still_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/still_bindings.dart"]
+
+[[symbol]]
+name       = "dng_debug_pool_checked_out"
+platforms  = "all"
+group      = "debug_pool"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decode_and_process"
+platforms  = "all"
+group      = "legacy_decode"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decode_and_process_sized"
+platforms  = "all"
+group      = "sized_decode"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decode_configure_slots"
+platforms  = "all"
+group      = "slot_config"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decode_configured_slots"
+platforms  = "all"
+group      = "slot_config"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decode_recommendation_class_pixels"
+platforms  = "all"
+group      = "slot_config"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decode_recommended_slots_for_pixels"
+platforms  = "all"
+group      = "slot_config"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decoder_pipeline_cache_status"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decoder_save_pipeline_cache"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decoder_set_pipeline_cache_path"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_decoder_warmup_for_size"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_extract_preview_jpeg"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_free_buffer"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "dng_free_result"
+platforms  = "all"
+group      = ""
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "heif_decode_rgba"
+platforms  = "all"
+group      = "heif"
+source     = "native/src/ffi/heif_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/heif_bindings.dart"]
+
+[[symbol]]
+name       = "heif_probe"
+platforms  = "all"
+group      = "heif"
+source     = "native/src/ffi/heif_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/heif_bindings.dart"]
+
+[[symbol]]
+name       = "heif_release"
+platforms  = "all"
+group      = "heif"
+source     = "native/src/ffi/heif_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/heif_bindings.dart"]
+
+[[symbol]]
+name       = "raw_decode_and_process"
+platforms  = "all"
+group      = "raw"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "raw_last_diagnostics"
+platforms  = "all"
+group      = "raw_diagnostics"
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]

@@ -28,7 +28,21 @@ jobs:
     # "Linux / Linux x86_64 Vulkan native (dng_decoder_native)". Only the part
     # the caller does not already say belongs here.
     name: x86_64 Vulkan
-    runs-on: ubuntu-latest
+    # WI-14 step 14.5 (S-F4). RULED (user, 2026-09-12): support as many Linux
+    # versions as possible without losing current capabilities. Linux build
+    # floor = glibc 2.35 (Ubuntu 22.04 / Debian 12 and newer), achieved via
+    # `container: ubuntu:22.04` running on an explicitly pinned
+    # `runs-on: ubuntu-24.04` runner -- the container runs the build; the
+    # runner only hosts Docker, which is what decouples the glibc floor from
+    # GitHub's runner-deprecation calendar. The previous unpinned rolling
+    # runner label had already silently moved glibc 2.35->2.39 unannounced
+    # from this project's point of view before this pin. Rejected:
+    # `runs-on: ubuntu-22.04` directly (no container) reaches the same floor
+    # but GitHub schedules brownout failures for that label starting
+    # 2026-09-17; staying on the rolling label leaves the floor drifting
+    # with GitHub's default.
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
     timeout-minutes: 60
     # `contents: write` was dropped in round 6 together with the release-attach
     # step it existed for. This leg now only reads the repo and uploads
@@ -100,12 +114,30 @@ jobs:
         #     documents at its `brew install ... nasm yasm` step); this leg now
         #     installs the `aom` vcpkg feature below, so the assembler must be
         #     present before that install step runs.
+        # WI-14 step 14.5: `git curl python3 python3-pip ca-certificates` added
+        # to the set below -- the previously used rolling hosted runner image
+        # preinstalled these, a bare `ubuntu:22.04` container does not, and
+        # they are needed by the vcpkg bootstrap and
+        # native/scripts/build_deps.py. The rest of this set has identical
+        # package names on 22.04, so this addition is additive-only.
+        #
+        # RESIDUAL RISK, disclosed not hidden (S-F4): no container was
+        # actually spun up and built in during baseline selection. This
+        # `sudo` invocation is UNVERIFIED inside a bare `container:` job --
+        # GitHub Actions container jobs run as root by default and a minimal
+        # `ubuntu:22.04` base image does not ship a `sudo` binary, which
+        # would make this line fail outright rather than degrade. Left
+        # unchanged pending the first real containerised run per the plan's
+        # own accepting-evidence clause (the measured MIN_RUNTIME_linux value
+        # from that run, not this YAML diff, is what closes S-F4) -- do not
+        # "fix" this preemptively without first observing whether it is
+        # actually a problem on the real image.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools \
-            nasm yasm
+            nasm yasm git curl python3 python3-pip ca-certificates
 
       - name: Cache vendored Halide v21 distribution (host, Linux)
         uses: actions/cache@v4
@@ -322,6 +354,60 @@ jobs:
             exit 1
           fi
 
+          # WI-4 step 4.4 (S-B3): import-closure gate against DT_NEEDED, a
+          # SEPARATE capture from ldd_out.txt above. DT_NEEDED is the
+          # declared dependency set; ldd is the resolved transitive closure
+          # and would fold in host glibc paths that are not this artifact's
+          # own declared imports, so a fresh `readelf -d` capture is used
+          # instead of reusing ldd_out.txt.
+          echo "== S-B3: readelf DT_NEEDED import-closure gate =="
+          readelf -d "$SO" > readelf_dynamic.txt
+          cat readelf_dynamic.txt
+          set +e
+          python3 native/scripts/assert_import_closure.py \
+            --dump readelf_dynamic.txt \
+            --staged-dir native/build-linux \
+            --declaration native/deps/shipped_files.toml \
+            --platform linux \
+            --format elf
+          RC=$?
+          set -e
+          echo "IMPORT_CLOSURE_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::import-closure gate failed for $SO — see IMPORT ... -> MISSING lines above." >&2
+            exit "${RC}"
+          fi
+
+          # WI-14 step 14.2 (S-F1): the maximum GLIBC_x.y/GLIBCXX_x.y.z/
+          # CXXABI_x.y.z version reference in the dynamic symbol table.
+          # SEPARATE capture from readelf_dynamic.txt above (that is `-d`,
+          # the dependency section; this is `--dyn-syms`, the versioned
+          # symbol table) -- never a pipe, parsed from the file.
+          readelf --dyn-syms "$SO" > readelf_dynsyms.txt
+          python3 native/scripts/read_min_runtime.py \
+            --artifact readelf_dynsyms.txt \
+            --platform linux \
+            --out min_runtime.txt
+          echo "READ_MIN_RUNTIME_RC=$?"
+          cat min_runtime.txt
+
+          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
+          # just-measured floor and ceyx's own declaration (step 14.5's
+          # containerised build is what makes this leg's measured value
+          # match the declared 2.35 target -- see min_runtime_expected.toml's
+          # [linux] reason field).
+          set +e
+          python3 native/scripts/assert_min_runtime_matches_declared.py \
+            --emitted min_runtime.txt \
+            --declared native/deps/min_runtime_expected.toml \
+            --platform linux
+          RC=$?
+          set -e
+          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            exit "${RC}"
+          fi
+
           # AC-L5 (2026-08-30): the FFI export surface is actually present.
           #
           # Why this gate exists: src/ffi/encode_ffi_api.cpp originally defined
@@ -349,21 +435,24 @@ jobs:
           # nm_dynsyms.txt was written de-pipelined by AC-L3 above; grepping the
           # FILE (never `nm | grep -q`) is what keeps pipefail from turning nm's
           # SIGPIPE into a bogus 141 on a SUCCESSFUL match.
+          #
+          # WI-13 (S-G2): the two-name allowlist loop is replaced by the
+          # Dart-derived manifest (native/deps/export_manifest.toml) via
+          # native/scripts/assert_exports.py. The script matches ELF
+          # dynamic-symbol lines by name with the same ` T ` type filter
+          # this loop used, so the check does not weaken.
           echo "== AC-L5: required FFI exports present in .so =="
-          missing=""
-          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8; do
-            set +e
-            grep -E " T ${sym}\$" nm_dynsyms.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} ${sym}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in $SO:${missing} — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
-            exit 1
+          set +e
+          python3 native/scripts/assert_exports.py \
+            --manifest native/deps/export_manifest.toml \
+            --platform linux \
+            --dump nm_dynsyms.txt
+          RC=$?
+          set -e
+          echo "ASSERT_EXPORTS_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::assert_exports.py reported missing/absent symbol(s) in $SO — the .so does not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in native/src/ffi/)." >&2
+            exit "${RC}"
           fi
 
       # PORTABLE-BASELINE GATE (2026-09-08). The v0.1.19 Linux release SIGILL'd
@@ -545,6 +634,27 @@ jobs:
           echo "CODEC_CAPABILITY_PROBE_RC=${rc}"
           exit "${rc}"
 
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, linux-x86_64
+      # leg. Vector transcribed from native/deps/codec_expectations.toml
+      # [linux-x86_64.capabilities]. ICC=0 on every leg (OQ-N4 option Z,
+      # WI-5): ENABLE_LCMS is forced OFF in native/cmake/tests.cmake; the
+      # forced value is itself the Linux-determinism fix -- previously
+      # nothing installed, asserted or documented liblcms2-dev on this leg
+      # and FindLCMS2 silently degraded, so the prior ICC value here was a
+      # runner-image accident.
+      - name: Assert build capability vector via probe (S-E2)
+        run: |
+          SO="native/build-linux/libdng_decoder_native.so"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/native/third_party/heif-dist-linux/lib:${LD_LIBRARY_PATH:-}"
+          set +e
+          python3 native/scripts/codec_capability_probe.py "$SO" \
+            --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 \
+            --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1
+          rc=$?
+          set -e
+          echo "BUILD_CAPABILITY_PROBE_RC=${rc}"
+          exit "${rc}"
+
       # CI-T3 (task #11 spec; LINUX-HEIF round 3 adds the previously-held
       # Linux leg): functional capability-bitmask probe against the dist the
       # "Build HEIF stack" step produced two steps above, same
@@ -596,14 +706,16 @@ jobs:
         # the decoder -- the exact Windows DLL-trio failure mode, Linux
         # variant. NOT `|| true`: a missing companion here must fail the
         # step, not silently ship an incomplete group.
+        #
+        # WI-15 step 15.2: the file list is read from the single declaration
+        # native/deps/shipped_files.toml (via read_shipped_files.py) instead
+        # of hard-coded, so this step cannot drift from it.
         run: |
           mkdir -p "${ARTIFACT_DIR}/native"
-          cp "${NATIVE_DIR}/build-linux/libdng_decoder_native.so" \
-            "${ARTIFACT_DIR}/native/"
-          cp "${NATIVE_DIR}/build-linux/libheif.so.1" \
-            "${ARTIFACT_DIR}/native/"
-          cp "${NATIVE_DIR}/build-linux/libde265.so.0" \
-            "${ARTIFACT_DIR}/native/"
+          LINUX_FILES="$(python3 native/scripts/read_shipped_files.py --platform linux --all)"
+          for f in ${LINUX_FILES}; do
+            cp "${NATIVE_DIR}/build-linux/${f}" "${ARTIFACT_DIR}/native/"
+          done
           ls -la "${ARTIFACT_DIR}/native"
 
       - name: Fail if no shared library was produced
@@ -620,16 +732,36 @@ jobs:
       # group. Counts the staged copy in ${ARTIFACT_DIR}/native -- the
       # directory that is actually uploaded -- so the instrument can see the
       # failure it exists to catch.
+      #
+      # WI-15 step 15.2 (S-H1): EXPECTED_SET comes from the declaration
+      # (native/deps/shipped_files.toml via read_shipped_files.py);
+      # STAGED_SET is enumerated from what actually landed in
+      # ${ARTIFACT_DIR}/native. Both are printed unconditionally (not just
+      # on failure) so a green run leaves positive evidence the comparison
+      # ran, closing the 2026-09-01 "Linux HEIF staging silently absent"
+      # gap this item exists to remove -- previously nothing here would have
+      # caught a completely empty companion set the way an --expect-based
+      # instrument elsewhere in this repo has been shown to.
       - name: Assert the Linux shared-lib group is complete (atomic group)
         run: |
           ls -la "${ARTIFACT_DIR}/native"
-          for f in libdng_decoder_native.so libheif.so.1 libde265.so.0; do
-            if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
-              echo "::error::atomic group member missing: ${f}" >&2
-              exit 1
-            fi
-          done
-          echo "ATOMIC_GROUP_COMPLETE=1"
+          EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform linux --all | tr ' ' '\n' | sort)"
+          # STAGED_SET enumerates the DIRECTORY'S ACTUAL CONTENTS filtered by
+          # the shared-object naming convention (.so / .so.N), never a
+          # second hard-coded file list -- a hard-coded list here would be
+          # exactly the drift class this item removes and would make a
+          # staged-but-undeclared extra file invisible (the 2026-09-01
+          # incident's direction).
+          STAGED_SET="$(cd "${ARTIFACT_DIR}/native" && ls -1 | grep -E '\.so(\.[0-9]+)*$' | sort)"
+          echo "EXPECTED_SET:"
+          echo "${EXPECTED_SET}"
+          echo "STAGED_SET:"
+          echo "${STAGED_SET}"
+          if [ "${EXPECTED_SET}" != "${STAGED_SET}" ]; then
+            echo "::error::Linux staged set does not match the shipped_files.toml declaration." >&2
+            exit 1
+          fi
+          echo "ATOMIC_GROUP_COMPLETE=1 (EXPECTED_SET == STAGED_SET)"
 
       # DT_NEEDED verification (AC1; fixed post-run-33455862800 diagnosis,
       # task #18 follow-up). ORIGINAL BUG: this step asserted BOTH

@@ -1,0 +1,106 @@
+# shipped_files.toml -- the single declaration of "what ships beside the
+# decoder" per platform (WI-15, S-H1).
+#
+# Spec: Halcyon/docs/logs/2026-09-12/platform-parity-plan.md, WI-15 step 15.1.
+# This collapses four drift-prone expressions of the same fact into one:
+# native/cmake/heif.cmake's per-platform staging branches, the CI staging
+# assertions (windows_build.yml / macos_build.yml, and the ones this item
+# adds for linux/android), Halcyon's ceyx_release_pin.json `libraries[]`
+# (verified transitively, not read directly -- see step 15.4), and this file.
+#
+# Every value below is TRANSCRIBED VERBATIM from the `source` line's cited
+# code -- no invented entries, and this declaration records what is
+# ACTUALLY SHIPPING TODAY (S-D1 / Plan Ruling 1: the declaration equals the
+# pin's `libraries[]`, which still lists every one of today's files). Two
+# content rulings are already DECIDED but not yet EXECUTED by their owning
+# items, and this file does not jump ahead of either:
+#   - OQ-N2 RULED SHIP (user, 2026-09-12): Windows gets a 4th companion,
+#     libomp140.x86_64.dll (the decoder's own import table names it; WI-4
+#     step 4.2 takes its source path FROM this declaration -- WI-4 has not
+#     landed yet, so this is a forward-declared member, not yet staged).
+#   - OQ-N4 RULED option Z (user, 2026-09-12): macOS DROPS liblcms2.2.dylib
+#     -- lcms2 is dead code on every platform, WI-5 step 5.2b forces
+#     ENABLE_LCMS OFF and removes the build + staging apparatus in the same
+#     round this declaration lands, so this row is authored from the
+#     post-removal state per plan step 5.7 (WI-5 landing first).
+#
+# Consumers (step 15.2):
+#   1. native/cmake/heif.cmake's four staging branches, via the generated
+#      native/cmake/shipped_files.cmake (native/scripts/gen_shipped_files_cmake.py).
+#   2. The CI staging assertions, via native/scripts/read_shipped_files.py.
+#   3. Halcyon's ceyx_release_pin.json, verified transitively at pin-refresh
+#      time (Halcyon build_apps.py's update_ceyx_pin_latest, WI-15 step 15.4
+#      -- OUT OF SCOPE for this file's authoring commit; see
+#      Halcyon/docs/logs/2026-09-12/wi15-pin-schema-spec.md).
+#
+# Schema, per platform table [<platform>]:
+#   decoder      = "<filename>"           -- the built decoder library name.
+#   companions   = ["<filename>", ...]    -- every dynamically-shipped
+#                                             sibling file, in staging order.
+#   staged_from  = "<dir>"                -- the directory the CI staging
+#                                             assertion inspects (relative to
+#                                             the native build tree), or a
+#                                             CMake-generator-expression-shaped
+#                                             placeholder when the real
+#                                             location is resolved at build
+#                                             time (see [macos] below).
+#   placed       = true|false             -- whether Halcyon's build_apps.py
+#                                             places this platform's files
+#                                             into a plugin/<platform>/... tree
+#                                             it owns (false only for android,
+#                                             whose jniLibs tree is a committed
+#                                             upstream build_apps.py must not
+#                                             overwrite).
+#   not_placed_reason = "<one line>"      -- required when placed = false.
+#   source       = "<file:lines>"         -- where every value above was
+#                                             transcribed from, so a reviewer
+#                                             can diff this table against the
+#                                             cited code rather than take it
+#                                             on trust.
+
+[windows]
+decoder    = "dng_decoder_native.dll"
+# Four members: OQ-N2 ruled SHIP (user 2026-09-12) -- the decoder imports the
+# OpenMP runtime, so omitting it produces an artifact that cannot load on a
+# machine without the LLVM redistributable.
+companions = ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"]
+staged_from = "native/build-windows"
+placed      = true
+source      = "native/cmake/heif.cmake:207-236"
+
+[linux]
+decoder    = "libdng_decoder_native.so"
+companions = ["libheif.so.1", "libde265.so.0"]
+staged_from = "native/build-linux"
+placed      = true
+source      = "native/cmake/heif.cmake:259-289"
+
+[macos]
+decoder    = "libdng_decoder_native.dylib"
+# FOUR members (OQ-N4 RULED option Z, user 2026-09-12, executed by WI-5):
+# liblcms2.2.dylib is REMOVED from this row -- lcms2 is dead code on every
+# platform (its only consumer, LibRaw::apply_profile(), is reachable solely
+# from dcraw_process(), which ceyx architecturally never calls), WI-5 forces
+# ENABLE_LCMS OFF in native/cmake/tests.cmake and deletes the build +
+# staging apparatus that used to vendor it. Do not re-add it.
+companions = ["libjpeg.8.dylib", "libheif.1.dylib", "libde265.0.dylib", "libomp.dylib"]
+# The real staging directory is "$<TARGET_FILE_DIR:dng_decoder_native>",
+# resolved only at CMake generate/build time; there is no static path to
+# transcribe here the way the other three platforms have one. Recorded as
+# the literal generator-expression string so a reader is told to resolve it
+# via the build rather than treat this as a filesystem path.
+staged_from = "$<TARGET_FILE_DIR:dng_decoder_native>"
+placed      = true
+# Three separate staging mechanisms name macOS's companions today -- a
+# pre-existing three-way split, not something WI-15 introduces (plan
+# WI-15, note under Step 15.1). This declaration is the first place all
+# three are named together:
+source      = "native/cmake/heif.cmake:187-206 + native/cmake/pipeline.cmake:151-160 + native/cmake/tests.cmake:673-699"
+
+[android]
+decoder    = "libdng_decoder_native.so"
+companions = ["libheif.so", "libde265.so"]
+staged_from = "native/build-android"
+placed      = false
+not_placed_reason = "destination plugin/android/src/main/jniLibs is a committed upstream tree build_apps.py must not overwrite (ceyx_release_pin.json:62-64)"
+source      = "native/cmake/heif.cmake:237-258"

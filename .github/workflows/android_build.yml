@@ -31,7 +31,13 @@ jobs:
     # Display name only; renders as "Android / arm64-v8a Vulkan". See
     # linux_build.yml for why the platform word is not repeated here.
     name: arm64-v8a Vulkan
-    runs-on: ubuntu-latest
+    # WI-14 step 14.5: pinned to ubuntu-24.04 for REPRODUCIBILITY ONLY -- this
+    # is not a glibc-floor fix the way linux_build.yml's container is.
+    # Android's shipped floor is `minSdk` (a Gradle DECLARATION, not a binary
+    # property) and its .so links Bionic from the NDK sysroot, never the
+    # host's glibc, so no container is warranted here. Do not "fix" this
+    # asymmetry with linux_build.yml by adding one.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     # `contents: write` was dropped in round 6 together with the release-attach
     # step it existed for. This leg now only reads the repo and uploads
@@ -198,6 +204,20 @@ jobs:
             exit 1
           fi
 
+      # WI-5 step 5.4 (S-E2): android-arm64-v8a has NO runnable capability
+      # instrument in CI (ledger `instrument = "none (accepted gap)"`,
+      # codec_expectations.toml [android-arm64-v8a.capabilities]) -- the
+      # cross-compiled AArch64 artifact cannot be dlopen'd from the x86_64
+      # runner and there is no emulator gate. Every capability cell is an
+      # honest, permanently-accepted zero for the same documented reason.
+      # A silent skip is a FAIL per the campaign's instrument discipline
+      # (2026-08-25 lesson: a silently-skipped gate looks identical to a
+      # fully-checked green one), so this step prints an explicit SKIP line.
+      - name: Assert build capability vector via probe (S-E2)
+        shell: bash
+        run: |
+          echo "CAPABILITY_PROBE SKIP (android: no runnable instrument, ledger instrument=\"none (accepted gap)\")"
+
       - name: Stage native artifacts
         # A-T8-FIX: multi-.so packaging. cmake/heif.cmake's ANDROID branches
         # (HEIF companions + the unconditional libc++_shared.so block) stage
@@ -227,6 +247,12 @@ jobs:
         # had to be corrected for. The bidirectional STL check below is where
         # libc++_shared.so's presence/absence is actually verified, against
         # the real DT_NEEDED table rather than a fixed file-existence list.
+        # WI-15 step 15.2: the required companion set is read from the
+        # single declaration native/deps/shipped_files.toml (via
+        # read_shipped_files.py --companions) instead of hard-coded, and
+        # EXPECTED/STAGED sets are printed unconditionally (not just on
+        # failure) so a green run leaves positive evidence the comparison
+        # ran -- mirrors the equivalent Linux gate added in the same commit.
         run: |
           shopt -s nullglob
           libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
@@ -234,17 +260,21 @@ jobs:
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
             exit 1
           fi
-          required=("libheif.so" "libde265.so")
+          EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform android --companions | tr ' ' '\n' | sort)"
+          echo "EXPECTED_SET (companions):"
+          echo "${EXPECTED_SET}"
           missing=""
-          for f in "${required[@]}"; do
+          while IFS= read -r f; do
+            [ -z "${f}" ] && continue
             if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
               missing="${missing} ${f}"
             fi
-          done
+          done <<< "${EXPECTED_SET}"
           if [ -n "${missing}" ]; then
             echo "::error::missing required companion .so(s) in ${ARTIFACT_DIR}/native:${missing} — the Android atomic group (decoder + HEIF companions) is incomplete." >&2
             exit 1
           fi
+          echo "ANDROID_COMPANION_GROUP_COMPLETE=1"
 
       # G6 fix (round-5 gap closure, task #9): this .so is a target-arm64 ELF
       # cross-compiled on an x86_64 host, so the NDK's own llvm-nm (not host
@@ -283,20 +313,20 @@ jobs:
             cat android_so_dynsyms.txt || true
             exit 1
           fi
-          missing=""
-          for sym in ceyx_decode_into_buffer_oriented ceyx_encode_jpeg_rgba8; do
-            set +e
-            grep -q "${sym}" android_so_dynsyms.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} ${sym}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing exported symbol(s) in ${SO}:${missing} — the .so does not export the FFI surface Dart looks up." >&2
-            exit 1
+          # WI-13 (S-G2): the two-name allowlist loop is replaced by the
+          # Dart-derived manifest (native/deps/export_manifest.toml) via
+          # native/scripts/assert_exports.py, --platform android.
+          set +e
+          python3 native/scripts/assert_exports.py \
+            --manifest native/deps/export_manifest.toml \
+            --platform android \
+            --dump android_so_dynsyms.txt
+          RC=$?
+          set -e
+          echo "ASSERT_EXPORTS_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::assert_exports.py reported missing/absent symbol(s) in ${SO} — the .so does not export the FFI surface Dart looks up." >&2
+            exit "${RC}"
           fi
 
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
@@ -509,6 +539,57 @@ jobs:
           if [ "${rc}" -ne 0 ]; then
             echo "::error::a packaged .so has a DT_NEEDED entry neither bundled nor in the measured system whitelist — see the output above for which library/libraries are unexplained (all offenders are named, not just the first)." >&2
             exit 1
+          fi
+
+          # WI-4 step 4.4 (S-B3): the same import-closure script used for
+          # Windows/Linux, run ALONGSIDE (not replacing, per the plan's
+          # "prove both green in one run, remove the old one in a follow-up
+          # step of the same item" instruction) the closure check above --
+          # this reads against the WI-15 declaration (native/deps/shipped_files.toml)
+          # for the decoder only; the script above is the whole-directory
+          # device-whitelist reading. Both must stay green before the older
+          # script is ever removed.
+          MAIN_SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
+          "${LLVM_READELF}" -d "${MAIN_SO}" > android_main_dynamic.txt 2>&1
+          set +e
+          python3 native/scripts/assert_import_closure.py \
+            --dump android_main_dynamic.txt \
+            --staged-dir "${ARTIFACT_DIR}/native" \
+            --declaration native/deps/shipped_files.toml \
+            --platform android \
+            --format elf
+          RC=$?
+          set -e
+          echo "IMPORT_CLOSURE_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::import-closure gate (WI-4/assert_import_closure.py) failed for ${MAIN_SO} — see IMPORT ... -> MISSING lines above." >&2
+            exit "${RC}"
+          fi
+
+      # WI-14 step 14.2 (S-F1): android's floor is a DECLARATION (minSdk),
+      # not a binary property -- read from plugin/android/build.gradle, not
+      # from the .so files this leg just built.
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        run: |
+          python3 native/scripts/read_min_runtime.py \
+            --gradle plugin/android/build.gradle \
+            --platform android \
+            --out min_runtime.txt
+          echo "READ_MIN_RUNTIME_RC=$?"
+          cat min_runtime.txt
+
+          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
+          # just-declared floor and ceyx's own min_runtime_expected.toml.
+          set +e
+          python3 native/scripts/assert_min_runtime_matches_declared.py \
+            --emitted min_runtime.txt \
+            --declared native/deps/min_runtime_expected.toml \
+            --platform android
+          RC=$?
+          set -e
+          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            exit "${RC}"
           fi
 
       # Round 6, Plan B: this artifact name is also the release asset stem —

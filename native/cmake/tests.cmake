@@ -1216,234 +1216,53 @@ set(JPEG_VERSION_STRING \"62\")
     # re-verified across a full campaign.
     set(ENABLE_X3FTOOLS ON CACHE BOOL "" FORCE)
 
-    # --- LCMS2 arch guard (LCMS2-X86_64, 2026-09-01) ------------------------
-    # libraw-cmake ships ITS OWN cmake/modules/FindLCMS2.cmake (not CMake's
-    # builtin one), which its own set(CMAKE_MODULE_PATH <its dir> ${...})
-    # (CMakeLists.txt:119) always puts ahead of anything this project could
-    # add to CMAKE_MODULE_PATH — so the module-shadowing shim technique used
-    # for JPEG above (a generated FindJPEG.cmake placed on CMAKE_MODULE_PATH)
-    # CANNOT work here; libraw's own module always wins that search. That
-    # module resolves lcms2 via bare pkg-config (`pkg_check_modules(PC_LCMS2
-    # lcms2)`), which — exactly like the OpenMP Homebrew-prefix search this
-    # same file used to get wrong — performs NO architecture check at all.
-    # Confirmed by local reproduction on this host: an x86_64 cross configure
-    # (-DDNG_CROSS_BUILD=ON -DCMAKE_OSX_ARCHITECTURES=x86_64) resolves LCMS2
-    # to /opt/homebrew/lib/liblcms2.dylib — the HOST's arm64-only Homebrew
-    # install — and reports "Libraw will be compiled with LCMS support ...
-    # YES", which would link an arm64 dylib into an x86_64 target. This is
-    # the same false-positive-arch class the OpenMP fix above corrected, on a
-    # dependency where the fix must take a different shape: instead of a
-    # module shim, seed FindLCMS2.cmake's own find_path/find_library CACHE
-    # variables before add_subdirectory() runs — find_path/find_library are
-    # no-ops when their result variable is already cached, so pre-seeding
-    # LCMS2_INCLUDE_DIR/LCMS2_LIBRARIES makes the vendored module use OUR
-    # values (or a deliberate NOTFOUND) instead of running its own unchecked
-    # search. This has none of the F4/reconfigure-poisoning hazard that ruled
-    # out cache-seeding for JPEG (that hazard was specific to
-    # third_party.cmake's QUIET find_package(JPEG) probe deciding whether to
-    # build vendored libjpeg-turbo at all; no such vendored-build decision
-    # exists for LCMS2 in this project — there is no vendored lcms2 source
-    # tree, see below).
-    set(_ceyx_lcms_want_archs "${CMAKE_OSX_ARCHITECTURES}")
-    if(NOT _ceyx_lcms_want_archs)
-        set(_ceyx_lcms_want_archs "${CMAKE_SYSTEM_PROCESSOR}")
-    endif()
-    if(APPLE AND NOT ANDROID AND NOT IOS)
-        set(_ceyx_lcms_resolved_dir "")
-        # Arch-suffixed vendored dir first (LCMS2-X86_64 landing spot,
-        # mirroring third_party/libomp-<arch>/, heif-dist-<arch>,
-        # libjxl-dist-<arch>): a sourced binary here always wins over the
-        # host's Homebrew copy, exactly like the OpenMP vendored-dir search.
-        foreach(_lcms_want_arch IN LISTS _ceyx_lcms_want_archs)
-            set(_ceyx_lcms_arch_dir "${THIRD_PARTY_DIR}/lcms2-${_lcms_want_arch}")
-            # Glob (not a hardcoded "liblcms2.dylib") because the real
-            # artifact ships VERSIONED (liblcms2.2.dylib is both the
-            # Homebrew bottle's own install name and the release asset's
-            # canonical six-file name) with no unversioned symlink —
-            # requiring the unversioned name here silently skipped the
-            # vendored dir once a real binary was placed at it (caught in
-            # review: the combination of an honest-OFF fallback plus a
-            # wrong filename produces a GREEN run that quietly ships without
-            # colour management, exactly what this fix exists to prevent).
-            if(NOT _ceyx_lcms_resolved_dir
-               AND EXISTS "${_ceyx_lcms_arch_dir}/include/lcms2.h")
-                file(GLOB _ceyx_lcms_arch_dylib
-                     "${_ceyx_lcms_arch_dir}/lib/liblcms2*.dylib")
-                list(LENGTH _ceyx_lcms_arch_dylib _ceyx_lcms_arch_dylib_count)
-                if(_ceyx_lcms_arch_dylib_count GREATER 0)
-                    list(GET _ceyx_lcms_arch_dylib 0 _ceyx_lcms_arch_first_dylib)
-                    execute_process(COMMAND lipo -archs
-                                            "${_ceyx_lcms_arch_first_dylib}"
-                                    OUTPUT_VARIABLE _ceyx_lcms_arch_have
-                                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                                    ERROR_QUIET RESULT_VARIABLE _ceyx_lcms_arch_rc)
-                    if(_ceyx_lcms_arch_rc EQUAL 0
-                       AND "${_ceyx_lcms_arch_have}" MATCHES "(^| )${_lcms_want_arch}( |$)")
-                        set(_ceyx_lcms_resolved_dir "${_ceyx_lcms_arch_dir}")
-                    endif()
-                endif()
-            endif()
-        endforeach()
-
-        # Otherwise, probe the same Homebrew prefixes the OpenMP search uses,
-        # but ACTUALLY CHECK the dylib's arch this time (the bug being fixed).
-        if(NOT _ceyx_lcms_resolved_dir)
-            foreach(_lcms_candidate IN ITEMS "$ENV{HOMEBREW_PREFIX}/opt/little-cms2"
-                                              "/opt/homebrew/opt/little-cms2"
-                                              "/usr/local/opt/little-cms2")
-                if(NOT _ceyx_lcms_resolved_dir
-                   AND EXISTS "${_lcms_candidate}/include/lcms2.h")
-                    file(GLOB _ceyx_lcms_candidate_dylib
-                         "${_lcms_candidate}/lib/liblcms2*.dylib")
-                    list(LENGTH _ceyx_lcms_candidate_dylib _ceyx_lcms_dylib_count)
-                    if(_ceyx_lcms_dylib_count GREATER 0)
-                        list(GET _ceyx_lcms_candidate_dylib 0 _ceyx_lcms_first_dylib)
-                        execute_process(COMMAND lipo -archs "${_ceyx_lcms_first_dylib}"
-                                        OUTPUT_VARIABLE _ceyx_lcms_have
-                                        OUTPUT_STRIP_TRAILING_WHITESPACE
-                                        ERROR_QUIET RESULT_VARIABLE _ceyx_lcms_rc)
-                        set(_ceyx_lcms_ok TRUE)
-                        if(NOT _ceyx_lcms_rc EQUAL 0)
-                            set(_ceyx_lcms_ok FALSE)
-                        else()
-                            foreach(_lcms_want_arch IN LISTS _ceyx_lcms_want_archs)
-                                if(NOT "${_ceyx_lcms_have}" MATCHES "(^| )${_lcms_want_arch}( |$)")
-                                    set(_ceyx_lcms_ok FALSE)
-                                endif()
-                            endforeach()
-                        endif()
-                        if(_ceyx_lcms_ok)
-                            set(_ceyx_lcms_resolved_dir "${_lcms_candidate}")
-                        else()
-                            message(STATUS
-                                "[ceyx] ${_lcms_candidate} has lcms2.h but "
-                                "${_ceyx_lcms_first_dylib} reports archs "
-                                "'${_ceyx_lcms_have}', not '${_ceyx_lcms_want_archs}'; "
-                                "not seeding it (would be a wrong-arch link "
-                                "failure otherwise).")
-                        endif()
-                    endif()
-                endif()
-            endforeach()
-        endif()
-
-        if(_ceyx_lcms_resolved_dir)
-            set(LCMS2_INCLUDE_DIR "${_ceyx_lcms_resolved_dir}/include" CACHE PATH "" FORCE)
-            file(GLOB _ceyx_lcms_lib "${_ceyx_lcms_resolved_dir}/lib/liblcms2*.dylib")
-            list(GET _ceyx_lcms_lib 0 _ceyx_lcms_lib_first)
-            # ARTIFACT-ID FIX (2026-09-01, caught in review before push): the
-            # vendored dir is a raw extracted Homebrew bottle, and Homebrew
-            # bottles record their OWN install name as an UNRESOLVED
-            # relocation placeholder token (confirmed via `otool -D` on the
-            # actual file: "@@HOMEBREW_PREFIX@@/opt/little-cms2/lib/
-            # liblcms2.2.dylib", literally, not a real path) -- `brew`
-            # itself rewrites that token to a real path as part of a normal
-            # `brew install`, a step this project's raw-extraction sourcing
-            # route does not perform. Linking directly against the resolved
-            # file bakes that broken token into the decoder's own
-            # LC_LOAD_DYLIB verbatim, which cannot be resolved on any
-            # machine -- ld/dyld record a dependency's load command from the
-            # DEPENDENCY's own LC_ID_DYLIB, not from the filesystem path used
-            # to find it, so pointing LCMS2_LIBRARIES straight at the raw
-            # file (as this branch used to) ships a dead reference despite a
-            # perfectly correct arch-verified resolution.
-            #
-            # The OpenMP consumption path above (this same file, the
-            # "ONE OpenMP runtime image" block) already solves exactly this
-            # for an IDENTICALLY-broken raw libomp.dylib bottle by copying it
-            # into the build tree and rewriting ITS OWN id to @rpath/<name>
-            # before ever linking against it. Reuse that shape here instead
-            # of inventing a second one.
-            set(_ceyx_lcms_vendored "${CMAKE_BINARY_DIR}/liblcms2.2.dylib")
-            if(NOT EXISTS "${_ceyx_lcms_vendored}"
-               OR "${_ceyx_lcms_lib_first}" IS_NEWER_THAN "${_ceyx_lcms_vendored}")
-                file(COPY "${_ceyx_lcms_lib_first}"
-                     DESTINATION "${CMAKE_BINARY_DIR}"
-                     FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
-                                      GROUP_READ GROUP_EXECUTE
-                                      WORLD_READ WORLD_EXECUTE)
-                get_filename_component(_ceyx_lcms_lib_first_name "${_ceyx_lcms_lib_first}" NAME)
-                if(NOT _ceyx_lcms_lib_first_name STREQUAL "liblcms2.2.dylib")
-                    file(RENAME "${CMAKE_BINARY_DIR}/${_ceyx_lcms_lib_first_name}"
-                                 "${_ceyx_lcms_vendored}")
-                endif()
-                execute_process(COMMAND install_name_tool -id "@rpath/liblcms2.2.dylib"
-                                        "${_ceyx_lcms_vendored}"
-                                RESULT_VARIABLE _ceyx_lcms_id_rc)
-                execute_process(COMMAND codesign --force --sign -
-                                        "${_ceyx_lcms_vendored}"
-                                RESULT_VARIABLE _ceyx_lcms_sign_rc)
-                if(NOT _ceyx_lcms_id_rc EQUAL 0 OR NOT _ceyx_lcms_sign_rc EQUAL 0)
-                    message(FATAL_ERROR
-                        "[ceyx] failed to vendor liblcms2.2.dylib (install_name_tool "
-                        "rc=${_ceyx_lcms_id_rc}, codesign rc=${_ceyx_lcms_sign_rc}). "
-                        "Refusing to continue: a partially-vendored copy would ship "
-                        "the same broken-placeholder-ID defect this fix exists to "
-                        "close.")
-                endif()
-                message(STATUS "[ceyx] vendored liblcms2.2.dylib -> ${_ceyx_lcms_vendored} (@rpath/liblcms2.2.dylib)")
-            endif()
-            set(LCMS2_LIBRARIES "${_ceyx_lcms_vendored}" CACHE FILEPATH "" FORCE)
-            message(STATUS
-                "[ceyx] LCMS2: seeding arch-verified ${_ceyx_lcms_resolved_dir} "
-                "(target arch(es): ${_ceyx_lcms_want_archs})")
-        elseif(NOT "${_ceyx_lcms_want_archs}" STREQUAL "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-            # Only force an explicit NOTFOUND when we are actually
-            # cross-arch'ing (target != host processor) — on the native leg,
-            # leave FindLCMS2.cmake's own pkg-config search alone; it has
-            # worked correctly there for the whole life of this project (see
-            # CI-T11/MACOS-DEPS-DETERMINISM evidence) and forcibly seeding
-            # NOTFOUND unconditionally would regress it on a machine whose
-            # CMAKE_SYSTEM_PROCESSOR happens to already equal
-            # CMAKE_OSX_ARCHITECTURES (the common case) for no benefit.
-            #
-            # No vendored lcms2 source exists in this repo (only libjpeg-turbo
-            # is vendored, third_party/libjpeg-turbo/), so unlike JPEG there
-            # is no from-source fallback available here — this is a genuine
-            # "not producible by this leg alone" gap, tracked as
-            # LCMS2-X86_64 pending a sourced binary landing at
-            # third_party/lcms2-<arch>/.
-            #
-            # CAUTION (measured locally, two dead ends before this one):
-            # (1) seeding LCMS2_INCLUDE_DIR/LIBRARIES with a "...-NOTFOUND"
-            #     CACHE value does NOT work — find_path()/find_library()
-            #     specifically treat any value ending in "-NOTFOUND" as "not
-            #     yet searched" and re-run their own unchecked search
-            #     regardless, silently overwriting it back to the wrong-arch
-            #     Homebrew path.
-            # (2) a plain (non-cache) `set(ENABLE_LCMS OFF)`, the pattern this
-            #     file uses elsewhere (WITH_OPENMP/ENABLE_X3FTOOLS) on the
-            #     assumption that the earlier `cmake_policy(SET CMP0077 NEW)`
-            #     makes libraw-cmake's own option() honor it, does NOT work
-            #     either — verified via this exact configure: CMake's own dev
-            #     warning ("Policy CMP0077 is not set ... option is clearing
-            #     the normal variable 'ENABLE_LCMS'") shows the child
-            #     directory scope is NOT seeing CMP0077=NEW, and the
-            #     "-- Check for LCMS2 availability..." / "Found LCMS2 ...
-            #     YES" lines confirm ENABLE_LCMS stayed ON regardless. (The
-            #     sibling ENABLE_OPENMP=OFF case in this same file happens to
-            #     end up correct anyway, but NOT because the option() override
-            #     worked — find_package(OpenMP) still runs, it just fails on
-            #     its own for lack of the OpenMP_*_FLAGS hint variables when
-            #     no libomp was found. That is a latent, currently-harmless
-            #     bug in the existing ENABLE_OPENMP/ENABLE_X3FTOOLS override
-            #     pattern, out of this task's scope — flagged to the lead
-            #     separately, not fixed here.) LCMS2 has no such accidental
-            #     safety net, so the only mechanism proven to actually work
-            #     here is a FORCEd CACHE BOOL, which option() unconditionally
-            #     leaves alone once the cache entry already exists.
-            set(ENABLE_LCMS OFF CACHE BOOL "Disabled: no ${_ceyx_lcms_want_archs} liblcms2 available (OMP-CROSS-FIX/LCMS2-X86_64)" FORCE)
-            message(WARNING
-                "[ceyx] LCMS2: no ${_ceyx_lcms_want_archs} liblcms2.dylib found "
-                "(checked third_party/lcms2-${_ceyx_lcms_want_archs}/ and Homebrew "
-                "little-cms2, which is host-arch (${CMAKE_HOST_SYSTEM_PROCESSOR}) "
-                "only on this machine). Building WITHOUT LCMS2 colour "
-                "management for this leg instead of silently linking a "
-                "wrong-arch dylib. See docs/logs LCMS2-X86_64.")
-        endif()
-    endif()
+    # --- LCMS2 forced OFF (OQ-N4 option Z, 2026-09-12) ----------------------
+    # WI-5 (docs/logs/2026-09-12/platform-parity-plan.md step 5.2b): lcms2 is
+    # dead code on every platform -- it enters the build only through
+    # LibRaw's ENABLE_LCMS, whose sole consumer is LibRaw::apply_profile(),
+    # reachable only from dcraw_process(), which ceyx architecturally never
+    # calls, and only when imgdata.params.camera_profile is non-NULL, which
+    # ceyx never sets. Colour management is done with fixed matrices plus
+    # DNG-SDK colour spaces. The former arch-guard block (~230 lines) that
+    # sourced a real lcms2 for the macos-x86_64 cross leg is deleted along
+    # with the vendored native/third_party/lcms2-{arm64,x86_64}/ trees; there
+    # is nothing left to source.
+    #
+    # The FORCE CACHE form (not a plain set()) is required for the same two
+    # measured reasons the deleted block's own comment recorded and which
+    # must survive this deletion verbatim:
+    #   (1) seeding a "...-NOTFOUND" CACHE value does not work -- find_path()/
+    #       find_library() treat any "-NOTFOUND"-suffixed value as "not yet
+    #       searched" and re-run their own unchecked search regardless.
+    #   (2) a plain (non-cache) `set(ENABLE_LCMS OFF)` is NOT seen by
+    #       libraw-cmake's own child-scope option() call -- CMP0077 does not
+    #       apply there (confirmed via CMake's own dev warning on this exact
+    #       configure), so the option() call clears it right back to ON.
+    # A FORCEd CACHE BOOL is the only mechanism proven to work: option()
+    # unconditionally leaves alone a cache entry that already exists.
+    set(ENABLE_LCMS OFF CACHE BOOL
+        "ceyx never calls dcraw_process; LibRaw's only lcms2 consumer is unreachable -- OQ-N4 option Z, 2026-09-12"
+        FORCE)
+    # The macos-x86_64 cross leg's capability assertion reads this line from
+    # the configure log (it cannot dlopen a foreign-arch artifact) -- keep it
+    # even though the deleted block's own "[ceyx] LCMS2: ..." status line is
+    # gone with the rest of that apparatus (WI-5 plan step 5.4).
+    message(STATUS "[ceyx] LCMS2: disabled (OQ-N4 option Z)")
 
     add_subdirectory(${LIBRAW_CMAKE_OVERLAY_DIR} libraw-cmake-build EXCLUDE_FROM_ALL)
+
+    # WI-5 step 5.2: propagate ENABLE_LCMS's effective value to ceyx's own
+    # target so ceyx_build_capabilities("ICC") reports a MEASURED answer,
+    # not an asserted constant. Reading the variable here, immediately after
+    # the add_subdirectory() above, is the only point where its effective
+    # value is knowable (detail-lcms2-sourcing.md §D.1). Under OQ-N4 option Z
+    # ENABLE_LCMS is unconditionally OFF (see the forced-CACHE set() above),
+    # so this define lands 0 on every platform by one mechanism rather than
+    # a platform conditional -- kept anyway as the instrument that would
+    # catch a future accidental re-enable; deleting it would make ICC=0
+    # unfalsifiable.
+    target_compile_definitions(dng_decoder_native PRIVATE
+        CEYX_HAVE_LCMS2=$<BOOL:${ENABLE_LCMS}>)
 
     # --- RawSpeed3 C-API glue (local modification, see PROVENANCE.md) ---
     # Generates rawspeed3_c_api/cameras.cpp from RawSpeed3/rawspeed/data/cameras.xml

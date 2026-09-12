@@ -51,6 +51,15 @@ workflow = "macos_build.yml"
 # conflicting avif tokens in the same file cannot collide. Must match the
 # step name in .github/workflows/macos_build.yml verbatim.
 step_anchor = "native leg"
+# WI-5 (S-E2): the build-capability step is a SEPARATE step from the codec
+# step above, but its name also contains the substring "native leg" (so the
+# two steps read side by side, per plan step 5.4) -- reusing step_anchor
+# here would make _STEP_HEADER_RE's substring search match the codec step's
+# header first (it appears earlier in the file) and clip the scan BEFORE the
+# capability step's own tokens, exactly the SF2 hazard this file's step_anchor
+# comment already documents, recurring one level down. A second, more
+# specific anchor keeps the two steps distinguishable.
+capabilities_step_anchor = "S-E2, native leg"
 
 [macos-arm64.expect]
 "jpeg:encode" = 1
@@ -64,6 +73,23 @@ step_anchor = "native leg"
 "jxl:encode" = 1
 "jxl:decode" = 1
 
+# WI-5 (docs/logs/2026-09-12/platform-parity-plan.md step 5.3): the build
+# capability surface -- what is compiled into the artifact, queried via
+# ceyx_build_capabilities -- broader than codec formats. ICC=0 on every leg
+# per OQ-N4 option Z (2026-09-12, user ruling): ENABLE_LCMS is forced OFF in
+# native/cmake/tests.cmake. lcms2 is unreachable dead code -- its only
+# consumer, LibRaw::apply_profile(), is reachable solely from
+# dcraw_process(), which ceyx architecturally never calls, and only when
+# imgdata.params.camera_profile is non-NULL, which ceyx never sets. Colour
+# uses fixed matrices plus DNG-SDK colour spaces.
+[macos-arm64.capabilities]
+"ICC" = { value = 0, reason = "OQ-N4 option Z (user ruling 2026-09-12): ENABLE_LCMS forced OFF on all platforms. No ICC transform is reachable -- LibRaw's only lcms2 consumer is apply_profile(), called solely from dcraw_process(), which ceyx never calls; camera_profile is never set. Colour uses fixed matrices + DNG-SDK spaces.", owner = "OQ-N4" }
+"OPENMP" = 1
+"HEIF" = 1
+"WEBP" = 1
+"JXL" = 1
+"RAW" = 1
+
 # The macOS cross x86_64 leg cannot dlopen a cross-compiled artifact from the
 # arm64 host process (F9): it keeps its configure-log-line assertion instead
 # of calling codec_capability_probe.py.
@@ -74,6 +100,9 @@ workflow = "macos_build.yml"
 # the full rationale. Must match the step name in
 # .github/workflows/macos_build.yml verbatim.
 step_anchor = "cross leg"
+# WI-5 (S-E2): see macos-arm64's capabilities_step_anchor comment above --
+# same rationale, mirrored for the cross leg.
+capabilities_step_anchor = "S-E2, cross leg"
 
 [macos-x86_64.expect]
 "jpeg:encode" = 1
@@ -90,6 +119,16 @@ step_anchor = "cross leg"
 "jxl:encode" = 1
 "jxl:decode" = 1
 
+# WI-5: macos-x86_64 cannot dlopen (same reason as its codec vector above),
+# so this leg's build-capability step reads the configure log too.
+[macos-x86_64.capabilities]
+"ICC" = { value = 0, reason = "OQ-N4 option Z (user ruling 2026-09-12): ENABLE_LCMS forced OFF on all platforms. No ICC transform is reachable -- LibRaw's only lcms2 consumer is apply_profile(), called solely from dcraw_process(), which ceyx never calls; camera_profile is never set. Colour uses fixed matrices + DNG-SDK spaces.", owner = "OQ-N4" }
+"OPENMP" = 1
+"HEIF" = 1
+"WEBP" = 1
+"JXL" = 1
+"RAW" = 1
+
 [linux-x86_64]
 instrument = "capability-probe"
 workflow = "linux_build.yml"
@@ -105,6 +144,19 @@ workflow = "linux_build.yml"
 "avif:decode" = 1
 "jxl:encode" = 1
 "jxl:decode" = 1
+
+# WI-5: linux-x86_64 build capabilities. ICC=0 is itself the Linux-
+# determinism fix: previously nothing installed, asserted or documented
+# liblcms2-dev on this leg and FindLCMS2 silently degraded, so the prior ICC
+# value here was a runner-image accident. The forced `ENABLE_LCMS=OFF` in
+# tests.cmake is the explicit, mechanical statement replacing it.
+[linux-x86_64.capabilities]
+"ICC" = { value = 0, reason = "OQ-N4 option Z (user ruling 2026-09-12): ENABLE_LCMS forced OFF on all platforms. No ICC transform is reachable -- LibRaw's only lcms2 consumer is apply_profile(), called solely from dcraw_process(), which ceyx never calls; camera_profile is never set. Colour uses fixed matrices + DNG-SDK spaces.", owner = "OQ-N4" }
+"OPENMP" = 1
+"HEIF" = 1
+"WEBP" = 1
+"JXL" = 1
+"RAW" = 1
 
 # End-state vector per the convergence contract (docs/logs/2026-09-01/contract-
 # windows-codec-round.md, CI-T1 acceptance criteria): full green across every
@@ -129,6 +181,18 @@ workflow = "windows_build.yml"
 "jxl:encode" = 1
 "jxl:decode" = 1
 
+# WI-5: windows-x86_64 build capabilities. ICC=0: nothing sourced lcms2 for
+# Windows in the first place (zero lcms2 branches outside tests.cmake), so
+# this leg moves from "silently non-deterministic" to "explicitly OFF" by
+# the same forced ENABLE_LCMS=OFF value.
+[windows-x86_64.capabilities]
+"ICC" = { value = 0, reason = "OQ-N4 option Z (user ruling 2026-09-12): ENABLE_LCMS forced OFF on all platforms. No ICC transform is reachable -- LibRaw's only lcms2 consumer is apply_profile(), called solely from dcraw_process(), which ceyx never calls; camera_profile is never set. Colour uses fixed matrices + DNG-SDK spaces.", owner = "OQ-N4" }
+"OPENMP" = 1
+"HEIF" = 1
+"WEBP" = 1
+"JXL" = 1
+"RAW" = 1
+
 # Android has NO runnable capability instrument in CI at all (compile-only
 # ruling 2026-08-31): the cross-compiled AArch64 .so cannot be dlopen'd from
 # the x86_64 runner, and the emulator gate that would have run an on-device
@@ -148,3 +212,16 @@ workflow = "android_build.yml"
 "avif:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
 "jxl:encode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
 "jxl:decode" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+
+# WI-5: android-arm64-v8a build capabilities. Honest zeros for the SAME
+# documented reason as the codec vector above (no runnable instrument in
+# CI); ICC additionally carries the OQ-N4 fact (ENABLE_LCMS forced OFF
+# everywhere, lcms2 unreachable dead code) since both are simultaneously
+# true here.
+[android-arm64-v8a.capabilities]
+"ICC" = { value = 0, reason = "no runnable instrument in CI (compile-only ruling 2026-08-31); also OQ-N4 option Z: ENABLE_LCMS forced OFF on all platforms, lcms2 unreachable dead code", owner = "CI-T5" }
+"OPENMP" = { value = 0, reason = "ANDROID OR IOS -> OFF policy (native/cmake/tests.cmake), not a CI-instrument gap", owner = "N/A (deliberate, not a gap)" }
+"HEIF" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"WEBP" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"JXL" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
+"RAW" = { value = 0, reason = "no runnable instrument in CI: cross-compiled AArch64 artifact, no emulator (compile-only ruling 2026-08-31)", owner = "CI-T5" }
