@@ -227,6 +227,12 @@ jobs:
         # had to be corrected for. The bidirectional STL check below is where
         # libc++_shared.so's presence/absence is actually verified, against
         # the real DT_NEEDED table rather than a fixed file-existence list.
+        # WI-15 step 15.2: the required companion set is read from the
+        # single declaration native/deps/shipped_files.toml (via
+        # read_shipped_files.py --companions) instead of hard-coded, and
+        # EXPECTED/STAGED sets are printed unconditionally (not just on
+        # failure) so a green run leaves positive evidence the comparison
+        # ran -- mirrors the equivalent Linux gate added in the same commit.
         run: |
           shopt -s nullglob
           libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
@@ -234,17 +240,21 @@ jobs:
             echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
             exit 1
           fi
-          required=("libheif.so" "libde265.so")
+          EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform android --companions | tr ' ' '\n' | sort)"
+          echo "EXPECTED_SET (companions):"
+          echo "${EXPECTED_SET}"
           missing=""
-          for f in "${required[@]}"; do
+          while IFS= read -r f; do
+            [ -z "${f}" ] && continue
             if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
               missing="${missing} ${f}"
             fi
-          done
+          done <<< "${EXPECTED_SET}"
           if [ -n "${missing}" ]; then
             echo "::error::missing required companion .so(s) in ${ARTIFACT_DIR}/native:${missing} — the Android atomic group (decoder + HEIF companions) is incomplete." >&2
             exit 1
           fi
+          echo "ANDROID_COMPANION_GROUP_COMPLETE=1"
 
       # G6 fix (round-5 gap closure, task #9): this .so is a target-arm64 ELF
       # cross-compiled on an x86_64 host, so the NDK's own llvm-nm (not host
