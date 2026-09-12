@@ -166,7 +166,17 @@ def assert_exports(platform: str, arch: str | None = None) -> int:
 
     report.section("AC-L5: required FFI exports present in .so")
     dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
-    rc = _assert_exports_script.run("native/deps/export_manifest.toml", platform, dump_text)
+    # Keyword call, not positional: `native/scripts/deps/test_no_shell_lint.py`
+    # flags any call named `run` whose FIRST POSITIONAL argument is a bare
+    # string (the subprocess-argv shape it exists to catch) -- this is a
+    # direct in-process call to assert_exports.py's own `run()`, not a
+    # subprocess invocation, so it is a false positive under that lint's
+    # name-only matching. Keyword args are not `node.args`, so this call
+    # shape is correctly outside the lint's scope without touching the lint
+    # itself (an un-owned, frozen file this campaign does not modify).
+    rc = _assert_exports_script.run(
+        manifest_path="native/deps/export_manifest.toml", platform=platform, dump_text=dump_text
+    )
     report.rc("ASSERT_EXPORTS", rc)
     if rc != 0:
         report.error(
