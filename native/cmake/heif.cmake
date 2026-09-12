@@ -208,14 +208,29 @@ if(DNG_ENABLE_HEIF)
         # copy_if_different, so an unchanged dist does not retrigger the
         # downstream Flutter build every time.
         # heif.cmake stages only the two libheif-stack members of
-        # CEYX_SHIPPED_MACOS_COMPANIONS (libjpeg.8.dylib/libomp.dylib are the
-        # other two staging mechanisms named in shipped_files.toml's macos
-        # `source` field: pipeline.cmake's bundle_macos_dylib_deps.py and
-        # tests.cmake's libomp vendoring, respectively) -- filter the
-        # declared list down to the ones this branch is responsible for
-        # rather than hard-coding their names.
-        list(GET CEYX_SHIPPED_MACOS_COMPANIONS 1 _ceyx_heif_dylib_name)
-        list(GET CEYX_SHIPPED_MACOS_COMPANIONS 2 _ceyx_de265_dylib_name)
+        # CEYX_SHIPPED_MACOS_COMPANIONS (liblcms2.2.dylib/libjpeg.8.dylib/
+        # libomp.dylib are the other staging mechanisms named in
+        # shipped_files.toml's macos `source` field: pipeline.cmake's
+        # bundle_macos_dylib_deps.py and tests.cmake's libomp vendoring
+        # respectively) -- looked up BY NAME PREFIX, not by a positional
+        # index, so a future change to the declared list's ORDER or LENGTH
+        # (e.g. WI-5 removing liblcms2.2.dylib) cannot silently pick the
+        # wrong companion the way a hard-coded `list(GET ... 1/2)` would.
+        set(_ceyx_heif_dylib_name "")
+        set(_ceyx_de265_dylib_name "")
+        foreach(_ceyx_companion IN LISTS CEYX_SHIPPED_MACOS_COMPANIONS)
+            if(_ceyx_companion MATCHES "^libheif\\.")
+                set(_ceyx_heif_dylib_name "${_ceyx_companion}")
+            elseif(_ceyx_companion MATCHES "^libde265\\.")
+                set(_ceyx_de265_dylib_name "${_ceyx_companion}")
+            endif()
+        endforeach()
+        if(NOT _ceyx_heif_dylib_name OR NOT _ceyx_de265_dylib_name)
+            message(FATAL_ERROR
+                "CEYX_SHIPPED_MACOS_COMPANIONS (${CEYX_SHIPPED_MACOS_COMPANIONS}) "
+                "is missing a libheif.*/libde265.* entry -- native/deps/shipped_files.toml "
+                "is malformed.")
+        endif()
         add_custom_command(TARGET dng_decoder_native POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${HEIF_DIST_DIR}/lib/${_ceyx_heif_dylib_name}"

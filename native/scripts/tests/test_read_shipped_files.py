@@ -27,7 +27,10 @@ def test_load_real_declaration_succeeds():
         assert platform in platforms
     assert platforms["windows"]["decoder"] == "dng_decoder_native.dll"
     assert "libomp140.x86_64.dll" in platforms["windows"]["companions"]
-    assert "liblcms2.2.dylib" not in platforms["macos"]["companions"]
+    # lcms2 stays listed until WI-5 lands (round-1 review blocker fix: the
+    # real macOS decoder still links it today; S-D1 must match the
+    # currently-shipping set, not the post-WI-5 end state).
+    assert "liblcms2.2.dylib" in platforms["macos"]["companions"]
     assert platforms["android"]["placed"] is False
     assert platforms["android"]["not_placed_reason"]
 

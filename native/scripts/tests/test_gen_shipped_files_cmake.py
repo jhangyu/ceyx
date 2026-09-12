@@ -36,8 +36,10 @@ def test_regenerated_content_matches_declaration():
     rendered = gen.render(platforms)
     assert 'set(CEYX_SHIPPED_WINDOWS_DECODER "dng_decoder_native.dll")' in rendered
     assert 'set(CEYX_SHIPPED_WINDOWS_COMPANIONS "heif.dll;libde265.dll;libomp140.x86_64.dll")' in rendered
-    assert 'set(CEYX_SHIPPED_MACOS_COMPANIONS "libjpeg.8.dylib;libheif.1.dylib;libde265.0.dylib;libomp.dylib")' in rendered
-    assert "lcms2" not in rendered
+    # lcms2 stays listed until WI-5 actually lands (round-1 review blocker
+    # fix: the real macOS decoder still links it today, S-D1 must match
+    # what is ACTUALLY shipping, not the post-WI-5 end state).
+    assert 'set(CEYX_SHIPPED_MACOS_COMPANIONS "liblcms2.2.dylib;libjpeg.8.dylib;libheif.1.dylib;libde265.0.dylib;libomp.dylib")' in rendered
 
 
 def test_generated_file_is_semicolon_separated_cmake_list():
