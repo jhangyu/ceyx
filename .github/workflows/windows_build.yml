@@ -765,55 +765,7 @@ jobs:
       - name: Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: |
-          DLL="native/build-windows/dng_decoder_native.dll"
-          if command -v llvm-strings >/dev/null 2>&1; then
-            STRINGS_TOOL="llvm-strings"
-          elif command -v strings >/dev/null 2>&1; then
-            STRINGS_TOOL="strings"
-          else
-            echo "::error::neither llvm-strings nor strings is on PATH; capability is UNVERIFIED, refusing to publish." >&2
-            exit 1
-          fi
-          set +e
-          "${STRINGS_TOOL}" "$DLL" > dll_strings.txt 2>&1
-          rc=$?
-          set -e
-          echo "STRINGS_TOOL=${STRINGS_TOOL} STRINGS_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::${STRINGS_TOOL} failed reading ${DLL}; capability is UNVERIFIED, refusing to publish." >&2
-            exit 1
-          fi
-          missing=""
-          # Only the split kernel's name literal is checked (not the plain
-          # dng_render_stage4 literal) per the CI-fix instruction: Windows is
-          # a Vulkan/split platform (DNG_STAGE4_SPLIT_KERNEL=ON, same as
-          # Linux/Android), so dng_render_stage4_split is the second-kernel
-          # signal that actually distinguishes a fused build here.
-          for sym in dng_render_stage4_split; do
-            set +e
-            grep -qx "${sym}" dll_strings.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (symbol literal: ${sym})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} symbol:${sym}"
-            fi
-          done
-          for coeff in orient_a_x orient_b_x orient_c_x orient_a_y orient_b_y orient_c_y; do
-            set +e
-            grep -qx "${coeff}" dll_strings.txt
-            rc=$?
-            set -e
-            echo "RC=${rc} (string: ${coeff})"
-            if [ "${rc}" -ne 0 ]; then
-              missing="${missing} string:${coeff}"
-            fi
-          done
-          if [ -n "${missing}" ]; then
-            echo "::error::missing fused-orientation signal(s) in ${DLL}:${missing} — this DLL may be a stale pre-fusion build (the generator names never changed, so symbol presence alone does not prove the kernel was rebuilt with orientation fused in)." >&2
-            exit 1
-          fi
+        run: python3 native/scripts/ci.py assert-orientation --platform windows
 
       - name: Assert full codec capability vector via probe (G1)
         shell: bash

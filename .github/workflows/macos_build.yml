@@ -643,20 +643,7 @@ jobs:
       # decision; the probe's own exit code is `$?`, captured immediately.
       - name: Build + run orientation capability probe (Task 11 / G-E)
         if: matrix.cross == 'false'
-        run: |
-          cmake --build "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
-            --target orient_capability_probe -j4
-          PROBE="${{ github.workspace }}/${{ matrix.dylib_dir }}/orient_capability_probe"
-          set +e
-          "$PROBE" "$DYLIB" > orient_capability_probe_output.txt 2>&1
-          rc=$?
-          set -e
-          cat orient_capability_probe_output.txt
-          echo "ORIENT_CAPABILITY_PROBE_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::orient_capability_probe reported the shipped dylib does not export the fused-orientation kernel(s); see output above for which symbol/capability is missing." >&2
-            exit 1
-          fi
+        run: python3 native/scripts/ci.py assert-orientation --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB"
 
       # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
       # the original nm-grep assertion tested an UNSATISFIABLE claim.
