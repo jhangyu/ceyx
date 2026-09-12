@@ -77,6 +77,25 @@ class TestNoShellLintAppliesToRepo(unittest.TestCase):
         self.assertEqual(all_violations, [], "\n".join(all_violations))
 
 
+class TestScanRootsIncludeCiPackage(unittest.TestCase):
+    """WI-2: the CI python-ization package (native/scripts/ci/) must be
+    inside this lint's scan scope, not exempted from it — it is new
+    production code under native/scripts/ and is subject to the same
+    no-shell/no-bare-string-argv/no-grep-in-argv rules as everything else."""
+
+    def test_ci_package_files_are_scanned_not_skipped(self) -> None:
+        ci_root = SCRIPTS_ROOT / "ci"
+        self.assertTrue(ci_root.is_dir(), f"expected {ci_root} to exist")
+        scanned = {p for p in _iter_python_files(SCRIPTS_ROOT) if ci_root in p.parents}
+        production_files = {
+            p
+            for p in ci_root.rglob("*.py")
+            if "__pycache__" not in p.parts and not p.name.startswith("test_")
+        }
+        self.assertTrue(production_files, "expected at least report.py/run.py under ci/")
+        self.assertEqual(scanned, production_files)
+
+
 class TestLintCatchesViolations(unittest.TestCase):
     """Demonstrated red: the lint must actually fire on deliberately
     malformed input, not merely pass on innocent code."""
