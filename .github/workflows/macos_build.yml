@@ -941,6 +941,49 @@ jobs:
               || { echo "::error::${companion} is depended upon via a non-relative reference (${companion_line}) — expected the line to start with @rpath/${companion}. This would fail to load on any machine but the build host (the exact class of defect fixed in b0a0573)."; exit 1; }
           done
 
+      # WI-14 step 14.2 (S-F1): measure the floor of the WHOLE staged group
+      # (decoder + every companion just verified above), not the decoder
+      # alone -- the macOS pin comment records the OpenMP runtime, not the
+      # decoder, as what actually sets the macOS 15 floor.
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        run: |
+          ARTIFACT_ARGS=()
+          for f in "${ARTIFACT_DIR}"/native/*.dylib; do
+            ARTIFACT_ARGS+=(--artifact "$f")
+          done
+          python3 native/scripts/read_min_runtime.py \
+            "${ARTIFACT_ARGS[@]}" \
+            --platform macos \
+            --out "${ARTIFACT_DIR}/min_runtime.txt"
+          echo "READ_MIN_RUNTIME_RC=$?"
+          cat "${ARTIFACT_DIR}/min_runtime.txt"
+
+          # WI-14 step 14.4 (S-F3, ceyx half): fail on drift between the
+          # just-measured floor and ceyx's own declaration.
+          #
+          # FLAGGED RISK (not silently assumed correct): min_runtime_expected.toml's
+          # single [macos] value (15.0) was measured against the arm64 NATIVE
+          # leg's group, which includes libomp.dylib. The x86_64 CROSS leg
+          # does not ship libomp.dylib at all (DNG_CROSS_BUILD turns desktop
+          # OpenMP off, per native/cmake/tests.cmake) -- its measured group
+          # max may legitimately be lower (decoder-only, ~14.0), which this
+          # single-value gate would then report as drift on that leg alone.
+          # This is flagged for team-lead review rather than silently
+          # special-cased; if the x86_64 leg goes red on this check for that
+          # reason, the fix is either a per-arch declaration or an
+          # arch-specific skip, not a change to the arm64 value.
+          set +e
+          python3 native/scripts/assert_min_runtime_matches_declared.py \
+            --emitted "${ARTIFACT_DIR}/min_runtime.txt" \
+            --declared native/deps/min_runtime_expected.toml \
+            --platform macos
+          RC=$?
+          set -e
+          echo "MIN_RUNTIME_DRIFT_RC=${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            exit "${RC}"
+          fi
+
       # Round 6, Plan B naming normalization: the artifact name is built from
       # `matrix.arch_tag` (arm64 / x86_64). Before round 6 it was built from a
       # separate `matrix.label` key (apple-silicon / intel), which no longer
