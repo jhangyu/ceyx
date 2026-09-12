@@ -77,7 +77,7 @@ void main() {
       final buffers = CeyxNativeBufferPool(maxBuffers: 2);
       CeyxDecodePool.nativeBufferPool = buffers;
       addTearDown(() {
-        CeyxDecodePool.nativeBufferPool = null;
+        CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared;
         buffers.debugDisposeIdle();
       });
 

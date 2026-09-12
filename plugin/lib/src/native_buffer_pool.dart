@@ -293,6 +293,22 @@ class CeyxNativeBufferPool {
       .map((e) => e.key)
       .toSet();
 
+  /// The summed CAPACITY of everything this pool currently has checked out.
+  ///
+  /// Exists for the host's memory-attribution ledger (S3.0), which has to state
+  /// the pool's contribution in BYTES and cannot reach the per-buffer sizes
+  /// from outside this class: [debugLiveAddresses] gives addresses only, and
+  /// multiplying a count by a nominal frame size would report a guess as a
+  /// measurement. Read-only and DERIVED from [_byAddress], for the same reason
+  /// that getter is.
+  ///
+  /// Capacity, not decoded extent: a slot is charged at the size it occupies,
+  /// which is what a memory ledger is asking about.
+  @visibleForTesting
+  int get debugLiveBufferByteTotal => _byAddress.values
+      .where((buffer) => !buffer.released)
+      .fold<int>(0, (total, buffer) => total + buffer.capacity);
+
   /// Live checkouts across EVERY pool on this isolate, including [shared] and
   /// any test-constructed pool. This is the half of the native gauge that
   /// per-buffer identity accounting cannot express: "is anything, anywhere,
@@ -531,7 +547,7 @@ class CeyxNativeBufferPool {
   /// buffer: it occupies no slot, counts against no bound, and its release
   /// frees rather than returns.
   ///
-  /// Used by the decode pool's self-allocating fallback, where the worker
+  /// Used by the decode pool's self-allocating adoption sink, where the worker
   /// isolate had to allocate (it cannot reach this Dart object) and the pool
   /// must still be the single owner of every live RGBA address.
   CeyxNativeBuffer adoptUnpooled(int address, int bytes) {

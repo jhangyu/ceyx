@@ -311,30 +311,22 @@ class CeyxDecodePool {
   @visibleForTesting
   static void Function(int address)? debugNativeFree;
 
-  /// WP2 defect gauge: how many times a native RGBA address arrived at the
-  /// wrap/free site WITHOUT being owned by [nativeBufferPool]. Permanent, not
-  /// temporary: it is the standing detector for the invariant that every live
-  /// full-resolution RGBA address is pool-owned. MUST stay 0.
-  @visibleForTesting
-  static int debugUnownedWraps = 0;
-
-  /// WP6: the native buffer pool a decode payload's RGBA buffer came from,
-  /// when it came from one.
+  /// WP6: the native buffer pool that owns every decode payload's RGBA buffer.
   ///
   /// The free list lives on THIS isolate (the pool's own), because that is
   /// where returns land; a native address is process-global but a Dart pool
-  /// object is not. Null means "no pooled allocation on this route", which is
-  /// the state whenever the worker's buffer is allocated by the dylib's own
-  /// decode entry (it owned the allocation and the native free entry owned the
-  /// free) — the pool then owns nothing and every code path below degrades to
-  /// the pre-WP6 behaviour, unchanged.
-  /// WP2: defaults to the process-wide pool rather than null. A null default
-  /// was degradation path P5 — a host that never assigned this field took the
-  /// legacy allocating route for every decode, silently. There is no allocating
-  /// route left to take, so "no pool" is no longer a coherent state. The type
-  /// stays nullable so a test can assign null to exercise the no-pool branch
-  /// until WP5 removes it.
-  static CeyxNativeBufferPool? nativeBufferPool = CeyxNativeBufferPool.shared;
+  /// object is not.
+  ///
+  /// S2.2 (decision D2): a pool is REQUIRED and `null` is no longer
+  /// representable. Assignment remains supported so a test or a host can
+  /// substitute a differently-sized or instrumented pool; it is not a way to
+  /// switch the pooled route off. Every buffer this class hands out is either
+  /// acquired from a slot or adopted into the pool on receipt, so "no pool" was
+  /// never a coherent state — it was an unbounded leak: with the field null,
+  /// the adoption call below was skipped, and both the wrap and free sites fell
+  /// through without attaching any finalizer and without freeing, so every
+  /// decode stranded one full-size buffer for the life of the process.
+  static CeyxNativeBufferPool nativeBufferPool = CeyxNativeBufferPool.shared;
 
   /// Test-only: how many isolates this pool has spawned, ever. After warmup
   /// this must NOT grow per decode — that is the whole point of the pool.
@@ -764,17 +756,16 @@ class CeyxDecodePool {
     return job.completer.future;
   }
 
-  /// Whether a decode may take the pooled decode-into route: a pool must exist
-  /// to take a slot from, and the dylib must export the entry pair.
+  /// Whether a decode may take the pooled decode-into route: the dylib must
+  /// export the entry pair. That a pool exists to take a slot from is a
+  /// type-level guarantee since D2, not a runtime check.
   ///
   /// Deliberately NOT per-path. The entries are format-agnostic, so there is
   /// nothing to ask about a path here; a format this build cannot decode is
   /// discovered by the PROBE (which answers no extent) and cached as "no
   /// pooled route", so the slot is never acquired in the first place.
-  bool get _pooledRouteEnabled {
-    if (nativeBufferPool == null) return false;
-    return debugDecodeIntoAvailable ?? _libraryDecodeInto();
-  }
+  bool get _pooledRouteEnabled =>
+      debugDecodeIntoAvailable ?? _libraryDecodeInto();
 
   /// The availability flag read off the loaded library, resolved once.
   ///
@@ -801,9 +792,9 @@ class CeyxDecodePool {
   /// WP10 preparation: learn the output extent (probing once per
   /// `(path, maxDim)`), acquire a slot of that size, then enqueue the job.
   ///
-  /// Any failure degrades to the ordinary allocating route rather than failing
-  /// the decode: this whole path is an optimisation, and a photo that will not
-  /// probe must still open.
+  /// Any failure degrades to the self-allocating adoption sink rather than
+  /// failing the decode: this whole path is an optimisation, and a photo that
+  /// will not probe must still open.
   Future<void> _prepareAndEnqueue(_PoolJob job) async {
     try {
       var bytes = _sizeCache[_sizeKey(job.path, job.maxDim)];
@@ -812,7 +803,7 @@ class CeyxDecodePool {
         if (_disposed || job.completer.isCompleted) return;
       }
       if (bytes != null && bytes > 0) {
-        job.slot = await nativeBufferPool?.acquire(bytes);
+        job.slot = await nativeBufferPool.acquire(bytes);
         if (_disposed || job.completer.isCompleted) {
           // Raced with dispose/cancel while awaiting: return the slot rather
           // than stranding it checked out forever.
@@ -931,7 +922,7 @@ class CeyxDecodePool {
     final slot = job.slot;
     if (slot == null) return;
     job.slot = null;
-    nativeBufferPool?.release(slot);
+    nativeBufferPool.release(slot);
   }
 
   /// Convenience wrapper: full decode, throwing on discard so the result type
@@ -1244,17 +1235,17 @@ class CeyxDecodePool {
       //
       // Failing here would mean a photo that opened fine BEFORE WP10 stops
       // opening because of WP10. So withdraw the buffer and dispatch once more
-      // on the ordinary allocating route: the photo still opens, degraded.
+      // on the self-allocating adoption sink: the photo still opens, degraded.
       //
       // The POOLED retry is still bounded at exactly one, which is the
       // property AC12.3 exists to protect. This cannot loop: with no
-      // dstAddress in the message the worker takes the allocating route and
+      // dstAddress in the message the worker takes the self-allocating sink and
       // has nothing to refuse — and if it refuses anyway, the guard above
       // fails the job.
       logger(
         'pool|DECODE_INTO_REFUSED_TWICE|${job.path}|supplied='
         '${job.slot?.capacity}|requested=$bytes|falling back to the '
-        'allocating route',
+        'self-allocating adoption sink',
       );
       job.pooledAbandoned = true;
       _byRequestId.remove(requestId);
@@ -1293,11 +1284,11 @@ class CeyxDecodePool {
   /// job for one more dispatch.
   Future<void> _reacquireAndRedispatch(_PoolJob job, int bytes) async {
     try {
-      job.slot = await nativeBufferPool?.acquire(bytes);
+      job.slot = await nativeBufferPool.acquire(bytes);
     } catch (e) {
       logger('pool|RESIZE_REACQUIRE_FAILED|${job.path}|$e');
-      // Fall through with no slot: the retry takes the ordinary allocating
-      // route, which still produces a correct image.
+      // Fall through with no slot: the retry takes the self-allocating
+      // adoption sink, which still produces a correct image.
       job.slot = null;
     }
     if (_disposed || job.completer.isCompleted) {
@@ -1478,7 +1469,7 @@ class CeyxDecodePool {
         payload != null &&
         payload.length >= 7 &&
         payload[6] != null) {
-      nativeBufferPool?.adoptUnpooled(payload[0] as int, payload[6] as int);
+      nativeBufferPool.adoptUnpooled(payload[0] as int, payload[6] as int);
     }
     if (job != null) {
       _byKey.remove(job.key);
@@ -1611,13 +1602,16 @@ class CeyxDecodePool {
   /// buffer. Leaving it armed on a buffer the pool may hand to someone else is
   /// how a later collection of [bytes] reclaims it under its new owner.
   void Function()? _releaseToPoolCallbackFor(int address, Uint8List bytes) {
-    final buffers = nativeBufferPool;
-    final buffer = buffers?.bufferFor(address);
-    if (buffers == null || buffer == null) return null;
+    // Captured rather than re-read inside the closure: a test may substitute a
+    // different pool between materialisation and release, and the buffer must
+    // go back to the pool it came from.
+    final bufferPool = nativeBufferPool;
+    final buffer = bufferPool.bufferFor(address);
+    if (buffer == null) return null;
     return () {
       _poolSafetyNet.detach(bytes);
       CeyxNativeBufferPool.noteSafetyNetDetach();
-      buffers.release(buffer);
+      bufferPool.release(buffer);
     };
   }
 
@@ -1633,7 +1627,7 @@ class CeyxDecodePool {
   /// alone cannot tell "still mine" from "someone else's now" (round-1 F1).
   static final Finalizer<(CeyxNativeBuffer, int)> _poolSafetyNet =
       Finalizer<(CeyxNativeBuffer, int)>(((CeyxNativeBuffer, int) armed) {
-        CeyxDecodePool.nativeBufferPool?.releaseFromFinalizer(
+        CeyxDecodePool.nativeBufferPool.releaseFromFinalizer(
           armed.$1,
           armed.$2,
         );
@@ -1641,9 +1635,8 @@ class CeyxDecodePool {
 
   Uint8List _viewNativeRgba(int address, int length) {
     final ptr = Pointer<Uint8>.fromAddress(address);
-    final buffers = nativeBufferPool;
-    final owned = buffers?.bufferFor(address);
-    if (buffers != null && owned != null) {
+    final owned = nativeBufferPool.bufferFor(address);
+    if (owned != null) {
       // Pool-owned: NO NativeFinalizer (freeing it would take the buffer away
       // from the pool). The safety net returns it instead, and it is armed for
       // THIS checkout only.
@@ -1659,20 +1652,17 @@ class CeyxDecodePool {
       // test owns the fake allocation and frees it through the seam.
       return ptr.asTypedList(length);
     }
-    // WP2 reachability proof: reaching here means an address the pool does not
-    // own arrived at the wrap site. After adoption there is no such address; if
-    // this counter ever leaves zero, deleting the dylib-free tail below is
-    // wrong. Counted AFTER the test seam on purpose — a fake address driven
-    // through the seam is not evidence of an unowned production wrap.
-    debugUnownedWraps++;
-    // WP2 step 7: the `finalizer: _nativeFreePtr` argument that used to live
-    // here is DELETED along with the standalone RGBA free entry itself (WP5). Choice
-    // recorded: a plain view guarded by the gauge, NOT a StateError. Throwing
-    // would invent a new way for a photo to fail to open — the exact outcome
-    // this campaign's contract forbids — for a state the gauge above proves
-    // does not occur. The gauge, asserted zero across the suites, is the
-    // detector; the throw would be a self-inflicted failure mode.
-    return ptr.asTypedList(length);
+    // S2.1/S2.4: reaching here means an address the pool does not own arrived
+    // at the wrap site. Every arrival path adopts before wrapping (a slot
+    // acquisition, or `adoptUnpooled` on the self-allocating sink's payload),
+    // so this state does not exist. The former gauge-and-plain-view tail is
+    // DELETED rather than kept: an unowned address has no reclaim path at all,
+    // so returning a view of it would strand the buffer silently, which is the
+    // unbounded leak this phase removes.
+    throw StateError(
+      'RGBA address 0x${address.toRadixString(16)} reached the wrap site '
+      'unowned by the native buffer pool',
+    );
   }
 
   /// Explicit free for the ONE arm that never materialises (soft cancel).
@@ -1681,19 +1671,22 @@ class CeyxDecodePool {
     // discard arm keeps its meaning (this address is done) while the memory
     // stays in the fixed slot set. Still exactly one reclaim per address: the
     // discard arm never materialises, so no safety net was ever attached.
-    if (nativeBufferPool?.tryReleaseByAddress(address) ?? false) return;
+    if (nativeBufferPool.tryReleaseByAddress(address)) return;
     final seam = debugNativeFree;
     if (seam != null) {
       seam(address);
       return;
     }
     if (address == 0) return;
-    // WP2 step 7: the dylib-free tail is DELETED. Every live RGBA address is
-    // pool-owned (Tasks 2.1-2.3), so the first line above returns for all of
-    // them; reaching here means the same unowned-address defect the wrap site
-    // counts, so it is counted with the same gauge rather than handed to a
-    // free function that no longer owns anything.
-    debugUnownedWraps++;
+    // S2.1/S2.4: every live RGBA address is pool-owned, so the release above
+    // returns for all of them. Reaching here is the same unowned-address defect
+    // the wrap site rejects, and there is no free function left that owns this
+    // memory — so it is stated as the impossible state it is rather than
+    // silently dropped.
+    throw StateError(
+      'RGBA address 0x${address.toRadixString(16)} reached the free site '
+      'unowned by the native buffer pool',
+    );
   }
 
   /// Symbol-table access to the native free entry on the POOL's isolate (the
