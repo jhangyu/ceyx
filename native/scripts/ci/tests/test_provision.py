@@ -371,6 +371,63 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("pip install cmake", err)
 
+    # ---- ninja (WI-29, push 8b) ----------------------------------------
+
+    def test_ninja_installs_via_pip_then_prints_version(self):
+        calls = []
+
+        def fake(argv, cwd=None, env=None):
+            calls.append(argv)
+            if argv[0] == "ninja":
+                return _fake_run_result(returncode=0, stdout="1.11.1\n")
+            return _fake_run_result(returncode=0, stdout="Successfully installed ninja\n")
+
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(provision.ninja)
+        self.assertEqual(rc, 0)
+        self.assertIn("1.11.1", out)
+        self.assertEqual(calls[0][-1], "ninja")
+        self.assertEqual(calls[1], ["ninja", "--version"])
+
+    def test_ninja_pip_failure_short_circuits_before_version_check(self):
+        def fake(argv, cwd=None, env=None):
+            return _fake_run_result(returncode=1, stderr="ERROR: no matching distribution\n")
+
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, err = _run_captured(provision.ninja)
+        self.assertEqual(rc, 1)
+        self.assertIn("pip install ninja", err)
+
+    # ---- apt (WI-29, push 8b) -------------------------------------------
+
+    def test_apt_installs_the_given_package_list(self):
+        calls = []
+
+        def fake(argv, cwd=None, env=None):
+            calls.append(argv)
+            return _fake_run_result(returncode=0)
+
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, _, _ = _run_captured(
+                provision.apt, ["cmake", "ninja-build", "build-essential"]
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0], ["sudo", "apt-get", "update"])
+        self.assertEqual(
+            calls[1],
+            ["sudo", "apt-get", "install", "-y", "--no-install-recommends",
+             "cmake", "ninja-build", "build-essential"],
+        )
+
+    def test_apt_update_failure_short_circuits_before_install(self):
+        def fake(argv, cwd=None, env=None):
+            return _fake_run_result(returncode=100, stderr="Could not get lock\n")
+
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, err = _run_captured(provision.apt, ["cmake"])
+        self.assertEqual(rc, 100)
+        self.assertIn("apt-get update failed", err)
+
 
 class TestAssertVcpkgArtefactsBareScriptInvocation(unittest.TestCase):
     """One real invocation through ci.py itself. macOS was gated out at

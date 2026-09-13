@@ -25,6 +25,24 @@ docstring; these six subcommands were declared and scaffolded to
                       itself has no platform branch of its own)
     ensure-cmake      linux_build.yml:312-317
 
+Extended by WI-29 (push 8b, the dist-workflow python-ization): the "Install
+Ninja" and "Install build prerequisites (apt)" step bodies are shared with
+the *_dist_*.yml carriers `dist_build.py` invokes provisioning for --
+they live here rather than in `dist_build.py` per this module's own
+existing charter (toolchain provisioning, not carrier invocation):
+
+    provision-ninja   windows_build.yml:99-102 and identical bodies in
+                      heif/jxl/webp_dist_windows.yml + jxl/webp_dist_android.yml
+                      (`ninja()`, no argv -- the body has no per-caller variant)
+    provision-apt     android_build.yml:60-66 (5 packages) vs its dist twin
+                      heif_dist_android.yml:77-81 (a 3-package SUBSET) --
+                      genuinely different, so `apt(packages)` takes the list
+                      as argv rather than hold either as a constant
+    locate-clang-cl   NOT added here -- already ported in
+                      `windows_toolchain.py`'s `locate_clang_cl()` (WI-24);
+                      the dist twins reuse that function directly rather
+                      than gaining a second implementation in this module.
+
 R13 (workflow context is a CLI pass-through, never a `targets.py` key):
 every path here (`$RUNNER_TEMP`, `$GITHUB_WORKSPACE`, the manifest root,
 the triplet, the install root) is workflow-supplied and taken as an
@@ -312,3 +330,49 @@ def ensure_cmake(min_version: str) -> int:
         report.error(f"cmake on PATH is older than {min_version}; Halide 21 will not configure.")
         return 1
     return 0
+
+
+def ninja() -> int:
+    """Replaces the repeated "Install Ninja" step body (windows_build.yml,
+    plus its dist twins heif/jxl/webp_dist_windows.yml and the two Android
+    dist twins jxl/webp_dist_android.yml that also use pip's ninja wheel
+    instead of apt's ninja-build): `pip install ninja` then `ninja --version`
+    to prove it landed on PATH. Identical body everywhere it appears (WI-29
+    push-8b twin-diff finding) -- no per-caller variant."""
+    pip_result = run.run([sys.executable, "-m", "pip", "install",
+                           "--disable-pip-version-check", "ninja"])
+    if pip_result.stdout:
+        report.plain(pip_result.stdout.rstrip("\n"))
+    if pip_result.returncode != 0:
+        report.error(f"pip install ninja failed (rc={pip_result.returncode}).")
+        return pip_result.returncode
+
+    version_result = run.run(["ninja", "--version"])
+    if version_result.stdout:
+        report.plain(version_result.stdout.rstrip("\n"))
+    return version_result.returncode
+
+
+def apt(packages: list[str]) -> int:
+    """Replaces "Install build prerequisites (apt)" (android_build.yml:64-66,
+    5 packages: cmake ninja-build build-essential libjpeg-dev zlib1g-dev; its
+    dist twin heif_dist_android.yml:78-81 installs a 3-package SUBSET --
+    cmake ninja-build build-essential, omitting libjpeg-dev/zlib1g-dev, which
+    only the main decoder build needs). The package list is therefore an
+    argv, never a fixed constant in this module (R13) -- `targets.py`/the
+    caller supplies it per-workflow."""
+    update_result = run.run(["sudo", "apt-get", "update"])
+    if update_result.stdout:
+        report.plain(update_result.stdout.rstrip("\n"))
+    if update_result.returncode != 0:
+        report.error(f"apt-get update failed (rc={update_result.returncode}).")
+        return update_result.returncode
+
+    install_result = run.run(
+        ["sudo", "apt-get", "install", "-y", "--no-install-recommends", *packages]
+    )
+    if install_result.stdout:
+        report.plain(install_result.stdout.rstrip("\n"))
+    if install_result.returncode != 0:
+        report.error(f"apt-get install failed (rc={install_result.returncode}).")
+    return install_result.returncode
