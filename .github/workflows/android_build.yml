@@ -214,12 +214,12 @@ jobs:
         # dir (same directory the POST_BUILD copy_if_different commands
         # target), so a single glob on *.so here collects the whole atomic
         # set with no separately-maintained file list to drift out of sync.
+        # WI-19/WI-22: migrated to ci/stage.py's stage_android() (impl-17,
+        # 15c54142), which never fails on copy/list errors -- matching the
+        # shell's `|| true` on both -- and globs non-recursively, matching
+        # `find -maxdepth 1`.
         run: |
-          mkdir -p "${ARTIFACT_DIR}/native"
-          find "${NATIVE_DIR}/build-android/android-arm64" -maxdepth 1 \
-            -name "*.so" \
-            -exec cp {} "${ARTIFACT_DIR}/native/" \; || true
-          ls -la "${ARTIFACT_DIR}/native" || true
+          python3 native/scripts/ci.py stage --platform android --artifact-dir "${ARTIFACT_DIR}" --source-dir "${NATIVE_DIR}/build-android/android-arm64"
 
       - name: Fail if the required Android .so set is incomplete (A-T8-FIX atomic group)
         # Required today: the decoder and its HEIF companions
@@ -242,28 +242,14 @@ jobs:
         # EXPECTED/STAGED sets are printed unconditionally (not just on
         # failure) so a green run leaves positive evidence the comparison
         # ran -- mirrors the equivalent Linux gate added in the same commit.
+        # WI-19/WI-22: migrated to ci/stage.py's assert_staged_group_android()
+        # (impl-17), which stays ONE-DIRECTIONAL (declared companions must be
+        # present; extras/libc++_shared.so absence are never flagged) per
+        # lead6's ruling against adopting linux's stricter two-way equality
+        # check -- android's completeness check checks companions only,
+        # never the decoder itself against a fixed list beyond existence.
         run: |
-          shopt -s nullglob
-          libs=("${ARTIFACT_DIR}"/native/libdng_decoder_native*.so)
-          if [ ${#libs[@]} -eq 0 ]; then
-            echo "::error::No libdng_decoder_native*.so found in ${ARTIFACT_DIR}/native; Stage 2 build did not emit the expected artifact." >&2
-            exit 1
-          fi
-          EXPECTED_SET="$(python3 native/scripts/read_shipped_files.py --platform android --companions | tr ' ' '\n' | sort)"
-          echo "EXPECTED_SET (companions):"
-          echo "${EXPECTED_SET}"
-          missing=""
-          while IFS= read -r f; do
-            [ -z "${f}" ] && continue
-            if [ ! -f "${ARTIFACT_DIR}/native/${f}" ]; then
-              missing="${missing} ${f}"
-            fi
-          done <<< "${EXPECTED_SET}"
-          if [ -n "${missing}" ]; then
-            echo "::error::missing required companion .so(s) in ${ARTIFACT_DIR}/native:${missing} — the Android atomic group (decoder + HEIF companions) is incomplete." >&2
-            exit 1
-          fi
-          echo "ANDROID_COMPANION_GROUP_COMPLETE=1"
+          python3 native/scripts/ci.py assert-staged-group --platform android --artifact-dir "${ARTIFACT_DIR}"
 
       # G6 fix (round-5 gap closure, task #9): this .so is a target-arm64 ELF
       # cross-compiled on an x86_64 host, so the NDK's own llvm-nm (not host
