@@ -160,7 +160,7 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=87", "push 7 / WI-21 (allowlist.py ratchet)"),
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=74", "push 8 / WI-33 (allowlist.py ratchet, 87->74)"),
     _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
 )
 

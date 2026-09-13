@@ -97,22 +97,12 @@ MUST_STAY: tuple = (
     Entry('jxl_dist_windows.yml', 'Build the libjxl dist (Python carrier)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
     Entry('jxl_dist_windows.yml', 'List the produced dist (complete)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
     Entry('linux_build.yml', 'Install git + python3 into the container (pre-checkout, WI-14 step 14.5)', 'C-G14 #1: pre-checkout apt bootstrap -- no checkout yet, no interpreter; must stay in YAML permanently'),
-    Entry('linux_build.yml', 'Derive vcpkg baseline from vcpkg.json', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Provision Python 3.11 inside the container (no hostedtoolcache)', 'C-G14 #2: Python 3.11 provisioning via $GITHUB_PATH; must stay in YAML permanently'),
-    Entry('linux_build.yml', 'Verify the interpreter is alive and not from hostedtoolcache', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Install build prerequisites (apt)', "C-G14 #3: apt build prerequisite package list -- a legible package list is the step's entire value; must stay in YAML permanently"),
-    Entry('linux_build.yml', 'Provide CMake >= 3.28 for Halide 21 (container has 3.22)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('linux_build.yml', 'Bootstrap vcpkg at the pinned baseline (D5)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('linux_build.yml', 'vcpkg install libwebp + libde265 + aom (x64-linux-heif)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('linux_build.yml', 'Assert the vcpkg libwebp artefact (static)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Build HEIF stack (libheif + libde265 + kvazaar + aom, Python carrier)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('linux_build.yml', 'Build dng_decoder_native for Linux (Vulkan, single-stage host)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('macos_build.yml', 'Derive vcpkg baseline from vcpkg.json', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)', "C-G14 #7 / UR-1 policy item: deps pytest suite call site (native/tests/run_dist_equivalence.py); stays pending WI-5's exemption"),
     Entry('macos_build.yml', 'Install build prerequisites (Homebrew)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('macos_build.yml', 'Bootstrap vcpkg at the pinned baseline (D5)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('macos_build.yml', 'vcpkg install libwebp + libde265 + aom (${{ matrix.vcpkg_triplet }})', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('macos_build.yml', 'Assert the vcpkg artefacts (libwebp static, libde265 shared)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Fetch vendored HEIF distribution (Python carrier)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', "Assert libde265's linkage in the produced dist (A5.2/A5.3)", "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Build dng_decoder_native via watchdog (native arm64)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -131,11 +121,8 @@ MUST_STAY: tuple = (
     Entry('windows_build.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout; must stay in YAML permanently'),
     Entry('windows_build.yml', 'Run deps unit suite (native Windows Python)', "C-G14 #7 / UR-1 policy item: deps pytest suite call site, pwsh deliberately (deps/run.py refuses an MSYS interpreter by design); stays pending WI-5's detected-then-exempted carve-out"),
     Entry('windows_build.yml', 'Install Ninja', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Locate clang-cl', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Locate the OpenMP runtime DLL', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Verify vulkan-1.lib is present', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Diagnose LibRaw patch failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Build zlib 1.3.1 (static, /MT) for the Windows toolchain', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Configure (Ninja + clang-cl, Vulkan AOT target)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Assert JXL was statically linked, not silently degraded (G1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Diagnose configure failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -163,4 +150,4 @@ GRANDFATHERED_SHELL_FILES: tuple = (
 # make visible (module docstring above, and markerdiff.py's assertion-vs-
 # observability split). Every push that shrinks MUST_STAY must update this
 # literal in the same diff -- that edit IS the two-line reviewable pin.
-ALLOWLIST_SIZE_EXPECTED: int = 87
+ALLOWLIST_SIZE_EXPECTED: int = 74
