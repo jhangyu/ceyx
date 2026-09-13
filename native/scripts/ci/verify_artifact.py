@@ -159,10 +159,21 @@ def verify_artifact(platform: str, arch: str | None = None, *, dylib_path: str |
 def import_closure(
     platform: str, *, artifact_dir: str | None = None, ndk_home: str | None = None
 ) -> int:
-    """S-B3 import-closure gate. Replaces `linux_build.yml:548-564` (linux),
-    `android_build.yml:414-437` (android, WI-34 push-8 follow-on) and
-    `windows_build.yml`'s "Assert Windows DLL dependency closure" step
+    """S-B3 import-closure gate. Replaces the pre-migration inline shell of
+    the step named `Import-closure gate (S-B3)` in `linux_build.yml` and in
+    `android_build.yml` (android, WI-34/WI-38 push-8 follow-on), and of
+    `Assert Windows DLL dependency closure` in `windows_build.yml`
     (windows, P-23 -- the last unmigrated step of that workflow).
+
+    THOSE SHELL BODIES NO LONGER EXIST AT ANY LINE: each of the three steps
+    is now a one-line `ci.py` call, which is why every citation in this
+    docstring names a STEP NAME to grep for rather than a line range. The
+    ranges that used to stand here were not merely off by a few lines --
+    `linux_build.yml:548-564` had drifted onto an unrelated
+    `capability-vector` step ~65 lines from the real one -- and they could
+    not have been kept correct by care, because the text they pointed at was
+    deleted by the very migration they describe. To read the pre-migration
+    shell, `git log -S` the step name in that workflow.
 
     WINDOWS, AND WHY THE OLD "PERMANENTLY EXCLUDED" NOTE HERE WAS WRONG:
     this docstring, `ci.py`'s `_IMPORT_CLOSURE_PLATFORMS` comment,
@@ -193,7 +204,9 @@ def import_closure(
     never a `targets.py` fact) -- same redesign `stage.py` already went
     through for its own android/macos functions. Two things are PORTED
     AS-IS and deliberately asymmetric with linux (verified against
-    `android_build.yml:414-437`, not assumed from linux's shape):
+    android's own pre-migration shell body -- `git log -S 'Import-closure
+    gate (S-B3)' -- .github/workflows/android_build.yml` -- not assumed from
+    linux's shape):
 
       * No `report.section()` banner and no echo of the readelf dump on
         android -- the shell redirects `llvm-readelf`'s combined output
@@ -213,8 +226,10 @@ def import_closure(
     platform-specific twin the way stage.py's completion markers are: that
     would invent a divergence the source YAML does not have.
 
-    ADDED, NOT A PORT: android_build.yml:422's `ls ... | head -n1` has no
-    explicit empty-match guard in the source shell and would fall through
+    ADDED, NOT A PORT: the `ls ... | head -n1` in android's pre-migration
+    shell (same `git log -S` as above; the pipeline is gone from the tree
+    with the rest of that body) had no explicit empty-match guard and would
+    have fallen through
     to a readelf invocation on an empty/garbage path (eventual failure via
     assert_import_closure.py's own UNVERIFIED-on-unparseable-dump path,
     just via a different, less legible route). A clean, named failure is
