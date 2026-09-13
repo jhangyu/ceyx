@@ -179,30 +179,19 @@ jobs:
         # broken dist already fails the build step above) -- this assertion
         # additionally proves the SUCCESS path actually took the HEIF-enabled
         # branch and not some other silently-OK-looking log shape.
-        shell: bash
+        # WI-19a (pyci python-ization): migrated to configure_log.py.
+        # Pattern is Python re, not grep BRE -- `.`, `+`, `(`, `)` must be
+        # escaped where they were literal in the original grep pattern
+        # (configure_log.py's docstring correction; verified by
+        # test_heif_pattern_with_unescaped_plus_and_parens_does_not_match).
         run: |
-          set +e
-          grep -q "HEIF: libheif .* + libde265 .* (dynamic)" android_build.log
-          rc=$?
-          set -e
-          echo "ASSERT HEIF enabled RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::configure log does not show the expected 'HEIF: libheif ... + libde265 ... (dynamic)' line from cmake/heif.cmake; -DDNG_ENABLE_HEIF=ON above may not have taken effect, or the Android dist was not found." >&2
-            exit 1
-          fi
+          python3 native/scripts/ci.py assert-configure-log --log-path android_build.log --pattern "HEIF: libheif .* \+ libde265 .* \(dynamic\)" --label "HEIF enabled" --error "configure log does not show the expected 'HEIF: libheif ... + libde265 ... (dynamic)' line from cmake/heif.cmake; -DDNG_ENABLE_HEIF=ON above may not have taken effect, or the Android dist was not found."
 
       - name: Assert JXL was explicitly disabled, not silently degraded (G1)
-        shell: bash
+        # WI-19a: migrated to configure_log.py. Pattern's literal parens are
+        # backslash-escaped for the same reason as the HEIF pattern above.
         run: |
-          set +e
-          grep -q "JXL: disabled (CEYX_ENABLE_JXL=OFF)" android_build.log
-          rc=$?
-          set -e
-          echo "ASSERT JXL explicit-OFF RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::configure log does not show the expected 'JXL: disabled (CEYX_ENABLE_JXL=OFF)' line from cmake/jxl.cmake; the -DCEYX_ENABLE_JXL=OFF flag above may not have taken effect." >&2
-            exit 1
-          fi
+          python3 native/scripts/ci.py assert-configure-log --log-path android_build.log --pattern "JXL: disabled \(CEYX_ENABLE_JXL=OFF\)" --label "JXL explicit-OFF" --error "configure log does not show the expected 'JXL: disabled (CEYX_ENABLE_JXL=OFF)' line from cmake/jxl.cmake; the -DCEYX_ENABLE_JXL=OFF flag above may not have taken effect."
 
       # WI-5 step 5.4 (S-E2): android-arm64-v8a has NO runnable capability
       # instrument in CI (ledger `instrument = "none (accepted gap)"`,
