@@ -265,8 +265,21 @@ def _run_producer(script_relpath: str, argv: tuple[str, ...] = ()) -> list[str]:
     re-check on its own, so calling it with a missing input still runs the
     script (and lets it fail on its own terms), which is deliberate: only
     `main`'s loop decides what "missing input" means for the ledger check,
-    this function stays a bare, unconditional runner."""
-    result = run.run([sys.executable, str(REPO_ROOT / script_relpath), *argv])
+    this function stays a bare, unconditional runner.
+
+    cwd IS EXPLICITLY PINNED TO `REPO_ROOT` (lead15's cwd-dependence
+    finding): `_missing_producer_inputs` above resolves `argv`'s path-shaped
+    entries against `REPO_ROOT` (line ~254), but a subprocess launched with
+    the default `cwd=None` inherits the CALLER's cwd, not `REPO_ROOT` --
+    two code points disagreeing about what a relative argv entry is
+    relative TO. From the repo root the two happen to coincide (an accident
+    of where every prior green was launched from); from any other cwd
+    (e.g. `native/scripts`) the precondition sees the input as present
+    while the producer -- resolving the SAME positional path against the
+    wrong base -- cannot find it, so this gate blames a stale LEDGER for a
+    cwd bug. Pinning `cwd=REPO_ROOT` here makes both resolutions agree,
+    which is the only property this file promises."""
+    result = run.run([sys.executable, str(REPO_ROOT / script_relpath), *argv], cwd=REPO_ROOT)
     combined = result.stdout + result.stderr
     return [markerdiff.normalize(line) for line in combined.splitlines()]
 

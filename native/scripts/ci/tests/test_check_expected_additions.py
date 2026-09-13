@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -150,6 +151,58 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
         actual ledger entries are not already stale."""
         rc, out, err = _run_captured(cea.main)
         self.assertEqual(rc, 0, f"real ledger vs real producer mismatch: stdout={out!r} stderr={err!r}")
+
+    def test_script_gives_same_verdict_regardless_of_caller_cwd(self):
+        """Regression test for the cwd-dependence defect (lead15's finding,
+        `tmp/verify/wi53/HANDOFF-cwd-dependence.md`): `_missing_producer_inputs`
+        resolves a producer's positional argv against `REPO_ROOT`, but
+        `_run_producer` used to launch the producer subprocess with the
+        default `cwd=None`, which inherits the CALLER's cwd instead. From
+        the repo root the two bases happened to coincide; from
+        `native/scripts` (or anywhere else) the precondition saw the input
+        as present while the producer -- resolving the SAME positional path
+        against the wrong base -- could not find it, so the gate blamed a
+        stale LEDGER for what was actually a cwd bug, and in the dangerous
+        mirror direction could take the declared-skip branch and exit 0
+        from a cwd where the input genuinely is unreachable.
+
+        This runs the REAL script (`python3 -m` bare invocation, matching
+        `Run with:` in the module docstring) as a subprocess launched from
+        two different cwds -- the repo root and `native/scripts`, the exact
+        cwd the original defect was reproduced from -- and asserts BOTH the
+        returncode and the final summary line agree. Before the `cwd=REPO_ROOT`
+        fix in `_run_producer`, this test is RED from `native/scripts`
+        (returncode 1, "entry is stale") while GREEN from the repo root;
+        after the fix, both cwds agree (returncode 0, `expected_additions: OK`)."""
+        script = _REPO_ROOT / "native" / "scripts" / "ci" / "check_expected_additions.py"
+
+        from_root = run_module.run([sys.executable, str(script)], cwd=_REPO_ROOT)
+        from_scripts = run_module.run(
+            [sys.executable, str(script.relative_to(_REPO_ROOT / "native" / "scripts"))],
+            cwd=_REPO_ROOT / "native" / "scripts",
+        )
+
+        self.assertEqual(
+            from_root.returncode, from_scripts.returncode,
+            f"cwd-dependent verdict: root RC={from_root.returncode} "
+            f"native/scripts RC={from_scripts.returncode}\n"
+            f"root stdout={from_root.stdout!r}\nscripts stdout={from_scripts.stdout!r}\n"
+            f"root stderr={from_root.stderr!r}\nscripts stderr={from_scripts.stderr!r}",
+        )
+
+        def _summary_line(result):
+            lines = (result.stdout + result.stderr).splitlines()
+            for line in lines:
+                if line.startswith("expected_additions: OK") or "entry is stale" in line:
+                    return line
+            return lines[-1] if lines else ""
+
+        self.assertEqual(
+            _summary_line(from_root), _summary_line(from_scripts),
+            "the two cwds report different verdicts for the same tip -- "
+            "a push gate whose verdict depends on the operator's cwd is not a gate",
+        )
+        self.assertEqual(from_root.returncode, 0, f"unexpected real failure: {from_root.stderr}")
 
     # -- WI-53 / guard (f)③ ------------------------------------------------
     # The literal below is deliberately NOT derived from
