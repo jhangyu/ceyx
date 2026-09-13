@@ -548,19 +548,39 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         # retired outright -- it had been an empty, permanently-unreachable
         # literal since WI-34, confirmed dead by a repo-wide grep before
         # deletion, not merely left inert): `import-closure` now has its
-        # own explicit `_IMPORT_CLOSURE_PLATFORMS = {linux, android}`
-        # allowlist in dispatch(), because windows/macOS exclusion here is
-        # permanent (no PE parser, no DT_NEEDED-shaped step) rather than
-        # "not yet migrated". This test isolates *that* gate: windows must
-        # still be rejected with RC 2, via a named `::error::` instead of
-        # the old generic "not implemented yet" scaffolding message.
+        # own explicit `_IMPORT_CLOSURE_PLATFORMS` allowlist in dispatch().
+        # P-23 (parking-lot round) REMOVED windows from the excluded side:
+        # its stated blocker ("no PE parser") was stale -- the parser landed
+        # with WI-4 and verify_artifact now has the PE dump-capture leg too.
+        # macOS is the only permanent exclusion left (no DT_NEEDED-shaped
+        # step in its YAML at all), so macOS is what this test now isolates:
+        # rejected with RC 2 via a named `::error::`, never a silent pass and
+        # never the old generic "not implemented yet" scaffolding message.
+        # `--arch` is supplied because macOS trips `_enforce_arch_requirement`
+        # FIRST (ci.py:187) and would exit 2 through argparse instead of
+        # through the gate under test -- two different RC-2s, and only one of
+        # them proves what this test claims.
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = ci_entrypoint.main(["import-closure", "--platform", "windows"])
+            rc = ci_entrypoint.main(["import-closure", "--platform", "macos", "--arch", "arm64"])
         self.assertEqual(rc, 2)
         self.assertIn(
-            "::error::import-closure has no --platform 'windows' leg", buf.getvalue()
+            "::error::import-closure has no --platform 'macos' leg", buf.getvalue()
         )
+
+    def test_import_closure_windows_is_accepted_and_reaches_verify_artifact(self):
+        """P-23's counterpart to the macOS rejection above: windows must now
+        DISPATCH rather than be refused at the CLI layer. Spies on the module
+        attribute instead of running the gate, so this asserts ROUTING only --
+        the gate's own behaviour is test_verify_artifact.py's subject."""
+        from unittest import mock
+
+        import ci.verify_artifact as verify_artifact
+
+        with mock.patch.object(verify_artifact, "import_closure", return_value=0) as mocked:
+            rc = ci_entrypoint.main(["import-closure", "--platform", "windows"])
+        self.assertEqual(rc, 0)
+        mocked.assert_called_once_with("windows", artifact_dir=None, ndk_home=None)
 
     def test_min_runtime_dispatch_calls_minruntime_module_not_verify_artifact(self):
         # The regression this whole class exists to prevent: a behavioural

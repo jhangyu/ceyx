@@ -342,8 +342,8 @@ def _enforce_import_closure_flags(parser: argparse.ArgumentParser, args: argpars
     """`import-closure` only: `--artifact-dir`/`--ndk-home` are required
     together for android (workflow context `ci/verify_artifact.py`'s
     `import_closure()` cannot know -- R5, same posture as `assert-exports`'
-    android flags) and rejected for every other platform, including linux
-    (which resolves everything from `targets.py`). Windows is not accepted
+    android flags) and rejected for every other platform, including linux and
+    windows (both resolve everything from `targets.py`). macOS is not accepted
     at all here -- see `_IMPORT_CLOSURE_PLATFORMS` in `dispatch()`."""
     if args.command != "import-closure":
         return
@@ -751,20 +751,25 @@ def dispatch(args: argparse.Namespace) -> int:
     # android via the same caller-supplied-artifact-dir/ndk-home redesign
     # `stage.py` already went through (confirmed against the committed
     # `verify_artifact.import_closure()`, not a report that it was done --
-    # P-10's own lesson). Windows is explicitly excluded, permanently, not
-    # "not yet": `import_closure()` hardcodes `--format elf` and
-    # `assert_import_closure.py` has no PE branch (allowlist.py:144's
-    # BLOCKED entry names this exact gap) -- ungating windows here would
-    # silently run the ELF parser against a PE dump rather than error.
-    # macOS has no DT_NEEDED-shaped step in its YAML at all. Same explicit-
-    # set-at-the-CLI-layer shape as `_DT_NEEDED_PLATFORMS`/
-    # `_AVX512_PLATFORMS` below.
-    _IMPORT_CLOSURE_PLATFORMS = frozenset({"linux", "android"})
+    # P-10's own lesson). WINDOWS ADDED BY P-23, and the reason it was
+    # excluded before did not survive being checked: this comment (and
+    # `verify_artifact`'s docstring, and `windows_build.yml`'s step comment,
+    # and the allowlist entry) all said "assert_import_closure.py has no PE
+    # branch". It has had `parse_pe_dump()` since WI-4
+    # (`native/scripts/assert_import_closure.py:130`) and the windows step was
+    # already invoking it with `--format pe`; the real gap was that
+    # `import_closure()` had no PE dump-CAPTURE leg. It has one now
+    # (`_import_closure_windows()`), so the exclusion is gone rather than
+    # weakened. This comment also used to cite `allowlist.py:144` for that
+    # BLOCKED entry -- a line that does not exist; the file is 127 lines and
+    # the entry is at `allowlist.py:105`. macOS has no DT_NEEDED-shaped step
+    # in its YAML at all and stays out, permanently. Same explicit-set-at-the-
+    # CLI-layer shape as `_DT_NEEDED_PLATFORMS`/`_AVX512_PLATFORMS` below.
+    _IMPORT_CLOSURE_PLATFORMS = frozenset({"linux", "android", "windows"})
     if args.command == "import-closure" and args.platform not in _IMPORT_CLOSURE_PLATFORMS:
         print(
             f"::error::import-closure has no --platform {args.platform!r} leg -- "
-            "verify_artifact.import_closure() hardcodes an ELF dump parser with no PE "
-            "branch (windows) and macOS has no DT_NEEDED-shaped step at all "
+            "macOS has no DT_NEEDED-shaped step at all "
             "(permanent exclusion, not 'not yet migrated')",
             file=sys.stderr,
         )

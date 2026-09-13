@@ -40,6 +40,12 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import assert_exports as _assert_exports_script  # noqa: E402
+# Imported for its PE/ELF dump PARSER only (P-23). The gate itself is still
+# invoked as a child process below, exactly as linux/android already do --
+# this import exists so the transitive walk enumerates a module's imports
+# with the same parser the gate uses, instead of growing a second regex
+# that could drift from it.
+import assert_import_closure as _assert_import_closure_script  # noqa: E402
 
 
 def _artifact_path(platform: str) -> str:
@@ -153,14 +159,30 @@ def verify_artifact(platform: str, arch: str | None = None, *, dylib_path: str |
 def import_closure(
     platform: str, *, artifact_dir: str | None = None, ndk_home: str | None = None
 ) -> int:
-    """S-B3: readelf DT_NEEDED import-closure gate. Replaces
-    `linux_build.yml:548-564` (linux) and `android_build.yml:414-437`
-    (android, WI-34 push-8 follow-on). Windows is NOT supported here: this
-    function hardcodes `--format elf`, and `assert_import_closure.py` has no
-    PE branch -- ungating windows without adding one would silently run the
-    wrong parser against a PE dump rather than error (see
-    `allowlist.py:144`'s BLOCKED entry, which names this exact gap). macOS
-    has no DT_NEEDED-shaped step in its YAML at all.
+    """S-B3 import-closure gate. Replaces `linux_build.yml:548-564` (linux),
+    `android_build.yml:414-437` (android, WI-34 push-8 follow-on) and
+    `windows_build.yml`'s "Assert Windows DLL dependency closure" step
+    (windows, P-23 -- the last unmigrated step of that workflow).
+
+    WINDOWS, AND WHY THE OLD "PERMANENTLY EXCLUDED" NOTE HERE WAS WRONG:
+    this docstring, `ci.py`'s `_IMPORT_CLOSURE_PLATFORMS` comment,
+    `windows_build.yml`'s step comment and `allowlist.py`'s BLOCKED entry all
+    said windows was blocked because "`assert_import_closure.py` has no PE
+    branch". It has had one since WI-4 -- `parse_pe_dump()` at
+    `native/scripts/assert_import_closure.py:130`, `WINDOWS_OS_ALLOWLIST` at
+    `:47`, `--format pe` accepted at `:192` -- and the windows step was
+    already calling it with `--format pe`. What was actually missing was a PE
+    leg HERE: the ELF legs below capture their dump with readelf, and nothing
+    captured a dumpbin/llvm-objdump dump. That is what `_import_closure_windows()`
+    adds. (Two stale cites corrected in the same commit as this migration: this
+    docstring and `ci.py` both named `allowlist.py:144`, a line that does not
+    exist -- the file is 127 lines and the entry is at `allowlist.py:105`;
+    that entry's own body cites `verify_artifact.py:181` for the `--format elf`
+    hardcode, which is docstring prose -- the call site is `:240`. The
+    allowlist entry itself belongs to its own owner and is not touched here.)
+
+    macOS still has no DT_NEEDED-shaped step in its YAML at all, so its
+    exclusion is unchanged and remains genuine.
 
     Android needed a caller-supplied `artifact_dir`/`ndk_home` (R5: the
     decoder's location and the NDK's llvm-readelf path are workflow context,
@@ -194,6 +216,9 @@ def import_closure(
     just via a different, less legible route). A clean, named failure is
     raised here instead of reproducing that crash-shaped gap verbatim --
     flagged for the leader's ruling, not silently decided as equivalent."""
+    if platform == "windows":
+        return _import_closure_windows()
+
     if platform == "android":
         if not artifact_dir or not ndk_home:
             raise ValueError(
@@ -253,6 +278,240 @@ def import_closure(
                 f"import-closure gate failed for {so} — see IMPORT ... -> MISSING lines above."
             )
     return rc
+
+
+_PE_DUMP_HEADER = "Dump of file"
+
+
+def _pe_dump_imports(
+    binary: str, dump_path: str, *, primary_marker: str, fallback_marker: str, subject: str,
+    prefix: str = "",
+) -> int:
+    """Captures a PE import-table dump to ``dump_path`` (dumpbin, falling back
+    to llvm-objdump) and returns the RC of whichever tool produced the file.
+
+    Both tools write to a FILE and the match happens in Python afterwards --
+    never `dumpbin | grep`, which SIGPIPEs the producer on a SUCCESSFUL match
+    under pipefail and reports 141 (the 2026-08-28 reverse-gate shape the
+    replaced shell step also called out in its own comment)."""
+    spec = targets.spec("windows")
+    dumpbin = spec["dumpbin_tools"][0] if spec["dumpbin_tools"] else "dumpbin"
+    objdump = spec["objdump_tools"][0] if spec["objdump_tools"] else "llvm-objdump"
+
+    rc = run.run_to_file([dumpbin, "-dependents", binary], dump_path).returncode
+    report.marker(primary_marker, rc)
+    if rc != 0:
+        message = f"{dumpbin} -dependents{subject} failed (rc={rc}); falling back to {objdump}."
+        if prefix:
+            # Inside the transitive walk the fallback notice is a PLAIN
+            # prefixed line, not a `::notice::`: `::notice::` matches
+            # markerdiff's marker pattern (markerdiff.py:32), so emitting one
+            # per visited module would make the step's marker multiset depend
+            # on how many companions the graph happens to contain.
+            report.plain(f"{prefix}notice: {message}")
+        else:
+            report.notice(message)
+        rc = run.run_to_file([objdump, "-p", binary], dump_path).returncode
+        report.marker(fallback_marker, rc)
+    return rc
+
+
+def _strip_pe_dump_header(dump_path: str, body_path: str) -> str:
+    """Writes ``dump_path`` minus its "Dump of file <path>" header lines to
+    ``body_path`` and returns the body text.
+
+    Load-bearing, not cosmetic: if the dumped file's own PATH contains the
+    name being asserted (e.g. a workspace directory holding "heif.dll"), the
+    header self-matches and the assertion passes without the binary importing
+    anything at all -- the 2026-08-28 `otool -L` self-match shape."""
+    text = Path(dump_path).read_text(errors="replace")
+    body = "\n".join(line for line in text.splitlines() if _PE_DUMP_HEADER not in line)
+    if body:
+        body += "\n"
+    Path(body_path).write_text(body, encoding="utf-8")
+    return body
+
+
+def _run_pe_closure_gate(body_path: str, staged_dir: str) -> tuple[int, str]:
+    return run.capture([
+        sys.executable, "native/scripts/assert_import_closure.py",
+        "--dump", body_path,
+        "--staged-dir", staged_dir,
+        "--declaration", "native/deps/shipped_files.toml",
+        "--platform", "windows",
+        "--format", "pe",
+    ])
+
+
+def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str) -> int:
+    """Walks the import graph BEYOND depth one and gates every staged module
+    it reaches, returning the worst RC.
+
+    WHY THIS EXISTS AND WHY DEPTH-ONE IS NOT ENOUGH: the decoder's own import
+    table names heif.dll but NOT libde265.dll -- no translation unit here
+    references a de265_* symbol, so libde265 appears only in heif.dll's table
+    (run 33294722901 proved asserting it at the wrong depth is red on a
+    correct artifact). The same shape holds for the OpenMP runtime:
+    libomp140.x86_64.dll is imported by the decoder and itself imports
+    VCRUNTIME140/VCRUNTIME140_1. A depth-one gate therefore cannot see a
+    companion that ships with an unsatisfied dependency of its own, which on a
+    user's machine is a total load failure naming only dng_decoder_native.dll.
+
+    OUTPUT SHAPE, DELIBERATE: each sub-module's gate output is re-printed with
+    a LOWERCASE `transitive(<module>):` prefix, so none of those lines matches
+    markerdiff's marker pattern (`^[A-Z][A-Z0-9_]*=`, `markerdiff.py:32`).
+    The evidence stays in the job log, but the step's MARKER multiset is
+    unchanged -- one `IMPORT_CLOSURE_RC`, aggregated over the whole walk,
+    rather than one per visited module. That keeps AC-2 zero-delta without a
+    `markerdiff.EXPECTED_ADDITIONS` ledger entry (another owner's file) and
+    without weakening the gate: a transitive failure still fails the step
+    through the aggregated RC."""
+    staged_names = {p.name for p in Path(staged_dir).iterdir()} if Path(staged_dir).is_dir() else set()
+
+    def staged_imports(body_text: str) -> list[str]:
+        return [
+            name for name in _assert_import_closure_script.parse_pe_dump(body_text)
+            if name in staged_names and name != decoder_name
+        ]
+
+    queue = staged_imports(root_body)
+    visited: set[str] = {decoder_name}
+    worst = 0
+    while queue:
+        module = queue.pop(0)
+        if module in visited:
+            continue
+        visited.add(module)
+        dump_path = f"transitive_{module}.dump.txt"
+        body_path = f"transitive_{module}.body.txt"
+        rc = _pe_dump_imports(
+            os.path.join(staged_dir, module),
+            dump_path,
+            # Lowercased marker names on purpose: see this function's output
+            # note. `report.marker` prints them verbatim, and a lowercase name
+            # is not a marker to markerdiff.
+            primary_marker=f"transitive({module}): dependents_rc",
+            fallback_marker=f"transitive({module}): objdump_rc",
+            subject=f" on {module}",
+            prefix=f"transitive({module}): ",
+        )
+        if rc != 0:
+            report.error(
+                f"could not read the import table of {module}; dependency presence is "
+                "UNVERIFIED, refusing to publish."
+            )
+            worst = worst or 1
+            continue
+        body = _strip_pe_dump_header(dump_path, body_path)
+        sub_rc, sub_out = _run_pe_closure_gate(body_path, staged_dir)
+        for line in sub_out.splitlines():
+            report.plain(f"transitive({module}): {line}")
+        if sub_rc != 0:
+            report.error(
+                f"import-closure gate failed for staged companion {module} — its own imports "
+                "are not satisfied beside the decoder; see the transitive IMPORT ... -> MISSING "
+                "lines above."
+            )
+            worst = worst or sub_rc
+        queue.extend(staged_imports(body))
+    return worst
+
+
+def _import_closure_windows() -> int:
+    """P-23: `windows_build.yml`'s "Assert Windows DLL dependency closure"
+    step. Every emitted line below is transcribed verbatim from that step's
+    shell, with ONE addition, marked in place: the transitive walk (see
+    `_pe_transitive_closure`). The two named depth-assertions the shell makes
+    (heif.dll in the decoder's table, libde265.dll in heif.dll's) are KEPT as
+    they are rather than folded into the general walk -- they carry
+    hand-written, actionable `::error::` text ("do NOT disable HEIF", "rebuild
+    the dist via heif_dist_windows.yml") that a generic closure failure cannot
+    reproduce."""
+    spec = targets.spec("windows")
+    dll = _artifact_path("windows")
+    staged_dir = spec["dist_dir"]
+
+    report.section("Step 4: import table")
+    rc = _pe_dump_imports(
+        dll, "dll_dependents.txt",
+        primary_marker="DEPENDENTS_RC", fallback_marker="LLVM_OBJDUMP_RC", subject="",
+    )
+    dump_text = Path("dll_dependents.txt").read_text(errors="replace") if Path(
+        "dll_dependents.txt").is_file() else ""
+    if rc != 0:
+        report.error(
+            f"could not read the import table of {dll}; dependency presence is UNVERIFIED, "
+            "refusing to publish."
+        )
+        if dump_text:
+            report.plain(dump_text.rstrip("\n"))
+        return 1
+    if dump_text:
+        report.plain(dump_text.rstrip("\n"))
+
+    body = _strip_pe_dump_header("dll_dependents.txt", "dll_dependents_body.txt")
+    heif_matches = [line for line in body.splitlines() if "heif.dll" in line.lower()]
+    for line in heif_matches:
+        report.plain(line)
+    heif_rc = 0 if heif_matches else 1
+    report.plain(f"ASSERT dep heif.dll RC={heif_rc}")
+    if heif_rc != 0:
+        report.error(
+            f"{dll} does not import heif.dll — the HEIF route was not compiled in. Do NOT 'fix' "
+            "this by disabling HEIF; check the configure log for 'HEIF: libheif' and that "
+            "native/third_party/heif-dist-windows was found."
+        )
+        return 1
+
+    report.section("Step 4: full import-closure gate (S-B1)")
+    closure_rc, closure_out = _run_pe_closure_gate("dll_dependents_body.txt", staged_dir)
+    if closure_out:
+        report.plain(closure_out.rstrip("\n"))
+    # ADDED (P-23), and placed BEFORE the marker so the single aggregated
+    # `IMPORT_CLOSURE_RC` covers the whole graph, not just depth one.
+    transitive_rc = _pe_transitive_closure(body, staged_dir, Path(dll).name)
+    closure_rc = closure_rc or transitive_rc
+    report.rc("IMPORT_CLOSURE", closure_rc)
+    if closure_rc != 0:
+        report.error(
+            f"import-closure gate failed for {dll} — see IMPORT ... -> MISSING lines above. A "
+            "package shipped like this fails at DynamicLibrary.open with an error naming only "
+            "dng_decoder_native.dll."
+        )
+        return closure_rc
+
+    report.section("Step 4: heif.dll's own import table (transitive libde265)")
+    heif_path = os.path.join(staged_dir, "heif.dll")
+    heif_dump_rc = _pe_dump_imports(
+        heif_path, "heif_dependents.txt",
+        primary_marker="HEIF_DEPENDENTS_RC", fallback_marker="HEIF_LLVM_OBJDUMP_RC",
+        subject=" on heif.dll",
+    )
+    heif_text = Path("heif_dependents.txt").read_text(errors="replace") if Path(
+        "heif_dependents.txt").is_file() else ""
+    if heif_dump_rc != 0:
+        report.error(
+            "could not read the import table of heif.dll; the HEVC decoder linkage is "
+            "UNVERIFIED, refusing to publish."
+        )
+        if heif_text:
+            report.plain(heif_text.rstrip("\n"))
+        return 1
+    if heif_text:
+        report.plain(heif_text.rstrip("\n"))
+    de265_matches = [line for line in heif_text.splitlines() if "libde265.dll" in line.lower()]
+    for line in de265_matches:
+        report.plain(line)
+    de265_rc = 0 if de265_matches else 1
+    report.plain(f"ASSERT dep libde265.dll RC={de265_rc}")
+    if de265_rc != 0:
+        report.error(
+            "heif.dll does not import libde265.dll — it was built WITHOUT an HEVC decoder and "
+            "would report every HEIC file as undecodable. Rebuild the dist via "
+            ".github/workflows/heif_dist_windows.yml; do NOT disable HEIF."
+        )
+        return 1
+    return 0
 
 
 # P-10 (push 6): `min_runtime()` used to live here, Linux-only. It was

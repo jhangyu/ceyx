@@ -369,6 +369,169 @@ class VerifyArtifactTests(unittest.TestCase):
         # appended elsewhere.
         self.assertEqual(err.count("import-closure gate"), 1)
 
+    # ---- S-B3 windows (P-23, parking-lot round) -------------------------
+    #
+    # These fake the two PE dumpers and the child gate the same way the
+    # linux/android tests fake readelf. The gate's behaviour against REAL PE
+    # binaries (the shipped v0.1.23 Windows set) was demonstrated separately,
+    # red-before-green, with the depth-one and transitive failures isolated
+    # from each other -- see tmp/verify/wi56/PREREGISTERED.md and the s1/s2/s3
+    # observation files. These tests are the regression net for that.
+
+    def _windows_dirs(self, companions=("heif.dll", "libde265.dll")):
+        """Creates `native/build-windows/` (targets.spec('windows')'s
+        artifact_path/dist_dir, both relative -- so this works inside _Cwd)."""
+        build = Path("native/build-windows")
+        build.mkdir(parents=True, exist_ok=True)
+        (build / "dng_decoder_native.dll").write_bytes(b"")
+        for name in companions:
+            (build / name).write_bytes(b"")
+        return build
+
+    @staticmethod
+    def _windows_fake_run(*, dumps, gate_results):
+        """dumps: binary-basename -> dump text. gate_results: dump-basename ->
+        (rc, stdout). Any dumpbin call fails (rc=1) so the llvm-objdump
+        fallback leg is what produces the dump -- the same leg the real
+        runner uses only when dumpbin is unavailable, exercised here because
+        it is the harder path (two markers instead of one)."""
+        def fake_run(argv, cwd=None, env=None):
+            if argv[0] == "dumpbin":
+                return _fake_run_result(returncode=1, stderr="dumpbin: not found\n")
+            if argv[0] == "llvm-objdump":
+                name = Path(argv[-1]).name
+                return _fake_run_result(returncode=0, stdout=dumps.get(name, ""))
+            # the child gate: `sys.executable native/scripts/assert_import_closure.py --dump D ...`
+            dump_arg = Path(argv[argv.index("--dump") + 1]).name
+            rc, out = gate_results.get(dump_arg, (0, "IMPORT_CLOSURE_RESULT=PASS\n"))
+            return _fake_run_result(returncode=rc, stdout=out)
+        return fake_run
+
+    def test_import_closure_windows_success_walks_transitively(self):
+        dumps = {
+            "dng_decoder_native.dll": "Dump of file x\n    DLL Name: heif.dll\n",
+            "heif.dll": "Dump of file y\n    DLL Name: libde265.dll\n",
+            "libde265.dll": "Dump of file z\n    DLL Name: KERNEL32.dll\n",
+        }
+        with _Cwd(self._tmp()):
+            self._windows_dirs()
+            with mock.patch.object(
+                run_module, "run",
+                side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
+            ):
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+        self.assertEqual(rc, 0)
+        self.assertIn("DEPENDENTS_RC=1", out)
+        self.assertIn("LLVM_OBJDUMP_RC=0", out)
+        self.assertIn("ASSERT dep heif.dll RC=0", out)
+        self.assertIn("IMPORT_CLOSURE_RC=0", out)
+        self.assertIn("HEIF_DEPENDENTS_RC=1", out)
+        self.assertIn("ASSERT dep libde265.dll RC=0", out)
+        self.assertEqual(err, "")
+        # The walk actually reached both companions, not just depth one.
+        self.assertIn("transitive(heif.dll):", out)
+        self.assertIn("transitive(libde265.dll):", out)
+
+    def test_import_closure_windows_transitive_failure_fails_the_step(self):
+        """THE test that keeps the transitive walk from being decorative: the
+        DECODER's own closure passes and only a staged companion's does not.
+        A depth-one gate is green on exactly this input (run 33294722901's
+        failure class)."""
+        dumps = {
+            "dng_decoder_native.dll": "Dump of file x\n    DLL Name: heif.dll\n",
+            "heif.dll": "Dump of file y\n    DLL Name: libde265.dll\n",
+        }
+        gate = {
+            "dll_dependents_body.txt": (0, "IMPORT heif.dll -> STAGED\nIMPORT_CLOSURE_RESULT=PASS\n"),
+            "transitive_heif.dll.body.txt": (
+                1, "IMPORT libde265.dll -> MISSING\nIMPORT_CLOSURE_RESULT=FAIL\n"
+            ),
+        }
+        with _Cwd(self._tmp()):
+            self._windows_dirs(companions=("heif.dll",))
+            with mock.patch.object(
+                run_module, "run",
+                side_effect=self._windows_fake_run(dumps=dumps, gate_results=gate),
+            ):
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+        self.assertEqual(rc, 1)
+        self.assertIn("IMPORT_CLOSURE_RC=1", out)
+        self.assertIn("import-closure gate failed for staged companion heif.dll", err)
+
+    def test_import_closure_windows_emits_exactly_one_import_closure_rc(self):
+        """AC-2 shape: the transitive walk must not multiply the step's
+        markers. One `IMPORT_CLOSURE_RC=` for the whole graph, and no
+        `transitive(...)` line may register as a marker at all."""
+        from .. import markerdiff
+
+        dumps = {
+            "dng_decoder_native.dll": "Dump of file x\n    DLL Name: heif.dll\n",
+            "heif.dll": "Dump of file y\n    DLL Name: libde265.dll\n",
+            "libde265.dll": "Dump of file z\n    DLL Name: KERNEL32.dll\n",
+        }
+        with _Cwd(self._tmp()):
+            self._windows_dirs()
+            with mock.patch.object(
+                run_module, "run",
+                side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
+            ):
+                _rc, out, _err = _run_captured(verify_artifact.import_closure, "windows")
+        markers = markerdiff.extract(out)
+        self.assertEqual(
+            len([m for m in markers if m.startswith("IMPORT_CLOSURE_RC=")]), 1
+        )
+        self.assertEqual([m for m in markers if "transitive(" in m], [])
+
+    def test_import_closure_windows_missing_heif_import_names_the_fix(self):
+        dumps = {"dng_decoder_native.dll": "Dump of file x\n    DLL Name: KERNEL32.dll\n"}
+        with _Cwd(self._tmp()):
+            self._windows_dirs()
+            with mock.patch.object(
+                run_module, "run",
+                side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
+            ):
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+        self.assertEqual(rc, 1)
+        self.assertIn("ASSERT dep heif.dll RC=1", out)
+        self.assertIn("does not import heif.dll", err)
+        self.assertIn("Do NOT 'fix' this by disabling HEIF", err)
+
+    def test_import_closure_windows_unreadable_dump_is_unverified_not_pass(self):
+        """Both dumpers failing must REFUSE, never fall through to a green --
+        `dependency presence is UNVERIFIED` is the whole point of the step."""
+        def fake_run(argv, cwd=None, env=None):
+            return _fake_run_result(returncode=1, stderr="no such tool\n")
+
+        with _Cwd(self._tmp()):
+            self._windows_dirs()
+            with mock.patch.object(run_module, "run", side_effect=fake_run):
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+        self.assertEqual(rc, 1)
+        self.assertIn("DEPENDENTS_RC=1", out)
+        self.assertIn("LLVM_OBJDUMP_RC=1", out)
+        self.assertIn("dependency presence is UNVERIFIED", err)
+        self.assertNotIn("IMPORT_CLOSURE_RC=0", out)
+
+    def test_import_closure_windows_strips_self_matching_dump_header(self):
+        """The header names the dumped file's PATH. If that path contains
+        'heif.dll', the un-stripped dump satisfies the heif assertion without
+        the binary importing anything (the 2026-08-28 otool self-match)."""
+        dumps = {
+            "dng_decoder_native.dll":
+                "Dump of file C:/work/heif.dll-staging/dng_decoder_native.dll\n"
+                "    DLL Name: KERNEL32.dll\n",
+        }
+        with _Cwd(self._tmp()):
+            self._windows_dirs()
+            with mock.patch.object(
+                run_module, "run",
+                side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
+            ):
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+        self.assertEqual(rc, 1)
+        self.assertIn("ASSERT dep heif.dll RC=1", out)
+        self.assertIn("does not import heif.dll", err)
+
     # S-F1 (min_runtime) direct-behaviour tests deleted here (P-10, push 7):
     # `verify_artifact.min_runtime` itself was deleted as an orphaned
     # duplicate of `ci/minruntime.py`'s four-platform generalisation -- see
