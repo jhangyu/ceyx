@@ -172,13 +172,6 @@ def render(platforms, static_components, pin):
         )
         lines.append(f"| {platform} | {static_cell} | {dynamic_cell} | {cap_cell} |")
 
-    lines.append("")
-    lines.append("## COLUMN2_EQUALS_PIN")
-    lines.append("")
-    for platform in sorted(platforms):
-        status, _ = column2_equals_pin(platform, platforms[platform], pin)
-        lines.append(f"COLUMN2_EQUALS_PIN({platform})={status}")
-
     return "\n".join(lines).rstrip() + "\n"
 
 
