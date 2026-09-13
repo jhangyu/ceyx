@@ -113,6 +113,17 @@ class ProvisionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             provision.assert_vcpkg_artefacts("macos", "arm64-osx-heif", str(self.tmp))
 
+    def test_assert_vcpkg_artefacts_rejects_android_by_name(self):
+        """Named pin, not just implied by the generic non-linux case above:
+        this function's platform gate has already been silently widened
+        once this push (linux-only -> {linux, macos}); a test naming
+        android specifically fails loudly the next time someone widens the
+        set without checking whether android actually has a ported shape
+        (it doesn't -- no android vcpkg-artefact step exists in any
+        workflow, confirmed by grep)."""
+        with self.assertRaises(ValueError):
+            provision.assert_vcpkg_artefacts("android", "arm64-v8a-android-heif", str(self.tmp))
+
     def test_assert_vcpkg_artefacts_success(self):
         lib_dir = self.tmp / "vcpkg-installed" / "x64-linux-heif" / "lib"
         lib_dir.mkdir(parents=True)
@@ -184,7 +195,7 @@ class ProvisionTests(unittest.TestCase):
         (lib_dir / "libwebp.a").write_bytes(b"")
         (lib_dir / "libde265.dylib").write_bytes(b"")
         (lib_dir / "libaom.a").write_bytes(b"")
-        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64"})
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64", "libaom.a": "arm64"})
         with mock.patch.object(run_module, "run", side_effect=fake):
             rc, out, _ = _run_captured(
                 provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
@@ -286,11 +297,15 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("libaom dylib(s) present", out)
 
-    def test_assert_vcpkg_artefacts_macos_no_arch_check_for_aom(self):
-        """aom gets no lipo/arch check at all -- the real shell's own
-        asymmetry (macos_build.yml:356-364 has no such block for aom).
-        Prove it by feeding aom a lipo call that would fail the arch
-        comparison if one existed; a wrong-arch aom .a must still pass."""
+    def test_assert_vcpkg_artefacts_macos_aom_wrong_arch_fails(self):
+        """CORRECTED 2026-09-13 (lead8-pyci-opus ruling, parity restoration):
+        this test used to assert the OPPOSITE -- that a wrong-arch aom
+        .a still passed, on a false premise that the shell never checked
+        aom's arch. macos_build.yml:364-367 has always run `lipo -archs`
+        against libaom.a and failed on a mismatch (the shell's own comment:
+        aom follows the HOST cpu on the cross leg unless AOM_TARGET_CPU is
+        forced). The old test pinned a dropped check and made it look
+        deliberate; this one pins the restored check instead."""
         lib_dir = self._macos_lib_dir()
         (lib_dir / "libwebp.a").write_bytes(b"")
         (lib_dir / "libde265.dylib").write_bytes(b"")
@@ -300,9 +315,8 @@ class ProvisionTests(unittest.TestCase):
             rc, out, _ = _run_captured(
                 provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
             )
-        self.assertEqual(rc, 0)
-        self.assertNotIn("aom archs", out)
-        self.assertNotIn("FAIL", out)
+        self.assertEqual(rc, 1)
+        self.assertIn("libaom.a archs 'x86_64' do not include arm64", out)
 
     # ---- verify_interpreter ------------------------------------------------
 
@@ -388,6 +402,18 @@ class TestAssertVcpkgArtefactsBareScriptInvocation(unittest.TestCase):
         self.assertIn("::error::", result.stderr)
         self.assertIn("no --platform 'windows' leg", result.stderr)
 
+    def test_assert_vcpkg_artefacts_android_is_cleanly_rejected_by_cli(self) -> None:
+        # Named pin through the real CLI too (see the module-level test's
+        # docstring for why "implied by the generic case" isn't enough).
+        result = self._run_ci(
+            "assert-vcpkg-artefacts", "--platform", "android",
+            "--triplet", "arm64-v8a-android-heif", "--runner-temp", "/tmp/does-not-matter",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("::error::", result.stderr)
+        self.assertIn("no --platform 'android' leg", result.stderr)
+
     def test_assert_vcpkg_artefacts_macos_success_path_through_real_cli(self) -> None:
         # Real subprocess call, real `lipo -archs` against real Mach-O
         # binaries (a copy of /usr/bin/true stands in for each staged
@@ -419,6 +445,37 @@ class TestAssertVcpkgArtefactsBareScriptInvocation(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_assert_vcpkg_artefacts_macos_aom_wrong_arch_rejected_by_real_cli(self) -> None:
+        # Same real-subprocess technique, but requesting an --arch-tag that
+        # does NOT appear in /usr/bin/true's real archs -- exercises the
+        # restored aom arch check's REJECT path end to end through the
+        # actual CLI, not just the mocked unit test above.
+        true_bin = Path("/usr/bin/true")
+        if not true_bin.is_file():
+            self.skipTest("/usr/bin/true not present on this host")
+        archs = run_module.run(["lipo", "-archs", str(true_bin)]).stdout.split()
+        if not archs:
+            self.skipTest("lipo -archs produced no output for /usr/bin/true on this host")
+        bogus_arch_tag = "not-a-real-arch-" + "".join(archs)
+
+        d = Path(tempfile.mkdtemp())
+        lib_dir = d / "vcpkg-installed" / "arm64-osx-heif" / "lib"
+        lib_dir.mkdir(parents=True)
+        import shutil
+
+        shutil.copy(true_bin, lib_dir / "libwebp.a")
+        shutil.copy(true_bin, lib_dir / "libde265.dylib")
+        shutil.copy(true_bin, lib_dir / "libaom.a")
+
+        result = self._run_ci(
+            "assert-vcpkg-artefacts", "--platform", "macos",
+            "--triplet", "arm64-osx-heif", "--runner-temp", str(d),
+            "--arch-tag", bogus_arch_tag,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"do not include {bogus_arch_tag}", result.stdout)
 
 
 if __name__ == "__main__":

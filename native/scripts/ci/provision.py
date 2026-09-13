@@ -175,10 +175,17 @@ def _assert_vcpkg_artefacts_macos(triplet: str, runner_temp: str, arch_tag: str)
       real shell used `find | head -n1` and let `lipo` follow whichever it
       got, reproduced exactly here rather than resolved by hand). `.a`
       must NOT exist. Its `lipo -archs` must include `arch_tag`.
-    * aom (:356-364): STATIC (linked INTO libheif). `.a` must exist, no
-      `.dylib` may exist. **No arch check at all** -- this is the real
-      shell's own asymmetry (no `lipo`/`grep -qw` block for aom there
-      either), not an omission to "complete" here.
+    * aom (:356-367): STATIC (linked INTO libheif) AND arch-checked --
+      **CORRECTED 2026-09-13 (lead8-pyci-opus ruling, parity restoration,
+      caught by impl-14 before the L328 migration landed)**: an earlier
+      version of this docstring/function claimed aom had no arch check at
+      all. That was FALSE against the shell, which has always had one
+      (`macos_build.yml:364-367`) for a specifically anticipated failure,
+      per the shell's own comment: "the cross leg is the one that gets it
+      wrong, and the old source build forced AOM_TARGET_CPU by hand
+      precisely because aom otherwise follows the HOST cpu." `.a` must
+      exist, no `.dylib` may exist, and its `lipo -archs` must include
+      `arch_tag` -- same shape as libwebp's and libde265's arch checks.
     """
     vcpkg_prefix = Path(runner_temp) / "vcpkg-installed" / triplet
     lib_dir = vcpkg_prefix / "lib"
@@ -224,7 +231,8 @@ def _assert_vcpkg_artefacts_macos(triplet: str, runner_temp: str, arch_tag: str)
         report.plain(f"FAIL: libde265 archs '{de265_archs}' do not include {arch_tag}")
         return 1
 
-    # -- aom: static, no arch check (linked into libheif) -----------------
+    # -- aom: static, right arch (linked into libheif; the cross leg is
+    # the one that gets this wrong -- aom otherwise follows the HOST cpu) --
     if not (lib_dir / "libaom.a").is_file():
         report.plain("FAIL: libaom.a absent (expected a static archive)")
         return 1
@@ -233,6 +241,11 @@ def _assert_vcpkg_artefacts_macos(triplet: str, runner_temp: str, arch_tag: str)
         report.plain(
             f"FAIL: {len(aom_dylibs)} libaom dylib(s) present; aom must stay static (it is linked into libheif)"
         )
+        return 1
+    aom_archs = _archs(lib_dir / "libaom.a")
+    report.plain(f"libaom.a archs: {aom_archs}")
+    if arch_tag not in aom_archs.split():
+        report.plain(f"FAIL: libaom.a archs '{aom_archs}' do not include {arch_tag}")
         return 1
     return 0
 
