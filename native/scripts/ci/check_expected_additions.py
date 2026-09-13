@@ -204,6 +204,24 @@ def iter_workflow_invocations(script_relpath: str, workflows_dir: Path | None = 
                     )
 
 
+def invoked_scripts(command: str) -> set[str]:
+    """Script path tokens INVOKED by one joined command line -- i.e. each
+    token immediately preceded by an interpreter token. A bare mention is
+    not an invocation.
+
+    Public and shared on purpose: `check_wiring_is_ledger.py` (guard (f)②)
+    decides "is this step marker-emitting?" from the same token rule that
+    `iter_workflow_invocations` uses, so the two can never disagree about
+    what counts as invoking a script.
+    """
+    tokens = command.split()
+    return {
+        token
+        for idx, token in enumerate(tokens)
+        if idx > 0 and tokens[idx - 1] in _INTERPRETER_TOKENS
+    }
+
+
 def _joined_commands(code: list[str]) -> list[str]:
     """Joins shell line-continuations so one logical command is one string."""
     out: list[str] = []
