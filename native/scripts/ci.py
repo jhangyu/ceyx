@@ -47,7 +47,9 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py assert-vcpkg-artefacts --platform linux --triplet T --runner-temp T
     python3 native/scripts/ci.py verify-interpreter --forbid-hostedtoolcache
     python3 native/scripts/ci.py ensure-cmake      --min 3.28
-    python3 native/scripts/ci.py build-zlib        --version 1.3.1
+    python3 native/scripts/ci.py build-zlib        --version 1.3.1 --workspace W
+    python3 native/scripts/ci.py locate-clang-cl   [--github-path PATH]
+    python3 native/scripts/ci.py verify-vulkan-lib [--vulkan-sdk PATH]
 
 `--platform` is always explicit and never inferred from the host OS.
 `--arch` is required iff `targets.spec(platform)["requires_arch"]` is True
@@ -115,6 +117,8 @@ _PLATFORMLESS_COMMANDS = (
     "verify-interpreter",
     "ensure-cmake",
     "build-zlib",
+    "locate-clang-cl",
+    "verify-vulkan-lib",
 )
 
 
@@ -556,6 +560,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     bz = sub.add_parser("build-zlib", help="build zlib from a pinned, checksummed tarball")
     bz.add_argument("--version", required=True)
+    bz.add_argument("--workspace", required=True)
+
+    lcl = sub.add_parser("locate-clang-cl", help="locate clang-cl on PATH or the LLVM install dir")
+    lcl.add_argument("--github-path", default=None)
+
+    vvl = sub.add_parser("verify-vulkan-lib", help="assert vulkan-1.lib is present under VULKAN_SDK")
+    vvl.add_argument("--vulkan-sdk", default="")
 
     return p
 
@@ -763,6 +774,26 @@ def dispatch(args: argparse.Namespace) -> int:
             workspace=args.workspace,
             log_path=args.log_path,
         )
+    if args.command == "build-zlib":
+        # `build-zlib` was declared in the frozen CLI-surface docstring and
+        # its subparser since WI-1/push-1 but had NO dispatch branch until
+        # now -- it silently fell through to `_not_yet()` (loud rc=2, but a
+        # static reader who only checks "does a subparser/docstring entry
+        # exist" would wrongly conclude this command was already wired).
+        # Module owner: impl-15 (zlib_build.py, push 8, `windows_toolchain`
+        # sibling) -- `build_zlib(version: str) -> int`, `--version`
+        # spelling frozen, do not rename either side.
+        import ci.zlib_build as zlib_build
+
+        return zlib_build.build_zlib(args.version, args.workspace)
+    if args.command == "locate-clang-cl":
+        import ci.windows_toolchain as windows_toolchain
+
+        return windows_toolchain.locate_clang_cl(args.github_path)
+    if args.command == "verify-vulkan-lib":
+        import ci.windows_toolchain as windows_toolchain
+
+        return windows_toolchain.verify_vulkan_lib(args.vulkan_sdk)
     if args.command == "vcpkg-baseline":
         import ci.provision as provision
 
