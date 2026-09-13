@@ -297,6 +297,25 @@ class TestAssertStagedGroupWindows(unittest.TestCase):
         # The .lib must not appear in either compared set.
         self.assertNotIn("dng_decoder_native.lib", out.split("STAGED_DLL_SET=")[1].splitlines()[0])
 
+    def test_marker_values_carry_the_shell_pipeline_trailing_space(self) -> None:
+        """windows_build.yml:867/869 pipe both sides through
+        ``sort | tr '\\n' ' '`` -- ``tr`` converts sort's trailing newline
+        into a trailing SPACE too, not just the separators between items.
+        Byte-verified against the real shell pipeline with ``od -c``
+        (impl-pyci-15-sonnet); lead6 ruling: reproduce it verbatim, do not
+        "tidy" it into a bare ``" ".join(...)``."""
+        artifact_dir = self._staged(["dng_decoder_native.dll", "heif.dll", "libde265.dll"])
+        with mock.patch.object(
+            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll", "libde265.dll"]
+        ):
+            rc, out, _ = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+        self.assertEqual(rc, 0)
+        expected_line = "EXPECTED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll "
+        staged_line = "STAGED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll "
+        lines = out.splitlines()
+        self.assertIn(expected_line, lines, "EXPECTED_DLL_SET is missing its trailing space")
+        self.assertIn(staged_line, lines, "STAGED_DLL_SET is missing its trailing space")
+
     def test_missing_dll_is_a_mismatch(self) -> None:
         artifact_dir = self._staged(["dng_decoder_native.dll"])
         with mock.patch.object(

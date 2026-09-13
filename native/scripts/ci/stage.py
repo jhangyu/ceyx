@@ -215,17 +215,39 @@ def stage_windows(source_dir: str, artifact_dir: str) -> int:
     return 0
 
 
+def _dll_set_marker_value(names: list[str]) -> str:
+    """windows_build.yml:867/869 pipe both sides through
+    ``tr '\\n' ' '`` on ``sort``'s output. ``sort`` always terminates a
+    non-empty list with a trailing newline, so ``tr`` turns THAT into a
+    TRAILING SPACE too -- not just a separator between items. Verified
+    against the real shell pipeline byte-for-byte with ``od -c``
+    (impl-pyci-15-sonnet, lead6 ruling on the wire format). This is
+    deliberate and must not be "tidied" back to a plain ``" ".join(...)``,
+    which silently drops the trailing byte AC-2 diffs against.
+    ``" ".join(names) + " "`` only for a non-empty list -- an empty list
+    never reaches ``sort`` with a trailing newline to convert."""
+    return " ".join(names) + " " if names else ""
+
+
 def assert_staged_group_windows(artifact_dir: str) -> int:
     """Replaces windows_build.yml:862-872. Symmetric ``*.dll``-only compare
     (the ``.lib`` is never part of either set, matching the shell's
     ``ls *.dll`` glob) -- unlike linux, no ``SHARED_LIB_COUNT``-style marker
-    and no atomic-group success line; the shell step is silent on match."""
+    and no atomic-group success line; the shell step is silent on match.
+
+    The EMITTED marker value carries the shell's trailing space (see
+    ``_dll_set_marker_value``); the COMPARISON below is on the plain Python
+    lists, which is whitespace-insensitive by construction -- exactly
+    matching windows_build.yml:871's ``echo … | xargs`` normalisation before
+    its own ``!=``. Do not compare the marker STRINGS instead of the lists:
+    that would make the comparison stricter than the shell's, which is a
+    migration-fidelity violation in the other direction (tightening)."""
     dest = Path(artifact_dir) / "native"
     _list_dir(dest)
     expected = sorted(n for n in declared_names("windows") if n.endswith(".dll"))
     staged = sorted(p.name for p in dest.iterdir() if p.name.endswith(".dll"))
-    report.marker("EXPECTED_DLL_SET", " ".join(expected))
-    report.marker("STAGED_DLL_SET", " ".join(staged))
+    report.marker("EXPECTED_DLL_SET", _dll_set_marker_value(expected))
+    report.marker("STAGED_DLL_SET", _dll_set_marker_value(staged))
     if expected != staged:
         report.error(
             "staged Windows DLL set does not match native/deps/shipped_files.toml's "
