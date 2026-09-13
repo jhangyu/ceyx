@@ -42,9 +42,9 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py dt-needed         --platform linux --artifact-dir D --runner-temp T
     python3 native/scripts/ci.py dt-needed         --platform android --artifact-dir D --runner-temp T --ndk-home H [--build-log L]
     python3 native/scripts/ci.py vcpkg-baseline    --github-env PATH
-    python3 native/scripts/ci.py vcpkg-bootstrap   --baseline SHA
-    python3 native/scripts/ci.py vcpkg-install     --triplet T
-    python3 native/scripts/ci.py assert-vcpkg-artefacts --platform P [--arch A]
+    python3 native/scripts/ci.py vcpkg-bootstrap   --baseline SHA --runner-temp T
+    python3 native/scripts/ci.py vcpkg-install     --triplet T --workspace W --runner-temp T [--feature F ...]
+    python3 native/scripts/ci.py assert-vcpkg-artefacts --platform linux --triplet T --runner-temp T
     python3 native/scripts/ci.py verify-interpreter --forbid-hostedtoolcache
     python3 native/scripts/ci.py ensure-cmake      --min 3.28
     python3 native/scripts/ci.py build-zlib        --version 1.3.1
@@ -512,7 +512,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_platform_command(
         sub, "dt-needed", "assert the DT_NEEDED import closure", _dt_needed_extra
     )
-    _add_platform_command(sub, "assert-vcpkg-artefacts", "assert vcpkg produced artefacts")
+    def _assert_vcpkg_artefacts_extra(sp):
+        # Workflow context (R13), not targets.py facts: the triplet is a
+        # matrix value and $RUNNER_TEMP is a runner-supplied path.
+        sp.add_argument("--triplet", required=True)
+        sp.add_argument("--runner-temp", required=True)
+
+    _add_platform_command(
+        sub,
+        "assert-vcpkg-artefacts",
+        "assert vcpkg produced artefacts",
+        _assert_vcpkg_artefacts_extra,
+        with_arch=False,
+    )
 
     acl = sub.add_parser(
         "assert-configure-log",
@@ -528,9 +540,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     vboot = sub.add_parser("vcpkg-bootstrap", help="bootstrap vcpkg at a pinned baseline")
     vboot.add_argument("--baseline", required=True)
+    vboot.add_argument("--runner-temp", required=True)
 
     vi = sub.add_parser("vcpkg-install", help="vcpkg install for a triplet")
     vi.add_argument("--triplet", required=True)
+    vi.add_argument("--workspace", required=True)
+    vi.add_argument("--runner-temp", required=True)
+    vi.add_argument("--feature", action="append", default=[])
 
     vint = sub.add_parser("verify-interpreter", help="refuse a hostedtoolcache interpreter")
     vint.add_argument("--forbid-hostedtoolcache", action="store_true")
@@ -747,6 +763,47 @@ def dispatch(args: argparse.Namespace) -> int:
             workspace=args.workspace,
             log_path=args.log_path,
         )
+    if args.command == "vcpkg-baseline":
+        import ci.provision as provision
+
+        return provision.vcpkg_baseline("native/vcpkg/vcpkg.json", args.github_env)
+    if args.command == "vcpkg-bootstrap":
+        import ci.provision as provision
+
+        return provision.vcpkg_bootstrap(args.baseline, args.runner_temp)
+    if args.command == "vcpkg-install":
+        import ci.provision as provision
+
+        return provision.vcpkg_install(args.triplet, args.workspace, args.runner_temp, args.feature)
+    if args.command == "assert-vcpkg-artefacts":
+        # PERMANENT exclusion, same shape as _CODEC_PROBE_PLATFORMS: macOS's
+        # real artefact-assertion shape differs (dylib + `lipo -archs`, not
+        # an .so-absence glob) and is deliberately unimplemented in
+        # provision.py (see its docstring) -- checked here, before the
+        # call, so an unsupported platform gets a clean ::error:: + exit 2
+        # instead of an uncaught ValueError traceback (found by smoke-test,
+        # not by a unit test: unit tests only exercised the module function
+        # directly, never the CLI's own rejection path).
+        _VCPKG_ARTEFACT_PLATFORMS = frozenset({"linux"})
+        if args.platform not in _VCPKG_ARTEFACT_PLATFORMS:
+            print(
+                f"::error::assert-vcpkg-artefacts has no --platform {args.platform!r} leg -- "
+                "only 'linux' is ported (macOS's real check asserts a different shape, see "
+                "provision.py's module docstring)",
+                file=sys.stderr,
+            )
+            return 2
+        import ci.provision as provision
+
+        return provision.assert_vcpkg_artefacts(args.platform, args.triplet, args.runner_temp)
+    if args.command == "verify-interpreter":
+        import ci.provision as provision
+
+        return provision.verify_interpreter(args.forbid_hostedtoolcache)
+    if args.command == "ensure-cmake":
+        import ci.provision as provision
+
+        return provision.ensure_cmake(args.min)
     if args.command in _PLATFORM_COMMANDS or args.command in _PLATFORMLESS_COMMANDS:
         return _not_yet(args.command)
     return 2
