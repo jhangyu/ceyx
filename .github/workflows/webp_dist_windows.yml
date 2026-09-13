@@ -105,14 +105,19 @@ jobs:
       # `result.returncode` from the `subprocess` object Python's own `run.py`
       # returns, adjacent to the call, never from a shell variable -- the
       # same guarantee the old dance was manually establishing.
+      # WI-40: collapsed from a `run: >` folded scalar to one physical line
+      # -- workflow_scan.code_lines() parses run: bodies by raw physical
+      # line and does not fold block scalars, so this step read as 4
+      # physical lines and failed Rule-1 even though it was already the
+      # one-line python3 `dist-build` carrier WI-32 wrote. YAML-parsed
+      # `run` string verified byte-identical before/after; formatting
+      # only. `shell: bash` and the relative `--dist` form are both
+      # untouched -- see this step's WI-32 comment block above for why.
       - name: Build the libwebp dist
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: >
-          python3 native/scripts/ci.py dist-build
-          --component webp-stack --platform windows --arch x86_64
-          --dist native/third_party/libwebp-dist-windows
-          --rc-marker WEBP_DIST_WINDOWS_RC
+        run: |
+          python3 native/scripts/ci.py dist-build --component webp-stack --platform windows --arch x86_64 --dist native/third_party/libwebp-dist-windows --rc-marker WEBP_DIST_WINDOWS_RC
 
       # Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
       # inventory while silently omitting the headers.

@@ -138,14 +138,20 @@ jobs:
       # `shell: pwsh` kept -- same reason as before the migration: Git-Bash
       # is eligible to MSYS-rewrite path-shaped argv and can put an MSYS
       # Python on PATH, which `deps/run.py` refuses to run under.
+      # WI-40: collapsed from a `run: >` folded scalar to one physical line
+      # -- workflow_scan.code_lines() parses run: bodies by raw physical
+      # line and does not fold block scalars, so this step read as 4
+      # physical lines and failed Rule-1 even though it was already the
+      # one-line python `dist-build` carrier WI-32 wrote. YAML-parsed `run`
+      # string verified byte-identical before/after (including the
+      # un-expanded `${{ github.workspace }}` text); formatting only.
+      # `shell: pwsh` and the `python` (not `python3`) spelling are both
+      # untouched -- see this step's WI-32 comment block above for why.
       - name: Build the libjxl dist (Python carrier)
         shell: pwsh
         working-directory: ${{ github.workspace }}
-        run: >
-          python native/scripts/ci.py dist-build
-          --component jxl-stack --platform windows --arch x86_64
-          --dist "${{ github.workspace }}/native/third_party/libjxl-dist-windows"
-          --rc-marker JXL_DIST_WINDOWS_RC
+        run: |
+          python native/scripts/ci.py dist-build --component jxl-stack --platform windows --arch x86_64 --dist "${{ github.workspace }}/native/third_party/libjxl-dist-windows" --rc-marker JXL_DIST_WINDOWS_RC
 
       # Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
       # inventory while silently omitting the headers.
