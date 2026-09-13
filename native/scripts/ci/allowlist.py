@@ -77,11 +77,8 @@ MUST_STAY: tuple = (
     Entry('build.yml', 'Assert the required asset set (tag pushes only)', 'C-G14 #8 / Q2 PARKED: publish job, tag-only, contents:write, unexercised by the CI loop; migration parked pending user ruling'),
     Entry('build.yml', 'Package + lock (dry run, non-tag events)', 'C-G14 #8 / Q2 PARKED: publish job, tag-only, contents:write, unexercised by the CI loop; migration parked pending user ruling'),
     Entry('build.yml', 'Publish release assets + artifacts.lock (tag pushes only)', 'C-G14 #8 / Q2 PARKED: publish job, tag-only, contents:write, unexercised by the CI loop; migration parked pending user ruling'),
-    Entry('heif_dist_android.yml', 'Build the HEIF dist (Python carrier)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
-    Entry('heif_dist_windows.yml', 'Force LF line endings for all git operations', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
-    Entry('jxl_dist_android.yml', 'Build the libjxl dist (Python carrier)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
-    Entry('jxl_dist_windows.yml', 'Force LF line endings for all git operations', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
-    Entry('jxl_dist_windows.yml', 'Build the libjxl dist (Python carrier)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
+    Entry('heif_dist_windows.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout (step index 0, checkout at index 1); must stay in YAML permanently'),
+    Entry('jxl_dist_windows.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout (step index 0, checkout at index 1); must stay in YAML permanently'),
     Entry('linux_build.yml', 'Install git + python3 into the container (pre-checkout, WI-14 step 14.5)', 'C-G14 #1: pre-checkout apt bootstrap -- no checkout yet, no interpreter; must stay in YAML permanently'),
     Entry('linux_build.yml', 'Provision Python 3.11 inside the container (no hostedtoolcache)', 'C-G14 #2: Python 3.11 provisioning via $GITHUB_PATH; must stay in YAML permanently'),
     Entry('linux_build.yml', 'Install build prerequisites (apt)', "C-G14 #3: apt build prerequisite package list -- a legible package list is the step's entire value; must stay in YAML permanently"),
@@ -94,9 +91,7 @@ MUST_STAY: tuple = (
     Entry('macos_build.yml', 'Build dng_decoder_native via watchdog (native arm64)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Build host Halide generators + x86_64 AOT (cross stage 1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Cross-compile dng_decoder_native for x86_64 (cross stage 2)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('webp_dist_android.yml', 'Build the libwebp dist (Python carrier)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
-    Entry('webp_dist_windows.yml', 'Force LF line endings for all git operations', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
-    Entry('webp_dist_windows.yml', 'Build the libwebp dist', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
+    Entry('webp_dist_windows.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout (step index 0, checkout at index 1); must stay in YAML permanently'),
     Entry('windows_build.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout; must stay in YAML permanently'),
     Entry('windows_build.yml', 'Run deps unit suite (native Windows Python)', "C-G14 #7 / UR-1 policy item: deps pytest suite call site, pwsh deliberately (deps/run.py refuses an MSYS interpreter by design); stays pending WI-5's detected-then-exempted carve-out"),
     Entry('windows_build.yml', 'Install Ninja', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -129,4 +124,4 @@ GRANDFATHERED_SHELL_FILES: tuple = (
 # make visible (module docstring above, and markerdiff.py's assertion-vs-
 # observability split). Every push that shrinks MUST_STAY must update this
 # literal in the same diff -- that edit IS the two-line reviewable pin.
-ALLOWLIST_SIZE_EXPECTED: int = 50
+ALLOWLIST_SIZE_EXPECTED: int = 45
