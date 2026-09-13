@@ -268,9 +268,13 @@ def _run_producer(script_relpath: str, argv: tuple[str, ...] = ()) -> list[str]:
     this function stays a bare, unconditional runner.
 
     cwd IS EXPLICITLY PINNED TO `REPO_ROOT` (lead15's cwd-dependence
-    finding): `_missing_producer_inputs` above resolves `argv`'s path-shaped
-    entries against `REPO_ROOT` (line ~254), but a subprocess launched with
-    the default `cwd=None` inherits the CALLER's cwd, not `REPO_ROOT` --
+    finding): `_missing_producer_inputs` above (line ~254) checks EVERY argv
+    entry (no path-vs-flag discrimination exists in that function -- it
+    resolves `REPO_ROOT / a` and asks whether the result exists on disk for
+    each entry unconditionally; today's only non-empty argv happens to be a
+    single positional path, which is why the blind spot has never been
+    exercised) against `REPO_ROOT`. A subprocess launched with the default
+    `cwd=None`, in contrast, inherits the CALLER's cwd, not `REPO_ROOT` --
     two code points disagreeing about what a relative argv entry is
     relative TO. From the repo root the two happen to coincide (an accident
     of where every prior green was launched from); from any other cwd
