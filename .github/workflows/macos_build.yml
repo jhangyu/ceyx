@@ -505,22 +505,21 @@ jobs:
           # configure log must carry the disabled-status line
           # (native/cmake/tests.cmake's forced-OFF block), proving the
           # removal actually took effect on this runner rather than
-          # ENABLE_LCMS silently staying ON. Configure log grepped from a
-          # saved file, not piped directly to grep, so a zero-match
-          # `grep -q` cannot itself trip SIGPIPE against a still-writing
-          # producer (2026-08-28 ledger: `nm | grep -q` under pipefail dies
-          # on early grep exit).
-          set +e
-          grep -q "\[ceyx\] LCMS2: disabled (OQ-N4 option Z)" \
-            "${{ github.workspace }}/native_build_native_arm64.log"
-          LCMS_RC=$?
-          set -e
-          echo "LCMS_CONFIGURE_RC=${LCMS_RC}"
-          if [ "${LCMS_RC}" -ne 0 ]; then
-            echo "::error::configure did not print the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line — ENABLE_LCMS may not be forced OFF on this runner, or the configure step was silently skipped. See native_build_native_arm64.log." >&2
-            grep "LCMS2" "${{ github.workspace }}/native_build_native_arm64.log" || echo "(no LCMS2 line found in log at all)"
-            exit 1
-          fi
+          # ENABLE_LCMS silently staying ON.
+          #
+          # WI-20 (push 7): collapsed into ci.py's generic
+          # assert-configure-log (native/scripts/ci/configure_log.py,
+          # WI-19a), the same module android_build.yml's HEIF/JXL
+          # configure-log assertions use. Pattern is a Python regex, not a
+          # grep BRE: `(` and `)` are metacharacters in re and must be
+          # escaped to match literally (configure_log.py's own docstring
+          # correction). Reads the saved log file directly, never through a
+          # pipe, so there is nothing for a zero-match to SIGPIPE-kill.
+          python3 native/scripts/ci.py assert-configure-log \
+            --log-path "${{ github.workspace }}/native_build_native_arm64.log" \
+            --pattern "\[ceyx\] LCMS2: disabled \(OQ-N4 option Z\)" \
+            --label "LCMS2 disabled" \
+            --error "configure log does not show the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line — ENABLE_LCMS may not be forced OFF on this runner, or the configure step was silently skipped. See native_build_native_arm64.log."
 
       # Cross leg, stage 1: arm64 host generators, emitting x86_64 AOT code.
       - name: Build host Halide generators + x86_64 AOT (cross stage 1)
