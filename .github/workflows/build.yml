@@ -340,12 +340,6 @@ jobs:
       - name: Guard — RAW/GPU architecture invariants (spec 13.3)
         run: python3 native/scripts/check_raw_architecture_gates.py
 
-      - name: Guard — vendored LibRaw/RawSpeed provenance + licences
-        run: python3 native/scripts/verify_raw_provenance.py
-
-      - name: Guard — normalize_model.cpp alias-table '@'-prefix convention (G2-2)
-        run: python3 native/scripts/check_alias_table_convention.py native/third_party/libraw/src/metadata/normalize_model.cpp
-
       - name: Guard — Stage4 orientation permutation derivation matches source
         run: python3 native/scripts/derive_oriented_stage4.py --check
 
@@ -390,6 +384,18 @@ jobs:
 
       - name: Fetch vendored LibRaw distribution
         run: python3 native/scripts/build_deps.py fetch libraw
+
+      # WI-41 (2026-09-13): relocated from before the fetch step above.
+      # These two guards read files under native/third_party/libraw/, which
+      # does not exist until the fetch step runs; placed earlier they always
+      # failed against a directory git treats as opaque (or non-existent),
+      # never against real vendored content. Moved for placement only --
+      # `run:` bodies unchanged.
+      - name: Guard — vendored LibRaw/RawSpeed provenance + licences
+        run: python3 native/scripts/verify_raw_provenance.py
+
+      - name: Guard — normalize_model.cpp alias-table '@'-prefix convention (G2-2)
+        run: python3 native/scripts/check_alias_table_convention.py native/third_party/libraw/src/metadata/normalize_model.cpp
 
       # D5 (2026-08-31): this job builds TEST targets, but the configure it runs
       # is the whole project's — cmake/encode.cmake included — and that file now
