@@ -158,10 +158,12 @@ jobs:
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here
       # instead of hardcoding its own copy that can drift.
+      # WI-24a (push 8): collapsed into ci.py's provision.vcpkg_baseline(),
+      # shared with linux_build.yml's identical shape. The vcpkg.json path
+      # is hardcoded in ci.py's own dispatch (not a flag here), matching
+      # this leg's own hardcoded "native/vcpkg/vcpkg.json" literal.
       - name: Derive vcpkg baseline from vcpkg.json
-        run: |
-          BASELINE="$(python3 -c "import json; print(json.load(open('native/vcpkg/vcpkg.json'))['builtin-baseline'])")"
-          echo "VCPKG_BASELINE=$BASELINE" >> "$GITHUB_ENV"
+        run: python3 native/scripts/ci.py vcpkg-baseline --github-env "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -297,27 +299,23 @@ jobs:
       # Bootstrap (clone, checkout the pinned baseline, bootstrap-vcpkg.sh)
       # rather than using a marketplace action, matching this repo's other
       # vcpkg-consuming workflows (e.g. linux_build.yml).
+      # WI-24a (push 8): collapsed into ci.py's provision.vcpkg_bootstrap(),
+      # shared with linux_build.yml's IDENTICAL shell body (no per-platform
+      # branch in the module).
       - name: Bootstrap vcpkg at the pinned baseline (D5)
-        run: |
-          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
-          git -C "$RUNNER_TEMP/vcpkg" checkout "$VCPKG_BASELINE"
-          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-          "$RUNNER_TEMP/vcpkg/vcpkg" version
+        run: python3 native/scripts/ci.py vcpkg-bootstrap --baseline "$VCPKG_BASELINE" --runner-temp "$RUNNER_TEMP"
 
+      # WI-24a (push 8): collapsed into ci.py's provision.vcpkg_install(),
+      # shared with linux_build.yml -- IDENTICAL shape, differing only in
+      # the caller-supplied --triplet/--feature (workflow matrix values,
+      # R13, not a platform branch). --feature is repeatable and matches
+      # this leg's two --x-feature= flags verbatim (de265, aom -- see the
+      # comment above this step's original body for why NOT --feature=heif).
+      # The module already emits VCPKG_INSTALL_RC= via report.marker(),
+      # matching the old echo line's exact name (no restoration needed,
+      # unlike WI-20's LCMS2 step).
       - name: vcpkg install libwebp + libde265 + aom (${{ matrix.vcpkg_triplet }})
-        run: |
-          set +e
-          "$RUNNER_TEMP/vcpkg/vcpkg" install \
-              --x-manifest-root="$GITHUB_WORKSPACE/native/vcpkg" \
-              --x-install-root="$RUNNER_TEMP/vcpkg-installed" \
-              --triplet="$VCPKG_TRIPLET" \
-              --x-no-default-features \
-              --x-feature=de265 \
-              --x-feature=aom \
-              --no-print-usage
-          rc=$?
-          echo "VCPKG_INSTALL_RC=${rc}"
-          exit $rc
+        run: python3 native/scripts/ci.py vcpkg-install --triplet "$VCPKG_TRIPLET" --workspace "$GITHUB_WORKSPACE" --runner-temp "$RUNNER_TEMP" --feature de265 --feature aom
 
       # Prove the artefacts before the product build consumes them. libwebp: a
       # STATIC archive of the RIGHT architecture — the linkage half is the
