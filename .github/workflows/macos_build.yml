@@ -181,10 +181,13 @@ jobs:
       - name: D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)
         run: |
           set -u
+          set +e
           python3 native/tests/run_dist_equivalence.py \
               --layers l1 \
               --report "${GITHUB_WORKSPACE}/d6-layer1-report-${{ matrix.arch_tag }}.md"
-          echo "D6_LAYER1_RC=$?"
+          D6_LAYER1_RC=$?
+          echo "D6_LAYER1_RC=${D6_LAYER1_RC}"
+          exit "${D6_LAYER1_RC}"
 
       # nasm/yasm are required by fetch_heif_deps.sh's aom build: aom's x86_64
       # codepath is hand-written assembly (unlike the arm64 codepath, which is
