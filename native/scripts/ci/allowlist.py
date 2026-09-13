@@ -102,7 +102,6 @@ MUST_STAY: tuple = (
     Entry('windows_build.yml', 'Diagnose configure failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Build dng_decoder_native', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Diagnose build failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Assert Windows DLL dependency closure', "BLOCKED, not scheduled: split out of the old 'Verify Windows artifact' 211-line step (WI-21, push 7) when its file-exists/size and export-table checks migrated to native/scripts/ci/verify_artifact.py. This residue (the decoder's import-table dependency closure + heif.dll's own transitive libde265.dll check) cannot migrate yet because `ci.py`'s `import-closure` dispatch rejects any --platform outside `_IMPORT_CLOSURE_PLATFORMS = frozenset({'linux', 'android'})` (ci.py:762-765; verified current -- the `_linux_only_commands` set this reason string used to cite was retired under WI-36 and no longer exists) AND `verify_artifact.import_closure()` itself hardcodes `--format elf` with no PE branch (verify_artifact.py:181) -- ungating it for windows without adding that branch would silently run the wrong check against a PE binary rather than error. Android is NO LONGER blocked here -- WI-34/WI-38 (f651550f/15421c48) generalised `import_closure()` to android and wired it to `ci.py`, so this entry's blocker is windows-only now, not the two-platform gap it used to be. No WI currently owns adding the PE branch."),
 )
 
 # Q6 (the ci/ package's own pre-existing fixture fetcher) plus three more
@@ -124,4 +123,4 @@ GRANDFATHERED_SHELL_FILES: tuple = (
 # make visible (module docstring above, and markerdiff.py's assertion-vs-
 # observability split). Every push that shrinks MUST_STAY must update this
 # literal in the same diff -- that edit IS the two-line reviewable pin.
-ALLOWLIST_SIZE_EXPECTED: int = 45
+ALLOWLIST_SIZE_EXPECTED: int = 44

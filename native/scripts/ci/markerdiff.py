@@ -160,7 +160,7 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=45", "push 9 / WI-25 (allowlist.py ratchet, 50->45: five folded-python carrier steps retired)"),
+    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=44", "push 11 / P-23 (allowlist.py ratchet, 45->44: Windows DLL dependency-closure step migrated by WI-56 in ef34f885; its exemption retired in the same ratchet)"),
     _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
     _ExpectedAddition("nativetests", "TABLE_COUNT=10", "push 9 / WI-26 (wired check_alias_table_convention.py:92 into build.yml)"),
     _ExpectedAddition("nativetests", "ALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES", "push 9 / WI-26 (wired check_alias_table_convention.py:98 into build.yml)"),
