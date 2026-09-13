@@ -42,6 +42,31 @@ ALGORITHM, per ledger entry:
      check that quietly does nothing for an input it does not recognise is
      the exact false-green shape this campaign keeps re-discovering.
 
+WI-44 (root cause: CI run 34746593820 red on a false premise of mine).
+TABLE_COUNT/ALIAS_TABLE_FIRST_ELEMENT_ALL_AT's producer
+(`check_alias_table_convention.py`) takes a POSITIONAL PATH ARGUMENT
+pointing into the vendored LibRaw tree (`native/third_party/libraw/...`),
+which is fetched by a build.yml step that runs AFTER `ci.py selftest`.
+This file's own dev machine has that tree checked out already (from a
+previous local build), so the producer ran and passed here while failing
+on every fresh CI runner -- the fifth appearance that day of "a check
+passes locally because the machine has something the runner does not."
+
+I originally classified these two markers as having "a real, identifiable
+local producer" and explicitly rejected `_BUILD_ARTIFACT_KEYS` for them.
+That classification is not wrong in general (the script IS a real,
+deterministic, non-CI-only producer) -- what was missing is recognising
+that a producer can have an ABSENT INPUT independently of whether it is a
+"build artifact." Forcing this into `_BUILD_ARTIFACT_KEYS` would have been
+a category error: `_BUILD_ARTIFACT_KEYS`'s contract is "never producible
+on a laptop without a full compile," which is FALSE here -- a laptop with
+the vendor tree fetched (as this one has) reproduces it exactly. The
+correct fix is a THIRD, orthogonal outcome, not a stretch of an existing
+one: if a producer's positional argv references a path that does not
+exist on disk, print a DECLARED, NAMED skip (naming the entry and the
+missing path) and move on -- never silent, and never conflated with
+"cannot exist outside CI." See `_run_producer`'s precondition check below.
+
 Run with: python3 native/scripts/ci/check_expected_additions.py
 """
 
@@ -111,13 +136,30 @@ def _marker_key(line: str) -> str:
     return line.split("=", 1)[0]
 
 
+def _missing_producer_inputs(argv: tuple[str, ...]) -> list[str]:
+    """WI-44: a producer's positional `argv` can name a path this file must
+    verify exists BEFORE running the producer -- `check_alias_table_convention.py`'s
+    single positional argument is exactly this shape (a file inside the
+    vendored LibRaw tree, absent until build.yml's fetch step runs).
+    Returns the argv entries (repo-root-relative) that do not exist on
+    disk, in argv order. A producer with no path-shaped argv at all (like
+    `check_shell_prohibition.py`'s `()`) always returns an empty list,
+    matching the pre-WI-44 always-run behaviour exactly."""
+    return [a for a in argv if not (REPO_ROOT / a).exists()]
+
+
 def _run_producer(script_relpath: str, argv: tuple[str, ...] = ()) -> list[str]:
     """Runs `script_relpath` (plus any positional `argv` the producer's own
     CLI requires -- WI-43: not every producer is argument-free) and returns
     its combined, normalized output lines -- the same normalization
     `markerdiff.py` applies to a real CI log, so a `<WS>`/`<TMP>`-shaped
     ledger line (none exist today, but the ledger's contract does not
-    forbid one) compares correctly."""
+    forbid one) compares correctly. Caller (`main`) is responsible for
+    calling `_missing_producer_inputs` first -- this function does not
+    re-check on its own, so calling it with a missing input still runs the
+    script (and lets it fail on its own terms), which is deliberate: only
+    `main`'s loop decides what "missing input" means for the ledger check,
+    this function stays a bare, unconditional runner."""
     result = run.run([sys.executable, str(REPO_ROOT / script_relpath), *argv])
     combined = result.stdout + result.stderr
     return [markerdiff.normalize(line) for line in combined.splitlines()]
@@ -127,7 +169,13 @@ def main() -> int:
     producer_cache: dict[tuple[str, tuple[str, ...]], list[str]] = {}
     stale: list[tuple] = []
     unclassified: list = []
-    skipped = 0
+    # WI-44: two DIFFERENT skip reasons, counted separately so the summary
+    # line never conflates them -- "cannot exist outside CI" and "this
+    # producer's input happens to be absent right now" are different facts
+    # about the world and must read differently to the next person tuning
+    # this file's classification tables.
+    build_artifact_skipped = 0
+    input_missing_skipped = 0
     checked = 0
 
     for entry in markerdiff.EXPECTED_ADDITIONS:
@@ -135,7 +183,7 @@ def main() -> int:
 
         if key in _BUILD_ARTIFACT_KEYS:
             print(f"SKIP (build-artifact, not locally producible): {entry.line} (source: {entry.source})")
-            skipped += 1
+            build_artifact_skipped += 1
             continue
 
         producer = _KEY_TO_PRODUCER_SCRIPT.get(key)
@@ -143,6 +191,24 @@ def main() -> int:
             unclassified.append(entry)
             continue
         script, argv = producer
+
+        # WI-44: a producer's own positional argv can name a path (e.g.
+        # inside the vendored LibRaw tree) that this dev machine happens to
+        # have and a fresh CI runner does not yet, because the fetch step
+        # runs AFTER `ci.py selftest`. Declared, named skip -- never a
+        # silent one, and never conflated with `_BUILD_ARTIFACT_KEYS`
+        # (whose contract is "no laptop can ever produce this," which is
+        # false here: this exact laptop just did, moments ago).
+        missing_inputs = _missing_producer_inputs(argv)
+        if missing_inputs:
+            print(
+                f"SKIP (producer input not present locally: {missing_inputs[0]!r}): "
+                f"{entry.line} (source: {entry.source}) -- {script} needs this path, which "
+                "a real CI runner only has after its fetch step; unverifiable before that "
+                "step runs, not a build-artifact."
+            )
+            input_missing_skipped += 1
+            continue
 
         if producer not in producer_cache:
             producer_cache[producer] = _run_producer(script, argv)
@@ -171,7 +237,11 @@ def main() -> int:
         return 1
 
     plural = "y" if checked == 1 else "ies"
-    print(f"expected_additions: OK ({checked} producible entr{plural} verified, {skipped} build-artifact skip(s))")
+    print(
+        f"expected_additions: OK ({checked} producible entr{plural} verified, "
+        f"{build_artifact_skipped} build-artifact skip(s), "
+        f"{input_missing_skipped} producer-input-missing skip(s))"
+    )
     return 0
 
 

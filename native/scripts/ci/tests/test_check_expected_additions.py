@@ -41,7 +41,10 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
              mock.patch.object(run_module, "run", side_effect=fake_run):
             rc, out, _ = _run_captured(cea.main)
         self.assertEqual(rc, 0)
-        self.assertIn("OK (1 producible entry verified, 0 build-artifact skip(s))", out)
+        self.assertIn(
+            "OK (1 producible entry verified, 0 build-artifact skip(s), 0 producer-input-missing skip(s))",
+            out,
+        )
 
     def test_stale_ledger_fails_naming_entry_and_both_lines(self):
         """The exact regression class this script exists to catch: a
@@ -86,6 +89,42 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
             rc, out, err = _run_captured(cea.main)
         self.assertEqual(rc, 0)
         self.assertIn("SKIP (build-artifact, not locally producible): BUILD_ONLY_MARKER=42", out)
+
+    def test_missing_producer_input_is_a_declared_skip_not_a_failure(self):
+        """WI-44 (root cause: CI run 34746593820): a producer whose
+        positional argv names a path absent on THIS machine (the exact
+        shape of `check_alias_table_convention.py`'s vendored-LibRaw
+        argument before build.yml's fetch step runs) must be a NAMED,
+        PRINTED skip and RC=0 -- never a silent no-op, and never
+        classified as stale (which would require actually running the
+        producer and comparing output) or unclassified (a real producer IS
+        known here, its input is just not present yet)."""
+        entry = markerdiff._ExpectedAddition("nativetests", "NEEDS_INPUT=1", "test")
+
+        def fail_if_called(argv, cwd=None, env=None):
+            self.fail("producer must not be invoked when its input path is missing")
+
+        with mock.patch.object(markerdiff, "EXPECTED_ADDITIONS", (entry,)), \
+             mock.patch.object(
+                 cea, "_KEY_TO_PRODUCER_SCRIPT",
+                 {"NEEDS_INPUT": ("fake/producer.py", ("definitely/does/not/exist.cpp",))},
+             ), \
+             mock.patch.object(cea, "_BUILD_ARTIFACT_KEYS", frozenset()), \
+             mock.patch.object(run_module, "run", side_effect=fail_if_called):
+            rc, out, _ = _run_captured(cea.main)
+        self.assertEqual(rc, 0)
+        self.assertIn("SKIP (producer input not present locally: 'definitely/does/not/exist.cpp')", out)
+        self.assertIn("NEEDS_INPUT=1", out)
+        self.assertIn("0 build-artifact skip(s), 1 producer-input-missing skip(s)", out)
+
+    def test_missing_producer_inputs_helper_is_argv_order_and_repo_relative(self):
+        """Direct unit test of the precondition helper itself (WI-44):
+        exactly the argv entries that do not exist under REPO_ROOT come
+        back, in argv order -- a real existing path (this test file
+        itself) is correctly excluded."""
+        real = str(Path(__file__).resolve().relative_to(_REPO_ROOT))
+        missing = cea._missing_producer_inputs((real, "totally/fake/path.cpp"))
+        self.assertEqual(missing, ["totally/fake/path.cpp"])
 
     def test_shared_producer_invoked_once_for_two_ledger_entries(self):
         """SHELL_ALLOWLIST_SIZE and SHELL_PROHIBITION_RESULT both come from
