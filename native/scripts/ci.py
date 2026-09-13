@@ -25,7 +25,9 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py verify-artifact   --platform P [--arch A]
     python3 native/scripts/ci.py import-closure    --platform P
     python3 native/scripts/ci.py min-runtime       --platform P [--arch A]
-    python3 native/scripts/ci.py assert-exports    --platform P [--arch A]
+    python3 native/scripts/ci.py assert-exports    --platform linux|windows [--arch A]
+    python3 native/scripts/ci.py assert-exports    --platform macos --arch A --dylib-path D
+    python3 native/scripts/ci.py assert-exports    --platform android --artifact-dir D --ndk-home H
     python3 native/scripts/ci.py assert-no-avx512  --platform P
     python3 native/scripts/ci.py assert-orientation --platform P
     python3 native/scripts/ci.py codec-probe       --platform P --workspace W [--dist-dir D]
@@ -298,6 +300,35 @@ def _enforce_dt_needed_flags(parser: argparse.ArgumentParser, args: argparse.Nam
             )
 
 
+def _enforce_assert_exports_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """`assert-exports` only: `--dylib-path` is macOS-only, `--artifact-dir`/
+    `--ndk-home` are required together for android, same reject-not-ignore
+    posture as `_enforce_orientation_flags` (the module's own `assert_exports()`
+    already raises `ValueError` on a missing per-platform-required one)."""
+    if args.command != "assert-exports":
+        return
+    platform = args.platform
+    dylib_path = args.dylib_path
+    artifact_dir = args.artifact_dir
+    ndk_home = args.ndk_home
+
+    if platform == "macos":
+        if dylib_path is None:
+            parser.error("--dylib-path is required for --platform macos")
+        if artifact_dir is not None or ndk_home is not None:
+            parser.error("--artifact-dir/--ndk-home are not accepted for --platform macos")
+    elif platform == "android":
+        if artifact_dir is None or ndk_home is None:
+            parser.error("--artifact-dir and --ndk-home are both required for --platform android")
+        if dylib_path is not None:
+            parser.error("--dylib-path is not accepted for --platform android")
+    else:
+        if dylib_path is not None or artifact_dir is not None or ndk_home is not None:
+            parser.error(
+                f"--dylib-path/--artifact-dir/--ndk-home are not accepted for --platform {platform!r}"
+            )
+
+
 def _add_platform_command(sub, name: str, help_text: str, extra=None, with_arch: bool = True):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
@@ -322,7 +353,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_platform_command(sub, "verify-artifact", "run the artifact verification suite")
     _add_platform_command(sub, "import-closure", "assert the import-closure gate")
     _add_platform_command(sub, "min-runtime", "assert min-runtime drift")
-    _add_platform_command(sub, "assert-exports", "assert exported FFI symbols")
+    def _assert_exports_extra(sp):
+        # Platform-specific, same reject-not-ignore posture as
+        # assert-orientation's --dylib-path/--artifact-dir/--ndk-home:
+        # macOS's dylib and android's artifact-dir/NDK are workflow context
+        # `verify_artifact.py` cannot know (R5). Enforced post-parse by
+        # `_enforce_assert_exports_flags`.
+        sp.add_argument("--dylib-path", default=None)
+        sp.add_argument("--artifact-dir", default=None)
+        sp.add_argument("--ndk-home", default=None)
+
+    _add_platform_command(
+        sub, "assert-exports", "assert exported FFI symbols", _assert_exports_extra
+    )
     _add_platform_command(sub, "assert-no-avx512", "assert no AVX-512 codepath")
 
     def _orientation_extra(sp):
@@ -517,11 +560,28 @@ def dispatch(args: argparse.Namespace) -> int:
     _linux_only_commands = {
         "verify-artifact",
         "import-closure",
-        "assert-exports",
         "assert-no-avx512",
     }
     if args.command in _linux_only_commands and getattr(args, "platform", None) != "linux":
         return _not_yet(args.command)
+    # `dt-needed` is explicitly narrowed to {linux, android} (not widened to
+    # all four): impl-18 confirmed via `grep -l DT_NEEDED .github/workflows/
+    # *.yml` that only linux_build.yml and android_build.yml have this step
+    # at all -- windows/macOS are genuinely unsupported, not "not yet
+    # migrated". `ci.dt_needed.dt_needed()` already returns rc=2 with a
+    # clear message for any other platform, but the explicit set here (same
+    # permanent-exclusion shape as `_CODEC_PROBE_PLATFORMS`) makes the
+    # narrowing auditable at the CLI layer too, one step earlier -- R3's
+    # pattern: narrow the gate, then prove the narrowing is narrow.
+    _DT_NEEDED_PLATFORMS = frozenset({"linux", "android"})
+    if args.command == "dt-needed" and args.platform not in _DT_NEEDED_PLATFORMS:
+        print(
+            f"::error::dt-needed has no --platform {args.platform!r} leg -- only linux and "
+            "android have a DT_NEEDED step, permanently (confirmed via `grep -l DT_NEEDED "
+            ".github/workflows/*.yml`)",
+            file=sys.stderr,
+        )
+        return 2
     if args.command == "verify-artifact":
         import ci.verify_artifact as verify_artifact
 
@@ -537,7 +597,13 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "assert-exports":
         import ci.verify_artifact as verify_artifact
 
-        return verify_artifact.assert_exports(args.platform, args.arch)
+        return verify_artifact.assert_exports(
+            args.platform,
+            args.arch,
+            dylib_path=args.dylib_path,
+            artifact_dir=args.artifact_dir,
+            ndk_home=args.ndk_home,
+        )
     if args.command == "assert-no-avx512":
         import ci.verify_artifact as verify_artifact
 
@@ -678,6 +744,7 @@ def main(argv=None) -> int:
         _enforce_capability_vector_flags(parser, args)
         _enforce_stage_flags(parser, args)
         _enforce_dt_needed_flags(parser, args)
+        _enforce_assert_exports_flags(parser, args)
     return dispatch(args)
 
 

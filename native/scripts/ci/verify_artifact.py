@@ -23,6 +23,7 @@ today).
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import sys
@@ -92,12 +93,22 @@ def verify_artifact(platform: str, arch: str | None = None) -> int:
 
 def import_closure(platform: str) -> int:
     """S-B3: readelf DT_NEEDED import-closure gate. Replaces
-    `linux_build.yml:548-564`."""
+    `linux_build.yml:548-564`. Still Linux-only in practice (`_artifact_path`/
+    `dist_dir` are both `None` for android in `targets.py` today, so this
+    function cannot run for android without the same caller-supplied-
+    artifact-dir redesign `stage.py` already went through -- flagged, not
+    attempted here, per impl-18's report that this file's hardcoded
+    `"readelf"` was likely wrong for android). Fixed here: the tool name now
+    comes from `targets.spec(platform)["readelf_tools"]` instead of a bare
+    hardcoded `"readelf"` -- linux's own declared value is identical
+    (`("readelf",)`), so this is a dead-data-consumption fix with zero
+    behaviour change on the only platform that reaches this function today."""
     so = _artifact_path(platform)
     spec = targets.spec(platform)
+    readelf_tool = spec["readelf_tools"][0] if spec["readelf_tools"] else "readelf"
 
     report.section("S-B3: readelf DT_NEEDED import-closure gate")
-    run.run_to_file(["readelf", "-d", so], "readelf_dynamic.txt")
+    run.run_to_file([readelf_tool, "-d", so], "readelf_dynamic.txt")
     dynamic_text = Path("readelf_dynamic.txt").read_text(errors="replace")
     if dynamic_text:
         report.plain(dynamic_text.rstrip("\n"))
@@ -141,13 +152,116 @@ def import_closure(platform: str) -> int:
 # being noticed).
 
 
-def assert_exports(platform: str, arch: str | None = None) -> int:
-    """AC-L5: required FFI exports present in the .so. Replaces
-    `linux_build.yml:629-641`."""
-    so = _artifact_path(platform)
+def assert_exports(
+    platform: str,
+    arch: str | None = None,
+    *,
+    dylib_path: str | None = None,
+    artifact_dir: str | None = None,
+    ndk_home: str | None = None,
+) -> int:
+    """AC-L5/G3/AC-W4/G6: required FFI exports present in the built
+    artifact. Replaces `linux_build.yml:629-641` (unchanged from before --
+    linux still reads `nm_dynsyms.txt`, produced as a side effect of
+    `verify_artifact()` earlier in the same job), `macos_build.yml:741-760`,
+    `windows_build.yml:544-585`, `android_build.yml:295-326`.
 
-    report.section("AC-L5: required FFI exports present in .so")
-    dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
+    macOS/windows/android could NOT be collapsed onto linux's shape: the
+    shell-prohibition guard's compliance test
+    (`check_shell_prohibition.py:95,168`) requires exactly one code line
+    starting with a python/pwsh-python invocation, so a `tool > file` dump
+    step can never itself be a compliant one-liner -- the dump has to move
+    INSIDE this module for every platform whose `ci.py verify-artifact`
+    equivalent does not already produce a dump as a side effect (only linux
+    does). One module change serves all three non-linux legs (they share
+    an identical dump-then-assert shape) rather than three near-duplicate
+    per-leg scripts -- the exact P-10 failure class this campaign keeps
+    re-finding.
+
+    Every dump-phase RC marker name and every `::error::` message below is
+    transcribed VERBATIM per platform, including macOS's genuine ABSENCE of
+    any `::error::` line on a dump failure (`exit "${RC}"` with no error
+    text in the source shell -- ported as-is, not an omission here)."""
+    if platform == "linux":
+        so = _artifact_path(platform)
+        report.section("AC-L5: required FFI exports present in .so")
+        dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
+    elif platform == "macos":
+        if not dylib_path:
+            raise ValueError("assert_exports(platform='macos') requires dylib_path")
+        so = dylib_path
+        result = run.run_to_file(["nm", "-gU", so], "dylib_exports.txt")
+        report.marker("NM_EXPORTS_RC", result.returncode)
+        if result.returncode != 0:
+            report.error(
+                f"nm failed on {so} (rc={result.returncode}); export presence is "
+                "UNVERIFIED, refusing to publish."
+            )
+            text = Path("dylib_exports.txt").read_text(errors="replace")
+            if text:
+                report.plain(text.rstrip("\n"))
+            return 1
+        dump_text = Path("dylib_exports.txt").read_text(errors="replace")
+    elif platform == "windows":
+        so = _artifact_path(platform)
+        report.plain("== AC-W4: exported FFI symbols ==")
+        result = run.run(["dumpbin", "-exports", so])
+        Path("dll_exports.txt").write_text(result.stdout + result.stderr)
+        rc = result.returncode
+        report.marker("DUMPBIN_RC", rc)
+        if rc != 0:
+            report.notice(f"dumpbin unavailable or failed (rc={rc}); falling back to llvm-nm.")
+            result = run.run(["llvm-nm", "--extern-only", "--defined-only", so])
+            Path("dll_exports.txt").write_text(result.stdout + result.stderr)
+            rc = result.returncode
+            report.marker("LLVM_NM_RC", rc)
+        if rc != 0:
+            report.error(
+                f"could not read the export table of {so} with either dumpbin or "
+                f"llvm-nm (rc={rc}); export presence is UNVERIFIED, refusing to publish."
+            )
+            text = Path("dll_exports.txt").read_text(errors="replace")
+            if text:
+                report.plain(text.rstrip("\n"))
+            return 1
+        dump_text = Path("dll_exports.txt").read_text(errors="replace")
+        report.plain("-- first 60 lines of the export listing --")
+        report.plain("\n".join(dump_text.splitlines()[:60]))
+    elif platform == "android":
+        if not artifact_dir or not ndk_home:
+            raise ValueError(
+                "assert_exports(platform='android') requires artifact_dir and ndk_home"
+            )
+        matches = sorted(
+            glob.glob(os.path.join(artifact_dir, "native", "libdng_decoder_native*.so"))
+        )
+        if not matches:
+            report.error(f"no libdng_decoder_native*.so found under {artifact_dir}/native")
+            return 1
+        so = matches[0]
+        llvm_nm = os.path.join(
+            ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-nm"
+        )
+        if not os.access(llvm_nm, os.X_OK):
+            report.error(
+                f"llvm-nm not found at {llvm_nm} — NDK layout may have changed (r27c expected)."
+            )
+            return 1
+        result = run.run_to_file([llvm_nm, "-D", so], "android_so_dynsyms.txt")
+        report.marker("NM_RC", result.returncode)
+        if result.returncode != 0:
+            report.error(
+                f"llvm-nm -D failed on {so} (rc={result.returncode}); export presence is "
+                "UNVERIFIED, refusing to publish."
+            )
+            text = Path("android_so_dynsyms.txt").read_text(errors="replace")
+            if text:
+                report.plain(text.rstrip("\n"))
+            return 1
+        dump_text = Path("android_so_dynsyms.txt").read_text(errors="replace")
+    else:
+        raise ValueError(f"assert_exports: unsupported platform {platform!r}")
+
     # Keyword call, not positional: `native/scripts/deps/test_no_shell_lint.py`
     # flags any call named `run` whose FIRST POSITIONAL argument is a bare
     # string (the subprocess-argv shape it exists to catch) -- this is a
@@ -161,11 +275,26 @@ def assert_exports(platform: str, arch: str | None = None) -> int:
     )
     report.rc("ASSERT_EXPORTS", rc)
     if rc != 0:
-        report.error(
-            f"assert_exports.py reported missing/absent symbol(s) in {so} — the .so does not "
-            "export the FFI surface Dart looks up (check FFI_EXPORT on the definitions in "
-            "native/src/ffi/)."
-        )
+        if platform == "windows":
+            report.error(
+                f"assert_exports.py reported missing/absent symbol(s) in {so} — the DLL does "
+                "not export the FFI surface Dart looks up. On Windows this needs "
+                "__declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ "
+                "(see dng_ffi_api.cpp and heif_ffi_api.cpp)."
+            )
+        elif platform == "android":
+            report.error(
+                f"assert_exports.py reported missing/absent symbol(s) in {so} — the .so does "
+                "not export the FFI surface Dart looks up."
+            )
+        elif platform == "linux":
+            report.error(
+                f"assert_exports.py reported missing/absent symbol(s) in {so} — the .so does "
+                "not export the FFI surface Dart looks up (check FFI_EXPORT on the definitions "
+                "in native/src/ffi/)."
+            )
+        # macOS: PORTED AS-IS -- the original shell has no `::error::` line
+        # here at all, only `exit "${RC}"`. Do not add one.
     return rc
 
 

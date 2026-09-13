@@ -160,7 +160,14 @@ TARGETS: dict = {
         "shared_lib_glob": "*.so",
         "dump_format": "elf",
         "strings_tools": ("llvm-strings",),
-        "readelf_tools": (),
+        # llvm-readelf, not host readelf: registry completeness for
+        # verify_artifact.import_closure()'s eventual android support --
+        # dt_needed.py resolves the identical NDK-relative path itself
+        # rather than reading this key (impl-18, WI-22 ask). android's
+        # host is x86_64 but the .so is cross-compiled aarch64; every other
+        # android tool key in this file (nm_tools, strings_tools) already
+        # names the NDK's own binary for the same reason.
+        "readelf_tools": ("llvm-readelf",),
         "nm_tools": ("llvm-nm",),
         "nm_tools_fallback": (),
         "objdump_tools": (),
