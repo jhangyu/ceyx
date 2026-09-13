@@ -106,6 +106,143 @@ class TestDtNeeded(unittest.TestCase):
         self.assertEqual(emitted, golden.splitlines())
 
 
+class TestDtNeededAndroid(unittest.TestCase):
+    """Android is NOT linux with a parameter swapped -- two independent
+    checks (STL bidirectional presence/absence, then device-whitelist
+    closure via the existing standalone script), per lead6-pyci-opus's
+    WI-22 ruling. See dt_needed.py's module docstring."""
+
+    def _dirs(self):
+        d = Path(tempfile.mkdtemp())
+        artifact_dir = d / "artifacts"
+        (artifact_dir / "native").mkdir(parents=True)
+        runner_temp = d / "runnertemp"
+        runner_temp.mkdir()
+        ndk_home = d / "ndk"
+        readelf_dir = ndk_home / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
+        readelf_dir.mkdir(parents=True)
+        llvm_readelf = readelf_dir / "llvm-readelf"
+        llvm_readelf.write_text("#!/bin/sh\n")
+        llvm_readelf.chmod(0o755)
+        build_log = d / "android_build.log"
+        return artifact_dir, runner_temp, ndk_home, build_log
+
+    def _stage_decoder(self, artifact_dir):
+        so = artifact_dir / "native" / "libdng_decoder_native.so"
+        so.write_bytes(b"")
+        return so
+
+    def test_stl_shared_with_libcxx_and_closure_ok_passes(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        self._stage_decoder(artifact_dir)
+        build_log.write_text(dt_needed._ANDROID_STL_SHARED_LOG_LINE + "\n")
+        dumps = {
+            "libdng_decoder_native.so": " 0x01 (NEEDED) Shared library: [libc++_shared.so]\n",
+        }
+        with mock.patch.object(dt_needed.run, "run_to_file", side_effect=_fake_run_to_file(dumps)), \
+             mock.patch.object(dt_needed.run, "capture", return_value=(0, "CLOSURE_RESULT=ok\n")):
+            rc, out, err = _emit(
+                dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+                ndk_home=str(ndk_home), build_log=str(build_log),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("STL_SHARED_LOG=True", out)
+        self.assertIn("DT_NEEDED_HAS_LIBCXX_SHARED=True", out)
+        self.assertIn("DT_NEEDED_CLOSURE_RC=0", out)
+
+    def test_stl_shared_but_libcxx_missing_fails(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        self._stage_decoder(artifact_dir)
+        build_log.write_text(dt_needed._ANDROID_STL_SHARED_LOG_LINE + "\n")
+        dumps = {"libdng_decoder_native.so": " 0x01 (NEEDED) Shared library: [libc.so]\n"}
+        with mock.patch.object(dt_needed.run, "run_to_file", side_effect=_fake_run_to_file(dumps)):
+            rc, out, err = _emit(
+                dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+                ndk_home=str(ndk_home), build_log=str(build_log),
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("does not list libc++_shared.so", err)
+
+    def test_stl_static_with_libcxx_present_fails(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        self._stage_decoder(artifact_dir)
+        build_log.write_text(dt_needed._ANDROID_STL_STATIC_LOG_LINE + "\n")
+        dumps = {"libdng_decoder_native.so": " 0x01 (NEEDED) Shared library: [libc++_shared.so]\n"}
+        with mock.patch.object(dt_needed.run, "run_to_file", side_effect=_fake_run_to_file(dumps)):
+            rc, out, err = _emit(
+                dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+                ndk_home=str(ndk_home), build_log=str(build_log),
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("lists libc++_shared.so, but the configure log says the STL is c++_static", err)
+
+    def test_stl_static_without_libcxx_then_closure_fail_propagates(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        self._stage_decoder(artifact_dir)
+        build_log.write_text(dt_needed._ANDROID_STL_STATIC_LOG_LINE + "\n")
+        dumps = {"libdng_decoder_native.so": " 0x01 (NEEDED) Shared library: [libc.so]\n"}
+        with mock.patch.object(dt_needed.run, "run_to_file", side_effect=_fake_run_to_file(dumps)), \
+             mock.patch.object(dt_needed.run, "capture", return_value=(1, "CLOSURE_RESULT=fail:x.so:liby.so\n")):
+            rc, out, err = _emit(
+                dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+                ndk_home=str(ndk_home), build_log=str(build_log),
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("DT_NEEDED_CLOSURE_RC=1", out)
+        self.assertIn("neither bundled nor in the measured", err)
+
+    def test_neither_stl_log_line_present_fails(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        self._stage_decoder(artifact_dir)
+        build_log.write_text("some unrelated configure output\n")
+        dumps = {"libdng_decoder_native.so": " 0x01 (NEEDED) Shared library: [libc++_shared.so]\n"}
+        with mock.patch.object(dt_needed.run, "run_to_file", side_effect=_fake_run_to_file(dumps)):
+            rc, out, err = _emit(
+                dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+                ndk_home=str(ndk_home), build_log=str(build_log),
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot be identified", err)
+
+    def test_missing_ndk_home_fails(self) -> None:
+        artifact_dir, runner_temp, _ndk_home, build_log = self._dirs()
+        rc, out, err = _emit(
+            dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+            ndk_home=None, build_log=str(build_log),
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("--ndk-home is required", err)
+
+    def test_llvm_readelf_not_executable_fails(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        # Point at an NDK root that has no llvm-readelf staged at all.
+        empty_ndk = ndk_home.parent / "empty_ndk"
+        rc, out, err = _emit(
+            dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+            ndk_home=str(empty_ndk), build_log=str(build_log),
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("llvm-readelf not found", err)
+
+    def test_no_decoder_so_staged_fails(self) -> None:
+        artifact_dir, runner_temp, ndk_home, build_log = self._dirs()
+        rc, out, err = _emit(
+            dt_needed.dt_needed, "android", str(artifact_dir), str(runner_temp),
+            ndk_home=str(ndk_home), build_log=str(build_log),
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("no libdng_decoder_native", err)
+
+
+class TestDtNeededUnsupportedPlatform(unittest.TestCase):
+    def test_windows_is_not_silently_accepted(self) -> None:
+        d = Path(tempfile.mkdtemp())
+        rc, out, err = _emit(dt_needed.dt_needed, "windows", str(d), str(d))
+        self.assertEqual(rc, 2)
+        self.assertIn("unsupported platform 'windows'", err)
+
+
 class TestDtNeededBareScriptInvocation(unittest.TestCase):
     """Owed item (leader ruling on WI-8 signoff): a genuine subprocess
     invocation of ``python3 native/scripts/ci.py dt-needed ...`` -- the
