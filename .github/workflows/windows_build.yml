@@ -491,126 +491,80 @@ jobs:
           # rather than inferring it from CMake variables.
           grep -m1 "DeflateDecompressor.cpp.obj" "$B/build.ninja" || echo "rule not found"
 
+      # Migrated to native/scripts/ci/verify_artifact.py (WI-21/WI-22,
+      # pyci python-ization campaign): AC-W3 file-exists + non-zero-size
+      # check only. Windows' export-table check (AC-W4) and its DLL
+      # dependency-closure gate ("Step 4") were split into their own steps
+      # below -- see those steps for why they could not fold into this one.
       - name: Verify Windows artifact
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py verify-artifact --platform windows
+
+      # AC-W4 (2026-08-30): the DLL actually EXPORTS the FFI surface.
+      # Migrated to native/scripts/ci/verify_artifact.py's assert_exports()
+      # (WI-21/WI-22). Everything the prior step proves passes for a DLL
+      # that exports nothing at all -- exports here come only from
+      # __declspec(dllexport) (no CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS, no .def
+      # file in this tree), so a definition missing its FFI_EXPORT compiles,
+      # links, produces a correctly-sized DLL, and then fails at the
+      # consumer's Dart lookupFunction; src/ffi/encode_ffi_api.cpp shipped
+      # exactly that omission and Linux/macOS's default-visibility exports
+      # could never have caught it. Dump-then-assert logic (dumpbin with an
+      # llvm-nm fallback, output to a file and grepped -- never
+      # `dumpbin | grep -q`, which SIGPIPEs the producer under pipefail on a
+      # SUCCESSFUL match) now lives in the module; DUMPBIN_RC/LLVM_NM_RC/
+      # ASSERT_EXPORTS_RC marker names and every `::error::` message are
+      # transcribed verbatim from this step's pre-migration shell.
+      - name: Assert required FFI exports present in Windows DLL (AC-W4)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-exports --platform windows
+
+      # --- Step-4 load gate: the DLLs this decoder needs at load time ---
+      #
+      # NOT migrated (carry-forward, pyci python-ization campaign, push 7):
+      # `ci.py import-closure` is still hard-gated to
+      # `platform == "linux"` (native/scripts/ci.py's `_linux_only_commands`),
+      # and `ci/verify_artifact.py`'s `import_closure()` itself hardcodes
+      # `--format elf` with no PE branch (verify_artifact.py:181) -- so
+      # ungating it for Windows without adding that branch would silently
+      # run the wrong check against a PE binary rather than error. This is
+      # one function with two platform gaps: android's is blocked on the
+      # caller-supplied-artifact-dir redesign `stage.py` already went
+      # through; Windows' is blocked on a PE-format branch that has not
+      # been started. Whoever picks this up should treat it as one function,
+      # two gaps -- not two separate problems. Kept as real shell rather
+      # than a stub or a weakened check (dropping this would silently pass
+      # a DLL missing its HEIF dependency, the same failure class AC-W4
+      # above exists to catch for missing exports).
+      #
+      # Two distinct failure modes, both invisible to every check above:
+      #   (a) HEIF silently NOT compiled in -- caught by the import table
+      #       not naming heif.dll;
+      #   (b) HEIF compiled in but the dependency DLLs are not beside the
+      #       decoder -- caught by the file-existence assertions. On a
+      #       user's machine that is a total load failure whose error names
+      #       only dng_decoder_native.dll.
+      #
+      # DEPENDENCY DEPTH MATTERS (run 33294722901): libde265 is a TRANSITIVE
+      # dependency. dng_decoder_native.dll imports heif.dll only; it is
+      # heif.dll that imports libde265.dll, because no translation unit in
+      # this project references a de265_* symbol. Asserting libde265.dll in
+      # the DECODER's import table is red on a perfectly correct artifact.
+      # So each name is asserted at the depth where it actually appears:
+      # heif.dll in the decoder's imports, libde265.dll in heif.dll's.
+      #
+      # The de265 runtime file is libde265.dll while its import library is
+      # de265.lib -- upstream's asymmetry, kept because heif.dll's import
+      # table names libde265.dll and renaming would break loading.
+      #
+      # Output to a file, then grep the file (never `dumpbin | grep -q`:
+      # under pipefail a SUCCESSFUL match kills the producer with SIGPIPE
+      # and the pipeline reports 141).
+      - name: Assert Windows DLL dependency closure
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           DLL="native/build-windows/dng_decoder_native.dll"
-          ls -la native/build-windows || true
-          if [ ! -f "$DLL" ]; then
-            echo "::error::$DLL not found — the Windows build did not emit the expected DLL." >&2
-            exit 1
-          fi
-          echo "== file =="
-          file "$DLL" || echo "::notice::file(1) unavailable on this runner; size check below is the binding evidence."
-          echo "== size (bytes) =="
-          SIZE=$(wc -c < "$DLL")
-          echo "DLL_SIZE_BYTES=$SIZE"
-          if [ "$SIZE" -le 0 ]; then
-            echo "::error::DLL is zero bytes." >&2
-            exit 1
-          fi
-
-          # AC-W4 (2026-08-30): the DLL actually EXPORTS the FFI surface.
-          #
-          # Everything above this line passes for a DLL that exports nothing at
-          # all, and on Windows that is a real and silent failure mode: exports
-          # here come only from __declspec(dllexport) (there is no
-          # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS and no .def file in this tree), so
-          # a definition missing its FFI_EXPORT compiles, links, produces a
-          # correctly-sized DLL, and then fails at the consumer's Dart
-          # lookupFunction. src/ffi/encode_ffi_api.cpp shipped exactly that
-          # omission; Linux and macOS export by default visibility and so could
-          # never have caught it. This step is the only place that can.
-          #
-          # ceyx_decode_into_buffer_oriented is the POSITIVE CONTROL: it is
-          # always compiled and always CEYX_FFI_EXPORT'd with no per-platform
-          # guard (native/src/ffi/ceyx_decode_into_ffi.cpp:1-8, :277), so its
-          # absence means this check is broken (wrong tool, wrong file), not
-          # that the build regressed.
-          # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
-          #
-          # ceyx_encode_webp_rgba8 is deliberately NOT gated: it is compiled to
-          # return kCeyxEncodeErrUnsupported where no vendored libwebp dist
-          # exists (the case on this runner) but the symbol is still exported.
-          # Presence is the contract; capability is not.
-          #
-          # Tooling: dumpbin comes from the MSVC environment set up by
-          # ilammy/msvc-dev-cmd above; llvm-nm ships beside the mandatory
-          # clang-cl. `-exports` is spelled with a leading dash, NOT /exports,
-          # because MSYS bash rewrites a leading-slash argument into a Windows
-          # path. Output goes to a FILE which is then grepped — never
-          # `dumpbin | grep -q`, which under `bash -eo pipefail` makes the
-          # producer die of SIGPIPE on a SUCCESSFUL match and reports 141.
-          echo "== AC-W4: exported FFI symbols =="
-          set +e
-          dumpbin -exports "$DLL" > dll_exports.txt 2>&1
-          rc=$?
-          set -e
-          echo "DUMPBIN_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::notice::dumpbin unavailable or failed (rc=${rc}); falling back to llvm-nm."
-            set +e
-            llvm-nm --extern-only --defined-only "$DLL" > dll_exports.txt 2>&1
-            rc=$?
-            set -e
-            echo "LLVM_NM_RC=${rc}"
-          fi
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::could not read the export table of $DLL with either dumpbin or llvm-nm (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
-            cat dll_exports.txt || true
-            exit 1
-          fi
-          echo "-- first 60 lines of the export listing --"
-          head -60 dll_exports.txt
-          # WI-13 (S-G2): the six-name allowlist loop is replaced by the
-          # Dart-derived manifest (native/deps/export_manifest.toml) via
-          # native/scripts/assert_exports.py. The four heif_* entries are
-          # still covered -- they are the manifest's "heif" guarded group,
-          # present only because src/ffi/heif_ffi_api.cpp applies FFI_EXPORT
-          # (__declspec(dllexport)) to each definition; absent that, every
-          # check above still passes and Dart's lookupFunction fails on the
-          # user's machine instead. The manifest's mandatory (ungrouped) set
-          # still carries ceyx_decode_into_buffer_oriented as this leg's own
-          # positive control, same role the six-name loop gave it.
-          set +e
-          python3 native/scripts/assert_exports.py \
-            --manifest native/deps/export_manifest.toml \
-            --platform windows \
-            --dump dll_exports.txt
-          RC=$?
-          set -e
-          echo "ASSERT_EXPORTS_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::assert_exports.py reported missing/absent symbol(s) in $DLL — the DLL does not export the FFI surface Dart looks up. On Windows this needs __declspec(dllexport) via FFI_EXPORT on the definitions in native/src/ffi/ (see dng_ffi_api.cpp and heif_ffi_api.cpp)." >&2
-            exit "${RC}"
-          fi
-
-          # --- Step-4 load gate: the DLLs this decoder needs at load time ---
-          #
-          # Two distinct failure modes, both invisible to every check above:
-          #   (a) HEIF silently NOT compiled in -- caught by the import table
-          #       not naming heif.dll;
-          #   (b) HEIF compiled in but the dependency DLLs are not beside the
-          #       decoder -- caught by the file-existence assertions. On a
-          #       user's machine that is a total load failure whose error names
-          #       only dng_decoder_native.dll.
-          #
-          # DEPENDENCY DEPTH MATTERS (run 33294722901): libde265 is a TRANSITIVE
-          # dependency. dng_decoder_native.dll imports heif.dll only; it is
-          # heif.dll that imports libde265.dll, because no translation unit in
-          # this project references a de265_* symbol. Asserting libde265.dll in
-          # the DECODER's import table is red on a perfectly correct artifact.
-          # So each name is asserted at the depth where it actually appears:
-          # heif.dll in the decoder's imports, libde265.dll in heif.dll's.
-          #
-          # The de265 runtime file is libde265.dll while its import library is
-          # de265.lib -- upstream's asymmetry, kept because heif.dll's import
-          # table names libde265.dll and renaming would break loading.
-          #
-          # Output to a file, then grep the file (never `dumpbin | grep -q`:
-          # under pipefail a SUCCESSFUL match kills the producer with SIGPIPE
-          # and the pipeline reports 141).
           echo "== Step 4: import table =="
           set +e
           dumpbin -dependents "$DLL" > dll_dependents.txt 2>&1
@@ -802,29 +756,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE"
 
+      # Migrated to native/scripts/ci/stage.py's stage_windows() (WI-21/WI-22,
+      # pyci python-ization campaign). The two HEIF dependencies and the
+      # OpenMP runtime companion are hard-required (declared shipped files;
+      # a missing one is a hard failure, matching this step's original
+      # unguarded `cp`); the optional import library
+      # (dng_decoder_native.lib) is copied only if present, matching the
+      # original `2>/dev/null || echo ::notice::...` fallback exactly.
       - name: Stage native artifacts
-        shell: bash
         working-directory: ${{ github.workspace }}
-        run: |
-          mkdir -p artifacts/native
-          cp native/build-windows/dng_decoder_native.dll artifacts/native/
-          # The two HEIF dependencies are NOT optional: dng_decoder_native.dll
-          # imports them (asserted in the verify step above), so a release that
-          # omits either cannot be loaded. Copied WITHOUT `|| true` on purpose --
-          # a failure here must stop the job.
-          cp native/build-windows/heif.dll      artifacts/native/
-          cp native/build-windows/libde265.dll  artifacts/native/
-          # WI-4 step 4.5 (OQ-N2 ruled SHIP): the OpenMP runtime is the 4th
-          # shipped-file-group member (native/deps/shipped_files.toml
-          # [windows].companions) -- staged by heif.cmake's WIN32 branch
-          # next to the built DLL, so it must travel into artifacts/native/
-          # the same way the other two dynamic companions do.
-          cp native/build-windows/libomp140.x86_64.dll artifacts/native/
-          # The import library is only produced when the linker sees exports;
-          # copy it when present so downstream consumers can link against it.
-          cp native/build-windows/dng_decoder_native.lib artifacts/native/ 2>/dev/null || \
-            echo "::notice::dng_decoder_native.lib not present (import library not emitted); DLL-only artifact."
-          ls -la artifacts/native
+        run: python3 native/scripts/ci.py stage --platform windows --artifact-dir artifacts --source-dir native/build-windows
 
       # WI-14 step 14.2 (S-F1): measure the floor of the file that actually
       # ships (the decoder DLL, PE subsystem version).
@@ -859,19 +800,20 @@ jobs:
       # native/scripts/read_shipped_files.py, the one declaration WI-4 step
       # 4.2/4.5 and this step now share. Renamed from "...DLL trio..." to
       # "...shipped-file group..." because "trio" bakes a count into a name.
+      # Migrated to native/scripts/ci/stage.py's assert_staged_group_windows()
+      # (WI-21/WI-22, pyci python-ization campaign). Symmetric *.dll-only
+      # compare (the optional .lib import library is never part of either
+      # set, matching the shell's `ls *.dll` glob) -- unlike Linux, no
+      # SHARED_LIB_COUNT-style marker and no atomic-group success line; this
+      # step stays silent on a match, same as the shell it replaces. The
+      # EXPECTED_DLL_SET/STAGED_DLL_SET marker values carry the shell's
+      # `sort | tr '\n' ' '` trailing space verbatim (verified byte-for-byte
+      # against the pre-migration shell with `od -c`); the comparison itself
+      # is on plain Python lists, matching this step's original
+      # `echo ... | xargs` whitespace-insensitive `!=`.
       - name: Assert the Windows shipped-file group is complete (atomic group)
-        shell: bash
         working-directory: ${{ github.workspace }}
-        run: |
-          ls -la artifacts/native
-          EXPECTED_DLL_SET=$(python3 native/scripts/read_shipped_files.py --platform windows --all | tr ' ' '\n' | sort | tr '\n' ' ')
-          echo "EXPECTED_DLL_SET=${EXPECTED_DLL_SET}"
-          STAGED_DLL_SET=$(cd artifacts/native && ls *.dll | sort | tr '\n' ' ')
-          echo "STAGED_DLL_SET=${STAGED_DLL_SET}"
-          if [ "$(echo "${EXPECTED_DLL_SET}" | xargs)" != "$(echo "${STAGED_DLL_SET}" | xargs)" ]; then
-            echo "::error::staged Windows DLL set does not match native/deps/shipped_files.toml's declaration — expected [${EXPECTED_DLL_SET}], found [${STAGED_DLL_SET}]." >&2
-            exit 1
-          fi
+        run: python3 native/scripts/ci.py assert-staged-group --platform windows --artifact-dir artifacts
 
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`
