@@ -679,6 +679,45 @@ class TestCapabilityVectorDispatch(unittest.TestCase):
         self.assertIsInstance(rc, int)
 
 
+class TestAssertVcpkgArtefactsMacosDispatch(unittest.TestCase):
+    """Regression pin for the gate-widening step: impl-18 committed
+    `_assert_vcpkg_artefacts_macos` (81fc2b94) but flagged that its branch
+    was UNREACHABLE from the CLI until `_VCPKG_ARTEFACT_PLATFORMS` widened
+    to admit macOS -- a passing module-level test proves the function
+    works, not that dispatch reaches it (the same class of gap
+    `build-zlib` sat in for two pushes)."""
+
+    def test_macos_reaches_provision_with_arch_tag(self):
+        from unittest import mock
+
+        import ci.provision as provision_module
+
+        with mock.patch.object(
+            provision_module, "assert_vcpkg_artefacts", return_value=0
+        ) as mocked:
+            rc = ci_entrypoint.main(
+                [
+                    "assert-vcpkg-artefacts", "--platform", "macos",
+                    "--triplet", "arm64-osx-heif", "--runner-temp", "/rt",
+                    "--arch-tag", "arm64",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        mocked.assert_called_once_with("macos", "arm64-osx-heif", "/rt", arch_tag="arm64")
+
+    def test_windows_still_rejected_narrowness_check(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = ci_entrypoint.main(
+                [
+                    "assert-vcpkg-artefacts", "--platform", "windows",
+                    "--triplet", "x64-windows-heif", "--runner-temp", "/rt",
+                ]
+            )
+        self.assertEqual(rc, 2)
+        self.assertIn("::error::", buf.getvalue())
+
+
 class TestBuildZlibDispatch(unittest.TestCase):
     """Regression pin for the defect lead7 found at ae56dc82: `build-zlib`
     had a subparser and a frozen-surface docstring entry (implying it was

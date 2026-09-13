@@ -45,6 +45,7 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py vcpkg-bootstrap   --baseline SHA --runner-temp T
     python3 native/scripts/ci.py vcpkg-install     --triplet T --workspace W --runner-temp T [--feature F ...]
     python3 native/scripts/ci.py assert-vcpkg-artefacts --platform linux --triplet T --runner-temp T
+    python3 native/scripts/ci.py assert-vcpkg-artefacts --platform macos --triplet T --runner-temp T --arch-tag A
     python3 native/scripts/ci.py verify-interpreter --forbid-hostedtoolcache
     python3 native/scripts/ci.py ensure-cmake      --min 3.28
     python3 native/scripts/ci.py build-zlib        --version 1.3.1 --workspace W
@@ -519,8 +520,16 @@ def build_parser() -> argparse.ArgumentParser:
     def _assert_vcpkg_artefacts_extra(sp):
         # Workflow context (R13), not targets.py facts: the triplet is a
         # matrix value and $RUNNER_TEMP is a runner-supplied path.
+        # --arch-tag (macOS only, NOT the --arch dropped from this command
+        # earlier -- different name, different semantics): the value comes
+        # from matrix.arch_tag for provision.py's macOS lipo comparison.
+        # Optional at the argparse level; provision._assert_vcpkg_artefacts_
+        # macos() itself raises if it's missing on macOS -- no default is
+        # added here that would reintroduce the silent-skip this command
+        # was built to avoid.
         sp.add_argument("--triplet", required=True)
         sp.add_argument("--runner-temp", required=True)
+        sp.add_argument("--arch-tag", default=None)
 
     _add_platform_command(
         sub,
@@ -808,26 +817,27 @@ def dispatch(args: argparse.Namespace) -> int:
 
         return provision.vcpkg_install(args.triplet, args.workspace, args.runner_temp, args.feature)
     if args.command == "assert-vcpkg-artefacts":
-        # PERMANENT exclusion, same shape as _CODEC_PROBE_PLATFORMS: macOS's
-        # real artefact-assertion shape differs (dylib + `lipo -archs`, not
-        # an .so-absence glob) and is deliberately unimplemented in
-        # provision.py (see its docstring) -- checked here, before the
-        # call, so an unsupported platform gets a clean ::error:: + exit 2
-        # instead of an uncaught ValueError traceback (found by smoke-test,
-        # not by a unit test: unit tests only exercised the module function
-        # directly, never the CLI's own rejection path).
-        _VCPKG_ARTEFACT_PLATFORMS = frozenset({"linux"})
+        # PERMANENT exclusion, same shape as _CODEC_PROBE_PLATFORMS. WIDENED
+        # (push 8) to admit macOS now that provision.py has a real
+        # `_assert_vcpkg_artefacts_macos` branch (81fc2b94) -- confirmed by
+        # reading that commit's signature directly, not assumed. Any other
+        # platform still gets a clean ::error:: + exit 2 instead of an
+        # uncaught ValueError traceback (found by smoke-test, not by a unit
+        # test: unit tests only exercised the module function directly,
+        # never the CLI's own rejection path).
+        _VCPKG_ARTEFACT_PLATFORMS = frozenset({"linux", "macos"})
         if args.platform not in _VCPKG_ARTEFACT_PLATFORMS:
             print(
                 f"::error::assert-vcpkg-artefacts has no --platform {args.platform!r} leg -- "
-                "only 'linux' is ported (macOS's real check asserts a different shape, see "
-                "provision.py's module docstring)",
+                "only 'linux' and 'macos' are ported, see provision.py's module docstring)",
                 file=sys.stderr,
             )
             return 2
         import ci.provision as provision
 
-        return provision.assert_vcpkg_artefacts(args.platform, args.triplet, args.runner_temp)
+        return provision.assert_vcpkg_artefacts(
+            args.platform, args.triplet, args.runner_temp, arch_tag=args.arch_tag
+        )
     if args.command == "verify-interpreter":
         import ci.provision as provision
 
