@@ -537,18 +537,22 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         )
 
     def test_a_still_linux_only_sibling_command_is_still_rejected_off_platform(self):
-        # Narrowness check: removing `min-runtime` from `_linux_only_commands`
-        # must not have widened (or accidentally emptied) the set itself --
-        # `import-closure` is still a genuinely linux-only module (no other
-        # platform's twin exists yet, WI-19/20/21 land those in push 7) and
-        # takes no extra required flags, so this isolates the
-        # `_linux_only_commands` gate itself from any command-specific
-        # required-flag argparse error.
+        # Narrowness check, updated for f651550f (WI-34, push 8 follow-on):
+        # `import-closure` is no longer gated by `_linux_only_commands`
+        # (that set is now empty) -- it has its own explicit
+        # `_IMPORT_CLOSURE_PLATFORMS = {linux, android}` allowlist in
+        # dispatch(), because windows/macOS exclusion here is permanent
+        # (no PE parser, no DT_NEEDED-shaped step) rather than "not yet
+        # migrated". This test now isolates *that* gate: windows must
+        # still be rejected with RC 2, via a named `::error::` instead of
+        # the old generic "not implemented yet" scaffolding message.
         buf = io.StringIO()
         with redirect_stderr(buf):
             rc = ci_entrypoint.main(["import-closure", "--platform", "windows"])
         self.assertEqual(rc, 2)
-        self.assertIn("not implemented yet", buf.getvalue())
+        self.assertIn(
+            "::error::import-closure has no --platform 'windows' leg", buf.getvalue()
+        )
 
     def test_min_runtime_dispatch_calls_minruntime_module_not_verify_artifact(self):
         # The regression this whole class exists to prevent: a behavioural
