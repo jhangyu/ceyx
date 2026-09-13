@@ -1,0 +1,10 @@
+jobs:
+  build:
+    steps:
+      - name: D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)
+        run: |
+          set -u
+          python3 native/tests/run_dist_equivalence.py \
+              --layers l1 \
+              --report "${GITHUB_WORKSPACE}/d6-layer1-report-${{ matrix.arch_tag }}.md"
+          echo "D6_LAYER1_RC=$?"
