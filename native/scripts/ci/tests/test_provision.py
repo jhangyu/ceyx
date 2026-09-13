@@ -359,28 +359,66 @@ class ProvisionTests(unittest.TestCase):
 
 
 class TestAssertVcpkgArtefactsBareScriptInvocation(unittest.TestCase):
-    """One real invocation through ci.py itself, including the rejection
-    path -- a raw traceback was found here once before (unit tests only
-    ever called the module function directly, never the CLI's own
-    rejection branch). macOS is currently gated out at ci.py's dispatch
-    layer (`_VCPKG_ARTEFACT_PLATFORMS`), not inside provision.py, so this
-    proves that gate still produces a clean ::error::/exit 2 -- not that
-    provision.py's own macOS branch is reachable from the CLI yet (it
-    isn't, until ci.py grows an --arch-tag flag and widens that set,
-    which is impl-16's file, not this one)."""
+    """One real invocation through ci.py itself. macOS was gated out at
+    ci.py's dispatch layer when this class was first written -- that gate
+    has since been widened (impl-16, `7d44807d`, --arch-tag wired) and this
+    class was updated to match: macOS now gets a REAL success-path
+    invocation (genuine subprocess `lipo -archs` against real Mach-O
+    binaries, not mocked), and the rejection-path coverage moved to
+    windows, which is still correctly excluded. A test that starts failing
+    because the behaviour it pinned changed ON PURPOSE is a correct test,
+    not a broken one -- this is that case, not a case of "fix the test to
+    match", so the fix here is retargeting, not loosening."""
 
     def _run_ci(self, *argv: str):
         return run_module.run([sys.executable, str(_CI_ENTRYPOINT), *argv], cwd=str(_REPO_ROOT))
 
-    def test_assert_vcpkg_artefacts_macos_is_cleanly_rejected_by_cli(self) -> None:
+    def test_assert_vcpkg_artefacts_windows_is_cleanly_rejected_by_cli(self) -> None:
+        # windows has no vcpkg-artefact shape ported at all (neither
+        # linux's .so-absence glob nor macOS's three-property dylib/lipo
+        # check) -- still correctly excluded, so this is the rejection-path
+        # coverage this class always existed to provide: a clean
+        # ::error::/exit 2, never an uncaught traceback.
         result = self._run_ci(
-            "assert-vcpkg-artefacts", "--platform", "macos",
-            "--triplet", "arm64-osx-heif", "--runner-temp", "/tmp/does-not-matter",
+            "assert-vcpkg-artefacts", "--platform", "windows",
+            "--triplet", "x64-windows-heif", "--runner-temp", "/tmp/does-not-matter",
         )
         self.assertEqual(result.returncode, 2)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("::error::", result.stderr)
-        self.assertIn("no --platform 'macos' leg", result.stderr)
+        self.assertIn("no --platform 'windows' leg", result.stderr)
+
+    def test_assert_vcpkg_artefacts_macos_success_path_through_real_cli(self) -> None:
+        # Real subprocess call, real `lipo -archs` against real Mach-O
+        # binaries (a copy of /usr/bin/true stands in for each staged
+        # library -- same shape impl-16 used to prove ci.py's own wiring),
+        # not the mocked `run.run` the unit tests above use. This is what
+        # was previously impossible: the CLI rejected --platform macos
+        # outright, so no test could reach this branch through ci.py.
+        true_bin = Path("/usr/bin/true")
+        if not true_bin.is_file():
+            self.skipTest("/usr/bin/true not present on this host")
+        archs = run_module.run(["lipo", "-archs", str(true_bin)]).stdout.split()
+        if not archs:
+            self.skipTest("lipo -archs produced no output for /usr/bin/true on this host")
+        arch_tag = archs[0]
+
+        d = Path(tempfile.mkdtemp())
+        lib_dir = d / "vcpkg-installed" / "arm64-osx-heif" / "lib"
+        lib_dir.mkdir(parents=True)
+        import shutil
+
+        shutil.copy(true_bin, lib_dir / "libwebp.a")
+        shutil.copy(true_bin, lib_dir / "libde265.dylib")
+        shutil.copy(true_bin, lib_dir / "libaom.a")
+
+        result = self._run_ci(
+            "assert-vcpkg-artefacts", "--platform", "macos",
+            "--triplet", "arm64-osx-heif", "--runner-temp", str(d),
+            "--arch-tag", arch_tag,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":
