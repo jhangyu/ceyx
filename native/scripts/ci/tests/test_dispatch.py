@@ -60,6 +60,12 @@ FROZEN_CLI_SURFACE = {
     "build-zlib",
     "locate-clang-cl",
     "verify-vulkan-lib",
+    # WI-29/WI-30 (push 8b, dispatch wiring extension ruled by lead9-pyci-opus):
+    # dist_build.py + vcpkg.py's argv surfaces.
+    "dist-build",
+    "dist-list",
+    "provision",
+    "vcpkg",
 }
 
 
@@ -537,13 +543,15 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         )
 
     def test_a_still_linux_only_sibling_command_is_still_rejected_off_platform(self):
-        # Narrowness check, updated for f651550f (WI-34, push 8 follow-on):
-        # `import-closure` is no longer gated by `_linux_only_commands`
-        # (that set is now empty) -- it has its own explicit
-        # `_IMPORT_CLOSURE_PLATFORMS = {linux, android}` allowlist in
-        # dispatch(), because windows/macOS exclusion here is permanent
-        # (no PE parser, no DT_NEEDED-shaped step) rather than "not yet
-        # migrated". This test now isolates *that* gate: windows must
+        # Narrowness check, updated for f651550f (WI-34, push 8 follow-on)
+        # and again for WI-36 (push 8, `_linux_only_commands` scaffold
+        # retired outright -- it had been an empty, permanently-unreachable
+        # literal since WI-34, confirmed dead by a repo-wide grep before
+        # deletion, not merely left inert): `import-closure` now has its
+        # own explicit `_IMPORT_CLOSURE_PLATFORMS = {linux, android}`
+        # allowlist in dispatch(), because windows/macOS exclusion here is
+        # permanent (no PE parser, no DT_NEEDED-shaped step) rather than
+        # "not yet migrated". This test isolates *that* gate: windows must
         # still be rejected with RC 2, via a named `::error::` instead of
         # the old generic "not implemented yet" scaffolding message.
         buf = io.StringIO()

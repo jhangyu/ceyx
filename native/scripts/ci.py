@@ -52,6 +52,34 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py locate-clang-cl   [--github-path PATH]
     python3 native/scripts/ci.py verify-vulkan-lib [--vulkan-sdk PATH]
 
+Extended by WI-29/WI-30 (push 8b, the dist-workflow python-ization -- user
+ruling P-3=(a)): dispatch wiring for both `dist_build.py` and `vcpkg.py`
+lands in one commit (ci.py has exactly one owner at a time per push --
+lead9-pyci-opus ruling), both modules' own functions unchanged.
+
+    python3 native/scripts/ci.py dist-build --component {heif-stack,jxl-stack,webp-stack,libjxl,libwebp} --platform android|windows --arch A --dist D [--android-ndk H] --rc-marker TOKEN
+    python3 native/scripts/ci.py dist-list  --dist D
+    python3 native/scripts/ci.py provision ninja
+    python3 native/scripts/ci.py provision apt --packages P [P ...]
+    python3 native/scripts/ci.py provision locate-clang-cl [--github-path PATH]
+    python3 native/scripts/ci.py vcpkg baseline --manifest F --github-env PATH
+    python3 native/scripts/ci.py vcpkg bootstrap --root D --baseline SHA
+    python3 native/scripts/ci.py vcpkg install --manifest-root D --install-root D --triplet T [--feature F ...] --rc-marker TOKEN
+    python3 native/scripts/ci.py vcpkg assert-aom-artifact --prefix D
+    python3 native/scripts/ci.py vcpkg export-prefix --prefix D --github-env PATH
+
+`provision ninja`/`provision apt`/`dist-list` emit NO markers (ledger
+enumeration confirmed the pre-migration steps they replace emit none --
+tightening a migration's marker surface is as much a regression as
+loosening it). `provision locate-clang-cl` is a second CLI path to the
+SAME `windows_toolchain.locate_clang_cl()` already dispatched by the flat
+`locate-clang-cl` command above -- not a second implementation. `vcpkg`
+is a distinct top-level group from the flat `vcpkg-baseline`/
+`vcpkg-bootstrap`/`vcpkg-install` commands above: those three dispatch to
+`provision.py`'s Linux/macOS (`.sh`) functions; `vcpkg <verb>` dispatches
+to `vcpkg.py`'s Windows-dist-only (`.bat`/`.exe`) functions -- same verb
+names, deliberately different modules (see `vcpkg.py`'s own docstring).
+
 `--platform` is always explicit and never inferred from the host OS.
 `--arch` is required iff `targets.spec(platform)["requires_arch"]` is True
 (C-G9: macOS yes, everything else is an argparse error if `--arch` is
@@ -120,6 +148,10 @@ _PLATFORMLESS_COMMANDS = (
     "build-zlib",
     "locate-clang-cl",
     "verify-vulkan-lib",
+    "dist-build",
+    "dist-list",
+    "provision",
+    "vcpkg",
 )
 
 
@@ -612,6 +644,70 @@ def build_parser() -> argparse.ArgumentParser:
     vvl = sub.add_parser("verify-vulkan-lib", help="assert vulkan-1.lib is present under VULKAN_SDK")
     vvl.add_argument("--vulkan-sdk", default="")
 
+    # WI-29 (push 8b): the carrier invocation and dist listing shared by
+    # all six *_dist_*.yml workflows.
+    db = sub.add_parser(
+        "dist-build", help="invoke build_deps.py's build carrier for a dist workflow (WI-29)"
+    )
+    db.add_argument(
+        "--component", required=True,
+        choices=["heif-stack", "jxl-stack", "webp-stack", "libjxl", "libwebp"],
+    )
+    db.add_argument("--platform", required=True, choices=["android", "windows"])
+    db.add_argument("--arch", required=True)
+    db.add_argument("--dist", required=True)
+    db.add_argument("--android-ndk", default=None)
+    db.add_argument("--rc-marker", required=True)
+
+    dl = sub.add_parser(
+        "dist-list", help="list a dist tree, sorted and unfiltered (find|sort replacement, WI-29)"
+    )
+    dl.add_argument("--dist", required=True)
+
+    # `provision <verb>`: WI-29's Ninja/apt bodies (new -- no prior
+    # migration anywhere) plus a second CLI path to WI-24's already-ported
+    # `locate_clang_cl` (the dist Windows twins reuse it rather than
+    # gaining a duplicate implementation). Distinct from the flat
+    # `locate-clang-cl` command above; both dispatch to the same function.
+    prov = sub.add_parser("provision", help="toolchain provisioning shared by dist carriers (WI-29)")
+    prov_sub = prov.add_subparsers(dest="provision_command")
+    prov_sub.add_parser("ninja", help="pip-install ninja, print its version (emits no marker)")
+    prov_apt = prov_sub.add_parser("apt", help="apt-get update + install a package list (emits no marker)")
+    prov_apt.add_argument("--packages", nargs="+", required=True)
+    prov_locate = prov_sub.add_parser("locate-clang-cl", help="reuses windows_toolchain.locate_clang_cl")
+    prov_locate.add_argument("--github-path", default=None)
+
+    # `vcpkg <verb>`: WI-30's five Windows HEIF-dist steps. A distinct
+    # top-level group from the flat `vcpkg-baseline`/`vcpkg-bootstrap`/
+    # `vcpkg-install` commands above -- those dispatch to provision.py's
+    # Linux/macOS (.sh) functions, this dispatches to vcpkg.py's
+    # Windows-dist-only (.bat/.exe) functions. Same verb names,
+    # deliberately different modules (see vcpkg.py's module docstring).
+    vcpkg_p = sub.add_parser("vcpkg", help="Windows HEIF-dist vcpkg steps (WI-30)")
+    vcpkg_sub = vcpkg_p.add_subparsers(dest="vcpkg_command")
+
+    vcb = vcpkg_sub.add_parser("baseline")
+    vcb.add_argument("--manifest", required=True)
+    vcb.add_argument("--github-env", required=True)
+
+    vcboot = vcpkg_sub.add_parser("bootstrap")
+    vcboot.add_argument("--root", required=True)
+    vcboot.add_argument("--baseline", required=True)
+
+    vcinst = vcpkg_sub.add_parser("install")
+    vcinst.add_argument("--manifest-root", required=True)
+    vcinst.add_argument("--install-root", required=True)
+    vcinst.add_argument("--triplet", required=True)
+    vcinst.add_argument("--feature", action="append", default=[])
+    vcinst.add_argument("--rc-marker", required=True)
+
+    vcaom = vcpkg_sub.add_parser("assert-aom-artifact")
+    vcaom.add_argument("--prefix", required=True)
+
+    vcexp = vcpkg_sub.add_parser("export-prefix")
+    vcexp.add_argument("--prefix", required=True)
+    vcexp.add_argument("--github-env", required=True)
+
     return p
 
 
@@ -630,24 +726,27 @@ def dispatch(args: argparse.Namespace) -> int:
             ["--baseline", args.baseline, "--candidate", args.candidate]
             + (["--leg", args.leg] if args.leg else [])
         )
-    # Push 3 (WI-7/WI-8) wires seven of these commands for Linux ONLY -- the
-    # other legs' twins land in later pushes (verify-artifact: WI-19/20/21,
-    # push 7). Falling through to `_not_yet()` for any other --platform
-    # keeps this push honest instead of calling into a module against
-    # `targets.py` data (e.g. macOS's `artifact_path: None`) that push 3
-    # never populated for it. `min-runtime` is NOT one of them as of push 6
-    # (WI-16b): `ci/minruntime.py` was generalised to all four platforms via
-    # `targets.spec(platform)["min_runtime_source"]`, so it dispatches to its
-    # own module below regardless of platform, same as `assert-orientation`
-    # and `codec-probe` before it.
-    # `stage`/`assert-staged-group`/`dt-needed`/`assert-exports`/
-    # `verify-artifact` are NOT in this set as of push 7 (WI-22): every one
-    # of their modules genuinely supports its platforms now -- confirmed
-    # against the committed modules, not a report that they were done
-    # (P-10's own lesson).
-    _linux_only_commands = set()
-    if args.command in _linux_only_commands and getattr(args, "platform", None) != "linux":
-        return _not_yet(args.command)
+    # WI-36 (pyci python-ization campaign): the `_linux_only_commands`
+    # scaffold that used to live here is RETIRED, not merely emptied.
+    # Push 3 (WI-7/WI-8) introduced it to wire seven commands for Linux
+    # ONLY while their other legs' twins were still pending; each command
+    # graduated out of the set as its own WI generalised its module
+    # (`min-runtime`: push 6/WI-16b; `stage`/`assert-staged-group`/
+    # `dt-needed`/`assert-exports`/`verify-artifact`: push 7/WI-22;
+    # `import-closure`, its last occupant: push 8/WI-34, which gave it its
+    # own explicit `_IMPORT_CLOSURE_PLATFORMS` allowlist below instead,
+    # because windows/macOS's exclusion from import-closure is PERMANENT
+    # (no PE parser, no DT_NEEDED-shaped step), not "not yet migrated" --
+    # the same distinction `_CODEC_PROBE_PLATFORMS`/`_CAPABILITY_VECTOR_
+    # PLATFORMS` already draw above. Confirmed dead before deletion (WI-36),
+    # not merely emptied and left as inert scaffolding: the set had been an
+    # empty literal, unconditionally False for every command, since WI-34;
+    # a repo-wide grep for `_linux_only_commands` found the two lines
+    # removed here as the ONLY live code reference -- every other hit
+    # (this file's own historical comments elsewhere, allowlist.py:131's
+    # BLOCKED-entry prose, windows_build.yml:491's comment,
+    # test_dispatch.py's docstrings) is prose describing the mechanism,
+    # not a consumer of it, and none breaks by its removal.
     # `import-closure` (WI-34, push 8 follow-on): generalised to linux AND
     # android via the same caller-supplied-artifact-dir/ndk-home redesign
     # `stage.py` already went through (confirmed against the committed
@@ -898,6 +997,47 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.provision as provision
 
         return provision.ensure_cmake(args.min)
+    if args.command == "dist-build":
+        import ci.dist_build as dist_build
+
+        return dist_build.dist_build(
+            args.component, args.platform, args.arch, args.dist, args.rc_marker,
+            android_ndk=args.android_ndk,
+        )
+    if args.command == "dist-list":
+        import ci.dist_build as dist_build
+
+        return dist_build.dist_list(args.dist)
+    if args.command == "provision":
+        if args.provision_command == "ninja":
+            import ci.provision as provision
+
+            return provision.ninja()
+        if args.provision_command == "apt":
+            import ci.provision as provision
+
+            return provision.apt(args.packages)
+        if args.provision_command == "locate-clang-cl":
+            import ci.windows_toolchain as windows_toolchain
+
+            return windows_toolchain.locate_clang_cl(args.github_path)
+        return 2
+    if args.command == "vcpkg":
+        import ci.vcpkg as vcpkg_mod
+
+        if args.vcpkg_command == "baseline":
+            return vcpkg_mod.baseline(args.manifest, args.github_env)
+        if args.vcpkg_command == "bootstrap":
+            return vcpkg_mod.bootstrap(args.root, args.baseline)
+        if args.vcpkg_command == "install":
+            return vcpkg_mod.install(
+                args.manifest_root, args.install_root, args.triplet, args.feature, args.rc_marker
+            )
+        if args.vcpkg_command == "assert-aom-artifact":
+            return vcpkg_mod.assert_aom_artifact(args.prefix)
+        if args.vcpkg_command == "export-prefix":
+            return vcpkg_mod.export_prefix(args.prefix, args.github_env)
+        return 2
     if args.command in _PLATFORM_COMMANDS or args.command in _PLATFORMLESS_COMMANDS:
         return _not_yet(args.command)
     return 2
