@@ -57,12 +57,7 @@ class Entry:
 MUST_STAY: tuple = (
     Entry('android_build.yml', 'Install build prerequisites (apt)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Build dng_decoder_native for Android', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('android_build.yml', 'Assert HEIF was actually linked, not silently degraded (A-T8-FIX)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('android_build.yml', 'Assert JXL was explicitly disabled, not silently degraded (G1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert build capability vector via probe (S-E2)', "PERMANENT exemption, not a migration backlog item (plan:1749-1757 scope correction, capability.py module docstring): this step is a single `echo` of an honest, permanently-accepted SKIP line -- android is not a capability-vector leg at all and `capability-vector --platform android` is not a supported target. No WI will ever retire this entry."),
-    Entry('android_build.yml', 'Stage native artifacts', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('android_build.yml', 'Fail if the required Android .so set is incomplete (A-T8-FIX atomic group)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('android_build.yml', 'Assert required FFI exports present in Android .so (G6)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert decoder DT_NEEDED matches the resolved Android STL (A-T8-FIX libc++_shared handling)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert DT_NEEDED closure across the packaged Android .so set (Task 11 follow-up)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('build.yml', 'Flutter pub get', "verify-dart job (Q4): flutter/dart toolchain step, outside this campaign's CI Python-ization scope"),
@@ -124,7 +119,6 @@ MUST_STAY: tuple = (
     Entry('macos_build.yml', 'Build host Halide generators + x86_64 AOT (cross stage 1)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Cross-compile dng_decoder_native for x86_64 (cross stage 2)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Verify dylib was produced and has the expected architecture', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('macos_build.yml', 'Assert required FFI exports present in dylib (G3)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('macos_build.yml', 'Stage native artifact', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('webp_dist_android.yml', 'Install Ninja', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
     Entry('webp_dist_android.yml', 'Build the libwebp dist (Python carrier)', 'not yet migrated to native/scripts/ci/ (pyci python-ization campaign; the *_dist_* workflows are outside the named WI list but Rule 1 scans every workflow file, so they carry the same generic reason pending a future WI)'),
@@ -147,9 +141,6 @@ MUST_STAY: tuple = (
     Entry('windows_build.yml', 'Diagnose configure failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Build dng_decoder_native', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Diagnose build failure (on failure only)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Verify Windows artifact', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Stage native artifacts', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
-    Entry('windows_build.yml', 'Assert the Windows shipped-file group is complete (atomic group)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('windows_build.yml', 'Assert Windows DLL dependency closure', "BLOCKED, not scheduled: split out of the old 'Verify Windows artifact' 211-line step (WI-21, push 7) when its file-exists/size and export-table checks migrated to native/scripts/ci/verify_artifact.py. This residue (the decoder's import-table dependency closure + heif.dll's own transitive libde265.dll check) cannot migrate yet because `ci.py import-closure` is hard-gated to platform=='linux' (ci.py's `_linux_only_commands`) AND `verify_artifact.import_closure()` itself hardcodes `--format elf` with no PE branch (verify_artifact.py:181) -- ungating it for windows without adding that branch would silently run the wrong check against a PE binary rather than error. Same underlying function (`import_closure()`) is also blocked for android, for a different reason (the caller-supplied-artifact-dir redesign stage.py already went through): one function, two platform gaps, not two problems. No WI currently owns adding the PE branch."),
 )
 
@@ -172,4 +163,4 @@ GRANDFATHERED_SHELL_FILES: tuple = (
 # make visible (module docstring above, and markerdiff.py's assertion-vs-
 # observability split). Every push that shrinks MUST_STAY must update this
 # literal in the same diff -- that edit IS the two-line reviewable pin.
-ALLOWLIST_SIZE_EXPECTED: int = 95
+ALLOWLIST_SIZE_EXPECTED: int = 87
