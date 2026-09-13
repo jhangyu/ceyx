@@ -53,10 +53,13 @@ jobs:
 
       # CMake ships with the runner image; Ninja does not reliably. pip's ninja
       # wheel is a pinned, deterministic way to get it on PATH without choco.
+      #
+      # WI-32 (push 8b): migrated to `ci.py provision ninja` (WI-29's
+      # `provision.ninja()`, identical body shared with windows_build.yml and
+      # the other *_dist_*.yml twins). `shell:` deliberately left unset --
+      # preserves the pre-migration default (`pwsh` on windows-latest).
       - name: Install Ninja
-        run: |
-          python -m pip install --disable-pip-version-check ninja
-          ninja --version
+        run: python native/scripts/ci.py provision ninja
 
       # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
       # LIB; this action is CI's equivalent of vcvars64.bat.
@@ -65,20 +68,22 @@ jobs:
         with:
           arch: x64
 
+      # WI-32 (push 8b): migrated to `ci.py provision locate-clang-cl`, which
+      # reuses `windows_toolchain.locate_clang_cl` (WI-24) rather than a
+      # second implementation.
+      #
+      # KNOWN DIVERGENCE, recorded rather than silently carried (identical to
+      # jxl_dist_windows.yml's note): the reused function's not-found message
+      # is "::error::clang-cl not found on the runner.
+      # native/cmake/pipeline.cmake requires it (cl.exe has no
+      # -ffp-contract=off equivalent)." (windows_toolchain.py:52-54), longer
+      # than this file's pre-migration "::error::clang-cl not found on the
+      # runner." Both `::error::`-prefixed, same trigger condition, text-only
+      # difference -- invisible to marker-diff since it only fires on an
+      # already-red step.
       - name: Locate clang-cl
         shell: bash
-        run: |
-          if command -v clang-cl >/dev/null 2>&1; then
-            CLANG_CL="$(command -v clang-cl)"
-          elif [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
-            CLANG_CL="/c/Program Files/LLVM/bin/clang-cl.exe"
-            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
-          else
-            echo "::error::clang-cl not found on the runner." >&2
-            exit 1
-          fi
-          echo "clang-cl: $CLANG_CL"
-          "$CLANG_CL" --version
+        run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
 
       # Migrated off build_libwebp_dist_windows.sh (2026-09-01 contract item
       # 11 / ENTRY-POINT RULE): the carrier is native/scripts/deps/win_webp_dist.py,
@@ -86,29 +91,40 @@ jobs:
       # was DELETED in round 3 once this carrier was proven green on a real
       # Windows run -- see win_webp_dist_test.py for the transcription test
       # frozen against its last revision.
+      #
+      # WI-32 (push 8b): migrated to `ci.py dist-build`. `--dist` keeps this
+      # file's pre-migration RELATIVE form (`native/third_party/...`, not the
+      # `${{ github.workspace }}/...` absolute form jxl/heif use) -- confirmed
+      # against WI-29 that `--dist` passes through unmodified, so the two
+      # argv forms are preserved as each file already had them rather than
+      # silently normalised to match. `shell: bash` KEPT (this is the one
+      # Windows carrier step written in bash, not pwsh -- see this file's
+      # header). The pre-migration `set +e` / `RC=$?` / `set -e` dance existed
+      # only to survive Actions' default `bash -eo pipefail` long enough to
+      # capture $?; `dist_build.py` needs no such workaround because it reads
+      # `result.returncode` from the `subprocess` object Python's own `run.py`
+      # returns, adjacent to the call, never from a shell variable -- the
+      # same guarantee the old dance was manually establishing.
       - name: Build the libwebp dist
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: |
-          # set +e so the literal RC=$? below actually runs: the default
-          # `bash -eo pipefail` shell would abort the step first, leaving a log
-          # that could only ever record RC=0.
-          set +e
-          python3 native/scripts/build_deps.py build webp-stack \
-            --platform windows --arch x86_64 \
-            --dist native/third_party/libwebp-dist-windows
-          RC=$?
-          set -e
-          echo "WEBP_DIST_WINDOWS_RC=$RC"
-          exit $RC
+        run: >
+          python3 native/scripts/ci.py dist-build
+          --component webp-stack --platform windows --arch x86_64
+          --dist native/third_party/libwebp-dist-windows
+          --rc-marker WEBP_DIST_WINDOWS_RC
 
       # Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
       # inventory while silently omitting the headers.
+      #
+      # WI-32 (push 8b): migrated to `ci.py dist-list` (WI-29) -- same
+      # deliberate tightening as jxl_dist_windows.yml's equivalent step
+      # (refuses to succeed silently on a missing/empty tree).
       - name: List the produced dist (complete)
         if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: find native/third_party/libwebp-dist-windows -type f | sort
+        run: python3 native/scripts/ci.py dist-list --dist native/third_party/libwebp-dist-windows
 
       # Canonical artifact name <component>-<platform>-<arch> (round 6); the
       # packaged directory keeps its committed tracked path.

@@ -70,10 +70,19 @@ jobs:
 
       # CMake ships with the runner image; Ninja does not reliably. pip's ninja
       # wheel is a pinned, deterministic way to get it on PATH without choco.
+      #
+      # WI-32 (push 8b): migrated to `ci.py provision ninja`, the identical
+      # body already extracted by WI-29 (provision.py's `ninja()` -- shared
+      # verbatim with windows_build.yml and the other five *_dist_*.yml
+      # twins, no per-caller variant). Emits no marker, matching this step's
+      # pre-migration silence. `shell:` deliberately left unset, same as the
+      # pre-migration body -- the runner's default (`pwsh` on windows-latest)
+      # is preserved rather than switched to `bash` to match the Android
+      # dist twins' convention (WI-31); those run on a linux runner where
+      # `bash` already was the default, so their explicit key changed
+      # nothing, but stating it here would be a real interpreter change.
       - name: Install Ninja
-        run: |
-          python -m pip install --disable-pip-version-check ninja
-          ninja --version
+        run: python native/scripts/ci.py provision ninja
 
       # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
       # LIB; this action is CI's equivalent of vcvars64.bat.
@@ -82,20 +91,25 @@ jobs:
         with:
           arch: x64
 
+      # WI-32 (push 8b): migrated to `ci.py provision locate-clang-cl`, which
+      # reuses `windows_toolchain.locate_clang_cl` (WI-24's port for
+      # windows_build.yml's identical body) rather than a second
+      # implementation, per dist_build.py's own twin-diff finding.
+      #
+      # KNOWN DIVERGENCE, recorded rather than silently carried: the reused
+      # function's not-found message is
+      # "::error::clang-cl not found on the runner. native/cmake/pipeline.cmake
+      # requires it (cl.exe has no -ffp-contract=off equivalent)."
+      # (windows_toolchain.py:52-54), longer than this file's pre-migration
+      # "::error::clang-cl not found on the runner." (no trailing sentence).
+      # Both are `::error::`-prefixed and fire on the identical condition; the
+      # difference is text-only. Failure-path text is invisible to marker-diff
+      # (it is only emitted when the step is already red), so this could not
+      # have been caught by a green gate -- flagged here instead of silently
+      # adopting shared code with a changed string.
       - name: Locate clang-cl
         shell: bash
-        run: |
-          if command -v clang-cl >/dev/null 2>&1; then
-            CLANG_CL="$(command -v clang-cl)"
-          elif [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
-            CLANG_CL="/c/Program Files/LLVM/bin/clang-cl.exe"
-            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
-          else
-            echo "::error::clang-cl not found on the runner." >&2
-            exit 1
-          fi
-          echo "clang-cl: $CLANG_CL"
-          "$CLANG_CL" --version
+        run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
 
       # Built by the PYTHON CARRIER, not by build_libjxl_dist_windows.sh.
       #
@@ -112,24 +126,40 @@ jobs:
       # Invoked through the SINGLE CARRIER ENTRY POINT (build_deps.py), the
       # ENTRY-POINT RULE (2026-09-01 contract item 10): every migrated
       # capability lands as a build_deps.py subcommand, `jxl-stack` here.
+      # WI-32 (push 8b): migrated to `ci.py dist-build`, WI-29's frozen
+      # carrier invocation. `--dist` passes the same absolute
+      # `${{ github.workspace }}/...` form this step already used --
+      # dist_build.py forwards it unmodified, no normalisation (confirmed
+      # against WI-29 before this migration). rc is read from the child
+      # process object inside dist_build.py (adjacent to the call, never a
+      # shell variable), and `--rc-marker JXL_DIST_WINDOWS_RC` reproduces
+      # `JXL_DIST_WINDOWS_RC=<rc>` byte-for-byte, replacing
+      # `$RC = $LASTEXITCODE; Write-Host "JXL_DIST_WINDOWS_RC=$RC"`.
+      # `shell: pwsh` kept -- same reason as before the migration: Git-Bash
+      # is eligible to MSYS-rewrite path-shaped argv and can put an MSYS
+      # Python on PATH, which `deps/run.py` refuses to run under.
       - name: Build the libjxl dist (Python carrier)
         shell: pwsh
         working-directory: ${{ github.workspace }}
-        run: |
-          python native/scripts/build_deps.py build jxl-stack `
-            --platform windows --arch x86_64 `
-            --dist "${{ github.workspace }}/native/third_party/libjxl-dist-windows"
-          $RC = $LASTEXITCODE
-          Write-Host "JXL_DIST_WINDOWS_RC=$RC"
-          exit $RC
+        run: >
+          python native/scripts/ci.py dist-build
+          --component jxl-stack --platform windows --arch x86_64
+          --dist "${{ github.workspace }}/native/third_party/libjxl-dist-windows"
+          --rc-marker JXL_DIST_WINDOWS_RC
 
       # Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
       # inventory while silently omitting the headers.
+      #
+      # WI-32 (push 8b): migrated to `ci.py dist-list` (WI-29), which
+      # replaces `find | sort` and additionally refuses to succeed silently
+      # on a missing/empty dist tree (exits 1 with an `::error::` line where
+      # the old pipeline printed nothing and exited 0) -- a deliberate
+      # tightening, not a defect, per dist_build.py's own docstring.
       - name: List the produced dist (complete)
         if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: find native/third_party/libjxl-dist-windows -type f | sort
+        run: python3 native/scripts/ci.py dist-list --dist native/third_party/libjxl-dist-windows
 
       # Canonical artifact name <component>-<platform>-<arch> (round 6); the
       # packaged directory keeps its committed tracked path.
