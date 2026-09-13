@@ -24,20 +24,50 @@ content (gitignored/untracked files never appear in it), so it is the
 closest mechanically-verifiable stand-in for a fresh runner checkout this
 repo can produce without a real CI run.
 
-WHAT THIS SIMULATES: absence of (1) any sibling directory next to the
-repo root (the ../Halcyon class -- WI-42's defect) and (2) any gitignored
-vendored/fetched tree inside the repo (the native/third_party/libraw/
-class -- WI-44's defect, historically caught this way against tip
-bba2a752, the commit immediately before WI-44's fix).
+WHAT THIS SIMULATES: absence of (1) the ../Halcyon sibling checkout
+(WI-42's defect) and (2) EVERY gitignored vendored/fetched tree under
+native/third_party/ -- not a hand-written list of two. Parking-lot guard
+(e), FULL BAR: the set of vendored roots to assert absent is DERIVED, via
+`git check-ignore` (never a hand-rolled .gitignore parser -- see
+`discover_vendored_roots()` below), from (a) whatever this machine has
+actually fetched on disk and (b) whatever git already tracks under
+native/third_party/ (so a tree nobody has fetched here yet, e.g. Halide
+on a clean clone, is still named and checked). This closes the UNPRINTED
+gap recorded in docs/logs/2026-09-13/pyci-ruling-G-guard-plan.md SS(e)3c:
+the minimal version's two-path hardcode (native/third_party/libraw/ and
+../Halcyon) covered WI-44's actual defect but SILENTLY excluded every
+other vendored tree (dng_sdk subtrees, the partial libjpeg-turbo tree,
+the heif/webp/jxl -dist-* directories, the libomp/lcms2/jpegturbo
+prebuilt dylibs, and Halide) from its absence claim without ever saying
+so. A `git worktree` checkout mechanically excludes all of them either
+way -- the gap was in the REPORT, not in the coverage -- but an unnamed
+absence is not a declared one, which is the property this whole script
+exists to enforce elsewhere; see VENDORED_ROOTS_ASSERTED_ABSENT below for
+the printed, auditable list this run actually checked.
+
+DESIGN HAZARD (read before touching discover_vendored_roots(), it cost a
+round to find): .gitignore carries several negations that re-include
+WHOLE committed directories (e.g. `!native/third_party/heif-dist-
+android-arm64-v8a/`), because those dists are reviewed, pinned INPUTS
+this repo cannot rebuild on every machine. `git check-ignore` on such a
+negated path correctly reports "not ignored" -- which is why this script
+asks git per-candidate-path rather than assuming every native/third_party
+child is a vendored tree. Do not special-case those names; let
+`git check-ignore` decide, exactly as git itself resolves negation and
+precedence.
 
 WHAT THIS DOES NOT SIMULATE (named, not silent): actual OS/toolchain
 differences (this always runs on the host OS, e.g. macOS here vs Linux
 on the `linux` legs -- the existing `docker run ubuntu:22.04` recipe in
 pyci-plan.md still owns that axis and is not superseded by this script),
-GitHub Actions env vars/secrets, and network-fetch behaviour. This is the
-MINIMAL version (USER RULING F): no configuration, no matrix, no
-per-platform variants -- one hardcoded, self-printing check list. The
-polished version is parking-lot guard (e).
+GitHub Actions env vars/secrets, and network-fetch behaviour. Also named,
+not silent: the sibling-checkout leg above only checks ../Halcyon by
+name, not "any sibling directory" generically -- that remains a
+narrower-than-the-property hardcode, unlike the vendored-tree leg, which
+this round widened. This is still the leg named in USER RULING F: no
+configuration, no matrix, no per-platform variants -- the check LIST
+(`CHECKS` below) is one hardcoded, self-printing list; only the
+vendored-root DISCOVERY inside it has been generalized this round.
 
 This is a Python script, not a shell script, deliberately: an earlier
 `.sh` version of this same leg failed its own `check_shell_prohibition.py`
@@ -78,6 +108,112 @@ CHECKS = [
     "native/scripts/ci/check_expected_additions.py",
 ]
 
+# Seeded on top of whatever the discovery below finds on disk/in the tree:
+# fetch targets this repo builds that may not exist on the machine running
+# this leg (e.g. a clean clone that has never run `build_deps.py fetch
+# halide`) and that carry no tracked placeholder (PROVENANCE.md or
+# otherwise) for the tree-scan half of discovery to find. Keep this list to
+# "known fetch targets with nothing tracked under them" only -- everything
+# else is derived, not hand-maintained; see docstring DESIGN HAZARD note.
+_SEEDED_CANDIDATES = ("halide",)
+
+
+def discover_vendored_roots(repo_root: Path) -> list[Path]:
+    """Return every path under native/third_party/ that `git check-ignore`
+    says is ignored -- i.e. a vendored/fetched tree, not tracked source.
+
+    Candidates to ask git about come from THREE sources, unioned, so the
+    result does not depend on what happens to be fetched on the machine
+    running this leg:
+      1. directories that actually exist on disk under native/third_party/
+         (whatever this machine has fetched), one level deep and one level
+         under each of those (covers dng_sdk/targets, libjpeg-turbo/java,
+         etc. -- trees whose PARENT is tracked but a CHILD is ignored);
+      2. directories git already tracks under native/third_party/ (covers
+         a vendored root that is fully or partly negated back in, e.g.
+         libomp/, so its ignored siblings are still named even when the
+         only thing on disk is the tracked PROVENANCE.md/dylib);
+      3. `_SEEDED_CANDIDATES`, for fetch targets with no tracked trace at
+         all on a clean clone (Halide).
+
+    Ignored-ness is decided ENTIRELY by `git check-ignore` -- this function
+    never reads or interprets .gitignore patterns itself, per the guard
+    plan's instruction to ask git rather than hand-roll ignore semantics
+    (negations/precedence/depth are exactly what check-ignore resolves).
+    """
+    third_party = repo_root / "native" / "third_party"
+    candidates: set[str] = set(_SEEDED_CANDIDATES)
+
+    if third_party.is_dir():
+        for child in sorted(third_party.iterdir()):
+            if not child.is_dir():
+                continue
+            candidates.add(child.name)
+            for grandchild in sorted(child.iterdir()):
+                if grandchild.is_dir():
+                    candidates.add(f"{child.name}/{grandchild.name}")
+
+    tracked = run.run(
+        ["git", "ls-tree", "-r", "-d", "--name-only", "HEAD", "native/third_party"],
+        cwd=repo_root,
+    )
+    if tracked.returncode == 0:
+        for line in tracked.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            prefix = "native/third_party/"
+            rel = line[len(prefix):] if line.startswith(prefix) else line
+            parts = rel.split("/")
+            if parts and parts[0]:
+                candidates.add(parts[0])
+                if len(parts) > 1 and parts[1]:
+                    candidates.add(f"{parts[0]}/{parts[1]}")
+
+    ignored_roots: list[Path] = []
+    for name in sorted(candidates):
+        rel_path = f"native/third_party/{name}"
+        # HOW TO RE-DERIVE THIS, not just trust it -- re-verify with:
+        #   git check-ignore -v native/third_party/libraw       (RC=1, silent)
+        #   git check-ignore -v native/third_party/libraw/      (RC=1, silent)
+        #   git check-ignore -v --no-index native/third_party/libraw/  (RC=0, prints match)
+        # A plain (index-aware) `git check-ignore` on a directory that has
+        # even ONE tracked file inside it (e.g. libraw/'s tracked
+        # PROVENANCE.md) answers "not ignored" for the directory itself --
+        # it is reporting on the INDEX ENTRY, not on the ignore PATTERN.
+        # --no-index asks the pattern-matching question this function
+        # actually needs. The trailing slash is independently required:
+        # git's directory-only patterns (the common shape here, `foo/`)
+        # only match a queried path that itself ends in `/`. Drop either
+        # flag and this silently regresses to under-reporting roots like
+        # libraw/ that are the exact regression this file exists to catch --
+        # re-run the three commands above against any future .gitignore
+        # change before "simplifying" this call.
+        check = run.run(
+            ["git", "check-ignore", "--no-index", "--quiet", f"{rel_path}/"],
+            cwd=repo_root,
+        )
+        if check.returncode == 0:
+            ignored_roots.append(Path(rel_path))
+    return ignored_roots
+
+
+def _tracked_files_under(repo_root: Path, rel_path: Path) -> set[str]:
+    """Files git actually tracks under `rel_path` (POSIX-relative strings),
+    generalizing the old single-file `PROVENANCE.md` carve-out: a negated
+    vendored subtree can legitimately re-track more than one filename
+    (e.g. a whole committed .dist directory), and hand-listing each such
+    exception name is the exact hand-maintained-list defect this section
+    exists to remove.
+    """
+    result = run.run(
+        ["git", "ls-files", "--", rel_path.as_posix()],
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
 
 def main() -> int:
     tip_result = run.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT)
@@ -105,7 +241,6 @@ def main() -> int:
         # ---- Declare what is simulated as absent -- mechanically verified,
         # not assumed. A leg whose absence claim is wrong is worse than no leg.
         sibling_halcyon = worktree_path.parent / "Halcyon"
-        libraw_tree = worktree_path / "native" / "third_party" / "libraw"
 
         print(f"FRESH_RUNNER_GATE: SIMULATED_ABSENT sibling-checkout ({sibling_halcyon})")
         if sibling_halcyon.exists():
@@ -117,31 +252,49 @@ def main() -> int:
             return 2
         print("FRESH_RUNNER_GATE: ABSENCE_CONFIRMED sibling-checkout")
 
-        # native/third_party/libraw/PROVENANCE.md is the one file this repo
-        # DOES track under that path (.gitignore:72-74) -- its presence is
-        # expected and does not represent the fetched vendor tree; anything
-        # else there does.
-        unexpected = None
-        if libraw_tree.exists():
-            for p in libraw_tree.rglob("*"):
-                if p.is_file() and p.name != "PROVENANCE.md":
-                    unexpected = p
-                    break
+        # FULL BAR (guard (e)): the vendored roots to assert absent are
+        # DERIVED via git, not a hand-written list of two -- see
+        # discover_vendored_roots()'s docstring for why and how. Discovery
+        # runs against REPO_ROOT (the real machine's disk + tracked tree),
+        # because the worktree -- being checkout-only -- can never itself
+        # reveal what an untracked, gitignored fetch would have looked like.
+        vendored_roots = discover_vendored_roots(REPO_ROOT)
         print(
-            f"FRESH_RUNNER_GATE: SIMULATED_ABSENT vendored-tree ({libraw_tree}, "
-            "excluding tracked PROVENANCE.md)"
+            f"FRESH_RUNNER_GATE: VENDORED_ROOTS_ASSERTED_ABSENT count={len(vendored_roots)} "
+            f"paths={[p.as_posix() for p in vendored_roots]}"
         )
-        if unexpected is not None:
+        if not vendored_roots:
             print(
-                f"FRESH_RUNNER_GATE: ABSENCE_CLAIM_FALSE -- {unexpected} exists, "
-                "leg is not trustworthy",
+                "FRESH_RUNNER_GATE: ABSENCE_CLAIM_FALSE -- discover_vendored_roots() "
+                "returned zero paths; a leg that asserts nothing is not trustworthy",
                 file=sys.stderr,
             )
             return 2
-        print(
-            "FRESH_RUNNER_GATE: ABSENCE_CONFIRMED vendored-tree "
-            "(only PROVENANCE.md, if anything, is tracked)"
-        )
+
+        for rel_root in vendored_roots:
+            target = worktree_path / rel_root
+            tracked_ok = _tracked_files_under(REPO_ROOT, rel_root)
+            print(f"FRESH_RUNNER_GATE: SIMULATED_ABSENT vendored-tree ({rel_root.as_posix()})")
+            unexpected = None
+            if target.exists():
+                for p in target.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    rel_str = p.relative_to(worktree_path).as_posix()
+                    if rel_str not in tracked_ok:
+                        unexpected = p
+                        break
+            if unexpected is not None:
+                print(
+                    f"FRESH_RUNNER_GATE: ABSENCE_CLAIM_FALSE -- {unexpected} exists and is "
+                    "not a tracked exception, leg is not trustworthy",
+                    file=sys.stderr,
+                )
+                return 2
+            print(
+                f"FRESH_RUNNER_GATE: ABSENCE_CONFIRMED vendored-tree ({rel_root.as_posix()}, "
+                f"{len(tracked_ok)} tracked exception file(s) allowed)"
+            )
 
         print(
             "FRESH_RUNNER_GATE: EXCLUDED_FROM_LEG none -- all 5 named local guards "
@@ -158,6 +311,15 @@ def main() -> int:
         print(
             "FRESH_RUNNER_GATE: EXCLUDED_FROM_LEG note -- only the "
             "absence-sensitive local guards named above"
+        )
+        print(
+            "FRESH_RUNNER_GATE: EXCLUDED_FROM_LEG note -- the sibling-checkout leg above "
+            "only asserts absence of ../Halcyon by name, not any sibling directory generically"
+        )
+        print(
+            "FRESH_RUNNER_GATE: EXCLUDED_FROM_LEG note -- OS/toolchain differences, GitHub "
+            "Actions env vars/secrets, and network-fetch behaviour are not simulated (docker "
+            "ubuntu:22.04 recipe in pyci-plan.md owns the OS/toolchain axis)"
         )
 
         overall_rc = 0
