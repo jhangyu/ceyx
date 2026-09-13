@@ -516,29 +516,16 @@ jobs:
           #
           # AC-2 remediation (push 8): the original `echo
           # "LCMS_CONFIGURE_RC=${LCMS_RC}"` marker was lost when this step
-          # collapsed to the call below -- configure_log.py's own
-          # "ASSERT <label> RC=<rc>" line does not match markerdiff's
-          # `[A-Z][A-Z0-9_]*=` marker shape (it starts with the word
-          # "ASSERT ", not immediately with a NAME=), so AC-2 saw a pure
-          # marker loss even though the assertion itself still fires
-          # correctly (verified: a log missing the LCMS2 line still returns
-          # rc=1). Restored here, in this file (configure_log.py belongs to
-          # a different owner), by capturing the module's own exit code and
-          # re-emitting the exact original marker name. `set +e`/`set -e`
-          # bracket the call because this step's `shell: bash` runs with
-          # errexit; without it, a non-zero exit would skip straight past
-          # the echo below instead of restoring the marker on the failure
-          # path too.
-          set +e
-          python3 native/scripts/ci.py assert-configure-log \
-            --log-path "${{ github.workspace }}/native_build_native_arm64.log" \
-            --pattern "\[ceyx\] LCMS2: disabled \(OQ-N4 option Z\)" \
-            --label "LCMS2 disabled" \
-            --error "configure log does not show the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line — ENABLE_LCMS may not be forced OFF on this runner, or the configure step was silently skipped. See native_build_native_arm64.log."
-          LCMS_RC=$?
-          set -e
-          echo "LCMS_CONFIGURE_RC=${LCMS_RC}"
-          exit "${LCMS_RC}"
+          # first collapsed to assert-configure-log -- configure_log.py's
+          # own "ASSERT <label> RC=<rc>" line does not match markerdiff's
+          # `[A-Z][A-Z0-9_]*=` marker shape. A shell-side rc-capture
+          # wrapper stood in as a temporary stopgap; now that
+          # assert_configure_log() takes a `--marker NAME` argument
+          # (65caa3ac) and emits it unconditionally on both the match and
+          # mismatch paths via report.marker() (a conforming NAME=value,
+          # order: ASSERT line, error (if any), marker), the stopgap is
+          # gone and this is a clean one-line body again.
+          python3 native/scripts/ci.py assert-configure-log --log-path "${{ github.workspace }}/native_build_native_arm64.log" --pattern "\[ceyx\] LCMS2: disabled \(OQ-N4 option Z\)" --label "LCMS2 disabled" --error "configure log does not show the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line — ENABLE_LCMS may not be forced OFF on this runner, or the configure step was silently skipped. See native_build_native_arm64.log." --marker LCMS_CONFIGURE_RC
 
       # Cross leg, stage 1: arm64 host generators, emitting x86_64 AOT code.
       - name: Build host Halide generators + x86_64 AOT (cross stage 1)
