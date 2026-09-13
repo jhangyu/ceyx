@@ -137,7 +137,7 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         baseline = "EXPORTS_RESULT=PASS\n"
         candidate = (
             "EXPORTS_RESULT=PASS\n"
-            "SHELL_ALLOWLIST_SIZE=74\n"
+            "SHELL_ALLOWLIST_SIZE=50\n"
             "SHELL_PROHIBITION_RESULT=PASS\n"
         )
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
@@ -176,7 +176,7 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         # forgiven. A different (stale/unratcheted) value for the same key
         # is an ordinary unlisted addition and still fails -- 106 is a
         # stale pre-ratchet value, no longer on the ledger now that it
-        # reads 74 (push 8 / WI-33).
+        # reads 50 (push 8b / WI-37).
         baseline = "EXPORTS_RESULT=PASS\n"
         candidate = "EXPORTS_RESULT=PASS\nSHELL_ALLOWLIST_SIZE=106\n"
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
@@ -186,7 +186,7 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
     def test_expected_addition_report_lines_names_both_entries(self):
         lines = markerdiff.expected_addition_report_lines("nativetests")
         joined = "\n".join(lines)
-        self.assertIn("SHELL_ALLOWLIST_SIZE=74", joined)
+        self.assertIn("SHELL_ALLOWLIST_SIZE=50", joined)
         self.assertIn("SHELL_PROHIBITION_RESULT=PASS", joined)
 
     def test_expected_addition_report_lines_empty_for_other_leg(self):
