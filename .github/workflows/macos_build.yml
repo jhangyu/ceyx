@@ -738,27 +738,16 @@ jobs:
       # manifest-driven check as the other three legs, not a parallel one.
       # The manifest's mandatory set still carries
       # ceyx_decode_into_buffer_oriented as its own positive control.
+      # WI-20 (push 7): collapsed into ci.py's generalised assert-exports
+      # (verify_artifact.assert_exports(), WI-22), unblocked by the exports
+      # self-sufficiency change that moved the `nm -gU` dump itself inside
+      # the module (a `tool > file` dump line could never be a compliant
+      # one-liner on its own). Every RC marker and ::error:: message is
+      # transcribed verbatim, including this leg's genuine absence of any
+      # ::error:: text on an assert_exports.py (non-zero-exit) failure --
+      # only the nm dump failure gets an ::error:: line, same as before.
       - name: Assert required FFI exports present in dylib (G3)
-        run: |
-          set +e
-          nm -gU "$DYLIB" > dylib_exports.txt 2>&1
-          rc=$?
-          set -e
-          echo "NM_EXPORTS_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::nm failed on $DYLIB (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
-            cat dylib_exports.txt || true
-            exit 1
-          fi
-          set +e
-          python3 native/scripts/assert_exports.py \
-            --manifest native/deps/export_manifest.toml \
-            --platform macos \
-            --dump dylib_exports.txt
-          RC=$?
-          set -e
-          echo "ASSERT_EXPORTS_RC=${RC}"
-          exit "${RC}"
+        run: python3 native/scripts/ci.py assert-exports --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB"
 
       # CI-T11 (MACOS-ASSET, user ruling 4a / contract AC9, 2026-09-01): the
       # release asset used to carry only the decoder itself. Five downstream
