@@ -39,5 +39,5 @@ READ_MIN_RUNTIME_RC=0
 PROVENANCE=linker-default
 MIN_RUNTIME_DRIFT_RESULT=PASS (measured=6.0, declared=6.0 from [windows])
 MIN_RUNTIME_DRIFT_RC=0
-EXPECTED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll libomp140.x86_64.dll
+EXPECTED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll libomp140.x86_64.dll 
 STAGED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll libomp140.x86_64.dll 
