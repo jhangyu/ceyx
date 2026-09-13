@@ -755,16 +755,20 @@ def dispatch(args: argparse.Namespace) -> int:
     # excluded before did not survive being checked: this comment (and
     # `verify_artifact`'s docstring, and `windows_build.yml`'s step comment,
     # and the allowlist entry) all said "assert_import_closure.py has no PE
-    # branch". It has had `parse_pe_dump()` since WI-4
-    # (`native/scripts/assert_import_closure.py:130`) and the windows step was
-    # already invoking it with `--format pe`; the real gap was that
-    # `import_closure()` had no PE dump-CAPTURE leg. It has one now
-    # (`_import_closure_windows()`), so the exclusion is gone rather than
-    # weakened. This comment also used to cite `allowlist.py:144` for that
-    # BLOCKED entry -- a line that does not exist; the file is 127 lines and
-    # the entry is at `allowlist.py:105`. macOS has no DT_NEEDED-shaped step
-    # in its YAML at all and stays out, permanently. Same explicit-set-at-the-
-    # CLI-layer shape as `_DT_NEEDED_PLATFORMS`/`_AVX512_PLATFORMS` below.
+    # branch". It has had `parse_pe_dump()` since WI-4 (grep
+    # `native/scripts/assert_import_closure.py` for that symbol) and the
+    # windows step was already invoking it with `--format pe`; the real gap
+    # was that `import_closure()` had no PE dump-CAPTURE leg. It has one now
+    # (`verify_artifact._import_closure_windows()`), so the exclusion is gone
+    # rather than weakened. This comment also used to cite a LINE NUMBER in
+    # `allowlist.py` for that BLOCKED entry -- a line that did not exist, the
+    # file being shorter than the number. Its replacement names no line on
+    # purpose (this round retired four rotted line-number citations, one of
+    # which rotted inside the same edit that wrote it): find the entry by
+    # grepping `allowlist.py` for the step name it exempts. macOS has no
+    # DT_NEEDED-shaped step in its YAML at all and stays out, permanently.
+    # Same explicit-set-at-the-CLI-layer shape as `_DT_NEEDED_PLATFORMS`/
+    # `_AVX512_PLATFORMS` below.
     _IMPORT_CLOSURE_PLATFORMS = frozenset({"linux", "android", "windows"})
     if args.command == "import-closure" and args.platform not in _IMPORT_CLOSURE_PLATFORMS:
         print(

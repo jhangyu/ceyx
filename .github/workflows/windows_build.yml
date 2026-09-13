@@ -491,8 +491,8 @@ jobs:
       # this workflow. The carry-forward note that used to sit here said this
       # step was blocked because assert_import_closure.py "has no PE branch";
       # that premise was stale. The PE branch landed with WI-4
-      # (native/scripts/assert_import_closure.py:130's parse_pe_dump) and the
-      # shell below was ALREADY calling it with --format pe. What was missing
+      # (grep native/scripts/assert_import_closure.py for parse_pe_dump) and
+      # the shell here was ALREADY calling it with --format pe. What was missing
       # was a PE dump-CAPTURE leg inside import_closure() itself, plus the
       # ci.py platform gate; both landed with this migration.
       #

@@ -556,10 +556,10 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         # step in its YAML at all), so macOS is what this test now isolates:
         # rejected with RC 2 via a named `::error::`, never a silent pass and
         # never the old generic "not implemented yet" scaffolding message.
-        # `--arch` is supplied because macOS trips `_enforce_arch_requirement`
-        # FIRST (ci.py:187) and would exit 2 through argparse instead of
-        # through the gate under test -- two different RC-2s, and only one of
-        # them proves what this test claims.
+        # `--arch` is supplied because macOS trips ci.py's
+        # `_enforce_arch_requirement` FIRST and would exit 2 through argparse
+        # instead of through the gate under test -- two different RC-2s, and
+        # only one of them proves what this test claims.
         buf = io.StringIO()
         with redirect_stderr(buf):
             rc = ci_entrypoint.main(["import-closure", "--platform", "macos", "--arch", "arm64"])

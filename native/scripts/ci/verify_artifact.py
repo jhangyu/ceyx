@@ -168,18 +168,22 @@ def import_closure(
     this docstring, `ci.py`'s `_IMPORT_CLOSURE_PLATFORMS` comment,
     `windows_build.yml`'s step comment and `allowlist.py`'s BLOCKED entry all
     said windows was blocked because "`assert_import_closure.py` has no PE
-    branch". It has had one since WI-4 -- `parse_pe_dump()` at
-    `native/scripts/assert_import_closure.py:130`, `WINDOWS_OS_ALLOWLIST` at
-    `:47`, `--format pe` accepted at `:192` -- and the windows step was
-    already calling it with `--format pe`. What was actually missing was a PE
-    leg HERE: the ELF legs below capture their dump with readelf, and nothing
-    captured a dumpbin/llvm-objdump dump. That is what `_import_closure_windows()`
-    adds. (Two stale cites corrected in the same commit as this migration: this
-    docstring and `ci.py` both named `allowlist.py:144`, a line that does not
-    exist -- the file is 127 lines and the entry is at `allowlist.py:105`;
-    that entry's own body cites `verify_artifact.py:181` for the `--format elf`
-    hardcode, which is docstring prose -- the call site is `:240`. The
-    allowlist entry itself belongs to its own owner and is not touched here.)
+    branch". It has had one since WI-4 -- grep that file for `parse_pe_dump`,
+    `WINDOWS_OS_ALLOWLIST` and its `--format` choices -- and the windows step
+    was already calling it with `--format pe`. What was actually missing was a
+    PE leg HERE: the ELF legs below capture their dump with readelf, and
+    nothing captured a dumpbin/llvm-objdump dump. That is what
+    `_import_closure_windows()` adds.
+
+    CITATIONS IN THIS PARAGRAPH ARE DELIBERATELY SYMBOL-ANCHORED, NOT LINE-
+    NUMBERED, and that is the round's own lesson rather than a style
+    preference: this migration was briefed against FOUR prose sites citing
+    line numbers that had rotted (including one naming a line past the end of
+    its file), and the first draft of this very docstring cited the
+    `--format elf` argv by a number that its own edit had already moved. A
+    comment recording HOW TO RE-DERIVE an answer survives editing; one
+    recording the answer expires on the next edit. To find the ELF hardcode
+    this paragraph is about, grep this file for the `"--format", "elf"` argv.
 
     macOS still has no DT_NEEDED-shaped step in its YAML at all, so its
     exclusion is unchanged and remains genuine.
@@ -305,7 +309,7 @@ def _pe_dump_imports(
         if prefix:
             # Inside the transitive walk the fallback notice is a PLAIN
             # prefixed line, not a `::notice::`: `::notice::` matches
-            # markerdiff's marker pattern (markerdiff.py:32), so emitting one
+            # markerdiff's marker pattern (`markerdiff.MARKER_RE`), so one
             # per visited module would make the step's marker multiset depend
             # on how many companions the graph happens to contain.
             report.plain(f"{prefix}notice: {message}")
@@ -359,7 +363,8 @@ def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str) -
 
     OUTPUT SHAPE, DELIBERATE: each sub-module's gate output is re-printed with
     a LOWERCASE `transitive(<module>):` prefix, so none of those lines matches
-    markerdiff's marker pattern (`^[A-Z][A-Z0-9_]*=`, `markerdiff.py:32`).
+    markerdiff's marker pattern (`markerdiff.MARKER_RE`, anchored on an
+    uppercase `NAME=`).
     The evidence stays in the job log, but the step's MARKER multiset is
     unchanged -- one `IMPORT_CLOSURE_RC`, aggregated over the whole walk,
     rather than one per visited module. That keeps AC-2 zero-delta without a
