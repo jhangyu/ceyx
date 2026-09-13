@@ -241,6 +241,134 @@ class VerifyArtifactTests(unittest.TestCase):
         expected = (_GOLDEN_DIR / "import-closure-linux.markers").read_text()
         self.assertEqual(out, expected)
 
+    # ---- S-B3 android (WI-34, push 8 follow-on) -------------------------
+
+    def _android_dirs(self, decoder_name: str | None = "libdng_decoder_native.so"):
+        base = Path(self._tmp())
+        ndk_home = base / "ndk"
+        llvm_readelf = ndk_home / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin" / "llvm-readelf"
+        llvm_readelf.parent.mkdir(parents=True)
+        llvm_readelf.write_bytes(b"")
+        llvm_readelf.chmod(0o755)
+        artifact_dir = base / "artifacts"
+        native_dir = artifact_dir / "native"
+        native_dir.mkdir(parents=True)
+        if decoder_name:
+            (native_dir / decoder_name).write_bytes(b"")
+        return str(artifact_dir), str(ndk_home)
+
+    def test_import_closure_android_requires_artifact_dir_and_ndk_home(self):
+        """Direct-call contract: the module itself raises, independent of
+        whatever the CLI layer's argparse enforcement does (ci.py's
+        `_enforce_import_closure_flags` is a separate, CLI-only guard)."""
+        with self.assertRaises(ValueError):
+            verify_artifact.import_closure("android")
+        with self.assertRaises(ValueError):
+            verify_artifact.import_closure("android", artifact_dir="/x")
+        with self.assertRaises(ValueError):
+            verify_artifact.import_closure("android", ndk_home="/y")
+
+    def test_import_closure_android_missing_llvm_readelf_errors(self):
+        artifact_dir, ndk_home = self._android_dirs()
+        # Remove the fixture's llvm-readelf so the not-found branch fires.
+        import os as _os
+
+        _os.remove(
+            Path(ndk_home) / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin" / "llvm-readelf"
+        )
+        rc, _, err = _run_captured(
+            verify_artifact.import_closure, "android", artifact_dir=artifact_dir, ndk_home=ndk_home
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::llvm-readelf not found at", err)
+
+    def test_import_closure_android_no_decoder_errors(self):
+        """R19-shaped negative: no `libdng_decoder_native*.so` under
+        <artifact_dir>/native. ADDED, not a port -- the source shell
+        (android_build.yml:422) has no equivalent guard and would fall
+        through to readelf on an empty/garbage path; flagged in the
+        module docstring as a deliberate addition, not silently decided
+        equivalent."""
+        artifact_dir, ndk_home = self._android_dirs(decoder_name=None)
+        rc, _, err = _run_captured(
+            verify_artifact.import_closure, "android", artifact_dir=artifact_dir, ndk_home=ndk_home
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("no libdng_decoder_native*.so found under", err)
+
+    def test_import_closure_android_success_has_no_section_banner_or_dump_echo(self):
+        """PORTED AS-IS pin: android_build.yml:423 redirects llvm-readelf's
+        output straight into a file with no `cat`/`echo` of the dump and no
+        section title anywhere in that half of the step -- unlike linux's
+        `echo "== S-B3: ... =="` + `cat readelf_dynamic.txt`
+        (test_import_closure_success above). A future "helpful" symmetry
+        fix that adds a banner/echo to the android branch must fail here."""
+        artifact_dir, ndk_home = self._android_dirs()
+
+        def fake_run(argv, cwd=None, env=None):
+            if str(argv[0]).endswith("llvm-readelf"):
+                return _fake_run_result(
+                    returncode=0,
+                    stdout=(
+                        "Dynamic section at offset 0x1000 contains 2 entries:\n"
+                        " 0x0000000000000001 (NEEDED) Shared library: [libc.so]\n"
+                    ),
+                )
+            return _fake_run_result(
+                returncode=0,
+                stdout=(
+                    "IMPORT libc.so -> OS_ALLOWLIST\n"
+                    "IMPORT_CLOSURE_RESULT=PASS\n"
+                    "IMPORT_CLOSURE PASS (android): 1 imports, 0 staged companions\n"
+                ),
+            )
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run):
+            rc, out, err = _run_captured(
+                verify_artifact.import_closure,
+                "android",
+                artifact_dir=artifact_dir,
+                ndk_home=ndk_home,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertNotIn("==", out)
+        self.assertNotIn("Dynamic section", out)  # the raw dump is never echoed
+        self.assertIn("IMPORT_CLOSURE_RC=0", out)
+
+    def test_import_closure_android_failure_message_names_the_script(self):
+        """PORTED AS-IS pin, the other direction from linux's message
+        (test_import_closure_failure_returns_nonzero_and_errors): android's
+        source YAML literal is
+        '::error::import-closure gate (WI-4/assert_import_closure.py)
+        failed for ...' -- a DIFFERENT string from linux's, kept as two
+        different literal strings here on purpose (P-10 discipline), not
+        unified into one platform-generic message."""
+        artifact_dir, ndk_home = self._android_dirs()
+
+        def fake_run(argv, cwd=None, env=None):
+            if str(argv[0]).endswith("llvm-readelf"):
+                return _fake_run_result(returncode=0, stdout="Dynamic section ...\n")
+            return _fake_run_result(
+                returncode=1,
+                stdout="IMPORT libmystery.so -> MISSING\nIMPORT_CLOSURE_RESULT=FAIL\n",
+            )
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run):
+            rc, out, err = _run_captured(
+                verify_artifact.import_closure,
+                "android",
+                artifact_dir=artifact_dir,
+                ndk_home=ndk_home,
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("IMPORT_CLOSURE_RC=1", out)
+        self.assertIn("import-closure gate (WI-4/assert_import_closure.py) failed for", err)
+        # Linux's own (shorter) message must not ALSO appear -- proves this
+        # is the distinct android string, not the linux one with extra text
+        # appended elsewhere.
+        self.assertEqual(err.count("import-closure gate"), 1)
+
     # S-F1 (min_runtime) direct-behaviour tests deleted here (P-10, push 7):
     # `verify_artifact.min_runtime` itself was deleted as an orphaned
     # duplicate of `ci/minruntime.py`'s four-platform generalisation -- see

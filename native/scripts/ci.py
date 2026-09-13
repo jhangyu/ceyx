@@ -306,6 +306,29 @@ def _enforce_dt_needed_flags(parser: argparse.ArgumentParser, args: argparse.Nam
             )
 
 
+def _enforce_import_closure_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """`import-closure` only: `--artifact-dir`/`--ndk-home` are required
+    together for android (workflow context `ci/verify_artifact.py`'s
+    `import_closure()` cannot know -- R5, same posture as `assert-exports`'
+    android flags) and rejected for every other platform, including linux
+    (which resolves everything from `targets.py`). Windows is not accepted
+    at all here -- see `_IMPORT_CLOSURE_PLATFORMS` in `dispatch()`."""
+    if args.command != "import-closure":
+        return
+    platform = args.platform
+    artifact_dir = args.artifact_dir
+    ndk_home = args.ndk_home
+
+    if platform == "android":
+        if artifact_dir is None or ndk_home is None:
+            parser.error("--artifact-dir and --ndk-home are both required for --platform android")
+    else:
+        if artifact_dir is not None or ndk_home is not None:
+            parser.error(
+                f"--artifact-dir/--ndk-home are not accepted for --platform {platform!r}"
+            )
+
+
 def _enforce_assert_exports_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """`assert-exports` only: `--dylib-path` is macOS-only, `--artifact-dir`/
     `--ndk-home` are required together for android, same reject-not-ignore
@@ -379,7 +402,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_platform_command(
         sub, "verify-artifact", "run the artifact verification suite", _verify_artifact_extra
     )
-    _add_platform_command(sub, "import-closure", "assert the import-closure gate")
+    def _import_closure_extra(sp):
+        # android-only (R5): the decoder's location under an already-staged
+        # artifact dir and the NDK's llvm-readelf path are workflow context
+        # `ci/verify_artifact.py` cannot know; linux resolves both from
+        # `targets.py` internally. Enforced post-parse by
+        # `_enforce_import_closure_flags`.
+        sp.add_argument("--artifact-dir", default=None)
+        sp.add_argument("--ndk-home", default=None)
+
+    _add_platform_command(
+        sub, "import-closure", "assert the import-closure gate", _import_closure_extra
+    )
     _add_platform_command(sub, "min-runtime", "assert min-runtime drift")
     def _assert_exports_extra(sp):
         # Platform-specific, same reject-not-ignore posture as
@@ -610,16 +644,32 @@ def dispatch(args: argparse.Namespace) -> int:
     # `verify-artifact` are NOT in this set as of push 7 (WI-22): every one
     # of their modules genuinely supports its platforms now -- confirmed
     # against the committed modules, not a report that they were done
-    # (P-10's own lesson). `import-closure` stays linux-only -- android's
-    # equivalent needs a caller-supplied-artifact-dir redesign
-    # (`_artifact_path`/`dist_dir` are both `None` for android in
-    # targets.py) not attempted yet; see verify_artifact.import_closure()'s
-    # docstring.
-    _linux_only_commands = {
-        "import-closure",
-    }
+    # (P-10's own lesson).
+    _linux_only_commands = set()
     if args.command in _linux_only_commands and getattr(args, "platform", None) != "linux":
         return _not_yet(args.command)
+    # `import-closure` (WI-34, push 8 follow-on): generalised to linux AND
+    # android via the same caller-supplied-artifact-dir/ndk-home redesign
+    # `stage.py` already went through (confirmed against the committed
+    # `verify_artifact.import_closure()`, not a report that it was done --
+    # P-10's own lesson). Windows is explicitly excluded, permanently, not
+    # "not yet": `import_closure()` hardcodes `--format elf` and
+    # `assert_import_closure.py` has no PE branch (allowlist.py:144's
+    # BLOCKED entry names this exact gap) -- ungating windows here would
+    # silently run the ELF parser against a PE dump rather than error.
+    # macOS has no DT_NEEDED-shaped step in its YAML at all. Same explicit-
+    # set-at-the-CLI-layer shape as `_DT_NEEDED_PLATFORMS`/
+    # `_AVX512_PLATFORMS` below.
+    _IMPORT_CLOSURE_PLATFORMS = frozenset({"linux", "android"})
+    if args.command == "import-closure" and args.platform not in _IMPORT_CLOSURE_PLATFORMS:
+        print(
+            f"::error::import-closure has no --platform {args.platform!r} leg -- "
+            "verify_artifact.import_closure() hardcodes an ELF dump parser with no PE "
+            "branch (windows) and macOS has no DT_NEEDED-shaped step at all "
+            "(permanent exclusion, not 'not yet migrated')",
+            file=sys.stderr,
+        )
+        return 2
     # `assert-no-avx512` is PERMANENTLY linux-only (same shape as
     # `_CODEC_PROBE_PLATFORMS`/`_CAPABILITY_VECTOR_PLATFORMS`), concept-search
     # confirmed: zero `-march`/`-mtune`/`/arch:`/ISA/baseline-CPU/SIMD-shaped
@@ -661,7 +711,9 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "import-closure":
         import ci.verify_artifact as verify_artifact
 
-        return verify_artifact.import_closure(args.platform)
+        return verify_artifact.import_closure(
+            args.platform, artifact_dir=args.artifact_dir, ndk_home=args.ndk_home
+        )
     if args.command == "min-runtime":
         import ci.minruntime as minruntime
 
@@ -878,6 +930,7 @@ def main(argv=None) -> int:
         _enforce_capability_vector_flags(parser, args)
         _enforce_stage_flags(parser, args)
         _enforce_dt_needed_flags(parser, args)
+        _enforce_import_closure_flags(parser, args)
         _enforce_assert_exports_flags(parser, args)
         _enforce_verify_artifact_flags(parser, args)
     return dispatch(args)

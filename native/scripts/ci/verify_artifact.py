@@ -150,32 +150,91 @@ def verify_artifact(platform: str, arch: str | None = None, *, dylib_path: str |
     raise ValueError(f"verify_artifact: unsupported platform {platform!r}")
 
 
-def import_closure(platform: str) -> int:
+def import_closure(
+    platform: str, *, artifact_dir: str | None = None, ndk_home: str | None = None
+) -> int:
     """S-B3: readelf DT_NEEDED import-closure gate. Replaces
-    `linux_build.yml:548-564`. Still Linux-only in practice (`_artifact_path`/
-    `dist_dir` are both `None` for android in `targets.py` today, so this
-    function cannot run for android without the same caller-supplied-
-    artifact-dir redesign `stage.py` already went through -- flagged, not
-    attempted here, per impl-18's report that this file's hardcoded
-    `"readelf"` was likely wrong for android). Fixed here: the tool name now
-    comes from `targets.spec(platform)["readelf_tools"]` instead of a bare
-    hardcoded `"readelf"` -- linux's own declared value is identical
-    (`("readelf",)`), so this is a dead-data-consumption fix with zero
-    behaviour change on the only platform that reaches this function today."""
-    so = _artifact_path(platform)
-    spec = targets.spec(platform)
-    readelf_tool = spec["readelf_tools"][0] if spec["readelf_tools"] else "readelf"
+    `linux_build.yml:548-564` (linux) and `android_build.yml:414-437`
+    (android, WI-34 push-8 follow-on). Windows is NOT supported here: this
+    function hardcodes `--format elf`, and `assert_import_closure.py` has no
+    PE branch -- ungating windows without adding one would silently run the
+    wrong parser against a PE dump rather than error (see
+    `allowlist.py:144`'s BLOCKED entry, which names this exact gap). macOS
+    has no DT_NEEDED-shaped step in its YAML at all.
 
-    report.section("S-B3: readelf DT_NEEDED import-closure gate")
-    run.run_to_file([readelf_tool, "-d", so], "readelf_dynamic.txt")
-    dynamic_text = Path("readelf_dynamic.txt").read_text(errors="replace")
-    if dynamic_text:
-        report.plain(dynamic_text.rstrip("\n"))
+    Android needed a caller-supplied `artifact_dir`/`ndk_home` (R5: the
+    decoder's location and the NDK's llvm-readelf path are workflow context,
+    never a `targets.py` fact) -- same redesign `stage.py` already went
+    through for its own android/macos functions. Two things are PORTED
+    AS-IS and deliberately asymmetric with linux (verified against
+    `android_build.yml:414-437`, not assumed from linux's shape):
+
+      * No `report.section()` banner and no echo of the readelf dump on
+        android -- the shell redirects `llvm-readelf`'s combined output
+        straight into a file (`> android_main_dynamic.txt 2>&1`) with no
+        `cat`/`echo` of a section title anywhere in that half of the step,
+        unlike linux's `echo "== S-B3: ... =="` + `cat readelf_dynamic.txt`.
+      * The failure message text differs: android's names the script
+        explicitly ("... (WI-4/assert_import_closure.py) failed for ...")
+        where linux's does not. Two different literal strings in the
+        source YAML, kept as two different literal strings here -- not
+        unified (P-10 discipline).
+
+    The `IMPORT_CLOSURE_RC=<n>` marker is the ONE thing genuinely identical
+    across both platforms in the source YAML (`echo "IMPORT_CLOSURE_RC=${RC}"`
+    verbatim in both `linux_build.yml` and `android_build.yml`) -- reused
+    as-is via the same `report.rc("IMPORT_CLOSURE", rc)` call, not given a
+    platform-specific twin the way stage.py's completion markers are: that
+    would invent a divergence the source YAML does not have.
+
+    ADDED, NOT A PORT: android_build.yml:422's `ls ... | head -n1` has no
+    explicit empty-match guard in the source shell and would fall through
+    to a readelf invocation on an empty/garbage path (eventual failure via
+    assert_import_closure.py's own UNVERIFIED-on-unparseable-dump path,
+    just via a different, less legible route). A clean, named failure is
+    raised here instead of reproducing that crash-shaped gap verbatim --
+    flagged for the leader's ruling, not silently decided as equivalent."""
+    if platform == "android":
+        if not artifact_dir or not ndk_home:
+            raise ValueError(
+                "import_closure(platform='android') requires artifact_dir and ndk_home"
+            )
+        llvm_readelf = os.path.join(
+            ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-readelf"
+        )
+        if not os.access(llvm_readelf, os.X_OK):
+            report.error(
+                f"llvm-readelf not found at {llvm_readelf} — NDK layout may have changed "
+                "(r27c expected)."
+            )
+            return 1
+        matches = sorted(
+            glob.glob(os.path.join(artifact_dir, "native", "libdng_decoder_native*.so"))
+        )
+        if not matches:
+            report.error(f"no libdng_decoder_native*.so found under {artifact_dir}/native")
+            return 1
+        so = matches[0]
+        dump_path = "android_main_dynamic.txt"
+        run.run_to_file([llvm_readelf, "-d", so], dump_path)
+        staged_dir = os.path.join(artifact_dir, "native")
+    else:
+        so = _artifact_path(platform)
+        spec = targets.spec(platform)
+        readelf_tool = spec["readelf_tools"][0] if spec["readelf_tools"] else "readelf"
+        staged_dir = spec["dist_dir"]
+        dump_path = "readelf_dynamic.txt"
+
+        report.section("S-B3: readelf DT_NEEDED import-closure gate")
+        run.run_to_file([readelf_tool, "-d", so], dump_path)
+        dynamic_text = Path(dump_path).read_text(errors="replace")
+        if dynamic_text:
+            report.plain(dynamic_text.rstrip("\n"))
 
     rc, out = run.capture([
         sys.executable, "native/scripts/assert_import_closure.py",
-        "--dump", "readelf_dynamic.txt",
-        "--staged-dir", spec["dist_dir"],
+        "--dump", dump_path,
+        "--staged-dir", staged_dir,
         "--declaration", "native/deps/shipped_files.toml",
         "--platform", platform,
         "--format", "elf",
@@ -184,7 +243,15 @@ def import_closure(platform: str) -> int:
         report.plain(out.rstrip("\n"))
     report.rc("IMPORT_CLOSURE", rc)
     if rc != 0:
-        report.error(f"import-closure gate failed for {so} — see IMPORT ... -> MISSING lines above.")
+        if platform == "android":
+            report.error(
+                f"import-closure gate (WI-4/assert_import_closure.py) failed for {so} — "
+                "see IMPORT ... -> MISSING lines above."
+            )
+        else:
+            report.error(
+                f"import-closure gate failed for {so} — see IMPORT ... -> MISSING lines above."
+            )
     return rc
 
 
