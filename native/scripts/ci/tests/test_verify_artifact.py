@@ -241,80 +241,13 @@ class VerifyArtifactTests(unittest.TestCase):
         expected = (_GOLDEN_DIR / "import-closure-linux.markers").read_text()
         self.assertEqual(out, expected)
 
-    # ---- S-F1 (min_runtime: measure + drift) ---------------------------
-
-    def test_min_runtime_read_rc_is_not_gated(self):
-        """C-G4 item 2, PORTED AS-IS: a nonzero READ_MIN_RUNTIME_RC alone
-        must not fail the command -- only the drift check can."""
-
-        def fake_run(argv, cwd=None, env=None):
-            if argv[0] == "readelf":
-                return _fake_run_result(returncode=0, stdout="Symbol table ...\n")
-            joined = " ".join(map(str, argv))
-            if "read_min_runtime.py" in joined:
-                Path("min_runtime.txt").write_text("MIN_RUNTIME_linux=2.35\n")
-                # The read step itself "fails" (rc=1)...
-                return _fake_run_result(returncode=1, stdout="READ_MIN_RUNTIME_RC=1\n")
-            if "assert_min_runtime_matches_declared.py" in joined:
-                # ...but the drift check still passes.
-                return _fake_run_result(
-                    returncode=0,
-                    stdout="MIN_RUNTIME_DRIFT_RESULT=PASS (measured=2.35, declared=2.35 from [linux])\n",
-                )
-            raise AssertionError(f"unexpected argv: {argv}")
-
-        with mock.patch.object(run_module, "run", side_effect=fake_run), _Cwd(self._tmp()):
-            rc, out, _ = _run_captured(verify_artifact.min_runtime, "linux")
-        self.assertEqual(rc, 0, "a nonzero READ_MIN_RUNTIME_RC alone must not fail min_runtime()")
-        self.assertIn("READ_MIN_RUNTIME_RC=1", out)
-
-    def test_min_runtime_drift_failure_returns_nonzero(self):
-        def fake_run(argv, cwd=None, env=None):
-            if argv[0] == "readelf":
-                return _fake_run_result(returncode=0, stdout="Symbol table ...\n")
-            joined = " ".join(map(str, argv))
-            if "read_min_runtime.py" in joined:
-                Path("min_runtime.txt").write_text("MIN_RUNTIME_linux=2.36\n")
-                return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_linux=2.36\nREAD_MIN_RUNTIME_RC=0\n")
-            if "assert_min_runtime_matches_declared.py" in joined:
-                return _fake_run_result(
-                    returncode=1,
-                    stdout="",
-                    stderr="error: measured MIN_RUNTIME_linux=2.36 != declared ...=2.35\n",
-                )
-            raise AssertionError(f"unexpected argv: {argv}")
-
-        with mock.patch.object(run_module, "run", side_effect=fake_run), _Cwd(self._tmp()):
-            rc, out, err = _run_captured(verify_artifact.min_runtime, "linux")
-        self.assertEqual(rc, 1)
-        # No ::error:: line is manufactured here -- the plan is explicit
-        # that none exists in the original for this block.
-        self.assertNotIn("::error::", out)
-        self.assertNotIn("::error::", err)
-
-    def test_emission_matches_golden_min_runtime(self):
-        def fake_run(argv, cwd=None, env=None):
-            if argv[0] == "readelf":
-                return _fake_run_result(returncode=0, stdout="Symbol table '.dynsym' contains 10 entries:\n")
-            joined = " ".join(map(str, argv))
-            if "read_min_runtime.py" in joined:
-                Path("min_runtime.txt").write_text("MIN_RUNTIME_linux=2.35\n  GLIBC_2.35\n")
-                return _fake_run_result(
-                    returncode=0,
-                    stdout="MIN_RUNTIME_linux=2.35\n  GLIBC_2.35\nREAD_MIN_RUNTIME_RC=0\n",
-                )
-            if "assert_min_runtime_matches_declared.py" in joined:
-                return _fake_run_result(
-                    returncode=0,
-                    stdout="MIN_RUNTIME_DRIFT_RESULT=PASS (measured=2.35, declared=2.35 from [linux])\n",
-                )
-            raise AssertionError(f"unexpected argv: {argv}")
-
-        with mock.patch.object(run_module, "run", side_effect=fake_run), _Cwd(self._tmp()):
-            rc, out, _ = _run_captured(verify_artifact.min_runtime, "linux")
-        self.assertEqual(rc, 0)
-        expected = (_GOLDEN_DIR / "min-runtime-linux.markers").read_text()
-        self.assertEqual(out, expected)
+    # S-F1 (min_runtime) direct-behaviour tests deleted here (P-10, push 7):
+    # `verify_artifact.min_runtime` itself was deleted as an orphaned
+    # duplicate of `ci/minruntime.py`'s four-platform generalisation -- see
+    # verify_artifact.py's comment at the old function's former location.
+    # Equivalent coverage (READ_MIN_RUNTIME_RC ungated, drift-failure RC,
+    # golden marker match) lives in test_minruntime.py against the real
+    # (non-orphaned) implementation.
 
     # ---- AC-L5 (assert_exports) -----------------------------------------
 
@@ -364,6 +297,128 @@ class VerifyArtifactTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         expected = (_GOLDEN_DIR / "assert-exports-linux.markers").read_text()
         self.assertEqual(out, expected)
+
+    # ---- macOS staged-companion gates (arch + reachability + rpath) -------
+
+    def _macos_companions(self):
+        import read_shipped_files
+
+        return read_shipped_files.load_declaration()["macos"]["companions"]
+
+    def test_staged_companions_all_gates_pass(self):
+        companions = self._macos_companions()
+        dylib = "native/build-macos-arm64/libdng_decoder_native.dylib"
+
+        def fake_run(argv, cwd=None, env=None):
+            if argv[0] == "lipo":
+                return _fake_run_result(returncode=0, stdout="arm64\n")
+            raise AssertionError(f"unexpected run(): {argv}")
+
+        def fake_run_to_file(argv, out_path, cwd=None, env=None):
+            self.assertEqual(argv[0], "otool")
+            lines = [dylib, "\t@rpath/libdng_decoder_native.dylib (compatibility ...)"]
+            for c in companions:
+                lines.append(f"\t@rpath/{c} (compatibility version 1.0.0)")
+            Path(out_path).write_text("\n".join(lines) + "\n")
+            return _fake_run_result(returncode=0)
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run), \
+             mock.patch.object(run_module, "run_to_file", side_effect=fake_run_to_file), \
+             _Cwd(self._tmp()):
+            for c in companions:
+                (Path(self._tmp()) / c).touch()
+            Path("artifacts/native").mkdir(parents=True, exist_ok=True)
+            for c in companions:
+                (Path("artifacts/native") / c).touch()
+            rc, out, _ = _run_captured(
+                verify_artifact.verify_staged_companions,
+                "macos", dylib, "artifacts", "arm64",
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("Gate 1: architecture", out)
+        self.assertIn("Gates 2+3: reachability", out)
+        for c in companions:
+            self.assertIn(f"dependency line for {c}:", out)
+
+    def test_staged_companions_arch_mismatch_fails_no_stderr_redirect(self):
+        companions = self._macos_companions()
+        dylib = "native/build-macos-arm64/libdng_decoder_native.dylib"
+
+        def fake_run(argv, cwd=None, env=None):
+            return _fake_run_result(returncode=0, stdout="x86_64\n")
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run), _Cwd(self._tmp()):
+            Path("artifacts/native").mkdir(parents=True, exist_ok=True)
+            for c in companions:
+                (Path("artifacts/native") / c).touch()
+            rc, out, err = _run_captured(
+                verify_artifact.verify_staged_companions,
+                "macos", dylib, "artifacts", "arm64",
+            )
+        self.assertEqual(rc, 1)
+        # PORTED AS-IS: this step's error lines carry no `>&2` in the
+        # original shell, unlike every other error in this module.
+        self.assertIn("::error::", out)
+        self.assertEqual(err, "")
+
+    def test_staged_companions_unlinked_companion_fails(self):
+        companions = self._macos_companions()
+        dylib = "native/build-macos-arm64/libdng_decoder_native.dylib"
+
+        def fake_run(argv, cwd=None, env=None):
+            return _fake_run_result(returncode=0, stdout="arm64\n")
+
+        def fake_run_to_file(argv, out_path, cwd=None, env=None):
+            # First companion is simply absent from the dependency graph.
+            lines = [dylib, "\t@rpath/libdng_decoder_native.dylib (compatibility ...)"]
+            for c in companions[1:]:
+                lines.append(f"\t@rpath/{c} (compatibility version 1.0.0)")
+            Path(out_path).write_text("\n".join(lines) + "\n")
+            return _fake_run_result(returncode=0)
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run), \
+             mock.patch.object(run_module, "run_to_file", side_effect=fake_run_to_file), \
+             _Cwd(self._tmp()):
+            Path("artifacts/native").mkdir(parents=True, exist_ok=True)
+            for c in companions:
+                (Path("artifacts/native") / c).touch()
+            rc, out, err = _run_captured(
+                verify_artifact.verify_staged_companions,
+                "macos", dylib, "artifacts", "arm64",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn(f"does not depend on {companions[0]} at all", out)
+        self.assertEqual(err, "")
+
+    def test_staged_companions_non_rpath_reference_fails(self):
+        companions = self._macos_companions()
+        dylib = "native/build-macos-arm64/libdng_decoder_native.dylib"
+
+        def fake_run(argv, cwd=None, env=None):
+            return _fake_run_result(returncode=0, stdout="arm64\n")
+
+        def fake_run_to_file(argv, out_path, cwd=None, env=None):
+            lines = [dylib, "\t@rpath/libdng_decoder_native.dylib (compatibility ...)"]
+            # First companion is reachable but via an absolute path, not @rpath.
+            lines.append(f"\t/opt/homebrew/lib/{companions[0]} (compatibility version 1.0.0)")
+            for c in companions[1:]:
+                lines.append(f"\t@rpath/{c} (compatibility version 1.0.0)")
+            Path(out_path).write_text("\n".join(lines) + "\n")
+            return _fake_run_result(returncode=0)
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run), \
+             mock.patch.object(run_module, "run_to_file", side_effect=fake_run_to_file), \
+             _Cwd(self._tmp()):
+            Path("artifacts/native").mkdir(parents=True, exist_ok=True)
+            for c in companions:
+                (Path("artifacts/native") / c).touch()
+            rc, out, err = _run_captured(
+                verify_artifact.verify_staged_companions,
+                "macos", dylib, "artifacts", "arm64",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("non-relative reference", out)
+        self.assertEqual(err, "")
 
     # ---- AVX-512 wrapper --------------------------------------------------
 

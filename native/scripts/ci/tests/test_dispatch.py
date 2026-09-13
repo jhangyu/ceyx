@@ -46,6 +46,8 @@ FROZEN_CLI_SURFACE = {
     "assert-orientation",
     "codec-probe",
     "capability-vector",
+    "assert-configure-log",
+    "assert-staged-companions",
     "stage",
     "assert-staged-group",
     "dt-needed",
@@ -486,26 +488,35 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         # `_artifact_path()` returns `None` off-linux and `run.run_to_file`
         # chokes on it -- a coincidence of the TWIN's internals, not a
         # property of the test, and a future None-handling tidy-up there
-        # would silently convert those into windows' same blind spot. A
-        # spy on BOTH modules is the only two-sided check that actually
-        # states "reaches the new module, not the twin": real dispatch is
-        # never executed, so no live child process runs (no marker leak,
-        # matching the earlier fix in this same class) and no platform-
-        # specific crash shape can hide the answer.
+        # would silently convert those into windows' same blind spot.
+        #
+        # UPDATED (push 7, P-10): the twin (`verify_artifact.min_runtime`)
+        # has now been DELETED -- it was the orphaned duplicate the class
+        # docstring already described. A `mock.patch.object` on a deleted
+        # attribute raises `AttributeError`, so the "twin not called" half
+        # is no longer a spy at all: it is the STRONGER claim that the twin
+        # cannot exist to be called, checked structurally via `hasattr`.
+        # The positive half (new module called with the expected arguments)
+        # is kept unchanged -- it is the half that actually proves
+        # production dispatch reaches the right implementation, which is
+        # the exact failure this whole class exists to catch.
         from unittest import mock
 
         import ci.minruntime as minruntime_module
         import ci.verify_artifact as verify_artifact_module
 
+        self.assertFalse(
+            hasattr(verify_artifact_module, "min_runtime"),
+            "verify_artifact.min_runtime was deleted as an orphan (P-10) -- "
+            "its reappearance would recreate the same-name-diverges defect "
+            "this class exists to catch.",
+        )
         with mock.patch.object(
             minruntime_module, "min_runtime", return_value=0
-        ) as mocked_new, mock.patch.object(
-            verify_artifact_module, "min_runtime", return_value=0
-        ) as mocked_old:
+        ) as mocked_new:
             rc = ci_entrypoint.main(argv)
         self.assertEqual(rc, 0)
         mocked_new.assert_called_once_with(*expected_call)
-        mocked_old.assert_not_called()
 
     def test_windows_min_runtime_reaches_minruntime_not_verify_artifact(self):
         self._assert_dispatches_to_minruntime_not_verify_artifact(
@@ -540,26 +551,25 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
     def test_min_runtime_dispatch_calls_minruntime_module_not_verify_artifact(self):
         # The regression this whole class exists to prevent: a behavioural
         # test on linux alone cannot distinguish `ci.minruntime.min_runtime`
-        # from `ci.verify_artifact.min_runtime` -- same name, same
-        # signature, both produce a plausible-looking int on linux. Spy on
-        # BOTH modules' attributes directly so a future wrong import (a
-        # revert, a merge conflict resolved the wrong way) fails loudly
-        # here instead of silently reproducing the exact bug this task
-        # fixed.
+        # from a same-named twin elsewhere -- same name, same signature,
+        # both produce a plausible-looking int on linux. Spy on the real
+        # module's attribute so a future wrong import (a revert, a merge
+        # conflict resolved the wrong way) fails loudly here; the twin
+        # itself is gone (P-10, push 7), so its non-existence is asserted
+        # structurally rather than spied on -- see the sibling method above
+        # for the full rationale.
         from unittest import mock
 
         import ci.minruntime as minruntime_module
         import ci.verify_artifact as verify_artifact_module
 
+        self.assertFalse(hasattr(verify_artifact_module, "min_runtime"))
         with mock.patch.object(
             minruntime_module, "min_runtime", return_value=0
-        ) as mocked_new, mock.patch.object(
-            verify_artifact_module, "min_runtime", return_value=0
-        ) as mocked_old:
+        ) as mocked_new:
             rc = ci_entrypoint.main(["min-runtime", "--platform", "linux"])
         self.assertEqual(rc, 0)
         mocked_new.assert_called_once_with("linux", None)
-        mocked_old.assert_not_called()
 
 
 class TestCapabilityVectorDispatch(unittest.TestCase):

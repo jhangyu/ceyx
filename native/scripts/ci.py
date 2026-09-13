@@ -30,6 +30,8 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py assert-orientation --platform P
     python3 native/scripts/ci.py codec-probe       --platform P --workspace W [--dist-dir D]
     python3 native/scripts/ci.py capability-vector --platform P --kind codec|build [--source probe|configure-log]
+    python3 native/scripts/ci.py assert-configure-log --log-path F --pattern R --label L --error E
+    python3 native/scripts/ci.py assert-staged-companions --platform macos --arch A --dylib-path D --artifact-dir T
     python3 native/scripts/ci.py stage             --platform P
     python3 native/scripts/ci.py assert-staged-group --platform P
     python3 native/scripts/ci.py dt-needed         --platform P
@@ -72,6 +74,7 @@ _PLATFORM_COMMANDS = (
     "assert-orientation",
     "codec-probe",
     "capability-vector",
+    "assert-staged-companions",
     "stage",
     "assert-staged-group",
     "dt-needed",
@@ -99,6 +102,7 @@ _CAPABILITY_VECTOR_PLATFORMS = frozenset({"linux", "macos", "windows"})
 _PLATFORMLESS_COMMANDS = (
     "selftest",
     "marker-diff",
+    "assert-configure-log",
     "vcpkg-baseline",
     "vcpkg-bootstrap",
     "vcpkg-install",
@@ -339,6 +343,17 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--kind", required=True, choices=["codec", "build"])
     cv.add_argument("--source", default="probe", choices=["probe", "configure-log"])
 
+    def _staged_companions_extra(sp):
+        sp.add_argument("--dylib-path", required=True)
+        sp.add_argument("--artifact-dir", required=True)
+
+    _add_platform_command(
+        sub,
+        "assert-staged-companions",
+        "assert the macOS staged companion dylibs (arch + reachability + rpath)",
+        _staged_companions_extra,
+    )
+
     def _stage_extra(sp):
         sp.add_argument("--artifact-dir", required=True)
         sp.add_argument("--native-dir", required=True)
@@ -358,6 +373,15 @@ def build_parser() -> argparse.ArgumentParser:
         sub, "dt-needed", "assert the DT_NEEDED import closure", _dt_needed_extra
     )
     _add_platform_command(sub, "assert-vcpkg-artefacts", "assert vcpkg produced artefacts")
+
+    acl = sub.add_parser(
+        "assert-configure-log",
+        help="assert a literal/pattern line is present in a build configure log",
+    )
+    acl.add_argument("--log-path", required=True)
+    acl.add_argument("--pattern", required=True)
+    acl.add_argument("--label", required=True)
+    acl.add_argument("--error", required=True)
 
     vb = sub.add_parser("vcpkg-baseline", help="resolve and export the vcpkg baseline")
     vb.add_argument("--github-env", required=True)
@@ -436,6 +460,12 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.verify_artifact as verify_artifact
 
         return verify_artifact.assert_no_avx512(args.platform)
+    if args.command == "assert-staged-companions":
+        import ci.verify_artifact as verify_artifact
+
+        return verify_artifact.verify_staged_companions(
+            args.platform, args.dylib_path, args.artifact_dir, args.arch
+        )
     if args.command == "stage":
         import ci.stage as stage
 
@@ -479,6 +509,12 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.codec_probe as codec_probe
 
         return codec_probe.codec_probe(args.platform, args.workspace, dist_dir=args.dist_dir)
+    if args.command == "assert-configure-log":
+        import ci.configure_log as configure_log
+
+        return configure_log.assert_configure_log(
+            args.log_path, args.pattern, args.label, args.error
+        )
     if args.command == "capability-vector":
         # `_CAPABILITY_VECTOR_PLATFORMS` is PERMANENT, same shape as
         # `_CODEC_PROBE_PLATFORMS`: android has no capability-vector step

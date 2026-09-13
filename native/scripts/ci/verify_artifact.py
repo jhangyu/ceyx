@@ -23,6 +23,8 @@ today).
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -116,47 +118,27 @@ def import_closure(platform: str) -> int:
     return rc
 
 
-def min_runtime(platform: str, arch: str | None = None) -> int:
-    """S-F1: measure the artifact's min-runtime floor, then assert it
-    matches the declared value. Replaces `linux_build.yml:571-594`. No
-    `== ... ==` banner and no `::error::` line exist in the original for
-    this block -- do not add either."""
-    so = _artifact_path(platform)
-
-    run.run_to_file(["readelf", "--dyn-syms", so], "readelf_dynsyms.txt")
-
-    rc, out = run.capture([
-        sys.executable, "native/scripts/read_min_runtime.py",
-        "--artifact", "readelf_dynsyms.txt",
-        "--platform", platform,
-        "--out", "min_runtime.txt",
-    ])
-    if out:
-        report.plain(out.rstrip("\n"))
-    # PORTED AS-IS (pre-existing, d33cc607 linux_build.yml:571-572 /
-    # C-G4 item 2): this RC is echoed but never gated -- the drift check
-    # below is the only sub-check of this function that can fail it. See
-    # test_min_runtime_read_rc_is_not_gated.
-    report.marker("READ_MIN_RUNTIME_RC", rc)
-
-    min_runtime_path = Path("min_runtime.txt")
-    if min_runtime_path.exists():
-        text = min_runtime_path.read_text(errors="replace")
-        if text:
-            report.plain(text.rstrip("\n"))
-
-    arch_args = ["--arch", arch] if arch else []
-    drift_rc, drift_out = run.capture([
-        sys.executable, "native/scripts/assert_min_runtime_matches_declared.py",
-        "--emitted", "min_runtime.txt",
-        "--declared", "native/deps/min_runtime_expected.toml",
-        "--platform", platform,
-        *arch_args,
-    ])
-    if drift_out:
-        report.plain(drift_out.rstrip("\n"))
-    report.marker("MIN_RUNTIME_DRIFT_RC", drift_rc)
-    return drift_rc
+# P-10 (push 6): `min_runtime()` used to live here, Linux-only. It was
+# orphaned when `ci.py`'s dispatch was rewired to the four-platform
+# `ci/minruntime.py` generalisation and never called again in production --
+# but it stayed invisible to every test for weeks because
+# `ci.minruntime.min_runtime` and this module's former `min_runtime` shared
+# the exact same name and signature, and on the only platform the stale
+# dispatch could still reach (linux) they did the same readelf work. Deleted
+# here, by this file's owner, in push 7 (deferred from push 6 deliberately --
+# deleting a function in another WI's file mid-migration is the exact
+# cross-ownership edit this campaign forbids; push 6 only fixed the dispatch).
+# Its three direct-behaviour tests (`test_min_runtime_read_rc_is_not_gated`,
+# `test_min_runtime_drift_failure_returns_nonzero`,
+# `test_emission_matches_golden_min_runtime`) were deleted in the same
+# commit -- this project's standing rule is that a superseded module's tests
+# and docs go with it, no tombstones. Equivalent coverage lives in
+# `ci/minruntime.py`'s own `_from_dump` and `test_minruntime.py`.
+# `test_dispatch.py`'s `TestMinRuntimeDispatchGeneralised` no longer spies on
+# this module's `min_runtime` attribute at all -- it asserts the attribute
+# does not exist, which is a STRONGER regression guard than "was not called"
+# (a future revert cannot recreate the function without the deletion itself
+# being noticed).
 
 
 def assert_exports(platform: str, arch: str | None = None) -> int:
@@ -185,6 +167,85 @@ def assert_exports(platform: str, arch: str | None = None) -> int:
             "native/src/ffi/)."
         )
     return rc
+
+
+def verify_staged_companions(platform: str, dylib_path: str, artifact_dir: str, arch: str) -> int:
+    """macOS's three staged-companion gates (macos_build.yml:790-861), split
+    out of the "Stage native artifact" step per leader ruling: `stage.py`
+    stages, this module verifies. THREE INDEPENDENT GATES, none implies the
+    others (each ported verbatim, see the YAML comment this replaces for the
+    real defect each one alone was proven to catch):
+
+      1. Architecture: `lipo -archs` on each STAGED companion (from
+         `<artifact_dir>/native/`, i.e. after `stage.py` has already copied
+         it there -- not the pre-staged source).
+      2. Reachability: the companion's basename appears in the decoder's OWN
+         `otool -L` dependency listing (read from `dylib_path`, the ORIGINAL
+         path -- not the staged copy; ported as-is, this asymmetry is
+         intentional in the source step).
+      3. Path convention: that dependency line must start `@rpath/<companion>`.
+
+    Self-reference handling: `otool -L`'s line 2 is the inspected file's own
+    LC_ID_DYLIB entry, stripped by NAME (`@rpath/<dylib basename>`), never by
+    a positional offset (measured directly against a real decoder: a
+    positional `tail -n +2` alone does not strip it).
+
+    Every emitted line has NO `>&2` redirect in the original shell (unlike
+    every other error line in this module) -- ported as-is via
+    `report.error(..., stream=sys.stdout)`, matching report.py's documented
+    exception list.
+    """
+    import read_shipped_files
+
+    _SCRIPTS_DIR2 = Path(__file__).resolve().parents[1]
+    if str(_SCRIPTS_DIR2) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR2))
+
+    companions = read_shipped_files.load_declaration()[platform]["companions"]
+    staged_dir = Path(artifact_dir) / "native"
+    dylib_basename = os.path.basename(dylib_path)
+
+    report.plain(f"--- Gate 1: architecture (every staged companion reports {arch}) ---")
+    for companion in companions:
+        result = run.run(["lipo", "-archs", str(staged_dir / companion)])
+        archs = (result.stdout + result.stderr).strip()
+        report.plain(f"arch({companion}): {archs}")
+        if not re.search(rf"\b{re.escape(arch)}\b", archs):
+            report.error(
+                f"{companion} archs '{archs}' do not include {arch}", stream=sys.stdout
+            )
+            return 1
+
+    report.plain("--- Gates 2+3: reachability + path convention (decoder's own dependency graph) ---")
+    run.run_to_file(["otool", "-L", dylib_path], "otool_dylib_deps.txt")
+    all_lines = Path("otool_dylib_deps.txt").read_text(errors="replace").splitlines()
+    # tail -n +2, then strip the self-reference (LC_ID_DYLIB) line by NAME,
+    # not by position -- see docstring.
+    dylib_dep_lines = [
+        line for line in all_lines[1:] if f"@rpath/{dylib_basename}" not in line
+    ]
+    report.plain("\n".join(dylib_dep_lines))
+    for companion in companions:
+        matching = [line for line in dylib_dep_lines if companion in line]
+        companion_line = "\n".join(matching)
+        if not companion_line:
+            report.error(
+                f"{dylib_path} does not depend on {companion} at all — staged but "
+                "unlinked (dead file).",
+                stream=sys.stdout,
+            )
+            return 1
+        report.plain(f"dependency line for {companion}: {companion_line}")
+        if not any(re.match(rf"^\s*@rpath/{re.escape(companion)} ", line) for line in matching):
+            report.error(
+                f"{companion} is depended upon via a non-relative reference "
+                f"({companion_line}) — expected the line to start with @rpath/{companion}. "
+                "This would fail to load on any machine but the build host (the exact "
+                "class of defect fixed in b0a0573).",
+                stream=sys.stdout,
+            )
+            return 1
+    return 0
 
 
 def assert_no_avx512(platform: str) -> int:
