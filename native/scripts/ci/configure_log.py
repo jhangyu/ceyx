@@ -53,14 +53,40 @@ from pathlib import Path
 from . import report
 
 
-def assert_configure_log(log_path: str, pattern: str, label: str, error_message: str) -> int:
+def assert_configure_log(
+    log_path: str, pattern: str, label: str, error_message: str, marker: str | None = None
+) -> int:
     """Reads `log_path`, searches it for `pattern` (a Python regex), prints
     `ASSERT <label> RC=<rc>`, and on a miss prints `error_message` via
-    `report.error` and returns 1. Returns 0 on a match."""
+    `report.error` and returns 1. Returns 0 on a match.
+
+    `marker` (AC-2 remediation, push 8): optional, because most real call
+    sites never had one -- `ASSERT <label> RC=<rc>` itself does NOT match
+    `markerdiff.MARKER_RE` (it starts with the word "ASSERT ", not a bare
+    `NAME=`/`RC=`), and that was ALREADY TRUE of every real call site's
+    original pre-migration shell (`echo "ASSERT ... RC=${rc}"`) -- so most
+    callers lost nothing when they migrated here, because there was nothing
+    markerdiff-visible to lose. Exactly one real call site
+    (macos_build.yml's LCMS2 configure-log assert) had a SECOND, separate
+    bare-marker echo after its ASSERT line (`echo
+    "LCMS_CONFIGURE_RC=${LCMS_RC}"`) that this module's collapse silently
+    dropped -- `marker` restores that second line for callers that need it,
+    via `report.marker()` (emits a conforming `NAME=value`).
+
+    Emission order matches the pre-migration shell exactly: ASSERT line,
+    then the error line if any, then the marker line LAST -- and
+    unconditionally on both the pass and fail path (`if marker:` runs
+    regardless of `rc`), which is what makes the failure path safe from the
+    `errexit`-skips-a-trailing-echo trap that caused the original loss: a
+    caller wrapping this in `set +e; ...; RC=$?; set -e; echo
+    "MARKER=${RC}"` no longer needs that wrapper at all -- one call, with
+    `--marker NAME`, does the whole thing."""
     text = Path(log_path).read_text(errors="replace")
     found = re.search(pattern, text) is not None
     rc = 0 if found else 1
     report.plain(f"ASSERT {label} RC={rc}")
     if rc != 0:
         report.error(error_message)
+    if marker:
+        report.marker(marker, rc)
     return rc

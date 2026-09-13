@@ -145,5 +145,70 @@ class ConfigureLogTests(unittest.TestCase):
         self.assertIn("::error::configure.log does not show the expected JXL static-link line", err)
 
 
+    # ---- AC-2 marker restoration (push 8) ---------------------------------
+
+    def test_no_marker_by_default_regression_pin(self):
+        """Most real call sites (android HEIF/JXL, windows JXL) never had a
+        second marker line -- their pre-migration shell was `ASSERT ... RC=`
+        only. `marker=None` (the default) must emit NOTHING beyond the
+        ASSERT line; this pins that three of the four real callers stay
+        exactly as they are."""
+        log = self._write_log("configure.log", "-- JXL: static\n")
+        rc, out, _ = _run_captured(
+            configure_log.assert_configure_log,
+            log, "JXL: static", "JXL static-link", "unused",
+        )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("=", out.replace("RC=0", ""))  # no bare NAME=value line beyond ASSERT's own RC=
+
+    def test_marker_emitted_on_success(self):
+        log = self._write_log(
+            "native_build_native_arm64.log", "-- [ceyx] LCMS2: disabled (OQ-N4 option Z)\n"
+        )
+        rc, out, _ = _run_captured(
+            configure_log.assert_configure_log,
+            log,
+            r"\[ceyx\] LCMS2: disabled \(OQ-N4 option Z\)",
+            "LCMS2 disabled",
+            "unused",
+            marker="LCMS_CONFIGURE_RC",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("LCMS_CONFIGURE_RC=0", out)
+
+    def test_marker_emitted_on_failure_with_nonzero_value(self):
+        """The condition this whole feature exists for: `errexit` skips a
+        trailing `echo` on a nonzero exit in the shell this replaces --
+        `if marker:` here runs unconditionally on both paths, so the
+        failure path cannot silently lose the marker the way the original
+        collapse did."""
+        log = self._write_log("native_build_native_arm64.log", "-- [ceyx] LCMS2: enabled\n")
+        rc, out, err = _run_captured(
+            configure_log.assert_configure_log,
+            log,
+            r"\[ceyx\] LCMS2: disabled \(OQ-N4 option Z\)",
+            "LCMS2 disabled",
+            "configure log does not show the expected LCMS2-disabled line",
+            marker="LCMS_CONFIGURE_RC",
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("LCMS_CONFIGURE_RC=1", out)
+        self.assertIn("::error::configure log does not show the expected LCMS2-disabled line", err)
+
+    def test_marker_line_comes_after_assert_and_error_lines(self):
+        """Emission order pin: ASSERT -> error (stderr) -> marker (stdout),
+        matching the pre-migration shell's own order exactly -- order is
+        observable and part of the contract (lead7 ruling)."""
+        log = self._write_log("native_build_native_arm64.log", "-- nothing matches\n")
+        rc, out, _ = _run_captured(
+            configure_log.assert_configure_log,
+            log, r"\[ceyx\] LCMS2: disabled", "LCMS2 disabled", "unused",
+            marker="LCMS_CONFIGURE_RC",
+        )
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "ASSERT LCMS2 disabled RC=1")
+        self.assertEqual(lines[-1], "LCMS_CONFIGURE_RC=1")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,7 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py assert-orientation --platform P
     python3 native/scripts/ci.py codec-probe       --platform P --workspace W [--dist-dir D]
     python3 native/scripts/ci.py capability-vector --platform P --kind codec|build [--source probe|configure-log]
-    python3 native/scripts/ci.py assert-configure-log --log-path F --pattern R --label L --error E
+    python3 native/scripts/ci.py assert-configure-log --log-path F --pattern R --label L --error E [--marker NAME]
     python3 native/scripts/ci.py assert-staged-companions --platform macos --arch A --dylib-path D --artifact-dir T
     python3 native/scripts/ci.py stage             --platform linux --artifact-dir D --native-dir N
     python3 native/scripts/ci.py stage             --platform windows|android --artifact-dir D --source-dir S
@@ -538,6 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
     acl.add_argument("--pattern", required=True)
     acl.add_argument("--label", required=True)
     acl.add_argument("--error", required=True)
+    acl.add_argument("--marker", default=None)
 
     vb = sub.add_parser("vcpkg-baseline", help="resolve and export the vcpkg baseline")
     vb.add_argument("--github-env", required=True)
@@ -746,7 +747,7 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.configure_log as configure_log
 
         return configure_log.assert_configure_log(
-            args.log_path, args.pattern, args.label, args.error
+            args.log_path, args.pattern, args.label, args.error, marker=args.marker
         )
     if args.command == "capability-vector":
         # `_CAPABILITY_VECTOR_PLATFORMS` is PERMANENT, same shape as
