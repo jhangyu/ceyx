@@ -558,20 +558,19 @@ jobs:
       # output is both printed and asserted — printing alone would let a wrong
       # architecture pass unnoticed, and asserting alone would leave no evidence
       # in the log.
+      # WI-35 (push 8b, Task #15): collapsed into ci.py verify-artifact
+      # --platform macos, calling verify_artifact.verify_artifact()'s macOS
+      # branch (verify_artifact.py:57-124, written FROM this exact step --
+      # its docstring cites macos_build.yml:581-593). Byte-verified before
+      # migrating (mechanical, not visual): both "Expected dylib not found
+      # at ..." and "Expected architecture '...' but the dylib reports
+      # '...'" reproduced exactly via a real missing-path run and a real
+      # wrong-arch dylib compiled locally; neither error line has a
+      # stderr redirect on either side, matching the shell's own convention
+      # here. No markers in the pre-migration shell (no bare NAME=value
+      # echo, only file/lipo/otool diagnostic output) -- none to restore.
       - name: Verify dylib was produced and has the expected architecture
-        run: |
-          if [ ! -f "$DYLIB" ]; then
-            echo "::error::Expected dylib not found at $DYLIB"
-            exit 1
-          fi
-          file "$DYLIB"
-          ARCHS="$(lipo -archs "$DYLIB")"
-          echo "lipo -archs => ${ARCHS}"
-          if [ "${ARCHS}" != "${{ matrix.arch_tag }}" ]; then
-            echo "::error::Expected architecture '${{ matrix.arch_tag }}' but the dylib reports '${ARCHS}'"
-            exit 1
-          fi
-          otool -L "$DYLIB"
+        run: python3 native/scripts/ci.py verify-artifact --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB"
 
       # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
       # G-E in that plan's gate ledger) — user-ordered CI build-integrity
