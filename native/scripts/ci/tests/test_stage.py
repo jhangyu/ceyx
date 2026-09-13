@@ -329,6 +329,27 @@ class TestAssertStagedGroupWindows(unittest.TestCase):
             err,
         )
 
+    def test_mismatch_message_matches_source_byte_for_byte(self) -> None:
+        """WI-39 byte audit: windows_build.yml's pre-migration literal
+        (confirmed via `git log -p` against the commit that introduced this
+        line) is 'declaration — expected [...], found [...].' with an EM
+        DASH (U+2014), not '--' (double hyphen). stage.py had silently
+        drifted to the ASCII form -- invisible to AC-2 because this is a
+        FAILURE-PATH string a green run never emits. Pinned here so a
+        future "helpful" normalize-to-ASCII pass fails loudly."""
+        artifact_dir = self._staged(["dng_decoder_native.dll"])
+        with mock.patch.object(
+            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll"]
+        ):
+            rc, _, err = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "declaration — expected [dng_decoder_native.dll heif.dll], found "
+            "[dng_decoder_native.dll].",
+            err,
+        )
+        self.assertNotIn("declaration -- expected", err)
+
 
 class TestStageMacos(unittest.TestCase):
     """``stage_macos()`` -- copy-only, no arch/reachability/rpath gates
@@ -373,6 +394,26 @@ class TestStageMacos(unittest.TestCase):
             "::error::expected companion dylib libheif.1.dylib not found in", err
         )
         self.assertFalse((artifact_dir / "native" / "libheif.1.dylib").exists())
+
+    def test_missing_companion_message_matches_source_byte_for_byte(self) -> None:
+        """WI-39 byte audit: macos_build.yml's pre-migration literal
+        (confirmed via `git log -p`) is '... not found in {dir} — the
+        release asset would ship ...' with an EM DASH (U+2014), not '--'.
+        Failure-path string, invisible to AC-2 on a green run -- pinned
+        here."""
+        native_dylib_dir, artifact_dir = self._dirs()
+        dylib = native_dylib_dir / "libdng_decoder_native.dylib"
+        dylib.write_bytes(b"\xcf\xfa\xed\xfe")
+        rc, _, err = _emit(
+            stage.stage_macos, str(dylib), ["libheif.1.dylib"], str(artifact_dir)
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            f"not found in {native_dylib_dir} — the release asset would ship the decoder "
+            "without a dependency the podspec vendors.",
+            err,
+        )
+        self.assertNotIn(" -- the release", err)
 
 
 class TestStageAndroid(unittest.TestCase):
@@ -436,6 +477,22 @@ class TestAssertStagedGroupAndroid(unittest.TestCase):
             "::error::missing required companion .so(s) in", err
         )
         self.assertIn("libheif.so", err)
+
+    def test_missing_companion_message_matches_source_byte_for_byte(self) -> None:
+        """WI-39 byte audit: android_build.yml's pre-migration literal
+        (confirmed via `git log -p`) is '...:missing — the Android atomic
+        group (decoder + HEIF companions) is incomplete.' with an EM DASH
+        (U+2014), not '--'. Failure-path string, invisible to AC-2 on a
+        green run -- pinned here."""
+        artifact_dir = self._staged(["libdng_decoder_native.so"])
+        with mock.patch.object(stage, "declared_companions", lambda p: ["libheif.so"]):
+            rc, _, err = _emit(stage.assert_staged_group_android, str(artifact_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            " libheif.so — the Android atomic group (decoder + HEIF companions) is incomplete.",
+            err,
+        )
+        self.assertNotIn(" -- the Android atomic group", err)
 
     def test_undeclared_extra_so_is_not_a_mismatch(self) -> None:
         """The android-specific asymmetry (ruling 3): an extra undeclared

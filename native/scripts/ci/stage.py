@@ -251,7 +251,7 @@ def assert_staged_group_windows(artifact_dir: str) -> int:
     if expected != staged:
         report.error(
             "staged Windows DLL set does not match native/deps/shipped_files.toml's "
-            f"declaration -- expected [{' '.join(expected)}], found [{' '.join(staged)}]."
+            f"declaration — expected [{' '.join(expected)}], found [{' '.join(staged)}]."
         )
         return 1
     return 0
@@ -283,7 +283,7 @@ def stage_macos(dylib_path: str, companions: list[str], artifact_dir: str) -> in
         src = src_dir / name
         if not src.exists():
             report.error(
-                f"expected companion dylib {name} not found in {src_dir} -- the release "
+                f"expected companion dylib {name} not found in {src_dir} — the release "
                 "asset would ship the decoder without a dependency the podspec vendors."
             )
             return 1
@@ -348,7 +348,7 @@ def assert_staged_group_android(artifact_dir: str) -> int:
     if missing:
         report.error(
             f"missing required companion .so(s) in {dest}:" + "".join(f" {n}" for n in missing)
-            + " -- the Android atomic group (decoder + HEIF companions) is incomplete."
+            + " — the Android atomic group (decoder + HEIF companions) is incomplete."
         )
         return 1
     report.marker("ANDROID_COMPANION_GROUP_COMPLETE", 1)
