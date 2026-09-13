@@ -411,30 +411,23 @@ jobs:
             exit 1
           fi
 
-          # WI-4 step 4.4 (S-B3): the same import-closure script used for
-          # Windows/Linux, run ALONGSIDE (not replacing, per the plan's
-          # "prove both green in one run, remove the old one in a follow-up
-          # step of the same item" instruction) the closure check above --
-          # this reads against the WI-15 declaration (native/deps/shipped_files.toml)
-          # for the decoder only; the script above is the whole-directory
-          # device-whitelist reading. Both must stay green before the older
-          # script is ever removed.
-          MAIN_SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
-          "${LLVM_READELF}" -d "${MAIN_SO}" > android_main_dynamic.txt 2>&1
-          set +e
-          python3 native/scripts/assert_import_closure.py \
-            --dump android_main_dynamic.txt \
-            --staged-dir "${ARTIFACT_DIR}/native" \
-            --declaration native/deps/shipped_files.toml \
-            --platform android \
-            --format elf
-          RC=$?
-          set -e
-          echo "IMPORT_CLOSURE_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::import-closure gate (WI-4/assert_import_closure.py) failed for ${MAIN_SO} — see IMPORT ... -> MISSING lines above." >&2
-            exit "${RC}"
-          fi
+      # WI-38 (pyci python-ization campaign, follow-on to WI-34/f651550f):
+      # collapsed from the old inline shell body (WI-4 step 4.4, S-B3) that
+      # ran alongside the device-whitelist closure check above -- both had
+      # to stay green together before the older shell was ever removed, per
+      # the plan's "prove both green in one run, remove in a follow-up step
+      # of the same item" instruction; WI-34 built and proved the python
+      # replacement, this step is that follow-up removal. verify_artifact.
+      # import_closure()'s android branch was verified byte-identical to
+      # the old shell body's marker output (IMPORT_CLOSURE_RESULT=,
+      # IMPORT_CLOSURE_RC=, and the ::error:: text) on both the success and
+      # failure paths before this step replaced it -- see
+      # tmp/verify/wi38-*.out/.err (not committed, working-tree evidence
+      # only, per this repo's docs/tmp-stays-out-of-VCS rule).
+      - name: Import-closure gate (S-B3)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: python3 native/scripts/ci.py import-closure --platform android --artifact-dir "${ARTIFACT_DIR}" --ndk-home "${ANDROID_NDK_HOME}"
 
       # WI-14 step 14.2 (S-F1): android's floor is a DECLARATION (minSdk),
       # not a binary property -- read from plugin/android/build.gradle, not
