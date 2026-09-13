@@ -81,10 +81,15 @@ class DiscoverVendoredRootsTest(unittest.TestCase):
             "dng_sdk/ itself is tracked source, not a vendored root",
         )
         # The specific ignored child present in .gitignore today:
-        # native/third_party/dng_sdk/targets/. Only assert it if the parent
-        # actually exists on this machine (tree-scan discovers it either way
-        # via `git ls-tree`, since dng_sdk/ is tracked, so this should hold
-        # on every machine, not just ones that have built it).
+        # native/third_party/dng_sdk/targets/. `git ls-tree` does NOT
+        # discover it even though dng_sdk/ itself is tracked -- ls-tree only
+        # walks TRACKED entries, and targets/ is gitignored, never
+        # committed. Disk-scan only finds it on a machine that has already
+        # built dng_sdk locally. Neither source is available on a fresh CI
+        # runner that has never built dng_sdk (CI run 34762557520 caught
+        # this), so `_SEEDED_CANDIDATES` seeds it explicitly -- this
+        # assertion must hold on EVERY machine, built or not, precisely
+        # because it no longer depends on either disk or tracked-tree state.
         self.assertIn("native/third_party/dng_sdk/targets", names)
 
     def test_returns_pathlib_paths_under_native_third_party(self) -> None:

@@ -109,13 +109,31 @@ CHECKS = [
 ]
 
 # Seeded on top of whatever the discovery below finds on disk/in the tree:
-# fetch targets this repo builds that may not exist on the machine running
-# this leg (e.g. a clean clone that has never run `build_deps.py fetch
-# halide`) and that carry no tracked placeholder (PROVENANCE.md or
-# otherwise) for the tree-scan half of discovery to find. Keep this list to
-# "known fetch targets with nothing tracked under them" only -- everything
-# else is derived, not hand-maintained; see docstring DESIGN HAZARD note.
-_SEEDED_CANDIDATES = ("halide",)
+# fetch/build targets this repo produces that may not exist on the machine
+# running this leg (e.g. a clean clone that has never run `build_deps.py
+# fetch halide`, or never run dng_sdk's own build) and that carry no tracked
+# placeholder (PROVENANCE.md or otherwise) for the tree-scan half of
+# discovery to find. Keep this list to "known fetch/build targets with
+# nothing tracked under them" only -- everything else is derived, not
+# hand-maintained; see docstring DESIGN HAZARD note.
+#
+# dng_sdk/{targets,documents,projects}: dng_sdk/ itself IS tracked (its
+# source/ subtree is committed), so the disk-scan half of discovery finds
+# these three only on a machine that has already built dng_sdk locally --
+# the tree-scan half (`git ls-tree`) cannot find them either, because
+# ls-tree only walks TRACKED entries and these three are gitignored, never
+# committed (see .gitignore lines for native/third_party/dng_sdk/{targets,
+# documents,projects}/). A fresh CI runner that has never built dng_sdk has
+# neither signal, so without seeding these here the leg silently narrows
+# its own absence claim on exactly the machines it exists to protect --
+# this was TC discovered via CI run 34762557520 (DiscoverVendoredRootsTest
+# failure), not by inspection.
+_SEEDED_CANDIDATES = (
+    "halide",
+    "dng_sdk/targets",
+    "dng_sdk/documents",
+    "dng_sdk/projects",
+)
 
 
 def discover_vendored_roots(repo_root: Path) -> list[Path]:
