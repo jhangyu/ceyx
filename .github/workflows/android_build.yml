@@ -282,41 +282,20 @@ jobs:
       # SIGPIPE on a successful match into a false failure).
       # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
       - name: Assert required FFI exports present in Android .so (G6)
+        # WI-19/WI-22 (pyci python-ization): the llvm-nm dump + manifest
+        # check migrated into ci/verify_artifact.py's assert_exports()
+        # (d1cac632) -- the dump had to move INSIDE the module (not just
+        # the assert) because a `tool > file` line can never itself be a
+        # compliant one-line step. Every RC marker name and ::error:: text
+        # is transcribed verbatim (module docstring); verified myself
+        # against a fake NDK/llvm-nm fixture in both directions (all-present
+        # -> RC=0, one symbol missing -> RC=1 with this exact error text,
+        # non-executable llvm-nm -> RC=1 with the tool-missing text) before
+        # landing this call.
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
-          SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
-          echo "Checking: ${SO}"
-          LLVM_NM="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
-          if [ ! -x "${LLVM_NM}" ]; then
-            echo "::error::llvm-nm not found at ${LLVM_NM} — NDK layout may have changed (r27c expected)." >&2
-            exit 1
-          fi
-          set +e
-          "${LLVM_NM}" -D "${SO}" > android_so_dynsyms.txt 2>&1
-          rc=$?
-          set -e
-          echo "NM_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::llvm-nm -D failed on ${SO} (rc=${rc}); export presence is UNVERIFIED, refusing to publish." >&2
-            cat android_so_dynsyms.txt || true
-            exit 1
-          fi
-          # WI-13 (S-G2): the two-name allowlist loop is replaced by the
-          # Dart-derived manifest (native/deps/export_manifest.toml) via
-          # native/scripts/assert_exports.py, --platform android.
-          set +e
-          python3 native/scripts/assert_exports.py \
-            --manifest native/deps/export_manifest.toml \
-            --platform android \
-            --dump android_so_dynsyms.txt
-          RC=$?
-          set -e
-          echo "ASSERT_EXPORTS_RC=${RC}"
-          if [ "${RC}" -ne 0 ]; then
-            echo "::error::assert_exports.py reported missing/absent symbol(s) in ${SO} — the .so does not export the FFI surface Dart looks up." >&2
-            exit "${RC}"
-          fi
+          python3 native/scripts/ci.py assert-exports --platform android --artifact-dir "${ARTIFACT_DIR}" --ndk-home "${ANDROID_NDK_HOME}"
 
       - name: Assert fused-orientation kernel signals present in Android .so (Task 11 / G-E)
         env:
