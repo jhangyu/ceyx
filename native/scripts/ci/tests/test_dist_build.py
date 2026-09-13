@@ -60,7 +60,8 @@ class DistBuildTests(unittest.TestCase):
             return _fake_run_result(returncode=0)
 
         with mock.patch.object(run_module, "run", side_effect=fake_run):
-            dist_build.dist_build(
+            _run_captured(
+                dist_build.dist_build,
                 component="libjxl", platform="android", arch="arm64-v8a",
                 dist="d", rc_marker="T", android_ndk="/opt/ndk",
             )
