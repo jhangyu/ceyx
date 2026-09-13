@@ -83,9 +83,13 @@ _SO_NAME_RE = re.compile(r"\.so(\.[0-9]+)*$")
 
 
 def declared_names(platform: str) -> list[str]:
-    """decoder + companions, in declaration order. ``read_shipped_files`` is
-    the single reader of shipped_files.toml (C-G3: imported, not
-    re-spawned)."""
+    """INCLUDES the decoder: returns decoder + companions, in declaration
+    order. Used by linux/windows, whose completeness checks are symmetric
+    over the whole group. For a companions-ONLY list (android's asymmetric
+    check), use ``declared_companions`` below instead -- do not slice this
+    list's ``[1:]`` as a substitute, since that silently assumes the decoder
+    is always index 0. ``read_shipped_files`` is the single reader of
+    shipped_files.toml (C-G3: imported, not re-spawned)."""
     import read_shipped_files
 
     entry = read_shipped_files.load_declaration()[platform]
@@ -93,11 +97,11 @@ def declared_names(platform: str) -> list[str]:
 
 
 def declared_companions(platform: str) -> list[str]:
-    """companions only, no decoder -- android's completeness check (unlike
-    linux/windows) is asymmetric and only ever checks companions, never the
-    decoder, by this list (android_build.yml:238 uses
-    ``read_shipped_files.py --platform android --companions``, not
-    ``--all``)."""
+    """EXCLUDES the decoder: companions only. android's completeness check
+    (unlike linux/windows, see ``declared_names`` above) is asymmetric and
+    only ever checks companions, never the decoder itself, by this list
+    (android_build.yml:238 uses ``read_shipped_files.py --platform android
+    --companions``, not ``--all``)."""
     import read_shipped_files
 
     return list(read_shipped_files.load_declaration()[platform]["companions"])
