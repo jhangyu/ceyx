@@ -320,25 +320,23 @@ jobs:
       - name: Guard — CI conventions C1-C10
         run: python3 native/scripts/ci_conventions_check.py
 
-      # WI-26 (push 10, unwired-scripts triage): the same "shipped a check,
+      # WI-26 (push 9, unwired-scripts triage): the same "shipped a check,
       # never invoked it in CI" condition documented for ci_conventions_check.py
       # above, found again in seven more scripts under native/scripts/ -- each
       # is a static, argument-light (or arg-free), read-only invariant check
       # that already passes against this tree; none require sample images,
       # a GPU, or a device, so all seven are safe in this compile-only,
       # guard-heavy job. An eighth candidate (check_expected_additions.py)
-      # was found and verified as the identical defect pattern but is NOT
-      # wired here: it currently fails against this tree for a reason
-      # unrelated to this WI (a pre-existing stale allowlist.py entry,
-      # webp_dist_android.yml:86, owned by WI-25/WI-37) -- wiring a brand
-      # new gate that starts red is worse than leaving it unwired one more
-      # push; see the triage doc for the exact command/output that proves
-      # it. Full triage of every script under native/scripts/ and
-      # native/scripts/ci/ (WIRED / DELIBERATELY UNWIRED / UNWIRED-DEFECT,
-      # one line per script with the grep that proves it):
-      # docs/logs/2026-09-13/unwired-scripts-triage.md (not committed, per
-      # this repo's docs/ policy -- the classification evidence lives there
-      # for the record; these six `run:` lines are the fix).
+      # was found and verified as the identical defect pattern but is
+      # deliberately NOT wired here: it is one of the four USER-ORDERED
+      # guards scheduled for the parking-lot round, not an oversight --
+      # see the triage doc. Full triage of every script under
+      # native/scripts/ and native/scripts/ci/ (WIRED / DELIBERATELY
+      # UNWIRED / UNWIRED-DEFECT, one line per script with the grep that
+      # proves it): docs/logs/2026-09-13/unwired-scripts-triage.md (not
+      # committed, per this repo's docs/ policy -- the classification
+      # evidence lives there for the record; these seven `run:` lines are
+      # the fix).
       - name: Guard — RAW/GPU architecture invariants (spec 13.3)
         run: python3 native/scripts/check_raw_architecture_gates.py
 
