@@ -68,12 +68,35 @@ else:
     from . import report  # noqa: E402
     from . import run  # noqa: E402
 
-# Marker KEY -> the repo-root-relative bare-script path that locally
-# produces it. Extend this table, never `markerdiff.py`, when a future push
-# adds a new guard-emitted ledger entry.
-_KEY_TO_PRODUCER_SCRIPT: dict[str, str] = {
-    "SHELL_ALLOWLIST_SIZE": "native/scripts/ci/check_shell_prohibition.py",
-    "SHELL_PROHIBITION_RESULT": "native/scripts/ci/check_shell_prohibition.py",
+# Marker KEY -> (the repo-root-relative bare-script path, its argv tuple)
+# that locally produces it. Extend this table, never `markerdiff.py`, when
+# a future push adds a new guard-emitted ledger entry.
+#
+# WI-43: the value used to be a bare `str` (script path only), which
+# silently assumed every producer is argument-free -- true of the first two
+# entries by accident, not by design. `check_alias_table_convention.py`
+# requires a positional path argument (its own `usage:` line proves it),
+# so the value became `(script, argv)`; `_run_producer` now passes argv
+# through rather than invoking every script bare.
+#
+# This is the SAME literal argv `.github/workflows/build.yml`'s "Check
+# alias-table convention" step passes (`native/third_party/libraw/src/
+# metadata/normalize_model.cpp`) -- two independent statements of the same
+# fact, deliberately not derived from each other (one reading the other at
+# runtime could never disagree with it, which defeats the point).
+# `test_check_expected_additions.py::test_alias_table_argv_matches_build_yml`
+# is the mechanical check that the two do not drift apart.
+_KEY_TO_PRODUCER_SCRIPT: dict[str, tuple[str, tuple[str, ...]]] = {
+    "SHELL_ALLOWLIST_SIZE": ("native/scripts/ci/check_shell_prohibition.py", ()),
+    "SHELL_PROHIBITION_RESULT": ("native/scripts/ci/check_shell_prohibition.py", ()),
+    "TABLE_COUNT": (
+        "native/scripts/check_alias_table_convention.py",
+        ("native/third_party/libraw/src/metadata/normalize_model.cpp",),
+    ),
+    "ALIAS_TABLE_FIRST_ELEMENT_ALL_AT": (
+        "native/scripts/check_alias_table_convention.py",
+        ("native/third_party/libraw/src/metadata/normalize_model.cpp",),
+    ),
 }
 
 # Marker KEYs whose only producer is a real CI build job (not reproducible
@@ -88,19 +111,20 @@ def _marker_key(line: str) -> str:
     return line.split("=", 1)[0]
 
 
-def _run_producer(script_relpath: str) -> list[str]:
-    """Runs `script_relpath` as a bare script and returns its combined,
-    normalized output lines -- the same normalization `markerdiff.py`
-    applies to a real CI log, so a `<WS>`/`<TMP>`-shaped ledger line (none
-    exist today, but the ledger's contract does not forbid one) compares
-    correctly."""
-    result = run.run([sys.executable, str(REPO_ROOT / script_relpath)])
+def _run_producer(script_relpath: str, argv: tuple[str, ...] = ()) -> list[str]:
+    """Runs `script_relpath` (plus any positional `argv` the producer's own
+    CLI requires -- WI-43: not every producer is argument-free) and returns
+    its combined, normalized output lines -- the same normalization
+    `markerdiff.py` applies to a real CI log, so a `<WS>`/`<TMP>`-shaped
+    ledger line (none exist today, but the ledger's contract does not
+    forbid one) compares correctly."""
+    result = run.run([sys.executable, str(REPO_ROOT / script_relpath), *argv])
     combined = result.stdout + result.stderr
     return [markerdiff.normalize(line) for line in combined.splitlines()]
 
 
 def main() -> int:
-    producer_cache: dict[str, list[str]] = {}
+    producer_cache: dict[tuple[str, tuple[str, ...]], list[str]] = {}
     stale: list[tuple] = []
     unclassified: list = []
     skipped = 0
@@ -114,14 +138,15 @@ def main() -> int:
             skipped += 1
             continue
 
-        script = _KEY_TO_PRODUCER_SCRIPT.get(key)
-        if script is None:
+        producer = _KEY_TO_PRODUCER_SCRIPT.get(key)
+        if producer is None:
             unclassified.append(entry)
             continue
+        script, argv = producer
 
-        if script not in producer_cache:
-            producer_cache[script] = _run_producer(script)
-        emitted = producer_cache[script]
+        if producer not in producer_cache:
+            producer_cache[producer] = _run_producer(script, argv)
+        emitted = producer_cache[producer]
         checked += 1
         if entry.line in emitted:
             continue

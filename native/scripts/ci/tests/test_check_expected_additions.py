@@ -5,11 +5,16 @@ from __future__ import annotations
 import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from .. import check_expected_additions as cea
 from .. import markerdiff
 from .. import run as run_module
+from .. import workflow_scan
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 
 
 def _fake_run_result(stdout="", stderr=""):
@@ -31,7 +36,7 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
             return _fake_run_result(stdout="FAKE_KEY=7\nOTHER=1\n")
 
         with mock.patch.object(markerdiff, "EXPECTED_ADDITIONS", (entry,)), \
-             mock.patch.object(cea, "_KEY_TO_PRODUCER_SCRIPT", {"FAKE_KEY": "fake/producer.py"}), \
+             mock.patch.object(cea, "_KEY_TO_PRODUCER_SCRIPT", {"FAKE_KEY": ("fake/producer.py", ())}), \
              mock.patch.object(cea, "_BUILD_ARTIFACT_KEYS", frozenset()), \
              mock.patch.object(run_module, "run", side_effect=fake_run):
             rc, out, _ = _run_captured(cea.main)
@@ -49,7 +54,7 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
 
         with mock.patch.object(markerdiff, "EXPECTED_ADDITIONS", (entry,)), \
              mock.patch.object(
-                 cea, "_KEY_TO_PRODUCER_SCRIPT", {"SHELL_ALLOWLIST_SIZE": "fake/producer.py"}
+                 cea, "_KEY_TO_PRODUCER_SCRIPT", {"SHELL_ALLOWLIST_SIZE": ("fake/producer.py", ())}
              ), \
              mock.patch.object(cea, "_BUILD_ARTIFACT_KEYS", frozenset()), \
              mock.patch.object(run_module, "run", side_effect=fake_run):
@@ -107,6 +112,43 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
         actual ledger entries are not already stale."""
         rc, out, err = _run_captured(cea.main)
         self.assertEqual(rc, 0, f"real ledger vs real producer mismatch: stdout={out!r} stderr={err!r}")
+
+    def test_alias_table_argv_matches_build_yml(self):
+        """WI-43: `_KEY_TO_PRODUCER_SCRIPT["TABLE_COUNT"]`'s argv and
+        `build.yml`'s real invocation of `check_alias_table_convention.py`
+        are TWO INDEPENDENT STATEMENTS of the same fact (the map does not
+        read the workflow file at runtime, and the workflow file does not
+        read the map) -- this test is the mechanical binding between them.
+        If either drifts, this fails; a validator that derived its input
+        from the thing it validates could never catch that drift, which is
+        the exact shape this campaign spent this WI finding three times
+        over (allowlist.py/markerdiff.py, the WI-26 step wiring/markerdiff.py
+        ledger, and now this producer map/build.yml itself)."""
+        script, argv = cea._KEY_TO_PRODUCER_SCRIPT["TABLE_COUNT"]
+        self.assertEqual(
+            cea._KEY_TO_PRODUCER_SCRIPT["ALIAS_TABLE_FIRST_ELEMENT_ALL_AT"],
+            (script, argv),
+            "TABLE_COUNT and ALIAS_TABLE_FIRST_ELEMENT_ALL_AT share one producer invocation",
+        )
+
+        text = (_WORKFLOWS_DIR / "build.yml").read_text()
+        matches = []
+        for step in workflow_scan.iter_run_steps(text, "build.yml"):
+            code = workflow_scan.code_lines(step)
+            if code and "check_alias_table_convention.py" in code[0]:
+                matches.append((step.step_name, code[0]))
+
+        self.assertEqual(
+            len(matches), 1,
+            f"expected exactly one build.yml step invoking check_alias_table_convention.py, found {matches}",
+        )
+        _step_name, real_line = matches[0]
+        real_argv = tuple(real_line.split()[2:])  # drop "python3 <script>"
+        self.assertEqual(
+            real_argv, argv,
+            f"build.yml invokes check_alias_table_convention.py with {real_argv!r}, "
+            f"but _KEY_TO_PRODUCER_SCRIPT says {argv!r} -- these must be updated together",
+        )
 
 
 if __name__ == "__main__":

@@ -192,6 +192,45 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
     def test_expected_addition_report_lines_empty_for_other_leg(self):
         self.assertEqual(markerdiff.expected_addition_report_lines("linux"), [])
 
+    def test_wi43_alias_table_markers_are_not_deltas_for_matching_leg(self):
+        # WI-43: WI-26 wired check_alias_table_convention.py into
+        # build.yml's nativetests leg -- a step that PRINTS is exactly as
+        # much an emission change as a pinned literal, so its two markers
+        # (check_alias_table_convention.py:92, :98) get the same ledger
+        # treatment as SHELL_ALLOWLIST_SIZE/SHELL_PROHIBITION_RESULT above.
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = (
+            "EXPORTS_RESULT=PASS\n"
+            "TABLE_COUNT=10\n"
+            "ALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES\n"
+        )
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
+        self.assertEqual(rc, 0)
+        self.assertEqual(deltas, [])
+
+    def test_wi43_alias_table_markers_still_a_delta_for_non_matching_leg(self):
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\nTABLE_COUNT=10\n"
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="linux")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("+1 TABLE_COUNT=10", deltas)
+
+    def test_wi43_alias_table_value_changed_is_a_hard_failure_not_forgiven(self):
+        # Same assertion-class proof as SHELL_ALLOWLIST_SIZE's 106 case:
+        # only the EXACT ledger value is forgiven. TABLE_COUNT=11 is not
+        # the ledgered 10, so it is an ordinary unlisted addition.
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\nTABLE_COUNT=11\n"
+        rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("+1 TABLE_COUNT=11", deltas)
+
+    def test_expected_addition_report_lines_names_all_four_entries(self):
+        lines = markerdiff.expected_addition_report_lines("nativetests")
+        joined = "\n".join(lines)
+        self.assertIn("TABLE_COUNT=10", joined)
+        self.assertIn("ALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES", joined)
+
     def test_observability_split_unaffected_by_ledger(self):
         # Regression pin: the ledger addition must not interact with the
         # observability split built earlier.
