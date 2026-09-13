@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard (h) -- folded-YAML reverse sentinel (parking-lot round, WI-55).
+r"""Guard (h) -- folded-YAML reverse sentinel (parking-lot round, WI-55).
 
 PROPERTY GUARDED (docs/logs/2026-09-13/pyci-ruling-G-guard-plan.md `(h)`):
 an allowlist entry's stated REASON does not contradict the tree it
@@ -32,11 +32,11 @@ substring `"not yet migrated"`:
     that no longer exists at all is `check_shell_prohibition.py`'s own
     `[stale-allowlist]` concern -- silently skipped here, not double-
     reported).
-  * Parse that workflow file with a REAL YAML parser (never the
-    physical-line scanner -- that IS the classifier this guard exists to
-    be independent of) and read the step's actual `run:` value.
-  * If that YAML-parsed value, once its sole trailing newline is
-    stripped, contains no embedded newline AND matches
+  * Determine the step's real, FOLDED `run:` body -- see "NO THIRD-PARTY
+    YAML PARSER" below for how, and why that is deliberate rather than a
+    corner cut.
+  * If that folded value, once its sole trailing newline is stripped,
+    resolves to no embedded newline AND matches
     `check_shell_prohibition.PYTHON_BODY_RE` -- the reason claims
     "not yet migrated" about a step whose real body is already exactly
     one python invocation -- this is a `[folded-yaml-reverse-sentinel]`
@@ -48,17 +48,68 @@ Deliberately SILENT (no finding, of either polarity) on:
     endings...` "C-G14 #6" trio are never even examined against their
     body -- their body is genuinely non-compliant real bash, and their
     CURRENT reason does not make the claim this guard checks);
-  * any entry naming a step no longer present in any workflow file.
+  * any entry naming a step no longer present in any workflow file;
+  * (new, see below) any folded body this module cannot confidently fold
+    itself -- a blank line inside the body, or a line indented deeper
+    than the body's own baseline. The false-negative risk this creates is
+    ACCEPTED, not overlooked: see "NO THIRD-PARTY YAML PARSER".
+    **STATED IN THE NEGATIVE, so it cannot be misread as coverage: bodies
+    outside this module's implemented fold subset are NOT EXAMINED at
+    all. Silence on such an entry means "this module declined to judge
+    it", never "this module checked it and found it clean." A future
+    reader auditing this guard's PASS output cannot distinguish "verified
+    clean" from "outside the subset" without reading this paragraph --
+    that asymmetry is the accepted cost of removing the PyYAML
+    dependency, not an oversight.**
 
-Run with: python3 native/scripts/ci/check_folded_yaml_reverse_sentinel.py
+NO THIRD-PARTY YAML PARSER (2026-09-13 fix-forward, CI run `34762557520`).
+The first cut of this guard used `import yaml` (PyYAML) to get a fully
+correct parse of the folded scalar. That dependency is not installed on
+this repo's CI runners (`ModuleNotFoundError: No module named 'yaml'`,
+`ci.py selftest`, job "Build native test targets") -- nothing else in
+`native/scripts/ci/` depends on a third-party package, and grepping the
+package (`grep -rn "^import \|^from " native/scripts/ci/*.py`, run at fix
+time) turned up none; adding a provisioning step for one guard would be
+the exact "environment the test only passes because of" shape the round's
+other three env-dependent test failures share. Rather than provision the
+dependency, this module implements JUST ENOUGH of YAML's folded-scalar
+(`>`) semantics to answer its own question -- using
+`workflow_scan.iter_run_steps()` (already the single source of truth for
+"where does this step's `run:` body start and what raw lines does it
+own", reused, not re-implemented) plus `workflow_scan._RUN_KEY_RE` to read
+back the block-scalar indicator character from the SAME line
+`iter_run_steps` already anchored on.
+
+The subset implemented: N physical lines, all at the SAME indentation,
+with NO blank line among them, fold to one logical line (join with a
+single space, per YAML's fold rule for equally-indented non-blank lines).
+Every REAL folded body in this repo's workflows today is exactly this
+shape. **SCOPE OF THAT CLAIM, stated precisely so it is not over-read:**
+verified against (a) blob `a7840ef6`'s five historical phantom-migration
+bodies (`heif_dist_android.yml`, `jxl_dist_android.yml`,
+`jxl_dist_windows.yml`, `webp_dist_android.yml`, `webp_dist_windows.yml`
+-- the exact bodies quoted in WI-55's test fixtures) and (b) every `run:
+>` body live in `.github/workflows/*.yml` at the current tip (this
+module's own GREEN test, `test_green_at_current_allowlist_zero_
+contradictions`, exercises the real tree, not a fixture). **NOT verified
+against every commit in between** -- no claim is made about any
+intermediate blob's folded bodies, only these two points. Anything OUTSIDE that
+subset (a blank line, which YAML folds to an embedded newline; a
+more-indented continuation, which YAML keeps literal) is NOT folded by
+this module -- it is reported as "not a single line", which means this
+guard stays SILENT on it rather than guessing. This is the SAME direction
+the ruling doc already accepts for this guard ("the reverse
+false-negative risk is acknowledged by the user, not dismissed") --
+`(d)`/`(h)`'s common family: when unsure, decline to flag, never invent a
+flag. A guard that is occasionally silent where a full parser would fold
+correctly is a smaller defect than a guard the CI pipeline cannot import
+at all.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -69,9 +120,11 @@ sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
 if not __package__:
     import ci.allowlist as allowlist  # noqa: E402
     import ci.check_shell_prohibition as shell_prohibition  # noqa: E402
+    import ci.workflow_scan as workflow_scan  # noqa: E402
 else:
     from . import allowlist  # noqa: E402
     from . import check_shell_prohibition as shell_prohibition  # noqa: E402
+    from . import workflow_scan  # noqa: E402
 
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
@@ -82,46 +135,108 @@ REASON_SENTINEL = "not yet migrated"
 # classifier's own judgement of "single python invocation".
 PYTHON_BODY_RE = shell_prohibition.PYTHON_BODY_RE
 
+# Reused from workflow_scan.py, not duplicated: the SAME regex that module
+# already uses to recognize a `run:` key and its optional block-scalar
+# indicator (`|`, `>`, `>-`, `>+`, ...). Re-matching it here against the
+# already-anchored `start_line` is how this module learns "was this body
+# FOLDED (`>...`)  or LITERAL (`|...`) or inline" without re-implementing
+# `iter_run_steps`'s own step/line bookkeeping a second time.
+_RUN_KEY_RE = workflow_scan._RUN_KEY_RE
+
+
+def _block_indicator(all_lines: list, step) -> str:
+    """Returns the block-scalar indicator character(s) ("", "|", ">",
+    ">-", ">+", ...) for `step`, by re-reading `step.start_line`'s own
+    text -- the exact line `workflow_scan.iter_run_steps` already
+    anchored `step` on. "" means an inline `run: <command>` (no block
+    scalar at all, i.e. already a single physical line)."""
+    line = all_lines[step.start_line - 1]
+    m = _RUN_KEY_RE.match(line.lstrip(" "))
+    if not m:
+        return ""
+    return m.group(1) or ""
+
+
+def _fold_body(indicator: str, body_lines: list) -> "str | None":
+    """Folds `step.body_lines` ((line_no, text) pairs, as returned by
+    `workflow_scan.iter_run_steps`) into a single logical line, IF this
+    module can do so with confidence -- see the module docstring's "NO
+    THIRD-PARTY YAML PARSER" section for exactly which shapes qualify.
+    Returns `None` (not "can't tell, guess False") when the shape is
+    outside that subset, so callers can tell "confidently not a single
+    line" apart from "not confident either way" if they ever need to.
+    """
+    if not body_lines:
+        return "" if indicator else None
+    if not indicator:
+        # Inline `run: <command>` -- iter_run_steps already yields exactly
+        # one (start_line, inline_rest) pair for this case.
+        return body_lines[0][1]
+    if not indicator.startswith(">"):
+        # Literal (`|`) block: YAML never folds these -- each physical
+        # line stays its own logical line. Only a genuine one-line body
+        # is a single line, and that shape is already visible to
+        # check_shell_prohibition.py's OWN physical-line classifier
+        # (workflow_scan.code_lines()), so this guard has nothing to add
+        # for it; still handled here for completeness rather than a
+        # silent assumption.
+        if len(body_lines) == 1:
+            return body_lines[0][1]
+        return None
+    texts = [text for _, text in body_lines]
+    if any(t.strip() == "" for t in texts):
+        # A blank line inside a folded scalar becomes an embedded newline
+        # in YAML's real fold algorithm -- outside this module's
+        # implemented subset (see docstring). Decline, don't guess.
+        return None
+    indents = [len(t) - len(t.lstrip(" ")) for t in texts]
+    base_indent = indents[0]
+    if any(i != base_indent for i in indents):
+        # A more-indented continuation line stays literal (with its own
+        # newline) in YAML's real fold algorithm -- also outside this
+        # module's implemented subset. Decline, don't guess.
+        return None
+    return " ".join(t.strip() for t in texts)
+
 
 def _parsed_run_bodies(workflow_files) -> dict:
-    """(workflow_file_name, step_name) -> the step's real, YAML-parsed
-    `run:` string value (or None if the step has no `run:` key at all,
-    e.g. a `uses:` step). Steps without a `name:` are skipped -- every
-    step in this repo's workflows is named (workflow_scan.py's own module
-    docstring records the same grep-verified fact) and an entry can only
-    ever be keyed by a step name in the first place.
+    """(workflow_file_name, step_name) -> the step's real, FOLDED `run:`
+    body (a single logical line, per `_fold_body`), or `None` if the step
+    has no `run:` key at all (e.g. a `uses:` step) or its body falls
+    outside the subset this module can confidently fold. Steps without a
+    `name:` are skipped -- every step in this repo's workflows is named
+    (workflow_scan.py's own module docstring records the same
+    grep-verified fact) and an entry can only ever be keyed by a step
+    name in the first place.
     """
     bodies: dict = {}
     for path in workflow_files:
-        doc = yaml.safe_load(path.read_text())
-        jobs = (doc or {}).get("jobs") or {}
-        for job in jobs.values():
-            if not isinstance(job, dict):
+        text = path.read_text()
+        all_lines = text.splitlines()
+        for step in workflow_scan.iter_run_steps(text, path.name):
+            if not step.step_name:
                 continue
-            for step in job.get("steps") or []:
-                if not isinstance(step, dict):
-                    continue
-                name = step.get("name")
-                if not name:
-                    continue
-                bodies[(path.name, name)] = step.get("run")
+            indicator = _block_indicator(all_lines, step)
+            bodies[(step.workflow, step.step_name)] = _fold_body(indicator, step.body_lines)
     return bodies
 
 
 def _is_single_python_invocation(run_value) -> bool:
-    """True iff the REAL parsed `run:` value is, after YAML's own folding
-    has already happened (that is what `yaml.safe_load` just did), a
-    single logical line matching the same python-invocation shape
-    `check_shell_prohibition.py` requires of a compliant one-liner.
+    """True iff the folded `run:` value (see `_fold_body`) is, once its
+    sole trailing newline (if any) is stripped, a single logical line
+    matching the same python-invocation shape `check_shell_prohibition.py`
+    requires of a compliant one-liner.
 
     A folded (`>`) scalar collapses line breaks between two non-blank,
     equally-indented lines into a single space; it does NOT collapse a
     blank line (folds to an embedded newline) or a more-indented
-    continuation (kept literal, with its newline). So checking for "no
-    embedded newline left after stripping the sole trailing one" is
-    exactly "this step, however it was written in the YAML, resolves to
-    one logical shell command" -- the property the reason string
-    "not yet migrated" is being checked against.
+    continuation (kept literal, with its newline) -- `_fold_body` returns
+    `None` rather than guess for either of those two shapes, and `None`
+    is not a string, so it always answers `False` here (a false negative
+    is accepted; a false positive is not). So checking for "no embedded
+    newline left" is exactly "this step, however it was written in the
+    YAML, resolves to one logical shell command" -- the property the
+    reason string "not yet migrated" is being checked against.
     """
     if not isinstance(run_value, str):
         return False
