@@ -1,0 +1,36 @@
+# Byte-verbatim capture of the three `- name:`/`run:` step pairs relevant to
+# guard (i)'s historical red case, taken from `.github/workflows/build.yml`
+# as it stood at `e7778cdb^` (WI-41's fix commit's parent -- the pre-fix
+# state; USER RULING G (i)2, run `34744748058`, conclusion "failure").
+# Captured via `git show e7778cdb^:.github/workflows/build.yml` while full
+# history was locally available; re-verified byte-for-byte against
+# `tmp/verify/wi54/redcase/build.yml` before this fixture was written.
+#
+# Unrelated intervening steps from the original file are DELIBERATELY
+# omitted -- check_step_order.py's pair table only compares the relative
+# `run:` line order of the NAMED producer/consumer steps, so trimming
+# steps that sit between them changes nothing about the ordering the guard
+# is asserting, exactly as guard (b)'s errexit_rc_probe_*.yml fixtures trim
+# to the one relevant step. The two guard steps are kept in their captured
+# order (both BEFORE the fetch) -- that ordering *is* the defect.
+#
+# The Halide fetch step IS included, unlike the trimmed middle steps: it is
+# also a member of PRODUCER_PAIRS (the "halide-awaiting-consumer" declared
+# gap) and check_step_order.py checks ALL declared pairs against whichever
+# workflow name is passed in, not just the pairs a given caller cares
+# about -- omitting it would make that pair's producer "not found in
+# build.yml" and manufacture a THIRD, unrelated finding here.
+jobs:
+  build:
+    steps:
+      - name: Guard — vendored LibRaw/RawSpeed provenance + licences
+        run: python3 native/scripts/verify_raw_provenance.py
+
+      - name: Guard — normalize_model.cpp alias-table '@'-prefix convention (G2-2)
+        run: python3 native/scripts/check_alias_table_convention.py native/third_party/libraw/src/metadata/normalize_model.cpp
+
+      - name: Fetch vendored Halide v21 distribution
+        run: python3 native/scripts/build_deps.py fetch halide
+
+      - name: Fetch vendored LibRaw distribution
+        run: python3 native/scripts/build_deps.py fetch libraw

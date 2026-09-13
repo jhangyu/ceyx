@@ -8,10 +8,10 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from .. import check_step_order as cso
-from .. import run as run_module
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _run_captured(func, *args, **kwargs):
@@ -97,8 +97,9 @@ class CheckStepOrderPairTableTests(unittest.TestCase):
 
 class CheckStepOrderRealWorkflowTests(unittest.TestCase):
     """Exercises PRODUCER_PAIRS against the real build.yml at the current
-    tip (green), and against the historical pre-WI-41 red via `git show`.
-    """
+    tip (green), and against the historical pre-WI-41 red via a committed
+    fixture (see class docstring on the red test for why this replaced a
+    live `git show` call)."""
 
     def test_tip_build_yml_passes(self):
         path = _WORKFLOWS_DIR / "build.yml"
@@ -114,20 +115,45 @@ class CheckStepOrderRealWorkflowTests(unittest.TestCase):
 
     def test_historical_pre_wi41_ordering_is_red(self):
         # e7778cdb is WI-41's fix commit; its PARENT is the red state this
-        # guard is built against (USER RULING G (i)2). Routed through the
-        # audited `run.run()` primitive rather than a bare `subprocess.run`
-        # call -- native/scripts/ci/run.py is the ONE place under
-        # native/scripts/ci/ allowed to import subprocess (WI-2 AC,
-        # enforced by check_no_test_execution_in_ci.py's
-        # [subprocess-outside-run] rule); a second direct import here
-        # would be exactly the "second implementation" this repo's
-        # standing rule forbids, not merely a lint dodge.
-        result = run_module.run(
-            ["git", "show", "e7778cdb^:.github/workflows/build.yml"],
-            cwd=_REPO_ROOT,
+        # guard is built against (USER RULING G (i)2).
+        #
+        # R2 CORRECTION (lead16 recall, CI run `34762557520`, job "Build
+        # native test targets"): this test PREVIOUSLY resolved the
+        # historical blob live via `git show e7778cdb^:...` -- that works
+        # on a full local clone but fails with `fatal: invalid object name
+        # 'e7778cdb^'` (git exit 128) on a `fetch-depth: 1` (default,
+        # unwidened) GitHub Actions checkout, which is what every runner in
+        # this repo's workflows actually uses (verified: no `fetch-depth:`
+        # override exists anywhere in `.github/workflows/build.yml`, so all
+        # three of its `actions/checkout@v4` calls get the action's own
+        # default of 1). A live-history-dependent assertion is exactly the
+        # defect class lead15's ledger already named for guard (f)②'s
+        # future `origin/main..HEAD` range -- it fired here first because
+        # this guard shipped first, not because it is a different class.
+        #
+        # FIX CHOSEN, with the trade stated: a committed BYTE-VERBATIM
+        # fixture (`fixtures/build_yml_pre_wi41_ordering.yml`), following
+        # guard (b)'s already-signed-off precedent
+        # (`check_errexit_rc_capture.py`'s `errexit_rc_probe_defect.yml` --
+        # "the fixture is the guarantee... it is a state of a real commit
+        # and does not expire when the live file is later fixed",
+        # USER-RULING-G.md guard (b) §3). REJECTED alternative:
+        # `fetch-depth: 0` on the checkout -- environment-independent and
+        # arguably more "honest" (resolves a REAL object, not a copy), but
+        # it requires editing `.github/workflows/build.yml`, which has
+        # exactly one writer this round (the B3-1 batch-3 wiring owner) and
+        # is not mine to touch; it also makes every CI run clone full
+        # history, a real cost this fix does not pay. The fixture's own
+        # trade, stated rather than hidden: it is a COPY of the historical
+        # blob, not the blob itself, and could in principle drift from what
+        # `e7778cdb^` actually contains -- mitigated by byte-verbatim
+        # capture (see the fixture's own header) and by this test still
+        # asserting the exact same finding count/labels as before, so a
+        # drifted fixture that stopped representing the real defect would
+        # itself go red here (either 0 findings, or a wrong label set).
+        text = (_FIXTURES_DIR / "build_yml_pre_wi41_ordering.yml").read_text(
+            encoding="utf-8"
         )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        text = result.stdout
         findings, _audit = cso.check_text(text, "build.yml")
         self.assertEqual(len(findings), 2, msg=f"findings: {findings}")
         labels = {label for label, _msg in findings}
