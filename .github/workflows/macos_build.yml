@@ -797,8 +797,22 @@ jobs:
       # the em dash is actually there before wiring this, rather than
       # trusting the fix commit's message. No markers in the pre-migration
       # shell body -- none to restore.
+      #
+      # FIX (push 8b CI red, run 34741474983): the line above shipped
+      # without --arch, which argparse accepts (--arch is optional at the
+      # parser level for `stage`, same as every other _add_platform_command
+      # verb) but ci.py's post-parse `_enforce_arch_requirement` (C-G9)
+      # then rejects at runtime for macos, which has `requires_arch=True`
+      # in targets.py -- exit 2, "--arch is required for --platform
+      # 'macos'". The fully-green local gate could not see this: argparse
+      # itself never complains, so nothing short of actually invoking the
+      # command exercises the check. Every other of this file's twelve
+      # `--platform macos` call sites already carries `--arch` where its
+      # command's contract requires it (verified individually against
+      # ci.py's own `_add_platform_command`/`with_arch` calls, not
+      # reasserted from memory); this was the only omission.
       - name: Stage native artifact
-        run: python3 native/scripts/ci.py stage --platform macos --artifact-dir "${ARTIFACT_DIR}" --dylib-path "$DYLIB"
+        run: python3 native/scripts/ci.py stage --platform macos --arch "${{ matrix.arch_tag }}" --artifact-dir "${ARTIFACT_DIR}" --dylib-path "$DYLIB"
 
       # WI-20 (push 7): the copy above stays inline shell for now -- its
       # migration to ci.py's `stage` dispatch verb (which DOES already
