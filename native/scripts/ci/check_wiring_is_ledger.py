@@ -56,7 +56,6 @@ Run with:
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -67,10 +66,12 @@ sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
 if not __package__:
     import ci.check_expected_additions as check_expected_additions  # noqa: E402
     import ci.report as report  # noqa: E402
+    import ci.run as run  # noqa: E402
     import ci.workflow_scan as workflow_scan  # noqa: E402
 else:
     from . import check_expected_additions  # noqa: E402
     from . import report  # noqa: E402
+    from . import run  # noqa: E402
     from . import workflow_scan  # noqa: E402
 
 _MARKERDIFF_RELPATH = "native/scripts/ci/markerdiff.py"
@@ -80,27 +81,56 @@ DEFAULT_BASE = "origin/main"
 DEFAULT_HEAD = "HEAD"
 
 
+class GitReadError(RuntimeError):
+    """A read-only git query returned non-zero -- normally "this path or rev
+    does not exist", which several callers treat as absence rather than as
+    an error.
+
+    WI-53 follow-up: this used to be `subprocess.CalledProcessError`, raised
+    by `subprocess.run(..., check=True)`. Both had to go. `run.py` is the
+    audited subprocess primitive and `check_no_test_execution_in_ci.py`
+    AST-scans for **any** `subprocess.*` call outside it -- which includes
+    CONSTRUCTING `subprocess.CalledProcessError`, not just running a
+    command. So keeping the old exception type to avoid touching callers
+    would have left the gate red for the same reason. The guard was
+    dissolved, not exempted: adding this file to
+    `GRANDFATHERED_SUBPROCESS_FILES` was explicitly barred, and weakening a
+    gate is escalate-only.
+    """
+
+
 def _git(*args: str) -> str:
-    """Read-only git. Never mutates the shared working tree -- no checkout,
-    no worktree, no stash (2026-07-06: a teammate's uncommitted work is
-    always assumed live in this tree)."""
-    return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args],
-        check=True, capture_output=True, text=True,
-    ).stdout
+    """Read-only git, through the audited `run` primitive. Never mutates the
+    shared working tree -- no checkout, no worktree, no stash (2026-07-06: a
+    teammate's uncommitted work is always assumed live in this tree).
+
+    `run.run` NEVER RAISES -- it reports failure as a returncode (and a
+    missing executable as 127). The `check=True` behaviour the callers below
+    depend on is therefore re-created explicitly here; dropping it would
+    silently turn "this rev does not exist" into "this rev is empty", which
+    reads as a clean PASS and is exactly the false-green this guard exists
+    to reject.
+    """
+    result = run.run(["git", "-C", str(REPO_ROOT), *args])
+    if result.returncode != 0:
+        raise GitReadError(
+            f"git {' '.join(args)} failed with rc={result.returncode}: "
+            f"{result.stderr.strip()}"
+        )
+    return result.stdout
 
 
 def _file_at_rev(rev: str, relpath: str) -> str | None:
     try:
         return _git("show", f"{rev}:{relpath}")
-    except subprocess.CalledProcessError:
+    except GitReadError:
         return None  # the path did not exist at that rev
 
 
 def _workflow_names_at_rev(rev: str) -> list[str]:
     try:
         listing = _git("ls-tree", "--name-only", f"{rev}:{_WORKFLOW_DIR_RELPATH}")
-    except subprocess.CalledProcessError:
+    except GitReadError:
         return []
     return [n for n in listing.splitlines() if n.endswith((".yml", ".yaml"))]
 

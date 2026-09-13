@@ -18,7 +18,6 @@ than quietly report green.
 from __future__ import annotations
 
 import io
-import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -44,7 +43,7 @@ def _history_available(*revs: str) -> bool:
         for rev in revs:
             cwil._git("cat-file", "-e", f"{rev}^{{commit}}")
         return True
-    except subprocess.CalledProcessError:
+    except cwil.GitReadError:
         return False
 
 
@@ -110,6 +109,29 @@ class DecisionLogicTests(unittest.TestCase):
         self.assertIn("P_24_NOT_COVERED", out)
         self.assertIn("NEW_STEPS_EXAMINED=", out)
         self.assertIn("NEW_MARKER_EMITTING_STEPS=", out)
+
+
+class GitPrimitiveTests(unittest.TestCase):
+    """WI-53 follow-up: `_git` moved from `subprocess.run(check=True)` to the
+    audited `run` primitive, which NEVER RAISES -- it returns a returncode.
+    The `check=True` semantics callers depend on are now re-created by hand,
+    so they are tested by hand. An untested failure path here would turn
+    "this rev does not exist" into "this rev is empty", which reads as a
+    clean PASS -- the precise false-green this guard exists to reject."""
+
+    def test_failed_git_query_raises_rather_than_returning_empty(self):
+        with self.assertRaises(cwil.GitReadError):
+            cwil._git("cat-file", "-e", "definitely-not-a-rev^{commit}")
+
+    def test_missing_path_at_rev_is_absence_not_an_error(self):
+        """`_file_at_rev` must convert that raise into None -- absence."""
+        self.assertIsNone(cwil._file_at_rev("HEAD", "no/such/file/here.py"))
+
+    def test_missing_workflow_dir_at_rev_yields_no_steps(self):
+        self.assertEqual(cwil._workflow_names_at_rev("definitely-not-a-rev"), [])
+
+    def test_successful_git_query_returns_stdout(self):
+        self.assertIn("check_wiring_is_ledger", cwil._git("ls-tree", "--name-only", "HEAD:native/scripts/ci"))
 
 
 class RealHistoryReplayTests(unittest.TestCase):
