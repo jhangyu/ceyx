@@ -227,5 +227,215 @@ class TestStageBareScriptInvocation(unittest.TestCase):
         self.assertIn("::error::declared shipped file", result.stderr)
 
 
+class TestStageWindows(unittest.TestCase):
+    """``stage_windows()`` -- 4 required files hard-fail, 5th (.lib) optional."""
+
+    def _dirs(self):
+        base = Path(tempfile.mkdtemp())
+        source_dir = base / "native" / "build-windows"
+        source_dir.mkdir(parents=True)
+        artifact_dir = base / "artifacts"
+        return source_dir, artifact_dir
+
+    _REQUIRED = ("dng_decoder_native.dll", "heif.dll", "libde265.dll", "libomp140.x86_64.dll")
+
+    def test_happy_path_without_optional_lib_emits_notice(self) -> None:
+        source_dir, artifact_dir = self._dirs()
+        for name in self._REQUIRED:
+            (source_dir / name).write_bytes(b"MZ")
+        with mock.patch.object(stage, "declared_names", lambda p: list(self._REQUIRED)):
+            rc, out, _ = _emit(stage.stage_windows, str(source_dir), str(artifact_dir))
+        self.assertEqual(rc, 0)
+        dest = artifact_dir / "native"
+        for name in self._REQUIRED:
+            self.assertTrue((dest / name).exists())
+        self.assertFalse((dest / "dng_decoder_native.lib").exists())
+        self.assertIn("::notice::dng_decoder_native.lib not present", out)
+
+    def test_optional_lib_copied_when_present(self) -> None:
+        source_dir, artifact_dir = self._dirs()
+        for name in (*self._REQUIRED, "dng_decoder_native.lib"):
+            (source_dir / name).write_bytes(b"MZ")
+        with mock.patch.object(stage, "declared_names", lambda p: list(self._REQUIRED)):
+            rc, out, _ = _emit(stage.stage_windows, str(source_dir), str(artifact_dir))
+        self.assertEqual(rc, 0)
+        self.assertTrue((artifact_dir / "native" / "dng_decoder_native.lib").exists())
+        self.assertNotIn("::notice::", out)
+
+    def test_missing_required_file_fails(self) -> None:
+        source_dir, artifact_dir = self._dirs()
+        (source_dir / "dng_decoder_native.dll").write_bytes(b"MZ")
+        # heif.dll declared but never produced by the build.
+        with mock.patch.object(stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll"]):
+            rc, _, err = _emit(stage.stage_windows, str(source_dir), str(artifact_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::declared shipped file 'heif.dll' is missing from", err)
+
+
+class TestAssertStagedGroupWindows(unittest.TestCase):
+    """``assert_staged_group_windows()`` -- *.dll-only symmetric compare, the
+    .lib import library is excluded from both sets."""
+
+    def _staged(self, names):
+        d = Path(tempfile.mkdtemp())
+        native = d / "artifacts" / "native"
+        native.mkdir(parents=True)
+        for name in names:
+            (native / name).write_bytes(b"MZ")
+        return d / "artifacts"
+
+    def test_matching_set_including_lib_present_passes_silently(self) -> None:
+        artifact_dir = self._staged(
+            ["dng_decoder_native.dll", "heif.dll", "libde265.dll", "dng_decoder_native.lib"]
+        )
+        with mock.patch.object(
+            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll", "libde265.dll"]
+        ):
+            rc, out, err = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        # The .lib must not appear in either compared set.
+        self.assertNotIn("dng_decoder_native.lib", out.split("STAGED_DLL_SET=")[1].splitlines()[0])
+
+    def test_missing_dll_is_a_mismatch(self) -> None:
+        artifact_dir = self._staged(["dng_decoder_native.dll"])
+        with mock.patch.object(
+            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll"]
+        ):
+            rc, _, err = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "::error::staged Windows DLL set does not match native/deps/shipped_files.toml's "
+            "declaration",
+            err,
+        )
+
+
+class TestStageMacos(unittest.TestCase):
+    """``stage_macos()`` -- copy-only, no arch/reachability/rpath gates
+    (those belong to verify_artifact.py, ruling 1)."""
+
+    def _dirs(self):
+        base = Path(tempfile.mkdtemp())
+        native_dylib_dir = base / "build-macos-arm64"
+        native_dylib_dir.mkdir(parents=True)
+        artifact_dir = base / "artifacts"
+        return native_dylib_dir, artifact_dir
+
+    def test_happy_path_copies_decoder_and_companions(self) -> None:
+        native_dylib_dir, artifact_dir = self._dirs()
+        dylib = native_dylib_dir / "libdng_decoder_native.dylib"
+        dylib.write_bytes(b"\xcf\xfa\xed\xfe")
+        (native_dylib_dir / "libheif.1.dylib").write_bytes(b"\xcf\xfa\xed\xfe")
+        (native_dylib_dir / "libde265.0.dylib").write_bytes(b"\xcf\xfa\xed\xfe")
+        rc, out, err = _emit(
+            stage.stage_macos,
+            str(dylib),
+            ["libheif.1.dylib", "libde265.0.dylib"],
+            str(artifact_dir),
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        dest = artifact_dir / "native"
+        for name in ("libdng_decoder_native.dylib", "libheif.1.dylib", "libde265.0.dylib"):
+            self.assertTrue((dest / name).exists(), f"{name} not staged")
+        self.assertIn("libdng_decoder_native.dylib", out)
+
+    def test_missing_companion_fails(self) -> None:
+        native_dylib_dir, artifact_dir = self._dirs()
+        dylib = native_dylib_dir / "libdng_decoder_native.dylib"
+        dylib.write_bytes(b"\xcf\xfa\xed\xfe")
+        # libheif.1.dylib never produced by the build.
+        rc, _, err = _emit(
+            stage.stage_macos, str(dylib), ["libheif.1.dylib"], str(artifact_dir)
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "::error::expected companion dylib libheif.1.dylib not found in", err
+        )
+        self.assertFalse((artifact_dir / "native" / "libheif.1.dylib").exists())
+
+
+class TestStageAndroid(unittest.TestCase):
+    """``stage_android()`` -- soft-fail copy, never errors (matches the
+    shell's ``|| true`` on both the find and the listing)."""
+
+    def _dirs(self):
+        base = Path(tempfile.mkdtemp())
+        source_dir = base / "native" / "build-android" / "android-arm64"
+        source_dir.mkdir(parents=True)
+        artifact_dir = base / "artifacts"
+        return source_dir, artifact_dir
+
+    def test_happy_path_copies_all_so_files(self) -> None:
+        source_dir, artifact_dir = self._dirs()
+        for name in ("libdng_decoder_native.so", "libheif.so", "libde265.so"):
+            (source_dir / name).write_bytes(b"\x7fELF")
+        rc, out, err = _emit(stage.stage_android, str(source_dir), str(artifact_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        dest = artifact_dir / "native"
+        for name in ("libdng_decoder_native.so", "libheif.so", "libde265.so"):
+            self.assertTrue((dest / name).exists())
+
+    def test_missing_source_dir_does_not_fail(self) -> None:
+        """Soft-fail: a nonexistent source dir must not raise or return
+        nonzero -- matches ``find ... || true``."""
+        base = Path(tempfile.mkdtemp())
+        source_dir = base / "does-not-exist"
+        artifact_dir = base / "artifacts"
+        rc, _, err = _emit(stage.stage_android, str(source_dir), str(artifact_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+
+
+class TestAssertStagedGroupAndroid(unittest.TestCase):
+    """``assert_staged_group_android()`` -- asymmetric completeness: required
+    companions present, decoder nonzero, NO undeclared-extra detection."""
+
+    def _staged(self, names):
+        d = Path(tempfile.mkdtemp())
+        native = d / "artifacts" / "native"
+        native.mkdir(parents=True)
+        for name in names:
+            (native / name).write_bytes(b"\x7fELF")
+        return d / "artifacts"
+
+    def test_no_decoder_errors(self) -> None:
+        artifact_dir = self._staged([])
+        with mock.patch.object(stage, "declared_companions", lambda p: []):
+            rc, _, err = _emit(stage.assert_staged_group_android, str(artifact_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::No libdng_decoder_native*.so found in", err)
+
+    def test_missing_companion_fails(self) -> None:
+        artifact_dir = self._staged(["libdng_decoder_native.so"])
+        with mock.patch.object(stage, "declared_companions", lambda p: ["libheif.so"]):
+            rc, _, err = _emit(stage.assert_staged_group_android, str(artifact_dir))
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "::error::missing required companion .so(s) in", err
+        )
+        self.assertIn("libheif.so", err)
+
+    def test_undeclared_extra_so_is_not_a_mismatch(self) -> None:
+        """The android-specific asymmetry (ruling 3): an extra undeclared
+        .so alongside a complete required set must still PASS -- unlike
+        linux/windows, this is deliberately not a symmetric diff."""
+        artifact_dir = self._staged(["libdng_decoder_native.so", "libheif.so", "libc++_shared.so"])
+        with mock.patch.object(stage, "declared_companions", lambda p: ["libheif.so"]):
+            rc, out, _ = _emit(stage.assert_staged_group_android, str(artifact_dir))
+        self.assertEqual(rc, 0)
+        self.assertIn("ANDROID_COMPANION_GROUP_COMPLETE=1", out)
+
+    def test_success_marker_is_android_specific(self) -> None:
+        artifact_dir = self._staged(["libdng_decoder_native.so", "libheif.so", "libde265.so"])
+        with mock.patch.object(stage, "declared_companions", lambda p: ["libheif.so", "libde265.so"]):
+            rc, out, _ = _emit(stage.assert_staged_group_android, str(artifact_dir))
+        self.assertEqual(rc, 0)
+        self.assertIn("ANDROID_COMPANION_GROUP_COMPLETE=1", out)
+        self.assertNotIn("ATOMIC_GROUP_COMPLETE", out)
+
+
 if __name__ == "__main__":
     unittest.main()
