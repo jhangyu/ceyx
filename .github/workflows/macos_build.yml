@@ -837,10 +837,11 @@ jobs:
           done
           ls -la "${ARTIFACT_DIR}/native"
 
-      # WI-20 (push 7): the copy above stays inline shell (stage.py's macOS
-      # path is not yet wired through ci.py's `stage` dispatch verb -- see
-      # ci.py:559-563, only linux/windows/android are gated there today).
-      # The three verification gates below are collapsed into
+      # WI-20 (push 7): the copy above stays inline shell for now -- its
+      # migration to ci.py's `stage` dispatch verb (which DOES already
+      # cover macOS, via stage.stage_macos()) is scheduled separately as
+      # WI-35/Task #15 (push 8b), not pulled forward here. The three
+      # verification gates below are collapsed into
       # verify_artifact.verify_staged_companions() (WI-22), which ports this
       # exact step's companion list, Gate-1/Gates-2+3 header text, self-
       # reference-by-name stripping, and no->&2 error-stream behaviour
