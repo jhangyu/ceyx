@@ -84,6 +84,91 @@ def test_pe_openmp_missing_before_staging_lands():
     pass  # covered structurally by test_pe_missing_staged_companion_fails' MISSING path
 
 
+# TRANSCRIBED VERBATIM from CI run 34762557520, windows/x86_64 Vulkan leg
+# (tmp/verify/lead16/ci-34762557520-failed.log:6095-6106) -- libomp140's OWN
+# import table, in the order the transitive gate printed it. PSAPI.DLL is the
+# entry the allowlist was missing, and note its spelling: uppercase extension,
+# unlike every MSVC-cased sibling.
+PE_DUMP_LIBOMP_TRANSITIVE = (
+    "  Image has the following dependencies:\n\n"
+    "    KERNEL32.dll\n"
+    "    PSAPI.DLL\n"
+    "    VCRUNTIME140.dll\n"
+    "    VCRUNTIME140_1.dll\n"
+    "    api-ms-win-crt-runtime-l1-1-0.dll\n"
+    "    api-ms-win-crt-heap-l1-1-0.dll\n"
+    "    api-ms-win-crt-stdio-l1-1-0.dll\n"
+)
+
+
+def test_pe_libomp_transitive_imports_pass(tmp_path, monkeypatch, capsys):
+    """Regression for CI run 34762557520: the transitive walk added in P-23
+    reached libomp140.x86_64.dll's table for the first time and PSAPI.DLL,
+    a System32 library, read MISSING."""
+    dump = _write(tmp_path, "dump.txt", PE_DUMP_LIBOMP_TRANSITIVE)
+    staged = _stage(tmp_path, ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"])
+    rc, out, err = _invoke(monkeypatch, [
+        "--dump", str(dump), "--staged-dir", str(staged),
+        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+    ], capsys)
+    assert rc == 0
+    assert "IMPORT PSAPI.DLL -> OS_ALLOWLIST" in out
+    assert "IMPORT_CLOSURE_RESULT=PASS" in out
+
+
+def test_pe_allowlist_match_is_case_insensitive(tmp_path, monkeypatch, capsys):
+    """The Windows loader is case-insensitive; Psapi.dll / kernel32.DLL name
+    the same System32 files as PSAPI.DLL / KERNEL32.dll and must not read
+    MISSING just because a producer spelled them differently."""
+    dump = _write(tmp_path, "dump.txt",
+                  "  Image has the following dependencies:\n\n"
+                  "    Psapi.dll\n"
+                  "    kernel32.DLL\n"
+                  "    LIBOMP140.X86_64.DLL\n")
+    staged = _stage(tmp_path, ["libomp140.x86_64.dll"])
+    rc, out, err = _invoke(monkeypatch, [
+        "--dump", str(dump), "--staged-dir", str(staged),
+        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+    ], capsys)
+    assert rc == 0
+    assert "IMPORT Psapi.dll -> OS_ALLOWLIST" in out
+    assert "IMPORT kernel32.DLL -> OS_ALLOWLIST" in out
+    assert "IMPORT LIBOMP140.X86_64.DLL -> STAGED" in out
+
+
+def test_pe_case_insensitivity_does_not_relax_the_gate(tmp_path, monkeypatch, capsys):
+    """POSITIVE CONTROL for the case-insensitive change: a genuinely absent
+    companion and an unknown third-party DLL must still read MISSING, in any
+    casing."""
+    dump = _write(tmp_path, "dump.txt",
+                  PE_DUMP_LIBOMP_TRANSITIVE +
+                  "    HEIF.DLL\n"
+                  "    Sketchy_Third_Party.DLL\n")
+    staged = _stage(tmp_path, ["libomp140.x86_64.dll"])  # heif.dll genuinely absent
+    rc, out, err = _invoke(monkeypatch, [
+        "--dump", str(dump), "--staged-dir", str(staged),
+        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+    ], capsys)
+    assert rc == 1
+    assert "IMPORT HEIF.DLL -> MISSING" in out
+    assert "IMPORT Sketchy_Third_Party.DLL -> MISSING" in out
+    assert "IMPORT_CLOSURE_RESULT=FAIL" in out
+
+
+def test_psapi_is_windows_only_and_elf_stays_case_sensitive():
+    """Scope guards: PSAPI.DLL is a Windows System32 library, and the
+    case-insensitive relaxation must NOT reach the ELF platforms, whose
+    soname lookup really is case-sensitive."""
+    assert "PSAPI.DLL" in aic.WINDOWS_OS_ALLOWLIST
+    assert "PSAPI.DLL" not in aic.LINUX_OS_ALLOWLIST
+    assert "PSAPI.DLL" not in aic.ANDROID_OS_ALLOWLIST
+    assert aic.CASE_INSENSITIVE_PLATFORMS == frozenset({"windows"})
+    assert aic.classify("LIBC.SO.6", aic.LINUX_OS_ALLOWLIST, (), set(),
+                        case_insensitive=False) == "MISSING"
+    assert aic.classify("libc.so.6", aic.LINUX_OS_ALLOWLIST, (), set(),
+                        case_insensitive=False) == "OS_ALLOWLIST"
+
+
 ELF_DUMP_LINUX_CLEAN = (
     " Dynamic section at offset 0x1000 contains 20 entries:\n"
     "  Tag        Type                         Name/Value\n"

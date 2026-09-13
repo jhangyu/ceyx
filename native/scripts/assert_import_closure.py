@@ -44,6 +44,25 @@ except ModuleNotFoundError:  # pragma: no cover - CI runners are 3.11+
 
 # Explicit, measured allowlists -- named constants, never a regex that would
 # swallow an unknown third-party import. Extend only with a measured entry.
+#
+# WINDOWS ADMISSION RULE (stated 2026-09-13, previously implicit):
+# a name belongs here if and only if BOTH hold --
+#   (1) it is provided by the operating system itself: it ships in
+#       %SystemRoot%\System32 on every supported Windows SKU (the Win32
+#       subsystem DLLs and the API-set stubs), or it is a Microsoft
+#       redistributable runtime (MSVCP140/VCRUNTIME140*/ucrtbase) that the
+#       VC++ redistributable installs system-wide and that Microsoft's
+#       redistribution terms do NOT allow us to copy beside the decoder; AND
+#   (2) it is not something WE build or vendor -- if this project's build
+#       could produce or fetch the file, it must be STAGED and declared in
+#       native/deps/shipped_files.toml, never allowlisted.
+# What the rule still REJECTS (this is the point of the gate): heif.dll,
+# libde265.dll, libomp140.x86_64.dll, libjxl*, zlib/jpeg DLLs and every other
+# third-party or self-built companion -- all of those are things we ship, so a
+# missing one must read MISSING. The rule is a membership test against a
+# closed, enumerated set, NOT a pattern like "*.DLL in System32 on the runner":
+# probing the runner's System32 would admit whatever happens to be installed
+# on a GitHub image and is exactly the broad rule this gate exists to avoid.
 WINDOWS_OS_ALLOWLIST = frozenset({
     "KERNEL32.dll",
     "WS2_32.dll",
@@ -56,8 +75,35 @@ WINDOWS_OS_ALLOWLIST = frozenset({
     "VCRUNTIME140_1.dll",
     "ucrtbase.dll",
     "ucrtbased.dll",
+    # Measured entry (2026-09-13, CI run 34762557520, windows/x86_64 Vulkan
+    # leg): the transitive walk added in ef34f885 (P-23) reached
+    # libomp140.x86_64.dll's OWN import table for the first time -- the
+    # pre-migration shell step gated only the decoder's depth-one table plus a
+    # single-name `grep libde265.dll` in heif.dll, so libomp's imports had
+    # never been presented to this allowlist. PSAPI.DLL (process-status API,
+    # used by the LLVM OpenMP runtime for affinity/memory queries) is a
+    # System32 library on every Windows SKU and satisfies rule (1)+(2). This
+    # is a gate gap newly exposed, NOT a regression in the artifact: the
+    # released v0.1.24 libomp declares the same import.
+    "PSAPI.DLL",
 })
 WINDOWS_OS_ALLOWLIST_PREFIXES = ("api-ms-win-",)
+
+# Windows module names are matched case-INSENSITIVELY, because the Windows
+# loader is: an import table may spell the same file KERNEL32.dll (MSVC),
+# kernel32.dll or PSAPI.DLL (the LLVM toolchain's spelling, seen in run
+# 34762557520) and all three load the identical file. A case-SENSITIVE set
+# membership therefore reports MISSING for a library that is unambiguously
+# present -- a false failure whose only cure would be enumerating every
+# spelling. ELF platforms are excluded: their soname lookup IS case-sensitive,
+# so libZ.so.1 really is a different name from libz.so.1 there.
+CASE_INSENSITIVE_PLATFORMS = frozenset({"windows"})
+
+
+def name_key(name: str, case_insensitive: bool) -> str:
+    """Comparison key for a module name on a platform whose loader/filesystem
+    is case-insensitive (Windows) or case-sensitive (ELF)."""
+    return name.lower() if case_insensitive else name
 
 LINUX_OS_ALLOWLIST = frozenset({
     "libc.so.6",
@@ -172,10 +218,12 @@ def load_declared_companions(declaration_path: Path, platform: str) -> set[str]:
 
 
 def classify(name: str, allowlist: frozenset[str], prefixes: tuple[str, ...],
-             staged_names: set[str]) -> str:
-    if name in allowlist or any(name.lower().startswith(p.lower()) for p in prefixes):
+             staged_names: set[str], case_insensitive: bool = False) -> str:
+    key = name_key(name, case_insensitive)
+    allow_keys = {name_key(a, case_insensitive) for a in allowlist}
+    if key in allow_keys or any(name.lower().startswith(p.lower()) for p in prefixes):
         return "OS_ALLOWLIST"
-    if name in staged_names:
+    if key in {name_key(s, case_insensitive) for s in staged_names}:
         return "STAGED"
     return "MISSING"
 
@@ -235,7 +283,8 @@ def main() -> int:
     missing: list[str] = []
     staged_count = 0
     for name in imports:
-        verdict = classify(name, allowlist, prefixes, staged_names)
+        verdict = classify(name, allowlist, prefixes, staged_names,
+                           args.platform in CASE_INSENSITIVE_PLATFORMS)
         print(f"IMPORT {name} -> {verdict}")
         if verdict == "STAGED":
             staged_count += 1

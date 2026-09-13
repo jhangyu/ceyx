@@ -386,12 +386,23 @@ def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str) -
     `markerdiff.EXPECTED_ADDITIONS` ledger entry (another owner's file) and
     without weakening the gate: a transitive failure still fails the step
     through the aggregated RC."""
-    staged_names = {p.name for p in Path(staged_dir).iterdir()} if Path(staged_dir).is_dir() else set()
+    # Case-insensitive, for the same reason the Windows allowlist is (see
+    # assert_import_closure.CASE_INSENSITIVE_PLATFORMS): an import table may
+    # spell a staged companion in any case. Under a case-SENSITIVE match the
+    # walk would silently SKIP that module -- an under-walk that looks exactly
+    # like a clean pass, which is the worse failure mode here. The map keeps the
+    # real on-disk name so the file is still opened by its actual path.
+    staged_by_key = (
+        {p.name.lower(): p.name for p in Path(staged_dir).iterdir()}
+        if Path(staged_dir).is_dir() else {}
+    )
+    decoder_key = decoder_name.lower()
 
     def staged_imports(body_text: str) -> list[str]:
         return [
-            name for name in _assert_import_closure_script.parse_pe_dump(body_text)
-            if name in staged_names and name != decoder_name
+            staged_by_key[name.lower()]
+            for name in _assert_import_closure_script.parse_pe_dump(body_text)
+            if name.lower() in staged_by_key and name.lower() != decoder_key
         ]
 
     queue = staged_imports(root_body)
