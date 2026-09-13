@@ -325,46 +325,19 @@ jobs:
       # library (A5.2 — LGPL-3 §4(d)(1); the default triplets are static, so this
       # assertion is the only thing between a triplet typo and a compliance
       # breach) of the same architecture.
+      # WI-24a (push 8): collapsed into ci.py's provision.assert_vcpkg_artefacts()
+      # -> _assert_vcpkg_artefacts_macos() (74e1bb8b, after impl-14 caught the
+      # module's earlier version silently dropping this shell's aom arch
+      # check -- see that commit and provision.py's own docstring). The
+      # migrated step exercises the RESTORED aom check: three libraries,
+      # three properties (libwebp static, libde265 SHARED per LGPL-3
+      # 4(d)(1) [A5.2], aom static), all three arch-checked against
+      # --arch-tag, none symmetrised. No markers in the pre-migration shell
+      # (verified: zero echo lines here match markerdiff's bare NAME=value
+      # shape, only "FAIL: ..."/"libNNN.a archs: ..." diagnostic text), so
+      # none to restore.
       - name: Assert the vcpkg artefacts (libwebp static, libde265 shared)
-        run: |
-          set -e
-          VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
-          ls -la "$VCPKG_PREFIX/lib"
-          test -f "$VCPKG_PREFIX/lib/libwebp.a" \
-            || { echo "FAIL: libwebp.a absent (expected a static archive)"; exit 1; }
-          shared=$(find "$VCPKG_PREFIX/lib" -name 'libwebp*.dylib' | wc -l | tr -d ' ')
-          test "$shared" = "0" \
-            || { echo "FAIL: ${shared} libwebp dylib(s) present; the triplet must keep libwebp static (LGPL asymmetry applies to libheif/libde265 only)"; exit 1; }
-          archs=$(lipo -archs "$VCPKG_PREFIX/lib/libwebp.a")
-          echo "libwebp.a archs: ${archs}"
-          echo "${archs}" | grep -qw "${{ matrix.arch_tag }}" \
-            || { echo "FAIL: libwebp.a archs '${archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
-          de265=$(find "$VCPKG_PREFIX/lib" -name 'libde265*.dylib' | wc -l | tr -d ' ')
-          test "$de265" != "0" \
-            || { echo "FAIL: no libde265 dylib in the vcpkg prefix; a static libde265 is an LGPL-3 4(d)(1) breach, not a packaging detail [A5.2]"; exit 1; }
-          test ! -f "$VCPKG_PREFIX/lib/libde265.a" \
-            || { echo "FAIL: libde265.a present; the triplet's dynamic exception did not apply [A5.2]"; exit 1; }
-          # Whichever spelling the port produced as the REAL file (the other is a
-          # symlink to it); -L makes lipo follow it either way.
-          de265_lib=$(find "$VCPKG_PREFIX/lib" -name 'libde265*.dylib' | head -n 1)
-          de265_archs=$(lipo -archs "$de265_lib")
-          echo "libde265 archs: ${de265_archs}"
-          echo "${de265_archs}" | grep -qw "${{ matrix.arch_tag }}" \
-            || { echo "FAIL: libde265 archs '${de265_archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
-          # aom (D5 leg 3): STATIC — it is linked INTO libheif, so a dylib here
-          # would have to be shipped and resolved at runtime instead. Arch is
-          # checked for the same reason as libwebp's: the cross leg is the one
-          # that gets it wrong, and the old source build forced AOM_TARGET_CPU
-          # by hand precisely because aom otherwise follows the HOST cpu.
-          test -f "$VCPKG_PREFIX/lib/libaom.a" \
-            || { echo "FAIL: libaom.a absent (expected a static archive)"; exit 1; }
-          aom_shared=$(find "$VCPKG_PREFIX/lib" -name 'libaom*.dylib' | wc -l | tr -d ' ')
-          test "$aom_shared" = "0" \
-            || { echo "FAIL: ${aom_shared} libaom dylib(s) present; aom must stay static (it is linked into libheif)"; exit 1; }
-          aom_archs=$(lipo -archs "$VCPKG_PREFIX/lib/libaom.a")
-          echo "libaom.a archs: ${aom_archs}"
-          echo "${aom_archs}" | grep -qw "${{ matrix.arch_tag }}" \
-            || { echo "FAIL: libaom.a archs '${aom_archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
+        run: python3 native/scripts/ci.py assert-vcpkg-artefacts --platform macos --triplet "$VCPKG_TRIPLET" --runner-temp "$RUNNER_TEMP" --arch-tag "${{ matrix.arch_tag }}"
 
       # macOS is the one platform that genuinely ships the HEIC decode route, so
       # unlike the Linux/Android workflows (which configure with
