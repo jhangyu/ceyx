@@ -46,49 +46,108 @@ def _artifact_path(platform: str) -> str:
     return targets.spec(platform)["artifact_path"]
 
 
-def verify_artifact(platform: str, arch: str | None = None) -> int:
-    """AC-L2 (file) + AC-L3 (nm -D vulkan symbol) + AC-L4 (ldd, no
-    libvulkan). Replaces `linux_build.yml:507-540`."""
-    so = _artifact_path(platform)
+def verify_artifact(platform: str, arch: str | None = None, *, dylib_path: str | None = None) -> int:
+    """Linux: AC-L2 (file) + AC-L3 (nm -D vulkan symbol) + AC-L4 (ldd, no
+    libvulkan). Replaces `linux_build.yml:507-540` -- UNCHANGED from before.
 
-    report.section("AC-L2: file")
-    result = run.run(["file", so])
-    if result.stdout:
+    macOS/windows added here (WI-22 follow-on): each replaces a completely
+    DIFFERENT check under the same command name -- ``file`` exists is the
+    only thing the three share. macOS asserts the produced dylib's
+    architecture matches `arch` (`macos_build.yml:581-593`); windows only
+    asserts the DLL exists and is non-empty (`windows_build.yml:494-511` --
+    its exports check is a SEPARATE step, now `assert_exports()`, not this
+    function). Every emitted line and every `::error::` message (including
+    macOS's genuine absence of any stderr redirect on either of its two
+    error lines, ported as-is) is transcribed verbatim per platform."""
+    if platform == "linux":
+        so = _artifact_path(platform)
+
+        report.section("AC-L2: file")
+        result = run.run(["file", so])
+        if result.stdout:
+            report.plain(result.stdout.rstrip("\n"))
+        report.bare_rc(result.returncode)
+        if result.returncode != 0:
+            report.error(f"file '{so}' failed (rc={result.returncode}); the Linux .so is missing.")
+            return 1
+
+        report.section("AC-L3: nm -D halide_vulkan_device_interface")
+        run.run_to_file(["nm", "-D", so], "nm_dynsyms.txt")
+        dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
+        matches = [line for line in dump_text.splitlines() if "halide_vulkan_device_interface" in line]
+        for line in matches:
+            report.plain(line)
+        rc = 0 if matches else 1
+        report.bare_rc(rc)
+        if rc != 0:
+            report.error(
+                f"halide_vulkan_device_interface not found in {so} — "
+                "Vulkan runtime absent from the binary (AC-L3)."
+            )
+            return 1
+
+        report.section("AC-L4: ldd (expect NO libvulkan)")
+        ldd_result = run.run_to_file(["ldd", so], "ldd_out.txt")
+        ldd_text = Path("ldd_out.txt").read_text(errors="replace")
+        if ldd_text:
+            report.plain(ldd_text.rstrip("\n"))
+        report.bare_rc(ldd_result.returncode)
+        # PORTED AS-IS (pre-existing, d33cc607 linux_build.yml:534): the gate is
+        # the substring test below, never ldd's own RC -- see
+        # test_ldd_gate_is_substring_not_rc.
+        if "libvulkan" in ldd_text:
+            report.error("libvulkan appears in ldd output — link-time Vulkan dependency regressed (D4).")
+            return 1
+
+        return 0
+
+    if platform == "macos":
+        if not dylib_path:
+            raise ValueError("verify_artifact(platform='macos') requires dylib_path")
+        if not arch:
+            raise ValueError("verify_artifact(platform='macos') requires arch")
+        so = dylib_path
+        if not Path(so).is_file():
+            # PORTED AS-IS: no stderr redirect on this line in the source
+            # shell (macos_build.yml:583-585), matching the same convention
+            # already established for the staging/exports steps.
+            report.error(f"Expected dylib not found at {so}", stream=sys.stdout)
+            return 1
+        result = run.run(["file", so])
         report.plain(result.stdout.rstrip("\n"))
-    report.bare_rc(result.returncode)
-    if result.returncode != 0:
-        report.error(f"file '{so}' failed (rc={result.returncode}); the Linux .so is missing.")
-        return 1
+        lipo_result = run.run(["lipo", "-archs", so])
+        archs = lipo_result.stdout.strip()
+        report.plain(f"lipo -archs => {archs}")
+        if archs != arch:
+            report.error(
+                f"Expected architecture '{arch}' but the dylib reports '{archs}'",
+                stream=sys.stdout,
+            )
+            return 1
+        otool_result = run.run(["otool", "-L", so])
+        report.plain(otool_result.stdout.rstrip("\n"))
+        return 0
 
-    report.section("AC-L3: nm -D halide_vulkan_device_interface")
-    run.run_to_file(["nm", "-D", so], "nm_dynsyms.txt")
-    dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
-    matches = [line for line in dump_text.splitlines() if "halide_vulkan_device_interface" in line]
-    for line in matches:
-        report.plain(line)
-    rc = 0 if matches else 1
-    report.bare_rc(rc)
-    if rc != 0:
-        report.error(
-            f"halide_vulkan_device_interface not found in {so} — "
-            "Vulkan runtime absent from the binary (AC-L3)."
-        )
-        return 1
+    if platform == "windows":
+        so = _artifact_path(platform)
+        if not Path(so).is_file():
+            report.error(f"{so} not found — the Windows build did not emit the expected DLL.")
+            return 1
+        report.plain("== file ==")
+        result = run.run(["file", so])
+        if result.returncode != 0:
+            report.notice("file(1) unavailable on this runner; size check below is the binding evidence.")
+        else:
+            report.plain(result.stdout.rstrip("\n"))
+        report.plain("== size (bytes) ==")
+        size = Path(so).stat().st_size
+        report.marker("DLL_SIZE_BYTES", size)
+        if size <= 0:
+            report.error("DLL is zero bytes.")
+            return 1
+        return 0
 
-    report.section("AC-L4: ldd (expect NO libvulkan)")
-    ldd_result = run.run_to_file(["ldd", so], "ldd_out.txt")
-    ldd_text = Path("ldd_out.txt").read_text(errors="replace")
-    if ldd_text:
-        report.plain(ldd_text.rstrip("\n"))
-    report.bare_rc(ldd_result.returncode)
-    # PORTED AS-IS (pre-existing, d33cc607 linux_build.yml:534): the gate is
-    # the substring test below, never ldd's own RC -- see
-    # test_ldd_gate_is_substring_not_rc.
-    if "libvulkan" in ldd_text:
-        report.error("libvulkan appears in ldd output — link-time Vulkan dependency regressed (D4).")
-        return 1
-
-    return 0
+    raise ValueError(f"verify_artifact: unsupported platform {platform!r}")
 
 
 def import_closure(platform: str) -> int:

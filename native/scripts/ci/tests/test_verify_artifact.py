@@ -249,6 +249,102 @@ class VerifyArtifactTests(unittest.TestCase):
     # golden marker match) lives in test_minruntime.py against the real
     # (non-orphaned) implementation.
 
+    # ---- macOS verify_artifact (file exists + lipo arch match) -----------
+
+    def test_macos_verify_artifact_missing_dylib_fails_no_stderr_redirect(self):
+        with _Cwd(self._tmp()):
+            rc, out, err = _run_captured(
+                verify_artifact.verify_artifact,
+                "macos", "arm64", dylib_path="does/not/exist.dylib",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::Expected dylib not found", out)
+        self.assertEqual(err, "")
+
+    def test_macos_verify_artifact_arch_mismatch_fails(self):
+        with _Cwd(self._tmp()):
+            dylib = Path(self._tmp()) / "libdng_decoder_native.dylib"
+            dylib.write_bytes(b"")
+
+            def fake(argv, cwd=None, env=None):
+                if argv[0] == "file":
+                    return _fake_run_result(returncode=0, stdout=f"{dylib}: Mach-O\n")
+                if argv[0] == "lipo":
+                    return _fake_run_result(returncode=0, stdout="x86_64\n")
+                raise AssertionError(f"unexpected argv: {argv}")
+
+            with mock.patch.object(run_module, "run", side_effect=fake):
+                rc, out, err = _run_captured(
+                    verify_artifact.verify_artifact, "macos", "arm64", dylib_path=str(dylib)
+                )
+        self.assertEqual(rc, 1)
+        self.assertIn("Expected architecture 'arm64' but the dylib reports 'x86_64'", out)
+        self.assertEqual(err, "")
+
+    def test_macos_verify_artifact_success(self):
+        with _Cwd(self._tmp()):
+            dylib = Path(self._tmp()) / "libdng_decoder_native.dylib"
+            dylib.write_bytes(b"")
+
+            def fake(argv, cwd=None, env=None):
+                if argv[0] == "file":
+                    return _fake_run_result(returncode=0, stdout=f"{dylib}: Mach-O\n")
+                if argv[0] == "lipo":
+                    return _fake_run_result(returncode=0, stdout="arm64\n")
+                if argv[0] == "otool":
+                    return _fake_run_result(returncode=0, stdout=f"{dylib}:\n\t@rpath/libheif.1.dylib\n")
+                raise AssertionError(f"unexpected argv: {argv}")
+
+            with mock.patch.object(run_module, "run", side_effect=fake):
+                rc, out, _ = _run_captured(
+                    verify_artifact.verify_artifact, "macos", "arm64", dylib_path=str(dylib)
+                )
+        self.assertEqual(rc, 0)
+        self.assertIn("lipo -archs => arm64", out)
+
+    # ---- Windows verify_artifact (file exists + non-zero size) -----------
+
+    def test_windows_verify_artifact_missing_dll_fails_with_stderr(self):
+        with _Cwd(self._tmp()):
+            rc, out, err = _run_captured(verify_artifact.verify_artifact, "windows")
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::", err)
+
+    def test_windows_verify_artifact_zero_byte_dll_fails(self):
+        with _Cwd(self._tmp()):
+            so = Path(_SO)  # "native/build-windows/dng_decoder_native.dll" via targets.py
+            with mock.patch.object(verify_artifact, "_artifact_path", return_value=str(so)):
+                so.parent.mkdir(parents=True, exist_ok=True)
+                so.write_bytes(b"")
+
+                def fake(argv, cwd=None, env=None):
+                    if argv[0] == "file":
+                        return _fake_run_result(returncode=0, stdout="data\n")
+                    raise AssertionError(f"unexpected argv: {argv}")
+
+                with mock.patch.object(run_module, "run", side_effect=fake):
+                    rc, out, err = _run_captured(verify_artifact.verify_artifact, "windows")
+        self.assertEqual(rc, 1)
+        self.assertIn("DLL_SIZE_BYTES=0", out)
+        self.assertIn("::error::DLL is zero bytes.", err)
+
+    def test_windows_verify_artifact_success(self):
+        with _Cwd(self._tmp()):
+            so = Path("native/build-windows/dng_decoder_native.dll")
+            with mock.patch.object(verify_artifact, "_artifact_path", return_value=str(so)):
+                so.parent.mkdir(parents=True, exist_ok=True)
+                so.write_bytes(b"not empty")
+
+                def fake(argv, cwd=None, env=None):
+                    if argv[0] == "file":
+                        return _fake_run_result(returncode=0, stdout="PE32+ executable\n")
+                    raise AssertionError(f"unexpected argv: {argv}")
+
+                with mock.patch.object(run_module, "run", side_effect=fake):
+                    rc, out, _ = _run_captured(verify_artifact.verify_artifact, "windows")
+        self.assertEqual(rc, 0)
+        self.assertIn("DLL_SIZE_BYTES=9", out)
+
     # ---- AC-L5 (assert_exports) -----------------------------------------
 
     def test_assert_exports_success(self):

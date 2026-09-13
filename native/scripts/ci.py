@@ -22,7 +22,8 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
 
     python3 native/scripts/ci.py selftest
     python3 native/scripts/ci.py marker-diff --baseline F --candidate F [--leg L]
-    python3 native/scripts/ci.py verify-artifact   --platform P [--arch A]
+    python3 native/scripts/ci.py verify-artifact   --platform linux|windows [--arch A]
+    python3 native/scripts/ci.py verify-artifact   --platform macos --arch A --dylib-path D
     python3 native/scripts/ci.py import-closure    --platform P
     python3 native/scripts/ci.py min-runtime       --platform P [--arch A]
     python3 native/scripts/ci.py assert-exports    --platform linux|windows [--arch A]
@@ -329,6 +330,19 @@ def _enforce_assert_exports_flags(parser: argparse.ArgumentParser, args: argpars
             )
 
 
+def _enforce_verify_artifact_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """`verify-artifact` only: `--dylib-path` is macOS-only (its
+    `artifact_path` is `None` in targets.py), same reject-not-ignore
+    posture as every other per-platform flag set above."""
+    if args.command != "verify-artifact":
+        return
+    if args.platform == "macos":
+        if args.dylib_path is None:
+            parser.error("--dylib-path is required for --platform macos")
+    elif args.dylib_path is not None:
+        parser.error(f"--dylib-path is not accepted for --platform {args.platform!r}")
+
+
 def _add_platform_command(sub, name: str, help_text: str, extra=None, with_arch: bool = True):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
@@ -350,7 +364,16 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--candidate", required=True)
     md.add_argument("--leg", default=None)
 
-    _add_platform_command(sub, "verify-artifact", "run the artifact verification suite")
+    def _verify_artifact_extra(sp):
+        # macOS-only: its dylib has no static `targets.py` path (two
+        # per-arch matrix legs), same shape as assert-orientation/
+        # assert-exports's macOS flag. Enforced post-parse by
+        # `_enforce_verify_artifact_flags`.
+        sp.add_argument("--dylib-path", default=None)
+
+    _add_platform_command(
+        sub, "verify-artifact", "run the artifact verification suite", _verify_artifact_extra
+    )
     _add_platform_command(sub, "import-closure", "assert the import-closure gate")
     _add_platform_command(sub, "min-runtime", "assert min-runtime drift")
     def _assert_exports_extra(sp):
@@ -546,24 +569,34 @@ def dispatch(args: argparse.Namespace) -> int:
     # `targets.spec(platform)["min_runtime_source"]`, so it dispatches to its
     # own module below regardless of platform, same as `assert-orientation`
     # and `codec-probe` before it.
-    # `stage`/`assert-staged-group`/`dt-needed` are NOT in this set as of
-    # push 7 (WI-22): `ci/stage.py` (impl-17, 15c54142) and
-    # `ci/dt_needed.py` (impl-18, 0dec0622) both genuinely support their
-    # platforms now -- confirmed against the committed modules, not a
-    # report that they were done (P-10's own lesson). `assert-no-avx512`
-    # stays linux-only PERMANENTLY (concept-search confirmed: zero
-    # -march/-mtune//arch:/ISA/baseline-CPU/SIMD-shaped step on any other
-    # platform's workflow, not just an absent "avx" string) but is left in
-    # this scaffold-and-shrink set rather than the permanent-exclusion
-    # shape (`_CODEC_PROBE_PLATFORMS`) because no other platform's caller
-    # has asked for it yet -- reclassify when/if one does.
+    # `stage`/`assert-staged-group`/`dt-needed`/`assert-exports`/
+    # `verify-artifact` are NOT in this set as of push 7 (WI-22): every one
+    # of their modules genuinely supports its platforms now -- confirmed
+    # against the committed modules, not a report that they were done
+    # (P-10's own lesson). `import-closure` stays linux-only -- android's
+    # equivalent needs a caller-supplied-artifact-dir redesign
+    # (`_artifact_path`/`dist_dir` are both `None` for android in
+    # targets.py) not attempted yet; see verify_artifact.import_closure()'s
+    # docstring.
     _linux_only_commands = {
-        "verify-artifact",
         "import-closure",
-        "assert-no-avx512",
     }
     if args.command in _linux_only_commands and getattr(args, "platform", None) != "linux":
         return _not_yet(args.command)
+    # `assert-no-avx512` is PERMANENTLY linux-only (same shape as
+    # `_CODEC_PROBE_PLATFORMS`/`_CAPABILITY_VECTOR_PLATFORMS`), concept-search
+    # confirmed: zero `-march`/`-mtune`/`/arch:`/ISA/baseline-CPU/SIMD-shaped
+    # step on any other platform's workflow, not just an absent "avx"
+    # string.
+    _AVX512_PLATFORMS = frozenset({"linux"})
+    if args.command == "assert-no-avx512" and args.platform not in _AVX512_PLATFORMS:
+        print(
+            f"::error::assert-no-avx512 has no --platform {args.platform!r} leg -- this "
+            "portable-baseline gate is meaningful on Linux only, permanently (concept-level "
+            "search found no ISA/baseline-CPU-shaped step on any other platform's workflow)",
+            file=sys.stderr,
+        )
+        return 2
     # `dt-needed` is explicitly narrowed to {linux, android} (not widened to
     # all four): impl-18 confirmed via `grep -l DT_NEEDED .github/workflows/
     # *.yml` that only linux_build.yml and android_build.yml have this step
@@ -585,7 +618,9 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "verify-artifact":
         import ci.verify_artifact as verify_artifact
 
-        return verify_artifact.verify_artifact(args.platform, args.arch)
+        return verify_artifact.verify_artifact(
+            args.platform, args.arch, dylib_path=args.dylib_path
+        )
     if args.command == "import-closure":
         import ci.verify_artifact as verify_artifact
 
@@ -745,6 +780,7 @@ def main(argv=None) -> int:
         _enforce_stage_flags(parser, args)
         _enforce_dt_needed_flags(parser, args)
         _enforce_assert_exports_flags(parser, args)
+        _enforce_verify_artifact_flags(parser, args)
     return dispatch(args)
 
 
