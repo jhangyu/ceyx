@@ -43,18 +43,26 @@ This is a Python script, not a shell script, deliberately: an earlier
 `.sh` version of this same leg failed its own `check_shell_prohibition.py`
 guard once committed -- a new shell file in a campaign whose purpose is
 removing shell from CI. The absence leg cannot be the one shell file the
-campaign keeps.
+campaign keeps. Process execution goes through `native/scripts/ci/run.py`
+(the one sanctioned subprocess wrapper), not raw `subprocess`, so this
+script also clears `check_no_test_execution_in_ci.py`'s
+`[subprocess-outside-run]` rule.
 
 Run with: python3 native/scripts/ci/fresh_runner_gate.py   (from repo root)
 """
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run  # noqa: E402 -- native/scripts/ci/run.py, the one sanctioned
+# subprocess wrapper. This script isn't invoked as part of the `ci` package
+# (it also runs against a git-worktree COPY of itself, so a relative
+# `from . import run` would break there), hence the sys.path shim.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -71,12 +79,9 @@ CHECKS = [
 ]
 
 
-def _run(args, cwd=None, **kwargs):
-    return subprocess.run(args, cwd=cwd or REPO_ROOT, **kwargs)
-
-
 def main() -> int:
-    tip = _run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    tip_result = run.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT)
+    tip = tip_result.stdout.strip()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"FRESH_RUNNER_GATE: tip={tip} date={now}")
 
@@ -85,10 +90,17 @@ def main() -> int:
 
     try:
         print(f"FRESH_RUNNER_GATE: creating worktree at {worktree_path}")
-        _run(
+        add_result = run.run(
             ["git", "worktree", "add", "--quiet", "--detach", str(worktree_path), tip],
-            check=True,
+            cwd=REPO_ROOT,
         )
+        if add_result.returncode != 0:
+            print(
+                f"FRESH_RUNNER_GATE: worktree creation FAILED rc={add_result.returncode} "
+                f"stderr={add_result.stderr}",
+                file=sys.stderr,
+            )
+            return 2
 
         # ---- Declare what is simulated as absent -- mechanically verified,
         # not assumed. A leg whose absence claim is wrong is worse than no leg.
@@ -151,8 +163,12 @@ def main() -> int:
         overall_rc = 0
         for check in CHECKS:
             print(f"FRESH_RUNNER_GATE: RUN {check}")
-            result = _run([sys.executable, check], cwd=worktree_path)
+            result = run.run([sys.executable, check], cwd=worktree_path)
             rc = result.returncode
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.stderr:
+                print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
             print(f"FRESH_RUNNER_GATE: RC({check})={rc}")
             if rc != 0:
                 overall_rc = 1
@@ -160,12 +176,7 @@ def main() -> int:
         print(f"FRESH_RUNNER_GATE: OVERALL_RC={overall_rc} tip={tip}")
         return overall_rc
     finally:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree_path)],
-            cwd=REPO_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        run.run(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=REPO_ROOT)
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
