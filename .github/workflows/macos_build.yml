@@ -786,28 +786,19 @@ jobs:
       # FALSE PASS for the decoder-depends-on-itself entry (verified against
       # a real downloaded artifact); the fix here iterates the five
       # companions only, never the decoder's own name.
+      # WI-35 (push 8b, Task #15): collapsed into ci.py stage --platform
+      # macos, calling stage.stage_macos() (companion list from the same
+      # read_shipped_files.py --platform macos --companions declaration the
+      # inline body read). Byte-verified mechanically before migrating:
+      # WI-39 (d8848cb1) had just restored this function's companion-
+      # missing error text to use an em dash (U+2014) matching this exact
+      # step, not the ASCII "--" an earlier version of the module emitted --
+      # re-verified myself at runtime (real fixture, grep -c on stderr) that
+      # the em dash is actually there before wiring this, rather than
+      # trusting the fix commit's message. No markers in the pre-migration
+      # shell body -- none to restore.
       - name: Stage native artifact
-        run: |
-          mkdir -p "${ARTIFACT_DIR}/native"
-          cp "$DYLIB" "${ARTIFACT_DIR}/native/"
-          NATIVE_DYLIB_DIR="$(dirname "$DYLIB")"
-          # WI-15 step 15.2: the companion list is read from the single
-          # declaration native/deps/shipped_files.toml (via
-          # read_shipped_files.py) rather than hard-coded here, so this
-          # gate cannot drift from the declaration. As of this commit the
-          # declaration already reflects OQ-N4 (lcms2 dropped, four
-          # companions) -- WI-5 lands the matching staging/build removal
-          # separately; this gate simply stops asserting a file WI-5 is
-          # about to stop shipping.
-          COMPANIONS="$(python3 native/scripts/read_shipped_files.py --platform macos --companions)"
-          for companion in ${COMPANIONS}; do
-            if [ ! -f "${NATIVE_DYLIB_DIR}/${companion}" ]; then
-              echo "::error::expected companion dylib ${companion} not found in ${NATIVE_DYLIB_DIR} — the release asset would ship the decoder without a dependency the podspec vendors." >&2
-              exit 1
-            fi
-            cp "${NATIVE_DYLIB_DIR}/${companion}" "${ARTIFACT_DIR}/native/"
-          done
-          ls -la "${ARTIFACT_DIR}/native"
+        run: python3 native/scripts/ci.py stage --platform macos --artifact-dir "${ARTIFACT_DIR}" --dylib-path "$DYLIB"
 
       # WI-20 (push 7): the copy above stays inline shell for now -- its
       # migration to ci.py's `stage` dispatch verb (which DOES already
