@@ -32,9 +32,12 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py capability-vector --platform P --kind codec|build [--source probe|configure-log]
     python3 native/scripts/ci.py assert-configure-log --log-path F --pattern R --label L --error E
     python3 native/scripts/ci.py assert-staged-companions --platform macos --arch A --dylib-path D --artifact-dir T
-    python3 native/scripts/ci.py stage             --platform P
-    python3 native/scripts/ci.py assert-staged-group --platform P
-    python3 native/scripts/ci.py dt-needed         --platform P
+    python3 native/scripts/ci.py stage             --platform linux --artifact-dir D --native-dir N
+    python3 native/scripts/ci.py stage             --platform windows|android --artifact-dir D --source-dir S
+    python3 native/scripts/ci.py stage             --platform macos --artifact-dir D --dylib-path P
+    python3 native/scripts/ci.py assert-staged-group --platform linux|windows|android --artifact-dir D
+    python3 native/scripts/ci.py dt-needed         --platform linux --artifact-dir D --runner-temp T
+    python3 native/scripts/ci.py dt-needed         --platform android --artifact-dir D --runner-temp T --ndk-home H [--build-log L]
     python3 native/scripts/ci.py vcpkg-baseline    --github-env PATH
     python3 native/scripts/ci.py vcpkg-bootstrap   --baseline SHA
     python3 native/scripts/ci.py vcpkg-install     --triplet T
@@ -241,6 +244,60 @@ def _enforce_capability_vector_flags(parser: argparse.ArgumentParser, args: argp
             parser.error(f"--dylib-path is not accepted for --platform {platform!r}")
 
 
+def _enforce_stage_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """`stage` only: each platform names its own source-location flag, and
+    every other platform's flag is REJECTED (same reject-not-ignore posture
+    as every other per-platform flag set above) -- linux's `--native-dir`
+    resolves via `ci/stage.py`'s original `stage()` (still reads
+    `targets.spec("linux")["dist_dir"]`); windows/android's `--source-dir`
+    and macos's `--dylib-path` are workflow context `stage.py` cannot know
+    (R5 -- see stage.py's own module docstring for exactly what path each
+    platform's real workflow step supplies today)."""
+    if args.command != "stage":
+        return
+    platform = args.platform
+    native_dir = args.native_dir
+    source_dir = args.source_dir
+    dylib_path = args.dylib_path
+
+    if platform == "linux":
+        if native_dir is None:
+            parser.error("--native-dir is required for --platform linux")
+        if source_dir is not None or dylib_path is not None:
+            parser.error("--source-dir/--dylib-path are not accepted for --platform linux")
+    elif platform in ("windows", "android"):
+        if source_dir is None:
+            parser.error(f"--source-dir is required for --platform {platform!r}")
+        if native_dir is not None or dylib_path is not None:
+            parser.error(
+                f"--native-dir/--dylib-path are not accepted for --platform {platform!r}"
+            )
+    elif platform == "macos":
+        if dylib_path is None:
+            parser.error("--dylib-path is required for --platform macos")
+        if native_dir is not None or source_dir is not None:
+            parser.error("--native-dir/--source-dir are not accepted for --platform macos")
+
+
+def _enforce_dt_needed_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """`dt-needed` only: `--ndk-home`/`--build-log` are android-only
+    (`ci/dt_needed.py`'s `dt_needed()` keyword-only params; no windows/macOS
+    branch exists there on purpose, neither platform has a DT_NEEDED step
+    today). Same reject-not-ignore posture as every other per-platform flag
+    set above."""
+    if args.command != "dt-needed":
+        return
+    platform = args.platform
+    if platform == "android":
+        if args.ndk_home is None:
+            parser.error("--ndk-home is required for --platform android")
+    else:
+        if args.ndk_home is not None or args.build_log is not None:
+            parser.error(
+                f"--ndk-home/--build-log are not accepted for --platform {platform!r}"
+            )
+
+
 def _add_platform_command(sub, name: str, help_text: str, extra=None, with_arch: bool = True):
     sp = sub.add_parser(name, help=help_text)
     sp.add_argument("--platform", required=True)
@@ -356,7 +413,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     def _stage_extra(sp):
         sp.add_argument("--artifact-dir", required=True)
-        sp.add_argument("--native-dir", required=True)
+        # Platform-specific source args, enforced post-parse by
+        # `_enforce_stage_flags` (same reject-not-ignore posture as every
+        # other per-platform flag set in this file): linux's `--native-dir`
+        # is `native/build-linux`-shaped (ci/stage.py's original `stage()`,
+        # still reads `targets.spec("linux")["dist_dir"]` under the hood).
+        # windows/android's `--source-dir` and macos's `--dylib-path` are
+        # workflow context stage.py cannot know (R5) -- ported verbatim from
+        # stage.py's own module docstring: windows is
+        # `native/build-windows`, android is
+        # `${NATIVE_DIR}/build-android/android-arm64`, macos is
+        # `dirname($DYLIB)`, all resolved by the CALLER, never by this CLI.
+        sp.add_argument("--native-dir", default=None)
+        sp.add_argument("--source-dir", default=None)
+        sp.add_argument("--dylib-path", default=None)
 
     def _staged_group_extra(sp):
         sp.add_argument("--artifact-dir", required=True)
@@ -364,6 +434,10 @@ def build_parser() -> argparse.ArgumentParser:
     def _dt_needed_extra(sp):
         sp.add_argument("--artifact-dir", required=True)
         sp.add_argument("--runner-temp", required=True)
+        # android-only (ci/dt_needed.py's `dt_needed()` keyword-only params);
+        # enforced post-parse by `_enforce_dt_needed_flags`.
+        sp.add_argument("--ndk-home", default=None)
+        sp.add_argument("--build-log", default=None)
 
     _add_platform_command(sub, "stage", "stage the built artifact + companions", _stage_extra)
     _add_platform_command(
@@ -429,14 +503,22 @@ def dispatch(args: argparse.Namespace) -> int:
     # `targets.spec(platform)["min_runtime_source"]`, so it dispatches to its
     # own module below regardless of platform, same as `assert-orientation`
     # and `codec-probe` before it.
+    # `stage`/`assert-staged-group`/`dt-needed` are NOT in this set as of
+    # push 7 (WI-22): `ci/stage.py` (impl-17, 15c54142) and
+    # `ci/dt_needed.py` (impl-18, 0dec0622) both genuinely support their
+    # platforms now -- confirmed against the committed modules, not a
+    # report that they were done (P-10's own lesson). `assert-no-avx512`
+    # stays linux-only PERMANENTLY (concept-search confirmed: zero
+    # -march/-mtune//arch:/ISA/baseline-CPU/SIMD-shaped step on any other
+    # platform's workflow, not just an absent "avx" string) but is left in
+    # this scaffold-and-shrink set rather than the permanent-exclusion
+    # shape (`_CODEC_PROBE_PLATFORMS`) because no other platform's caller
+    # has asked for it yet -- reclassify when/if one does.
     _linux_only_commands = {
         "verify-artifact",
         "import-closure",
         "assert-exports",
         "assert-no-avx512",
-        "stage",
-        "assert-staged-group",
-        "dt-needed",
     }
     if args.command in _linux_only_commands and getattr(args, "platform", None) != "linux":
         return _not_yet(args.command)
@@ -469,15 +551,38 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "stage":
         import ci.stage as stage
 
-        return stage.stage(args.platform, args.artifact_dir, args.native_dir)
+        if args.platform == "linux":
+            return stage.stage(args.platform, args.artifact_dir, args.native_dir)
+        if args.platform == "windows":
+            return stage.stage_windows(args.source_dir, args.artifact_dir)
+        if args.platform == "android":
+            return stage.stage_android(args.source_dir, args.artifact_dir)
+        if args.platform == "macos":
+            companions = stage.declared_companions("macos")
+            return stage.stage_macos(args.dylib_path, companions, args.artifact_dir)
+        return _not_yet(args.command)
     if args.command == "assert-staged-group":
         import ci.stage as stage
 
-        return stage.assert_staged_group(args.platform, args.artifact_dir)
+        if args.platform == "linux":
+            return stage.assert_staged_group(args.platform, args.artifact_dir)
+        if args.platform == "windows":
+            return stage.assert_staged_group_windows(args.artifact_dir)
+        if args.platform == "android":
+            return stage.assert_staged_group_android(args.artifact_dir)
+        # macos has no assert-staged-group step: its staged-group
+        # verification is `assert-staged-companions` (verify_artifact.py),
+        # not this command -- see verify_staged_companions()'s docstring.
+        return _not_yet(args.command)
     if args.command == "dt-needed":
         import ci.dt_needed as dt_needed
 
-        return dt_needed.dt_needed(args.platform, args.artifact_dir, args.runner_temp)
+        kwargs = {}
+        if args.ndk_home is not None:
+            kwargs["ndk_home"] = args.ndk_home
+        if args.build_log is not None:
+            kwargs["build_log"] = args.build_log
+        return dt_needed.dt_needed(args.platform, args.artifact_dir, args.runner_temp, **kwargs)
     if args.command == "assert-orientation":
         import ci.orientation as orientation
 
@@ -571,6 +676,8 @@ def main(argv=None) -> int:
         _enforce_orientation_flags(parser, args)
         _enforce_codec_probe_flags(parser, args)
         _enforce_capability_vector_flags(parser, args)
+        _enforce_stage_flags(parser, args)
+        _enforce_dt_needed_flags(parser, args)
     return dispatch(args)
 
 
