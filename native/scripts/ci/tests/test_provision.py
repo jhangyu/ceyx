@@ -9,8 +9,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+import sys
+
 from .. import provision
 from .. import run as run_module
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_CI_ENTRYPOINT = _REPO_ROOT / "native" / "scripts" / "ci.py"
 
 
 def _fake_run_result(returncode=0, stdout="", stderr=""):
@@ -152,6 +157,153 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("libwebp shared object(s) present", out)
 
+    # ---- assert_vcpkg_artefacts (macOS) ------------------------------------
+    # Three libraries, three different properties -- one negative test per
+    # assertion, not per library, so a shared green can't hide a broken one.
+
+    def _macos_lib_dir(self):
+        lib_dir = self.tmp / "vcpkg-installed" / "arm64-osx-heif" / "lib"
+        lib_dir.mkdir(parents=True)
+        return lib_dir
+
+    def _lipo_fake(self, archs_by_name):
+        def fake(argv, cwd=None, env=None):
+            if argv[0] == "lipo":
+                name = Path(argv[-1]).name
+                return _fake_run_result(returncode=0, stdout=archs_by_name.get(name, ""))
+            return _fake_run_result(returncode=0, stdout="total 0\n")
+
+        return fake
+
+    def test_assert_vcpkg_artefacts_macos_rejects_missing_arch_tag(self):
+        with self.assertRaises(ValueError):
+            provision.assert_vcpkg_artefacts("macos", "arm64-osx-heif", str(self.tmp))
+
+    def test_assert_vcpkg_artefacts_macos_all_correct_passes(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 0)
+
+    def test_assert_vcpkg_artefacts_macos_libwebp_dylib_present_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libwebp.1.dylib").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("libwebp dylib(s) present", out)
+
+    def test_assert_vcpkg_artefacts_macos_libwebp_wrong_arch_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "x86_64", "libde265.dylib": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("libwebp.a archs 'x86_64' do not include arm64", out)
+
+    def test_assert_vcpkg_artefacts_macos_libde265_not_shared_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("no libde265 dylib", out)
+        self.assertIn("A5.2", out)
+
+    def test_assert_vcpkg_artefacts_macos_libde265_still_static_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libde265.a").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("libde265.a present", out)
+        self.assertIn("A5.2", out)
+
+    def test_assert_vcpkg_artefacts_macos_libde265_wrong_arch_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "x86_64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("libde265 archs 'x86_64' do not include arm64", out)
+
+    def test_assert_vcpkg_artefacts_macos_aom_missing_static_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.dylib").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("libaom.a absent", out)
+
+    def test_assert_vcpkg_artefacts_macos_aom_dylib_present_fails(self):
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        (lib_dir / "libaom.dylib").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("libaom dylib(s) present", out)
+
+    def test_assert_vcpkg_artefacts_macos_no_arch_check_for_aom(self):
+        """aom gets no lipo/arch check at all -- the real shell's own
+        asymmetry (macos_build.yml:356-364 has no such block for aom).
+        Prove it by feeding aom a lipo call that would fail the arch
+        comparison if one existed; a wrong-arch aom .a must still pass."""
+        lib_dir = self._macos_lib_dir()
+        (lib_dir / "libwebp.a").write_bytes(b"")
+        (lib_dir / "libde265.dylib").write_bytes(b"")
+        (lib_dir / "libaom.a").write_bytes(b"")
+        fake = self._lipo_fake({"libwebp.a": "arm64", "libde265.dylib": "arm64", "libaom.a": "x86_64"})
+        with mock.patch.object(run_module, "run", side_effect=fake):
+            rc, out, _ = _run_captured(
+                provision.assert_vcpkg_artefacts, "macos", "arm64-osx-heif", str(self.tmp), "arm64"
+            )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("aom archs", out)
+        self.assertNotIn("FAIL", out)
+
     # ---- verify_interpreter ------------------------------------------------
 
     def test_verify_interpreter_rejects_hostedtoolcache(self):
@@ -204,6 +356,31 @@ class ProvisionTests(unittest.TestCase):
             rc, out, err = _run_captured(provision.ensure_cmake, "3.28")
         self.assertEqual(rc, 1)
         self.assertIn("pip install cmake", err)
+
+
+class TestAssertVcpkgArtefactsBareScriptInvocation(unittest.TestCase):
+    """One real invocation through ci.py itself, including the rejection
+    path -- a raw traceback was found here once before (unit tests only
+    ever called the module function directly, never the CLI's own
+    rejection branch). macOS is currently gated out at ci.py's dispatch
+    layer (`_VCPKG_ARTEFACT_PLATFORMS`), not inside provision.py, so this
+    proves that gate still produces a clean ::error::/exit 2 -- not that
+    provision.py's own macOS branch is reachable from the CLI yet (it
+    isn't, until ci.py grows an --arch-tag flag and widens that set,
+    which is impl-16's file, not this one)."""
+
+    def _run_ci(self, *argv: str):
+        return run_module.run([sys.executable, str(_CI_ENTRYPOINT), *argv], cwd=str(_REPO_ROOT))
+
+    def test_assert_vcpkg_artefacts_macos_is_cleanly_rejected_by_cli(self) -> None:
+        result = self._run_ci(
+            "assert-vcpkg-artefacts", "--platform", "macos",
+            "--triplet", "arm64-osx-heif", "--runner-temp", "/tmp/does-not-matter",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("::error::", result.stderr)
+        self.assertIn("no --platform 'macos' leg", result.stderr)
 
 
 if __name__ == "__main__":

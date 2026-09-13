@@ -13,13 +13,13 @@ docstring; these six subcommands were declared and scaffolded to
                       macos_build.yml:307-319, differs only in the
                       workflow-supplied triplet/feature values -- CLI
                       pass-through, R13, not a branch here)
-    assert-vcpkg-artefacts   linux_build.yml:385-394 ONLY, ported here.
-                      macOS's equivalent (macos_build.yml:330-345) asserts
-                      a DIFFERENT shape (dylib/lipo-arch, not .so-absence)
-                      and is NOT implemented here -- `platform` is accepted
-                      and validated but only `"linux"` has a real branch;
-                      calling this for macOS raises rather than silently
-                      running the wrong assertion.
+    assert-vcpkg-artefacts   linux_build.yml:385-394 (`platform == "linux"`)
+                      and macos_build.yml:324-364 (`platform == "macos"`,
+                      `_assert_vcpkg_artefacts_macos` -- three libraries,
+                      three different properties, see that function's
+                      docstring; requires `arch_tag`). Any other platform
+                      raises rather than silently running the wrong
+                      assertion.
     verify-interpreter    linux_build.yml:185-198 (the hostedtoolcache-glibc
                       mismatch check; container-specific, but the check
                       itself has no platform branch of its own)
@@ -118,21 +118,27 @@ def vcpkg_install(
     return result.returncode
 
 
-def assert_vcpkg_artefacts(platform: str, triplet: str, runner_temp: str) -> int:
-    """Replaces linux_build.yml:385-394 ONLY. `platform` is validated, not
-    branched-and-ignored: macOS's equivalent (macos_build.yml:330-345)
-    asserts a materially different shape (a dylib + `lipo -archs`
-    architecture check, not a shared-object-absence glob) and is
-    deliberately NOT implemented here -- calling this for macOS would
-    silently run the wrong assertion and report a false PASS/FAIL rather
-    than the real one. Add a `_assert_vcpkg_artefacts_macos` sibling
-    function (same shape as this module's other per-platform splits) when
-    a macOS caller actually needs it; do not fold it into this function's
-    `.so`-glob logic."""
+def assert_vcpkg_artefacts(platform: str, triplet: str, runner_temp: str, arch_tag: str | None = None) -> int:
+    """Replaces linux_build.yml:385-394 (`platform == "linux"`) and
+    macos_build.yml:324-364 (`platform == "macos"`) -- TWO DIFFERENT
+    ASSERTIONS, not one branched by platform: linux only checks
+    libwebp-is-static; macOS checks three libraries for three DIFFERENT
+    properties (see `_assert_vcpkg_artefacts_macos`'s docstring). `arch_tag`
+    is macOS-only (linux's shell body never checks architecture) and is
+    required, not defaulted, when `platform == "macos"` -- a silently
+    skipped arch comparison is the exact "passes because it did not run"
+    failure shape this campaign keeps finding."""
+    if platform == "macos":
+        if not arch_tag:
+            raise ValueError(
+                "assert_vcpkg_artefacts: arch_tag is required for platform macos "
+                "(a missing arch_tag would silently skip the lipo -archs checks)"
+            )
+        return _assert_vcpkg_artefacts_macos(triplet, runner_temp, arch_tag)
     if platform != "linux":
         raise ValueError(
             f"assert_vcpkg_artefacts: platform {platform!r} is not implemented -- only "
-            "'linux' is ported (macOS's real check asserts a different shape, see docstring)"
+            "'linux' and 'macos' are ported"
         )
     vcpkg_prefix = Path(runner_temp) / "vcpkg-installed" / triplet
     lib_dir = vcpkg_prefix / "lib"
@@ -151,6 +157,81 @@ def assert_vcpkg_artefacts(platform: str, triplet: str, runner_temp: str) -> int
         report.plain(
             f"FAIL: {len(shared)} libwebp shared object(s) present; the triplet must keep "
             "libwebp static (the LGPL dynamic exception covers libheif/libde265 only)"
+        )
+        return 1
+    return 0
+
+
+def _assert_vcpkg_artefacts_macos(triplet: str, runner_temp: str, arch_tag: str) -> int:
+    """Replaces macos_build.yml:324-364, "Assert the vcpkg artefacts
+    (libwebp static, libde265 shared)". THREE libraries, THREE DIFFERENT
+    properties -- do not symmetrise into one shape:
+
+    * libwebp (:329-337): STATIC. `.a` must exist, no `.dylib` may exist,
+      and its `lipo -archs` must include `arch_tag`.
+    * libde265 (:346-355): SHARED -- LGPL-3 4(d)(1) [A5.2]. At least one
+      `.dylib` must exist (glob, not an exact name -- one of
+      `libde265.dylib`/`libde265.1.dylib` is a symlink to the other; the
+      real shell used `find | head -n1` and let `lipo` follow whichever it
+      got, reproduced exactly here rather than resolved by hand). `.a`
+      must NOT exist. Its `lipo -archs` must include `arch_tag`.
+    * aom (:356-364): STATIC (linked INTO libheif). `.a` must exist, no
+      `.dylib` may exist. **No arch check at all** -- this is the real
+      shell's own asymmetry (no `lipo`/`grep -qw` block for aom there
+      either), not an omission to "complete" here.
+    """
+    vcpkg_prefix = Path(runner_temp) / "vcpkg-installed" / triplet
+    lib_dir = vcpkg_prefix / "lib"
+
+    ls_result = run.run(["ls", "-la", str(lib_dir)])
+    if ls_result.stdout:
+        report.plain(ls_result.stdout.rstrip("\n"))
+
+    def _archs(path: Path) -> str:
+        return run.run(["lipo", "-archs", str(path)]).stdout.strip()
+
+    # -- libwebp: static, right arch --------------------------------------
+    if not (lib_dir / "libwebp.a").is_file():
+        report.plain("FAIL: libwebp.a absent (expected a static archive)")
+        return 1
+    webp_dylibs = sorted(lib_dir.glob("libwebp*.dylib"))
+    if webp_dylibs:
+        report.plain(
+            f"FAIL: {len(webp_dylibs)} libwebp dylib(s) present; the triplet must keep "
+            "libwebp static (LGPL asymmetry applies to libheif/libde265 only)"
+        )
+        return 1
+    webp_archs = _archs(lib_dir / "libwebp.a")
+    report.plain(f"libwebp.a archs: {webp_archs}")
+    if arch_tag not in webp_archs.split():
+        report.plain(f"FAIL: libwebp.a archs '{webp_archs}' do not include {arch_tag}")
+        return 1
+
+    # -- libde265: shared, right arch (LGPL-3 4(d)(1) [A5.2]) -------------
+    de265_dylibs = sorted(lib_dir.glob("libde265*.dylib"))
+    if not de265_dylibs:
+        report.plain(
+            "FAIL: no libde265 dylib in the vcpkg prefix; a static libde265 is an LGPL-3 "
+            "4(d)(1) breach, not a packaging detail [A5.2]"
+        )
+        return 1
+    if (lib_dir / "libde265.a").is_file():
+        report.plain("FAIL: libde265.a present; the triplet's dynamic exception did not apply [A5.2]")
+        return 1
+    de265_archs = _archs(de265_dylibs[0])
+    report.plain(f"libde265 archs: {de265_archs}")
+    if arch_tag not in de265_archs.split():
+        report.plain(f"FAIL: libde265 archs '{de265_archs}' do not include {arch_tag}")
+        return 1
+
+    # -- aom: static, no arch check (linked into libheif) -----------------
+    if not (lib_dir / "libaom.a").is_file():
+        report.plain("FAIL: libaom.a absent (expected a static archive)")
+        return 1
+    aom_dylibs = sorted(lib_dir.glob("libaom*.dylib"))
+    if aom_dylibs:
+        report.plain(
+            f"FAIL: {len(aom_dylibs)} libaom dylib(s) present; aom must stay static (it is linked into libheif)"
         )
         return 1
     return 0
