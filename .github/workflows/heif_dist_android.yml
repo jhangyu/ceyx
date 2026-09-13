@@ -94,12 +94,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
-        run: >
-          python3 native/scripts/ci.py dist-build
-          --component heif-stack --platform android --arch arm64-v8a
-          --android-ndk "${ANDROID_NDK_HOME}"
-          --dist native/third_party/heif-dist-android-arm64-v8a
-          --rc-marker HEIF_DIST_ANDROID_RC
+        # WI-40: collapsed from a `run: >` folded scalar to one physical
+        # line -- workflow_scan.code_lines() parses run: bodies by raw
+        # physical line and does not fold block scalars, so this step read
+        # as 5 physical lines and failed Rule-1 even though WI-31 already
+        # migrated it to the one-line python3 carrier. YAML-parsed `run`
+        # string verified byte-identical before/after; formatting only.
+        run: |
+          python3 native/scripts/ci.py dist-build --component heif-stack --platform android --arch arm64-v8a --android-ndk "${ANDROID_NDK_HOME}" --dist native/third_party/heif-dist-android-arm64-v8a --rc-marker HEIF_DIST_ANDROID_RC
 
       # Complete listing, deliberately unfiltered -- same rationale as
       # heif_dist_windows.yml's equivalent step. (WI-31: `if: always()` stays

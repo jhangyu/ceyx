@@ -76,12 +76,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
-        run: >
-          python3 native/scripts/ci.py dist-build
-          --component libjxl --platform android --arch arm64-v8a
-          --android-ndk "${ANDROID_NDK_HOME}"
-          --dist native/third_party/libjxl-dist-android-arm64-v8a
-          --rc-marker JXL_DIST_ANDROID_RC
+        # WI-40: collapsed from a `run: >` folded scalar to one physical
+        # line -- workflow_scan.code_lines() parses run: bodies by raw
+        # physical line and does not fold block scalars, so this step read
+        # as 5 physical lines and failed Rule-1 even though WI-31 already
+        # migrated it to the one-line python3 carrier. YAML-parsed `run`
+        # string verified byte-identical before/after; formatting only.
+        run: |
+          python3 native/scripts/ci.py dist-build --component libjxl --platform android --arch arm64-v8a --android-ndk "${ANDROID_NDK_HOME}" --dist native/third_party/libjxl-dist-android-arm64-v8a --rc-marker JXL_DIST_ANDROID_RC
 
       # Unfiltered on purpose: a filtered listing looks like a full inventory
       # while silently omitting some artifact class. (WI-31: `if: always()`
