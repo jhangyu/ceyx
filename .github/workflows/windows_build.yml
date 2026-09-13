@@ -116,20 +116,15 @@ jobs:
       # byte-exact Stage4 colour contract, which cl.exe cannot express. LLVM is
       # preinstalled on the windows runner image; this step proves it is on PATH
       # and fails loudly (rather than at cmake configure) if the image changes.
+      # Migrated to native/scripts/ci/windows_toolchain.py's locate_clang_cl()
+      # (WI-24, pyci python-ization campaign). PATH-then-LLVM/bin-fallback
+      # order preserved exactly, including the single-backslash string
+      # appended to $GITHUB_PATH on the fallback branch (see the module's
+      # own docstring for the shell double-quote `\\` -> `\` collapse this
+      # replicates).
       - name: Locate clang-cl
         shell: bash
-        run: |
-          if command -v clang-cl >/dev/null 2>&1; then
-            CLANG_CL="$(command -v clang-cl)"
-          elif [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
-            CLANG_CL="/c/Program Files/LLVM/bin/clang-cl.exe"
-            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
-          else
-            echo "::error::clang-cl not found on the runner. native/cmake/pipeline.cmake requires it (cl.exe has no -ffp-contract=off equivalent)." >&2
-            exit 1
-          fi
-          echo "clang-cl: $CLANG_CL"
-          "$CLANG_CL" --version
+        run: python3 native/scripts/ci.py locate-clang-cl --github-path "$GITHUB_PATH"
 
       # WI-4 step 4.1 (S-B1/OQ-N2 ruled SHIP): the decoder's own import table
       # names libomp140.x86_64.dll (rootcause-native-capability.md Item B), so
@@ -205,16 +200,14 @@ jobs:
           cache: true
           stripdown: false
 
+      # Migrated to native/scripts/ci/windows_toolchain.py's
+      # verify_vulkan_lib() (WI-24, pyci python-ization campaign). The
+      # "ls -la ... || true" swallow on the missing-file path and the exact
+      # `exit 1` vs. last-command's-RC split are preserved -- see the
+      # module's own docstring.
       - name: Verify vulkan-1.lib is present
         shell: bash
-        run: |
-          echo "VULKAN_SDK=${VULKAN_SDK:-<unset>}"
-          if [ ! -f "${VULKAN_SDK}/Lib/vulkan-1.lib" ]; then
-            echo "::error::vulkan-1.lib missing under VULKAN_SDK; cmake/ffi.cmake's WIN32 branch would fail configure." >&2
-            ls -la "${VULKAN_SDK}/Lib" || true
-            exit 1
-          fi
-          ls -la "${VULKAN_SDK}/Lib/vulkan-1.lib"
+        run: python3 native/scripts/ci.py verify-vulkan-lib --vulkan-sdk "${VULKAN_SDK}"
 
       - name: Cache vendored Halide v21 distribution (Windows x86_64)
         uses: actions/cache@v4
@@ -308,42 +301,14 @@ jobs:
       # Same version and same SHA256 as third_party.cmake:44-45, so this does not
       # fork the project's pin; and the same /MT runtime as the main build, or
       # the two would not link together.
+      # Migrated to native/scripts/ci/zlib_build.py's build_zlib() (WI-24,
+      # pyci python-ization campaign). `set -e` abort-with-that-command's-
+      # own-RC semantics preserved exactly, including the "SHA_RC=$?"
+      # marker never printing on a sha256 mismatch (the shell's own abort
+      # happened before that echo ran) -- see the module's own docstring.
       - name: Build zlib 1.3.1 (static, /MT) for the Windows toolchain
-        shell: bash
         working-directory: ${{ github.workspace }}
-        run: |
-          set -e
-          ZLIB_URL="https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
-          ZLIB_SHA="9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
-          mkdir -p zlib-src
-          curl -fsSL -o zlib.tar.gz "$ZLIB_URL"
-          echo "${ZLIB_SHA}  zlib.tar.gz" > zlib.sha256
-          sha256sum -c zlib.sha256
-          echo "SHA_RC=$?"
-          tar -xzf zlib.tar.gz -C zlib-src --strip-components=1
-          cmake -S zlib-src -B zlib-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang-cl \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/zlib-install" \
-            -DZLIB_BUILD_EXAMPLES=OFF
-          cmake --build zlib-build --target install -- -k 0
-          # List EVERYTHING installed. The previous version of this listing
-          # filtered on '*.lib' and 'zlib.h', which made it look like a complete
-          # inventory while silently omitting zconf.h — the exact file whose
-          # absence was then suspected in round 4. An instrument that answers
-          # only the question you thought to ask is worse than none.
-          echo "== installed zlib (complete) =="
-          find "${GITHUB_WORKSPACE}/zlib-install" -type f | sort
-          # Hard-assert the two artifacts everything downstream depends on, so a
-          # layout change fails here rather than 400 compile steps later.
-          for required in include/zlib.h include/zconf.h lib/zlibstatic.lib; do
-            if [ ! -f "${GITHUB_WORKSPACE}/zlib-install/${required}" ]; then
-              echo "::error::zlib install is missing ${required}." >&2
-              exit 1
-            fi
-          done
-          echo "zlib install verified: zlib.h, zconf.h, zlibstatic.lib all present"
+        run: python3 native/scripts/ci.py build-zlib --version 1.3.1 --workspace "${{ github.workspace }}"
 
       # cmake is invoked directly rather than through
       # native/scripts/build_native_watchdog.py: that script's watchdog loop
