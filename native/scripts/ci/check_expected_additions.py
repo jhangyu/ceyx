@@ -73,6 +73,7 @@ Run with: python3 native/scripts/ci/check_expected_additions.py
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -88,10 +89,12 @@ if not __package__:
     import ci.markerdiff as markerdiff  # noqa: E402
     import ci.report as report  # noqa: E402
     import ci.run as run  # noqa: E402
+    import ci.workflow_scan as workflow_scan  # noqa: E402
 else:
     from . import markerdiff  # noqa: E402
     from . import report  # noqa: E402
     from . import run  # noqa: E402
+    from . import workflow_scan  # noqa: E402
 
 # Marker KEY -> (the repo-root-relative bare-script path, its argv tuple)
 # that locally produces it. Extend this table, never `markerdiff.py`, when
@@ -109,8 +112,18 @@ else:
 # metadata/normalize_model.cpp`) -- two independent statements of the same
 # fact, deliberately not derived from each other (one reading the other at
 # runtime could never disagree with it, which defeats the point).
-# `test_check_expected_additions.py::test_alias_table_argv_matches_build_yml`
+# `test_check_expected_additions.py::test_producer_map_argv_matches_workflows`
 # is the mechanical check that the two do not drift apart.
+#
+# WI-53 / guard (f)③: that binding used to cover exactly ONE of this map's
+# two distinct producer invocations (the alias-table one, hardcoded by key
+# name). The `check_shell_prohibition.py` pair had NO argv binding at all,
+# and the blindness was mechanically demonstrated before it was fixed:
+# perturbing either side -- the map's argv or `build.yml`'s real `run:`
+# line -- left the entire 9-test suite green
+# (`tmp/verify/wi53/red-A-before.txt`, `red-B-before.txt`). The binding is
+# now driven BY this map rather than by a hardcoded key, so an entry added
+# here in future is bound automatically instead of silently unbound.
 _KEY_TO_PRODUCER_SCRIPT: dict[str, tuple[str, tuple[str, ...]]] = {
     "SHELL_ALLOWLIST_SIZE": ("native/scripts/ci/check_shell_prohibition.py", ()),
     "SHELL_PROHIBITION_RESULT": ("native/scripts/ci/check_shell_prohibition.py", ()),
@@ -130,6 +143,81 @@ _KEY_TO_PRODUCER_SCRIPT: dict[str, tuple[str, tuple[str, ...]]] = {
 # the actual CI step that emits it; an unnamed/uncommented addition is a
 # review defect.
 _BUILD_ARTIFACT_KEYS: frozenset[str] = frozenset()
+
+
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+
+# Interpreter tokens that can precede a script path in a workflow `run:`
+# body. Named rather than regex-guessed so a future `py -3` on a Windows
+# leg is a reviewable one-line addition instead of a silent miss.
+_INTERPRETER_TOKENS: frozenset[str] = frozenset({"python3", "python", "py"})
+
+
+@dataclass(frozen=True)
+class WorkflowInvocation:
+    """One `python3 <script> [argv...]` invocation found in a workflow."""
+
+    workflow: str  # file name, e.g. "build.yml"
+    step_name: str
+    line: int  # 1-based line of the `run:` key owning this invocation
+    script: str  # the script path token exactly as the workflow writes it
+    argv: tuple[str, ...]  # everything after the script token
+
+
+def iter_workflow_invocations(script_relpath: str, workflows_dir: Path | None = None):
+    """Yields a `WorkflowInvocation` for every invocation of
+    ``script_relpath`` across EVERY workflow file -- not just `build.yml`,
+    because "which workflow wires this producer" is precisely the fact that
+    must not be assumed (WI-53 / guard (f)③).
+
+    WHY THIS LIVES HERE AND IS PUBLIC: guard (g) needs the same
+    workflow-invocation extraction, and this repo's standing rule is *never
+    write a second counter, call this one* -- the same rule
+    `workflow_scan.code_lines()` carries. A second extractor is how the two
+    disagree silently. Line-level parsing is delegated to
+    `workflow_scan`; this function only adds command-token semantics.
+
+    Continuation lines (`\\` at end of a shell line, as
+    `assert_import_closure.py`'s invocation uses) are JOINED before
+    tokenizing -- otherwise a multi-line invocation's argv would be read as
+    empty, which is a false PASS shape, not a crash.
+    """
+    wf_dir = WORKFLOWS_DIR if workflows_dir is None else Path(workflows_dir)
+    for path in sorted(wf_dir.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        for step in workflow_scan.iter_run_steps(text, path.name):
+            for command in _joined_commands(workflow_scan.code_lines(step)):
+                tokens = command.split()
+                for idx, token in enumerate(tokens):
+                    if token != script_relpath:
+                        continue
+                    if idx == 0 or tokens[idx - 1] not in _INTERPRETER_TOKENS:
+                        # A bare mention (e.g. inside a string or as an
+                        # argument to something else) is NOT an invocation.
+                        continue
+                    yield WorkflowInvocation(
+                        workflow=path.name,
+                        step_name=step.step_name,
+                        line=step.start_line,
+                        script=token,
+                        argv=tuple(tokens[idx + 1:]),
+                    )
+
+
+def _joined_commands(code: list[str]) -> list[str]:
+    """Joins shell line-continuations so one logical command is one string."""
+    out: list[str] = []
+    pending: list[str] = []
+    for line in code:
+        if line.endswith("\\"):
+            pending.append(line[:-1].strip())
+            continue
+        pending.append(line)
+        out.append(" ".join(p for p in pending if p))
+        pending = []
+    if pending:
+        out.append(" ".join(p for p in pending if p))
+    return out
 
 
 def _marker_key(line: str) -> str:

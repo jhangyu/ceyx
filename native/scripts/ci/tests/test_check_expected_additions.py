@@ -11,7 +11,6 @@ from unittest import mock
 from .. import check_expected_additions as cea
 from .. import markerdiff
 from .. import run as run_module
-from .. import workflow_scan
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
@@ -152,42 +151,99 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
         rc, out, err = _run_captured(cea.main)
         self.assertEqual(rc, 0, f"real ledger vs real producer mismatch: stdout={out!r} stderr={err!r}")
 
-    def test_alias_table_argv_matches_build_yml(self):
-        """WI-43: `_KEY_TO_PRODUCER_SCRIPT["TABLE_COUNT"]`'s argv and
-        `build.yml`'s real invocation of `check_alias_table_convention.py`
-        are TWO INDEPENDENT STATEMENTS of the same fact (the map does not
-        read the workflow file at runtime, and the workflow file does not
-        read the map) -- this test is the mechanical binding between them.
-        If either drifts, this fails; a validator that derived its input
-        from the thing it validates could never catch that drift, which is
-        the exact shape this campaign spent this WI finding three times
-        over (allowlist.py/markerdiff.py, the WI-26 step wiring/markerdiff.py
-        ledger, and now this producer map/build.yml itself)."""
-        script, argv = cea._KEY_TO_PRODUCER_SCRIPT["TABLE_COUNT"]
+    # -- WI-53 / guard (f)③ ------------------------------------------------
+    # The literal below is deliberately NOT derived from
+    # `_KEY_TO_PRODUCER_SCRIPT`. If it were, emptying the map would make the
+    # binding test iterate nothing and pass vacuously -- the first false-green
+    # shape pre-registered in tmp/verify/wi53/f3-PREREG.md §2 (V1).
+    _EXPECTED_DISTINCT_PRODUCER_INVOCATIONS = 2
+
+    def test_producer_map_argv_matches_workflows(self):
+        """WI-43, generalized to the WHOLE producer map by WI-53 (guard (f)③).
+
+        `_KEY_TO_PRODUCER_SCRIPT`'s (script, argv) values and the workflows'
+        real `python3 <script> ...` invocations are TWO INDEPENDENT
+        STATEMENTS of the same fact (the map does not read the workflow
+        files at runtime, and the workflow files do not read the map) --
+        this test is the mechanical binding between them. A validator that
+        derived its input from the thing it validates could never catch
+        that drift.
+
+        WHAT WI-53 CHANGED AND WHY IT WAS NOT COSMETIC: the predecessor
+        (`test_alias_table_argv_matches_build_yml`) hardcoded the key
+        `"TABLE_COUNT"` and scanned only `build.yml`, so the map's OTHER
+        producer -- the `check_shell_prohibition.py` pair -- had no argv
+        binding at all. That blindness was demonstrated mechanically before
+        it was fixed: perturbing the map side and perturbing `build.yml`'s
+        real `run:` line each left the full 9-test suite GREEN
+        (`tmp/verify/wi53/red-A-before.txt`, `red-B-before.txt`). The loop
+        below is driven by the map itself, so a producer added in future is
+        bound automatically rather than silently unbound -- which is the
+        actual defect class, not the one missing entry."""
+        by_invocation: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+        for key, invocation in cea._KEY_TO_PRODUCER_SCRIPT.items():
+            by_invocation.setdefault(invocation, []).append(key)
+
         self.assertEqual(
-            cea._KEY_TO_PRODUCER_SCRIPT["ALIAS_TABLE_FIRST_ELEMENT_ALL_AT"],
-            (script, argv),
-            "TABLE_COUNT and ALIAS_TABLE_FIRST_ELEMENT_ALL_AT share one producer invocation",
+            len(by_invocation),
+            self._EXPECTED_DISTINCT_PRODUCER_INVOCATIONS,
+            "the producer map's distinct (script, argv) invocation count changed -- update "
+            "_EXPECTED_DISTINCT_PRODUCER_INVOCATIONS deliberately. This literal exists so an "
+            "emptied/shrunken map fails here instead of passing a vacuous, zero-iteration loop.",
         )
 
-        text = (_WORKFLOWS_DIR / "build.yml").read_text()
-        matches = []
-        for step in workflow_scan.iter_run_steps(text, "build.yml"):
-            code = workflow_scan.code_lines(step)
-            if code and "check_alias_table_convention.py" in code[0]:
-                matches.append((step.step_name, code[0]))
+        bound = 0
+        for (script, argv), keys in sorted(by_invocation.items()):
+            found = list(cea.iter_workflow_invocations(script, workflows_dir=_WORKFLOWS_DIR))
+            self.assertEqual(
+                len(found), 1,
+                f"expected exactly ONE workflow invocation of {script} (producer of "
+                f"{sorted(keys)}), found {[(f.workflow, f.line, f.argv) for f in found]} -- "
+                "a producer map entry naming a script no workflow invokes (or invokes twice) "
+                "is itself the drift this test exists to catch",
+            )
+            real = found[0]
+            self.assertEqual(
+                real.argv, argv,
+                f"{real.workflow}:{real.line} ({real.step_name!r}) invokes {script} with "
+                f"{real.argv!r}, but _KEY_TO_PRODUCER_SCRIPT says {argv!r} for "
+                f"{sorted(keys)} -- these must be updated in the same commit",
+            )
+            bound += 1
 
-        self.assertEqual(
-            len(matches), 1,
-            f"expected exactly one build.yml step invoking check_alias_table_convention.py, found {matches}",
-        )
-        _step_name, real_line = matches[0]
-        real_argv = tuple(real_line.split()[2:])  # drop "python3 <script>"
-        self.assertEqual(
-            real_argv, argv,
-            f"build.yml invokes check_alias_table_convention.py with {real_argv!r}, "
-            f"but _KEY_TO_PRODUCER_SCRIPT says {argv!r} -- these must be updated together",
-        )
+        self.assertEqual(bound, self._EXPECTED_DISTINCT_PRODUCER_INVOCATIONS)
+
+    def test_invocation_extractor_ignores_bare_mentions_and_joins_continuations(self):
+        """The extractor's two non-obvious semantics, tested directly rather
+        than assumed: (1) a script name appearing WITHOUT an interpreter
+        token in front of it is a mention, not an invocation -- otherwise a
+        comment-shaped or argument-shaped occurrence manufactures a phantom
+        binding (guard (g)'s 13-phantom lesson, one layer down); (2) a
+        backslash-continued invocation is joined before tokenizing, so its
+        argv is read in full instead of as an empty tuple, which would be a
+        false PASS rather than a crash."""
+        import tempfile
+
+        yaml = """jobs:
+  j:
+    steps:
+      - name: Bare mention only
+        run: echo "see native/scripts/demo.py for details"
+      - name: Real multi-line invocation
+        run: |
+          python3 native/scripts/demo.py \\
+            --alpha one \\
+            --beta two
+"""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "synthetic.yml").write_text(yaml)
+            found = list(
+                cea.iter_workflow_invocations("native/scripts/demo.py", workflows_dir=Path(d))
+            )
+
+        self.assertEqual(len(found), 1, f"bare mention must not count as an invocation: {found}")
+        self.assertEqual(found[0].argv, ("--alpha", "one", "--beta", "two"))
+        self.assertEqual(found[0].step_name, "Real multi-line invocation")
 
 
 if __name__ == "__main__":
