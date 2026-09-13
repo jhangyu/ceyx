@@ -824,7 +824,6 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}/native"
           cp "$DYLIB" "${ARTIFACT_DIR}/native/"
           NATIVE_DYLIB_DIR="$(dirname "$DYLIB")"
-          DYLIB_BASENAME="$(basename "$DYLIB")"
           # WI-15 step 15.2: the companion list is read from the single
           # declaration native/deps/shipped_files.toml (via
           # read_shipped_files.py) rather than hard-coded here, so this
@@ -843,27 +842,17 @@ jobs:
           done
           ls -la "${ARTIFACT_DIR}/native"
 
-          echo "--- Gate 1: architecture (every staged companion reports ${{ matrix.arch_tag }}) ---"
-          for companion in ${COMPANIONS}; do
-            archs="$(lipo -archs "${ARTIFACT_DIR}/native/${companion}" 2>&1)"
-            echo "arch(${companion}): ${archs}"
-            echo "${archs}" | grep -qw "${{ matrix.arch_tag }}" \
-              || { echo "::error::${companion} archs '${archs}' do not include ${{ matrix.arch_tag }}"; exit 1; }
-          done
-
-          echo "--- Gates 2+3: reachability + path convention (decoder's own dependency graph) ---"
-          dylib_deps="$(otool -L "$DYLIB" | tail -n +2 | grep -v "@rpath/${DYLIB_BASENAME}")"
-          echo "${dylib_deps}"
-          for companion in ${COMPANIONS}; do
-            companion_line="$(grep "${companion}" <<< "${dylib_deps}" || true)"
-            if [ -z "${companion_line}" ]; then
-              echo "::error::$DYLIB does not depend on ${companion} at all — staged but unlinked (dead file)."
-              exit 1
-            fi
-            echo "dependency line for ${companion}: ${companion_line}"
-            grep -q "^[[:space:]]*@rpath/${companion} " <<< "${companion_line}" \
-              || { echo "::error::${companion} is depended upon via a non-relative reference (${companion_line}) — expected the line to start with @rpath/${companion}. This would fail to load on any machine but the build host (the exact class of defect fixed in b0a0573)."; exit 1; }
-          done
+      # WI-20 (push 7): the copy above stays inline shell (stage.py's macOS
+      # path is not yet wired through ci.py's `stage` dispatch verb -- see
+      # ci.py:559-563, only linux/windows/android are gated there today).
+      # The three verification gates below are collapsed into
+      # verify_artifact.verify_staged_companions() (WI-22), which ports this
+      # exact step's companion list, Gate-1/Gates-2+3 header text, self-
+      # reference-by-name stripping, and no->&2 error-stream behaviour
+      # verbatim -- do not re-add >&2 to failures from this command, that
+      # would be a semantics change from what this step asserted before.
+      - name: Verify staged companion dylibs (arch + reachability + rpath)
+        run: python3 native/scripts/ci.py assert-staged-companions --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB" --artifact-dir "$ARTIFACT_DIR"
 
       # WI-14 step 14.2 (S-F1): measure the floor of the WHOLE staged group
       # (decoder + every companion just verified above), not the decoder
