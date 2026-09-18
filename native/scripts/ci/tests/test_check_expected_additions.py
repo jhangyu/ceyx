@@ -127,19 +127,48 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
         self.assertEqual(missing, ["totally/fake/path.cpp"])
 
     def test_shared_producer_invoked_once_for_two_ledger_entries(self):
-        """SHELL_ALLOWLIST_SIZE and SHELL_PROHIBITION_RESULT both come from
-        check_shell_prohibition.py -- it must not be run twice."""
+        """TABLE_COUNT and ALIAS_TABLE_FIRST_ELEMENT_ALL_AT both come from
+        check_alias_table_convention.py -- it must not be run twice.
+
+        The SUBJECT of this test moved rather than disappearing: Phase 2
+        deleted `check_shell_prohibition.py`, which used to be the map's
+        one-script/two-keys shape. `check_alias_table_convention.py` has
+        exactly that shape today (derive: group
+        `cea._KEY_TO_PRODUCER_SCRIPT` by its (script, argv) value), so the
+        caching property is still live coverage, not obsolete."""
         entries = (
-            markerdiff._ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=109", "push 4"),
-            markerdiff._ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2"),
+            markerdiff._ExpectedAddition("nativetests", "TABLE_COUNT=10", "WI-43"),
+            markerdiff._ExpectedAddition(
+                "nativetests", "ALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES", "WI-43"
+            ),
         )
         call_count = {"n": 0}
 
         def fake_run(argv, cwd=None, env=None):
             call_count["n"] += 1
-            return _fake_run_result(stdout="SHELL_ALLOWLIST_SIZE=109\nSHELL_PROHIBITION_RESULT=PASS\n")
+            return _fake_run_result(
+                stdout="TABLE_COUNT=10\nALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES\n"
+            )
 
+        # The map is PATCHED (file convention, see the two tests above) with
+        # an argv-free producer rather than read live. The real producer's
+        # argv names a path inside the vendored LibRaw tree, and `main`
+        # SKIPS an entry whose producer input is absent -- reading the live
+        # map would make this test assert 1 call on a machine that has the
+        # vendor tree and 0 on a fresh checkout. The property under test is
+        # caching keyed by (script, argv); the live map's fidelity is
+        # `test_producer_map_argv_matches_workflows`'s job.
+        shared_producer = ("native/scripts/check_alias_table_convention.py", ())
         with mock.patch.object(markerdiff, "EXPECTED_ADDITIONS", entries), \
+             mock.patch.object(
+                 cea,
+                 "_KEY_TO_PRODUCER_SCRIPT",
+                 {
+                     "TABLE_COUNT": shared_producer,
+                     "ALIAS_TABLE_FIRST_ELEMENT_ALL_AT": shared_producer,
+                 },
+             ), \
+             mock.patch.object(cea, "_BUILD_ARTIFACT_KEYS", frozenset()), \
              mock.patch.object(run_module, "run", side_effect=fake_run):
             rc, out, _ = _run_captured(cea.main)
         self.assertEqual(rc, 0)
@@ -209,7 +238,12 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
     # `_KEY_TO_PRODUCER_SCRIPT`. If it were, emptying the map would make the
     # binding test iterate nothing and pass vacuously -- the first false-green
     # shape pre-registered in tmp/verify/wi53/f3-PREREG.md §2 (V1).
-    _EXPECTED_DISTINCT_PRODUCER_INVOCATIONS = 2
+    # Was 2 while `check_shell_prohibition.py` was the map's second producer.
+    # Phase 2 deleted that script and both of its ledger keys, leaving ONE
+    # distinct (script, argv) invocation. Lowering this literal is exactly
+    # the "update it deliberately" the assertion below demands -- it is not a
+    # relaxation: a map that shrinks again still fails here.
+    _EXPECTED_DISTINCT_PRODUCER_INVOCATIONS = 1
 
     def test_producer_map_argv_matches_workflows(self):
         """WI-43, generalized to the WHOLE producer map by WI-53 (guard (f)③).
@@ -247,12 +281,16 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
 
         bound = 0
         for (script, argv), keys in sorted(by_invocation.items()):
-            # `iter_all_invocations`, not `iter_workflow_invocations`: since
-            # Phase 1 a producer may be invoked TRANSITIVELY, inside the
-            # containerised guard block, rather than by a `run:` line naming
-            # it. The property asserted is unchanged -- exactly one producer
-            # that CI actually runs -- the detection just covers both shapes.
-            found = cea.iter_all_invocations(script, workflows_dir=_WORKFLOWS_DIR)
+            # Back to `iter_workflow_invocations` (the `iter_all_invocations`
+            # wrapper was deleted with the transitive machinery): every
+            # producer left in the map is invoked by a `run:` line naming it.
+            # The property asserted is unchanged -- exactly one invocation
+            # that CI actually runs. If a future producer is reachable ONLY
+            # through `ci.py guards`, restore the transitive detector rather
+            # than weakening the `len(found) == 1` assertion below.
+            # `list(...)`: this one is a GENERATOR function, unlike the
+            # deleted `iter_all_invocations` which already returned a list.
+            found = list(cea.iter_workflow_invocations(script, workflows_dir=_WORKFLOWS_DIR))
             self.assertEqual(
                 len(found), 1,
                 f"expected exactly ONE workflow invocation of {script} (producer of "
@@ -304,100 +342,12 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
         self.assertEqual(found[0].step_name, "Real multi-line invocation")
 
 
-class ContainerInvocationTests(unittest.TestCase):
-    """Phase 1 gave 'CI invokes this script' a second, indirect shape: ten
-    guard steps moved out of build.yml into one `ci.py guards --docker`
-    step. These tests pin the rule that detects it.
-
-    THE RULE REQUIRES BOTH CONDITIONS, and condition (ii) is why:
-      (i)  the script is in `guards.GUARDS`, AND
-      (ii) a workflow actually invokes `ci.py guards`.
-    With only (i), tuple membership alone would count as invocation, and
-    deleting the entire guards job from build.yml would still leave every
-    marker "with a producer" -- a PASS over a CI running no guards at all.
-    That is a worse false green than the one this rule repairs, so each
-    condition gets a test that fails when that condition is removed."""
-
-    _CONTAINER_YAML = """jobs:
-  guards-container:
-    steps:
-      - name: Run repo-static guards in the digest-pinned container
-        run: python3 native/scripts/ci.py guards --docker
-"""
-
-    def _dir_with(self, yaml_text: str):
-        import tempfile  # local, matching this file's existing convention
-
-        d = tempfile.TemporaryDirectory()
-        (Path(d.name) / "synthetic.yml").write_text(yaml_text)
-        return d
-
-    def test_condition_ii_live_no_guards_step_means_no_invocation(self):
-        """Remove the container step: a tuple member must then be reported
-        as NOT invoked. This is the false-green guard."""
-        d = self._dir_with("jobs:\n  j:\n    steps:\n      - name: Unrelated\n        run: echo hi\n")
-        with d:
-            found = list(
-                cea.iter_container_invocations(
-                    "native/scripts/ci/check_shell_prohibition.py", workflows_dir=Path(d.name)
-                )
-            )
-        self.assertEqual(found, [], "no `ci.py guards` step must mean no transitive invocation")
-
-    def test_condition_i_live_non_member_is_not_invoked_by_the_container(self):
-        """A script absent from the tuple gets nothing, even though the
-        container step is present."""
-        d = self._dir_with(self._CONTAINER_YAML)
-        with d:
-            found = list(
-                cea.iter_container_invocations(
-                    "native/scripts/verify_raw_provenance.py", workflows_dir=Path(d.name)
-                )
-            )
-        self.assertEqual(found, [], "a non-member must not be credited to the container block")
-
-    def test_both_conditions_met_yields_one_invocation_named_for_the_script(self):
-        d = self._dir_with(self._CONTAINER_YAML)
-        with d:
-            found = list(
-                cea.iter_container_invocations(
-                    "native/scripts/ci/check_shell_prohibition.py", workflows_dir=Path(d.name)
-                )
-            )
-        self.assertEqual(len(found), 1)
-        # Named for the SCRIPT, not the container step: attributing the
-        # marker to the step would discard the fact the ledger exists to
-        # record.
-        self.assertEqual(found[0].script, "native/scripts/ci/check_shell_prohibition.py")
-        self.assertEqual(found[0].argv, ())
-
-    def test_a_different_ci_py_verb_does_not_satisfy_condition_ii(self):
-        """`ci.py selftest` is a separate step and runs no guards; it must
-        not be mistaken for the guard block."""
-        d = self._dir_with(
-            "jobs:\n  j:\n    steps:\n      - name: selftest\n"
-            "        run: python3 native/scripts/ci.py selftest\n"
-        )
-        with d:
-            found = list(
-                cea.iter_container_invocations(
-                    "native/scripts/ci/check_shell_prohibition.py", workflows_dir=Path(d.name)
-                )
-            )
-        self.assertEqual(found, [], "only the `guards` verb runs the block")
-
-    def test_argv_comes_from_the_roster_entry(self):
-        """A `--check`-style member must report its flag, so the producer
-        map's argv comparison still means something."""
-        d = self._dir_with(self._CONTAINER_YAML)
-        with d:
-            found = list(
-                cea.iter_container_invocations(
-                    "native/scripts/gen_linkage_table.py", workflows_dir=Path(d.name)
-                )
-            )
-        self.assertEqual(len(found), 1)
-        self.assertEqual(found[0].argv, ("--check",))
+# `ContainerInvocationTests` (5 tests) WAS DELETED HERE, with the
+# `iter_container_invocations` / `iter_all_invocations` machinery it was the
+# only consumer of. It pinned the transitive-invocation rule's two
+# conditions; both the rule and its subject (a ledger producer reachable only
+# through `ci.py guards`) no longer exist. Recover from history if that shape
+# returns -- see the removal note in `check_expected_additions.py`.
 
 
 if __name__ == "__main__":

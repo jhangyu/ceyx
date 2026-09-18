@@ -33,8 +33,9 @@ ALGORITHM, per ledger entry:
      never actually been run -- push 2 lost a round to precisely that),
      normalize its emitted lines the same way `markerdiff.py` normalizes a
      real CI log, and check the ledger's EXACT line is among them. A
-     script producing two ledger keys (as `check_shell_prohibition.py`
-     does today) is only ever invoked once; its output is cached.
+     script producing two ledger keys (as `check_alias_table_convention.py`
+     does today, for TABLE_COUNT and ALIAS_TABLE_FIRST_ELEMENT_ALL_AT) is
+     only ever invoked once; its output is cached.
   3. A key that is neither classified as a build artifact NOR has a known
      local producer is a HARD FAIL, not a skip -- an unclassifiable entry
      means either this file's own classification tables are stale, or the
@@ -162,75 +163,22 @@ class WorkflowInvocation:
     argv: tuple[str, ...]  # everything after the script token
 
 
-#: The entry point that runs the repo-static guard block inside the
-#: digest-pinned container. A script listed in `guards.GUARDS` is invoked by
-#: CI through THIS command rather than by a `run:` line of its own.
-_GUARDS_ENTRY_SCRIPT = "native/scripts/ci.py"
-_GUARDS_VERB = "guards"
-
-
-def iter_container_invocations(script_relpath: str, workflows_dir: Path | None = None):
-    """Yields a `WorkflowInvocation` for a script CI invokes TRANSITIVELY,
-    through the containerised guard block, rather than by a `run:` line
-    naming it directly.
-
-    WHY THIS EXISTS: Phase 1 of the CI migration moved ten guard steps out of
-    `build.yml` and into one `ci.py guards --docker` step. The scripts still
-    run on every CI run and still emit their markers into the job log --
-    verified, not assumed: `SHELL_ALLOWLIST_SIZE=42` and
-    `SHELL_PROHIBITION_RESULT=PASS` appear in the container gate artifact.
-    But a purely static scan of workflow YAML stopped finding them, because
-    invocation acquired a second, indirect form. The ledger's PROPERTY --
-    every marker has exactly one producer that CI actually runs -- is
-    unchanged; only the detection MODEL needed to learn the new shape.
-
-    BOTH CONDITIONS ARE REQUIRED, and the second is the load-bearing one:
-      (i)  the script is listed in `guards.GUARDS`, AND
-      (ii) some workflow step actually invokes `ci.py guards`.
-    Implementing (i) alone would make tuple membership by itself count as
-    invocation -- and then deleting the entire `guards-container` job from
-    build.yml would leave every marker still "having a producer", so this
-    guard would report PASS over a CI that runs no guards whatsoever. That
-    is a far worse false green than the one this function repairs, and it is
-    the easier implementation, which is exactly why it is called out here.
-    Both directions are covered by tests; each was observed RED before being
-    accepted.
-    """
-    from . import guards  # local import: guards imports report/run, and a
-    # module-level import here would make the dependency cycle between the
-    # guard modules load-order sensitive for no benefit.
-
-    entry = next((g for g in guards.GUARDS if g[0] == script_relpath), None)
-    if entry is None:
-        return  # condition (i) fails: not part of the container block.
-
-    for invocation in iter_workflow_invocations(_GUARDS_ENTRY_SCRIPT, workflows_dir):
-        # `ci.py` hosts many verbs; only `guards` runs the block. `ci.py
-        # selftest` is a different step and must not satisfy this.
-        if invocation.argv[:1] != (_GUARDS_VERB,):
-            continue
-        # Condition (ii) holds. Report the TRANSITIVE invocation under the
-        # real script's name and its roster argv, so the ledger keeps
-        # recording which script emits the marker rather than attributing it
-        # to the container step -- attributing it to the step would buy a
-        # passing check by discarding the fact the ledger exists to hold.
-        yield WorkflowInvocation(
-            workflow=invocation.workflow,
-            step_name=invocation.step_name,
-            line=invocation.line,
-            script=script_relpath,
-            argv=tuple(entry[1:]),
-        )
-        return  # one logical invocation, however many guard steps exist
-
-
-def iter_all_invocations(script_relpath: str, workflows_dir: Path | None = None):
-    """Every way CI invokes ``script_relpath``: directly from a `run:` line,
-    or transitively through the containerised guard block. Callers asking
-    "does CI run this?" want this, not either half on its own."""
-    return list(iter_workflow_invocations(script_relpath, workflows_dir)) + list(
-        iter_container_invocations(script_relpath, workflows_dir)
-    )
+# TRANSITIVE (container) INVOCATION DETECTION WAS REMOVED HERE, DELIBERATELY.
+# `iter_container_invocations()` / `iter_all_invocations()` existed because
+# Phase 1 moved ten guard steps into one `ci.py guards --docker` step, so a
+# ledger producer could be invoked WITHOUT any `run:` line naming it. That
+# shape no longer exists in the producer map: the only producer left
+# (`check_alias_table_convention.py`, two ledger keys) is invoked by its own
+# `run:` line in build.yml -- measured at the removal tip, static=1 /
+# container=0 for that script, i.e. the machinery had no production consumer.
+# IF A FUTURE LEDGER ENTRY'S PRODUCER IS A `guards.GUARDS` MEMBER WITH NO
+# `run:` LINE OF ITS OWN, restore it rather than relaxing the "exactly one
+# invocation" assertion in
+# `test_check_expected_additions.py::test_producer_map_argv_matches_workflows`
+# -- relaxing that assertion is the false-green route, since it would let a
+# producer no workflow invokes at all pass silently. Recover the prior
+# implementation (and its five ContainerInvocationTests, which pinned the
+# both-conditions rule) from this file's history.
 
 
 def iter_workflow_invocations(script_relpath: str, workflows_dir: Path | None = None):
