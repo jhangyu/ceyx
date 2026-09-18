@@ -478,7 +478,14 @@ def run_checks(repo_root: Path = REPO_ROOT) -> int:
     durations = []
     started = time.monotonic()
     for guard in GUARDS:
-        label = guard[0]
+        # The FULL invocation, not just the script path. Two roster entries
+        # may legitimately share a script and differ only in argv -- the
+        # obvious case being `ci.py <verb>` entries, where each would
+        # otherwise report as `GUARDS_RC(native/scripts/ci.py)` and a reader
+        # could not tell which verb failed. Keying the log line on the script
+        # alone was safe only while every entry had a distinct script, which
+        # is an accident of the current roster and not a rule.
+        label = " ".join(guard)
         print(f"GUARDS_RUN: {' '.join(guard)}", flush=True)
         guard_started = time.monotonic()
         result = run.run([sys.executable, *guard], cwd=repo_root)
