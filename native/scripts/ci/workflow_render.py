@@ -77,6 +77,25 @@ from . import targets
 # triggers vs 4, and a job-level `env:` block the template has no concept
 # of. If a second leg ever needs that vcpkg block, the shared structure
 # becomes real and this decision should be revisited.
+#
+# DELIBERATELY NOT RENDERED -- the four platform legs (android_build.yml,
+# linux_build.yml, windows_build.yml, macos_build.yml). This is a declared
+# exclusion, by USER RULING (2026-09-18) retiring the ~400-line rendered-YAML
+# target: rendering stops at the dist legs above, and these four stay
+# hand-written.
+#
+# Measured, not asserted: the four legs have 20 / 36 / 34 / 35 steps
+# respectively, and share only THREE step names across all four --
+# `Checkout`, `Measure and emit the minimum runtime floor (S-F1)`, and
+# `Upload native artifact`. A template built for three shared steps out of
+# 20-36 would have exactly one real user per file, which is the single-user
+# template shape this phase exists to avoid creating. (Derived by parsing
+# each file's `jobs[*].steps[*].name` with `yaml.safe_load` and intersecting
+# the four name sets -- not by grep, not by eyeballing.)
+#
+# If two or more of these legs ever converge on a common step sequence
+# beyond those three, the shared structure becomes real and this decision
+# should be revisited, same as heif_dist_windows.yml above.
 RENDERED = (
     "webp_dist_android.yml",
     "jxl_dist_android.yml",
