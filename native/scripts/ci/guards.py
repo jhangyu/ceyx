@@ -156,12 +156,6 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     ("native/scripts/ci_conventions_check.py",),
     ("native/scripts/derive_oriented_stage4.py", "--check"),
     ("native/scripts/gen_export_manifest.py", "--check"),
-    # RETIRES IN PHASE 3 (impl-p3) -- and it is the DANGEROUS shape: Phase 3
-    # removes the `--check` MODE, not the script. The file will still be
-    # here, so a bare existence check passes and the failure surfaces as an
-    # argparse "unrecognized arguments" error from a script that looks
-    # perfectly healthy. `_classify_failure()` below catches exactly that.
-    ("native/scripts/gen_linkage_table.py", "--check"),
     ("native/scripts/gen_shipped_files_cmake.py", "--check"),
     ("native/scripts/ci/check_cmake_sources_tracked.py",),
     ("native/scripts/ci/check_no_test_execution_in_ci.py",),
@@ -216,16 +210,13 @@ GUARDS: tuple[tuple[str, ...], ...] = (
 # The comments are for the person reading the tuple; this map is for the
 # person staring at a red gate at 3am wondering what they broke.
 #
-# Arithmetic for whoever reads next: Phase 2's five are DELETED as of this
-# commit, taking the tuple 18 -> 13; Phase 3 removes one more (the
-# linkage-table --check mode) for 12 at the end of the migration. The one
-# row left below is that Phase 3 entry. An entry here is LIVE until its
-# deletion actually lands -- coverage does not drop on a schedule that
-# might slip, so nothing is pre-emptively removed.
+# Arithmetic for whoever reads next: 18 - 5 (Phase 2, DONE) - 1 (Phase 3,
+# DONE -- gen_linkage_table.py's --check mode and its GUARDS/schedule
+# entries were retired by impl-p3) = 12 at the end of the migration. Both
+# phases' retirements have landed for real, so this map is EMPTY -- an
+# empty map here means every scheduled retirement has actually happened,
+# not that nothing was ever scheduled.
 RETIREMENT_SCHEDULE: dict = {
-    # Phase 3 removes the --check MODE; the script itself stays, because
-    # native/deps/linkage_table.md names it as its own regenerator.
-    "native/scripts/gen_linkage_table.py": ("Phase 3", "impl-p3"),
 }
 
 #: What this verb does NOT cover. Printed in-band on every run.

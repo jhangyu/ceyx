@@ -201,17 +201,17 @@ class GuardListTest(unittest.TestCase):
 
         Count history: 17 -> 18 when Phase 2 added `ci.py
         render-workflows --check`, then 18 -> 13 when Phase 2 DELETED its
-        five synchronizer guards. That second move is a shrink, and it is
-        the one this test is built to interrogate -- so read the paragraph
-        above before concluding it is fine. It is fine here for a reason
-        the paragraph does not cover: those five were removed by a USER
-        RULING (2026-09-18 21:40) that named them individually, not to
-        make a number match a document. The membership this test actually
-        pins (check_test_marker_leak.py) is asserted separately above and
-        is unchanged."""
+        five synchronizer guards, then 13 -> 12 when Phase 3 retired
+        gen_linkage_table.py's --check entry. Both shrinks are fine for a
+        reason this test still guards against: they were removed by named,
+        individual USER RULINGs (2026-09-18 21:40 for Phase 2's five;
+        the narrow-ruling contract clause for Phase 3's one), not to make
+        a number match a document. The membership this test actually pins
+        (check_test_marker_leak.py) is asserted separately above and is
+        unchanged."""
         listed = {g[0] for g in guards.GUARDS}
         self.assertIn("native/scripts/ci/check_test_marker_leak.py", listed)
-        self.assertEqual(len(guards.GUARDS), 13)
+        self.assertEqual(len(guards.GUARDS), 12)
 
     def test_artifact_dependent_guards_are_excluded(self):
         """The membership rule is 'repo-static'. These two read
@@ -258,9 +258,30 @@ class StaleRosterTest(unittest.TestCase):
         self.assertIn("NO scheduled retirement", problems[0])
 
     def test_removed_check_flag_is_diagnosed_not_reported_as_a_guard_failure(self):
-        """The Phase 3 shape, and the nastier one: the FILE still exists, so
-        the existence preflight passes and the script dies on an
-        unrecognised flag while looking perfectly healthy."""
+        """The shape a retirement leaves if a --check-mode deletion lands
+        without removing the GUARDS/RETIREMENT_SCHEDULE entry: the FILE
+        still exists, so the existence preflight passes and the script dies
+        on an unrecognised flag while looking perfectly healthy. Uses a
+        currently-scheduled Phase 2 guard (gen_linkage_table.py's own Phase
+        3 entry was retired for real by impl-p3, so it no longer exercises
+        this path -- see test_stale_entry_with_no_schedule_is_flagged_as_unknown
+        for that now-actual scenario)."""
+        result = mock.Mock()
+        result.stdout = ""
+        result.stderr = "usage: check_shell_prohibition.py\nerror: unrecognized arguments: --check\n"
+        diagnosis = guards._classify_failure(
+            ("native/scripts/ci/check_shell_prohibition.py", "--check"), result
+        )
+        self.assertIn("STALE GUARDS ENTRY", diagnosis)
+        self.assertIn("no longer accepts --check", diagnosis)
+        self.assertIn("Phase 2", diagnosis)
+
+    def test_stale_entry_with_no_schedule_is_flagged_as_unknown(self):
+        """The actual current shape for gen_linkage_table.py: its --check
+        mode and GUARDS/RETIREMENT_SCHEDULE entries were retired together by
+        impl-p3 (Phase 3), so a stale invocation of it now has NO scheduled
+        retirement and must be flagged as unannounced drift, not attributed
+        to a phase that already finished."""
         result = mock.Mock()
         result.stdout = ""
         result.stderr = "usage: gen_linkage_table.py\nerror: unrecognized arguments: --check\n"
@@ -268,8 +289,7 @@ class StaleRosterTest(unittest.TestCase):
             ("native/scripts/gen_linkage_table.py", "--check"), result
         )
         self.assertIn("STALE GUARDS ENTRY", diagnosis)
-        self.assertIn("no longer accepts --check", diagnosis)
-        self.assertIn("Phase 3", diagnosis)
+        self.assertIn("NO scheduled retirement", diagnosis)
 
     def test_an_ordinary_guard_failure_is_not_misdiagnosed_as_roster_drift(self):
         """The common case must stay quiet, or a real finding gets buried
@@ -291,18 +311,14 @@ class StaleRosterTest(unittest.TestCase):
         for path in guards.RETIREMENT_SCHEDULE:
             self.assertIn(path, listed, f"{path} is scheduled but not in GUARDS")
 
-    def test_one_entry_is_scheduled_for_retirement(self):
-        """13 - 1 (Phase 3) = 12 at the end of the migration.
-
-        Phase 2's five landed, so its rows are gone from the schedule with
-        the guards they described. The single remaining row is Phase 3's
-        linkage-table entry, and it is the DANGEROUS shape: Phase 3 removes
-        that script's `--check` MODE, not the script, so a bare existence
-        check would pass while the guard silently stopped working."""
-        self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 1)
+    def test_five_entries_are_scheduled_for_retirement(self):
+        """17 - 5 (Phase 2, still pending) - 1 (Phase 3, DONE -- retired
+        for real, so it no longer appears here) = 11 at the end of the
+        migration."""
+        self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 5)
         phases = [p for p, _ in guards.RETIREMENT_SCHEDULE.values()]
-        self.assertEqual(phases.count("Phase 2"), 0)
-        self.assertEqual(phases.count("Phase 3"), 1)
+        self.assertEqual(phases.count("Phase 2"), 5)
+        self.assertEqual(phases.count("Phase 3"), 0)
 
 
 class ScopePrintingTest(unittest.TestCase):

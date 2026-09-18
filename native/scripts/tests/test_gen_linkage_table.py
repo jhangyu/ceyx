@@ -16,18 +16,6 @@ sys.modules["gen_linkage_table"] = gen
 spec.loader.exec_module(gen)
 
 
-def test_check_passes_against_committed_file():
-    rc = gen.main(["--check"])
-    assert rc == 0
-
-
-def test_check_detects_staleness_negative_control(tmp_path):
-    stale = tmp_path / "linkage_table.md"
-    stale.write_text("stale content\n")
-    rc = gen.main(["--output", str(stale), "--check"])
-    assert rc == 1
-
-
 def test_static_components_exclude_halide():
     names = gen.load_static_components()
     assert "libwebp" in names
@@ -86,10 +74,15 @@ def test_column2_equals_pin_skip_when_pin_absent():
     assert "SKIP" in status
 
 
-def test_column2_equals_pin_line_always_printed(capsys):
+def test_column2_equals_pin_line_always_printed(tmp_path, capsys):
     # The plan is explicit: "a silent skip is a FAIL" -- the line must be
-    # printed unconditionally, never omitted.
-    rc = gen.main(["--check"])
+    # printed unconditionally, never omitted. This was originally a
+    # main()-wide invariant printed before the (now-deleted) --check
+    # branch; the branch is gone (Phase 3 retired the guard), but the
+    # print itself stays load-bearing, so this test still drives it via
+    # the only mode that remains: the default write path.
+    out_path = tmp_path / "linkage_table.md"
+    rc = gen.main(["--output", str(out_path)])
     captured = capsys.readouterr()
     for platform in ("windows", "linux", "macos", "android"):
         assert f"COLUMN2_EQUALS_PIN({platform})=" in captured.out
