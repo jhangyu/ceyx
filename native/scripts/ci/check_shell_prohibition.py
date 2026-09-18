@@ -94,7 +94,29 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 PYTHON_BODY_RE = re.compile(r"^(python3|python|pwsh -c python)\s")
 
+# Guard (d): an inline `python3 -c "..."` / `python -c ...` invocation matches
+# PYTHON_BODY_RE's interpreter prefix but carries its actual code on the
+# command line, not in any file this repo's guards scan -- shell-carried
+# Python, invisible to every file-scanning check this campaign built (P-15).
+# Scope is `-c` ONLY (ruling, SIGNOFF-LEDGER "(d) flags -c only NOT -m") --
+# `python -m <module>` is deliberately NOT flagged by this predicate.
+_INLINE_DASH_C_RE = re.compile(r"^(python3|python|pwsh -c python)\s+-c\b")
+
 _SHELL_GLOB_PATTERNS = ("*.sh", "*.bat", "*.ps1", "*.cmd")
+
+
+def _is_rule1_compliant(code: list) -> bool:
+    """The ONE predicate for 'is this run: body an acceptable one-line python
+    invocation', used identically by Rule 1 (skip) and the obsolete-allowlist
+    reverse sentinel `check_obsolete_entries` (fail) -- deliberately the SAME
+    function so the two can never diverge (2026-09-13 finding: narrowing one
+    copy of a duplicated predicate silently loosens whichever consumer reads
+    the other copy in the opposite direction)."""
+    return (
+        len(code) == 1
+        and bool(PYTHON_BODY_RE.match(code[0]))
+        and not bool(_INLINE_DASH_C_RE.match(code[0]))
+    )
 
 
 def _is_excluded(rel_path: str) -> bool:
@@ -165,7 +187,7 @@ def _rule1_run_bodies(failures: list, workflow_files):
         for step in workflow_scan.iter_run_steps(text, path.name):
             key = (step.workflow, step.step_name)
             code = workflow_scan.code_lines(step)
-            compliant = len(code) == 1 and bool(PYTHON_BODY_RE.match(code[0]))
+            compliant = _is_rule1_compliant(code)
             if compliant:
                 continue
             if key in lookup:
@@ -237,7 +259,7 @@ def check_obsolete_entries(steps_by_key: dict, entries) -> list:
         if step is None:
             continue
         code = workflow_scan.code_lines(step)
-        compliant = len(code) == 1 and bool(PYTHON_BODY_RE.match(code[0]))
+        compliant = _is_rule1_compliant(code)
         if not compliant:
             continue
         failures.append(

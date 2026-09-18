@@ -255,6 +255,123 @@ class TestObsoleteAllowlistEntries(unittest.TestCase):
         self.assertEqual(rc, 0, combined)
 
 
+DASH_C_ONE_LINER_WORKFLOW = """\
+jobs:
+  build:
+    steps:
+      - name: Inline dash-c
+        run: python3 -c "print('x')"
+"""
+
+DASH_M_ONE_LINER_WORKFLOW = """\
+jobs:
+  build:
+    steps:
+      - name: Inline dash-m
+        run: python3 -m json.tool --help
+"""
+
+
+class TestGuardDInlineDashC(unittest.TestCase):
+    """Guard (d): an inline `python3 -c "..."` one-liner matches
+    PYTHON_BODY_RE's interpreter prefix but its code is on the command line,
+    not in any file this repo's guards scan -- must be rejected by Rule 1
+    even though `len(code) == 1`. Scope: `-c` ONLY (SIGNOFF-LEDGER inherited
+    ruling "(d) flags -c only NOT -m") -- `-m` is a separate case pinned
+    NOT-flagged below."""
+
+    def test_inline_dash_c_one_liner_fails_shell_body(self):
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", DASH_C_ONE_LINER_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", ()), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 0
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 1)
+            combined = out.getvalue() + err.getvalue()
+            self.assertIn("[shell-body]", combined)
+            self.assertIn("Inline dash-c", combined)
+
+    def test_inline_dash_m_one_liner_still_passes(self):
+        """Negative control for the ruling's scope: `-m` must NOT be
+        flagged. If this ever fails, the predicate has drifted from the
+        binding ruling and must be narrowed back to `-c` only."""
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", DASH_M_ONE_LINER_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", ()), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 0
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 0, buf.getvalue())
+            self.assertIn("SHELL_PROHIBITION_RESULT=PASS", buf.getvalue())
+
+    def test_real_file_invocation_one_liner_still_passes(self):
+        """Negative control: a real one-line file invocation (the existing
+        ONE_LINE_WORKFLOW shape) must remain compliant -- proves the new
+        predicate discriminates rather than rejecting every python call."""
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", ONE_LINE_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", ()), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 0
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 0, buf.getvalue())
+            self.assertIn("SHELL_PROHIBITION_RESULT=PASS", buf.getvalue())
+
+    def test_shared_predicate_both_sites_agree_on_dash_c(self):
+        """`:168`/`:240` coupling (the hazard this batch fixes): construct an
+        allowlisted entry whose real body is `python3 -c "..."`. Under the
+        unified predicate, Rule 1 (correctly) requires the exemption AND
+        `check_obsolete_entries` must NOT call it dead -- both sites reading
+        the SAME function is what keeps this from silently diverging again."""
+        fake_entry = allowlist.Entry("x.yml", "Inline dash-c", "test fixture")
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", DASH_C_ONE_LINER_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", (fake_entry,)), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 1
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = guard.main(repo_root=root)
+            combined = out.getvalue() + err.getvalue()
+            self.assertNotIn("[obsolete-allowlist]", combined)
+            self.assertNotIn("[shell-body]", combined)
+            self.assertEqual(rc, 0, combined)
+
+    def test_shared_predicate_real_file_invocation_still_flagged_obsolete(self):
+        """Unrelated-to-(d) behaviour that must not regress: an allowlisted
+        entry whose body IS a real compliant file invocation is still a
+        genuinely dead exemption and must still be flagged."""
+        fake_entry = allowlist.Entry("x.yml", "One-liner", "test fixture")
+        with _IsolatedRepo() as root:
+            fx = _IsolatedRepo()
+            fx.root = root
+            fx.write_workflow("x.yml", ONE_LINE_WORKFLOW)
+            with mock.patch.object(allowlist, "MUST_STAY", (fake_entry,)), mock.patch.object(
+                allowlist, "ALLOWLIST_SIZE_EXPECTED", 1
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = guard.main(repo_root=root)
+            self.assertEqual(rc, 1)
+            combined = out.getvalue() + err.getvalue()
+            self.assertIn("[obsolete-allowlist]", combined)
+
+
 class TestBareScriptInvocation(unittest.TestCase):
     """Round-2 signoff blocker: every prior test invoked the guard by
     IMPORTING it, so a defect that only manifests when the module is run as
