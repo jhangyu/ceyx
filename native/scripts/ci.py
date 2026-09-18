@@ -442,6 +442,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the guards directly (what --docker invokes inside the container)",
     )
 
+    # Phase 2 of the four-phase CI migration. `--check` is the CI mode: it
+    # renders every workflow in workflow_render.RENDERED and asserts the
+    # output is byte-identical to the committed file, which is what lets the
+    # synchronizer guards be deleted -- a generator's output cannot drift
+    # from its own input. With no flag it WRITES the rendered files.
+    #
+    # `--check` alone is deliberately NOT the whole acceptance. A renderer
+    # that silently drops a step still satisfies byte-identity once its own
+    # output is committed: the assertion is satisfied by the very file that
+    # lost the step. `--step-names` prints the committed-vs-rendered step
+    # NAME diff, in both directions and in order, which is the check that
+    # sees that loss. Neither subsumes the other -- byte-identity also
+    # catches degradation INSIDE a step body (a hyphenated job id under dot
+    # syntax parses as subtraction and silently yields an empty string),
+    # which a name diff structurally cannot see. Keep both.
+    rw = sub.add_parser(
+        "render-workflows", help="render .github/workflows from targets.py (Phase 2)"
+    )
+    rw_mode = rw.add_mutually_exclusive_group()
+    rw_mode.add_argument(
+        "--check",
+        action="store_true",
+        help="assert rendered == committed; write nothing (the CI mode)",
+    )
+    rw_mode.add_argument(
+        "--step-names",
+        action="store_true",
+        help="print the committed-vs-rendered step NAME diff, both directions",
+    )
+
     md = sub.add_parser("marker-diff", help="multiset-diff two marker logs (C-G1)")
     md.add_argument("--baseline", required=True)
     md.add_argument("--candidate", required=True)
@@ -751,6 +781,54 @@ def dispatch(args: argparse.Namespace) -> int:
         # bare-host path must be the SAME code, or the container stops being
         # evidence about what CI will do.
         return guards.run_in_docker() if args.docker else guards.run_checks()
+    if args.command == "render-workflows":
+        import ci.workflow_render as wr
+
+        repo = Path(__file__).resolve().parents[2]
+        wf = repo / ".github" / "workflows"
+        rendered = wr.render_all()
+
+        if args.step_names:
+            # Names only, never counts: a count cannot say WHICH step left.
+            bad = 0
+            for name, text in rendered.items():
+                committed = wr.step_names((wf / name).read_text())
+                produced = wr.step_names(text)
+                missing = [n for n in committed if n not in produced]
+                added = [n for n in produced if n not in committed]
+                print(f"STEP_NAMES {name}")
+                for n in committed:
+                    print(f"  committed: {n}")
+                print(f"  MISSING_FROM_RENDERED: {missing if missing else 'NONE'}")
+                print(f"  ADDED_IN_RENDERED:     {added if added else 'NONE'}")
+                if missing or added or committed != produced:
+                    bad += 1
+            print(f"RENDER_STEP_NAMES_RESULT={'FAIL' if bad else 'PASS'}")
+            return 1 if bad else 0
+
+        if args.check:
+            bad = []
+            for name, text in rendered.items():
+                path = wf / name
+                # A name in RENDERED with no committed file is a FAILURE, not
+                # a skip: a check that quietly does nothing for an input it
+                # cannot find reports the reassuring answer.
+                if not path.exists():
+                    print(f"RENDER_CHECK {name} MISSING_COMMITTED_FILE")
+                    bad.append(name)
+                elif path.read_text() != text:
+                    print(f"RENDER_CHECK {name} DIFFERS")
+                    bad.append(name)
+                else:
+                    print(f"RENDER_CHECK {name} IDENTICAL")
+            print(f"RENDER_CHECK_RENDERED_SET={len(rendered)}")
+            print(f"RENDER_CHECK_RESULT={'FAIL' if bad else 'PASS'}")
+            return 1 if bad else 0
+
+        for name, text in rendered.items():
+            (wf / name).write_text(text)
+            print(f"RENDER_WROTE {name}")
+        return 0
     if args.command == "marker-diff":
         import ci.markerdiff as markerdiff
 

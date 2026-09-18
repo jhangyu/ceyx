@@ -127,10 +127,17 @@ EXPECTED_COMMAND_PATHS: frozenset[tuple[str, ...]] = frozenset(
         # mutually exclusive FLAGS on this single command, not sub-parsers,
         # so this adds exactly ONE command path (36 -> 37), not three.
         ("guards",),
+        # Phase 2 of the same migration: the workflow renderer. `--check`
+        # and `--step-names` are mutually exclusive FLAGS on this single
+        # command, not sub-parsers, so this adds exactly ONE command path
+        # (37 -> 38). NOTE: this guard is itself on Phase 2's deletion list,
+        # so it is bumped and then retired -- the bump is not ceremony, it
+        # is what keeps the guard honest for as long as it is alive.
+        ("render-workflows",),
     }
 )
 
-EXPECTED_COMMAND_COUNT = 37
+EXPECTED_COMMAND_COUNT = 38
 assert len(EXPECTED_COMMAND_PATHS) == EXPECTED_COMMAND_COUNT, (
     f"EXPECTED_COMMAND_PATHS itself has {len(EXPECTED_COMMAND_PATHS)} entries, "
     f"not {EXPECTED_COMMAND_COUNT} -- this is a bug in this file, fix the set "
