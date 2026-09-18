@@ -35,8 +35,21 @@ ci_entrypoint = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ci_entrypoint)
 
 
+# LOAD-BEARING, AND AFTER PHASE 2 IT IS ALONE. Three independent pins on
+# ci.py's command list existed during this migration: this set,
+# `check_argv_contract.py`'s EXPECTED_COMMAND_PATHS, and that guard's own
+# count assertion. The other two DIE with `check_argv_contract.py` when
+# Phase 2's five synchronizer guards are deleted -- this one SURVIVES, and
+# is then the only mechanism that will notice a new verb.
+#
+# So if you are here because you added a command and this test went red:
+# that is the design working. Add the name. Do NOT loosen the comparison,
+# and do not delete the set because "the guard already checks it" -- after
+# Phase 2 there is no guard, and there is no sibling to compare against.
 FROZEN_CLI_SURFACE = {
     "selftest",
+    # Phase 2 (impl-p2-render-opus): the workflow renderer.
+    "render-workflows",
     "marker-diff",
     "verify-artifact",
     "import-closure",
