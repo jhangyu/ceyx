@@ -317,99 +317,22 @@ jobs:
       # grep -q PATTERN` returns 141 and INVERTS the verdict when the
       # pattern IS found, because grep exits early and readelf takes
       # SIGPIPE -- never pipe straight into grep -q here).
-      - name: Assert decoder DT_NEEDED matches the resolved Android STL (A-T8-FIX libc++_shared handling)
+      # P-21+P-22 migration (native/scripts/ci/dt_needed.py, WI-8/WI-22):
+      # the two shell steps this replaced independently asserted (P-21) the
+      # decoder's DT_NEEDED matches the resolved Android STL and (P-22) that
+      # every packaged .so's DT_NEEDED entries are bundled or on the measured
+      # system whitelist. `dt_needed.dt_needed(platform="android", ...)` runs
+      # both checks in one function (STL level first, closure level second,
+      # returning at the first failure) as a byte-for-byte port of both shell
+      # bodies — same ::error:: strings, same marker names, same
+      # llvm-readelf path derivation. See tmp/verify/p21-p22/findings.md for
+      # the side-by-side verification and the red/green evidence for both
+      # failure modes.
+      - name: Assert DT_NEEDED (STL match + device-whitelist closure) (A-T8-FIX / Task 11, P-21+P-22 migration)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
-          SO=$(ls "${ARTIFACT_DIR}"/native/libdng_decoder_native*.so | head -n 1)
-          LLVM_READELF="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          if [ ! -x "${LLVM_READELF}" ]; then
-            echo "::error::llvm-readelf not found at ${LLVM_READELF} — NDK layout may have changed (r27c expected)." >&2
-            exit 1
-          fi
-          set +e
-          "${LLVM_READELF}" -d "${SO}" > android_decoder_dynamic.txt 2>&1
-          rc=$?
-          set -e
-          echo "READELF_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::llvm-readelf -d failed on ${SO} (rc=${rc}); DT_NEEDED is UNVERIFIED, refusing to publish." >&2
-            cat android_decoder_dynamic.txt || true
-            exit 1
-          fi
-
-          set +e
-          grep -q "^-- Android STL: c++_shared -- staged libc++_shared.so next to dng_decoder_native$" android_build.log
-          stl_shared_rc=$?
-          grep -q "^-- Android STL: c++_static -- libc++_shared.so not required, nothing staged$" android_build.log
-          stl_static_rc=$?
-          set -e
-          echo "STL_SHARED_LOG_RC=${stl_shared_rc} STL_STATIC_LOG_RC=${stl_static_rc}"
-          if [ "${stl_shared_rc}" -ne 0 ] && [ "${stl_static_rc}" -ne 0 ]; then
-            echo "::error::configure log shows neither of heif.cmake's expected 'Android STL: ...' lines — the STL branch that ran cannot be identified, refusing to publish an unverified decoder." >&2
-            exit 1
-          fi
-
-          set +e
-          grep -q "libc++_shared.so" android_decoder_dynamic.txt
-          dt_has_libcxx_rc=$?
-          set -e
-          echo "DT_NEEDED_HAS_LIBCXX_SHARED_RC=${dt_has_libcxx_rc}"
-
-          if [ "${stl_shared_rc}" -eq 0 ]; then
-            if [ "${dt_has_libcxx_rc}" -ne 0 ]; then
-              echo "::error::${SO}'s DT_NEEDED does not list libc++_shared.so, but the configure log says CMAKE_ANDROID_STL_TYPE=c++_shared — staging without an actual link-time need (or a build that silently dropped it) would ship a dead file." >&2
-              cat android_decoder_dynamic.txt
-              exit 1
-            fi
-          else
-            if [ "${dt_has_libcxx_rc}" -eq 0 ]; then
-              echo "::error::${SO}'s DT_NEEDED lists libc++_shared.so, but the configure log says the STL is c++_static (not c++_shared) — an unexpected partial/shared C++ link crept in." >&2
-              cat android_decoder_dynamic.txt
-              exit 1
-            fi
-          fi
-
-      # DT_NEEDED CLOSURE (CI hardening after the T8b live-load episode,
-      # tmp/verify/orient_prod_t8b_so_refresh.txt): the check two steps above
-      # only verifies libc++_shared.so's presence/absence against the
-      # resolved STL; it says nothing about every OTHER DT_NEEDED entry of
-      # every packaged .so actually being satisfiable on-device. That gap is
-      # exactly how the shipped decoder carried a libomp.so dependency
-      # Android does not provide for weeks -- only a real device dlopen()
-      # caught it (root-caused and fixed in 68dd3a5). This step generalises
-      # that catch: for every .so in the artifact dir, every DT_NEEDED entry
-      # must be either bundled alongside it or in a MEASURED (not assumed)
-      # whitelist of platform-provided libraries -- see
-      # native/scripts/assert_android_so_dt_needed_closure.py's header and
-      # tmp/verify/orient_prod_t11c_device_whitelist.txt for the on-device
-      # `adb shell ls /system/lib64/<name>` measurement the default
-      # whitelist transcribes (device PHY110, serial cc5bf709). No
-      # --whitelist override is passed here on purpose -- CI always runs
-      # against the measured default; overriding it is for local
-      # negative-control testing only (see the script's own header).
-      - name: Assert DT_NEEDED closure across the packaged Android .so set (Task 11 follow-up)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
-        run: |
-          LLVM_READELF="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          if [ ! -x "${LLVM_READELF}" ]; then
-            echo "::error::llvm-readelf not found at ${LLVM_READELF} — NDK layout may have changed (r27c expected)." >&2
-            exit 1
-          fi
-          set +e
-          python3 native/scripts/assert_android_so_dt_needed_closure.py \
-            --readelf "${LLVM_READELF}" \
-            --so-dir "${ARTIFACT_DIR}/native" \
-            --bundled "libheif.so,libde265.so,libdng_decoder_native.so" \
-            --optional-bundled "libc++_shared.so"
-          rc=$?
-          set -e
-          echo "DT_NEEDED_CLOSURE_RC=${rc}"
-          if [ "${rc}" -ne 0 ]; then
-            echo "::error::a packaged .so has a DT_NEEDED entry neither bundled nor in the measured system whitelist — see the output above for which library/libraries are unexplained (all offenders are named, not just the first)." >&2
-            exit 1
-          fi
+          python3 native/scripts/ci.py dt-needed --platform android --artifact-dir "${ARTIFACT_DIR}" --runner-temp "${RUNNER_TEMP}" --ndk-home "${ANDROID_NDK_HOME}"
 
       # WI-38 (pyci python-ization campaign, follow-on to WI-34/f651550f):
       # collapsed from the old inline shell body (WI-4 step 4.4, S-B3) that

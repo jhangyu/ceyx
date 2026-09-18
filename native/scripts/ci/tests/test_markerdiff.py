@@ -137,7 +137,7 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         baseline = "EXPORTS_RESULT=PASS\n"
         candidate = (
             "EXPORTS_RESULT=PASS\n"
-            "SHELL_ALLOWLIST_SIZE=44\n"
+            "SHELL_ALLOWLIST_SIZE=42\n"
             "SHELL_PROHIBITION_RESULT=PASS\n"
         )
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
@@ -195,7 +195,7 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
     def test_expected_addition_report_lines_names_both_entries(self):
         lines = markerdiff.expected_addition_report_lines("nativetests")
         joined = "\n".join(lines)
-        self.assertIn("SHELL_ALLOWLIST_SIZE=44", joined)
+        self.assertIn("SHELL_ALLOWLIST_SIZE=42", joined)
         self.assertIn("SHELL_PROHIBITION_RESULT=PASS", joined)
 
     def test_expected_addition_report_lines_empty_for_other_leg(self):

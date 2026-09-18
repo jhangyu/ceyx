@@ -61,8 +61,6 @@ MUST_STAY: tuple = (
     Entry('android_build.yml', 'Install build prerequisites (apt)', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Build dng_decoder_native for Android', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
     Entry('android_build.yml', 'Assert build capability vector via probe (S-E2)', "PERMANENT exemption, not a migration backlog item (plan:1749-1757 scope correction, capability.py module docstring): this step is a single `echo` of an honest, permanently-accepted SKIP line -- android is not a capability-vector leg at all and `capability-vector --platform android` is not a supported target. No WI will ever retire this entry."),
-    Entry('android_build.yml', 'Assert decoder DT_NEEDED matches the resolved Android STL (A-T8-FIX libc++_shared handling)', "IN SCOPE, UNSCHEDULED, no blocker: not verify_artifact.import_closure() (that step, 'Import-closure gate (S-B3)', migrated separately under WI-34/WI-38) -- this is a distinct inline STL-direction check with nothing structurally preventing migration. No WI currently claims it; it is not parked, not blocked, and not a C-G14 exemption -- simply unassigned."),
-    Entry('android_build.yml', 'Assert DT_NEEDED closure across the packaged Android .so set (Task 11 follow-up)', "IN SCOPE, UNSCHEDULED, no blocker: not verify_artifact.import_closure() (that step, 'Import-closure gate (S-B3)', migrated separately under WI-34/WI-38) -- this is a distinct whitelist-closure check (assert_android_so_dt_needed_closure.py) with nothing structurally preventing migration. No WI currently claims it; it is not parked, not blocked, and not a C-G14 exemption -- simply unassigned."),
     Entry('build.yml', 'Flutter pub get', "verify-dart job (Q4): flutter/dart toolchain step, outside this campaign's CI Python-ization scope"),
     Entry('build.yml', 'dart analyze', "verify-dart job (Q4): flutter/dart toolchain step, outside this campaign's CI Python-ization scope"),
     Entry('build.yml', 'Derive vcpkg baseline from vcpkg.json', "not yet migrated to native/scripts/ci/ (pyci python-ization campaign; see docs/logs/2026-09-13/pyci-plan.md work-package table for this leg's push)"),
@@ -123,4 +121,4 @@ GRANDFATHERED_SHELL_FILES: tuple = (
 # make visible (module docstring above, and markerdiff.py's assertion-vs-
 # observability split). Every push that shrinks MUST_STAY must update this
 # literal in the same diff -- that edit IS the two-line reviewable pin.
-ALLOWLIST_SIZE_EXPECTED: int = 44
+ALLOWLIST_SIZE_EXPECTED: int = 42
