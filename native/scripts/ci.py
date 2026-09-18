@@ -419,6 +419,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("selftest", help="run native/scripts/ci/tests/ in-process")
 
+    # Phase 1 (four-phase CI migration): the repo-static guard block, run
+    # identically on a laptop and on a runner inside one digest-pinned
+    # container. `--docker` renders AND executes the pinned `docker run`;
+    # the local gate and the build.yml step both invoke exactly that, so the
+    # command string comes from one renderer instead of being maintained in
+    # two places that a reader has to diff by eye. `--in-container` is what
+    # the rendered command invokes inside the container, and is also the
+    # no-flag host behaviour. See native/scripts/ci/guards.py's docstring
+    # for the single-source argument and for the one field (the bind-mount
+    # source path) that is host-dependent by nature.
+    g = sub.add_parser("guards", help="repo-static guard block (Phase 1)")
+    g_mode = g.add_mutually_exclusive_group()
+    g_mode.add_argument(
+        "--docker",
+        action="store_true",
+        help="render + run the digest-pinned container (the gate entry point)",
+    )
+    g_mode.add_argument(
+        "--in-container",
+        action="store_true",
+        help="run the guards directly (what --docker invokes inside the container)",
+    )
+
     md = sub.add_parser("marker-diff", help="multiset-diff two marker logs (C-G1)")
     md.add_argument("--baseline", required=True)
     md.add_argument("--candidate", required=True)
@@ -719,6 +742,15 @@ def _not_yet(name: str) -> int:
 def dispatch(args: argparse.Namespace) -> int:
     if args.command == "selftest":
         return _selftest()
+    if args.command == "guards":
+        import ci.guards as guards
+
+        # `--docker` renders + runs the pinned container; anything else
+        # (`--in-container`, or no flag at all) runs the guards right here.
+        # Deliberately not three behaviours: the in-container path and the
+        # bare-host path must be the SAME code, or the container stops being
+        # evidence about what CI will do.
+        return guards.run_in_docker() if args.docker else guards.run_checks()
     if args.command == "marker-diff":
         import ci.markerdiff as markerdiff
 

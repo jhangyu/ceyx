@@ -16,11 +16,20 @@ never a re-implementation of how `_add_platform_command` or the nested
 set of registered command PATHS (a "path" is a tuple of subcommand names
 reachable by walking every `_SubParsersAction.choices` at every depth, e.g.
 `("provision", "ninja")` or `("min-runtime",)`) exactly matches a frozen set
-of 36 entries. It does NOT replay workflow YAML through the parser and does
+of 37 entries. It does NOT replay workflow YAML through the parser and does
 NOT validate matrix-substituted argv strings -- that half of (g) is a
 SEPARATE, NOT-YET-BUILT piece (see `pyci-ruling-G-guard-plan.md` (g)§3:
 "Do not accept a green from a text-matching implementation"). A reader of a
 clean run of THIS script must not conclude the full (g) property holds.
+
+WHY 37 TODAY, AND WHY THE DERIVATION BELOW STILL SAYS 36: the 36 figure is
+the count this surface was frozen at, and the arithmetic in the next
+paragraph reconstructs exactly that 36. Phase 1 of the four-phase CI
+migration then added ONE command -- `guards`, the containerised
+repo-static guard block -- bringing the frozen set to 37. Its `--docker`/
+`--in-container` are mutually exclusive FLAGS, not sub-parsers, so it
+contributes one path and not three. Read the paragraph below as the
+derivation of the 36 BASELINE, then add `guards` for today's total.
 
 WHY 36, NOT 35: the ruling in
 `tmp/verify/lead16/SIGNOFF-LEDGER.md` ("Inherited rulings I am holding
@@ -71,7 +80,8 @@ else:
 
 _CI_PY_PATH = REPO_ROOT / "native" / "scripts" / "ci.py"
 
-# Frozen expected surface, ruled at 36 (see module docstring). Each entry is
+# Frozen expected surface, ruled at 36 and now 37 with Phase 1's `guards`
+# (see module docstring). Each entry is
 # a full command PATH, deepest-first not required -- comparison is a plain
 # set-equality so both an addition and a removal are reported by name.
 EXPECTED_COMMAND_PATHS: frozenset[tuple[str, ...]] = frozenset(
@@ -112,10 +122,15 @@ EXPECTED_COMMAND_PATHS: frozenset[tuple[str, ...]] = frozenset(
         ("vcpkg", "install"),
         ("vcpkg", "assert-aom-artifact"),
         ("vcpkg", "export-prefix"),
+        # Phase 1 of the four-phase CI migration: the containerised
+        # repo-static guard block. `--docker` and `--in-container` are
+        # mutually exclusive FLAGS on this single command, not sub-parsers,
+        # so this adds exactly ONE command path (36 -> 37), not three.
+        ("guards",),
     }
 )
 
-EXPECTED_COMMAND_COUNT = 36
+EXPECTED_COMMAND_COUNT = 37
 assert len(EXPECTED_COMMAND_PATHS) == EXPECTED_COMMAND_COUNT, (
     f"EXPECTED_COMMAND_PATHS itself has {len(EXPECTED_COMMAND_PATHS)} entries, "
     f"not {EXPECTED_COMMAND_COUNT} -- this is a bug in this file, fix the set "
@@ -190,14 +205,16 @@ def main(argv=None) -> int:
     for path in added:
         report.error(
             f"[argv-contract] ci.py registers {' '.join(path)!r} which is NOT in "
-            "the frozen 36-command-path surface. If this addition is intended, "
+            f"the frozen {EXPECTED_COMMAND_COUNT}-command-path surface. If this "
+            "addition is intended, "
             "update EXPECTED_COMMAND_PATHS in "
             "native/scripts/ci/check_argv_contract.py in the SAME COMMIT."
         )
     for path in removed:
         report.error(
             f"[argv-contract] ci.py no longer registers {' '.join(path)!r}, which "
-            "the frozen 36-command-path surface expects. If this removal is "
+            f"the frozen {EXPECTED_COMMAND_COUNT}-command-path surface expects. "
+            "If this removal is "
             "intended, update EXPECTED_COMMAND_PATHS in "
             "native/scripts/ci/check_argv_contract.py in the SAME COMMIT."
         )

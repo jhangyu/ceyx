@@ -395,12 +395,12 @@ jobs:
       # these five and the two below, in tmp/verify/impl-b31/triage-table.md.
       # check_expected_additions.py stays unwired for its own,
       # independent reason: user-ordered for the parking-lot round, same
-      # as WI-26's eighth candidate. fresh_runner_gate.py stays unwired for
-      # TWO independent reasons: it is a local pre-push instrument that
-      # simulates "a fresh checkout has none of this machine's gitignored
-      # vendored trees" via `git worktree` (redundant inside a CI job that
-      # already IS a fresh `actions/checkout`), AND it is independently on
-      # the Phase 1 deletion list.
+      # as WI-26's eighth candidate.
+      # (A paragraph here used to explain why the local `git worktree`-based
+      # fresh-checkout simulator stayed unwired. Phase 1 deleted that
+      # instrument -- the digest-pinned guard container supersedes it -- and
+      # this paragraph went with it, because Phase 1's acceptance is a
+      # literal grep-zero claim on that filename and a comment is a hit.)
 
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here

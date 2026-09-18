@@ -66,6 +66,11 @@ FROZEN_CLI_SURFACE = {
     "dist-list",
     "provision",
     "vcpkg",
+    # Phase 1 (four-phase CI migration): the containerised repo-static guard
+    # block. One top-level command -- its `--docker`/`--in-container` are
+    # mutually exclusive FLAGS, not sub-parsers, so this set (which covers
+    # top-level names only) gains exactly one entry.
+    "guards",
 }
 
 
