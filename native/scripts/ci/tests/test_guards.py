@@ -199,16 +199,19 @@ class GuardListTest(unittest.TestCase):
         the gate. Shrinking a gate to match a document is the failure this
         whole campaign keeps paying for.
 
-        Count bumped 17 -> 18 by Phase 2 (impl-p2-render-opus, lead18
-        ruling): the tuple GAINED `ci.py render-workflows --check`, the
-        rendered == committed assertion. Bumping for a GROWTH does not touch
-        what this test defends -- the membership it pins
-        (check_test_marker_leak.py) is asserted separately above and is
-        unchanged. A future edit that SHRINKS this number still has to come
-        here and read the paragraph above, which is the whole point."""
+        Count history: 17 -> 18 when Phase 2 added `ci.py
+        render-workflows --check`, then 18 -> 13 when Phase 2 DELETED its
+        five synchronizer guards. That second move is a shrink, and it is
+        the one this test is built to interrogate -- so read the paragraph
+        above before concluding it is fine. It is fine here for a reason
+        the paragraph does not cover: those five were removed by a USER
+        RULING (2026-09-18 21:40) that named them individually, not to
+        make a number match a document. The membership this test actually
+        pins (check_test_marker_leak.py) is asserted separately above and
+        is unchanged."""
         listed = {g[0] for g in guards.GUARDS}
         self.assertIn("native/scripts/ci/check_test_marker_leak.py", listed)
-        self.assertEqual(len(guards.GUARDS), 18)
+        self.assertEqual(len(guards.GUARDS), 13)
 
     def test_artifact_dependent_guards_are_excluded(self):
         """The membership rule is 'repo-static'. These two read
@@ -288,16 +291,17 @@ class StaleRosterTest(unittest.TestCase):
         for path in guards.RETIREMENT_SCHEDULE:
             self.assertIn(path, listed, f"{path} is scheduled but not in GUARDS")
 
-    def test_six_entries_are_scheduled_for_retirement(self):
-        """18 - 5 (Phase 2) - 1 (Phase 3) = 12 at the end of the migration.
+    def test_one_entry_is_scheduled_for_retirement(self):
+        """13 - 1 (Phase 3) = 12 at the end of the migration.
 
-        This test passes either way -- RETIREMENT_SCHEDULE is untouched at
-        six -- but the arithmetic in this line described the tuple, and
-        Phase 2's addition falsified it. A passing test carrying a false
-        comment is the trap, not the failure."""
-        self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 6)
+        Phase 2's five landed, so its rows are gone from the schedule with
+        the guards they described. The single remaining row is Phase 3's
+        linkage-table entry, and it is the DANGEROUS shape: Phase 3 removes
+        that script's `--check` MODE, not the script, so a bare existence
+        check would pass while the guard silently stopped working."""
+        self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 1)
         phases = [p for p, _ in guards.RETIREMENT_SCHEDULE.values()]
-        self.assertEqual(phases.count("Phase 2"), 5)
+        self.assertEqual(phases.count("Phase 2"), 0)
         self.assertEqual(phases.count("Phase 3"), 1)
 
 

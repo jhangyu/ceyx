@@ -87,22 +87,25 @@ OBSERVABILITY_MARKERS: frozenset[str] = frozenset({"DLL_SIZE_BYTES"})
 # EXPECTED_ADDITIONS ledger: a named, printed record of markers that a
 # SPECIFIC push deliberately introduced (a new guard printing a new marker
 # for the first time). AC-2's "zero deltas" contract would otherwise fail
-# every push that adds a guard, for succeeding at its own job -- push 2
-# introduced SHELL_ALLOWLIST_SIZE and SHELL_PROHIBITION_RESULT on the
-# `nativetests` leg and neither exists in the r7/d33cc607 baseline, so both
-# show up as `+1` with no corresponding baseline line.
+# every push that adds a guard, for succeeding at its own job.
+#
+# REMOVALS are the mirror case and are handled the same way, in the same
+# commit: Phase 2 deleted check_shell_prohibition.py, so the two entries it
+# owned (SHELL_ALLOWLIST_SIZE, SHELL_PROHIBITION_RESULT) left this ledger
+# WITH the script that emitted them. Zero delta is restored by construction
+# -- the lines stop being emitted and stop being expected in one move. Any
+# captured baseline still holding those two lines must be re-cut (user
+# ruling, AC-2 removal semantics, 2026-09-18 22:47).
 #
 # This is NOT the same relief as OBSERVABILITY_MARKERS: an observability
 # entry tolerates the VALUE varying forever (nothing in this repo controls
 # it). Here the repository controls the value completely -- each entry
 # records the EXACT full normalized line a push introduced, and only that
 # exact line is treated as an expected addition. A different value for the
-# same key (e.g. a wrong/unratcheted SHELL_ALLOWLIST_SIZE) is NOT on the
-# ledger and therefore still FAILS as an ordinary unlisted addition -- this
-# is what keeps SHELL_ALLOWLIST_SIZE an ASSERTION marker with a deliberately
-# updated expected value, not an observability marker: the allowlist ratchet
-# is the entire point of the shell-prohibition guard (WI-4), and normalising
-# its count away would let ten entries be added back unnoticed.
+# same key is NOT on the ledger and therefore still FAILS as an ordinary
+# unlisted addition. That is what keeps a ratcheted count an ASSERTION
+# marker with a deliberately updated expected value rather than an
+# observability marker whose drift nobody notices.
 #
 # Each ratchet updates its own ledger entry's `line` in the same commit that
 # shrinks the allowlist, in principle -- coordinated through the leader per
@@ -160,8 +163,6 @@ class _ExpectedAddition:
 
 
 EXPECTED_ADDITIONS: tuple[_ExpectedAddition, ...] = (
-    _ExpectedAddition("nativetests", "SHELL_ALLOWLIST_SIZE=42", "B2-3 / P-21+P-22 (allowlist.py ratchet, 44->42: android_build.yml's two DT_NEEDED shell steps collapsed into one `ci.py dt-needed --platform android` call; both exemptions retired in the same commit)"),
-    _ExpectedAddition("nativetests", "SHELL_PROHIBITION_RESULT=PASS", "push 2 / b88c41a4"),
     _ExpectedAddition("nativetests", "TABLE_COUNT=10", "push 9 / WI-26 (wired check_alias_table_convention.py:92 into build.yml)"),
     _ExpectedAddition("nativetests", "ALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES", "push 9 / WI-26 (wired check_alias_table_convention.py:98 into build.yml)"),
 )

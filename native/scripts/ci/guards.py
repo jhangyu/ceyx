@@ -112,8 +112,8 @@ DOCKERFILE = Path("native/ci.Dockerfile")
 # roster that goes stale silently is the exact defect class this campaign
 # exists to remove. You are not relied upon to remember: `_preflight()` below
 # fails LOUDLY and names the retiring phase and owner from
-# `RETIREMENT_SCHEDULE`. Six of the seventeen entries are already scheduled
-# for removal -- keep that map in step with this tuple.
+# `RETIREMENT_SCHEDULE`. One of the thirteen entries is still scheduled for
+# removal (Phase 3) -- keep that map in step with this tuple.
 #
 # ADDING a guard is the same discipline in reverse: apply the membership rule,
 # add the tuple entry, and if it is NOT repo-static do not add it here at all
@@ -165,15 +165,11 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     ("native/scripts/gen_shipped_files_cmake.py", "--check"),
     ("native/scripts/ci/check_cmake_sources_tracked.py",),
     ("native/scripts/ci/check_no_test_execution_in_ci.py",),
-    ("native/scripts/ci/check_shell_prohibition.py",),        # RETIRES: Phase 2
-    ("native/scripts/ci/check_argv_contract.py",),            # RETIRES: Phase 2
     ("native/scripts/ci/check_errexit_rc_capture.py",),
-    ("native/scripts/ci/check_folded_yaml_reverse_sentinel.py",),  # RETIRES: Phase 2
-    ("native/scripts/ci/check_step_order.py",),               # RETIRES: Phase 2
-    ("native/scripts/ci/check_wiring_is_ledger.py",),         # RETIRES: Phase 2
-    # KEPT, despite sitting next to five Phase 2 casualties and being the
-    # kind of name that looks like one: the user's 21:40 ruling scoped that
-    # deletion list to five, and this is not among them.
+    # KEPT. The user's 21:40 ruling scoped Phase 2's deletion list to five
+    # guards and this was not among them; those five are now gone and this
+    # one remains, which is the ruling having been applied rather than
+    # merely recorded.
     ("native/scripts/ci/check_expected_additions.py",),
     # SEVENTEENTH, and the only contested membership. It is a meta-guard: it
     # runs `ci.py selftest` as a subprocess and checks that no test leaked a
@@ -220,19 +216,13 @@ GUARDS: tuple[tuple[str, ...], ...] = (
 # The comments are for the person reading the tuple; this map is for the
 # person staring at a red gate at 3am wondering what they broke.
 #
-# Arithmetic for whoever reads next: 18 - 5 (Phase 2) - 1 (Phase 3) = 12 at
-# the end of the migration. Every one of these entries is LIVE until its
-# deletion actually lands -- coverage does not drop on a schedule that might
-# slip, so nothing here is pre-emptively removed.
+# Arithmetic for whoever reads next: Phase 2's five are DELETED as of this
+# commit, taking the tuple 18 -> 13; Phase 3 removes one more (the
+# linkage-table --check mode) for 12 at the end of the migration. The one
+# row left below is that Phase 3 entry. An entry here is LIVE until its
+# deletion actually lands -- coverage does not drop on a schedule that
+# might slip, so nothing is pre-emptively removed.
 RETIREMENT_SCHEDULE: dict = {
-    "native/scripts/ci/check_shell_prohibition.py": ("Phase 2", "impl-p2-render-opus"),
-    "native/scripts/ci/check_argv_contract.py": ("Phase 2", "impl-p2-render-opus"),
-    "native/scripts/ci/check_folded_yaml_reverse_sentinel.py": (
-        "Phase 2",
-        "impl-p2-render-opus",
-    ),
-    "native/scripts/ci/check_step_order.py": ("Phase 2", "impl-p2-render-opus"),
-    "native/scripts/ci/check_wiring_is_ledger.py": ("Phase 2", "impl-p2-render-opus"),
     # Phase 3 removes the --check MODE; the script itself stays, because
     # native/deps/linkage_table.md names it as its own regenerator.
     "native/scripts/gen_linkage_table.py": ("Phase 3", "impl-p3"),
