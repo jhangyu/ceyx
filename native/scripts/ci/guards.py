@@ -189,6 +189,29 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     # that only manifests under the runner's interpreter is precisely the
     # shape this container exists to catch.
     ("native/scripts/ci/check_test_marker_leak.py",),
+    # EIGHTEENTH, added by Phase 2 (lead18 ruling): the rendered == committed
+    # assertion, which is contract acceptance 3's first clause. It belongs
+    # HERE rather than in a hand-written build.yml step, on this module's own
+    # membership rule -- it reads nothing but git-tracked content (the
+    # renderer's data and the committed YAML), so it is repo-static by
+    # definition. A separate build.yml step would have satisfied the same
+    # acceptance while reintroducing exactly what Phase 1 removed: a guard
+    # wired by hand beside the verb that was supposed to subsume it.
+    #
+    # It is also the only entry that invokes a `ci.py` VERB rather than a
+    # standalone script. That is deliberate -- the renderer must be reachable
+    # through the one command this campaign exists to produce, not through a
+    # second entry point that could drift from it.
+    #
+    # NOTE for whoever deletes things next: `--check` is byte-identity only.
+    # It does NOT catch a renderer that drops a step, because once that
+    # renderer's output is committed the two sides agree again -- the
+    # assertion is satisfied by the very file that lost the step. The step
+    # NAME diff (`ci.py render-workflows --step-names`) is what sees that,
+    # and byte-identity in turn sees degradation INSIDE a step body that a
+    # name diff cannot. Neither subsumes the other; do not drop one for the
+    # other.
+    ("native/scripts/ci.py", "render-workflows", "--check"),
 )
 
 # Machine-readable twin of the `# RETIRES:` comments in GUARDS above. It
@@ -197,7 +220,7 @@ GUARDS: tuple[tuple[str, ...], ...] = (
 # The comments are for the person reading the tuple; this map is for the
 # person staring at a red gate at 3am wondering what they broke.
 #
-# Arithmetic for whoever reads next: 17 - 5 (Phase 2) - 1 (Phase 3) = 11 at
+# Arithmetic for whoever reads next: 18 - 5 (Phase 2) - 1 (Phase 3) = 12 at
 # the end of the migration. Every one of these entries is LIVE until its
 # deletion actually lands -- coverage does not drop on a schedule that might
 # slip, so nothing here is pre-emptively removed.
