@@ -243,37 +243,48 @@ jobs:
       # is an ordinary environment variable inside `run:` steps, so paths are
       # composed there.
     steps:
-      # B3-1 (2026-09-18): `fetch-depth: 0` guarantees `origin/main` resolves
-      # for whichever ref triggers this job. GitHub Actions' default
-      # `actions/checkout@v4` (fetch-depth: 1) only fetches the single
-      # commit the run is actually building -- `refs/remotes/origin/main`
-      # is created ONLY when that commit IS on main (a push to main), and
-      # stays entirely absent on a PR branch or a `ci/**` push. A local
-      # clone always creates `origin/<default>` regardless of which local
-      # branch is checked out, so "not on main" was the wrong mental model
-      # for the precondition (a same-repo probe proved that leg RESOLVES);
-      # the real trigger is "was origin/main ever fetched". `fetch-depth: 0`
-      # fetches full history for every ref (mirroring the one other
-      # precedent in this repo, `macos_build.yml:156`).
+      # NO `fetch-depth: 0` HERE, DELIBERATELY -- and this is the second
+      # time that absence needs defending, so the reasoning is recorded
+      # rather than the setting.
       #
-      # NOTHING IN THIS JOB CONSUMES `origin/main` TODAY -- this is a
-      # precondition for a consumer that does not exist in this workflow
-      # yet, not a fix with an immediate CI effect. `check_wiring_is_ledger.py`
-      # (guard (f)2, `--base origin/main` by default) is the one script in
-      # the tree that reads this ref, and a frozen four-phase CI migration
-      # ruling (2026-09-18) puts it on the Phase 1/2 deletion list rather
-      # than wiring it here -- see the guard-scope note this migration
-      # removed below and `tmp/verify/impl-b31/triage-table.md`. This step
-      # is kept because Phase 0 of that migration is expected to rely on
-      # the same precondition; a red-proof of why the precondition matters
-      # (a shallow clone makes the guard exit 0/PASS while silently
-      # examining zero steps instead of the real diff) is captured at
-      # `tmp/verify/lead17/b31-shallow-red-proof.txt`.
+      # A `fetch-depth: 0` lived here from B3-1 (2026-09-18) until it was
+      # removed. Its own comment stated plainly that NOTHING IN THIS JOB
+      # CONSUMED `origin/main`: it was a precondition staged for an
+      # anticipated consumer, `check_wiring_is_ledger.py`, which was never
+      # wired into this job. That consumer now runs in the
+      # `guards-container` job, inside the guard block, and THAT job carries
+      # its own `fetch-depth: 0` for the purpose. So the precondition was
+      # satisfied in the wrong place; removing it here does not affect it.
+      #
+      # MEASURED BEFORE REMOVING, not reasoned. Every step remaining in this
+      # job either does not invoke git at all, or invokes it against a
+      # repository that is NOT this checkout -- which is the only thing
+      # `fetch-depth` governs:
+      #   * `ci.py selftest` -- the only step touching this repo's git. Runs
+      #     green in a depth-1 clone where `origin/main` does not resolve.
+      #   * `verify_raw_provenance.py` -- `git -C <vendored component>
+      #     rev-parse HEAD`, a DIFFERENT repo (native/third_party/libraw,
+      #     whose .git is stripped after fetch), and HEAD rather than history.
+      #   * "Bootstrap vcpkg (D5)" -- clones microsoft/vcpkg into
+      #     $RUNNER_TEMP and checks out a ref in THAT clone.
+      #   * check_alias_table_convention.py, build_deps.py,
+      #     build_native_watchdog.py -- zero git invocations.
+      #
+      # The probe carries a POSITIVE CONTROL, because a depth-1 probe that
+      # passes for the wrong reason -- never exercising a git-sensitive path
+      # -- is indistinguishable from a real pass. The control runs
+      # `check_wiring_is_ledger.py`, a known history-dependent consumer, in
+      # the same shallow checkout and requires it to FAIL. Evidence, with the
+      # tip it was taken at recorded inside:
+      # `tmp/verify/impl-p1-docker/setting1-probe.txt`.
+      #
+      # IF YOU ADD A STEP HERE THAT READS THIS REPO'S HISTORY OR NEEDS
+      # `origin/main`, you must re-add `fetch-depth: 0` -- and re-run that
+      # probe, including its positive control, to show the need is real.
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
       # WI-6 fix (push-2 gate defect): provisioning the pinned interpreter
       # must happen BEFORE any guard runs, not after. ci_conventions_check.py
