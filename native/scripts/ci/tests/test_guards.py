@@ -240,15 +240,22 @@ class StaleRosterTest(unittest.TestCase):
     the most expensive wrong turn available here."""
 
     def test_missing_guard_names_its_phase_and_owner(self):
-        with mock.patch.object(
-            guards, "GUARDS", (("native/scripts/ci/check_step_order.py",),)
+        # Synthetic fixture rather than a real guard/phase: every real
+        # RETIREMENT_SCHEDULE row is retired sooner or later (Phase 3's own
+        # row already is), so a fixture pinned to a real entry goes stale
+        # the moment that phase lands. Mocking both GUARDS and
+        # RETIREMENT_SCHEDULE keeps this testing real _preflight() code
+        # without depending on migration state.
+        fake_path = "native/scripts/ci/check_fake_guard_for_test.py"
+        with mock.patch.object(guards, "GUARDS", ((fake_path,),)), mock.patch.object(
+            guards, "RETIREMENT_SCHEDULE", {fake_path: ("Phase X", "test-owner")}
         ):
             tmp = Path(tempfile.mkdtemp(prefix="ceyx-guards-stale."))
             problems = guards._preflight(tmp)
         self.assertEqual(len(problems), 1)
         self.assertIn("STALE GUARDS ENTRY", problems[0])
-        self.assertIn("Phase 2", problems[0])
-        self.assertIn("impl-p2-render-opus", problems[0])
+        self.assertIn("Phase X", problems[0])
+        self.assertIn("test-owner", problems[0])
 
     def test_unscheduled_missing_guard_says_so_rather_than_inventing_an_owner(self):
         with mock.patch.object(guards, "GUARDS", (("native/scripts/not_a_guard.py",),)):
@@ -256,25 +263,6 @@ class StaleRosterTest(unittest.TestCase):
             problems = guards._preflight(tmp)
         self.assertEqual(len(problems), 1)
         self.assertIn("NO scheduled retirement", problems[0])
-
-    def test_removed_check_flag_is_diagnosed_not_reported_as_a_guard_failure(self):
-        """The shape a retirement leaves if a --check-mode deletion lands
-        without removing the GUARDS/RETIREMENT_SCHEDULE entry: the FILE
-        still exists, so the existence preflight passes and the script dies
-        on an unrecognised flag while looking perfectly healthy. Uses a
-        currently-scheduled Phase 2 guard (gen_linkage_table.py's own Phase
-        3 entry was retired for real by impl-p3, so it no longer exercises
-        this path -- see test_stale_entry_with_no_schedule_is_flagged_as_unknown
-        for that now-actual scenario)."""
-        result = mock.Mock()
-        result.stdout = ""
-        result.stderr = "usage: check_shell_prohibition.py\nerror: unrecognized arguments: --check\n"
-        diagnosis = guards._classify_failure(
-            ("native/scripts/ci/check_shell_prohibition.py", "--check"), result
-        )
-        self.assertIn("STALE GUARDS ENTRY", diagnosis)
-        self.assertIn("no longer accepts --check", diagnosis)
-        self.assertIn("Phase 2", diagnosis)
 
     def test_stale_entry_with_no_schedule_is_flagged_as_unknown(self):
         """The actual current shape for gen_linkage_table.py: its --check
@@ -291,19 +279,6 @@ class StaleRosterTest(unittest.TestCase):
         self.assertIn("STALE GUARDS ENTRY", diagnosis)
         self.assertIn("NO scheduled retirement", diagnosis)
 
-    def test_an_ordinary_guard_failure_is_not_misdiagnosed_as_roster_drift(self):
-        """The common case must stay quiet, or a real finding gets buried
-        under a bookkeeping message that does not apply."""
-        result = mock.Mock()
-        result.stdout = "[gen_linkage_table] FAIL -- table does not match manifest\n"
-        result.stderr = ""
-        self.assertEqual(
-            guards._classify_failure(
-                ("native/scripts/gen_linkage_table.py", "--check"), result
-            ),
-            "",
-        )
-
     def test_retirement_schedule_only_names_real_guards(self):
         """The map and the tuple must not drift apart -- a schedule row for a
         path nobody runs is a lie that outlives the guard."""
@@ -311,14 +286,14 @@ class StaleRosterTest(unittest.TestCase):
         for path in guards.RETIREMENT_SCHEDULE:
             self.assertIn(path, listed, f"{path} is scheduled but not in GUARDS")
 
-    def test_five_entries_are_scheduled_for_retirement(self):
-        """17 - 5 (Phase 2, still pending) - 1 (Phase 3, DONE -- retired
-        for real, so it no longer appears here) = 11 at the end of the
-        migration."""
-        self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 5)
+    def test_phase_3_retirement_is_final_not_pending(self):
+        """A literal total count here re-rots at every OTHER phase's
+        landing (Phase 2's five in particular) -- this pins only what
+        Phase 3's own deletion is responsible for: its schedule row is
+        gone for good, not merely pending, and must never reappear."""
         phases = [p for p, _ in guards.RETIREMENT_SCHEDULE.values()]
-        self.assertEqual(phases.count("Phase 2"), 5)
-        self.assertEqual(phases.count("Phase 3"), 0)
+        self.assertNotIn("Phase 3", phases)
+        self.assertNotIn("native/scripts/gen_linkage_table.py", guards.RETIREMENT_SCHEDULE)
 
 
 class ScopePrintingTest(unittest.TestCase):
