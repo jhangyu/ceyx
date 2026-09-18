@@ -134,6 +134,83 @@ class GitPrimitiveTests(unittest.TestCase):
         self.assertIn("check_wiring_is_ledger", cwil._git("ls-tree", "--name-only", "HEAD:native/scripts/ci"))
 
 
+class RevisionResolutionTests(unittest.TestCase):
+    """FAIL CLOSED when a revision does not resolve.
+
+    Measured defect (lead17, `tmp/verify/lead17/b31-shallow-red-proof-
+    ADJUDICATION.md`): with `refs/remotes/origin/main` deleted,
+    `NEW_STEPS_EXAMINED` read 152 instead of 0 -- and RC was 0 with
+    `WIRING_LEDGER_RESULT=PASS` in BOTH cases. The exit code could not
+    distinguish a real diff from an evaporated baseline.
+
+    The tests below pin BOTH halves of the distinction this fix rests on.
+    An unresolvable REVISION is fatal; a missing PATH at a valid revision
+    stays absence, because a guard that fired on every newly added file
+    would be disabled by the first person to meet it -- the same end state
+    as the vacuous pass, reached from the other side.
+    """
+
+    _NO_SUCH_REV = "definitely-not-a-rev"
+
+    def test_unresolvable_base_exits_nonzero_instead_of_passing_vacuously(self):
+        rc, out, err = _run_captured(
+            cwil.main, ["--base", self._NO_SUCH_REV, "--head", "HEAD"]
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("WIRING_LEDGER_RESULT=ERROR", out)
+        self.assertNotIn("WIRING_LEDGER_RESULT=PASS", out)
+        self.assertIn(self._NO_SUCH_REV, err)
+
+    def test_unresolvable_base_examines_nothing_rather_than_everything(self):
+        """The old failure did not merely pass -- it passed having silently
+        treated all 152 wired steps as new. No count may be reported from a
+        range whose baseline was never found."""
+        _rc, out, _err = _run_captured(
+            cwil.main, ["--base", self._NO_SUCH_REV, "--head", "HEAD"]
+        )
+        self.assertNotIn("NEW_STEPS_EXAMINED=", out)
+
+    def test_unresolvable_head_exits_nonzero(self):
+        rc, out, _err = _run_captured(
+            cwil.main, ["--base", "HEAD", "--head", self._NO_SUCH_REV]
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("WIRING_LEDGER_RESULT=ERROR", out)
+
+    def test_unresolvable_revision_is_NOT_a_GitReadError_subclass(self):
+        """STRUCTURAL, and the reason the fix holds. `_workflow_names_at_rev`
+        still does `except GitReadError: return []`. If a later tidy-up made
+        `UnresolvableRevision` inherit from `GitReadError`, that handler
+        would swallow it and restore the exact vacuous PASS this task
+        removed -- with every test above still green, because main() would
+        never see the exception. This is the only test that notices."""
+        self.assertFalse(issubclass(cwil.UnresolvableRevision, cwil.GitReadError))
+
+    def test_steps_at_rev_raises_rather_than_returning_an_empty_dict(self):
+        with self.assertRaises(cwil.UnresolvableRevision):
+            cwil._steps_at_rev(self._NO_SUCH_REV)
+
+    def test_resolve_rev_returns_a_commit_id_for_a_real_rev(self):
+        resolved = cwil._resolve_rev("HEAD")
+        self.assertRegex(resolved, r"^[0-9a-f]{40}$")
+
+    def test_a_path_absent_at_a_VALID_rev_is_still_absence_not_fatal(self):
+        """The other half of the distinction: a genuinely new file must not
+        make this guard fatal, or it fires on every workflow addition."""
+        self.assertIsNone(cwil._file_at_rev("HEAD", "no/such/file/here.py"))
+        # ...and the surrounding read still succeeds at that same rev, so the
+        # absence was handled rather than merely not raising.
+        self.assertTrue(cwil._workflow_names_at_rev("HEAD"))
+
+    def test_both_revs_resolvable_still_produces_an_ordinary_verdict(self):
+        """Guards against the fix converting a working guard into a noisy
+        one: a valid range must still reach a normal PASS/FAIL path."""
+        rc, out, _err = _run_captured(cwil.main, ["--base", "HEAD", "--head", "HEAD"])
+        self.assertEqual(rc, 0)
+        self.assertIn("WIRING_LEDGER_RESULT=PASS", out)
+        self.assertIn("NEW_STEPS_EXAMINED=0", out)
+
+
 class RealHistoryReplayTests(unittest.TestCase):
     """The acceptance evidence: (f)② is a claim about commits."""
 

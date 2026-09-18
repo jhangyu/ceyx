@@ -81,6 +81,31 @@ DEFAULT_BASE = "origin/main"
 DEFAULT_HEAD = "HEAD"
 
 
+class UnresolvableRevision(RuntimeError):
+    """A REVISION named on the command line does not resolve to a commit.
+
+    DELIBERATELY NOT A SUBCLASS of `GitReadError`. The two conditions look
+    alike at the git-plumbing layer and are opposites at the semantic layer:
+
+      * `GitReadError` from a PATH query at a VALID rev means "that path did
+        not exist then" -- a legitimate, expected answer for a genuinely new
+        file. Swallowing it into None/[] is correct, and making it fatal
+        would fire this guard on every new workflow added, which gets the
+        guard disabled by whoever meets it first.
+      * THIS means the BASELINE ITSELF EVAPORATED. Every step then reads as
+        new (or none do), and the verdict is computed against nothing.
+
+    Measured, not hypothesised (lead17, `tmp/verify/lead17/
+    b31-shallow-red-proof-ADJUDICATION.md`): in a clone with
+    `refs/remotes/origin/main` deleted, `NEW_STEPS_EXAMINED` went 0 -> 152
+    while RC stayed 0 and the result stayed PASS. The exit code could not
+    distinguish a guard examining its real diff from one whose baseline had
+    silently vanished. Inheriting from `GitReadError` would put this back:
+    `_workflow_names_at_rev`'s `except GitReadError: return []` would catch
+    it and restore the vacuous pass.
+    """
+
+
 class GitReadError(RuntimeError):
     """A read-only git query returned non-zero -- normally "this path or rev
     does not exist", which several callers treat as absence rather than as
@@ -127,6 +152,27 @@ def _file_at_rev(rev: str, relpath: str) -> str | None:
         return None  # the path did not exist at that rev
 
 
+def _resolve_rev(rev: str) -> str:
+    """Resolve ``rev`` to a commit id, or raise `UnresolvableRevision`.
+
+    This is a SEPARATE GIT QUERY from any path read, which is the whole
+    point: it asks only "does this revision exist", so its failure carries
+    exactly one meaning and cannot be confused with "this path is new". It
+    must therefore NOT be implemented by noticing that a path read failed.
+    """
+    try:
+        return _git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").strip()
+    except GitReadError as exc:
+        raise UnresolvableRevision(
+            f"revision {rev!r} does not resolve to a commit in this checkout. "
+            "This guard compares two revisions; with one of them missing it "
+            "would compute its verdict against an empty baseline and report a "
+            "PASS that verified nothing. Commonest cause: a shallow or "
+            "single-branch checkout that never fetched the base ref -- this "
+            "guard requires `fetch-depth: 0` and an explicitly fetched base."
+        ) from exc
+
+
 def _workflow_names_at_rev(rev: str) -> list[str]:
     try:
         listing = _git("ls-tree", "--name-only", f"{rev}:{_WORKFLOW_DIR_RELPATH}")
@@ -157,7 +203,14 @@ def ledger_keys_at_rev(rev: str) -> set[str]:
 
 
 def _steps_at_rev(rev: str) -> dict[tuple[str, str], list[str]]:
-    """(workflow, step_name) -> its joined command lines, at ``rev``."""
+    """(workflow, step_name) -> its joined command lines, at ``rev``.
+
+    Resolves ``rev`` FIRST and lets `UnresolvableRevision` propagate. An
+    empty return from here is then a real statement about the revision's
+    contents ("no workflows there") rather than the residue of a revision
+    that was never found -- the two used to be indistinguishable.
+    """
+    _resolve_rev(rev)
     steps: dict[tuple[str, str], list[str]] = {}
     for name in _workflow_names_at_rev(rev):
         text = _file_at_rev(rev, f"{_WORKFLOW_DIR_RELPATH}/{name}")
@@ -199,8 +252,19 @@ def main(argv=None) -> int:
     )
     print(f"WIRING_LEDGER_RANGE={args.base}..{args.head}")
 
-    base_steps = _steps_at_rev(args.base)
-    head_steps = _steps_at_rev(args.head)
+    # FAIL CLOSED on an unresolvable revision. Before this, an absent
+    # `origin/main` made `base_steps` empty, every wired step read as new,
+    # and the run still printed PASS with RC=0 -- measured at 152 phantom
+    # new steps (see `UnresolvableRevision`). A guard whose baseline can
+    # evaporate without changing its exit code is not a guard.
+    try:
+        base_steps = _steps_at_rev(args.base)
+        head_steps = _steps_at_rev(args.head)
+    except UnresolvableRevision as exc:
+        print("WIRING_LEDGER_RESULT=ERROR")
+        report.error(f"[wiring-is-ledger] {exc}")
+        return 2
+
     new_step_keys = [k for k in head_steps if k not in base_steps]
 
     offenders: list[tuple[str, str, set[str]]] = []
