@@ -502,6 +502,63 @@ jobs:
             --idle-timeout-sec 180
 
   # --------------------------------------------------------------------------
+  # Repo-static guards, in the digest-pinned container (Phase 1 of the
+  # four-phase CI migration).
+  #
+  # WHY A SEPARATE JOB ON LINUX, rather than more steps in the macOS job that
+  # already runs guards: the container image is linux/amd64, and the
+  # acceptance condition is that the local gate and the CI step are the
+  # BYTE-IDENTICAL `docker run` string, digest included. A macOS host cannot
+  # satisfy that, and the no-container fallback ("just run the guards
+  # directly here") forfeits the one property the container exists to
+  # provide -- the runner's site-packages, notably the ABSENCE of PyYAML,
+  # which is what made a guard's `import yaml` pass on a developer machine
+  # and redden CI. A fallback would pass acceptance while deleting the reason
+  # for the work.
+  #
+  # This job provisions NOTHING beyond checkout + interpreter, because every
+  # guard in the block is repo-static by construction (the membership rule is
+  # in native/scripts/ci/guards.py). No Homebrew, no vcpkg, no Halide/LibRaw
+  # fetch -- so it fails in under a minute when it fails, far ahead of any
+  # build leg.
+  #
+  # `fetch-depth: 0` is REQUIRED, not hygiene: check_wiring_is_ledger.py
+  # compares two revisions and fails closed when `origin/main` does not
+  # resolve, which is exactly what a shallow checkout produces.
+  #
+  # It uploads no artifact, so it is invisible to ci_conventions_check's C6
+  # rule (which ties build.yml's `required=` set to upload-artifact names).
+  # Nothing to add there.
+  # --------------------------------------------------------------------------
+  guards-container:
+    name: Repo-static guards (digest-pinned container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # See the job comment: check_wiring_is_ledger fails closed without
+          # a resolvable origin/main.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The ONLY step in this job. Its body is deliberately one line: the
+      # docker argv (image digest included) is rendered inside
+      # native/scripts/ci/guards.py so that this step and a developer's local
+      # `python3 native/scripts/ci.py guards --docker` are the same code path
+      # producing the same string, rather than two strings a reader must diff
+      # by eye. Do not inline the docker command here "for visibility" --
+      # that is precisely the arrangement this replaces.
+      - name: Run repo-static guards in the digest-pinned container
+        run: python3 native/scripts/ci.py guards --docker
+
+  # --------------------------------------------------------------------------
   # Guard.
   #
   # Plan B's named risk: "matrix-level `if:` for platform-specific steps is a
@@ -518,7 +575,13 @@ jobs:
   all-platforms-green:
     name: All platform legs succeeded
     runs-on: ubuntu-latest
-    needs: [macos, linux, windows, android]
+    # `guards-container` joins the four platform legs here (Phase 1). It is
+    # not a platform leg and produces no bytes, but this job is the single
+    # "is this run publishable" gate, and a tree that fails its own static
+    # guards is not publishable. Same treatment as the legs, and for the same
+    # documented reason: `needs:` alone is satisfied by a SKIPPED job, so the
+    # result is compared against the literal "success" below.
+    needs: [macos, linux, windows, android, guards-container]
     if: always()
     steps:
       - name: Assert every platform leg reported success
@@ -527,15 +590,24 @@ jobs:
           LINUX_RESULT: ${{ needs.linux.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
           ANDROID_RESULT: ${{ needs.android.result }}
+          # Bracket syntax is REQUIRED here, not stylistic: the job id
+          # contains a hyphen, and `needs.guards-container.result` parses the
+          # hyphen as subtraction, yielding an empty string. An empty result
+          # is treated as failure by the comparison below, so the mistake
+          # would have failed closed rather than silently passing -- but it
+          # would have failed every run, for a reason nothing in the log
+          # explains.
+          GUARDS_RESULT: ${{ needs['guards-container'].result }}
         run: |
-          echo "macos=${MACOS_RESULT} linux=${LINUX_RESULT} windows=${WINDOWS_RESULT} android=${ANDROID_RESULT}"
+          echo "macos=${MACOS_RESULT} linux=${LINUX_RESULT} windows=${WINDOWS_RESULT} android=${ANDROID_RESULT} guards=${GUARDS_RESULT}"
           failed=""
-          for leg in macos linux windows android; do
+          for leg in macos linux windows android guards; do
             case "${leg}" in
               macos)   result="${MACOS_RESULT}" ;;
               linux)   result="${LINUX_RESULT}" ;;
               windows) result="${WINDOWS_RESULT}" ;;
               android) result="${ANDROID_RESULT}" ;;
+              guards)  result="${GUARDS_RESULT}" ;;
             esac
             # Explicit string comparison. An empty result (a leg that never
             # started) must be caught too, which is why this tests for equality
@@ -545,7 +617,7 @@ jobs:
             fi
           done
           if [ -n "${failed}" ]; then
-            echo "::error::platform leg(s) not successful:${failed} — refusing to treat this run as publishable." >&2
+            echo "::error::leg(s)/gate(s) not successful:${failed} — refusing to treat this run as publishable." >&2
             exit 1
           fi
           echo "ALL_LEGS_SUCCESS=1"

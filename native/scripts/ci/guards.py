@@ -71,6 +71,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+import time
 from pathlib import Path
 
 if __package__:
@@ -98,28 +99,39 @@ DOCKERFILE = Path("native/ci.Dockerfile")
 # ---------------------------------------------------------------------------
 # The guard list.
 #
-# MEMBERSHIP RULE, applied mechanically rather than by taste: a guard belongs
-# here if and only if it is REPO-STATIC -- it reads nothing but git-tracked
-# content in the checkout. No fetched dependency, no compiled artifact, no
-# device, no network. That rule is what makes a bare `actions/checkout` (and
-# a read-only bind mount of the same) a sufficient environment for the whole
-# block, and it is why the block can run before any provisioning at all.
+# MEMBERSHIP RULE -- apply this, do not pattern-match the list below. A guard
+# belongs here if and only if it is REPO-STATIC: it reads nothing but
+# git-tracked content in the checkout. No fetched dependency, no compiled
+# artifact, no device, no network. That rule is what makes a bare
+# `actions/checkout` (and a read-only bind mount of the same) a sufficient
+# environment for the whole block, and it is why the block runs before any
+# provisioning at all.
 #
-# DELIBERATELY EXCLUDED, named so the absence is declared and not merely
+# IF YOU DELETE A GUARD SCRIPT, DELETE ITS TUPLE ENTRY IN THE SAME COMMIT.
+# This list does not discover anything; it is a hand-maintained roster, and a
+# roster that goes stale silently is the exact defect class this campaign
+# exists to remove. You are not relied upon to remember: `_preflight()` below
+# fails LOUDLY and names the retiring phase and owner from
+# `RETIREMENT_SCHEDULE`. Six of the seventeen entries are already scheduled
+# for removal -- keep that map in step with this tuple.
+#
+# ADDING a guard is the same discipline in reverse: apply the membership rule,
+# add the tuple entry, and if it is NOT repo-static do not add it here at all
+# -- wire it in build.yml next to the step that provisions what it needs.
+#
+# DELIBERATELY EXCLUDED, named so each absence is declared rather than merely
 # true:
 #   * native/scripts/verify_raw_provenance.py and
 #     native/scripts/check_alias_table_convention.py -- both read
 #     native/third_party/libraw/, which does not exist until the LibRaw
 #     fetch step runs. WI-41 relocated them below that fetch in build.yml
-#     for exactly this reason. They are not repo-static and they stay
-#     wired where they are; this verb does not cover them.
+#     for exactly this reason. Not repo-static; they stay wired where they
+#     are and this verb does not cover them.
 #   * The five product-artifact assertions (exports, DT_NEEDED, import
 #     closure, no-AVX512, min-runtime) -- they read a BUILT library. Out of
-#     scope for this verb by construction, and they keep their existing
-#     per-platform wiring.
+#     scope by construction; they keep their existing per-platform wiring.
 #   * `ci.py selftest` -- a unit-test suite, not a guard over the repo. It
-#     is run by its own build.yml step, ahead of this one.
-#   * native/scripts/ci/check_test_marker_leak.py -- PROVISIONAL, and the
+#     has its own build.yml step, ahead of this one.
 #   * the superseded local fresh-checkout simulator -- a `git worktree`-based
 #     instrument that approximated "a fresh checkout lacks this machine's
 #     gitignored vendored trees". This container subsumes it and Phase 1
@@ -127,15 +139,16 @@ DOCKERFILE = Path("native/ci.Dockerfile")
 #     Phase 1's acceptance is a literal grep-zero claim on that filename, and
 #     a comment is a grep hit.
 #
-# ON THE COUNT, since a number in a document disagreed with the tree: the
-# Phase 1 scope prose says "16 repo-static guards". Applying the membership
-# rule above mechanically yields SEVENTEEN, and this list is the seventeen.
-# The extra one is check_test_marker_leak.py (see its entry below). The
-# discrepancy was raised rather than absorbed, and the ruling was to follow
-# the derivation, not the prose -- a count inherited from a document has
-# been wrong more than once in this campaign. Anyone tempted to "correct"
-# this list back down to sixteen to match a sentence: the sentence is the
-# thing that is out of date.
+# ON THE COUNT: the Phase 1 scope prose says "16 repo-static guards".
+# Applying the membership rule mechanically yields SEVENTEEN, and this list is
+# the seventeen. The discrepancy was raised rather than absorbed, and the
+# ruling (lead18, Ruling 1) was to follow the derivation: a count inherited
+# from a document has been wrong more than once in this campaign, and
+# acceptance names no count. The seventeenth is check_test_marker_leak.py,
+# which has NO build.yml consumer at all -- so adopting 17 does not preserve
+# an existing CI behaviour, it ADDS coverage CI never had. Anyone tempted to
+# "correct" this list back down to sixteen to match a sentence: the sentence
+# is the thing that is out of date.
 # ---------------------------------------------------------------------------
 GUARDS: tuple[tuple[str, ...], ...] = (
     ("native/scripts/check_workflow_bashisms.py",),
@@ -143,16 +156,24 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     ("native/scripts/ci_conventions_check.py",),
     ("native/scripts/derive_oriented_stage4.py", "--check"),
     ("native/scripts/gen_export_manifest.py", "--check"),
+    # RETIRES IN PHASE 3 (impl-p3) -- and it is the DANGEROUS shape: Phase 3
+    # removes the `--check` MODE, not the script. The file will still be
+    # here, so a bare existence check passes and the failure surfaces as an
+    # argparse "unrecognized arguments" error from a script that looks
+    # perfectly healthy. `_classify_failure()` below catches exactly that.
     ("native/scripts/gen_linkage_table.py", "--check"),
     ("native/scripts/gen_shipped_files_cmake.py", "--check"),
     ("native/scripts/ci/check_cmake_sources_tracked.py",),
     ("native/scripts/ci/check_no_test_execution_in_ci.py",),
-    ("native/scripts/ci/check_shell_prohibition.py",),
-    ("native/scripts/ci/check_argv_contract.py",),
+    ("native/scripts/ci/check_shell_prohibition.py",),        # RETIRES: Phase 2
+    ("native/scripts/ci/check_argv_contract.py",),            # RETIRES: Phase 2
     ("native/scripts/ci/check_errexit_rc_capture.py",),
-    ("native/scripts/ci/check_folded_yaml_reverse_sentinel.py",),
-    ("native/scripts/ci/check_step_order.py",),
-    ("native/scripts/ci/check_wiring_is_ledger.py",),
+    ("native/scripts/ci/check_folded_yaml_reverse_sentinel.py",),  # RETIRES: Phase 2
+    ("native/scripts/ci/check_step_order.py",),               # RETIRES: Phase 2
+    ("native/scripts/ci/check_wiring_is_ledger.py",),         # RETIRES: Phase 2
+    # KEPT, despite sitting next to five Phase 2 casualties and being the
+    # kind of name that looks like one: the user's 21:40 ruling scoped that
+    # deletion list to five, and this is not among them.
     ("native/scripts/ci/check_expected_additions.py",),
     # SEVENTEENTH, and the only contested membership. It is a meta-guard: it
     # runs `ci.py selftest` as a subprocess and checks that no test leaked a
@@ -169,6 +190,30 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     # shape this container exists to catch.
     ("native/scripts/ci/check_test_marker_leak.py",),
 )
+
+# Machine-readable twin of the `# RETIRES:` comments in GUARDS above. It
+# exists so a STALE ENTRY produces an error naming the phase and the owner
+# instead of a generic file-not-found that reads like a broken environment.
+# The comments are for the person reading the tuple; this map is for the
+# person staring at a red gate at 3am wondering what they broke.
+#
+# Arithmetic for whoever reads next: 17 - 5 (Phase 2) - 1 (Phase 3) = 11 at
+# the end of the migration. Every one of these entries is LIVE until its
+# deletion actually lands -- coverage does not drop on a schedule that might
+# slip, so nothing here is pre-emptively removed.
+RETIREMENT_SCHEDULE: dict = {
+    "native/scripts/ci/check_shell_prohibition.py": ("Phase 2", "impl-p2-render-opus"),
+    "native/scripts/ci/check_argv_contract.py": ("Phase 2", "impl-p2-render-opus"),
+    "native/scripts/ci/check_folded_yaml_reverse_sentinel.py": (
+        "Phase 2",
+        "impl-p2-render-opus",
+    ),
+    "native/scripts/ci/check_step_order.py": ("Phase 2", "impl-p2-render-opus"),
+    "native/scripts/ci/check_wiring_is_ledger.py": ("Phase 2", "impl-p2-render-opus"),
+    # Phase 3 removes the --check MODE; the script itself stays, because
+    # native/deps/linkage_table.md names it as its own regenerator.
+    "native/scripts/gen_linkage_table.py": ("Phase 3", "impl-p3"),
+}
 
 #: What this verb does NOT cover. Printed in-band on every run.
 NOT_COVERED = (
@@ -214,6 +259,66 @@ def read_pinned_image(repo_root: Path = REPO_ROOT) -> str:
             )
         return ref
     raise ValueError(f"{DOCKERFILE.as_posix()} contains no FROM line")
+
+
+def _retirement_note(path: str) -> str:
+    """The 'who do I talk to' half of a stale-entry error, or '' if this
+    guard has no scheduled retirement."""
+    entry = RETIREMENT_SCHEDULE.get(path)
+    if entry is None:
+        return (
+            " This guard has NO scheduled retirement, so this is not expected "
+            "roster drift -- it is either an unannounced deletion or a broken "
+            "checkout. Do not 'fix' it by removing the entry until you know which."
+        )
+    phase, owner = entry
+    return (
+        f" This guard was scheduled for deletion in {phase} (owner: {owner}) and "
+        f"its GUARDS entry in native/scripts/ci/guards.py was not removed with it. "
+        f"The fix is to delete the tuple entry and its RETIREMENT_SCHEDULE row, "
+        f"NOT to weaken or skip the guard block."
+    )
+
+
+def _preflight(repo_root: Path) -> list:
+    """Fail loudly and specifically on a stale roster entry, BEFORE running
+    anything.
+
+    Six of the seventeen entries are scheduled for deletion by three members
+    across two phases. When one of those deletions lands without the matching
+    tuple edit, the default failure is `python3: can't open file ...` -- which
+    reads like a broken container and sends the reader looking at Docker.
+    This turns it into a sentence naming the phase and the owner.
+    """
+    problems = []
+    for guard in GUARDS:
+        path = guard[0]
+        if not (repo_root / path).is_file():
+            problems.append(f"STALE GUARDS ENTRY: {path} does not exist.{_retirement_note(path)}")
+    return problems
+
+
+def _classify_failure(guard: tuple, result) -> str:
+    """Turn the argparse-flag variant of roster drift into a named diagnosis.
+
+    The `--check` entries are the trap: Phase 3 removes the MODE, not the
+    script, so the file still exists, `_preflight()` is satisfied, and the
+    guard dies with `error: unrecognized arguments: --check` -- an error that
+    looks like a bug in a healthy script rather than a stale roster. Returns
+    '' when the failure is an ordinary guard failure, which is the common
+    case and must stay quiet so real findings are not buried.
+    """
+    flags = [a for a in guard[1:] if a.startswith("-")]
+    if not flags:
+        return ""
+    blob = f"{result.stdout}\n{result.stderr}"
+    if "unrecognized arguments" in blob or "invalid choice" in blob:
+        path = guard[0]
+        return (
+            f"STALE GUARDS ENTRY: {path} exists but no longer accepts "
+            f"{' '.join(flags)}.{_retirement_note(path)}"
+        )
+    return ""
 
 
 def render_docker_argv(image: str, repo_root_field: str = REPO_ROOT_TOKEN) -> list:
@@ -276,7 +381,36 @@ def print_scope() -> None:
         flush=True,
     )
     for i, guard in enumerate(GUARDS, start=1):
-        print(f"GUARDS_SCOPE_COVERS[{i}/{len(GUARDS)}]: {' '.join(guard)}", flush=True)
+        retirement = RETIREMENT_SCHEDULE.get(guard[0])
+        suffix = f"  [retires: {retirement[0]}, owner {retirement[1]}]" if retirement else ""
+        print(
+            f"GUARDS_SCOPE_COVERS[{i}/{len(GUARDS)}]: {' '.join(guard)}{suffix}",
+            flush=True,
+        )
+    # Cost, MEASURED rather than estimated. The first version of this text said
+    # "roughly doubles", inherited from an estimate; the per-guard timings this
+    # very function emits said 21.4s for that one guard against 2.8s for the
+    # other sixteen COMBINED, so the estimate was wrong by roughly a factor of
+    # four in the wrong direction. Corrected to match the instrument, and
+    # recorded here because a cost note that disagrees with the timings printed
+    # ten lines below it is worse than no note. Re-measure before editing.
+    print(
+        "GUARDS_SCOPE_COST: check_test_marker_leak.py re-runs the full unit "
+        "suite in-process and DOMINATES this block -- measured 21.4s against "
+        "2.8s for the other sixteen combined (~8x), so the block costs roughly "
+        "9x what it would without that one guard. Accepted deliberately "
+        "(correctness over speed): it is the only guard covering marker leakage "
+        "into the job log, and CI has never run it before. The GUARDS_SECONDS "
+        "lines below make this checkable on every run instead of trusted from "
+        "this sentence.",
+        flush=True,
+    )
+    print(
+        f"GUARDS_SCOPE_RETIRING: {len(RETIREMENT_SCHEDULE)} of {len(GUARDS)} entries "
+        "are scheduled for deletion by later phases; each stays LIVE until its "
+        "deletion actually lands, and a stale entry fails loudly by name",
+        flush=True,
+    )
     for item in NOT_COVERED:
         print(f"GUARDS_SCOPE_DOES_NOT_COVER: {item}", flush=True)
 
@@ -290,23 +424,50 @@ def run_checks(repo_root: Path = REPO_ROOT) -> int:
     never off a pipeline tail (see run.py's rule 3).
     """
     print_scope()
+
+    # Roster health BEFORE any guard runs. A stale entry is a bookkeeping
+    # failure, not a guard finding, and conflating the two sends the reader
+    # to the wrong place.
+    stale = _preflight(repo_root)
+    for problem in stale:
+        report.error(problem)
+    if stale:
+        report.marker("GUARDS_STALE_ENTRIES", len(stale))
+        report.bare_rc(2, "ci.py guards -- stale roster, nothing executed")
+        return 2
+
     report.section("ci.py guards -- run")
     failures = []
+    diagnoses = []
+    started = time.monotonic()
     for guard in GUARDS:
         label = guard[0]
         print(f"GUARDS_RUN: {' '.join(guard)}", flush=True)
+        guard_started = time.monotonic()
         result = run.run([sys.executable, *guard], cwd=repo_root)
+        elapsed = time.monotonic() - guard_started
         if result.stdout:
             sys.stdout.write(result.stdout if result.stdout.endswith("\n") else result.stdout + "\n")
         if result.stderr:
             sys.stderr.write(result.stderr if result.stderr.endswith("\n") else result.stderr + "\n")
         sys.stdout.flush()
+        # Wall time per guard, in-band: the block's cost is dominated by one
+        # member (check_test_marker_leak re-runs the whole suite), and a
+        # reader comparing two runs should be able to see WHERE the time went
+        # rather than inferring it.
+        print(f"GUARDS_SECONDS({label})={elapsed:.1f}", flush=True)
         print(f"GUARDS_RC({label})={result.returncode}", flush=True)
         if result.returncode != 0:
             failures.append(label)
+            diagnosis = _classify_failure(guard, result)
+            if diagnosis:
+                diagnoses.append(diagnosis)
 
     report.marker("GUARDS_TOTAL", len(GUARDS))
     report.marker("GUARDS_FAILED", len(failures))
+    report.marker("GUARDS_TOTAL_SECONDS", f"{time.monotonic() - started:.1f}")
+    for diagnosis in diagnoses:
+        report.error(diagnosis)
     for label in failures:
         report.error(f"guard failed: {label}")
     rc = 1 if failures else 0
@@ -323,11 +484,24 @@ def run_in_docker(repo_root: Path = REPO_ROOT) -> int:
     # it exists even when the run fails -- an artifact you only get on
     # success cannot be used to diagnose a failure.
     print(f"GUARDS_DOCKER_CMD={printed}", flush=True)
+    # The substitution is declared THREE ways -- that it happened, what the
+    # token is, and what it stood for on THIS host -- so that no reader of a
+    # green log can mistake `<REPO_ROOT>` for a literal argument that was
+    # actually passed to docker. A redacted field that does not announce
+    # itself is indistinguishable from a field that was never there.
     print(
-        "GUARDS_DOCKER_CMD_NOTE: the sole substituted field is the bind-mount "
-        f"source ({REPO_ROOT_TOKEN}); it is a host absolute path and cannot be "
-        "portable. Image digest, flags, env, workdir and entrypoint argv above "
-        "are byte-identical between this artifact and the CI one.",
+        f"GUARDS_DOCKER_CMD_IS_SUBSTITUTED=1 token={REPO_ROOT_TOKEN} "
+        f"field=bind-mount-source",
+        flush=True,
+    )
+    print(f"GUARDS_DOCKER_CMD_SUBSTITUTION_VALUE={os.fspath(repo_root)}", flush=True)
+    print(
+        f"GUARDS_DOCKER_CMD_NOTE: the command string above is NOT verbatim -- "
+        f"{REPO_ROOT_TOKEN} is a placeholder standing for the bind-mount source "
+        f"printed on the line above, which is a host absolute path and therefore "
+        "cannot be portable. Every other field -- image DIGEST, flags, env, "
+        "workdir, entrypoint argv -- is byte-identical between this artifact and "
+        "the CI one, and that is the equality acceptance tests.",
         flush=True,
     )
     print(f"GUARDS_DOCKER_IMAGE={image}", flush=True)

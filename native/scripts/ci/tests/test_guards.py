@@ -33,6 +33,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from .. import guards
 from .. import run as ci_run  # the ONE sanctioned subprocess wrapper; a raw
@@ -220,6 +221,73 @@ class GuardListTest(unittest.TestCase):
         self.assertEqual([g for g in listed if "fresh_runner" in g], [])
 
 
+class StaleRosterTest(unittest.TestCase):
+    """Six of the seventeen entries are scheduled for deletion by three
+    members across two phases. When one of those deletions lands without the
+    matching tuple edit, the failure MUST name the phase and owner -- a
+    generic `can't open file` sends the reader to look at Docker, which is
+    the most expensive wrong turn available here."""
+
+    def test_missing_guard_names_its_phase_and_owner(self):
+        with mock.patch.object(
+            guards, "GUARDS", (("native/scripts/ci/check_step_order.py",),)
+        ):
+            tmp = Path(tempfile.mkdtemp(prefix="ceyx-guards-stale."))
+            problems = guards._preflight(tmp)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("STALE GUARDS ENTRY", problems[0])
+        self.assertIn("Phase 2", problems[0])
+        self.assertIn("impl-p2-render-opus", problems[0])
+
+    def test_unscheduled_missing_guard_says_so_rather_than_inventing_an_owner(self):
+        with mock.patch.object(guards, "GUARDS", (("native/scripts/not_a_guard.py",),)):
+            tmp = Path(tempfile.mkdtemp(prefix="ceyx-guards-stale."))
+            problems = guards._preflight(tmp)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("NO scheduled retirement", problems[0])
+
+    def test_removed_check_flag_is_diagnosed_not_reported_as_a_guard_failure(self):
+        """The Phase 3 shape, and the nastier one: the FILE still exists, so
+        the existence preflight passes and the script dies on an
+        unrecognised flag while looking perfectly healthy."""
+        result = mock.Mock()
+        result.stdout = ""
+        result.stderr = "usage: gen_linkage_table.py\nerror: unrecognized arguments: --check\n"
+        diagnosis = guards._classify_failure(
+            ("native/scripts/gen_linkage_table.py", "--check"), result
+        )
+        self.assertIn("STALE GUARDS ENTRY", diagnosis)
+        self.assertIn("no longer accepts --check", diagnosis)
+        self.assertIn("Phase 3", diagnosis)
+
+    def test_an_ordinary_guard_failure_is_not_misdiagnosed_as_roster_drift(self):
+        """The common case must stay quiet, or a real finding gets buried
+        under a bookkeeping message that does not apply."""
+        result = mock.Mock()
+        result.stdout = "[gen_linkage_table] FAIL -- table does not match manifest\n"
+        result.stderr = ""
+        self.assertEqual(
+            guards._classify_failure(
+                ("native/scripts/gen_linkage_table.py", "--check"), result
+            ),
+            "",
+        )
+
+    def test_retirement_schedule_only_names_real_guards(self):
+        """The map and the tuple must not drift apart -- a schedule row for a
+        path nobody runs is a lie that outlives the guard."""
+        listed = {g[0] for g in guards.GUARDS}
+        for path in guards.RETIREMENT_SCHEDULE:
+            self.assertIn(path, listed, f"{path} is scheduled but not in GUARDS")
+
+    def test_six_entries_are_scheduled_for_retirement(self):
+        """17 - 5 (Phase 2) - 1 (Phase 3) = 11 at the end of the migration."""
+        self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 6)
+        phases = [p for p, _ in guards.RETIREMENT_SCHEDULE.values()]
+        self.assertEqual(phases.count("Phase 2"), 5)
+        self.assertEqual(phases.count("Phase 3"), 1)
+
+
 class ScopePrintingTest(unittest.TestCase):
     def test_scope_names_both_coverage_and_non_coverage(self):
         """Printed on every run by contract. An unnamed absence is not a
@@ -262,6 +330,24 @@ class DispatchRegistrationTest(unittest.TestCase):
 
 
 class ShlexRoundTripTest(unittest.TestCase):
+    def test_substitution_is_declared_in_band(self):
+        """The accepted deviation comes with a condition: a reader of a green
+        log must not be able to mistake `<REPO_ROOT>` for a literal argument
+        that was passed to docker. Asserted on the real emitter, not on a
+        promise in a docstring."""
+        buf = io.StringIO()
+        with mock.patch.object(guards.run, "run", return_value=mock.Mock(
+            returncode=0, stdout="", stderr=""
+        )):
+            with redirect_stdout(buf):
+                guards.run_in_docker(_REPO_ROOT)
+        out = buf.getvalue()
+        self.assertIn("GUARDS_DOCKER_CMD_IS_SUBSTITUTED=1", out)
+        self.assertIn(f"token={guards.REPO_ROOT_TOKEN}", out)
+        # and what it stood for on THIS host
+        self.assertIn(f"GUARDS_DOCKER_CMD_SUBSTITUTION_VALUE={_REPO_ROOT}", out)
+        self.assertIn("is NOT verbatim", out)
+
     def test_printed_string_parses_back_to_the_argv(self):
         """The printed GUARDS_DOCKER_CMD is the acceptance artifact; it must
         be a faithful, re-runnable rendering of the argv rather than a
