@@ -224,7 +224,7 @@ string verified byte-identical before/after; formatting only.""",
             """\
 Unfiltered on purpose: a '*.a'-filtered listing looks like a full
 inventory while silently omitting the headers. (WI-31: `if: always()`
-stays on the step; `dist-list` replaces the `find | sort` pipeline
+stays on the step; `dist-list` replaces the shell `find`-then-`sort` pipeline
 and refuses to succeed silently on a missing or empty dist -- a
 deliberate tightening over the old pipeline, which printed nothing
 and exited 0 on an empty tree.)""",
@@ -303,7 +303,7 @@ string verified byte-identical before/after; formatting only.""",
             """\
 Unfiltered on purpose: a filtered listing looks like a full inventory
 while silently omitting some artifact class. (WI-31: `if: always()`
-stays on the step; `dist-list` replaces the `find | sort` pipeline
+stays on the step; `dist-list` replaces the shell `find`-then-`sort` pipeline
 and refuses to succeed silently on a missing or empty dist -- a
 deliberate tightening over the old pipeline, which printed nothing
 and exited 0 on an empty tree.)""",
@@ -401,7 +401,7 @@ string verified byte-identical before/after; formatting only.""",
 Complete listing, deliberately unfiltered -- same rationale as
 heif_dist_windows.yml's equivalent step. (WI-31: `if: always()` stays
 on the step, not the module; `dist-list` replaces the
-`find | sort` pipeline and refuses to succeed silently on a missing
+shell `find`-then-`sort` pipeline and refuses to succeed silently on a missing
 or empty dist -- a deliberate tightening over the old pipeline,
 which printed nothing and exited 0 on an empty tree.)""",
         ),
@@ -656,7 +656,7 @@ Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
 inventory while silently omitting the headers.
 
 WI-32 (push 8b): migrated to `ci.py dist-list` (WI-29), which
-replaces `find | sort` and additionally refuses to succeed silently
+replaces the shell `find`-then-`sort` pipeline and additionally refuses to succeed silently
 on a missing/empty dist tree (exits 1 with an `::error::` line where
 the old pipeline printed nothing and exited 0) -- a deliberate
 tightening, not a defect, per dist_build.py's own docstring.""",
