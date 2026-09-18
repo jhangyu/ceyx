@@ -516,22 +516,38 @@ def render_all() -> dict:
 # should check instruction and evidence blocks EXHAUSTIVELY and sample the
 # narration, which is impossible if the table treats all 25 alike.
 #
-# The cut, made checkable rather than left to taste:
-#   instruction  losing it causes a wrong ACTION -- it names a specific
-#                edit/deletion target, or forbids a specific change
-#   evidence     it records HOW a claim was established (an incident, a
-#                verification performed) so the claim can be re-checked
-#   narration    everything else: design rationale and context
+# The cut, per lead19's binding definitions:
+#   instruction  tells a future editor to do or not do something. Tie-break
+#                is BINDING: torn between instruction and narration ->
+#                instruction, because losing narration costs context while
+#                losing an instruction costs a wrong action.
+#   evidence     names a measurement, artefact path, run id, work item or
+#                commit that justifies a setting, so it can be re-checked
+#   narration    commands nothing AND cites nothing
+#
+# MEASURED RESULT: narration is EMPTY here. All 25 blocks either command or
+# cite -- the seven I had first called narration each cite a work item
+# (WI-31) or a ruling (CI-T6, DP-3), which makes them evidence by the
+# definition above, not narration. That is not a classification failure: a
+# comment in a CI workflow exists because someone had to justify or defend
+# a setting, so "explains nothing actionable and cites nothing" describes
+# almost no surviving comment. The practical consequence is that audit here
+# is EXHAUSTIVE over all 25; what the classification still buys is naming
+# WHICH 12 can cause a wrong action if lost.
 #
 # The canonical instruction case is not in this file at all: build.yml's
 # `fetch-depth: 0` under guards-container carries "DELETE THIS LINE when it
 # goes". That is the difference between a removable setting and one nobody
 # dares touch.
 _COMMENT_KIND: dict = {
-    "header: between `name:` and `on:`": "narration",
+    # cites Option B / task CI-T6 and the DP-3 ruling -> evidence, not
+    # narration: it names the decisions that justify the trigger set.
+    "header: between `name:` and `on:`": "evidence",
     "before step `Set up Android NDK`": "instruction",
-    "before step `Install Ninja`": "narration",
-    "before step `Install build prerequisites (apt)`": "narration",
+    # both cite WI-31 (the shell-to-ci.py collapse) as the justification
+    # for the step's present form.
+    "before step `Install Ninja`": "evidence",
+    "before step `Install build prerequisites (apt)`": "evidence",
     "before step `List the produced dist (complete)`": "instruction",
     "before step `Upload the dist`": "instruction",
     "inside step `Upload the dist`, above `include-hidden-files:`": "instruction",
