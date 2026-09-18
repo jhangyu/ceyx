@@ -86,10 +86,14 @@ def test_column2_equals_pin_skip_when_pin_absent():
     assert "SKIP" in status
 
 
-def test_column2_equals_pin_line_always_printed(capsys):
+def test_column2_equals_pin_line_always_printed(tmp_path, capsys):
     # The plan is explicit: "a silent skip is a FAIL" -- the line must be
-    # printed unconditionally, never omitted.
-    rc = gen.main(["--check"])
+    # printed unconditionally, never omitted. This is a main()-wide
+    # invariant (the print loop at gen_linkage_table.py:199-204 runs BEFORE
+    # the `if args.check:` branch), not something specific to --check mode,
+    # so this test drives the default (write) path rather than --check.
+    out_path = tmp_path / "linkage_table.md"
+    rc = gen.main(["--output", str(out_path)])
     captured = capsys.readouterr()
     for platform in ("windows", "linux", "macos", "android"):
         assert f"COLUMN2_EQUALS_PIN({platform})=" in captured.out
