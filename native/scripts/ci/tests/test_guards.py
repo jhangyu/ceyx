@@ -197,10 +197,18 @@ class GuardListTest(unittest.TestCase):
         later reader trims the list back to 16 to match the prose, this goes
         red and makes them read the reasoning instead of quietly shrinking
         the gate. Shrinking a gate to match a document is the failure this
-        whole campaign keeps paying for."""
+        whole campaign keeps paying for.
+
+        Count bumped 17 -> 18 by Phase 2 (impl-p2-render-opus, lead18
+        ruling): the tuple GAINED `ci.py render-workflows --check`, the
+        rendered == committed assertion. Bumping for a GROWTH does not touch
+        what this test defends -- the membership it pins
+        (check_test_marker_leak.py) is asserted separately above and is
+        unchanged. A future edit that SHRINKS this number still has to come
+        here and read the paragraph above, which is the whole point."""
         listed = {g[0] for g in guards.GUARDS}
         self.assertIn("native/scripts/ci/check_test_marker_leak.py", listed)
-        self.assertEqual(len(guards.GUARDS), 17)
+        self.assertEqual(len(guards.GUARDS), 18)
 
     def test_artifact_dependent_guards_are_excluded(self):
         """The membership rule is 'repo-static'. These two read
@@ -281,7 +289,12 @@ class StaleRosterTest(unittest.TestCase):
             self.assertIn(path, listed, f"{path} is scheduled but not in GUARDS")
 
     def test_six_entries_are_scheduled_for_retirement(self):
-        """17 - 5 (Phase 2) - 1 (Phase 3) = 11 at the end of the migration."""
+        """18 - 5 (Phase 2) - 1 (Phase 3) = 12 at the end of the migration.
+
+        This test passes either way -- RETIREMENT_SCHEDULE is untouched at
+        six -- but the arithmetic in this line described the tuple, and
+        Phase 2's addition falsified it. A passing test carrying a false
+        comment is the trap, not the failure."""
         self.assertEqual(len(guards.RETIREMENT_SCHEDULE), 6)
         phases = [p for p, _ in guards.RETIREMENT_SCHEDULE.values()]
         self.assertEqual(phases.count("Phase 2"), 5)
