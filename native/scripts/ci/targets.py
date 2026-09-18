@@ -85,6 +85,29 @@ from __future__ import annotations
 #   requires_arch        C-G9: True only for macos (per-arch legs,
 #                        `--arch "${{ matrix.arch_tag }}"`); False elsewhere
 #                        (single-arch legs, --arch is an argparse error)
+#   arch_tags            Phase 2 first item: the arch strings a leg actually
+#                        builds, in the order the workflow declares them.
+#                        Until now these literals existed ONLY hand-copied
+#                        into YAML, which is the duplicated-description shape
+#                        this phase exists to remove -- `requires_arch` said
+#                        WHETHER a leg is per-arch but never WHICH arch, so
+#                        the renderer had nothing to render `--arch` from.
+#                        Transcribed from:
+#                          linux   "x86_64"     linux_build.yml:431
+#                          windows "x86_64"     heif_dist_windows.yml:208,
+#                                               jxl_dist_windows.yml:154,
+#                                               webp_dist_windows.yml:120
+#                          android "arm64-v8a"  heif_dist_android.yml:104,
+#                                               jxl_dist_android.yml:86,
+#                                               webp_dist_android.yml:87
+#                          macos   "arm64","x86_64"  macos_build.yml:92,106
+#                                               (the `arch_tag` matrix values,
+#                                               in declaration order)
+#                        INVARIANT, enforced in _validate(): a leg is
+#                        per-arch iff it has more than one arch tag, i.e.
+#                        requires_arch == (len(arch_tags) > 1). The two keys
+#                        state one fact; the assert is what keeps them from
+#                        becoming two descriptions of it.
 #   expected_companions  the companion shared libraries staged beside the
 #                        decoder, per native/deps/shipped_files.toml
 #                        (read_shipped_files.py is the single reader of that
@@ -111,6 +134,7 @@ TARGETS: dict = {
         "c_compiler": "clang",
         "probe_link_style": "posix",
         "requires_arch": False,
+        "arch_tags": ("x86_64",),
         "expected_companions": ("libheif.so.1", "libde265.so.0"),
         "declaration_platform": "linux",
         "min_runtime_source": "dump",
@@ -130,6 +154,7 @@ TARGETS: dict = {
         "c_compiler": "clang-cl",
         "probe_link_style": "clang-cl",
         "requires_arch": False,
+        "arch_tags": ("x86_64",),
         "expected_companions": ("heif.dll", "libde265.dll"),
         "declaration_platform": "windows",
         "min_runtime_source": "binary",
@@ -149,6 +174,7 @@ TARGETS: dict = {
         "c_compiler": "clang",
         "probe_link_style": "posix",
         "requires_arch": True,
+        "arch_tags": ("arm64", "x86_64"),
         "expected_companions": ("libheif.1.dylib", "libde265.0.dylib"),
         "declaration_platform": "macos",
         "min_runtime_source": "binary",
@@ -175,6 +201,7 @@ TARGETS: dict = {
         "c_compiler": None,
         "probe_link_style": None,
         "requires_arch": False,
+        "arch_tags": ("arm64-v8a",),
         "expected_companions": (),
         "declaration_platform": "android",
         "min_runtime_source": "declaration",
@@ -197,6 +224,7 @@ REQUIRED_KEYS = (
     "c_compiler",
     "probe_link_style",
     "requires_arch",
+    "arch_tags",
     "expected_companions",
     "declaration_platform",
     "min_runtime_source",
@@ -230,6 +258,21 @@ def _validate():
         if missing or extra:
             raise ValueError(
                 f"platform {name!r}: missing keys {missing}, unexpected keys {extra}"
+            )
+        # arch_tags and requires_arch state ONE fact ("is this leg per-arch");
+        # this is what stops them drifting into two descriptions of it, which
+        # is the exact shape Phase 2 exists to delete. A leg with two or more
+        # arch tags is per-arch and its calls carry --arch; a single-tag leg
+        # is not, and passing --arch there is an argparse error (C-G9).
+        tags = entry["arch_tags"]
+        if not isinstance(tags, tuple) or not tags:
+            raise ValueError(
+                f"platform {name!r}: arch_tags must be a non-empty tuple, got {tags!r}"
+            )
+        if entry["requires_arch"] != (len(tags) > 1):
+            raise ValueError(
+                f"platform {name!r}: requires_arch={entry['requires_arch']} "
+                f"contradicts arch_tags={tags!r} (per-arch iff more than one tag)"
             )
 
 
