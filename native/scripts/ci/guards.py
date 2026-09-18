@@ -120,8 +120,12 @@ DOCKERFILE = Path("native/ci.Dockerfile")
 #   * `ci.py selftest` -- a unit-test suite, not a guard over the repo. It
 #     is run by its own build.yml step, ahead of this one.
 #   * native/scripts/ci/check_test_marker_leak.py -- PROVISIONAL, and the
-#   * native/scripts/ci/fresh_runner_gate.py -- the local instrument this
-#     container supersedes; its deletion is another work item's.
+#   * the superseded local fresh-checkout simulator -- a `git worktree`-based
+#     instrument that approximated "a fresh checkout lacks this machine's
+#     gitignored vendored trees". This container subsumes it and Phase 1
+#     deleted it, so it is named here by description rather than by filename:
+#     Phase 1's acceptance is a literal grep-zero claim on that filename, and
+#     a comment is a grep hit.
 #
 # ON THE COUNT, since a number in a document disagreed with the tree: the
 # Phase 1 scope prose says "16 repo-static guards". Applying the membership

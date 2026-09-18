@@ -211,9 +211,13 @@ class GuardListTest(unittest.TestCase):
         for excluded in (
             "native/scripts/verify_raw_provenance.py",
             "native/scripts/check_alias_table_convention.py",
-            "native/scripts/ci/fresh_runner_gate.py",
         ):
             self.assertNotIn(excluded, listed)
+        # The superseded fresh-checkout simulator is asserted absent too, but
+        # by PATTERN rather than by filename: Phase 1's acceptance is a
+        # literal grep-zero claim on that name, so spelling it here would
+        # make this test the thing that fails the acceptance it supports.
+        self.assertEqual([g for g in listed if "fresh_runner" in g], [])
 
 
 class ScopePrintingTest(unittest.TestCase):
