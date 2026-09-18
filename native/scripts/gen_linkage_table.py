@@ -21,9 +21,12 @@ Three columns, per platform:
      campaign removes; the lead ruling scopes capabilities to WI-5's S-E2
      table).
 
-`--check` regenerates and diffs against the committed file (same
-regenerate-and-diff pattern as gen_shipped_files_cmake.py), so the checked-in
-table cannot go stale.
+This script's automated `--check`-mode CI guard was retired in Phase 3 of
+the ceyx CI architecture migration (native/deps/ is acknowledged as its own
+terminal source+rendered-view shape; only the linkage-table synchronizer
+guard was in scope for deletion, not this generator). Regenerate by hand
+with `python3 native/scripts/gen_linkage_table.py` after editing
+manifest.toml or shipped_files.toml.
 
 COLUMN2_EQUALS_PIN: when a sibling Halcyon checkout is present
 (../../Halcyon/scripts/ceyx_release_pin.json relative to this repo root, i.e.
@@ -181,7 +184,6 @@ def main(argv=None):
     parser.add_argument("--declaration", default=None)
     parser.add_argument("--pin", default=None, help="override path to Halcyon's ceyx_release_pin.json")
     parser.add_argument("--output", default=None)
-    parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
 
     output_path = pathlib.Path(args.output) if args.output else DEFAULT_OUTPUT_PATH
@@ -198,21 +200,10 @@ def main(argv=None):
 
     # Always print the COLUMN2_EQUALS_PIN lines to stdout too, unconditionally
     # -- a silent skip is a FAIL (plan wording), so this must never be
-    # omitted even in --check mode.
+    # omitted.
     for platform in sorted(platforms):
         status, _ = column2_equals_pin(platform, platforms[platform], pin)
         print(f"COLUMN2_EQUALS_PIN({platform})={status}")
-
-    if args.check:
-        if not output_path.exists():
-            print(f"error: {output_path} does not exist -- run without --check to generate it", file=sys.stderr)
-            return 1
-        current = output_path.read_text()
-        if current != rendered:
-            print(f"error: {output_path} is STALE relative to its sources", file=sys.stderr)
-            return 1
-        print(f"OK: {output_path} is up to date")
-        return 0
 
     output_path.write_text(rendered)
     print(f"wrote {output_path}")
