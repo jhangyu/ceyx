@@ -508,17 +508,68 @@ def render_all() -> dict:
     return {name: render(name) for name in RENDERED}
 
 
+# Classification of each migrated block, keyed by the anchor it sat at
+# (lead18 requirement). WHY IT EXISTS: under the user's option (b), every
+# INSTRUCTION that lived in a committed workflow comment stops existing
+# there. Those are not narration -- they tell a future editor what to do,
+# and losing one costs a WRONG ACTION rather than lost context. An auditor
+# should check instruction and evidence blocks EXHAUSTIVELY and sample the
+# narration, which is impossible if the table treats all 25 alike.
+#
+# The cut, made checkable rather than left to taste:
+#   instruction  losing it causes a wrong ACTION -- it names a specific
+#                edit/deletion target, or forbids a specific change
+#   evidence     it records HOW a claim was established (an incident, a
+#                verification performed) so the claim can be re-checked
+#   narration    everything else: design rationale and context
+#
+# The canonical instruction case is not in this file at all: build.yml's
+# `fetch-depth: 0` under guards-container carries "DELETE THIS LINE when it
+# goes". That is the difference between a removable setting and one nobody
+# dares touch.
+_COMMENT_KIND: dict = {
+    "header: between `name:` and `on:`": "narration",
+    "before step `Set up Android NDK`": "instruction",
+    "before step `Install Ninja`": "narration",
+    "before step `Install build prerequisites (apt)`": "narration",
+    "before step `List the produced dist (complete)`": "instruction",
+    "before step `Upload the dist`": "instruction",
+    "inside step `Upload the dist`, above `include-hidden-files:`": "instruction",
+}
+
+
+def _kind_for(anchor: str) -> str:
+    if anchor in _COMMENT_KIND:
+        return _COMMENT_KIND[anchor]
+    # The two per-component anchors carry the build step's name, so they
+    # cannot be spelled as fixed keys. Both are EVIDENCE: the first records
+    # the 08-23 exit-code incident (a harness-reported status lying about
+    # which process's code it forwarded) and states the marker is
+    # reproduced byte-for-byte; the second records WI-40's folded-scalar
+    # defect and states the run string was verified identical before/after.
+    if anchor.startswith("inside step `Build the "):
+        return "evidence"
+    if anchor.startswith("before step `Build the "):
+        return "evidence"
+    raise KeyError(
+        f"unclassified comment anchor {anchor!r} -- classify it rather than "
+        "letting it default; an unclassified block is one an auditor will "
+        "sample instead of checking"
+    )
+
+
 def comment_migration_table(name: str) -> list:
-    """Audit rows for one file: (anchor, line_count, first_line).
+    """Audit rows for one file: (anchor, kind, line_count, first_line).
 
     The user's protective requirement on option (b): the incident record is
     RELOCATED, not deleted, and this table is how that is checked rather
-    than asserted. The full verbatim text sits in `_MIGRATED_COMMENTS`.
+    than asserted. `kind` is lead18's addition -- see `_COMMENT_KIND`. The
+    full verbatim text sits in `_MIGRATED_COMMENTS`.
     """
     rows = []
     for anchor, text in _MIGRATED_COMMENTS.get(name, []):
         lines = text.splitlines()
-        rows.append((anchor, len(lines), lines[0] if lines else ""))
+        rows.append((anchor, _kind_for(anchor), len(lines), lines[0] if lines else ""))
     return rows
 
 
