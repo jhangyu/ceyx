@@ -55,6 +55,28 @@ from . import targets
 
 # The enumerated render set. A name here with no committed file, or a
 # mismatch against one, fails `--check`.
+#
+# DELIBERATELY NOT RENDERED -- heif_dist_windows.yml. This is a declared
+# exclusion, not an oversight, and it is not to be "fixed" by adding the
+# file here without first re-testing the reason below.
+#
+# The test lead19 set: render it only if its variable facts genuinely move
+# into targets.py, leaving the template holding structure only. They do not.
+# Its distinguishing facts are the vcpkg triplet `x64-windows-heif` and the
+# `de265`/`aom` feature selection, which are properties of the HEIF-STACK
+# COMPONENT, not of the windows PLATFORM. targets.py is keyed by platform
+# (linux/windows/macos/android), so putting a component's triplet in the
+# `windows` entry would make that file state a fact it does not own -- the
+# exact duplicated-description shape this phase exists to remove, recreated
+# in the single description itself. Nothing real would move; the template
+# would be the file with its values inlined, plus four vcpkg steps
+# (bootstrap / install / assert-aom-artifact / export-prefix) that exist on
+# no other leg.
+#
+# Measured, not asserted: 14 steps vs the Windows template's 9, 12 path
+# triggers vs 4, and a job-level `env:` block the template has no concept
+# of. If a second leg ever needs that vcpkg block, the shared structure
+# becomes real and this decision should be revisited.
 RENDERED = (
     "webp_dist_android.yml",
     "jxl_dist_android.yml",
