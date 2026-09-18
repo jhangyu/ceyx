@@ -7,27 +7,45 @@ of one fact, and every bookkeeping guard in this repo exists only to keep
 such a pair synchronized. A generator's output cannot drift from its own
 input, so the guards are deleted rather than improved.
 
+COMMENTS LIVE HERE NOW (user ruling 2026-09-18, option (b)). Rendered and
+committed YAML carry NO hand-written comments; the incident record they
+held is RELOCATED into this module, not deleted. `_MIGRATED_COMMENTS` below
+holds every migrated block VERBATIM, keyed by the file and the anchor it
+sat at, and `comment_migration_table()` prints that mapping for audit. The
+text is stored rather than paraphrased on purpose: a summary would be a
+claim that the record survived, and the verbatim text is the record
+surviving. Nothing in `_MIGRATED_COMMENTS` is ever emitted.
+
+The safeguard that makes a 2,591-line regeneration diff reviewable is
+`strip_comments()`: for every regenerated file, the old committed text with
+its pure-comment lines removed must be BYTE-IDENTICAL to the new rendered
+text. If that holds, the diff's size stops mattering, because the only
+thing that changed is comment lines. If it fails anywhere that is a
+FINDING, not a formatting artefact -- a semantic change riding along inside
+a diff too large to read is exactly what this check exists to catch.
+
 SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders the
 THREE Android dist workflows only:
 
     webp_dist_android.yml  jxl_dist_android.yml  heif_dist_android.yml
 
-It does NOT render the six remaining workflows (the four platform legs,
-`build.yml`, and the three Windows dist legs). `RENDERED` below is the
+It does NOT render the six remaining workflows. `RENDERED` below is the
 explicit, enumerated set, and `ci.py render-workflows --check` compares
 exactly those names -- so the assertion can never pass by rendering
-nothing, and a file added here without a committed counterpart is a
-failure, not a silent skip.
+nothing, and a name here with no committed counterpart is a failure, not a
+silent skip.
 
 WHAT IS DERIVED vs WHAT IS DATA. The arch string (`arm64-v8a`) is NOT
 written here: it is read from ``targets.spec("android")["arch_tags"]``,
 which is the single source this phase exists to create. Step structure,
-step order, action versions, and every `ci.py` invocation are derived from
-one template. Per-workflow English prose is DATA, held verbatim in
-``_DIST``: these comments record real incidents (the 08-23 exit-code
-lesson, WI-40's folded-scalar defect) and paraphrasing them to shorten this
-file would destroy the only record of why the steps look like this. A
-comment that survives byte-identical is a comment nobody has to re-earn.
+step order, action versions, and every `ci.py` invocation come from one
+template.
+
+GitHub expression text is held as VERBATIM DATA and never composed from
+parts. This module does not parse expressions, so it cannot "helpfully"
+normalise `needs['job-id'].result` into dot form -- where a hyphen parses
+as SUBTRACTION and silently yields an empty string. If a future extension
+finds itself generating an expression from components, STOP and report.
 """
 
 from __future__ import annotations
@@ -35,16 +53,35 @@ from __future__ import annotations
 from . import targets
 
 # The enumerated render set. A name here with no committed file, or a
-# mismatch against one, fails `--check`. Extending this set is how future
-# pushes bring the remaining workflows under the renderer.
+# mismatch against one, fails `--check`.
 RENDERED = (
     "webp_dist_android.yml",
     "jxl_dist_android.yml",
     "heif_dist_android.yml",
 )
 
-# Per-workflow data. Identifiers are derived from `short` and `dist_prefix`;
-# the `*_comment` fields are verbatim prose, reproduced exactly.
+
+def strip_comments(text: str) -> str:
+    """Drops whole-line comments, leaving everything else byte-exact.
+
+    Only lines whose first non-space character is `#` are removed; nothing
+    is reflowed, no blank line is collapsed, no trailing whitespace is
+    touched. That narrowness is the point -- this function defines the
+    ONLY difference a comment-migration commit is permitted to make, and a
+    stripper that also tidied would hide the very changes it is meant to
+    expose.
+
+    Verified safe for the rendered set before use: every `#` in those three
+    files is a whole-line comment, so there is no inline-hash case where a
+    `#` inside a quoted value could be mistaken for one.
+    """
+    return "".join(
+        line for line in text.splitlines(keepends=True) if not line.lstrip().startswith("#")
+    )
+
+
+# Per-workflow data. Identifiers only -- every field here appears in the
+# rendered output. Prose lives in _MIGRATED_COMMENTS and is never emitted.
 _DIST: dict = {
     "webp_dist_android.yml": {
         "title": "libwebp dist (Android)",
@@ -56,43 +93,6 @@ _DIST: dict = {
         "build_step_name": "Build the libwebp dist (Python carrier)",
         "timeout_minutes": 45,
         "apt_step": False,
-        "header_comment": """\
-# DISPATCH-ONLY BY DESIGN, same rationale as webp_dist_windows.yml /
-# heif_dist_windows.yml: the dist is a pinned, reviewed input that is
-# COMMITTED to native/third_party/libwebp-dist-android-arm64-v8a/, not rebuilt per
-# push.
-#
-# ci/** is included so the workflow can be verified from a bootstrap branch:
-# a workflow file only becomes dispatchable once it exists on a ref that runs
-# it.
-#
-# `workflow_call` lets build.yml invoke this leg on demand (Option B, task
-# CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
-# wired into build.yml's per-push platform matrix for the same "moving
-# target under a committed dist" reason documented on the Windows dist legs
-# -- see build.yml's "Windows third-party dist legs" comment block, which
-# this leg's build.yml entry sits directly beside and shares the run_dists
-# input with (DP-3 ruled: one boolean, no per-platform split).""",
-        "ninja_comment": """\
-      # CMake ships with the runner image; Ninja does not reliably.
-      # (WI-31: collapsed into ci.py's `provision ninja` -- emits no marker,
-      # same as the shell it replaces.)""",
-        "build_comment": """\
-      # Single carrier entry point (build_deps.py), same contract as every
-      # other dist producer. RC captured on the line immediately after the
-      # command, echoed from the step itself -- a harness-reported status has
-      # lied about which process's exit code it forwarded before on this
-      # project (08-23 lesson). (WI-31: collapsed into ci.py's `dist-build`
-      # -- rc read from the child process object, not a shell variable;
-      # `--rc-marker WEBP_DIST_ANDROID_RC` reproduces the same
-      # `WEBP_DIST_ANDROID_RC=<rc>` marker byte-for-byte.)""",
-        "list_comment": """\
-      # Unfiltered on purpose: a '*.a'-filtered listing looks like a full
-      # inventory while silently omitting the headers. (WI-31: `if: always()`
-      # stays on the step; `dist-list` replaces the `find | sort` pipeline
-      # and refuses to succeed silently on a missing or empty dist -- a
-      # deliberate tightening over the old pipeline, which printed nothing
-      # and exited 0 on an empty tree.)""",
     },
     "jxl_dist_android.yml": {
         "title": "libjxl dist (Android)",
@@ -104,42 +104,6 @@ _DIST: dict = {
         "build_step_name": "Build the libjxl dist (Python carrier)",
         "timeout_minutes": 45,
         "apt_step": False,
-        "header_comment": """\
-# DISPATCH-ONLY BY DESIGN, same rationale as jxl_dist_windows.yml /
-# heif_dist_windows.yml: the dist is a pinned, reviewed input that is
-# COMMITTED to native/third_party/libjxl-dist-android-arm64-v8a/, not rebuilt per
-# push.
-#
-# ci/** is included so the workflow can be verified from a bootstrap branch:
-# a workflow file only becomes dispatchable once it exists on a ref that runs
-# it.
-#
-# `workflow_call` lets build.yml invoke this leg on demand (Option B, task
-# CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
-# wired into build.yml's per-push platform matrix -- see build.yml's
-# "Windows third-party dist legs" comment block, which this leg's build.yml
-# entry sits directly beside and shares the run_dists input with (DP-3
-# ruled: one boolean, no per-platform split).""",
-        "ninja_comment": """\
-      # CMake ships with the runner image; Ninja does not reliably.
-      # (WI-31: collapsed into ci.py's `provision ninja` -- emits no marker,
-      # same as the shell it replaces.)""",
-        "build_comment": """\
-      # Single carrier entry point (build_deps.py), same contract as every
-      # other dist producer. RC captured on the line immediately after the
-      # command, echoed from the step itself -- a harness-reported status has
-      # lied about which process's exit code it forwarded before on this
-      # project (08-23 lesson). (WI-31: collapsed into ci.py's `dist-build`
-      # -- rc read from the child process object, not a shell variable;
-      # `--rc-marker JXL_DIST_ANDROID_RC` reproduces the same
-      # `JXL_DIST_ANDROID_RC=<rc>` marker byte-for-byte.)""",
-        "list_comment": """\
-      # Unfiltered on purpose: a filtered listing looks like a full inventory
-      # while silently omitting some artifact class. (WI-31: `if: always()`
-      # stays on the step; `dist-list` replaces the `find | sort` pipeline
-      # and refuses to succeed silently on a missing or empty dist -- a
-      # deliberate tightening over the old pipeline, which printed nothing
-      # and exited 0 on an empty tree.)""",
     },
     "heif_dist_android.yml": {
         "title": "HEIF dist (Android)",
@@ -151,63 +115,289 @@ _DIST: dict = {
         "build_step_name": "Build the HEIF dist (Python carrier)",
         "timeout_minutes": 90,
         "apt_step": True,
-        "header_comment": """\
-# DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml: this job
-# builds the libheif/libde265/kvazaar/aom distribution that is then COMMITTED
-# to native/third_party/heif-dist-android-arm64-v8a/, exactly as the macOS/Windows
-# dists are. It is not part of the per-commit Android build: the dist is a
-# pinned, reviewed input (upstream tarball + SHA-256 + a fixed flag set), and
-# rebuilding it on every push would make the shipped bytes a moving target
-# under an LGPL source-availability obligation.
-#
-# ci/** is included so the workflow can be verified from a bootstrap branch:
-# a workflow file only becomes dispatchable once it exists on a ref that runs
-# it.
-#
-# `workflow_call` lets build.yml invoke this leg on demand (Option B, task
-# CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
-# wired into build.yml's per-push platform matrix -- see build.yml's
-# "Windows third-party dist legs" comment block, which this leg's build.yml
-# entry sits directly beside and shares the run_dists input with (DP-3
-# ruled: one boolean, no per-platform split).
-#
-# timeout-minutes is 90, not the 45 used by the webp/jxl Android dist legs:
-# the desktop (Windows) HEIF dist takes ~40min on clang-cl alone, this leg
-# additionally cross-compiles libheif + libde265 + kvazaar + aom for arm64
-# via the NDK, so the budget is doubled with margin rather than measured and
-# tightened after the fact.""",
-        "ninja_comment": """\
-      # CMake ships with the runner image; Ninja does not reliably.
-      # (WI-31: pip-install + version print collapsed into ci.py's
-      # `provision ninja` -- emits no marker, same as the shell it replaces.)""",
-        "build_comment": """\
-      # Single carrier entry point (build_deps.py), same contract as every
-      # other dist producer, invoked through the "heif-stack" group exactly
-      # as heif_dist_windows.yml does. RC captured on the line immediately
-      # after the command, echoed from the step itself -- a harness-reported
-      # status has lied about which process's exit code it forwarded before
-      # on this project (08-23 lesson). (WI-31: collapsed into ci.py's
-      # `dist-build` -- rc read from the child process object, not a shell
-      # variable; `--rc-marker HEIF_DIST_ANDROID_RC` reproduces the same
-      # `HEIF_DIST_ANDROID_RC=<rc>` marker byte-for-byte.)""",
-        "list_comment": """\
-      # Complete listing, deliberately unfiltered -- same rationale as
-      # heif_dist_windows.yml's equivalent step. (WI-31: `if: always()` stays
-      # on the step, not the module; `dist-list` replaces the
-      # `find | sort` pipeline and refuses to succeed silently on a missing
-      # or empty dist -- a deliberate tightening over the old pipeline,
-      # which printed nothing and exited 0 on an empty tree.)""",
     },
 }
 
-# The apt prerequisites step, present only on the HEIF leg (its aom/kvazaar/
-# de265 CMake subbuilds need host-side tooling the other two do not).
+# ---------------------------------------------------------------------------
+# THE RELOCATED INCIDENT RECORD (user ruling 2026-09-18, option (b)).
+#
+# Every comment block that used to live in the three rendered workflows,
+# VERBATIM, keyed by the file it came from and the anchor it sat at. This
+# structure is NEVER emitted. It exists so the claim "the comments were
+# relocated, not deleted" can be CHECKED -- `comment_migration_table()`
+# prints file, anchor, first line and line count for each entry, and the
+# full text is right here to read.
+#
+# These are not decoration. They record real incidents: the 08-23
+# exit-code lesson (a harness-reported status lying about which process's
+# code it forwarded), WI-40's folded-scalar defect (a `run: >` scalar
+# reading as five physical lines to a physical-line classifier), and the
+# reason `include-hidden-files: true` is mandatory (upload-artifact v4
+# excludes dotfiles, and the `.pins` stamp is what a staleness digest check
+# depends on).
+# ---------------------------------------------------------------------------
+_MIGRATED_COMMENTS: dict = {
+    "webp_dist_android.yml": [
+        (
+            "header: between `name:` and `on:`",
+            """\
+DISPATCH-ONLY BY DESIGN, same rationale as webp_dist_windows.yml /
+heif_dist_windows.yml: the dist is a pinned, reviewed input that is
+COMMITTED to native/third_party/libwebp-dist-android-arm64-v8a/, not rebuilt per
+push.
+
+ci/** is included so the workflow can be verified from a bootstrap branch:
+a workflow file only becomes dispatchable once it exists on a ref that runs
+it.
+
+`workflow_call` lets build.yml invoke this leg on demand (Option B, task
+CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
+wired into build.yml's per-push platform matrix for the same "moving
+target under a committed dist" reason documented on the Windows dist legs
+-- see build.yml's "Windows third-party dist legs" comment block, which
+this leg's build.yml entry sits directly beside and shares the run_dists
+input with (DP-3 ruled: one boolean, no per-platform split).""",
+        ),
+        (
+            "before step `Set up Android NDK`",
+            """\
+Pinned NDK revision, same choice and rationale as android_build.yml:
+not the runner image's preinstalled NDK, which can drift silently
+when GitHub bumps the image.""",
+        ),
+        (
+            "before step `Install Ninja`",
+            """\
+CMake ships with the runner image; Ninja does not reliably.
+(WI-31: collapsed into ci.py's `provision ninja` -- emits no marker,
+same as the shell it replaces.)""",
+        ),
+        (
+            "before step `Build the libwebp dist (Python carrier)`",
+            """\
+Single carrier entry point (build_deps.py), same contract as every
+other dist producer. RC captured on the line immediately after the
+command, echoed from the step itself -- a harness-reported status has
+lied about which process's exit code it forwarded before on this
+project (08-23 lesson). (WI-31: collapsed into ci.py's `dist-build`
+-- rc read from the child process object, not a shell variable;
+`--rc-marker WEBP_DIST_ANDROID_RC` reproduces the same
+`WEBP_DIST_ANDROID_RC=<rc>` marker byte-for-byte.)""",
+        ),
+        (
+            "inside step `Build the libwebp dist (Python carrier)`, above `run:`",
+            """\
+WI-40: collapsed from a `run: >` folded scalar to one physical
+line -- workflow_scan.code_lines() parses run: bodies by raw
+physical line and does not fold block scalars, so this step read
+as 5 physical lines and failed Rule-1 even though WI-31 already
+migrated it to the one-line python3 carrier. YAML-parsed `run`
+string verified byte-identical before/after; formatting only.""",
+        ),
+        (
+            "before step `List the produced dist (complete)`",
+            """\
+Unfiltered on purpose: a '*.a'-filtered listing looks like a full
+inventory while silently omitting the headers. (WI-31: `if: always()`
+stays on the step; `dist-list` replaces the `find | sort` pipeline
+and refuses to succeed silently on a missing or empty dist -- a
+deliberate tightening over the old pipeline, which printed nothing
+and exited 0 on an empty tree.)""",
+        ),
+        (
+            "before step `Upload the dist`",
+            "Canonical artifact name <component>-<platform>-<arch> (rule C4).",
+        ),
+        (
+            "inside step `Upload the dist`, above `include-hidden-files:`",
+            """\
+actions/upload-artifact v4 excludes dotfiles by default; the
+carrier's .pins stamp (and the dist-local .gitignore) must ship
+with this artifact so a committed dist tree carries the pin
+record CI-T8's staleness digest check depends on.""",
+        ),
+    ],
+    "jxl_dist_android.yml": [
+        (
+            "header: between `name:` and `on:`",
+            """\
+DISPATCH-ONLY BY DESIGN, same rationale as jxl_dist_windows.yml /
+heif_dist_windows.yml: the dist is a pinned, reviewed input that is
+COMMITTED to native/third_party/libjxl-dist-android-arm64-v8a/, not rebuilt per
+push.
+
+ci/** is included so the workflow can be verified from a bootstrap branch:
+a workflow file only becomes dispatchable once it exists on a ref that runs
+it.
+
+`workflow_call` lets build.yml invoke this leg on demand (Option B, task
+CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
+wired into build.yml's per-push platform matrix -- see build.yml's
+"Windows third-party dist legs" comment block, which this leg's build.yml
+entry sits directly beside and shares the run_dists input with (DP-3
+ruled: one boolean, no per-platform split).""",
+        ),
+        (
+            "before step `Set up Android NDK`",
+            """\
+Pinned NDK revision, same choice and rationale as android_build.yml:
+not the runner image's preinstalled NDK, which can drift silently
+when GitHub bumps the image.""",
+        ),
+        (
+            "before step `Install Ninja`",
+            """\
+CMake ships with the runner image; Ninja does not reliably.
+(WI-31: collapsed into ci.py's `provision ninja` -- emits no marker,
+same as the shell it replaces.)""",
+        ),
+        (
+            "before step `Build the libjxl dist (Python carrier)`",
+            """\
+Single carrier entry point (build_deps.py), same contract as every
+other dist producer. RC captured on the line immediately after the
+command, echoed from the step itself -- a harness-reported status has
+lied about which process's exit code it forwarded before on this
+project (08-23 lesson). (WI-31: collapsed into ci.py's `dist-build`
+-- rc read from the child process object, not a shell variable;
+`--rc-marker JXL_DIST_ANDROID_RC` reproduces the same
+`JXL_DIST_ANDROID_RC=<rc>` marker byte-for-byte.)""",
+        ),
+        (
+            "inside step `Build the libjxl dist (Python carrier)`, above `run:`",
+            """\
+WI-40: collapsed from a `run: >` folded scalar to one physical
+line -- workflow_scan.code_lines() parses run: bodies by raw
+physical line and does not fold block scalars, so this step read
+as 5 physical lines and failed Rule-1 even though WI-31 already
+migrated it to the one-line python3 carrier. YAML-parsed `run`
+string verified byte-identical before/after; formatting only.""",
+        ),
+        (
+            "before step `List the produced dist (complete)`",
+            """\
+Unfiltered on purpose: a filtered listing looks like a full inventory
+while silently omitting some artifact class. (WI-31: `if: always()`
+stays on the step; `dist-list` replaces the `find | sort` pipeline
+and refuses to succeed silently on a missing or empty dist -- a
+deliberate tightening over the old pipeline, which printed nothing
+and exited 0 on an empty tree.)""",
+        ),
+        (
+            "before step `Upload the dist`",
+            "Canonical artifact name <component>-<platform>-<arch> (rule C4).",
+        ),
+        (
+            "inside step `Upload the dist`, above `include-hidden-files:`",
+            """\
+actions/upload-artifact v4 excludes dotfiles by default; the
+carrier's .pins stamp (and the dist-local .gitignore) must ship
+with this artifact so a committed dist tree carries the pin
+record CI-T8's staleness digest check depends on.""",
+        ),
+    ],
+    "heif_dist_android.yml": [
+        (
+            "header: between `name:` and `on:`",
+            """\
+DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml: this job
+builds the libheif/libde265/kvazaar/aom distribution that is then COMMITTED
+to native/third_party/heif-dist-android-arm64-v8a/, exactly as the macOS/Windows
+dists are. It is not part of the per-commit Android build: the dist is a
+pinned, reviewed input (upstream tarball + SHA-256 + a fixed flag set), and
+rebuilding it on every push would make the shipped bytes a moving target
+under an LGPL source-availability obligation.
+
+ci/** is included so the workflow can be verified from a bootstrap branch:
+a workflow file only becomes dispatchable once it exists on a ref that runs
+it.
+
+`workflow_call` lets build.yml invoke this leg on demand (Option B, task
+CI-T6); `workflow_dispatch` is kept as the primary human entry point. Not
+wired into build.yml's per-push platform matrix -- see build.yml's
+"Windows third-party dist legs" comment block, which this leg's build.yml
+entry sits directly beside and shares the run_dists input with (DP-3
+ruled: one boolean, no per-platform split).
+
+timeout-minutes is 90, not the 45 used by the webp/jxl Android dist legs:
+the desktop (Windows) HEIF dist takes ~40min on clang-cl alone, this leg
+additionally cross-compiles libheif + libde265 + kvazaar + aom for arm64
+via the NDK, so the budget is doubled with margin rather than measured and
+tightened after the fact.""",
+        ),
+        (
+            "before step `Set up Android NDK`",
+            """\
+Pinned NDK revision, same choice and rationale as android_build.yml:
+not the runner image's preinstalled NDK, which can drift silently
+when GitHub bumps the image.""",
+        ),
+        (
+            "before step `Install Ninja`",
+            """\
+CMake ships with the runner image; Ninja does not reliably.
+(WI-31: pip-install + version print collapsed into ci.py's
+`provision ninja` -- emits no marker, same as the shell it replaces.)""",
+        ),
+        (
+            "before step `Install build prerequisites (apt)`",
+            """\
+cmake/nasm/etc. that the aom/kvazaar/de265 CMake subbuilds may need on
+the host side of a cross-compile; mirrors android_build.yml's apt
+prerequisite step. (WI-31: collapsed into ci.py's `provision apt`
+-- emits no marker, same as the shell it replaces.)""",
+        ),
+        (
+            "before step `Build the HEIF dist (Python carrier)`",
+            """\
+Single carrier entry point (build_deps.py), same contract as every
+other dist producer, invoked through the "heif-stack" group exactly
+as heif_dist_windows.yml does. RC captured on the line immediately
+after the command, echoed from the step itself -- a harness-reported
+status has lied about which process's exit code it forwarded before
+on this project (08-23 lesson). (WI-31: collapsed into ci.py's
+`dist-build` -- rc read from the child process object, not a shell
+variable; `--rc-marker HEIF_DIST_ANDROID_RC` reproduces the same
+`HEIF_DIST_ANDROID_RC=<rc>` marker byte-for-byte.)""",
+        ),
+        (
+            "inside step `Build the HEIF dist (Python carrier)`, above `run:`",
+            """\
+WI-40: collapsed from a `run: >` folded scalar to one physical
+line -- workflow_scan.code_lines() parses run: bodies by raw
+physical line and does not fold block scalars, so this step read
+as 5 physical lines and failed Rule-1 even though WI-31 already
+migrated it to the one-line python3 carrier. YAML-parsed `run`
+string verified byte-identical before/after; formatting only.""",
+        ),
+        (
+            "before step `List the produced dist (complete)`",
+            """\
+Complete listing, deliberately unfiltered -- same rationale as
+heif_dist_windows.yml's equivalent step. (WI-31: `if: always()` stays
+on the step, not the module; `dist-list` replaces the
+`find | sort` pipeline and refuses to succeed silently on a missing
+or empty dist -- a deliberate tightening over the old pipeline,
+which printed nothing and exited 0 on an empty tree.)""",
+        ),
+        (
+            "before step `Upload the dist`",
+            "Canonical artifact name <component>-<platform>-<arch> (rule C4).",
+        ),
+        (
+            "inside step `Upload the dist`, above `include-hidden-files:`",
+            """\
+actions/upload-artifact v4 excludes dotfiles by default; the
+carrier's .pins stamp (and the dist-local .gitignore) must ship
+with this artifact so a committed dist tree carries the pin
+record CI-T8's staleness digest check depends on.""",
+        ),
+    ],
+}
+
+# The apt prerequisites step, present only on the HEIF leg.
 _APT_STEP = """\
 
-      # cmake/nasm/etc. that the aom/kvazaar/de265 CMake subbuilds may need on
-      # the host side of a cross-compile; mirrors android_build.yml's apt
-      # prerequisite step. (WI-31: collapsed into ci.py's `provision apt`
-      # -- emits no marker, same as the shell it replaces.)
       - name: Install build prerequisites (apt)
         shell: bash
         run: python3 native/scripts/ci.py provision apt --packages cmake ninja-build build-essential
@@ -221,12 +411,16 @@ def _android_arch() -> str:
     and ``targets._validate()`` refuses to let those two keys disagree, so
     indexing [0] here cannot silently pick one of several.
     """
-    tags = targets.spec("android")["arch_tags"]
-    return tags[0]
+    return targets.spec("android")["arch_tags"][0]
 
 
 def render(name: str) -> str:
-    """Returns the full text of one rendered workflow, newline-terminated."""
+    """Returns the full text of one rendered workflow, newline-terminated.
+
+    Emits NO comments (user ruling, option (b)). The prose that used to sit
+    in this output is in `_MIGRATED_COMMENTS`, verbatim, and is never read
+    by this function.
+    """
     try:
         d = _DIST[name]
     except KeyError:
@@ -242,7 +436,6 @@ def render(name: str) -> str:
     return f"""\
 name: {d['title']}
 
-{d['header_comment']}
 on:
   workflow_call:
   workflow_dispatch:
@@ -274,9 +467,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Pinned NDK revision, same choice and rationale as android_build.yml:
-      # not the runner image's preinstalled NDK, which can drift silently
-      # when GitHub bumps the image.
       - name: Set up Android NDK
         id: setup_ndk
         uses: nttld/setup-ndk@v1
@@ -284,34 +474,24 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-{d['ninja_comment']}
       - name: Install Ninja
         shell: bash
         run: python3 native/scripts/ci.py provision ninja
 {apt}
-{d['build_comment']}
       - name: {d['build_step_name']}
         shell: bash
         working-directory: ${{{{ github.workspace }}}}
         env:
           ANDROID_NDK_HOME: ${{{{ steps.setup_ndk.outputs.ndk-path }}}}
-        # WI-40: collapsed from a `run: >` folded scalar to one physical
-        # line -- workflow_scan.code_lines() parses run: bodies by raw
-        # physical line and does not fold block scalars, so this step read
-        # as 5 physical lines and failed Rule-1 even though WI-31 already
-        # migrated it to the one-line python3 carrier. YAML-parsed `run`
-        # string verified byte-identical before/after; formatting only.
         run: |
           python3 native/scripts/ci.py dist-build --component {d['component']} --platform android --arch {arch} --android-ndk "${{ANDROID_NDK_HOME}}" --dist {dist} --rc-marker {d['rc_marker']}
 
-{d['list_comment']}
       - name: List the produced dist (complete)
         if: always()
         shell: bash
         working-directory: ${{{{ github.workspace }}}}
         run: python3 native/scripts/ci.py dist-list --dist {dist}
 
-      # Canonical artifact name <component>-<platform>-<arch> (rule C4).
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
@@ -319,10 +499,6 @@ jobs:
           path: ${{{{ github.workspace }}}}/{dist}
           if-no-files-found: error
           retention-days: 7
-          # actions/upload-artifact v4 excludes dotfiles by default; the
-          # carrier's .pins stamp (and the dist-local .gitignore) must ship
-          # with this artifact so a committed dist tree carries the pin
-          # record CI-T8's staleness digest check depends on.
           include-hidden-files: true
 """
 
@@ -332,14 +508,27 @@ def render_all() -> dict:
     return {name: render(name) for name in RENDERED}
 
 
+def comment_migration_table(name: str) -> list:
+    """Audit rows for one file: (anchor, line_count, first_line).
+
+    The user's protective requirement on option (b): the incident record is
+    RELOCATED, not deleted, and this table is how that is checked rather
+    than asserted. The full verbatim text sits in `_MIGRATED_COMMENTS`.
+    """
+    rows = []
+    for anchor, text in _MIGRATED_COMMENTS.get(name, []):
+        lines = text.splitlines()
+        rows.append((anchor, len(lines), lines[0] if lines else ""))
+    return rows
+
+
 def step_names(text: str) -> list:
     """Every `- name:` step label in a workflow, in order.
 
-    Used by the acceptance evidence for this phase. A rendered file that
-    silently drops a step still satisfies `rendered == committed` once the
-    rendered output is committed -- the assertion is satisfied by the very
-    file that lost the step. Comparing step NAMES before and after, and
-    never counts, is what makes that disappearance visible.
+    A rendered file that silently drops a step still satisfies
+    `rendered == committed` once the rendered output is committed -- the
+    assertion is satisfied by the very file that lost the step. Comparing
+    step NAMES, and never counts, is what makes that disappearance visible.
     """
     out = []
     for line in text.splitlines():
