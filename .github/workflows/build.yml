@@ -465,9 +465,37 @@ jobs:
   # in check_cmake_sources_tracked.py, `git check-ignore` in
   # ci_conventions_check.py), which a depth-1 checkout satisfies.
   #
-  # Whoever lands that deletion: remove `fetch-depth: 0` below in the same
-  # commit, and re-run the depth-1 probe above to confirm the block is green
-  # without it. That re-run is the whole check; it takes a minute.
+  # WHOEVER LANDS THAT DELETION -- READ THE TARGET CAREFULLY. The string
+  # `fetch-depth: 0` appears more than once in this file, and only TWO of
+  # those occurrences are real settings (the rest are prose in comments like
+  # this one). The one to remove is:
+  #
+  #     the `fetch-depth: 0` under the `Checkout` step of the
+  #     `guards-container` job -- i.e. THIS job, the one this comment block
+  #     sits directly above.
+  #
+  # NOT the identically-spelled setting in `verify-native-tests`. That is a
+  # separate setting with its own history and its own comment block, and it
+  # must be reasoned about on its own evidence rather than swept up by a
+  # grep. Deleting one, believing the job done, and leaving the other is the
+  # specific mistake this paragraph exists to prevent.
+  #
+  # After removing it, re-run the depth-1 probe described above against THIS
+  # job's block and confirm it is still green. That re-run is the whole
+  # check; it takes a minute.
+  #
+  # RELATED FINDING, recorded not acted on (it belongs to whoever owns that
+  # job's comment, not to this block): `verify-native-tests` justifies its
+  # own `fetch-depth: 0` by naming check_wiring_is_ledger.py and its
+  # `origin/main` precondition. That guard no longer runs in that job -- its
+  # step moved into this container block -- so that justification now names
+  # a consumer the job does not have. Measured, not argued: `ci.py selftest`,
+  # the only git-sensitive step remaining in `verify-native-tests`, passes
+  # 490/0/0 RC=0 in a depth-1 clone where `origin/main` does not resolve
+  # (tmp/verify/impl-p1-docker/shallow-perjob-selftest.txt). Whether that
+  # setting should go is a separate decision on separate evidence; it is
+  # named here only so the next reader does not assume both settings share
+  # one fate.
   #
   # It uploads no artifact, so it is invisible to ci_conventions_check's C6
   # rule (which ties build.yml's `required=` set to upload-artifact names).
