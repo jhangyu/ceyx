@@ -297,110 +297,32 @@ jobs:
       - name: ci.py selftest (dispatch + report + run primitives)
         run: python3 native/scripts/ci.py selftest
 
-      # R7 fix (2026-09-06/07 incident): a cmake source-file reference can
-      # exist on the AUTHOR's disk (local configure green) while being
-      # untracked by git (CI checkout doesn't have it, configure dies with
-      # "Cannot find source file") -- exactly what ddb45b2's `git add` of a
-      # shared, concurrently-edited tests.cmake produced. Placed as the FIRST
-      # step, cheaper than any toolchain provisioning below it: pure git +
-      # stdlib Python, no Homebrew/vcpkg/Halide fetch needed, so a violation
-      # fails in seconds instead of after ~10+ minutes of setup. Kept inside
-      # THIS job rather than a new standalone job because this is the one
-      # job whose configure the incident actually broke, and a same-job step
-      # needs no new `needs:` wiring across the other three platform legs.
-      - name: Guard cmake source references against untracked files
-        run: python3 native/scripts/ci/check_cmake_sources_tracked.py
-
-      # R7 user decree (2026-09-07): ceyx CI is compile-only. This scans every
-      # .github/workflows/*.yml for a test-execution command (flutter test /
-      # dart test / ctest / a direct test_*/probe_* binary invocation) and
-      # fails loudly naming the line -- mechanical backstop so a removed
-      # execution step (see verify-dart above) cannot silently creep back.
-      # Same cheap-first-step placement rationale as the guard above: pure
-      # Python, no toolchain provisioning needed.
-      - name: Guard CI workflows against test execution (compile-only policy)
-        run: python3 native/scripts/ci/check_no_test_execution_in_ci.py
-
-      # WI-6 (pyci push 2), consuming WI-4: every `run:` step body across all
-      # four leg workflows must eventually be pure Python (or on the
-      # printed, size-pinned MUST_STAY allowlist). Same cheap-first-step
-      # placement as the two guards above.
-      - name: Guard — shell prohibition (CI logic must be Python)
-        run: python3 native/scripts/ci/check_shell_prohibition.py
-
-      # WI-6 (pyci push 2): re-points check_workflow_bashisms.py's value from
-      # "find any bashism anywhere" (its original purpose) to "police the
-      # residual must-stay shell only" now that check_shell_prohibition.py
-      # (above) owns the broader ban -- WI-25 (push 4) does the re-pointing
-      # edit; this WI only adds the missing invocation.
-      - name: Guard — workflow bashisms (residual must-stay shell only)
-        run: python3 native/scripts/check_workflow_bashisms.py
-
-      # WI-6 (pyci push 2): ci_conventions_check.py carries 10 rules / 29
-      # test cases and had ZERO CI invocation as of d33cc607 -- the same
-      # "tested but never run" condition Halcyon's ci.yml comment describes
-      # ("these 21 cases existed for months with nothing executing them, and
-      # four of them were red the whole time"). C6 is this migration's own
-      # compensation for the parked `publish` job migration (plan D1): it
-      # ties the 12-name `required=` list at build.yml:550-563 to the union
-      # of every leg's canonical `upload-artifact` name.
-      - name: Guard — CI conventions C1-C10
-        run: python3 native/scripts/ci_conventions_check.py
-
-      # WI-26 (push 9, unwired-scripts triage): the same "shipped a check,
-      # never invoked it in CI" condition documented for ci_conventions_check.py
-      # above, found again in seven more scripts under native/scripts/ -- each
-      # is a static, argument-light (or arg-free), read-only invariant check
-      # that already passes against this tree; none require sample images,
-      # a GPU, or a device, so all seven are safe in this compile-only,
-      # guard-heavy job. An eighth candidate (check_expected_additions.py)
-      # was found and verified as the identical defect pattern but is
-      # deliberately NOT wired here: it is one of the four USER-ORDERED
-      # guards scheduled for the parking-lot round, not an oversight --
-      # see the triage doc. Full triage of every script under
-      # native/scripts/ and native/scripts/ci/ (WIRED / DELIBERATELY
-      # UNWIRED / UNWIRED-DEFECT, one line per script with the grep that
-      # proves it): docs/logs/2026-09-13/unwired-scripts-triage.md (not
-      # committed, per this repo's docs/ policy -- the classification
-      # evidence lives there for the record; these seven `run:` lines are
-      # the fix).
-      - name: Guard — RAW/GPU architecture invariants (spec 13.3)
-        run: python3 native/scripts/check_raw_architecture_gates.py
-
-      - name: Guard — Stage4 orientation permutation derivation matches source
-        run: python3 native/scripts/derive_oriented_stage4.py --check
-
-      - name: Guard — export_manifest.toml matches the Dart FFI call sites
-        run: python3 native/scripts/gen_export_manifest.py --check
-
-      - name: Guard — linkage_table.md matches manifest.toml/shipped_files.toml
-        run: python3 native/scripts/gen_linkage_table.py --check
-
-      - name: Guard — shipped_files.cmake matches shipped_files.toml
-        run: python3 native/scripts/gen_shipped_files_cmake.py --check
-
-      # B3-1 (2026-09-18, unwired-scripts triage round 2): the pyci
-      # parking-lot round's guards (a)/(g)/(h)/(i)/(f)2 -- check_argv_contract.py,
-      # check_folded_yaml_reverse_sentinel.py, check_errexit_rc_capture.py,
-      # check_step_order.py, check_wiring_is_ledger.py -- were found unwired
-      # against the REAL workflow tree by the same triage discipline that
-      # found WI-26's seven (their tests exercise fixtures under
-      # `native/scripts/ci/tests/fixtures/`, a different claim from running
-      # against `.github/workflows/*.yml` itself), and each was confirmed
-      # green standalone against this tree (tmp/verify/impl-b31/pre-wire-baseline.txt).
-      # NOT wired here: a frozen four-phase CI migration ruling (2026-09-18)
-      # puts all five on the Phase 1/2 deletion list, so adding a CI step
-      # for a guard scheduled for removal would only cost review/CI time
-      # now and an unwiring step later. Full classification, including
-      # these five and the two below, in tmp/verify/impl-b31/triage-table.md.
-      # check_expected_additions.py stays unwired for its own,
-      # independent reason: user-ordered for the parking-lot round, same
-      # as WI-26's eighth candidate.
-      # (A paragraph here used to explain why the local `git worktree`-based
-      # fresh-checkout simulator stayed unwired. Phase 1 deleted that
-      # instrument -- the digest-pinned guard container supersedes it -- and
-      # this paragraph went with it, because Phase 1's acceptance is a
-      # literal grep-zero claim on that filename and a comment is a hit.)
+      # The ten repo-static guard steps that used to sit here were REMOVED in
+      # favour of the `guards-container` job, which runs all of them (and
+      # seven more) inside the digest-pinned linux/amd64 container via
+      # `python3 native/scripts/ci.py guards --docker`. Phase 1's stated end
+      # is that the workflow step and a developer's local gate are ONE
+      # command; ten surviving duplicates here would have meant it was never
+      # achieved.
+      #
+      # THEY WERE NOT REMOVED UNTIL THE REPLACEMENT WAS PROVEN GREEN ON A
+      # REAL RUNNER (run 35354798330 at 2650bbc5, the guards-container job's
+      # own conclusion read as `success` -- not merely the run's colour,
+      # since a skipped job contributes no red). Deleting existing coverage
+      # in the same commit that introduces its untested replacement removes
+      # the very check that would have caught the new job being
+      # misconfigured.
+      #
+      # Coverage moved, it did not shrink: every removed step's argv has an
+      # exact counterpart in the GUARDS tuple in native/scripts/ci/guards.py.
+      # If you are looking for one of them, it runs there now. The two
+      # vendored-LibRaw guards further down this job did NOT move and are
+      # NOT covered by that verb -- they read native/third_party/libraw/,
+      # which does not exist until the fetch step above them, so they are
+      # not repo-static and must stay wired here.
+      #
+      # `ci.py selftest` above also stays: it is a unit-test suite, not a
+      # guard over the repo, and the container verb does not run it.
 
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here

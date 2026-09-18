@@ -247,7 +247,12 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
 
         bound = 0
         for (script, argv), keys in sorted(by_invocation.items()):
-            found = list(cea.iter_workflow_invocations(script, workflows_dir=_WORKFLOWS_DIR))
+            # `iter_all_invocations`, not `iter_workflow_invocations`: since
+            # Phase 1 a producer may be invoked TRANSITIVELY, inside the
+            # containerised guard block, rather than by a `run:` line naming
+            # it. The property asserted is unchanged -- exactly one producer
+            # that CI actually runs -- the detection just covers both shapes.
+            found = cea.iter_all_invocations(script, workflows_dir=_WORKFLOWS_DIR)
             self.assertEqual(
                 len(found), 1,
                 f"expected exactly ONE workflow invocation of {script} (producer of "
@@ -297,6 +302,102 @@ class CheckExpectedAdditionsTests(unittest.TestCase):
         self.assertEqual(len(found), 1, f"bare mention must not count as an invocation: {found}")
         self.assertEqual(found[0].argv, ("--alpha", "one", "--beta", "two"))
         self.assertEqual(found[0].step_name, "Real multi-line invocation")
+
+
+class ContainerInvocationTests(unittest.TestCase):
+    """Phase 1 gave 'CI invokes this script' a second, indirect shape: ten
+    guard steps moved out of build.yml into one `ci.py guards --docker`
+    step. These tests pin the rule that detects it.
+
+    THE RULE REQUIRES BOTH CONDITIONS, and condition (ii) is why:
+      (i)  the script is in `guards.GUARDS`, AND
+      (ii) a workflow actually invokes `ci.py guards`.
+    With only (i), tuple membership alone would count as invocation, and
+    deleting the entire guards job from build.yml would still leave every
+    marker "with a producer" -- a PASS over a CI running no guards at all.
+    That is a worse false green than the one this rule repairs, so each
+    condition gets a test that fails when that condition is removed."""
+
+    _CONTAINER_YAML = """jobs:
+  guards-container:
+    steps:
+      - name: Run repo-static guards in the digest-pinned container
+        run: python3 native/scripts/ci.py guards --docker
+"""
+
+    def _dir_with(self, yaml_text: str):
+        import tempfile  # local, matching this file's existing convention
+
+        d = tempfile.TemporaryDirectory()
+        (Path(d.name) / "synthetic.yml").write_text(yaml_text)
+        return d
+
+    def test_condition_ii_live_no_guards_step_means_no_invocation(self):
+        """Remove the container step: a tuple member must then be reported
+        as NOT invoked. This is the false-green guard."""
+        d = self._dir_with("jobs:\n  j:\n    steps:\n      - name: Unrelated\n        run: echo hi\n")
+        with d:
+            found = list(
+                cea.iter_container_invocations(
+                    "native/scripts/ci/check_shell_prohibition.py", workflows_dir=Path(d.name)
+                )
+            )
+        self.assertEqual(found, [], "no `ci.py guards` step must mean no transitive invocation")
+
+    def test_condition_i_live_non_member_is_not_invoked_by_the_container(self):
+        """A script absent from the tuple gets nothing, even though the
+        container step is present."""
+        d = self._dir_with(self._CONTAINER_YAML)
+        with d:
+            found = list(
+                cea.iter_container_invocations(
+                    "native/scripts/verify_raw_provenance.py", workflows_dir=Path(d.name)
+                )
+            )
+        self.assertEqual(found, [], "a non-member must not be credited to the container block")
+
+    def test_both_conditions_met_yields_one_invocation_named_for_the_script(self):
+        d = self._dir_with(self._CONTAINER_YAML)
+        with d:
+            found = list(
+                cea.iter_container_invocations(
+                    "native/scripts/ci/check_shell_prohibition.py", workflows_dir=Path(d.name)
+                )
+            )
+        self.assertEqual(len(found), 1)
+        # Named for the SCRIPT, not the container step: attributing the
+        # marker to the step would discard the fact the ledger exists to
+        # record.
+        self.assertEqual(found[0].script, "native/scripts/ci/check_shell_prohibition.py")
+        self.assertEqual(found[0].argv, ())
+
+    def test_a_different_ci_py_verb_does_not_satisfy_condition_ii(self):
+        """`ci.py selftest` is a separate step and runs no guards; it must
+        not be mistaken for the guard block."""
+        d = self._dir_with(
+            "jobs:\n  j:\n    steps:\n      - name: selftest\n"
+            "        run: python3 native/scripts/ci.py selftest\n"
+        )
+        with d:
+            found = list(
+                cea.iter_container_invocations(
+                    "native/scripts/ci/check_shell_prohibition.py", workflows_dir=Path(d.name)
+                )
+            )
+        self.assertEqual(found, [], "only the `guards` verb runs the block")
+
+    def test_argv_comes_from_the_roster_entry(self):
+        """A `--check`-style member must report its flag, so the producer
+        map's argv comparison still means something."""
+        d = self._dir_with(self._CONTAINER_YAML)
+        with d:
+            found = list(
+                cea.iter_container_invocations(
+                    "native/scripts/gen_linkage_table.py", workflows_dir=Path(d.name)
+                )
+            )
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].argv, ("--check",))
 
 
 if __name__ == "__main__":
