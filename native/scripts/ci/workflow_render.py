@@ -24,12 +24,13 @@ thing that changed is comment lines. If it fails anywhere that is a
 FINDING, not a formatting artefact -- a semantic change riding along inside
 a diff too large to read is exactly what this check exists to catch.
 
-SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders the
-THREE Android dist workflows only:
+SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders FOUR
+of the eleven workflows:
 
     webp_dist_android.yml  jxl_dist_android.yml  heif_dist_android.yml
+    webp_dist_windows.yml
 
-It does NOT render the six remaining workflows. `RENDERED` below is the
+It does NOT render the other seven. `RENDERED` below is the
 explicit, enumerated set, and `ci.py render-workflows --check` compares
 exactly those names -- so the assertion can never pass by rendering
 nothing, and a name here with no committed counterpart is a failure, not a
@@ -58,6 +59,7 @@ RENDERED = (
     "webp_dist_android.yml",
     "jxl_dist_android.yml",
     "heif_dist_android.yml",
+    "webp_dist_windows.yml",
 )
 
 
@@ -393,6 +395,136 @@ with this artifact so a committed dist tree carries the pin
 record CI-T8's staleness digest check depends on.""",
         ),
     ],
+    "webp_dist_windows.yml": [
+        (
+            'header: between `name:` and `on:`',
+            """\
+DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml: the dist is
+a pinned, reviewed input that is COMMITTED, not rebuilt per push.
+
+ci/** is included so the workflow can be verified from a bootstrap branch:
+a workflow file only becomes dispatchable once it exists on a ref that runs it.
+
+Round 6 (Plan B): `workflow_call` was ADDED alongside the existing triggers so
+build.yml can invoke this leg on demand; workflow_dispatch is KEPT and remains
+the primary entry point. Sole producer of the committed
+native/third_party/libwebp-dist-windows tree — see heif_dist_windows.yml for
+the full rationale and for why this leg is not in build.yml's per-push matrix.""",
+        ),
+        (
+            'before step `Force LF line endings for all git operations`',
+            """\
+MUST run BEFORE actions/checkout, same reason as heif_dist_windows.yml:
+Git for Windows ships core.autocrlf=true system-wide, and a checkout
+done before this writes shell scripts with CRLF, which Git-Bash then
+fails to execute with an opaque error.""",
+        ),
+        (
+            'before step `Install Ninja`',
+            """\
+CMake ships with the runner image; Ninja does not reliably. pip's ninja
+wheel is a pinned, deterministic way to get it on PATH without choco.
+
+WI-32 (push 8b): migrated to `ci.py provision ninja` (WI-29's
+`provision.ninja()`, identical body shared with windows_build.yml and
+the other *_dist_*.yml twins). `shell:` deliberately left unset --
+preserves the pre-migration default (`pwsh` on windows-latest).""",
+        ),
+        (
+            'before step `Set up MSVC developer environment (x64)`',
+            """\
+Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
+LIB; this action is CI's equivalent of vcvars64.bat.""",
+        ),
+        (
+            'before step `Locate clang-cl`',
+            """\
+WI-32 (push 8b): migrated to `ci.py provision locate-clang-cl`, which
+reuses `windows_toolchain.locate_clang_cl` (WI-24) rather than a
+second implementation.
+
+KNOWN DIVERGENCE, recorded rather than silently carried (identical to
+jxl_dist_windows.yml's note): the reused function's not-found message
+is "::error::clang-cl not found on the runner.
+native/cmake/pipeline.cmake requires it (cl.exe has no
+-ffp-contract=off equivalent)." (windows_toolchain.py:52-54), longer
+than this file's pre-migration "::error::clang-cl not found on the
+runner." Both `::error::`-prefixed, same trigger condition, text-only
+difference -- invisible to marker-diff since it only fires on an
+already-red step.""",
+        ),
+        (
+            'before step `Build the libwebp dist`',
+            """\
+Migrated off build_libwebp_dist_windows.sh (2026-09-01 contract item
+11 / ENTRY-POINT RULE): the carrier is native/scripts/deps/win_webp_dist.py,
+exposed as `build_deps.py build webp-stack`. build_libwebp_dist_windows.sh
+was DELETED in round 3 once this carrier was proven green on a real
+Windows run -- see win_webp_dist_test.py for the transcription test
+frozen against its last revision.
+
+WI-32 (push 8b): migrated to `ci.py dist-build`. `--dist` keeps this
+file's pre-migration RELATIVE form (`native/third_party/...`, not the
+`${{ github.workspace }}/...` absolute form jxl/heif use) -- confirmed
+against WI-29 that `--dist` passes through unmodified, so the two
+argv forms are preserved as each file already had them rather than
+silently normalised to match. `shell: bash` KEPT (this is the one
+Windows carrier step written in bash, not pwsh -- see this file's
+header). The pre-migration `set +e` / `RC=$?` / `set -e` dance existed
+only to survive Actions' default `bash -eo pipefail` long enough to
+capture $?; `dist_build.py` needs no such workaround because it reads
+`result.returncode` from the `subprocess` object Python's own `run.py`
+returns, adjacent to the call, never from a shell variable -- the
+same guarantee the old dance was manually establishing.
+WI-40: collapsed from a `run: >` folded scalar to one physical line
+-- workflow_scan.code_lines() parses run: bodies by raw physical
+line and does not fold block scalars, so this step read as 4
+physical lines and failed Rule-1 even though it was already the
+one-line python3 `dist-build` carrier WI-32 wrote. YAML-parsed
+`run` string verified byte-identical before/after; formatting
+only. `shell: bash` and the relative `--dist` form are both
+untouched -- see this step's WI-32 comment block above for why.""",
+        ),
+        (
+            'before step `List the produced dist (complete)`',
+            """\
+Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
+inventory while silently omitting the headers.
+
+WI-32 (push 8b): migrated to `ci.py dist-list` (WI-29) -- same
+deliberate tightening as jxl_dist_windows.yml's equivalent step
+(refuses to succeed silently on a missing/empty tree).""",
+        ),
+        (
+            'before step `Upload the dist`',
+            """\
+Canonical artifact name <component>-<platform>-<arch> (round 6); the
+packaged directory keeps its committed tracked path.""",
+        ),
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# WINDOWS DIST LEGS. A SECOND TEMPLATE, NOT A PARAMETER OF THE ANDROID ONE.
+# The step sequences genuinely differ: Windows needs an LF-line-endings step
+# BEFORE checkout, an MSVC developer-environment action and a clang-cl
+# locator, and has no NDK step; its dist directory carries no arch suffix and
+# its upload sets no include-hidden-files. Forcing one template to cover both
+# would mean a parameter per difference, which is how a renderer stops being
+# readable. Two templates, one data shape.
+# ---------------------------------------------------------------------------
+_WIN_DIST: dict = {
+    "webp_dist_windows.yml": {
+        "title": "libwebp dist (Windows)",
+        "short": "webp",
+        "dist_prefix": "libwebp",
+        "component": "webp-stack",
+        "rc_marker": "WEBP_DIST_WINDOWS_RC",
+        "job_name": "libwebp dist (windows x86_64, clang-cl, static, encode+decode+mux)",
+        "build_step_name": "Build the libwebp dist",
+        "timeout_minutes": 45,
+        "path_trigger": "native/scripts/deps/win_webp_dist.py",
+    },
 }
 
 # The apt prerequisites step, present only on the HEIF leg.
@@ -421,6 +553,8 @@ def render(name: str) -> str:
     in this output is in `_MIGRATED_COMMENTS`, verbatim, and is never read
     by this function.
     """
+    if name in _WIN_DIST:
+        return _render_windows_dist(name)
     try:
         d = _DIST[name]
     except KeyError:
@@ -503,6 +637,83 @@ jobs:
 """
 
 
+def _render_windows_dist(name: str) -> str:
+    d = _WIN_DIST[name]
+    arch = targets.spec("windows")["arch_tags"][0]
+    dist = f"native/third_party/{d['dist_prefix']}-dist-windows"
+    return f"""\
+name: {d['title']}
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/**"
+    paths:
+      - "{d['path_trigger']}"
+      - "native/scripts/build_deps.py"
+      - ".github/workflows/{name}"
+
+concurrency:
+  group: {d['short']}-dist-windows-${{{{ github.ref }}}}
+  cancel-in-progress: true
+
+jobs:
+  build-{d['short']}-dist:
+    name: {d['job_name']}
+    runs-on: windows-latest
+    timeout-minutes: {d['timeout_minutes']}
+    steps:
+      - name: Force LF line endings for all git operations
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          echo "core.autocrlf=$(git config --global core.autocrlf)"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ninja
+        run: python native/scripts/ci.py provision ninja
+
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Locate clang-cl
+        shell: bash
+        run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
+
+      - name: {d['build_step_name']}
+        shell: bash
+        working-directory: ${{{{ github.workspace }}}}
+        run: |
+          python3 native/scripts/ci.py dist-build --component {d['component']} --platform windows --arch {arch} --dist {dist} --rc-marker {d['rc_marker']}
+
+      - name: List the produced dist (complete)
+        if: always()
+        shell: bash
+        working-directory: ${{{{ github.workspace }}}}
+        run: python3 native/scripts/ci.py dist-list --dist {dist}
+
+      - name: Upload the dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: {d['dist_prefix']}-dist-windows-{arch}
+          path: ${{{{ github.workspace }}}}/{dist}
+          if-no-files-found: error
+          retention-days: 7
+"""
+
+
 def render_all() -> dict:
     """{filename: rendered text} for every name in RENDERED."""
     return {name: render(name) for name in RENDERED}
@@ -548,6 +759,16 @@ _COMMENT_KIND: dict = {
     # for the step's present form.
     "before step `Install Ninja`": "evidence",
     "before step `Install build prerequisites (apt)`": "evidence",
+    # --- Windows dist leg anchors ---
+    # MUST run before checkout or Git-for-Windows' system-wide
+    # core.autocrlf=true writes CRLF shell scripts that Git-Bash cannot
+    # execute: a step-ORDER directive, not an explanation.
+    "before step `Force LF line endings for all git operations`": "instruction",
+    # names the action that supplies MSVC headers/libs to clang-cl.
+    "before step `Set up MSVC developer environment (x64)`": "evidence",
+    # records WI-32's reuse of windows_toolchain.locate_clang_cl and the
+    # known error-text divergence it accepted.
+    "before step `Locate clang-cl`": "evidence",
     "before step `List the produced dist (complete)`": "instruction",
     "before step `Upload the dist`": "instruction",
     "inside step `Upload the dist`, above `include-hidden-files:`": "instruction",
