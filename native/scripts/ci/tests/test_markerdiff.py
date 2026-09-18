@@ -134,12 +134,28 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
     still must."""
 
     def test_ledger_addition_is_not_a_delta_for_matching_leg(self):
-        baseline = "EXPORTS_RESULT=PASS\n"
-        candidate = (
-            "EXPORTS_RESULT=PASS\n"
-            "SHELL_ALLOWLIST_SIZE=42\n"
-            "SHELL_PROHIBITION_RESULT=PASS\n"
+        """DIAGNOSED, not inherited: this went red because its candidate
+        hardcoded `SHELL_ALLOWLIST_SIZE=42` / `SHELL_PROHIBITION_RESULT=PASS`,
+        which Phase 2 removed from the ledger along with their producer. An
+        unknown key is an ordinary unlisted addition, so `diff` returned
+        rc=1 -- correct behaviour, stale fixture.
+
+        Repaired as the GENERIC form (the hardcoded-literal form is
+        `test_wi43_alias_table_markers_are_not_deltas_for_matching_leg`
+        below, deliberately kept as the independent second statement): every
+        CURRENT nativetests ledger line, taken from the ledger itself, must
+        be forgiven. The length assertion is what stops an emptied ledger
+        from passing this vacuously."""
+        ledger_lines = [
+            e.line for e in markerdiff.EXPECTED_ADDITIONS if e.leg == "nativetests"
+        ]
+        self.assertGreaterEqual(
+            len(ledger_lines), 2,
+            "fixture is derived from the ledger; fewer than two entries means this test "
+            "would assert almost nothing -- update it deliberately, do not let it pass empty",
         )
+        baseline = "EXPORTS_RESULT=PASS\n"
+        candidate = "EXPORTS_RESULT=PASS\n" + "".join(f"{line}\n" for line in ledger_lines)
         rc, deltas = markerdiff.diff(baseline, candidate, leg="nativetests")
         self.assertEqual(rc, 0)
         self.assertEqual(deltas, [])
@@ -193,10 +209,15 @@ class ExpectedAdditionsLedgerTests(unittest.TestCase):
         self.assertIn("+1 SHELL_ALLOWLIST_SIZE=106", deltas)
 
     def test_expected_addition_report_lines_names_both_entries(self):
+        # SUBJECT MOVED, not obsolete: Phase 2 deleted check_shell_prohibition.py
+        # and with it the SHELL_ALLOWLIST_SIZE / SHELL_PROHIBITION_RESULT
+        # ledger pair. The nativetests leg still carries exactly TWO entries
+        # -- the alias-table pair -- so "the report names BOTH entries" is
+        # the same live property, restated over the current ledger.
         lines = markerdiff.expected_addition_report_lines("nativetests")
         joined = "\n".join(lines)
-        self.assertIn("SHELL_ALLOWLIST_SIZE=42", joined)
-        self.assertIn("SHELL_PROHIBITION_RESULT=PASS", joined)
+        self.assertIn("TABLE_COUNT=10", joined)
+        self.assertIn("ALIAS_TABLE_FIRST_ELEMENT_ALL_AT=YES", joined)
 
     def test_expected_addition_report_lines_empty_for_other_leg(self):
         self.assertEqual(markerdiff.expected_addition_report_lines("linux"), [])
