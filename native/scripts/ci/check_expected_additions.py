@@ -125,8 +125,6 @@ else:
 # now driven BY this map rather than by a hardcoded key, so an entry added
 # here in future is bound automatically instead of silently unbound.
 _KEY_TO_PRODUCER_SCRIPT: dict[str, tuple[str, tuple[str, ...]]] = {
-    "SHELL_ALLOWLIST_SIZE": ("native/scripts/ci/check_shell_prohibition.py", ()),
-    "SHELL_PROHIBITION_RESULT": ("native/scripts/ci/check_shell_prohibition.py", ()),
     "TABLE_COUNT": (
         "native/scripts/check_alias_table_convention.py",
         ("native/third_party/libraw/src/metadata/normalize_model.cpp",),

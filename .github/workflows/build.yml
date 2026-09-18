@@ -455,45 +455,41 @@ jobs:
   # fetch -- so it fails in under a minute when it fails, far ahead of any
   # build leg.
   #
-  # `fetch-depth: 0` is REQUIRED TODAY, BY EXACTLY ONE GUARD, AND THAT GUARD
-  # IS SCHEDULED FOR DELETION. Stated this precisely because the next reader
-  # needs to be able to act on it rather than preserve the setting forever
-  # out of caution.
+  # THIS JOB NO LONGER SETS `fetch-depth: 0`, AND THAT IS DELIBERATE. It was
+  # required by exactly one guard, check_wiring_is_ledger.py, which compared
+  # two revisions and failed closed without a resolvable `origin/main`. Phase
+  # 2 deleted that guard (user ruling 2026-09-18 21:40) and this setting left
+  # with it, in the same commit, rather than being kept "just in case" -- a
+  # setting whose justification names a file that no longer exists is one
+  # nobody can ever remove.
   #
-  # Determined empirically, not by reading the guards: a genuine `git clone
-  # --depth 1` of this branch (one commit, `origin/main` does not resolve)
-  # was made and the whole block run inside it. Exactly ONE of the seventeen
-  # failed -- check_wiring_is_ledger.py, RC=2, failing closed as designed
-  # because it compares two revisions. The other sixteen passed on a
-  # single-commit checkout. Evidence:
-  # tmp/verify/impl-p1-docker/shallow-depth1-probe.txt.
+  # Established empirically before the removal, not by reading the guards: a
+  # genuine `git clone --depth 1` (one commit, `origin/main` unresolvable)
+  # was made and the whole block run inside it. Exactly ONE of the then
+  # seventeen failed -- check_wiring_is_ledger.py, RC=2, failing closed as
+  # designed. The other sixteen passed on a single-commit checkout. Evidence:
+  # tmp/verify/impl-p1-docker/shallow-depth1-probe.txt. The surviving git
+  # users only touch the index and the checked-out tree (`git ls-files` in
+  # check_cmake_sources_tracked.py, `git check-ignore` in
+  # ci_conventions_check.py), which a depth-1 checkout satisfies. Re-run of
+  # that probe after the removal: tmp/verify/impl-p2/depth1-probe-postdelete.txt.
   #
-  # check_wiring_is_ledger.py is on Phase 2's deletion list. WHEN IT GOES,
-  # NOTHING IN THE BLOCK NEEDS HISTORY and this setting should be DELETED
-  # rather than re-justified -- full history is not free on every run, and a
-  # setting kept "just in case" is one nobody can ever remove. The surviving
-  # git users only touch the index and the checked-out tree (`git ls-files`
-  # in check_cmake_sources_tracked.py, `git check-ignore` in
-  # ci_conventions_check.py), which a depth-1 checkout satisfies.
-  #
-  # WHOEVER LANDS THAT DELETION -- READ THE TARGET CAREFULLY. `fetch-depth`
-  # is mentioned many times in this file and there is now exactly ONE real
-  # setting; everything else is prose in comment blocks like this one, and
-  # the mention count grows every time someone writes about it. DO NOT
-  # enumerate by grep. Enumerate by parsing:
+  # END STATE (check_wiring_is_ledger.py's deletion, the thing the
+  # paragraph above was written to prepare for, has now landed): NOTHING IN
+  # THIS BLOCK NEEDS HISTORY, and there is no `fetch-depth: 0` left under
+  # this job's Checkout step. Verify by PARSING, never by grep -- mention
+  # counts of "fetch-depth" grow every time someone writes a paragraph like
+  # this one; the parsed count does not:
   #
   #     python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/build.yml'));
   #     print([(j, s.get('name')) for j,job in d['jobs'].items()
   #            for s in (job.get('steps') or []) if 'fetch-depth' in (s.get('with') or {})])"
   #
-  # That prints the real settings and nothing else. The one to remove is the
-  # `fetch-depth: 0` under the `Checkout` step of the `guards-container`
-  # job -- THIS job, the one this comment block sits directly above.
-  #
-  # After removing it, re-run the depth-1 probe described above against THIS
-  # job's block and confirm it is still green -- including its POSITIVE
-  # CONTROL, without which a green proves nothing. That re-run is the whole
-  # check; it takes a minute.
+  # Expect `[]`. If a FUTURE guard added to this block needs history, re-add
+  # `fetch-depth: 0` naming that guard, then re-run the depth-1 probe
+  # described above against THIS job's block -- including its POSITIVE
+  # CONTROL, without which a green proves nothing -- before trusting the
+  # result.
   #
   # HISTORY, so nobody re-derives a wrong version of it: `verify-native-tests`
   # also carried a `fetch-depth: 0` until it was removed on the evidence
@@ -519,13 +515,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          # Needed by exactly ONE guard in the block --
-          # check_wiring_is_ledger.py, which fails closed without a
-          # resolvable origin/main. That guard is on Phase 2's deletion
-          # list; DELETE THIS LINE when it goes. See the job comment above
-          # for the depth-1 probe that establishes the other sixteen do not
-          # need it, and for how to re-run that probe.
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
