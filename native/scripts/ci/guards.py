@@ -387,22 +387,30 @@ def print_scope() -> None:
             f"GUARDS_SCOPE_COVERS[{i}/{len(GUARDS)}]: {' '.join(guard)}{suffix}",
             flush=True,
         )
-    # Cost, MEASURED rather than estimated. The first version of this text said
-    # "roughly doubles", inherited from an estimate; the per-guard timings this
-    # very function emits said 21.4s for that one guard against 2.8s for the
-    # other sixteen COMBINED, so the estimate was wrong by roughly a factor of
-    # four in the wrong direction. Corrected to match the instrument, and
-    # recorded here because a cost note that disagrees with the timings printed
-    # ten lines below it is worse than no note. Re-measure before editing.
+    # Cost: QUALITATIVE here, because this block prints BEFORE anything has
+    # been timed. The numbers are emitted after the run by
+    # `_print_cost_summary()`, COMPUTED from the same durations printed on the
+    # GUARDS_SECONDS lines.
+    #
+    # This used to carry hard-coded figures and they went stale exactly as you
+    # would predict: the text said "21.4s against 2.8s", which was a real
+    # measurement from a HOST run, while the artifact it was printed into was
+    # a CONTAINER run whose own lines said 49.2s against 8.8s. A narrative
+    # number contradicting the mechanical numbers in the same log is the
+    # defect class this whole campaign exists to remove, and the reviewer
+    # found it by summing the lines this function emits. Hence the rule now
+    # enforced by construction rather than by diligence: a summary sentence is
+    # DERIVED from the data it summarises, never transcribed alongside it. A
+    # recomputed sentence cannot go stale; a transcribed one always can.
     print(
         "GUARDS_SCOPE_COST: check_test_marker_leak.py re-runs the full unit "
-        "suite in-process and DOMINATES this block -- measured 21.4s against "
-        "2.8s for the other sixteen combined (~8x), so the block costs roughly "
-        "9x what it would without that one guard. Accepted deliberately "
-        "(correctness over speed): it is the only guard covering marker leakage "
-        "into the job log, and CI has never run it before. The GUARDS_SECONDS "
-        "lines below make this checkable on every run instead of trusted from "
-        "this sentence.",
+        "suite in-process and DOMINATES this block's wall time. Accepted "
+        "deliberately (correctness over speed): it is the only guard covering "
+        "marker leakage into the job log, and CI has never run it before. "
+        "Exact figures for THIS run are computed from this run's own timings "
+        "and printed as GUARDS_COST_SUMMARY below -- read that, not a "
+        "remembered number, and note that host and container runs differ "
+        "substantially.",
         flush=True,
     )
     print(
@@ -413,6 +421,34 @@ def print_scope() -> None:
     )
     for item in NOT_COVERED:
         print(f"GUARDS_SCOPE_DOES_NOT_COVER: {item}", flush=True)
+
+
+def _print_cost_summary(durations: list) -> None:
+    """Emit the cost summary DERIVED from this run's own measurements.
+
+    ``durations`` is a list of ``(label, seconds)`` -- the very same values
+    printed on the GUARDS_SECONDS lines. Nothing here is transcribed, so this
+    sentence cannot drift away from the data underneath it, which is the
+    failure it exists to prevent: the previous hard-coded version quoted a
+    host run's figures inside a container run's artifact and was off by more
+    than a factor of two.
+    """
+    if not durations:
+        return
+    total = sum(s for _, s in durations)
+    slowest_label, slowest = max(durations, key=lambda pair: pair[1])
+    others = total - slowest
+    # Guard the division: a fast enough machine could in principle floor the
+    # rest of the block at 0.0s, and a crash in the cost REPORTER would be an
+    # absurd way to fail a green guard run.
+    ratio = f"{slowest / others:.1f}x" if others > 0 else "n/a (rest of block ~0s)"
+    block_ratio = f"{total / others:.1f}x" if others > 0 else "n/a"
+    print(
+        f"GUARDS_COST_SUMMARY: slowest={slowest_label} {slowest:.1f}s; "
+        f"other_{len(durations) - 1}_combined={others:.1f}s; ratio={ratio}; "
+        f"block_total={total:.1f}s; block_vs_without_slowest={block_ratio}",
+        flush=True,
+    )
 
 
 def run_checks(repo_root: Path = REPO_ROOT) -> int:
@@ -439,6 +475,7 @@ def run_checks(repo_root: Path = REPO_ROOT) -> int:
     report.section("ci.py guards -- run")
     failures = []
     diagnoses = []
+    durations = []
     started = time.monotonic()
     for guard in GUARDS:
         label = guard[0]
@@ -456,6 +493,7 @@ def run_checks(repo_root: Path = REPO_ROOT) -> int:
         # reader comparing two runs should be able to see WHERE the time went
         # rather than inferring it.
         print(f"GUARDS_SECONDS({label})={elapsed:.1f}", flush=True)
+        durations.append((label, elapsed))
         print(f"GUARDS_RC({label})={result.returncode}", flush=True)
         if result.returncode != 0:
             failures.append(label)
@@ -466,6 +504,7 @@ def run_checks(repo_root: Path = REPO_ROOT) -> int:
     report.marker("GUARDS_TOTAL", len(GUARDS))
     report.marker("GUARDS_FAILED", len(failures))
     report.marker("GUARDS_TOTAL_SECONDS", f"{time.monotonic() - started:.1f}")
+    _print_cost_summary(durations)
     for diagnosis in diagnoses:
         report.error(diagnosis)
     for label in failures:

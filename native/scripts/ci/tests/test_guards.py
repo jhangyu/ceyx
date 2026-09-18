@@ -307,6 +307,47 @@ class ScopePrintingTest(unittest.TestCase):
         self.assertIn("macOS", out)
 
 
+class CostSummaryTest(unittest.TestCase):
+    """The reviewer found a hard-coded cost sentence quoting a HOST run's
+    figures (21.4s / 2.8s) inside a CONTAINER run's artifact whose own
+    GUARDS_SECONDS lines said 49.2s / 8.8s. The summary is now derived from
+    the measurements rather than transcribed beside them; these tests pin
+    that it stays derived."""
+
+    def test_summary_is_computed_from_the_supplied_durations(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            guards._print_cost_summary([("slow.py", 49.2), ("a.py", 6.0), ("b.py", 2.8)])
+        out = buf.getvalue()
+        self.assertIn("slowest=slow.py 49.2s", out)
+        self.assertIn("other_2_combined=8.8s", out)
+        self.assertIn("ratio=5.6x", out)       # 49.2 / 8.8
+        self.assertIn("block_total=58.0s", out)
+
+    def test_no_hardcoded_timing_figures_survive_in_the_scope_text(self):
+        """The specific regression: a number of the form `N.Ns` baked into
+        the scope prose. Scope prints before anything is timed, so any
+        second-figure there is necessarily transcribed and will go stale."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            guards.print_scope()
+        cost_lines = [ln for ln in buf.getvalue().splitlines() if "GUARDS_SCOPE_COST" in ln]
+        self.assertEqual(len(cost_lines), 1)
+        self.assertNotRegex(
+            cost_lines[0],
+            r"\d+\.\d+\s*s",
+            "scope cost text must not carry transcribed timings -- it prints "
+            "before anything has been measured; put figures in "
+            "GUARDS_COST_SUMMARY, which is computed",
+        )
+
+    def test_summary_survives_a_zero_second_remainder(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            guards._print_cost_summary([("only.py", 1.0)])
+        self.assertIn("n/a", buf.getvalue())
+
+
 class DispatchRegistrationTest(unittest.TestCase):
     def test_guards_verb_is_registered_with_both_modes(self):
         parser = _load_ci_entry().build_parser()
