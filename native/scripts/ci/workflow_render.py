@@ -24,13 +24,13 @@ thing that changed is comment lines. If it fails anywhere that is a
 FINDING, not a formatting artefact -- a semantic change riding along inside
 a diff too large to read is exactly what this check exists to catch.
 
-SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders FOUR
+SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders FIVE
 of the eleven workflows:
 
     webp_dist_android.yml  jxl_dist_android.yml  heif_dist_android.yml
-    webp_dist_windows.yml
+    webp_dist_windows.yml  jxl_dist_windows.yml
 
-It does NOT render the other seven. `RENDERED` below is the
+It does NOT render the other six. `RENDERED` below is the
 explicit, enumerated set, and `ci.py render-workflows --check` compares
 exactly those names -- so the assertion can never pass by rendering
 nothing, and a name here with no committed counterpart is a failure, not a
@@ -60,6 +60,7 @@ RENDERED = (
     "jxl_dist_android.yml",
     "heif_dist_android.yml",
     "webp_dist_windows.yml",
+    "jxl_dist_windows.yml",
 )
 
 
@@ -502,6 +503,149 @@ Canonical artifact name <component>-<platform>-<arch> (round 6); the
 packaged directory keeps its committed tracked path.""",
         ),
     ],
+    "jxl_dist_windows.yml": [
+        (
+            'header: between `name:` and `on:`',
+            """\
+DISPATCH-ONLY BY DESIGN, same rationale as heif_dist_windows.yml /
+webp_dist_windows.yml: the dist is a pinned, reviewed input that is
+COMMITTED, not rebuilt per push.
+
+timeout-minutes is 90, not the 45-60 used by the other two Windows dists:
+libjxl is the heaviest of the three builds and highway's SIMD dispatch is
+the most compiler-sensitive part of it.
+
+ci/** is included so the workflow can be verified from a bootstrap branch:
+a workflow file only becomes dispatchable once it exists on a ref that runs it.
+
+Round 6 (Plan B): `workflow_call` was ADDED alongside the existing triggers so
+build.yml can invoke this leg on demand; workflow_dispatch is KEPT and remains
+the primary entry point. Sole producer of the committed
+native/third_party/libjxl-dist-windows tree — see heif_dist_windows.yml for
+the full rationale and for why this leg is not in build.yml's per-push matrix.
+
+2026-09-01 (contract item 10 / ENTRY-POINT RULE): built by the PYTHON
+CARRIER (native/scripts/deps/win_jxl_dist.py via
+`build_deps.py build jxl-stack`), not by build_libjxl_dist_windows.sh --
+same migration heif_dist_windows.yml already made for the HEIF dist. The
+path trigger below follows suit: it names the carrier module paths, the
+same S2/S3 trigger-coverage rationale heif_dist_windows.yml documents (a
+carrier change must be able to trigger the leg that proves it).
+build_libjxl_dist_windows.sh was retired in round 2 once the carrier-built
+dist was committed and green (its transcription test is frozen in
+win_jxl_dist_test.py); it was never a trigger path here since it was no
+longer consumed by this job.""",
+        ),
+        (
+            'before step `Force LF line endings for all git operations`',
+            """\
+MUST run BEFORE actions/checkout, same reason as the sibling dists:
+Git for Windows ships core.autocrlf=true system-wide, and a checkout
+done before this writes shell scripts with CRLF, which Git-Bash then
+fails to execute with an opaque error.""",
+        ),
+        (
+            'before step `Install Ninja`',
+            """\
+CMake ships with the runner image; Ninja does not reliably. pip's ninja
+wheel is a pinned, deterministic way to get it on PATH without choco.
+
+WI-32 (push 8b): migrated to `ci.py provision ninja`, the identical
+body already extracted by WI-29 (provision.py's `ninja()` -- shared
+verbatim with windows_build.yml and the other five *_dist_*.yml
+twins, no per-caller variant). Emits no marker, matching this step's
+pre-migration silence. `shell:` deliberately left unset, same as the
+pre-migration body -- the runner's default (`pwsh` on windows-latest)
+is preserved rather than switched to `bash` to match the Android
+dist twins' convention (WI-31); those run on a linux runner where
+`bash` already was the default, so their explicit key changed
+nothing, but stating it here would be a real interpreter change.""",
+        ),
+        (
+            'before step `Set up MSVC developer environment (x64)`',
+            """\
+Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
+LIB; this action is CI's equivalent of vcvars64.bat.""",
+        ),
+        (
+            'before step `Locate clang-cl`',
+            """\
+WI-32 (push 8b): migrated to `ci.py provision locate-clang-cl`, which
+reuses `windows_toolchain.locate_clang_cl` (WI-24's port for
+windows_build.yml's identical body) rather than a second
+implementation, per dist_build.py's own twin-diff finding.
+
+KNOWN DIVERGENCE, recorded rather than silently carried: the reused
+function's not-found message is
+"::error::clang-cl not found on the runner. native/cmake/pipeline.cmake
+requires it (cl.exe has no -ffp-contract=off equivalent)."
+(windows_toolchain.py:52-54), longer than this file's pre-migration
+"::error::clang-cl not found on the runner." (no trailing sentence).
+Both are `::error::`-prefixed and fire on the identical condition; the
+difference is text-only. Failure-path text is invisible to marker-diff
+(it is only emitted when the step is already red), so this could not
+have been caught by a green gate -- flagged here instead of silently
+adopting shared code with a changed string.""",
+        ),
+        (
+            'before step `Build the libjxl dist (Python carrier)`',
+            """\
+Built by the PYTHON CARRIER, not by build_libjxl_dist_windows.sh.
+
+`shell: pwsh` rather than bash is the substantive change here, not a
+style preference -- same rationale as heif_dist_windows.yml's
+equivalent step: under Git-Bash every path-shaped argument is
+eligible for MSYS rewriting, and Git-Bash can put an MSYS Python on
+PATH, which deps/run.py refuses to run under by design. pwsh + native
+Windows Python means argv reaches CreateProcessW unmodified.
+
+$LASTEXITCODE is captured on the line IMMEDIATELY after the command
+and echoed from the step itself, mirroring heif_dist_windows.yml.
+
+Invoked through the SINGLE CARRIER ENTRY POINT (build_deps.py), the
+ENTRY-POINT RULE (2026-09-01 contract item 10): every migrated
+capability lands as a build_deps.py subcommand, `jxl-stack` here.
+WI-32 (push 8b): migrated to `ci.py dist-build`, WI-29's frozen
+carrier invocation. `--dist` passes the same absolute
+`${{ github.workspace }}/...` form this step already used --
+dist_build.py forwards it unmodified, no normalisation (confirmed
+against WI-29 before this migration). rc is read from the child
+process object inside dist_build.py (adjacent to the call, never a
+shell variable), and `--rc-marker JXL_DIST_WINDOWS_RC` reproduces
+`JXL_DIST_WINDOWS_RC=<rc>` byte-for-byte, replacing
+`$RC = $LASTEXITCODE; Write-Host "JXL_DIST_WINDOWS_RC=$RC"`.
+`shell: pwsh` kept -- same reason as before the migration: Git-Bash
+is eligible to MSYS-rewrite path-shaped argv and can put an MSYS
+Python on PATH, which `deps/run.py` refuses to run under.
+WI-40: collapsed from a `run: >` folded scalar to one physical line
+-- workflow_scan.code_lines() parses run: bodies by raw physical
+line and does not fold block scalars, so this step read as 4
+physical lines and failed Rule-1 even though it was already the
+one-line python `dist-build` carrier WI-32 wrote. YAML-parsed `run`
+string verified byte-identical before/after (including the
+un-expanded `${{ github.workspace }}` text); formatting only.
+`shell: pwsh` and the `python` (not `python3`) spelling are both
+untouched -- see this step's WI-32 comment block above for why.""",
+        ),
+        (
+            'before step `List the produced dist (complete)`',
+            """\
+Unfiltered on purpose: a '*.lib'-filtered listing looks like a full
+inventory while silently omitting the headers.
+
+WI-32 (push 8b): migrated to `ci.py dist-list` (WI-29), which
+replaces `find | sort` and additionally refuses to succeed silently
+on a missing/empty dist tree (exits 1 with an `::error::` line where
+the old pipeline printed nothing and exited 0) -- a deliberate
+tightening, not a defect, per dist_build.py's own docstring.""",
+        ),
+        (
+            'before step `Upload the dist`',
+            """\
+Canonical artifact name <component>-<platform>-<arch> (round 6); the
+packaged directory keeps its committed tracked path.""",
+        ),
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -524,6 +668,31 @@ _WIN_DIST: dict = {
         "build_step_name": "Build the libwebp dist",
         "timeout_minutes": 45,
         "path_trigger": "native/scripts/deps/win_webp_dist.py",
+        "build_shell": "bash",
+        "python_exe": "python3",
+        # RELATIVE --dist, deliberately. WI-32 preserved each file's
+        # pre-migration argv form rather than normalising the two to match,
+        # having confirmed --dist passes through unmodified. jxl/heif use
+        # the ${{ github.workspace }}-absolute form. Rendering them the same
+        # would be a silent normalisation of exactly what WI-32 declined to
+        # normalise.
+        "dist_absolute": False,
+    },
+    "jxl_dist_windows.yml": {
+        "title": "libjxl dist (Windows)",
+        "short": "jxl",
+        "dist_prefix": "libjxl",
+        "component": "jxl-stack",
+        "rc_marker": "JXL_DIST_WINDOWS_RC",
+        "job_name": "libjxl dist (windows x86_64, clang-cl, static, encode+decode)",
+        "build_step_name": "Build the libjxl dist (Python carrier)",
+        "timeout_minutes": 90,
+        "path_trigger": "native/scripts/deps/**",
+        # pwsh + `python`, not bash + `python3`: this leg's carrier step was
+        # written in the runner's default shell and never migrated to bash.
+        "build_shell": "pwsh",
+        "python_exe": "python",
+        "dist_absolute": True,
     },
 }
 
@@ -641,6 +810,7 @@ def _render_windows_dist(name: str) -> str:
     d = _WIN_DIST[name]
     arch = targets.spec("windows")["arch_tags"][0]
     dist = f"native/third_party/{d['dist_prefix']}-dist-windows"
+    dist_arg = f'"${{{{ github.workspace }}}}/{dist}"' if d["dist_absolute"] else dist
     return f"""\
 name: {d['title']}
 
@@ -693,10 +863,10 @@ jobs:
         run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
 
       - name: {d['build_step_name']}
-        shell: bash
+        shell: {d['build_shell']}
         working-directory: ${{{{ github.workspace }}}}
         run: |
-          python3 native/scripts/ci.py dist-build --component {d['component']} --platform windows --arch {arch} --dist {dist} --rc-marker {d['rc_marker']}
+          {d['python_exe']} native/scripts/ci.py dist-build --component {d['component']} --platform windows --arch {arch} --dist {dist_arg} --rc-marker {d['rc_marker']}
 
       - name: List the produced dist (complete)
         if: always()
