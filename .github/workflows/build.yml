@@ -243,10 +243,35 @@ jobs:
       # is an ordinary environment variable inside `run:` steps, so paths are
       # composed there.
     steps:
+      # B3-1 (2026-09-18): `fetch-depth: 0` is required here, not cosmetic.
+      # `check_wiring_is_ledger.py` below defaults to `--base origin/main`,
+      # and GitHub Actions' default `actions/checkout@v4` (fetch-depth: 1)
+      # only fetches the single commit the run is actually building --
+      # `refs/remotes/origin/main` is created ONLY when that commit IS on
+      # main (a push to main), and stays entirely absent on a PR branch or a
+      # `ci/**` push. A local clone always creates `origin/<default>`
+      # regardless of which local branch is checked out, so "not on main"
+      # was the wrong mental model for the precondition (a same-repo probe
+      # proved that leg RESOLVES); the real trigger is "was origin/main ever
+      # fetched". A red-proof captured in a throwaway shallow clone
+      # (tmp/verify/lead17/b31-shallow-red-proof.txt, 2026-09-18) shows why
+      # this cannot be left to the guard's own exit code: with the ref
+      # absent, `check_wiring_is_ledger.py` still exits 0 and prints
+      # `WIRING_LEDGER_RESULT=PASS` -- it silently examines ZERO new steps
+      # (`NEW_STEPS_EXAMINED=0`) instead of the real diff
+      # (`NEW_STEPS_EXAMINED=152` with the ref present), because an absent
+      # base rev makes `_steps_at_rev(base)` return an empty dict and every
+      # head step reads as "new against nothing", which the new-step-only
+      # guard (P-24, its own documented scope limit) then silently no-ops
+      # on before a marker check can even run. `fetch-depth: 0` fetches full
+      # history for every ref (mirroring the one other precedent in this
+      # repo, `macos_build.yml:156`), which is what guarantees
+      # `origin/main` resolves regardless of which ref triggered the run.
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       # WI-6 fix (push-2 gate defect): provisioning the pinned interpreter
       # must happen BEFORE any guard runs, not after. ci_conventions_check.py
@@ -351,6 +376,45 @@ jobs:
 
       - name: Guard — shipped_files.cmake matches shipped_files.toml
         run: python3 native/scripts/gen_shipped_files_cmake.py --check
+
+      # B3-1 (2026-09-18, unwired-scripts triage round 2): the pyci
+      # parking-lot round's guards (a)/(g)/(h)/(i)/(f)2 shipped with real
+      # tests (see `native/scripts/ci.py selftest`) but, like WI-26's seven
+      # above, had zero invocation against the REAL workflow tree -- their
+      # tests exercise them against fixtures under
+      # `native/scripts/ci/tests/fixtures/`, which is a different claim
+      # from having run against `.github/workflows/*.yml` itself. Each of
+      # these five is static/argument-light, reads only committed workflow
+      # source (no build artifact, no sample image, no device), and was
+      # verified green standalone before being wired here
+      # (tmp/verify/impl-b31/pre-wire-baseline.txt). Two candidates from the
+      # same triage are deliberately NOT wired — see
+      # docs/logs/2026-09-13/unwired-scripts-triage.md and this migration's
+      # own triage note for the reasons (check_expected_additions.py:
+      # user-ordered for the parking-lot round, same as WI-26's eighth
+      # candidate; fresh_runner_gate.py: a local pre-push instrument that
+      # simulates "a fresh checkout has none of this machine's gitignored
+      # vendored trees" via `git worktree` — redundant inside a CI job that
+      # already IS a fresh `actions/checkout`).
+      - name: Guard — argv contract command-path-count slice (g)
+        run: python3 native/scripts/ci/check_argv_contract.py
+
+      - name: Guard — folded-YAML reverse sentinel (h)
+        run: python3 native/scripts/ci/check_folded_yaml_reverse_sentinel.py
+
+      - name: Guard — errexit defeats RC capture (b)
+        run: python3 native/scripts/ci/check_errexit_rc_capture.py
+
+      - name: Guard — step-order dependency check (i)
+        run: python3 native/scripts/ci/check_step_order.py
+
+      # Depends on this job's Checkout step above carrying `fetch-depth: 0`
+      # -- see that step's comment for the full red-proof. The
+      # NEW_STEPS_EXAMINED line this guard prints is the in-band evidence
+      # that `origin/main` actually resolved to a real base commit rather
+      # than silently examining zero steps.
+      - name: Guard — wiring is ledger, new-step-only slice (f)2
+        run: python3 native/scripts/ci/check_wiring_is_ledger.py
 
       # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
       # is the ONLY authority for this SHA; every workflow reads it here
