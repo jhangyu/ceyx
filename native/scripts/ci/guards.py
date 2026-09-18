@@ -45,6 +45,21 @@ guards -- a false red. The three `GIT_CONFIG_COUNT/KEY_0/VALUE_0` vars are
 the non-persistent way to set `safe.directory` for one process; they are
 host-independent, so they live in the shared string.
 
+RUN THIS FROM A REAL CHECKOUT, NOT A `git worktree` (measured, not
+theorised). In a linked worktree, `.git` is a FILE containing a pointer to
+`<main repo>/.git/worktrees/<name>` -- a path OUTSIDE the bind mount. Every
+git-backed guard then dies with `fatal: not a git repository`, and
+`check_wiring_is_ledger` additionally cannot resolve `origin/main`. Observed:
+3 of the 17 guards fail from a worktree and all 17 pass from a `git clone` of
+the same commit (tmp/verify/impl-p1-docker/gate-branch.txt vs gate-clone.txt).
+Those failures are an artefact of the MOUNT, not a property of the tree, and
+must not be "fixed" by relaxing a guard. A CI runner is unaffected:
+`actions/checkout` produces a real `.git` directory. Mounting the external
+gitdir as a second volume would work but would put a host-specific path into
+the shared command string, trading the property this module exists to
+provide for a developer convenience -- so the limitation is documented
+instead, and printed in the scope block below.
+
 SCOPE IS PRINTED ON EVERY RUN, PASS OR FAIL (`print_scope()`): a gate whose
 coverage you have to reconstruct from source is one whose coverage silently
 narrows. The negative space -- what this verb does NOT cover -- is printed
@@ -164,6 +179,10 @@ NOT_COVERED = (
     "macOS and Windows toolchain behaviour -- this container is linux/amd64 "
     "only; the macOS/Windows legs are NOT containerised by this verb",
     "network-fetch behaviour, GitHub Actions env vars and secrets",
+    "a `git worktree` as the mount source -- its .git is a FILE pointing "
+    "outside the mount, so git-backed guards fail for a reason that is an "
+    "artefact of the mount, not a property of the tree. Run the gate from a "
+    "real checkout (CI always is one)",
 )
 
 
