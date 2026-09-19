@@ -41,8 +41,23 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "threads must be >= 1\n");
     return 2;
   }
+  // Phase-0 (T-P0a, AC-P0-4): an optional output-long-edge cap. It exists to
+  // give the submission-index -> stage mapping a DIFFERENTIAL experiment: the
+  // cap shrinks the Stage-4 render/output extent by a large factor while the
+  // Stage-3 demosaic still consumes the full-resolution sensor mosaic, so the
+  // submission whose GPU busy time collapses is Stage 4 and the one that does
+  // not is Stage 3. Default 0 == full resolution, i.e. every pre-existing
+  // invocation of this probe is byte-for-byte unchanged.
+  uint32_t max_long_edge = 0u;
   std::vector<std::string> files;
-  for (int i = 2; i < argc; ++i) files.emplace_back(argv[i]);
+  for (int i = 2; i < argc; ++i) {
+    const std::string argument = argv[i];
+    if (argument == "--max-long-edge" && i + 1 < argc) {
+      max_long_edge = static_cast<uint32_t>(std::atoi(argv[++i]));
+    } else {
+      files.emplace_back(argument);
+    }
+  }
 
   std::atomic<size_t> next{0};
   std::atomic<int> failures{0};
@@ -60,10 +75,11 @@ int main(int argc, char **argv) {
         develop.exposure_ev = 0.0f;
         develop.tone_curve_strength = 1.0f;
         develop.output_space = kRawOutputColorSpaceSrgb;
-        develop.max_output_long_edge = 0u;
+        develop.max_output_long_edge = max_long_edge;
 
         uint32_t pw = 0, ph = 0;
-        if (raw_pipeline_probe_output_size(files[i].c_str(), 0, &pw, &ph) !=
+        if (raw_pipeline_probe_output_size(files[i].c_str(), max_long_edge, &pw,
+                                           &ph) !=
                 kRawSuccess ||
             pw == 0 || ph == 0) {
           failures.fetch_add(1);
