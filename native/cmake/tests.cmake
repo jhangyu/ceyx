@@ -167,6 +167,22 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${VULKAN_LIBRARY}
         ${LOG_LIBRARY})
 
+    # Task 10 (2026-09-19, cpu-levers second-client campaign): Android
+    # cross-build of the same probe_concurrent_raw.cpp driver already used for
+    # the Metal 1-vs-N-client wall-clock measurement (host target at line
+    # ~1793 below, host-only guard). No source-file changes -- identical
+    # sources, linked against the shipped dng_decoder_native SHARED lib
+    # exactly like the host target does, so the on-device binary drives the
+    # same production FFI entry (raw_pipeline_decode_file_into) as the .so
+    # already pushed to jniLibs. Coarse-grained (whole-decode wall_ms) only:
+    # this device has no per-kernel Vulkan timing (raw_gpu_timing_probe.cpp's
+    # CEYX_GPU_TIMING is Metal-only, stubbed to "disabled" off-Apple) -- see
+    # docs/logs/2026-09-19/cpu-levers-final-breakdown.md Task 10 gap report.
+    add_executable(probe_concurrent_raw_android tests/probe_concurrent_raw.cpp)
+    target_include_directories(probe_concurrent_raw_android PRIVATE ${INC_DIR})
+    target_link_libraries(probe_concurrent_raw_android PRIVATE dng_decoder_native)
+    add_dependencies(probe_concurrent_raw_android dng_decoder_native)
+
     # ------------------------------------------------------------------------
     # R3-3: Halide Vulkan runtime fork (VkPipelineCache persistence).
     # See native/halide_runtime_fork/README.md for the weak-override mechanism.
@@ -1753,6 +1769,12 @@ if(DNG_ENABLE_GENERIC_RAW)
     target_sources(test_concurrent_decode PRIVATE
         src/pipeline/raw_file_router.cpp
         src/pipeline/raw_gpu_pipeline.cpp
+        # raw_gpu_pipeline.cpp's decode_file_*_into entries call
+        # raw_timing_log_emit (src/pipeline/raw_timing_log.cpp). The shipped
+        # dylib picks that TU up from pipeline.cmake's src/ glob; this target
+        # compiles the pipeline sources directly, so it must name the TU or the
+        # link fails on an undefined raw_timing_log_emit.
+        src/pipeline/raw_timing_log.cpp
         src/pipeline/raw_contract_validate.cpp
         src/pipeline/raw_auto_exposure.cpp
         src/pipeline/raw_render_eval.cpp
