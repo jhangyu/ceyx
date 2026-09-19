@@ -44,6 +44,38 @@
       "notes": "Third Bayer vendor for the three-vendor minimum."
     },
     {
+      "id": "nikon_z8_high_efficiency",
+      "path": "image_samples/raw_corpus/nikon_z8_he.nef",
+      "sha256": "82df041542b8d328738443bb5ff3373b396e406ecc8cbe7dc3b35252790c53e7",
+      "vendor": "nikon",
+      "camera": "NIKON Z 8",
+      "extension": "nef",
+      "expect_route": "generic",
+      "expect_layout": "bayer2x2",
+      "expect_backend": "libraw_native",
+      "expect_error": "kRawSuccess",
+      "expect_width": 8280,
+      "expect_height": 5520,
+      "license": "Sourced from the raw.pixls.us public raw-sample archive (https://raw.pixls.us/data/Nikon/Z%208/Nikon_Z8_high_efficiency_low.NEF), an archive intended for raw-decoder development/testing use; no explicit per-file redistribution license was found, so the file is kept untracked/git-ignored.",
+      "notes": "Nikon High Efficiency (HE) compression. Decoded by nikon_he_load_raw() via project LibRaw patches 14/15; RawSpeed3 does not support this compression, so libraw_native is the expected backend."
+    },
+    {
+      "id": "nikon_z8_high_efficiency_star",
+      "path": "image_samples/raw_corpus/nikon_z8_he_star.nef",
+      "sha256": "ea8b093cd11c946c5eeb501b775859e8e617ce1d79577abc41b233c339e4004c",
+      "vendor": "nikon",
+      "camera": "NIKON Z 8",
+      "extension": "nef",
+      "expect_route": "generic",
+      "expect_layout": "bayer2x2",
+      "expect_backend": "libraw_native",
+      "expect_error": "kRawSuccess",
+      "expect_width": 8280,
+      "expect_height": 5520,
+      "license": "Sourced from the raw.pixls.us public raw-sample archive (https://raw.pixls.us/data/Nikon/Z%208/Nikon_Z8_raw_high_efficiency_hight.NEF), an archive intended for raw-decoder development/testing use; no explicit per-file redistribution license was found, so the file is kept untracked/git-ignored.",
+      "notes": "Nikon High Efficiency* (HE*) compression — the higher-bit-budget regime the upstream PR #826 decoder rejects; supported only via the zidage HE* extension imported by patch 14."
+    },
+    {
       "id": "fuji_xt3_xtrans",
       "path": "image_samples/raw_corpus/fuji_xt3.raf",
       "sha256": "95b33021160b239ceb1a09d46a1b29cb60cb7dd47581feb126b337c219091754",
