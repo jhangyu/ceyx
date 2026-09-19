@@ -522,12 +522,39 @@ public:
 // re-verified SAFE on Halide v21 Vulkan (Adreno 750) by the G2 pre-check
 // Probe A — fully-inlined kernel, 0/24,000,000 per-channel mismatches at
 // 6000x4000 (docs/logs/2026-07-04/Task_g2_vulkan_rg_bug_recheck.md).
-// HARD CONSTRAINT: do NOT port the macOS `rendered_rgb.compute_at` schedule —
-// any materialized compute_at producer still collapses G/B to the last select
-// branch on Vulkan (pre-check Probe B, re-confirmed 2026-07-05 with
-// align_bounds). The kernel body must stay fully inlined; unroll(c) + select
-// folds c per copy and CSE shares the c-independent pipeline body, so inlining
-// costs no redundant compute.
+// CONSTRAINT: do NOT port the macOS `rendered_rgb.compute_at` schedule as it
+// stands. The reason is NOT `compute_at` itself — the previous wording here
+// ("any materialized compute_at producer still collapses G/B") generalised
+// from a single measurement and is FALSE as stated; T22 measured the actual
+// variable and it is the producer's ELEMENT TYPE.
+// A Func materialised at a GPU loop level becomes an array in the Workgroup
+// storage class, and this driver miscompiles that array when its element type
+// is narrower than 32 bits. Measured on Adreno 750 / SM8650, driver V@0762.41,
+// two schedules identical character-for-character apart from the staged type,
+// same binary, same run, 6000x4000: uint8 gives G/B = 24,000,000/24,000,000
+// wrong, every wrong value 255 (the last select branch) — reproducing Probe B's
+// R count of 93,750 exactly; uint32 gives 0/0/0/0. uint16 is partially wrong.
+// `align_bounds` does NOT rescue it, re-confirming the 2026-07-05 note.
+// So: a materialised producer IS available here if its element type is 32-bit
+// or wider. `rendered_rgb` is a Tuple of three uint8_t (:465), which is why
+// porting it UNCHANGED is still wrong. Widening is normally value-neutral when
+// the value is already range-clamped, and the sibling generic-RAW kernel took
+// exactly this route (RawBayerDemosaicGenerator.cpp, uint32 staged producer,
+// device-gated green) — but that specific widening of `rendered_rgb` has NOT
+// been measured, so treat it as an available option to be gated, not a
+// finished result.
+// The failure is SILENT — kernel_rc=0, no crash, no error code, just wrong
+// pixels — so any future materialised producer here needs a mechanical
+// element-width check, not a reviewer's memory.
+// Until such a port is gated, the kernel body stays fully inlined; unroll(c) +
+// select folds c per copy and CSE shares the c-independent pipeline body, so
+// inlining costs no redundant compute.
+// LIMITS OF THE ABOVE: one device, one driver build. Windows and Linux compile
+// this same generator on Vulkan and were NOT exercised — no hardware for them
+// here; they are implicated by shared source, not by measurement. The causal
+// story (sub-32-bit Workgroup arrays are miscompiled) is inference consistent
+// with the data, not vendor-confirmed; what is measured is the input/output
+// relation. Evidence: T22, 2026-09-19.
 //
 // TailStrategy::GuardWithIf COMPILES on this target (RC=0 for
 // arm-64-android-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query,
