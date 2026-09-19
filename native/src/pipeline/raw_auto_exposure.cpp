@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -107,40 +108,105 @@ RawAutoExposureResult raw_auto_exposure_estimate(const uint16_t* samples,
     // would stack two WB architectures. wb_gain is accepted for signature
     // compatibility / diagnostics only and is unused in this computation.
     (void)wb_gain;
-    std::vector<float> values[3];
-    for (int c = 0; c < 3; ++c) values[c].reserve(static_cast<size_t>(num_sampled) / 2 + 1);
-    for (uint64_t row = 0; row < height; row += sy) {
-        const uint16_t* row_ptr = samples + static_cast<size_t>(row) * row_pitch_samples;
-        for (uint64_t col = 0; col < width; col += sx) {
-            uint32_t ch;
-            if (interleaved) {
-                ch = static_cast<uint32_t>(col) % components_per_pixel;
-                if (ch >= 4) ch = ch % 4;  // clamp into the black[]/wb_gain[] range
-            } else {
-                const uint32_t site_row = static_cast<uint32_t>(row) % pattern_h;
-                const uint32_t site_col = static_cast<uint32_t>(col) % pattern_w;
-                ch = colour_of_site[site_row * pattern_w + site_col];
-            }
-            const float black_ch = black[ch];
-            const float denom = white_level - black_ch;
-            float v = (static_cast<float>(row_ptr[col]) - black_ch) / denom;
-            v = std::max(0.0f, v);
-            const uint32_t colour_class = ch < 3 ? ch : (ch % 3);
-            values[colour_class].push_back(v);
-        }
-    }
-
     const float thr = auto_bright_thr <= 0.0f ? 0.01f : auto_bright_thr;
     const double keep_fraction = 1.0 - static_cast<double>(thr);
     float h[3] = {0.0f, 0.0f, 0.0f};
-    for (int c = 0; c < 3; ++c) {
-        if (values[c].empty()) continue;  // a class this layout never emits
-        size_t quantile_idx = static_cast<size_t>(std::min<double>(
-            values[c].size() - 1,
-            std::max<double>(0.0, keep_fraction * static_cast<double>(values[c].size()))));
-        std::nth_element(values[c].begin(), values[c].begin() + static_cast<long>(quantile_idx),
-                          values[c].end());
-        h[c] = values[c][quantile_idx];
+
+    if (!interleaved) {
+        // T-V3 (spec-cpu-levers.md §6.2, Branch H): exact integer histogram
+        // over the raw uint16_t sample, replacing the store-then-nth_element
+        // scan. On this arm every colour_of_site entry is validated < 3
+        // (:46-52), so colour_class == ch and each class has ONE constant
+        // black_ch = black[ch] and ONE constant denom = white_level - black_ch
+        // with denom > 0 (guaranteed by the guard at :93-98). The map
+        // raw -> max(0, (raw - black_ch)/denom) is therefore non-decreasing in
+        // the raw sample, so it preserves order statistics including ties and
+        // the clamped-to-zero plateau: the cumulative walk below selects the
+        // same value std::nth_element placed at quantile_idx, and the single
+        // surviving divide is the SAME expression on the SAME operands, so the
+        // float is bit-identical, not merely close (§6.3). Bin count is fixed
+        // 65536 unconditionally -- the index IS the sample, so nothing can be
+        // out of range and no per-sample clamp/shift is reintroduced (§6.5).
+        constexpr size_t kHistogramBins = 65536;
+        // 3 x 65536 x uint32_t = 768 KB, a single per-call buffer zeroed at
+        // entry (replaces ~9.1 MB of per-decode vector growth). Deliberately
+        // NOT static/thread_local: up to 8 decode lanes call this
+        // concurrently, and the spec does not authorise a reused buffer
+        // without a thread-safety argument (§6.5).
+        std::vector<uint32_t> counts(3 * kHistogramBins, 0u);
+        uint64_t class_count[3] = {0, 0, 0};
+        for (uint64_t row = 0; row < height; row += sy) {
+            const uint16_t* row_ptr = samples + static_cast<size_t>(row) * row_pitch_samples;
+            for (uint64_t col = 0; col < width; col += sx) {
+                const uint32_t site_row = static_cast<uint32_t>(row) % pattern_h;
+                const uint32_t site_col = static_cast<uint32_t>(col) % pattern_w;
+                const uint32_t ch = colour_of_site[site_row * pattern_w + site_col];
+                ++counts[static_cast<size_t>(ch) * kHistogramBins +
+                         static_cast<size_t>(row_ptr[col])];
+                ++class_count[ch];
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            if (class_count[c] == 0) continue;  // a class this layout never emits
+            // IDENTICAL expression to the vector path's quantile index, with
+            // values[c].size() replaced by this class's sample count.
+            const size_t quantile_idx = static_cast<size_t>(std::min<double>(
+                static_cast<double>(class_count[c] - 1),
+                std::max<double>(0.0, keep_fraction * static_cast<double>(class_count[c]))));
+            const uint32_t* class_counts = counts.data() + static_cast<size_t>(c) * kHistogramBins;
+            uint64_t cumulative = 0;
+            size_t raw_k = kHistogramBins - 1;
+            for (size_t bin = 0; bin < kHistogramBins; ++bin) {
+                cumulative += class_counts[bin];
+                if (cumulative > quantile_idx) { raw_k = bin; break; }
+            }
+            const float black_ch = black[c];
+            const float denom = white_level - black_ch;
+            float v = (static_cast<float>(raw_k) - black_ch) / denom;
+            v = std::max(0.0f, v);
+            h[c] = v;
+        }
+        if (const char* trace = std::getenv("CEYX_AE_HISTOGRAM_TRACE")) {
+            if (trace[0] == '1') {
+                // Direct proof the histogram path ran, per §6.6 AC 6. Never
+                // inferred from a timing change.
+                std::fprintf(stderr,
+                             "[CEYX_AE_HISTOGRAM] arm=cfa n0=%llu n1=%llu n2=%llu\n",
+                             static_cast<unsigned long long>(class_count[0]),
+                             static_cast<unsigned long long>(class_count[1]),
+                             static_cast<unsigned long long>(class_count[2]));
+            }
+        }
+    } else {
+        // Interleaved arm (Foveon / linear RGB): UNCHANGED by T-V3. With >= 4
+        // components, ch = 0 and ch = 3 fold into class 0 under DIFFERENT
+        // black[ch], so two affine maps feed one class and a single
+        // raw-indexed histogram cannot reproduce the order statistic (§6.4).
+        std::vector<float> values[3];
+        for (int c = 0; c < 3; ++c) values[c].reserve(static_cast<size_t>(num_sampled) / 2 + 1);
+        for (uint64_t row = 0; row < height; row += sy) {
+            const uint16_t* row_ptr = samples + static_cast<size_t>(row) * row_pitch_samples;
+            for (uint64_t col = 0; col < width; col += sx) {
+                uint32_t ch;
+                ch = static_cast<uint32_t>(col) % components_per_pixel;
+                if (ch >= 4) ch = ch % 4;  // clamp into the black[]/wb_gain[] range
+                const float black_ch = black[ch];
+                const float denom = white_level - black_ch;
+                float v = (static_cast<float>(row_ptr[col]) - black_ch) / denom;
+                v = std::max(0.0f, v);
+                const uint32_t colour_class = ch < 3 ? ch : (ch % 3);
+                values[colour_class].push_back(v);
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            if (values[c].empty()) continue;  // a class this layout never emits
+            size_t quantile_idx = static_cast<size_t>(std::min<double>(
+                values[c].size() - 1,
+                std::max<double>(0.0, keep_fraction * static_cast<double>(values[c].size()))));
+            std::nth_element(values[c].begin(), values[c].begin() + static_cast<long>(quantile_idx),
+                              values[c].end());
+            h[c] = values[c][quantile_idx];
+        }
     }
 
     // clip_value stays the GREEN-class quantile for diagnostics (Revision

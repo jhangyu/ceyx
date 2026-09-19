@@ -3,9 +3,11 @@
 // Plan: docs/logs/2026-09-03/raw_color_implementation_plan.md Round 1 Task 1.2
 // + Revision 2.1 (X-Trans/linear-RGB pattern-descriptor generalisation, Task
 // 1.5). Style follows test_raw_render_params.cpp's CHECK/report convention.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "raw_auto_exposure.h"
@@ -43,6 +45,191 @@ float stubRenderEval(void* /*ctx*/, const float rgb[3], float ev) {
     const float v = m * std::exp2(ev);
     if (!std::isfinite(v)) return v;
     return std::fmin(1.0f, std::fmax(0.0f, v));
+}
+
+// ---------------------------------------------------------------------------
+// T-V3 (spec-cpu-levers.md §6.6 AC 5): the PRE-CHANGE estimator, copied
+// verbatim from raw_auto_exposure.cpp as it stood before the exact-integer
+// histogram landed (store every normalised sample in a per-class vector, then
+// std::nth_element at the quantile index). It exists ONLY as the old-vs-new
+// oracle: the cases at the end of main() assert the production function's
+// auto_ev, clip_value and status against this reference BITWISE, so a
+// difference of one ULP fails rather than rounding away. Keep this body frozen
+// -- "fixing" it to match a future production change destroys the comparison.
+// ---------------------------------------------------------------------------
+RawAutoExposureResult referenceEstimateVectorPath(
+    const uint16_t* samples, uint32_t width, uint32_t height,
+    uint32_t row_pitch_samples, uint32_t stride_x, uint32_t stride_y,
+    const float black[4], float white_level, const float wb_gain[4],
+    const uint8_t* colour_of_site, uint32_t pattern_w, uint32_t pattern_h,
+    RawRenderEvalFn render_eval, void* render_eval_ctx, float auto_bright_thr) {
+    RawAutoExposureResult result;
+    auto setReasonLocal = [](RawAutoExposureResult& r, const char* msg) {
+        std::snprintf(r.reason, sizeof(r.reason), "%s", msg);
+    };
+
+    const bool interleaved = (pattern_w == 0);
+    if (!interleaved) {
+        if (colour_of_site == nullptr || pattern_w == 0 || pattern_h == 0) {
+            result.status = RawAutoExposureStatus::kUnsupportedLayout;
+            result.auto_ev = 0.0f;
+            setReasonLocal(result, "colour_of_site missing for a patterned layout");
+            return result;
+        }
+        const size_t table_len = static_cast<size_t>(pattern_w) * pattern_h;
+        for (size_t i = 0; i < table_len; ++i) {
+            if (colour_of_site[i] >= 3) {
+                result.status = RawAutoExposureStatus::kUnsupportedLayout;
+                result.auto_ev = 0.0f;
+                setReasonLocal(result, "colour_of_site entry out of range (>= 3)");
+                return result;
+            }
+        }
+    } else if (pattern_h == 0) {
+        result.status = RawAutoExposureStatus::kUnsupportedLayout;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "components_per_pixel is zero in interleaved mode");
+        return result;
+    }
+    const uint32_t components_per_pixel = pattern_h;
+
+    const uint32_t sx = stride_x < 1 ? 1 : stride_x;
+    const uint32_t sy = stride_y < 1 ? 1 : stride_y;
+
+    const uint64_t num_x = (static_cast<uint64_t>(width) + sx - 1) / sx;
+    const uint64_t num_y = (static_cast<uint64_t>(height) + sy - 1) / sy;
+    const uint64_t num_sampled = num_x * num_y;
+    if (num_sampled < 4096) {
+        result.status = RawAutoExposureStatus::kInsufficientSamples;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "fewer than 4096 sampled pixels");
+        return result;
+    }
+
+    float max_black = black[0];
+    for (int c = 1; c < 4; ++c) max_black = std::max(max_black, black[c]);
+
+    if (render_eval == nullptr) {
+        result.status = RawAutoExposureStatus::kNoRenderEval;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "no render_eval callback supplied");
+        return result;
+    }
+
+    if (!std::isfinite(white_level) || white_level <= max_black) {
+        result.status = RawAutoExposureStatus::kDegenerateFrame;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "white_level <= max(black) or non-finite");
+        return result;
+    }
+
+    (void)wb_gain;
+    std::vector<float> values[3];
+    for (int c = 0; c < 3; ++c) values[c].reserve(static_cast<size_t>(num_sampled) / 2 + 1);
+    for (uint64_t row = 0; row < height; row += sy) {
+        const uint16_t* row_ptr = samples + static_cast<size_t>(row) * row_pitch_samples;
+        for (uint64_t col = 0; col < width; col += sx) {
+            uint32_t ch;
+            if (interleaved) {
+                ch = static_cast<uint32_t>(col) % components_per_pixel;
+                if (ch >= 4) ch = ch % 4;
+            } else {
+                const uint32_t site_row = static_cast<uint32_t>(row) % pattern_h;
+                const uint32_t site_col = static_cast<uint32_t>(col) % pattern_w;
+                ch = colour_of_site[site_row * pattern_w + site_col];
+            }
+            const float black_ch = black[ch];
+            const float denom = white_level - black_ch;
+            float v = (static_cast<float>(row_ptr[col]) - black_ch) / denom;
+            v = std::max(0.0f, v);
+            const uint32_t colour_class = ch < 3 ? ch : (ch % 3);
+            values[colour_class].push_back(v);
+        }
+    }
+
+    const float thr = auto_bright_thr <= 0.0f ? 0.01f : auto_bright_thr;
+    const double keep_fraction = 1.0 - static_cast<double>(thr);
+    float h[3] = {0.0f, 0.0f, 0.0f};
+    for (int c = 0; c < 3; ++c) {
+        if (values[c].empty()) continue;
+        size_t quantile_idx = static_cast<size_t>(std::min<double>(
+            values[c].size() - 1,
+            std::max<double>(0.0, keep_fraction * static_cast<double>(values[c].size()))));
+        std::nth_element(values[c].begin(), values[c].begin() + static_cast<long>(quantile_idx),
+                          values[c].end());
+        h[c] = values[c][quantile_idx];
+    }
+
+    const float clip_value = h[1];
+    if (!std::isfinite(h[0]) || !std::isfinite(h[1]) || !std::isfinite(h[2]) ||
+        (h[0] <= 0.0f && h[1] <= 0.0f && h[2] <= 0.0f)) {
+        result.status = RawAutoExposureStatus::kDegenerateFrame;
+        result.auto_ev = 0.0f;
+        result.clip_value = std::isfinite(clip_value) ? clip_value : 0.0f;
+        setReasonLocal(result, "highlight triple non-finite or all <= 0");
+        return result;
+    }
+
+    result.clip_value = clip_value;
+    result.status = RawAutoExposureStatus::kOk;
+
+    const float f_lo = render_eval(render_eval_ctx, h, 0.0f);
+    if (!std::isfinite(f_lo)) {
+        result.status = RawAutoExposureStatus::kDegenerateFrame;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "render_eval returned non-finite at ev=0");
+        return result;
+    }
+    if (f_lo >= 1.0f) {
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "already at or above output white at ev=0; no gain applied");
+        return result;
+    }
+
+    float lo = 0.0f, hi = 2.0f;
+    const float f_hi = render_eval(render_eval_ctx, h, hi);
+    if (!std::isfinite(f_hi)) {
+        result.status = RawAutoExposureStatus::kDegenerateFrame;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "render_eval returned non-finite at ev=2");
+        return result;
+    }
+    if (f_hi < 1.0f) {
+        result.auto_ev = hi;
+    } else {
+        for (int i = 0; i < 30; ++i) {
+            const float mid = 0.5f * (lo + hi);
+            const float f_mid = render_eval(render_eval_ctx, h, mid);
+            if (!std::isfinite(f_mid) || f_mid < 1.0f) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        result.auto_ev = 0.5f * (lo + hi);
+    }
+
+    if (!std::isfinite(result.auto_ev)) {
+        result.status = RawAutoExposureStatus::kDegenerateFrame;
+        result.auto_ev = 0.0f;
+        setReasonLocal(result, "auto_ev non-finite after bisection");
+    }
+
+    return result;
+}
+
+// Bitwise float comparison: the spec forbids any epsilon on this lever, and a
+// %.7f text comparison can hide a low-bit difference (§6.6 AC 3).
+uint32_t floatBits(float f) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &f, sizeof(bits));
+    return bits;
+}
+
+bool bitwiseEqualResults(const RawAutoExposureResult& a, const RawAutoExposureResult& b) {
+    return floatBits(a.auto_ev) == floatBits(b.auto_ev) &&
+           floatBits(a.clip_value) == floatBits(b.clip_value) &&
+           a.status == b.status;
 }
 
 }  // namespace
@@ -436,6 +623,149 @@ int main() {
               r_bad.status == RawAutoExposureStatus::kUnsupportedLayout &&
                   r_bad.auto_ev == 0.0f && r_bad.reason[0] != '\0',
               detail_bad);
+    }
+
+    // Case 11 (T-V3, spec-cpu-levers.md §6.6 AC 5): old-vs-new BITWISE
+    // equality on the CFA arm. Each sub-case builds a synthetic buffer aimed
+    // at one way an order statistic can differ between "store every normalised
+    // float then nth_element" and "count raw samples then walk the cumulative
+    // histogram", and asserts auto_ev, clip_value AND status are bit-identical
+    // (no epsilon is authorised for this lever at any point).
+    {
+        auto compareCase = [](const char* name, const uint16_t* buf, uint32_t w, uint32_t h,
+                              const float black[4], float white_level, const float wb[4],
+                              const uint8_t* cfa, uint32_t pw, uint32_t ph,
+                              float thr) {
+            RawAutoExposureResult now = raw_auto_exposure_estimate(
+                buf, w, h, w, 1, 1, black, white_level, wb, cfa, pw, ph,
+                &stubRenderEval, nullptr, thr);
+            RawAutoExposureResult ref = referenceEstimateVectorPath(
+                buf, w, h, w, 1, 1, black, white_level, wb, cfa, pw, ph,
+                &stubRenderEval, nullptr, thr);
+            char detail[320];
+            std::snprintf(detail, sizeof(detail),
+                          "new auto_ev bits=0x%08x clip bits=0x%08x status=%d; "
+                          "ref auto_ev bits=0x%08x clip bits=0x%08x status=%d",
+                          floatBits(now.auto_ev), floatBits(now.clip_value),
+                          static_cast<int>(now.status), floatBits(ref.auto_ev),
+                          floatBits(ref.clip_value), static_cast<int>(ref.status));
+            report(name, bitwiseEqualResults(now, ref), detail);
+        };
+
+        float wb[4];
+        for (int i = 0; i < 4; ++i) wb[i] = 1.0f;
+        uint8_t bayer_cfa[4];
+        identityChannelMap(bayer_cfa);
+
+        // 11a: clamp plateau -- a large fraction of samples below black, so
+        // max(0, .) folds many distinct raw values onto the same 0.0f. A
+        // histogram indexed by the RAW sample must still land on the same
+        // order statistic as sorting the clamped floats.
+        {
+            const uint32_t w = 256, h = 256;
+            std::vector<uint16_t> buf(static_cast<size_t>(w) * h);
+            // Half the samples sit below black (they all clamp to 0.0f); the
+            // other half walk a stride-7 sweep of DISTINCT raw values so the
+            // quantile lands between two different raw codes -- without that,
+            // a one-rank error would land on the same value and the case could
+            // never go red (proven: the first draft of this buffer stayed green
+            // under the AC 4 off-by-one perturbation).
+            for (size_t i = 0; i < buf.size(); ++i) {
+                buf[i] = static_cast<uint16_t>((i % 2 == 0) ? (i % 1500)
+                                                            : (2000 + (i * 7) % 58000));
+            }
+            float black[4] = {2000.0f, 2000.0f, 2000.0f, 2000.0f};
+            compareCase("v3-old-vs-new-below-black-clamp-plateau", buf.data(), w, h, black,
+                        60000.0f, wb, bayer_cfa, 2, 2, 0.01f);
+        }
+
+        // 11b: heavy ties -- only three distinct raw values, so the quantile
+        // index falls inside a run of equal values. This is where an off-by-one
+        // in the cumulative walk (cum > idx vs cum >= idx) shows up.
+        {
+            const uint32_t w = 256, h = 256;
+            std::vector<uint16_t> buf(static_cast<size_t>(w) * h);
+            for (size_t i = 0; i < buf.size(); ++i) {
+                buf[i] = (i % 3 == 0) ? 1000 : ((i % 3 == 1) ? 30000 : 65535);
+            }
+            float black[4] = {512.0f, 512.0f, 512.0f, 512.0f};
+            compareCase("v3-old-vs-new-heavy-ties", buf.data(), w, h, black, 64000.0f, wb,
+                        bayer_cfa, 2, 2, 0.01f);
+        }
+
+        // 11c: X-Trans 6x6 colour_of_site -- exercises the non-Bayer lookup in
+        // the histogram loop (unequal class populations: 20 G, 8 R, 8 B sites
+        // per 36-site tile).
+        {
+            static const uint8_t kXTrans[36] = {
+                1, 1, 0, 1, 1, 2,
+                1, 1, 2, 1, 1, 0,
+                2, 0, 1, 0, 2, 1,
+                1, 1, 2, 1, 1, 0,
+                1, 1, 0, 1, 1, 2,
+                0, 2, 1, 2, 0, 1,
+            };
+            const uint32_t w = 132, h = 132;
+            std::vector<uint16_t> buf(static_cast<size_t>(w) * h);
+            for (uint32_t row = 0; row < h; ++row) {
+                for (uint32_t col = 0; col < w; ++col) {
+                    const uint8_t cls = kXTrans[(row % 6) * 6 + (col % 6)];
+                    // Wide, near-unique jitter so the per-class quantile falls
+                    // between two distinct raw codes (see 11a's note).
+                    const uint32_t jitter = (row * 1009u + col * 7919u) % 20011u;
+                    const uint16_t base = (cls == 1) ? 22000 : (cls == 0 ? 9000 : 6000);
+                    buf[static_cast<size_t>(row) * w + col] =
+                        static_cast<uint16_t>(base + jitter);
+                }
+            }
+            float black[4] = {1024.0f, 900.0f, 800.0f, 900.0f};
+            compareCase("v3-old-vs-new-xtrans-6x6", buf.data(), w, h, black, 60000.0f, wb,
+                        kXTrans, 6, 6, 0.01f);
+        }
+
+        // 11d: a colour class that emits ZERO samples -- a 2x2 table with no
+        // blue site. Both paths must skip class 2 and leave h[2] at 0.0f
+        // rather than reading an empty container / an all-zero histogram.
+        {
+            const uint32_t w = 256, h = 256;
+            std::vector<uint16_t> buf(static_cast<size_t>(w) * h);
+            for (size_t i = 0; i < buf.size(); ++i) {
+                buf[i] = static_cast<uint16_t>(12000 + (i * 11) % 37003);
+            }
+            uint8_t no_blue[4] = {0, 1, 1, 0};  // R/G/G/R -- class 2 never emitted
+            float black[4] = {600.0f, 600.0f, 600.0f, 600.0f};
+            compareCase("v3-old-vs-new-zero-sample-class", buf.data(), w, h, black, 50000.0f,
+                        wb, no_blue, 2, 2, 0.01f);
+        }
+
+        // 11e: interleaved arm control -- untouched by T-V3, compared through
+        // the same bitwise predicate so a leak out of the CFA branch fails
+        // here too (§6.4).
+        {
+            const uint32_t components = 4;
+            const uint32_t pixels_w = 64, h = 64;
+            const uint32_t w = pixels_w * components;
+            std::vector<uint16_t> buf(static_cast<size_t>(w) * h);
+            for (size_t i = 0; i < buf.size(); ++i) {
+                buf[i] = static_cast<uint16_t>(7000 + (i % 9001));
+            }
+            float black[4] = {300.0f, 500.0f, 700.0f, 1100.0f};
+            RawAutoExposureResult now = raw_auto_exposure_estimate(
+                buf.data(), w, h, w, 1, 1, black, 60000.0f, wb, nullptr, 0, components,
+                &stubRenderEval, nullptr, 0.01f);
+            RawAutoExposureResult ref = referenceEstimateVectorPath(
+                buf.data(), w, h, w, 1, 1, black, 60000.0f, wb, nullptr, 0, components,
+                &stubRenderEval, nullptr, 0.01f);
+            char detail[320];
+            std::snprintf(detail, sizeof(detail),
+                          "new auto_ev bits=0x%08x clip bits=0x%08x status=%d; "
+                          "ref auto_ev bits=0x%08x clip bits=0x%08x status=%d",
+                          floatBits(now.auto_ev), floatBits(now.clip_value),
+                          static_cast<int>(now.status), floatBits(ref.auto_ev),
+                          floatBits(ref.clip_value), static_cast<int>(ref.status));
+            report("v3-old-vs-new-interleaved-arm-control", bitwiseEqualResults(now, ref),
+                   detail);
+        }
     }
 
     // Every returned auto_ev asserted finite across all cases above (checked
