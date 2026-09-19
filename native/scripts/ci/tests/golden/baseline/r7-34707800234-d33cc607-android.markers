@@ -13,9 +13,13 @@ RC=0 (string: orient_c_x)
 RC=0 (string: orient_a_y)
 RC=0 (string: orient_b_y)
 RC=0 (string: orient_c_y)
+== Android level 1: decoder DT_NEEDED matches resolved STL ==
 READELF_RC=0
-STL_SHARED_LOG_RC=1 STL_STATIC_LOG_RC=0
-DT_NEEDED_HAS_LIBCXX_SHARED_RC=1
+STL_SHARED_LOG=False
+STL_STATIC_LOG=True
+DT_NEEDED_HAS_LIBCXX_SHARED=False
+RC=0 (android STL DT_NEEDED matches configure log)
+== Android level 2: DT_NEEDED closure across packaged .so set (device whitelist) ==
 CLOSURE_RESULT=ok
 DT_NEEDED_CLOSURE_RC=0
 IMPORT_CLOSURE_RESULT=PASS
