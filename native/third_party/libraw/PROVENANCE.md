@@ -144,6 +144,9 @@ gate patch exists.
 | 10.fuji-qtable-cache.patch | d2230b5810b1595482cd337ecf98809ab181c11ad5d8cd0044dd81aeaafac568 |
 | 12.normalize-model-orig-race.patch | 9197b31fc32b090ab73635d3c69a3554348ab1b458c0c2f04b5e60fd7a4962ff |
 | 13.neon-validation-sweep.patch | 2fb7f7f4875a574b32634ab24390dffae5ef35f01e8f8ae2d8d363f924c78d9f |
+| 14.nikon-he-decoder-import.patch | 9cf860eccd14deda168b6929a9a4f28f394a657f0706e4f522a0e588c2733f8b |
+| 15.nikon-he-dispatch.patch | dd47858529b05d5f64289733b8f1ca5dd8e7397eefcf431a596cf2015cb225dd |
+| 16.nikon-he-refactor.patch | 56a97c4e2935d38ab1779e67391a2dd54657c14139d3c13c20261172642d62c1 |
 
 R4 item 2 (2026-09-05): `src/metadata/normalize_model.cpp:406` declared a
 function-local `static const char *orig;` inside `LibRaw::GetNormalizedModel()`
@@ -385,3 +388,109 @@ change their bodies were entirely inside `#ifdef USE_X3FTOOLS`.
 Upstream origin of that code: Kalpanika x3f-tools, redistributed by LibRaw
 (see `LICENSE.LGPL` / `COPYRIGHT` in this tree). Recorded in
 `docs/THIRD_PARTY_LICENSES.md`.
+
+## Nikon HE/HE* decoder import
+
+Project LibRaw patches 14 and 15 add support for Nikon's High Efficiency (HE)
+and High Efficiency* (HE*) compressed NEF formats — a JPEG XS-like 2D 5/3
+wavelet codestream embedded in an ordinary TIFF strip, used by the Z8, Z9,
+Z6 III, Zf and (per upstream evidence) the Z50 II.
+
+### Upstream pins
+
+| Role | Repository | Revision | Date |
+|---|---|---|---|
+| HE decoder origin (LibRaw PR #826, branch `nikon-he-decoder`, open/unmerged) | https://github.com/yogthos/LibRaw | 499bfd4cbf802c2fb5eac4c9a6f53bbeb776cad1 | 2026-08-10 |
+| Imported tree (HE + HE*, branch `feature/nikon_he_support`) | https://github.com/zidage/LibRaw | fca3ee4db0b51f3787534fc370891e93ceb52f59 | 2026-08-16 |
+| Co-copyright attribution commit | https://github.com/zidage/LibRaw | cd421ab41174e423edcfc52c91be3813f6d0ddb5 | 2026-06-24 |
+
+Patch 14 imports 33 files byte-verbatim (`src/decoders/nikon_he/*`, 32 files,
+plus `src/decoders/nikon_he_decoder.cpp`); each file's SHA-256 was verified
+against the upstream blob **at patch-14 application time**, and each blob's git
+SHA-1 was recomputed locally and compared with the value the GitHub contents
+API reported. Patch 15 activates them by removing the throwing
+`LibRaw::nikon_he_load_raw()` stub, relaxing the JPEG-XS marker branch in
+`src/metadata/tiff.cpp` to the marker sniff plus a short-read guard, and
+correcting four camera-list strings.
+
+Patch 15 additionally carries one **minimal fix to an upstream defect**, which
+is this project's own code and is not transcribed from any upstream tree:
+`src/decoders/nikon_he/nikon_he_decode.cpp` placed two syntactic
+`#pragma omp ordered` blocks in mutually exclusive branches of a single
+`#pragma omp for ordered` loop. OpenMP permits exactly one `ordered` directive
+per loop body and Apple clang enforces this statically, so that translation
+unit could not compile as imported (15 of 16 succeeded). The fix hoists the
+early-out into a local flag so exactly one ordered region remains, entered once
+per iteration in loop order as before; no pragma was removed and OpenMP was not
+disabled for any translation unit. Attributing it here keeps patch 16's
+provenance chain accurate: patch 16's diff is measured against the patch-14
+verbatim content, and this one behaviour-neutral hunk in patch 15 is the only
+other project-authored change inside the imported files.
+
+Patch 16 is a **behaviour-preserving refactor** of patch 14's content
+(readability, spelled-out identifiers, dead-code removal), authorised by the
+user. It is deliberately a separate patch so the provenance chain stays
+auditable end to end: upstream blob SHA-1/SHA-256 → byte-verbatim patch 14 →
+this project's refactor diff → final tree. The final vendored tree therefore
+does **not** match the upstream blob hashes, and is not expected to; the
+verbatim record lives in patch 14 and in the digests above.
+
+Behaviour preservation was established mechanically, not by review: the
+full-pipeline decode hash (`fnv1a`, from
+`native/tests/raw_corpus_hash_baseline.cpp`) for both the HE and the HE*
+corpus sample is identical before and after patch 16 — the measured baselines
+are `fnv1a=0xf2b68e94a4bfd717` (HE) and `fnv1a=0xc38f6dceb167be20` (HE*), and
+the checker was first shown failing on an injected one-line change before the
+refactor began.
+
+### Scope: CPU unpack only
+
+The imported code is reachable through exactly one entry,
+`LibRaw::nikon_he_load_raw()`, and its only output is the uint16 Bayer plane in
+`raw_image`. Ceyx's Stage 2→4 GPU pipeline consumes that plane unchanged. No
+render, demosaic, colour-conversion or output path from the imported sources is
+wired in or reachable. CPU SIMD inside the unpack (`nikon_he_simd.h`) is in
+scope and is not a platform fork of the render path.
+
+### Authorship
+
+- HE decoder: **Dmitri Sotnikov**, described by its author in LibRaw PR #826
+  as clean-room reverse engineering of the format.
+- HE* extension: co-copyright **Yurun Zi**. The imported file headers state
+  verbatim: "code generated with assistance from GLM 5.2 and GPT 5.5".
+
+### Licensing
+
+The imported files carry LibRaw's own dual-license header: GNU LGPL-2.1 **or**
+CDDL-1.0, at the licensee's choice. This matches the existing LibRaw row in the
+components table above (LGPL-2.1 elected). No new third-party licence
+obligation is introduced; `LICENSE.LGPL` and `LICENSE.CDDL` in this vendored
+tree already cover these files.
+
+### Clean-room caveat — REVIEW BEFORE ANY PUBLIC RELEASE
+
+The HE (non-star) decoder's clean-room status rests on its author's own
+statement in an open, unmerged pull request; it has not been independently
+attested. The HE* extension is weaker still: it is an LLM-assisted derivation
+whose clean-room isolation is not attested at all. This is a distribution-risk
+question, not a build-correctness question — the code builds and decodes
+correctly either way.
+
+Ceyx must not publish a release binary containing the HE* code path until the
+user has reviewed this caveat and recorded a decision here. Decision status:
+**not yet reviewed by the user as of 2026-09-19.**
+
+### Deliberate divergence from the imported branch
+
+The zidage branch carries fork-local changes unrelated to HE/HE* that were
+**not** imported: `src/metadata/identify.cpp`, `src/metadata/sony.cpp`,
+`src/metadata/normalize_model.cpp`, `src/tables/colordata.cpp`,
+`internal/libraw_cameraids.h`, `.gitignore`, `doc/`, `Makefile*` and
+`buildfiles/`. `normalize_model.cpp` in particular is owned by project patch 12
+(the `GetNormalizedModel()` shared-static race fix) and importing the fork's
+version would collide with it. The `Makefile*`/`buildfiles/` changes are
+unnecessary because this project builds LibRaw through the vendored
+LibRaw-cmake overlay, whose `file(GLOB_RECURSE ... "${LIBRAW_PATH}/src/*.cpp")`
+picks up the new translation units with no build-file edit. The upstream
+camera-list hunk also added a `Sony ILCE-7M5 (A7 V)` entry; that line was not
+imported, as it is unrelated to this change.

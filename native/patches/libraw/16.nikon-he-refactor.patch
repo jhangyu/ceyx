@@ -1,0 +1,479 @@
+diff --git a/src/decoders/nikon_he/nikon_he_bayer.cpp b/src/decoders/nikon_he/nikon_he_bayer.cpp
+index b7a1c390..ca9ca488 100644
+--- a/src/decoders/nikon_he/nikon_he_bayer.cpp
++++ b/src/decoders/nikon_he/nikon_he_bayer.cpp
+@@ -20,7 +20,6 @@ it under the terms of the one of two licenses as you choose:
+ // See nikon_he_bayer.h for the public API.
+ 
+ #include "nikon_he_bayer.h"
+-#include "nikon_he_simd.h"
+ 
+ namespace nikon_he {
+ 
+diff --git a/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp b/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp
+index f2a626ad..a53ead5d 100644
+--- a/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp
+@@ -31,57 +31,6 @@ static inline void unpack_one_nibble(int32_t m[4], uint32_t nibble) {
+     m[3] = (m[3] << 1) | static_cast<int32_t>( nibble       & 1u);
+ }
+ 
+-void unpack_coefficient_magnitudes(
+-    BitReader& data_reader,
+-    const uint8_t* gcli_values,
+-    int gtli,
+-    int num_groups,
+-    int32_t* coefficients_out) {
+-
+-    for (int g = 0; g < num_groups; ++g) {
+-        const int num_bitplanes = static_cast<int>(gcli_values[g]) - gtli;
+-        int32_t* dst = coefficients_out + g * 4;
+-        if (num_bitplanes <= 0) {
+-            dst[0] = dst[1] = dst[2] = dst[3] = 0;
+-            continue;
+-        }
+-
+-        int32_t m[4] = {0, 0, 0, 0};
+-        int bp = 0;
+-        while (bp + 8 <= num_bitplanes) {
+-            uint32_t bits = data_reader.read_bits(32);
+-            for (int k = 0; k < 8; ++k) {
+-                unpack_one_nibble(m, bits >> 28);
+-                bits <<= 4;
+-            }
+-            bp += 8;
+-        }
+-        for (; bp < num_bitplanes; ++bp) {
+-            unpack_one_nibble(m, data_reader.read_bits(4));
+-        }
+-
+-        dst[0] = m[0] << gtli;
+-        dst[1] = m[1] << gtli;
+-        dst[2] = m[2] << gtli;
+-        dst[3] = m[3] << gtli;
+-    }
+-}
+-
+-void apply_sign_bits(
+-    BitReader& sign_reader,
+-    int32_t* coefficients,
+-    int coefficient_count) {
+-
+-    for (int i = 0; i < coefficient_count; ++i) {
+-        if (coefficients[i] == 0) {
+-            continue;
+-        }
+-        if (sign_reader.read_bits(1) == 1) {
+-            coefficients[i] = -coefficients[i];
+-        }
+-    }
+-}
+-
+ bool unpack_sign_and_dequantize(
+     BitReader& data_reader,
+     BitReader& sign_reader,
+diff --git a/src/decoders/nikon_he/nikon_he_coefficient_decode.h b/src/decoders/nikon_he/nikon_he_coefficient_decode.h
+index 20007963..0d50ed8e 100644
+--- a/src/decoders/nikon_he/nikon_he_coefficient_decode.h
++++ b/src/decoders/nikon_he/nikon_he_coefficient_decode.h
+@@ -33,43 +33,6 @@ it under the terms of the one of two licenses as you choose:
+ 
+ namespace nikon_he {
+ 
+-// Unpack coefficient magnitudes from the data substream.
+-//
+-// For each group g with num_bitplanes = gcli_values[g] - gtli:
+-//   - If num_bitplanes ≤ 0, all 4 coefficients are zero.
+-//   - Otherwise, read num_bitplanes nibbles (4 bits each) MSB-first.
+-//     Each nibble gives one bit for each of the 4 coefficients:
+-//       bit 3 → coefficient 0
+-//       bit 2 → coefficient 1
+-//       bit 1 → coefficient 2
+-//       bit 0 → coefficient 3
+-//   - After assembly, shift left by gtli to restore the implicit low bits.
+-//
+-// Parameters:
+-//   data_reader      — bit reader positioned at the data substream
+-//   gcli_values      — per-group GCLI values (length ≥ num_groups)
+-//   gtli             — this sub-band's GTLI threshold
+-//   num_groups       — number of coefficient groups (each = 4 coefficients)
+-//   coefficients_out — output buffer of at least num_groups * 4 int32_t
+-//
+-void unpack_coefficient_magnitudes(
+-    BitReader& data_reader,
+-    const uint8_t* gcli_values,
+-    int gtli,
+-    int num_groups,
+-    int32_t* coefficients_out);
+-
+-// Apply sign bits from the sign substream.
+-//
+-// For each non-zero coefficient in `coefficients` (length = coefficient_count),
+-// read one bit from sign_reader: 1 means negate, 0 means keep positive.
+-// Zero coefficients consume no sign bit.
+-//
+-void apply_sign_bits(
+-    BitReader& sign_reader,
+-    int32_t* coefficients,
+-    int coefficient_count);
+-
+ // Unpack magnitudes, apply sign bits, and dequantize in one pass.
+ // Writes `num_groups * 4` coefficients to `coefficients_out`.
+ // Returns true when every reconstructed coefficient is zero.
+diff --git a/src/decoders/nikon_he/nikon_he_decode.cpp b/src/decoders/nikon_he/nikon_he_decode.cpp
+index d6e0ef68..3eafa0be 100644
+--- a/src/decoders/nikon_he/nikon_he_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_decode.cpp
+@@ -25,7 +25,6 @@ it under the terms of the one of two licenses as you choose:
+ #include "nikon_he_predecessor.h"
+ #include "nikon_he_precinct_decode.h"
+ #include "nikon_he_predict_lut.h"
+-#include "nikon_he_simd.h"
+ 
+ #include <atomic>
+ #include <vector>
+diff --git a/src/decoders/nikon_he/nikon_he_dequantize.cpp b/src/decoders/nikon_he/nikon_he_dequantize.cpp
+index 71b8ae52..60e9e11d 100644
+--- a/src/decoders/nikon_he/nikon_he_dequantize.cpp
++++ b/src/decoders/nikon_he/nikon_he_dequantize.cpp
+@@ -20,85 +20,7 @@ it under the terms of the one of two licenses as you choose:
+ // See nikon_he_dequantize.h for the public API.
+ 
+ #include "nikon_he_dequantize.h"
+-#include "nikon_he_simd.h"
+ 
+ namespace nikon_he {
+ 
+-int32_t dequantize_coefficient(int32_t coefficient,
+-                               int gcli,
+-                               int gtli) {
+-    if (coefficient == 0) {
+-        return 0;
+-    }
+-    if (gcli <= gtli) {
+-        return 0;
+-    }
+-    const int bit_plane_count = gcli - gtli;
+-    if (bit_plane_count < 1 || bit_plane_count > 15) {
+-        return 0;
+-    }
+-    const uint32_t magnitude =
+-        static_cast<uint32_t>(coefficient < 0 ? -coefficient : coefficient) >> gtli;
+-    const uint64_t product = static_cast<uint64_t>(magnitude)
+-                           * static_cast<uint64_t>(kMidpointScaleTable[bit_plane_count - 1]);
+-    const int32_t shifted = static_cast<int32_t>(product >> (16 - gtli));
+-    const int32_t result  = shifted << kW4Shift;
+-    return (coefficient < 0) ? -result : result;
+-}
+-
+-int32_t dequantize_ll_coefficient(int32_t coefficient,
+-                                  int gcli,
+-                                  int gtli) {
+-    if (coefficient == 0 || gcli <= gtli) {
+-        return 0;
+-    }
+-    const uint32_t magnitude =
+-        static_cast<uint32_t>(coefficient < 0 ? -coefficient : coefficient) >> gtli;
+-    const int32_t factor = (1 << kW4Shift) + 1;
+-    const int32_t result = static_cast<int32_t>(magnitude) * factor << kW4Shift;
+-    return (coefficient < 0) ? -result : result;
+-}
+-
+-void dequantize_coefficient_array(
+-    int32_t* NIKON_HE_RESTRICT coefficients,
+-    int coefficient_count,
+-    const uint8_t* NIKON_HE_RESTRICT gcli_values,
+-    int num_groups,
+-    int target_gtli,
+-    bool is_ll_band) {
+-
+-    (void)is_ll_band;
+-    const int groups = (num_groups * 4 <= coefficient_count)
+-                       ? num_groups
+-                       : coefficient_count / 4;
+-    for (int g = 0; g < groups; ++g) {
+-        const int gcli = static_cast<int>(gcli_values[g]);
+-        int32_t* NIKON_HE_RESTRICT dst = coefficients + g * 4;
+-        if (gcli <= target_gtli) {
+-            dst[0] = dst[1] = dst[2] = dst[3] = 0;
+-            continue;
+-        }
+-        const int bit_plane_count = gcli - target_gtli;
+-        if (bit_plane_count < 1 || bit_plane_count > 15) {
+-            dst[0] = dst[1] = dst[2] = dst[3] = 0;
+-            continue;
+-        }
+-        const uint32_t scale =
+-            static_cast<uint32_t>(kMidpointScaleTable[bit_plane_count - 1]);
+-        const int shift = 16 - target_gtli;
+-        for (int c = 0; c < 4; ++c) {
+-            const int32_t v = dst[c];
+-            if (v == 0) {
+-                continue;
+-            }
+-            const uint32_t magnitude =
+-                static_cast<uint32_t>(v < 0 ? -v : v) >> target_gtli;
+-            const int32_t reconstructed =
+-                static_cast<int32_t>((static_cast<uint64_t>(magnitude) * scale) >> shift)
+-                << kW4Shift;
+-            dst[c] = (v < 0) ? -reconstructed : reconstructed;
+-        }
+-    }
+-}
+-
+ }  // namespace nikon_he
+diff --git a/src/decoders/nikon_he/nikon_he_dequantize.h b/src/decoders/nikon_he/nikon_he_dequantize.h
+index 3c90a2e6..01cfc45a 100644
+--- a/src/decoders/nikon_he/nikon_he_dequantize.h
++++ b/src/decoders/nikon_he/nikon_he_dequantize.h
+@@ -50,30 +50,6 @@ constexpr int32_t kMidpointScaleTable[16] = {
+ // Z9 HE image-wide tone shift.
+ constexpr int kW4Shift = 4;
+ 
+-// Dequantize one coefficient (non-LL).
+-//   coefficient — signed raw coefficient from entropy decode
+-//   gcli        — this group's GCLI value
+-//   gtli        — this sub-band's GTLI (from the (Bp, Br) GTLI table)
+-int32_t dequantize_coefficient(int32_t coefficient,
+-                               int gcli,
+-                               int gtli);
+-
+-// Dequantize one LL-band coefficient (sb 12, sb 23).
+-//   result = sign(coef) × (abs(coef) >> gtli) × ((1 << w4) + 1) << w4
+-int32_t dequantize_ll_coefficient(int32_t coefficient,
+-                                  int gcli,
+-                                  int gtli);
+-
+-// Batch dequantize an array of coefficients for one sub-band.
+-// For LL bands, pass is_ll_band = true.
+-void dequantize_coefficient_array(
+-    int32_t* coefficients,
+-    int coefficient_count,
+-    const uint8_t* gcli_values,
+-    int num_groups,
+-    int target_gtli,
+-    bool is_ll_band);
+-
+ }  // namespace nikon_he
+ 
+ #endif  // LIBRAW_NIKON_HE_DEQUANTIZE_H
+diff --git a/src/decoders/nikon_he/nikon_he_precinct_decode.cpp b/src/decoders/nikon_he/nikon_he_precinct_decode.cpp
+index ff01046b..76c3f858 100644
+--- a/src/decoders/nikon_he/nikon_he_precinct_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_precinct_decode.cpp
+@@ -24,7 +24,6 @@ it under the terms of the one of two licenses as you choose:
+ #include "nikon_he_coefficient_decode.h"
+ #include "nikon_he_gtli_table.h"
+ #include "nikon_he_predict_lut.h"
+-#include <algorithm>
+ 
+ namespace nikon_he {
+ 
+@@ -33,37 +32,6 @@ static const int kLbSbRange[8][2] = {
+     {19, 21}, {21, 23}, {23, 24}, {24, 26},
+ };
+ 
+-void compute_subband_byte_slice(
+-    int lb_sig_remaining,
+-    int lb_gcli_remaining,
+-    int lb_data_remaining,
+-    int lb_sign_remaining,
+-    int total_ng_in_lb,
+-    int sb_ng,
+-    int& out_sig_bytes,
+-    int& out_gcli_bytes,
+-    int& out_data_bytes,
+-    int& out_sign_bytes) {
+-
+-    if (total_ng_in_lb <= sb_ng) {
+-        out_sig_bytes  = lb_sig_remaining;
+-        out_gcli_bytes = lb_gcli_remaining;
+-        out_data_bytes = lb_data_remaining;
+-        out_sign_bytes = lb_sign_remaining;
+-        return;
+-    }
+-
+-    out_sig_bytes  = (lb_sig_remaining * sb_ng) / total_ng_in_lb;
+-    out_gcli_bytes = (lb_gcli_remaining * sb_ng) / total_ng_in_lb;
+-    out_data_bytes = (lb_data_remaining * sb_ng) / total_ng_in_lb;
+-    out_sign_bytes = (lb_sign_remaining * sb_ng) / total_ng_in_lb;
+-
+-    const int min_sig = (sb_ng + 7) / 8;
+-    if (out_sig_bytes < min_sig) {
+-        out_sig_bytes = std::min(min_sig, lb_sig_remaining);
+-    }
+-}
+-
+ PrecinctDecodeResult decode_precinct(
+     const uint8_t* precinct_data,
+     size_t precinct_size,
+diff --git a/src/decoders/nikon_he/nikon_he_precinct_decode.h b/src/decoders/nikon_he/nikon_he_precinct_decode.h
+index d795c35d..e1be260f 100644
+--- a/src/decoders/nikon_he/nikon_he_precinct_decode.h
++++ b/src/decoders/nikon_he/nikon_he_precinct_decode.h
+@@ -50,21 +50,6 @@ PrecinctDecodeResult decode_precinct(
+     int32_t* bufA,
+     int32_t* bufB);
+ 
+-// Compute byte slicing for one sub-band within an LB.
+-// Given the LB totals and remaining bytes, allocate this sub-band's
+-// portion of sig, gcli, data, sign substreams.
+-void compute_subband_byte_slice(
+-    int lb_sig_remaining,
+-    int lb_gcli_remaining,
+-    int lb_data_remaining,
+-    int lb_sign_remaining,
+-    int total_ng_in_lb,
+-    int sb_ng,
+-    int& out_sig_bytes,
+-    int& out_gcli_bytes,
+-    int& out_data_bytes,
+-    int& out_sign_bytes);
+-
+ }  // namespace nikon_he
+ 
+ #endif  // LIBRAW_NIKON_HE_PRECINCT_DECODE_H
+diff --git a/src/decoders/nikon_he/nikon_he_tile.cpp b/src/decoders/nikon_he/nikon_he_tile.cpp
+index 57279872..8c79d27c 100644
+--- a/src/decoders/nikon_he/nikon_he_tile.cpp
++++ b/src/decoders/nikon_he/nikon_he_tile.cpp
+@@ -105,8 +105,8 @@ bool decode_tile_entropy_horizontal(
+             scratch.bufA.data(), scratch.bufB.data());
+         if (!prec.success) return false;
+ 
+-        int32_t* ha = store.a(p);
+-        int32_t* hb = store.b(p);
++        int32_t* ha = store.pass_a_row(p);
++        int32_t* hb = store.pass_b_row(p);
+         std::memset(ha, 0, static_cast<size_t>(h_len) * sizeof(int32_t));
+         std::memset(hb, 0, static_cast<size_t>(h_len) * sizeof(int32_t));
+         std::memset(scratch.h_work.data(), 0, scratch.h_work.size() * sizeof(int32_t));
+@@ -174,7 +174,7 @@ void apply_tile_vertical_idwt(
+     };
+ 
+     for (int p = 0; p < store.precinct_count; ++p) {
+-        const int32_t* ha = store.a(p);
++        const int32_t* ha = store.pass_a_row(p);
+         std::memcpy(scratch.tile_buf.data() + memcpy_cursor + 3 * kBand,
+                     ha + 2 * lift_st,
+                     static_cast<size_t>(memcpy_st) * sizeof(int32_t));
+@@ -186,7 +186,7 @@ void apply_tile_vertical_idwt(
+             if (pre_tick > 5) x1_write_offset += 4;
+         }
+ 
+-        const int32_t* hb = store.b(p);
++        const int32_t* hb = store.pass_b_row(p);
+         std::memcpy(scratch.tile_buf.data() + memcpy_cursor + 3 * kBand,
+                     hb + 2 * lift_st,
+                     static_cast<size_t>(memcpy_st) * sizeof(int32_t));
+@@ -220,36 +220,4 @@ void apply_tile_vertical_idwt(
+                 static_cast<size_t>(2 * stripe_ints) * sizeof(int32_t));
+ }
+ 
+-TileDecodeResult decode_tile(
+-    const uint8_t* const* precinct_data,
+-    const size_t* precinct_sizes,
+-    int image_width,
+-    const SubbandConfig config[26],
+-    PrecinctPredecessorState& pred_state,
+-    const uint8_t* predict_lut,
+-    int32_t* tile_coeff_buf,
+-    int tile_index,
+-    int32_t* overflow_carry,
+-    bool is_first_tile,
+-    bool is_last_tile,
+-    int precinct_count) {
+-
+-    TileDecodeResult result = {0, false};
+-    TileWorkScratch scratch;
+-    TileHorizStore store;
+-
+-    if (!decode_tile_entropy_horizontal(
+-            precinct_data, precinct_sizes, image_width, config,
+-            pred_state, predict_lut, scratch, store, precinct_count)) {
+-        return result;
+-    }
+-
+-    apply_tile_vertical_idwt(config, store, tile_coeff_buf, tile_index,
+-                             overflow_carry, is_first_tile, is_last_tile,
+-                             scratch);
+-    result.precincts_decoded = precinct_count;
+-    result.success = true;
+-    return result;
+-}
+-
+ }  // namespace nikon_he
+diff --git a/src/decoders/nikon_he/nikon_he_tile.h b/src/decoders/nikon_he/nikon_he_tile.h
+index b369f619..91d3e647 100644
+--- a/src/decoders/nikon_he/nikon_he_tile.h
++++ b/src/decoders/nikon_he/nikon_he_tile.h
+@@ -69,12 +69,6 @@ inline int compute_kband(const LayoutInfo* li) {
+     return li->lift_LB * 4;
+ }
+ 
+-// Result of decoding one tile.
+-struct TileDecodeResult {
+-    int precincts_decoded;  // should be 18 for a full tile
+-    bool success;
+-};
+-
+ // Reused per-thread working buffers. Call ensure() once per image width.
+ struct TileWorkScratch {
+     std::vector<int32_t> bufA;
+@@ -97,16 +91,16 @@ struct TileHorizStore {
+ 
+     void ensure(int store_precincts, int store_h_len);
+ 
+-    int32_t* a(int p) {
++    int32_t* pass_a_row(int p) {
+         return pass_a.data() + static_cast<size_t>(p) * h_len;
+     }
+-    int32_t* b(int p) {
++    int32_t* pass_b_row(int p) {
+         return pass_b.data() + static_cast<size_t>(p) * h_len;
+     }
+-    const int32_t* a(int p) const {
++    const int32_t* pass_a_row(int p) const {
+         return pass_a.data() + static_cast<size_t>(p) * h_len;
+     }
+-    const int32_t* b(int p) const {
++    const int32_t* pass_b_row(int p) const {
+         return pass_b.data() + static_cast<size_t>(p) * h_len;
+     }
+ };
+@@ -132,35 +126,6 @@ void apply_tile_vertical_idwt(
+     bool is_last_tile,
+     TileWorkScratch& scratch);
+ 
+-// Decode one tile.
+-//
+-// Parameters:
+-//   precinct_data[18] — array of (pointer, size) for each precinct's raw data
+-//   image_width       — full image width in pixels
+-//   config[26]        — sub-band layout
+-//   pred_state        — predecessor state (shared across tiles)
+-//   predict_lut       — prediction LUT
+-//   tile_coeff_buf          — output buffer (image-wide, this tile's 32 stripes written)
+-//   tile_index        — 0-based tile index
+-//   overflow_carry    — 2 * bufStripeInts int32_t for cross-tile carry (in/out)
+-//   is_first_tile     — true for tile 0 (path A init)
+-//   is_last_tile      — true for final tile (may have < 18 precincts)
+-//   precinct_count    — number of precincts in this tile (≤ 18)
+-//
+-TileDecodeResult decode_tile(
+-    const uint8_t* const* precinct_data,
+-    const size_t* precinct_sizes,
+-    int image_width,
+-    const SubbandConfig config[26],
+-    PrecinctPredecessorState& pred_state,
+-    const uint8_t* predict_lut,
+-    int32_t* tile_coeff_buf,
+-    int tile_index,
+-    int32_t* overflow_carry,
+-    bool is_first_tile,
+-    bool is_last_tile,
+-    int precinct_count);
+-
+ }  // namespace nikon_he
+ 
+ #endif  // LIBRAW_NIKON_HE_TILE_H

@@ -64,7 +64,11 @@ static_assert(offsetof(RawDevelopParams, shadows) == 24,
 // RawDevelopParams gains exif_orientation, appended at the end.
 static_assert(offsetof(RawDevelopParams, exif_orientation) == 28,
              "exif_orientation offset moved - must stay APPENDED, never inserted");
-static_assert(sizeof(RawDevelopParams) == 32, "RawDevelopParams size changed");
+// contract version 6: RawDevelopParams gains
+// caller_destination_is_page_aligned, appended at the end. Same guard pattern.
+static_assert(offsetof(RawDevelopParams, caller_destination_is_page_aligned) == 32,
+             "caller_destination_is_page_aligned offset moved - must stay APPENDED, never inserted");
+static_assert(sizeof(RawDevelopParams) == 36, "RawDevelopParams size changed");
 
 namespace {
 

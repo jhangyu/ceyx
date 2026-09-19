@@ -1,7 +1,13 @@
 {
+  "canon_r5_bayer": "fb1f1c0bcc54723b80997ff7dedbd5f6420fd55a1797812487ff5005b5bdb36a",
   "foveon_x3f_linear": "1d4df957fb47a5f482dde89e543ca12a1e73f1cfe323d06f35630190f51c55b3",
   "foveon_x3f_linear_2": "cd8323d0d79de8f0f9850ed26c3df44f0e63cb101737c09227877b9dbd1ef553",
   "fuji_xt3_xtrans": "2a51ccb4faca52f0e801e4008662fe5444547bbe4f753d4e14ace25cf6831f87",
   "fuji_xt5_xtrans": "45b3713bfbc021db26cb53f93e99f4160bd85a3116af6794a9bf9e41533e4af5",
-  "local_sony_bayer": "fb8facb5ef299f73c5320f102555d24b83b48b1fddd4ab80b8f2ccc55aad685d"
+  "local_sony_bayer": "fb8facb5ef299f73c5320f102555d24b83b48b1fddd4ab80b8f2ccc55aad685d",
+  "natural_libraw_fallback": "334c8e9f31ea9208326050c3c032edff5d2d8aa41f8db960c4fb1e5ff008eb43",
+  "nikon_z7_bayer": "f0d8f9d16ffc419d54bbb65ad35f39b50cb79292c1c54740a6c2b1cee6e19238",
+  "nikon_z8_high_efficiency": "49815e7dacd7b4a2cb92c59125afbfc9281548338adf14f37577c2543edc4514",
+  "nikon_z8_high_efficiency_star": "93c06026794d50c0c37cfbae2f238c26b27fe8a6c091aba3070667d71302f5a5",
+  "sony_a7r4_bayer": "d4cf7d360bc89e86b19d648901e9cc80be53c01d439a654b35cd8625aad4a5db"
 }
