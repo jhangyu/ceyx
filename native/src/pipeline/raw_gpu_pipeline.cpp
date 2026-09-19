@@ -1,6 +1,7 @@
 #include "raw_gpu_pipeline.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -49,6 +50,13 @@
 #endif
 
 namespace {
+
+// mem8 T4 (SR-7). Process-wide count of Stage-3 HOST allocations, incremented
+// only in makeStage3Buffer's fallback branch below. Read by
+// raw_stage3_host_allocation_count() from an arbitrary thread, so atomic even
+// though each lane only ever increments. See the accessor's comment in
+// raw_gpu_pipeline.h for why a counter is required and vmmap is not enough.
+std::atomic<uint64_t> g_stage3_host_allocation_count{0};
 
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 using ObjectiveCSendNewBufferNoCopy = void* (*)(void*, SEL, void*, unsigned long,
@@ -311,6 +319,90 @@ void scaledOutputExtent(uint32_t src_w, uint32_t src_h, uint32_t max_long_edge,
     *dst_h = std::max<uint32_t>(1u, static_cast<uint32_t>(std::llround(src_h * s)));
 }
 
+// --------------------------------------------------------------------------
+// mem8 T4 (spec SR-7, frozen plan docs/logs/2026-09-12/mem8-plan.md §T4):
+// the ONE Stage-3 interleaved-RGB16 allocation decision.
+//
+// Before T4 this decision was written out three times (Bayer, X-Trans,
+// linear-RGB), which is precisely how D-P1-5 ended up with two of the three
+// sites unfixed. It is consolidated here so a future change is one edit.
+//
+// WHAT CHANGED: the order. The pre-T4 code ALLOCATED a full host buffer
+// (make_interleaved) and then tried to bind the lane arena's device region on
+// top of it, so a ~3x-mosaic host region (139-234 MiB per in-flight lane on
+// the in-repo corpus) existed on every decode even though nothing ever read
+// it. Now the bind is attempted FIRST, against a host-null buffer, and the
+// host allocation happens only if the arena could not supply the region.
+//
+// HONESTY (spec SR-7, and this comment is part of the deliverable): those
+// pages were never touched, so this is an ADDRESS-SPACE and vmmap-legibility
+// change plus the closure of the failure-path hazard below. It is NOT a
+// resident-footprint reduction and must never be reported as one.
+//
+// THE BUFFER IS DEVICE-ONLY FOR ITS WHOLE LIFE on the arena path: written by
+// raw_bayer_demosaic / raw_xtrans_demosaic / raw_linear_rgb_normalize on the
+// GPU, read by runRenderStage4HalideAotFromDevice from the device.
+// *** NO copy_to_host MAY EVER BE INTRODUCED ON THIS BUFFER. *** On the arena
+// path buf.host is nullptr, so a host copy is a NULL-POINTER WRITE, not a slow
+// path. The same rule makes any early return between the construction here and
+// the Stage-4 call a hazard if it reads stage3's host side; the audit showing
+// none of them does is native/tests/tmp/t4-04-failure-path-audit.txt.
+//
+// SHAPE: built with Halide's own wrap form make_interleaved(nullptr, w, h, 3),
+// which runs the identical `Buffer(t, data, channels, width, height);
+// transpose(0,1); transpose(1,2)` sequence as the allocating overload
+// (HalideBuffer.h:1954-1961 vs :1934-1941). The dimension/stride triple is
+// therefore equal to the pre-T4 buffer's BY CONSTRUCTION rather than by a
+// hand-derived {1, 3, 3*w} a reviewer would have to re-check.
+//
+// SIGNATURE NOTE (T20 consumes this helper; v3 plan §4.3 / P1.B): the spec
+// sketched `Buffer<uint16_t> makeStage3Buffer(arena, w, h, optional<Binding>&)`,
+// returning the buffer. That cannot be memory-safe here.
+// RawDeviceArenaRegionBinding stores the ADDRESS of the halide_buffer_t it
+// bound, Halide::Runtime::Buffer holds its halide_buffer_t BY VALUE, and the
+// binding is both non-copyable and non-movable. Returning the buffer would
+// move that struct to a new address and leave the binding pointing at a dead
+// temporary, whose destructor would then detach_region() on dead stack memory.
+// So the buffer is an OUT-PARAM too, and BOTH out-params must be declared in
+// the caller's scope with `out_buffer` FIRST — the binding must be destroyed
+// before the buffer it is attached to (it detaches, clearing buf.device; a
+// Buffer destroyed with a still-set foreign device pointer would device-free
+// the arena's region, invariant I-D).
+void makeStage3Buffer(ceyx::RawPersistentDeviceArena* arena,
+                      uint32_t w, uint32_t h,
+                      Halide::Runtime::Buffer<uint16_t>& out_buffer,
+                      std::optional<ceyx::RawDeviceArenaRegionBinding>& out_binding) {
+    const size_t required_bytes =
+        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t);
+
+    // Device-only descriptor: correct dims/strides, host == nullptr.
+    out_buffer = Halide::Runtime::Buffer<uint16_t>::make_interleaved(
+        static_cast<uint16_t*>(nullptr), static_cast<int>(w),
+        static_cast<int>(h), 3);
+
+    out_binding.emplace(arena, out_buffer.raw_buffer(),
+                        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
+                        required_bytes);
+    if (*out_binding) return;  // device-only: the common path.
+
+    // FALLBACK, and it is mandatory rather than optional
+    // (raw_persistent_device_arena.h: "AN ARENA FAILURE IS NEVER A DECODE
+    // FAILURE"). arena == nullptr (non-Metal build, no device, lane ceiling
+    // exceeded) and a refused bind_region() both land here, and both are
+    // normal answers. Allocate the host buffer exactly as the pre-T4 code did.
+    //
+    // The falsy binding is dropped first: its destructor is a no-op when
+    // bound_ is false (raw_persistent_device_arena.cpp:227-233), so this
+    // cannot detach anything. It is NOT re-attempted against the host buffer,
+    // because bind_region() only ever writes halide_buffer's `device` field
+    // and never looks at `host` — a bind that refused the host-null buffer
+    // refuses the host-backed one for the identical reason.
+    out_binding.reset();
+    out_buffer = Halide::Runtime::Buffer<uint16_t>::make_interleaved(
+        static_cast<int>(w), static_cast<int>(h), 3);
+    g_stage3_host_allocation_count.fetch_add(1, std::memory_order_relaxed);
+}
+
 RawErrorCode runBayerBranch(const RawGpuInput& input,
                             const RawDevelopParams& develop,
                             RawPipelineResult& out) {
@@ -400,15 +492,14 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // Interleaved RGB16 intermediate, byte-identical in shape to the DNG
     // route's device-handoff buffer (src/dng_warp_halide.cpp:1123). Left
     // device-dirty for the handoff, so there is no GPU->host->GPU round trip
-    // (spec section 5.2.3). The host allocation is never read on the success
-    // path; it exists because the shared Stage4 entry accepts a host-backed
-    // halide_buffer_t and Halide device-mallocs on first dispatch.
-    // ponytail: host side stays resident for the whole decode, same as the DNG
-    // route's Stage3 workspace; swap to a device-only allocation only if a
-    // measurement shows this footprint matters.
-    Halide::Runtime::Buffer<uint16_t> stage3 =
-        Halide::Runtime::Buffer<uint16_t>::make_interleaved(
-            static_cast<int>(w), static_cast<int>(h), 3);
+    // (spec section 5.2.3). mem8 T4 (SR-7): the host allocation that used to
+    // sit here unconditionally is gone on the arena path — makeStage3Buffer
+    // binds the lane arena's device region onto a host-null buffer and only
+    // falls back to a host allocation when the arena cannot supply one. Read
+    // that helper's comment before touching anything below; in particular the
+    // declaration ORDER here is load-bearing (buffer first, binding second, so
+    // the binding detaches before the buffer is destroyed).
+    Halide::Runtime::Buffer<uint16_t> stage3;
 
     // C1 (plan §3.2 item 1-2, §2.6): wrap the source mosaic and Stage3
     // intermediate onto their arena regions (arena acquired above, shared
@@ -424,10 +515,8 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     ceyx::RawDeviceArenaRegionBinding src_arena_binding(
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
-    ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
-        arena, stage3.raw_buffer(),
-        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
-        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
+    std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
+    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
 
     // GPU targets only upload an input whose host_dirty flag is set; without
     // these the kernel reads freshly device-malloc'd memory. Same handshake as
@@ -724,9 +813,9 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     Halide::Runtime::Buffer<const float> black_buf(
         input.black.values, static_cast<int>(bw), static_cast<int>(bh));
 
-    Halide::Runtime::Buffer<uint16_t> stage3 =
-        Halide::Runtime::Buffer<uint16_t>::make_interleaved(
-            static_cast<int>(w), static_cast<int>(h), 3);
+    // mem8 T4 (SR-7): device-only on the arena path. Declaration order is
+    // load-bearing — see makeStage3Buffer.
+    Halide::Runtime::Buffer<uint16_t> stage3;
 
     // C1 (plan §3.2, §2.6): same lane-arena bind as runBayerBranch — see that
     // branch's comment for the full rationale. Structurally identical sibling
@@ -734,10 +823,8 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     ceyx::RawDeviceArenaRegionBinding src_arena_binding(
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
-    ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
-        arena, stage3.raw_buffer(),
-        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
-        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
+    std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
+    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
 
     // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
     if (zero_copy_src_host != nullptr) {
@@ -983,9 +1070,9 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                        input.component_black[2]};
     Halide::Runtime::Buffer<const float> black_buf(black3, 3);
 
-    Halide::Runtime::Buffer<uint16_t> stage3 =
-        Halide::Runtime::Buffer<uint16_t>::make_interleaved(
-            static_cast<int>(w), static_cast<int>(h), 3);
+    // mem8 T4 (SR-7): device-only on the arena path. Declaration order is
+    // load-bearing — see makeStage3Buffer.
+    Halide::Runtime::Buffer<uint16_t> stage3;
 
     // C1 (plan §3.2, §2.6): same lane-arena bind as runBayerBranch — see that
     // branch's comment for the full rationale. Structurally identical sibling
@@ -993,10 +1080,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     ceyx::RawDeviceArenaRegionBinding src_arena_binding(
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
-    ceyx::RawDeviceArenaRegionBinding stage3_arena_binding(
-        arena, stage3.raw_buffer(),
-        ceyx::RawDeviceArenaRegion::kStageThreeInterleavedRgb16Region,
-        static_cast<size_t>(w) * h * 3 * sizeof(uint16_t));
+    std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
+    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
 
     // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
     if (zero_copy_src_host != nullptr) {
@@ -1142,6 +1227,11 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
 }
 
 }  // namespace
+
+// mem8 T4 (SR-7). See the declaration's comment in raw_gpu_pipeline.h.
+uint64_t raw_stage3_host_allocation_count() {
+    return g_stage3_host_allocation_count.load(std::memory_order_relaxed);
+}
 
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
                                          const RawDevelopParams& develop,

@@ -184,6 +184,27 @@ constexpr uint64_t kRawMaxPixelCount = 268435456ull;
 // path.
 int raw_pipeline_gpu_available();
 
+// mem8 T4 (spec SR-7): how many times the Stage-3 interleaved RGB16
+// intermediate has been given a HOST allocation since process start.
+//
+// WHY THIS COUNTER EXISTS AT ALL: vmmap cannot distinguish "no Stage-3 host
+// region because the allocation is device-only" from "no Stage-3 host region
+// because no decode ran". Only a counter can, so the device-only claim is
+// falsifiable rather than merely plausible.
+//
+// On the arena-backed path this NEVER moves: makeStage3Buffer binds the lane
+// arena's kStageThreeInterleavedRgb16Region onto a host-null buffer, and the
+// intermediate is written by the demosaic kernel and read by Stage-4 entirely
+// on the device. It moves by exactly one per decode on the FALLBACK path
+// (no Metal, no device, lane ceiling exceeded, or a refused bind), which is a
+// normal answer and never a decode failure — that fallback allocates the host
+// buffer exactly as the pre-T4 code did.
+//
+// Deliberately declared HERE and not in raw_ffi_api.h: it is a C++ accessor
+// for in-tree gates that link dng_decoder_native directly, so it adds no FFI
+// export and cannot widen any frozen probe signature.
+uint64_t raw_stage3_host_allocation_count();
+
 // Non-zero return requests cancellation. Polled between open_file and unpack,
 // after unpack, and before GPU dispatch. Deliberately a plain function pointer:
 // no lock on the hot path.

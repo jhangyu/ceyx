@@ -87,6 +87,10 @@ struct ArenaCounters {
   uint64_t binding_count = 0;
   uint64_t resident_device_bytes = 0;
   uint64_t live_lane_count = 0;
+  // mem8 T4 (SR-7), gate G1. Not part of the frozen five-parameter FFI probe:
+  // read through the C++ accessor raw_stage3_host_allocation_count()
+  // (raw_gpu_pipeline.h), so no FFI signature is widened.
+  uint64_t stage3_host_allocation_count = 0;
 };
 
 ArenaCounters read_counters() {
@@ -101,6 +105,7 @@ ArenaCounters read_counters() {
         "non-zero rc is a probe defect)\n",
         (int)rc);
   }
+  c.stage3_host_allocation_count = raw_stage3_host_allocation_count();
   return c;
 }
 
@@ -316,6 +321,10 @@ int main(int argc, char** argv) {
   const int64_t binding_delta =
       static_cast<int64_t>(after.binding_count) -
       static_cast<int64_t>(baseline.binding_count);
+  // mem8 T4 (SR-7), gate G1.
+  const int64_t stage3_host_allocation_delta =
+      static_cast<int64_t>(after.stage3_host_allocation_count) -
+      static_cast<int64_t>(baseline.stage3_host_allocation_count);
   const int expected_decodes =
       thread_count * repeat * static_cast<int>(corpus.size());
   std::printf(
@@ -323,6 +332,12 @@ int main(int argc, char** argv) {
       "successful_decodes=%d expected_decodes=%d\n",
       (long long)allocation_delta, (long long)growth_delta,
       (long long)binding_delta, successful_decodes.load(), expected_decodes);
+  std::printf(
+      "[ConcurrentRawDecode] mem8-T4: stage3_host_allocation_count %llu -> "
+      "%llu (delta=%lld)\n",
+      (unsigned long long)baseline.stage3_host_allocation_count,
+      (unsigned long long)after.stage3_host_allocation_count,
+      (long long)stage3_host_allocation_delta);
 
   // (a) correctness under concurrency.
   CHECK("all_concurrent_decodes_succeeded",
@@ -361,6 +376,65 @@ int main(int argc, char** argv) {
         // family). The token lives only in the artifact and in comments.
         "three regions bound per decode; a failed region binding lowers this, "
         "and the artifact greps the arena log for the failure event");
+  // mem8 T4 (SR-7), gate G1. Meaningful ONLY together with the binding check
+  // just above: a zero here on a run where the arena never bound anything
+  // would be the trivial pass (no decode reached a Stage-3 allocation at all),
+  // which is why the two are asserted as a pair and never alone.
+  CHECK("mem8_t4_stage3_host_allocation_delta_is_zero",
+        stage3_host_allocation_delta == 0,
+        "every arena-backed decode must build its Stage-3 intermediate "
+        "device-only; a non-zero delta means a lane fell back to a host "
+        "allocation, or that the T4 consolidation was reverted at one of the "
+        "three branches");
+
+  // ---------------------------------------------------------------------
+  // Phase 4 — mem8 T4 (SR-7), gate G2: POSITIVE CONTROL for the check above.
+  //
+  // G1's "delta == 0" is only evidence if a non-zero value is REACHABLE. This
+  // phase reaches it, without hacking the code: it forces the arena to answer
+  // nullptr the way production does, by exceeding the lane ceiling.
+  //   release_all_lanes()  -> empty lane map
+  //   configure_lane_count(1) -> budget 1
+  //   decode on THIS thread   -> claims lane index 0, arena granted
+  //   decode on a NEW thread  -> next_index(1) >= budget(1), so
+  //                              for_current_lane() returns nullptr
+  //                              (raw_persistent_device_arena.cpp:622-626)
+  // The un-arened decode must (a) move the counter and (b) still produce the
+  // SAME bytes — the fallback is a different allocation, never a different
+  // image. Deliberately LAST: it changes the process-wide lane budget, so
+  // nothing this driver asserts above may run after it.
+  // ---------------------------------------------------------------------
+  ceyx::raw_persistent_device_arena_release_all_lanes();
+  ceyx::raw_persistent_device_arena_configure_lane_count(1);
+  const char* const control_path = corpus[0].c_str();
+  const DecodeOutcome arena_on = decode_and_hash(control_path);
+  const uint64_t before_control = raw_stage3_host_allocation_count();
+  DecodeOutcome arena_off;
+  {
+    std::thread surplus([&] { arena_off = decode_and_hash(control_path); });
+    surplus.join();
+  }
+  const int64_t control_delta =
+      static_cast<int64_t>(raw_stage3_host_allocation_count()) -
+      static_cast<int64_t>(before_control);
+  std::printf(
+      "[ConcurrentRawDecode] mem8-T4 positive control (%s): arena_on ok=%d "
+      "hash=%016llx | arena_off ok=%d hash=%016llx | "
+      "stage3_host_allocation delta=%lld\n",
+      control_path, (int)arena_on.ok, (unsigned long long)arena_on.hash,
+      (int)arena_off.ok, (unsigned long long)arena_off.hash,
+      (long long)control_delta);
+  CHECK("mem8_t4_arena_off_decode_still_succeeds", arena_on.ok && arena_off.ok,
+        "an arena failure is never a decode failure "
+        "(raw_persistent_device_arena.h); if this fails, the fallback branch "
+        "of makeStage3Buffer is broken");
+  CHECK("mem8_t4_arena_off_is_byte_identical",
+        arena_on.ok && arena_off.ok && arena_on.hash == arena_off.hash,
+        "the host fallback must produce the same image as the device-only "
+        "path; a difference here means the two Stage-3 buffer shapes disagree");
+  CHECK("mem8_t4_arena_off_allocates_on_the_host", control_delta > 0,
+        "without this the zero measured above would be unfalsifiable — a "
+        "counter that can never move is not evidence");
 
   std::printf("[ConcurrentRawDecode] TOTAL failures=%d\n", failures);
   std::fflush(stdout);
