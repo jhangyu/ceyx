@@ -271,6 +271,155 @@ int32_t ceyx_debug_zero_copy_capability_counters(
     uint64_t *out_destination_alignment_degradation_count,
     uint64_t *out_source_mosaic_wrap_count);
 
+/* ===================================================================== */
+/* T12.0 -- FROZEN OUTPUT-FORMAT CONTRACT (mem8 v3 campaign, Phase P0,    */
+/* Halcyon/docs/logs/2026-09-19/mem8-v3-plan.md "T12.0 -- Freeze the      */
+/* yuv420 format contract").                                              */
+/*                                                                        */
+/* DECLARATIONS ONLY. No behaviour is implemented by T12.0: the kernel    */
+/* arm is T12, the converter is T13, the Dart binding is T14 and the      */
+/* Halcyon seam is T15a. Those four tasks CONSUME this block; a consumer  */
+/* that needs it changed STOPS and reports to the lead rather than        */
+/* editing it, because the whole value of freezing it is that four        */
+/* consumers can trust one declaration.                                   */
+/*                                                                        */
+/* R-B: rgba8 is enumerator 0 and remains the C-side DEFAULT, so every    */
+/* existing caller and every existing entry point is byte-for-byte        */
+/* unchanged. This block is purely ADDITIVE.                              */
+/*                                                                        */
+/* Enumerators are APPENDED, never renumbered -- the same rule            */
+/* CeyxImageFormat (ceyx_encode_api.h) already follows, because the       */
+/* values cross an FFI boundary into plugin/lib/src/codec_format.dart's   */
+/* CeyxOutputFormat mirror.                                               */
+/* ===================================================================== */
+enum CeyxOutputFormat {
+    /* 4 B/px interleaved RGBA8 -- today's behaviour, the default. */
+    kCeyxOutputFormatRgba8 = 0,
+    /* Planar 4:2:0, 1.5 B/px average. See the layout contract below. */
+    kCeyxOutputFormatYuv420 = 1
+};
+
+/* ===================================================================== */
+/* DESTINATION MEMORY LAYOUT -- RULED, TIGHTLY PACKED (T12.0 clause 2a,   */
+/* rationale in T12.0.1).                                                 */
+/*                                                                        */
+/* A decode writes into a SINGLE CONTIGUOUS CALLER-OWNED allocation.      */
+/* Plane order is Y, Cb, Cr. Each plane is TIGHTLY PACKED: its row stride */
+/* EQUALS its plane width, and there is NO inter-plane padding.           */
+/*                                                                        */
+/*   plane extents:  Y  = w x h                                           */
+/*                   Cb = ceil(w/2) x ceil(h/2)                           */
+/*                   Cr = ceil(w/2) x ceil(h/2)                           */
+/*   plane bases:    Y  = base                                            */
+/*                   Cb = base + w*h                                      */
+/*                   Cr = base + w*h + ceil(w/2)*ceil(h/2)                */
+/*   total bytes:    EXACTLY w*h + 2*(ceil(w/2) * ceil(h/2))              */
+/*                                                                        */
+/* This is not an observation about Halide's defaults, it is the          */
+/* contract: the byte-count formula below is correct ONLY under tight     */
+/* packing, and under padded rows it UNDER-ALLOCATES, which is a heap     */
+/* overrun rather than a miscount. T12's tests therefore ASSERT the       */
+/* returned descriptor's pointers and strides against literals, including */
+/* an ODD-dimension case where a naive w/2 differs from ceil(w/2).        */
+/*                                                                        */
+/* If a backend turns out to be unable to write this layout, that is      */
+/* R-O's exception trigger: STOP and report for a user ruling. A          */
+/* per-backend layout is forbidden.                                       */
+/* ===================================================================== */
+typedef struct CeyxYuv420PlaneDescriptor {
+    uint32_t struct_size;         /* sizeof(CeyxYuv420PlaneDescriptor) */
+    uint8_t *plane_base[3];       /* Y, Cb, Cr -- see plane bases above */
+    int32_t  plane_width[3];
+    int32_t  plane_height[3];
+    int32_t  plane_row_stride[3]; /* == plane_width[i], by contract */
+} CeyxYuv420PlaneDescriptor;
+
+/* Bytes a decode of width x height in `output_format` occupies.
+ *
+ * THIS IS THE CONTRACT'S SIZING FUNCTION (T12.0 clause 2b), not a T14
+ * convenience: T12's destination sizing, T13's converter, T14's binding and
+ * T15's slot sizing all call it. A consumer that open-codes the arithmetic
+ * instead is a DEFECT BY CONTRACT, not a style preference. Its Dart mirror is
+ * `ceyxOutputFormatByteCount` (plugin/lib/src/codec_format.dart) and the two
+ * must agree exactly.
+ *
+ *   kCeyxOutputFormatRgba8  -> w*h*4
+ *   kCeyxOutputFormatYuv420 -> w*h + 2*(ceil(w/2) * ceil(h/2))
+ *
+ * Returns the byte count, or -1 for an unknown format / a non-positive width
+ * or height. int64_t because w*h*4 overflows int32_t well inside the sensor
+ * sizes this pipeline already decodes. */
+int64_t ceyx_output_format_byte_count(int32_t output_format, int32_t width,
+                                      int32_t height);
+
+/* ===================================================================== */
+/* FORMAT-TAKING ENTRY POINTS (T12.0 clause 2).                           */
+/*                                                                        */
+/* Additive siblings of the format-agnostic entries in ceyx_decode_into.h */
+/* (ceyx_probe_output_size / ceyx_decode_into_buffer /                    */
+/* ceyx_decode_into_buffer_oriented), which are UNCHANGED and remain      */
+/* rgba8. Format selection is a HOST-SIDE choice of which entry to call;  */
+/* it is never an Expr inside a kernel (DngRenderGenerator.cpp:641-655).  */
+/*                                                                        */
+/* `out_planes` may be NULL. When non-NULL and the request succeeded with */
+/* kCeyxOutputFormatYuv420, it is filled with the layout described above; */
+/* for kCeyxOutputFormatRgba8 it is zeroed (there are no planes).         */
+/* Callers set out_planes->struct_size before the call.                   */
+/* ===================================================================== */
+
+/* Format-aware sibling of ceyx_probe_output_size. Additionally reports the
+ * destination byte requirement for `output_format`, which is exactly
+ * ceyx_output_format_byte_count(output_format, *out_width, *out_height).
+ * out_byte_count may be NULL. Same return codes as ceyx_probe_output_size. */
+int32_t ceyx_probe_output_size_format(const char *file_path, int32_t max_dim,
+                                      int32_t output_format,
+                                      int32_t *out_width, int32_t *out_height,
+                                      int64_t *out_byte_count);
+
+/* Format-aware sibling of ceyx_decode_into_buffer. Identical contract except
+ * that the pixels written to dst are in `output_format` and the dst_capacity
+ * floor is ceyx_output_format_byte_count(...) rather than w*h*4; a smaller
+ * capacity is kCeyxErrDstTooSmall before any pixel work. */
+DngResult *ceyx_decode_into_buffer_format(
+    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
+    int32_t output_format, CeyxYuv420PlaneDescriptor *out_planes);
+
+/* Format-aware sibling of ceyx_decode_into_buffer_oriented. Orientation
+ * semantics are unchanged (orientation failure is decode failure, never an
+ * unoriented fallback); plane extents describe the ORIENTED extent. */
+DngResult *ceyx_decode_into_buffer_oriented_format(
+    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
+    int32_t exif_orientation, int32_t output_format,
+    CeyxYuv420PlaneDescriptor *out_planes);
+
+/* The single yuv420 -> RGBA8 upconvert implementation (SR-11, T13). Dart must
+ * never open-code one. `src` is the tightly-packed layout above; `dst` is
+ * w*h*4 interleaved RGBA8 with alpha 255. Conversion follows the plan's §3
+ * oracle: full-range BT.601, 2x2 box-average chroma.
+ * Returns 0, or kCeyxErrDstTooSmall when dst_capacity < w*h*4, or -1 for a
+ * null pointer or a non-positive extent. */
+int32_t ceyx_yuv420_to_rgba8(const uint8_t *src, size_t src_capacity,
+                             uint8_t *dst, size_t dst_capacity, int32_t width,
+                             int32_t height);
+
+/* ===================================================================== */
+/* FAILURE ENCODING FOR A STALE DYLIB (T12.0 clause 3 / R-J).             */
+/*                                                                        */
+/* A library predating this contract does not EXPORT the five symbols     */
+/* above. The guarded Dart lookup therefore finds nothing, and the        */
+/* binding raises a HARD TYPED FAILURE (CeyxFormatUnsupportedException,   */
+/* plugin/lib/src/codec_format.dart) at submit time -- NEVER a null, and  */
+/* NEVER a silent rgba8 fallback, which would hand the caller 4 B/px      */
+/* bytes it is about to interpret as 1.5 B/px. There is no C-side error   */
+/* code for this condition, because the condition is "the symbol is       */
+/* absent", which no C call can report.                                   */
+/*                                                                        */
+/* The exception carries EXACTLY THREE fields (T12.0.2): the requested    */
+/* format, the missing symbol, and the ABSOLUTE PATH OF THE LIBRARY       */
+/* ACTUALLY LOADED. A fourth (the expected pin digest) is ruled out: it   */
+/* is already authoritative in Halcyon's scripts/ceyx_release_pin.json.   */
+/* ===================================================================== */
+
 #ifdef __cplusplus
 }
 #endif

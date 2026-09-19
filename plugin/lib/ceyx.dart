@@ -80,7 +80,12 @@ export 'src/encode_bindings.dart' show CeyxEncodeErrorCode;
 export 'src/encode_service.dart'
     show CeyxEncodeService, CeyxEncodeException, CeyxEncodeUnavailableException;
 
-export 'src/codec_format.dart' show CeyxImageFormat;
+export 'src/codec_format.dart'
+    show
+        CeyxImageFormat,
+        CeyxOutputFormat,
+        CeyxFormatUnsupportedException,
+        ceyxOutputFormatByteCount;
 
 export 'src/still_error_codes.dart'
     show
