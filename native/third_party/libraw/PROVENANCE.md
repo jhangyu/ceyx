@@ -145,6 +145,7 @@ gate patch exists.
 | 12.normalize-model-orig-race.patch | 9197b31fc32b090ab73635d3c69a3554348ab1b458c0c2f04b5e60fd7a4962ff |
 | 13.neon-validation-sweep.patch | 2fb7f7f4875a574b32634ab24390dffae5ef35f01e8f8ae2d8d363f924c78d9f |
 | 14.nikon-he-decoder-import.patch | 9cf860eccd14deda168b6929a9a4f28f394a657f0706e4f522a0e588c2733f8b |
+| 15.nikon-he-dispatch.patch | dd47858529b05d5f64289733b8f1ca5dd8e7397eefcf431a596cf2015cb225dd |
 
 R4 item 2 (2026-09-05): `src/metadata/normalize_model.cpp:406` declared a
 function-local `static const char *orig;` inside `LibRaw::GetNormalizedModel()`

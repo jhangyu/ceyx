@@ -1,0 +1,140 @@
+--- a/src/decoders/decoders_libraw_dcrdefs.cpp
++++ b/src/decoders/decoders_libraw_dcrdefs.cpp
+@@ -14,13 +14,9 @@
+
+ #include "../../internal/dcraw_defs.h"
+
+-
+-void LibRaw::nikon_he_load_raw()
+-{
+-    if(dng_version)
+-    	throw LIBRAW_EXCEPTION_UNSUPPORTED_FORMAT; // Never reached
+-    throw LIBRAW_EXCEPTION_UNSUPPORTED_FORMAT;
+-}
++// nikon_he_load_raw lives in nikon_he_decoder.cpp (separate TU so the
++// nikon_he/ headers can be included without colliding with
++// LibRaw's macro-defined names).
+
+ void LibRaw::packed_tiled_dng_load_raw()
+ {
+--- a/src/metadata/tiff.cpp
++++ b/src/metadata/tiff.cpp
+@@ -2259,17 +2259,15 @@ void LibRaw::apply_tiff()
+       {
+         load_raw = &LibRaw::nikon_load_padded_packed_raw;
+       }
+-      else if ((!strncmp(model, "NIKON Z 9", 9) || !strncmp(model, "NIKON Z 8", 9) || !strcmp(model, "NIKON Z f")
+-		  || !strcmp(model, "NIKON Z6_3")) &&
+-               tiff_ifd[raw].offset)
++      else if (tiff_ifd[raw].offset)
+       {
+           INT64 pos = ftell(ifp);
+           unsigned char cmp[] = {0xff, 0x10, 0xff, 0x50 }; // JpegXS SOC + Cap
+-          unsigned char buf[4];
++          unsigned char buf[4] = {0,0,0,0};
+           fseek(ifp, INT64(tiff_ifd[raw].offset), SEEK_SET);
+-          fread(buf, 1, 4, ifp);
++          size_t got = fread(buf, 1, 4, ifp);
+           fseek(ifp, pos, SEEK_SET);
+-          if(!memcmp(buf,cmp,4))
++          if(got == sizeof(buf) && !memcmp(buf,cmp,4))
+             load_raw = &LibRaw::nikon_he_load_raw;
+           else
+             load_raw = &LibRaw::nikon_load_raw;
+--- a/src/tables/cameralist.cpp
++++ b/src/tables/cameralist.cpp
+@@ -739,13 +739,13 @@ static const char *static_camera_list[] = {
+ 	"Nikon Z 5",
+ 	"Nikon Z 6",
+ 	"Nikon Z 6 II",
+-	"Nikon Z 6 III (HE/HE* formats are not supported yet)",
++	"Nikon Z 6 III",
+ 	"Nikon Z 7",
+ 	"Nikon Z 7 II",
+-	"Nikon Z 8 (HE/HE* formats are not supported yet)",
+-	"Nikon Z 9 (HE/HE* formats are not supported yet)",
++	"Nikon Z 8",
++	"Nikon Z 9",
+ 	"Nikon Z 30",
+ 	"Nikon Z 50",
+-	"Nikon Z f (HE/HE* formats are not supported yet)",
++	"Nikon Z f",
+ 	"Nikon Z fc",
+ 	"Nikon 1 AW1",
+ 	"Nikon 1 J1",
+--- a/src/decoders/nikon_he/nikon_he_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_decode.cpp
+@@ -123,38 +123,49 @@ HeDecodeResult decode_nikon_he_image(
+ #pragma omp for ordered schedule(dynamic, 1)
+ #endif
+         for (int t = 0; t < loop_n_tiles; t++) {
+-            if (!ok.load(std::memory_order_relaxed)) {
+-#if defined(_OPENMP)
+-#pragma omp ordered
+-#endif
+-                { /* keep ordered sequence even on a failed tile */ }
+-                continue;
+-            }
+-
+-            pred_state.reset_for_new_tile();
+-            const bool is_first = (t == 0);
+-            const bool is_last = (t == n_tiles - 1);
+-            const int tile_prec_base = t * 16;
++            // Project patch 15: upstream put a second omp-ordered pragma
++            // in this early-out branch. OpenMP allows exactly one `ordered`
++            // directive per `ordered` loop body, and clang enforces that
++            // statically (mutually exclusive branches do not help), so the
++            // translation unit never compiled. The early-out is now a flag and
++            // the single ordered region below branches on it. Every iteration
++            // still enters the ordered region exactly once, in loop order --
++            // the ordered sequence is unchanged.
++            const bool tile_skipped = !ok.load(std::memory_order_relaxed);
++
++            bool decoded = false;
++            bool is_first = false;
++            bool is_last = false;
+             int prec_count = 0;
+-            for (int p = 0; p < kPrecinctsPerTile; ++p) {
+-                const int file_idx = tile_prec_base + p;
+-                if (file_idx >= n_file_precincts || !prec_ptrs[static_cast<size_t>(file_idx)]) {
+-                    break;
++            int tile_prec_base = 0;
++
++            if (!tile_skipped) {
++                pred_state.reset_for_new_tile();
++                is_first = (t == 0);
++                is_last = (t == n_tiles - 1);
++                tile_prec_base = t * 16;
++                for (int p = 0; p < kPrecinctsPerTile; ++p) {
++                    const int file_idx = tile_prec_base + p;
++                    if (file_idx >= n_file_precincts || !prec_ptrs[static_cast<size_t>(file_idx)]) {
++                        break;
++                    }
++                    prec_count++;
+                 }
+-                prec_count++;
+-            }
+ 
+-            const bool decoded = decode_tile_entropy_horizontal(
+-                prec_ptrs.data() + tile_prec_base,
+-                prec_sizes.data() + tile_prec_base,
+-                image_width, config, pred_state, predict_lut,
+-                scratch, store, prec_count);
++                decoded = decode_tile_entropy_horizontal(
++                    prec_ptrs.data() + tile_prec_base,
++                    prec_sizes.data() + tile_prec_base,
++                    image_width, config, pred_state, predict_lut,
++                    scratch, store, prec_count);
++            }
+ 
+ #if defined(_OPENMP)
+ #pragma omp ordered
+ #endif
+             {
+-                if (!decoded || !ok.load(std::memory_order_relaxed)) {
++                if (tile_skipped) {
++                    /* keep ordered sequence even on a failed tile */
++                } else if (!decoded || !ok.load(std::memory_order_relaxed)) {
+                     ok.store(false, std::memory_order_relaxed);
+                 } else {
+                     apply_tile_vertical_idwt(
