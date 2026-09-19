@@ -35,13 +35,26 @@ void main() {
 
   tearDown(() {
     CeyxDecodePool.debugNativeFree = null;
-    CeyxDecodePool.nativeBufferPool = null;
+    // D2 (budget-decouple ruling): `nativeBufferPool` is non-nullable now,
+    // defaulting to `CeyxNativeBufferPool.shared` -- restore that default
+    // rather than null, matching the idiom every sibling test file already
+    // uses (decode_pool_test.dart:1342, native_buffer_pool_test.dart,
+    // pool_probe_ceiling_test.dart, sequential_decode_wedge_regression_test.dart).
+    CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool.shared;
     CeyxDecodePool.debugDecodeIntoAvailable = null;
   });
 
   test('AC-S2/Q1: a pool that has never run anything, with no buffer pool '
       'attached, is quiescent', () async {
-    CeyxDecodePool.nativeBufferPool = null;
+    // What the old `= null` proved: `isQuiescent`'s buffer-pool branch
+    // (decode_pool.dart:502-506) contributes NOTHING when nothing is
+    // outstanding. A fresh, unshared pool with zero checkouts and zero
+    // waiters exercises that exact branch and gets the same "contributes
+    // nothing" answer as the old null did -- the D2 ruling removed the
+    // "no pool at all" state, not the "pool with nothing outstanding" state
+    // this test is actually about. Fresh (not `.shared`) so no other test's
+    // checkouts can leak in.
+    CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool(maxBuffers: 4);
     final pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
     addTearDown(pool.dispose);
 
@@ -52,7 +65,10 @@ void main() {
     'AC-S2/Q2 (RACE CASE): isQuiescent is false SYNCHRONOUSLY on submit — '
     'before the future returns and before the job reaches the queue',
     () async {
-      CeyxDecodePool.nativeBufferPool = null;
+      // Fresh isolated pool (see Q1's comment): the race being pinned is
+      // purely job-bookkeeping timing, not buffer-pool state, and a fresh
+      // pool starts with nothing outstanding either way.
+      CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool(maxBuffers: 4);
       final pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
       addTearDown(pool.dispose);
 
@@ -90,7 +106,9 @@ void main() {
   test(
     'AC-S2/Q3: a job QUEUED BUT NOT STARTED (no idle worker) is not quiescent',
     () async {
-      CeyxDecodePool.nativeBufferPool = null;
+      // Fresh isolated pool (see Q1's comment) -- this case pins queue-depth
+      // bookkeeping, not buffer-pool state.
+      CeyxDecodePool.nativeBufferPool = CeyxNativeBufferPool(maxBuffers: 4);
       // width 1 => exactly one worker => the second submit must wait in
       // `_queue` with no worker holding it and no requestId assigned.
       final pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
