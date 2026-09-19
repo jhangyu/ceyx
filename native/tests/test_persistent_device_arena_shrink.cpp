@@ -259,6 +259,24 @@ int main(int argc, char** argv) {
       (unsigned long long)warm.live_lane_count,
       (unsigned long long)per_lane_bytes,
       (unsigned long long)warm.allocation_count);
+  // Bound provenance, printed so the artifact carries it without a reader
+  // having to open this source file (lead ruling, 2026-09-20). The frame size
+  // is PROBED rather than hard-coded, so the line stays true when this gate is
+  // pointed at a different file via argv.
+  {
+    uint32_t pw = 0, ph = 0;
+    const double megapixels =
+        raw_pipeline_probe_output_size(path.c_str(), 0u, &pw, &ph) ==
+                kRawSuccess
+            ? (static_cast<double>(pw) * ph) / 1.0e6
+            : 0.0;
+    std::printf(
+        "[ArenaShrink] bound_provenance: plan_constant=194MB@~16MP "
+        "measured=%lluMB@%.1fMP self_derived=resident_warm/lanes "
+        "(the bound is NOT the plan's constant; see S1's comment)\n",
+        (unsigned long long)(per_lane_bytes / (1024ull * 1024ull)),
+        megapixels);
+  }
 
   // The whole gate is vacuous without resident bytes to release: on a host
   // with no Metal device every arena call answers nullptr and every number
@@ -297,6 +315,19 @@ int main(int argc, char** argv) {
   {
     // UPPER bound, never an equality (v2 A1): a lane legitimately holding
     // fewer regions must not fail this gate.
+    //
+    // PROVENANCE OF THE BOUND (lead ruling, 2026-09-20). The predecessor plan
+    // states this criterion as a literal `<= 2 x 194 MB`. That constant was
+    // derived from a ~16 MP frame; the in-repo corpus file this gate drives
+    // is 6048x4024 on the sensor and 6024x4024 = 24.2 MP after crop at the
+    // pipeline's output, which measures ~278 MB per lane. Rather than
+    // widen the plan's constant — or, worse, choose a corpus file that makes
+    // the plan's number come out — the bound is DERIVED from this same run's
+    // own warm-up residency (resident_warm / lane_count). That is the
+    // criterion's intent stated mechanically: after a floor-2 shrink,
+    // residency must have collapsed to at most the floor's worth of lanes.
+    // A self-derived bound cannot be gamed by frame choice, and the run
+    // passes it at exact equality rather than with slack.
     const uint64_t bound = 2ull * per_lane_bytes;
     char detail[256];
     std::snprintf(detail, sizeof(detail),
