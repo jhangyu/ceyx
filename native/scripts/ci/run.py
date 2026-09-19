@@ -78,7 +78,9 @@ def run_to_file(argv, out_path, cwd=None, env=None) -> RunResult:
     combined = result.stdout
     if result.stderr:
         combined = combined + result.stderr
-    Path(out_path).write_text(combined, encoding="utf-8")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(combined, encoding="utf-8")
     return result
 
 

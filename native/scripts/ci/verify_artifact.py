@@ -78,8 +78,8 @@ def verify_artifact(platform: str, arch: str | None = None, *, dylib_path: str |
             return 1
 
         report.section("AC-L3: nm -D halide_vulkan_device_interface")
-        run.run_to_file(["nm", "-D", so], "nm_dynsyms.txt")
-        dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
+        run.run_to_file(["nm", "-D", so], "tmp/nm_dynsyms.txt")
+        dump_text = Path("tmp/nm_dynsyms.txt").read_text(errors="replace")
         matches = [line for line in dump_text.splitlines() if "halide_vulkan_device_interface" in line]
         for line in matches:
             report.plain(line)
@@ -259,7 +259,7 @@ def import_closure(
             report.error(f"no libdng_decoder_native*.so found under {artifact_dir}/native")
             return 1
         so = matches[0]
-        dump_path = "android_main_dynamic.txt"
+        dump_path = "tmp/android_main_dynamic.txt"
         run.run_to_file([llvm_readelf, "-d", so], dump_path)
         staged_dir = os.path.join(artifact_dir, "native")
     else:
@@ -601,7 +601,7 @@ def assert_exports(
     if platform == "linux":
         so = _artifact_path(platform)
         report.section("AC-L5: required FFI exports present in .so")
-        dump_text = Path("nm_dynsyms.txt").read_text(errors="replace")
+        dump_text = Path("tmp/nm_dynsyms.txt").read_text(errors="replace")
     elif platform == "macos":
         if not dylib_path:
             raise ValueError("assert_exports(platform='macos') requires dylib_path")

@@ -121,8 +121,8 @@ _NO_TOOL_ERROR = (
 )
 
 _OUT_FILES = {
-    "linux": "so_strings.txt",
-    "windows": "dll_strings.txt",
+    "linux": "tmp/so_strings.txt",
+    "windows": "tmp/dll_strings.txt",
 }
 
 

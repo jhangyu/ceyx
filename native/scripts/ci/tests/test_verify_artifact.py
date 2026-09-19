@@ -640,7 +640,8 @@ class VerifyArtifactTests(unittest.TestCase):
 
     def test_assert_exports_success(self):
         with _Cwd(self._tmp()):
-            Path("nm_dynsyms.txt").write_text("... T foo\n")
+            Path("tmp").mkdir(exist_ok=True)
+            Path("tmp/nm_dynsyms.txt").write_text("... T foo\n")
             with mock.patch.object(verify_artifact, "_assert_exports_script") as fake_script:
                 def fake_export_run(manifest_path, platform, dump_text):
                     print("SYMBOL foo -> PRESENT")
@@ -655,7 +656,8 @@ class VerifyArtifactTests(unittest.TestCase):
 
     def test_assert_exports_failure_returns_nonzero_and_errors(self):
         with _Cwd(self._tmp()):
-            Path("nm_dynsyms.txt").write_text("... T foo\n")
+            Path("tmp").mkdir(exist_ok=True)
+            Path("tmp/nm_dynsyms.txt").write_text("... T foo\n")
             with mock.patch.object(verify_artifact, "_assert_exports_script") as fake_script:
                 def fake_export_run(manifest_path, platform, dump_text):
                     print("SYMBOL bar -> MISSING")
@@ -671,7 +673,8 @@ class VerifyArtifactTests(unittest.TestCase):
 
     def test_emission_matches_golden_assert_exports(self):
         with _Cwd(self._tmp()):
-            Path("nm_dynsyms.txt").write_text("... T foo\n")
+            Path("tmp").mkdir(exist_ok=True)
+            Path("tmp/nm_dynsyms.txt").write_text("... T foo\n")
             with mock.patch.object(verify_artifact, "_assert_exports_script") as fake_script:
                 def fake_export_run(manifest_path, platform, dump_text):
                     print("SYMBOL foo -> PRESENT")
