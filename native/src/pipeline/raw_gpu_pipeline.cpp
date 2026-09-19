@@ -444,10 +444,18 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     stage3.set_host_dirty(false);
 
     const double gpu_t0 = nowMs();
-    // C4 (plan §6.2 item 1): explicit host->device upload, timed. This is a
-    // re-attribution, not added work -- the kernel below finds src_buf clean
-    // and performs no copy of its own (Halide's copy_to_device is a no-op
-    // when the buffer is not host-dirty).
+    // C4 (plan §6.2 item 1): explicit host->device upload, timed. Investigated
+    // under spec-a-fence-elimination.md Route A (2026-09-19, artifact
+    // native/tests/tmp/ta4-*.txt): the call below self-elides via
+    // Halide::Runtime::Buffer::copy_to_device's own host_dirty() gate
+    // (HalideBuffer.h:1820-1824) -- it submits no command buffer and waits on
+    // no fence when this zero-copy route has already cleared host_dirty just
+    // above (:437-439). A Route-A-style skip wrapper here would duplicate
+    // that guard and was reverted after T-A4's mutation check proved the two
+    // arms code-identical (REFUTED-BY-CODE, native/tests/tmp/ta5-close.txt).
+    // The disassembly-derived fence in spec-a §0 is real, but only on the
+    // non-zero-copy branch below (host_dirty() left true), where this same
+    // call still performs the upload and its sync IS load-bearing.
     const double h2d_t0 = nowMs();
     const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
     // R4-T4 S3 (round-4 review B1): NOT folding source_memcpy_ms in here --
@@ -740,7 +748,8 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
 
     const double gpu_t0 = nowMs();
     // C4 (plan §6.2 item 1): explicit host->device upload, timed. Same
-    // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
+    // re-attribution as runBayerBranch -- see that branch's comment for the
+    // 2026-09-19 fence investigation (spec-a Route A, REFUTED-BY-CODE).
     const double h2d_t0 = nowMs();
     const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
     // R4-T4 S3 (round-4 review B1): see runBayerBranch's identical comment.
@@ -997,7 +1006,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
 
     const double gpu_t0 = nowMs();
     // C4 (plan §6.2 item 1): explicit host->device upload, timed. Same
-    // re-attribution as runBayerBranch -- the kernel finds src_buf clean.
+    // re-attribution as runBayerBranch -- see that branch's comment for the
+    // 2026-09-19 fence investigation (spec-a Route A, REFUTED-BY-CODE).
     const double h2d_t0 = nowMs();
     const int h2d_rc = src_buf.copy_to_device(dng_halide_gpu_device_interface());
     // R4-T4 S3 (round-4 review B1): see runBayerBranch's identical comment.

@@ -1162,8 +1162,8 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   renderer.SetFinalPixelType(ttByte);
   renderer.SetFinalSpace(dng_space_sRGB::Get());
 
-  // Acquire pool buffer: warm pages stay committed → 0ms on warm paths.
-  // W7-B: RGBA8 checkout buffer on the Android fused path, else RGB8. Reuses an
+  // Acquire the caller-supplied output buffer (RGBA8, width*height*4 bytes;
+  // no pool, no RGB8 format -- see acquireStage4OutputBuffer). Reuses an
   // already-set stage4_out_ptr when re-entered from the device-handoff fallback.
   // R2 sized decode: sized by OUTPUT extent (equals input on the full-res path).
   uint32_t plannedW = inputWidth;
@@ -1216,8 +1216,8 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
       handoff.planes < 3 || handoff.pixel_range == 0)
     return restoreHostStage2();
 
-  // Acquire pool buffer before calling render to avoid page fault.
-  // W7-B: RGBA8 checkout buffer on the Android fused path, else RGB8.
+  // Acquire the caller-supplied output buffer before calling render to avoid
+  // page fault. Always RGBA8 (width*height*4 bytes); no pool, no RGB8 format.
   if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, stage4_out_ptr,
                                  stage4_out_size))
     return restoreHostStage2();

@@ -63,7 +63,7 @@ struct RawColorPipelineDiagnostics {
 RawColorPipelineDiagnostics raw_adapter_last_color_diagnostics();
 
 struct RawPipelineResult {
-    uint8_t* rgba_ptr = nullptr;   // pool-owned UNLESS caller_dst was set; see below
+    uint8_t* rgba_ptr = nullptr;   // caller-owned: aliases caller_dst on every surviving route (WP3/WP5 removed the pool-checkout arm; see raw_gpu_pipeline.cpp near the DNG route for detail)
     size_t   rgba_size = 0;
     uint32_t width = 0;
     uint32_t height = 0;

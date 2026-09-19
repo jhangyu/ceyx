@@ -87,7 +87,18 @@ RAW_FFI_EXPORT int32_t raw_last_timing_diagnostics(RawTimingDiagnostics* out) {
     // the header comment actually true for this cross-boundary getter, and
     // it must be done at raw byte granularity (not struct assignment) since
     // the copied length can now be smaller than sizeof(RawTimingDiagnostics).
+    // Round-4 parking-lot P-5 follow-up: struct_size is a caller-supplied
+    // INPUT (header comment above raw_last_timing_diagnostics), not merely
+    // an output field. A caller that zero-initialises `out` and forgets to
+    // set struct_size passes 0 here; without this guard that yields
+    // copy_bytes == 0 below (an all-zero struct silently returned with
+    // RC == 0), which is exactly the "caller bug, not a valid signal" case
+    // the header already documents but this function did not previously
+    // enforce. Anything smaller than sizeof(uint32_t) can't even hold the
+    // struct_size field this function writes back on success, so it is
+    // rejected the same way.
     const uint32_t caller_struct_size = out->struct_size;
+    if (caller_struct_size < sizeof(uint32_t)) return -1;
     const size_t copy_bytes = std::min<size_t>(
         caller_struct_size, sizeof(RawTimingDiagnostics));
     std::memcpy(out, &g_last_timing_diagnostics, copy_bytes);

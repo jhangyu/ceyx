@@ -106,6 +106,30 @@ int main(int argc, char **argv) {
 
   dng_free_result(result);
 
+  // Round-4 parking-lot P-5 follow-up (raw_ffi_api.cpp): struct_size is a
+  // caller-supplied INPUT to raw_last_timing_diagnostics, not an
+  // output-only field. A caller that forgets to set it passes 0, which
+  // must be rejected outright rather than silently producing copy_bytes
+  // == 0 (an all-zero struct returned with RC == 0). Must run AFTER a
+  // decode has populated g_have_timing_diagnostics -- otherwise the
+  // pre-existing "no decode has run yet" guard (line ~79 of raw_ffi_api.cpp)
+  // returns -1 unconditionally regardless of struct_size, masking whether
+  // the struct_size guard itself does anything.
+  RawTimingDiagnostics zero_struct_size_probe{};
+  zero_struct_size_probe.struct_size = 0;
+  const int32_t zero_rc = raw_last_timing_diagnostics(&zero_struct_size_probe);
+  CHECK(zero_rc == -1,
+        "raw_last_timing_diagnostics(struct_size=0) returned %d after a "
+        "real decode had populated timing diagnostics, expected -1 -- the "
+        "struct_size==0 runtime guard (P-5 follow-up) is missing or not "
+        "rejecting the invalid input",
+        zero_rc);
+  CHECK(zero_struct_size_probe.host_copy_ms == 0.0,
+        "raw_last_timing_diagnostics(struct_size=0) wrote into the caller "
+        "struct despite rejecting the call -- host_copy_ms=%f, expected "
+        "untouched (0.0 from zero-init)",
+        zero_struct_size_probe.host_copy_ms);
+
   std::fprintf(stderr, "%s: %d failure(s)\n", argv[0], g_failures);
   return g_failures == 0 ? 0 : 1;
 }
