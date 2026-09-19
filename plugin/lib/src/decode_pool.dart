@@ -500,8 +500,7 @@ class CeyxDecodePool {
       if (worker.currentJob != null) return false;
     }
     final buffers = nativeBufferPool;
-    if (buffers != null &&
-        (buffers.hasOutstandingCheckouts || buffers.hasWaiters)) {
+    if (buffers.hasOutstandingCheckouts || buffers.hasWaiters) {
       return false;
     }
     return true;
@@ -571,7 +570,6 @@ class CeyxDecodePool {
     final buffers = nativeBufferPool;
     if (identical(buffers, _shrinkPolicyPool)) return;
     _teardownShrinkPolicy();
-    if (buffers == null) return;
     if (buffers.idleFloor >= buffers.maxBuffers) return;
     _shrinkPolicyPool = buffers;
     final policy = CeyxPoolShrinkPolicy(
@@ -599,7 +597,6 @@ class CeyxDecodePool {
   void _attachQuiescenceWatch() {
     _lastPublishedQuiescence = isQuiescent;
     final buffers = nativeBufferPool;
-    if (buffers == null) return;
     _watchedBufferPool = buffers;
     buffers.onCheckoutChange = _noteQuiescenceMayHaveChanged;
   }
