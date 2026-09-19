@@ -37,6 +37,10 @@
 // below takes today's unwrapped path when it sees one (plan §3.4).
 #include "raw_persistent_device_arena.h"
 #include "raw_render_params_builder.h"
+// The single CPU-phase timing emitter. Hoisted here from ceyx_decode_into_ffi
+// so probe_concurrent_raw (which calls the entries below directly, never the
+// FFI entry) sees the same per-lane line. Gate and schema: raw_timing_log.h.
+#include "raw_timing_log.h"
 #include "raw_xtrans_demosaic.h"
 
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
@@ -1509,13 +1513,41 @@ RawErrorCode raw_pipeline_probe_output_size(const char* file_path,
 // borrow-only collapse is refused by makeRgbaCheckout, so they could not
 // succeed on any RAW route. The caller-buffer siblings below are the only
 // form that remains.
+namespace {
+
+// The ONE place a completed decode's CPU phases are emitted. Every public
+// decode_file_*_into entry goes through here, so the FFI entry, the multi-lane
+// probe and the harness tests all produce the same per-lane [RawTiming] line;
+// no caller can opt in or out by choosing an entry point. Inert (one relaxed
+// atomic load) unless CEYX_RAW_TIMING_LOG=1.
+//
+// Emitted AFTER decodeFileImpl returns, not inside it, because decodeFileImpl
+// has a dozen early-return paths: wrapping the call is the only placement that
+// cannot silently miss one as that function grows.
+RawErrorCode decodeFileImplLogged(const char* file_path,
+                                  const RawDevelopParams& develop,
+                                  RawForcedBackend forced,
+                                  const RawCancelToken& cancel,
+                                  uint8_t* dst, size_t dst_capacity,
+                                  RawPipelineResult& out) {
+    const RawErrorCode rc =
+        decodeFileImpl(file_path, develop, forced, cancel, dst, dst_capacity, out);
+    // Unconditional on rc, matching raw_record_decode_timing_diagnostics's own
+    // rule: a failed decode still accumulated real sub-timings before failing,
+    // and hiding them is exactly when they are most wanted.
+    raw_timing_log_emit(&out.timing, &out.diag);
+    return rc;
+}
+
+}  // namespace
+
 RawErrorCode raw_pipeline_decode_file_into(const char* file_path,
                                            const RawDevelopParams& develop,
                                            uint8_t* dst, size_t dst_capacity,
                                            RawPipelineResult& out) {
     const RawCancelToken none;
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, none,
-                          dst, dst_capacity, out);
+    return decodeFileImplLogged(file_path, develop, RawForcedBackend::kAuto,
+                                none, dst, dst_capacity, out);
 }
 
 // WP3: caller-buffer sibling. Contract on the declaration.
@@ -1525,7 +1557,8 @@ RawErrorCode raw_pipeline_decode_file_forced_into(const char* file_path,
                                                   uint8_t* dst, size_t dst_capacity,
                                                   RawPipelineResult& out) {
     const RawCancelToken none;
-    return decodeFileImpl(file_path, develop, forced, none, dst, dst_capacity, out);
+    return decodeFileImplLogged(file_path, develop, forced, none, dst,
+                                dst_capacity, out);
 }
 
 int raw_pipeline_gpu_available() {
@@ -1547,6 +1580,6 @@ RawErrorCode raw_pipeline_decode_file_cancellable_into(const char* file_path,
                                                        const RawCancelToken& cancel,
                                                        uint8_t* dst, size_t dst_capacity,
                                                        RawPipelineResult& out) {
-    return decodeFileImpl(file_path, develop, RawForcedBackend::kAuto, cancel,
-                          dst, dst_capacity, out);
+    return decodeFileImplLogged(file_path, develop, RawForcedBackend::kAuto,
+                                cancel, dst, dst_capacity, out);
 }

@@ -1,0 +1,51 @@
+#  Canned instrument log for run_timing_harness.py selfcheck. HAND-WRITTEN,
+#  never regenerated from a real run: the point is that the expected medians
+#  are computable by eye, so a parsing change shows up as a mismatch against
+#  arithmetic rather than against whatever the parser happened to print last.
+#
+#  Do not "fix" this file to make the self-check pass. If the assertions in
+#  run_timing_harness.py's EXPECTED_SELFCHECK disagree with it, one of the
+#  parsing rules changed and the change is what needs justifying.
+#
+#  Block 1 (width=1) exercises: cold-drop, CPU medians, even/odd stage split,
+#    the invalid-record exclusion, and the interval UNION (two of the six
+#    valid records overlap another, so sum != union).
+#  Block 2 (width=2) exercises: the cold-drop being PER LANE, not per run.
+#  Block 3 (width=4) exercises: the positive control. CPU lines present, GPU
+#    stream absent -> the row must be VOID, never a row of zeros.
+
+#SESSION start=canned widths=1,2,4 decodes=4 sample=canned
+
+#RUN arm=live width=1 round=0
+#PROVENANCE arm=live time=canned UUID: 00000000-0000-0000-0000-000000000000 (arm64) canned
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=50.000 gpu_submit_wait_ms=1.000 gpu_process_ms=30.000 raw_unpack_ms=90.000 total_ms=150.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=5.000 gpu_submit_wait_ms=1.000 gpu_process_ms=9.000 raw_unpack_ms=10.000 total_ms=30.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=6.000 gpu_submit_wait_ms=1.000 gpu_process_ms=10.000 raw_unpack_ms=11.000 total_ms=31.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=4.000 gpu_submit_wait_ms=1.000 gpu_process_ms=8.000 raw_unpack_ms=9.000 total_ms=29.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[CEYX_GPU_TIMING] lane=0 submission=0 valid=1 busy_ms=5.000000 gpu_start_s=100.000000000 gpu_end_s=100.005000000 queue=0x1
+[CEYX_GPU_TIMING] lane=0 submission=1 valid=1 busy_ms=2.000000 gpu_start_s=100.004000000 gpu_end_s=100.006000000 queue=0x1
+[CEYX_GPU_TIMING] lane=0 submission=2 valid=1 busy_ms=6.000000 gpu_start_s=200.000000000 gpu_end_s=200.006000000 queue=0x1
+[CEYX_GPU_TIMING] lane=0 submission=3 valid=1 busy_ms=3.000000 gpu_start_s=200.500000000 gpu_end_s=200.503000000 queue=0x1
+[CEYX_GPU_TIMING] lane=0 submission=4 valid=1 busy_ms=7.000000 gpu_start_s=300.000000000 gpu_end_s=300.007000000 queue=0x1
+[CEYX_GPU_TIMING] lane=0 submission=5 valid=1 busy_ms=4.000000 gpu_start_s=300.003000000 gpu_end_s=300.007000000 queue=0x1
+[CEYX_GPU_TIMING] lane=0 submission=6 valid=0 busy_ms=-1.000000 gpu_start_s=0.000000000 gpu_end_s=0.000000000 queue=0x1
+PROBE threads=1 files=4 wall_ms=240.0
+#RC arm=live width=1 round=0 rc=0 cpu_lines=4 gpu_valid=6 gpu_invalid=1
+
+#RUN arm=live width=2 round=0
+#PROVENANCE arm=live time=canned UUID: 00000000-0000-0000-0000-000000000000 (arm64) canned
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=60.000 gpu_submit_wait_ms=1.000 gpu_process_ms=30.000 raw_unpack_ms=100.000 total_ms=160.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=1 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=62.000 gpu_submit_wait_ms=1.000 gpu_process_ms=31.000 raw_unpack_ms=110.000 total_ms=170.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=8.000 gpu_submit_wait_ms=1.000 gpu_process_ms=12.000 raw_unpack_ms=20.000 total_ms=45.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=1 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=9.000 gpu_submit_wait_ms=1.000 gpu_process_ms=13.000 raw_unpack_ms=22.000 total_ms=47.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[CEYX_GPU_TIMING] lane=0 submission=0 valid=1 busy_ms=6.000000 gpu_start_s=400.000000000 gpu_end_s=400.006000000 queue=0x1
+[CEYX_GPU_TIMING] lane=1 submission=1 valid=1 busy_ms=3.000000 gpu_start_s=400.100000000 gpu_end_s=400.103000000 queue=0x2
+PROBE threads=2 files=4 wall_ms=180.0
+#RC arm=live width=2 round=0 rc=0 cpu_lines=4 gpu_valid=2 gpu_invalid=0
+
+#RUN arm=live width=4 round=0
+#PROVENANCE arm=live time=canned UUID: 00000000-0000-0000-0000-000000000000 (arm64) canned
+[RawTiming] schema=2 lane=0 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=7.000 gpu_submit_wait_ms=1.000 gpu_process_ms=11.000 raw_unpack_ms=19.000 total_ms=40.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+[RawTiming] schema=2 lane=1 host_to_device_copy_ms=1.000 device_to_host_copy_ms=1.000 host_copy_ms=2.000 auto_exposure_ms=7.500 gpu_submit_wait_ms=1.000 gpu_process_ms=11.500 raw_unpack_ms=19.500 total_ms=41.000 unified_memory_path_active=0 source_mosaic_copy_milliseconds=0.000
+PROBE threads=4 files=2 wall_ms=90.0
+#RC arm=live width=4 round=0 rc=0 cpu_lines=2 gpu_valid=0 gpu_invalid=0
