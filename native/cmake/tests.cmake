@@ -139,6 +139,34 @@ if(ANDROID AND DNG_CROSS_BUILD)
         target_link_libraries(test_device_handoff_android PRIVATE ${JPEG_LIBRARIES})
     endif()
 
+    # T-V0 (2026-09-19, spec-cpu-levers.md section 3.3b): Android cross-build of
+    # the generic-RAW Bayer kernel oracle. The L3 staged producer
+    # (`normalized.compute_at(dst, xo)`, RawBayerDemosaicGenerator.cpp:74) ships
+    # on three Vulkan platforms and has never been executed on a Vulkan device;
+    # the v21 materialized-producer channel-collapse landmine
+    # (DngRenderGenerator.cpp:526-530) is what this target exists to rule in or
+    # out. Same source as the host test_raw_bayer_kernel target below, so the
+    # oracle cannot drift between platforms.
+    add_executable(test_raw_bayer_kernel_android
+        tests/test_raw_bayer_kernel.cpp
+        src/pipeline/raw_demosaic_reference.cpp)
+    target_include_directories(test_raw_bayer_kernel_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include)
+    # A Vulkan target must produce a device allocation; assert it rather than
+    # letting a silent CPU fallback pass as a Vulkan green.
+    target_compile_definitions(test_raw_bayer_kernel_android PRIVATE
+        DNG_EXPECT_GPU_DEVICE=1)
+    target_link_libraries(test_raw_bayer_kernel_android PRIVATE
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+
     # ------------------------------------------------------------------------
     # R3-3: Halide Vulkan runtime fork (VkPipelineCache persistence).
     # See native/halide_runtime_fork/README.md for the weak-override mechanism.

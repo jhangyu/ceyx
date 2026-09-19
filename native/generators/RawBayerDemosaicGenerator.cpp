@@ -26,6 +26,13 @@ public:
     Input<float> inv_range{"inv_range"};        // 65535 / (white - black_max)
     Output<Buffer<uint16_t>> dst{"dst", 3};     // x, y, RGB interleaved
 
+    // L3 (spec-b sec4.3): the normalized mosaic staged as its own producer so
+    // the 9 demosaic taps share one normalize per source pixel instead of
+    // each independently re-running map_repeat_coord + black lookup + scale.
+    // Stays an EXPRESSION-level producer scheduled compute_at the GPU tile --
+    // never root -- per this file's acceptance gate (see header comment).
+    Func normalized{"normalized"};
+
     void generate() {
         Var x("x"), y("y"), c("c");
 
@@ -40,12 +47,33 @@ public:
         Expr bh = max(black.dim(1).extent(), 1);
 
         // R1 fused into R2: one expression, no intermediate frame.
-        auto sample = [&](Expr sx, Expr sy) {
-            Expr mx = map_repeat_coord(sx, width);
-            Expr my = map_repeat_coord(sy, height);
+        {
+            Expr mx = map_repeat_coord(x, width);
+            Expr my = map_repeat_coord(y, height);
             Expr level = black(mx % bw, my % bh);
             Expr norm = (cast<float>(src(mx, my)) - level) * inv_range;
-            return cast<uint16_t>(clamp(norm, 0.0f, 65535.0f));
+            // Stored 32-bit on purpose. The natural type here is uint16_t, but
+            // a 16-bit array in the GPU workgroup storage class is miscompiled
+            // by the Adreno Vulkan driver: the halo ring of the staged tile
+            // comes back carrying another workgroup's values, which shows up as
+            // wrong tile-border pixels in every channel except the one whose
+            // only tap is the centre. It is NOT a missing barrier: the emitted
+            // SPIR-V has an unguarded producer store followed, in uniform
+            // control flow, by OpControlBarrier with Workgroup execution and
+            // memory scope and AcquireRelease|WorkgroupMemory semantics, ahead
+            // of every shared read, and spirv-val is clean. The one thing the
+            // Metal arm never exercises is a 16-bit array in the Workgroup
+            // storage class, and widening it to 32-bit makes the device gate
+            // (Adreno 750, 6048x4024 + tail geometries + all four CFA phases)
+            // pass. Do not narrow this back to uint16_t.
+            // Widening is bit-exact: the value is already clamped to
+            // [0, 65535], so the narrowing cast in `sample` below recovers
+            // exactly the uint16_t that used to be stored.
+            normalized(x, y) = cast<uint32_t>(clamp(norm, 0.0f, 65535.0f));
+        }
+
+        auto sample = [&](Expr sx, Expr sy) {
+            return cast<uint16_t>(normalized(sx, sy));
         };
 
         dst(x, y, c) = build_demosaic_expr(x, y, c, sample, red_x, red_y);
@@ -60,6 +88,8 @@ public:
                .reorder(c, x, y)
                .gpu_tile(x, y, xo, yo, xi, yi, 16, 16)
                .unroll(c);
+            normalized.compute_at(dst, xo)
+                      .gpu_threads(x, y);
         } else {
             Var yo("yo"), yi("yi");
             dst.bound(c, 0, 3)
@@ -68,6 +98,8 @@ public:
                .parallel(yo)
                .vectorize(x, 8)
                .unroll(c);
+            normalized.compute_at(dst, yo)
+                      .vectorize(x, 8);
         }
     }
 };
