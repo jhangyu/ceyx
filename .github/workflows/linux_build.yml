@@ -1,0 +1,669 @@
+name: Linux Build (Vulkan native)
+
+# REUSABLE WORKFLOW (round 6, Plan B). This file has NO triggers of its own:
+# it is invoked exclusively by .github/workflows/build.yml, which owns the
+# push/PR/tag/dispatch trigger set for every platform leg. Adding a push or
+# pull_request trigger back here would make the leg run twice per event (once
+# standalone, once through the orchestrator) and would resurrect the
+# cross-run artifact-resolution problem the orchestrator exists to remove.
+on:
+  workflow_call:
+
+# Concurrency is deliberately NOT declared here. A reusable workflow inherits
+# the caller's concurrency group; declaring a second group at this level would
+# let the orchestrator's own cancel-in-progress race this leg's.
+
+jobs:
+  build-linux:
+    # BUILD-ONLY gate (user decision 2026-08-28): CI proves compilation of the
+    # Linux Vulkan native library (AC-L1..AC-L4). Runtime gates (capability
+    # probe AC-R1, backend smoke AC-R2, decode/PSNR AC-R3/R4) are NOT run here —
+    # a GitHub-hosted ubuntu-latest runner exposes only the lavapipe software
+    # ICD, whose feature support for the strict vk_int8/vk_int16/vk_int64
+    # contract is not guaranteed; those gates run in the local Linux container
+    # environment instead (see docs/logs/2026-08-28/Task_linux_vulkan_ci_run.md).
+    # Display name only. GitHub renders this as "<caller job> / <this job>",
+    # and build.yml's caller job is already named "Linux", so naming this job
+    # "Linux x86_64 Vulkan native (dng_decoder_native)" rendered as
+    # "Linux / Linux x86_64 Vulkan native (dng_decoder_native)". Only the part
+    # the caller does not already say belongs here.
+    name: x86_64 Vulkan
+    # WI-14 step 14.5 (S-F4). RULED (user, 2026-09-12): support as many Linux
+    # versions as possible without losing current capabilities. Linux build
+    # floor = glibc 2.35 (Ubuntu 22.04 / Debian 12 and newer), achieved via
+    # `container: ubuntu:22.04` running on an explicitly pinned
+    # `runs-on: ubuntu-24.04` runner -- the container runs the build; the
+    # runner only hosts Docker, which is what decouples the glibc floor from
+    # GitHub's runner-deprecation calendar. The previous unpinned rolling
+    # runner label had already silently moved glibc 2.35->2.39 unannounced
+    # from this project's point of view before this pin. Rejected:
+    # `runs-on: ubuntu-22.04` directly (no container) reaches the same floor
+    # but GitHub schedules brownout failures for that label starting
+    # 2026-09-17; staying on the rolling label leaves the floor drifting
+    # with GitHub's default.
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    timeout-minutes: 60
+    # `contents: write` was dropped in round 6 together with the release-attach
+    # step it existed for. This leg now only reads the repo and uploads
+    # artifacts; the publish job in build.yml holds the write scope.
+    permissions:
+      contents: read
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      NATIVE_DIR: ${{ github.workspace }}/native
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      # VCPKG_BASELINE is NOT set here (ruling 5, 2026-09-01) -- derived at
+      # runtime by the "Derive vcpkg baseline from vcpkg.json" step below,
+      # from native/vcpkg/vcpkg.json's builtin-baseline (the single source),
+      # rather than a hardcoded literal that could drift from it silently.
+      VCPKG_TRIPLET: x64-linux-heif
+      # The vcpkg paths deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a workflow
+      # STARTUP failure (the run reports its name as the file path and executes
+      # zero jobs), which is how the first D5 push failed. RUNNER_TEMP is
+      # available as an ordinary environment variable inside `run:` steps, so
+      # the paths are composed there instead.
+    steps:
+      # MUST RUN BEFORE actions/checkout (CI run 34697591379, this leg's first
+      # real containerised run, died here). `container: ubuntu:22.04` is a bare
+      # base image with NO git. actions/checkout falls back to downloading a
+      # tarball through the REST API when git < 2.18 is absent from PATH, and
+      # that fallback mode REJECTS `submodules:` outright:
+      #   "Input 'submodules' not supported when falling back to download
+      #    using the GitHub REST API"
+      # So the leg failed at step 1 and never built anything. Installing git in
+      # the existing "Install build prerequisites (apt)" step below cannot help
+      # -- that step runs AFTER checkout, which is the ordering bug.
+      #
+      # Kept minimal on purpose: only what checkout itself needs (git, plus CA
+      # certificates for the HTTPS fetch). The full build prerequisite set
+      # stays in its own step below, unchanged.
+      #
+      # No `sudo` here: GitHub Actions container jobs run as root by default
+      # and a minimal ubuntu:22.04 image ships no sudo binary at all.
+      #
+      # python3 added 2026-09-12 (CI run 34702307604). With checkout fixed, the
+      # leg advanced to the next step and died there: "Derive vcpkg baseline
+      # from vcpkg.json" runs `python3 -c` at :101, but in a bare
+      # ubuntu:22.04 the first interpreter would otherwise arrive two steps
+      # LATER (actions/setup-python@v5), so the step exited 127
+      # "python3: not found".
+      #
+      # Fixed HERE rather than by moving that step after Set up Python, and the
+      # step order is deliberately left alone. Reason: setup-python@v5 has never
+      # successfully run in this container, and its hosted-tool-cache CPython
+      # can depend on libs a bare image lacks. Installing a system python3
+      # up front makes the baseline step independent of whether setup-python
+      # works, and gives setup-python a saner base if it needs one -- i.e. it
+      # removes a dependency instead of reordering around one.
+      #
+      # `python3`, NOT `python3-minimal`: MEASURED in this exact image --
+      # python3-minimal (122 KB) omits the stdlib `json` module and that step's
+      # command dies with "ModuleNotFoundError: No module named 'json'", which
+      # would simply have been the next red. With full python3 the step's real
+      # command returns the baseline with RC=0.
+      - name: Install git + python3 into the container (pre-checkout, WI-14 step 14.5)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates python3
+          git --version
+          python3 --version
+          python3 -c "import json; print('json module OK')"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Ruling 5 (2026-09-01): single-source the vcpkg baseline from
+      # native/vcpkg/vcpkg.json's builtin-baseline instead of a hardcoded
+      # 40-hex literal in this env: block (native/scripts/ci_conventions_check.py
+      # rule C9 fails red on the latter). Populates $GITHUB_ENV so every later
+      # step's $VCPKG_BASELINE reference keeps working unchanged.
+      - name: Derive vcpkg baseline from vcpkg.json
+        # WI-23 (pyci python-ization): migrated to ci/provision.py's
+        # vcpkg_baseline() (impl-16). No marker to preserve: the original
+        # wrote VCPKG_BASELINE to $GITHUB_ENV, never to stdout, so nothing
+        # here is markerdiff-visible either way.
+        run: |
+          python3 native/scripts/ci.py vcpkg-baseline --github-env "${GITHUB_ENV}"
+
+      # actions/setup-python@v5 was REMOVED from this leg (2026-09-12, CI run
+      # 34703203982). It does not build an interpreter -- it resolves a prebuilt
+      # CPython from /opt/hostedtoolcache, bind-mounted into the container as
+      # /__t from the ubuntu-24.04 HOST. That binary is linked against the
+      # host's glibc 2.38 while this container is glibc 2.35, so the first step
+      # that actually RAN python died with:
+      #   python: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not
+      #   found (required by /__t/Python/3.11.16/x64/lib/libpython3.11.so.1.0)
+      # The action itself reported "Successfully set up CPython (3.11.16)" and
+      # went GREEN, because it only edits PATH and never executes what it
+      # installed -- a step that "installs Python" that cannot fail on a Python
+      # that cannot run.
+      #
+      # This is STRUCTURAL, not a flake: every hosted-tool-cache artefact on an
+      # ubuntu-24.04 host targets glibc >= 2.38, so no python-version value can
+      # fix it. The glibc-floor decoupling the container exists for is exactly
+      # what makes the host's toolcache unusable here.
+      #
+      # INVARIANT (leave-behind b): this leg must never consume /__t binaries.
+      # Anything under /opt/hostedtoolcache inherits the HOST's glibc, not the
+      # container's. The liveness step below enforces it mechanically.
+      #
+      # Why a real 3.11 and not the container's system python3: python3.10 is
+      # what ubuntu:22.04 ships, but `tomllib` is stdlib only from 3.11 and 11
+      # files under native/scripts import it (9 without a tomli fallback),
+      # including deps/manifest.py and deps/assertions.py which the very next
+      # step imports. Using 3.10 would just move the red a few steps later.
+      #
+      # Why deadsnakes and not stock 22.04: MEASURED -- stock jammy's
+      # python3.11 candidate is 3.11.0~rc1-1~22.04.1, a RELEASE CANDIDATE.
+      # deadsnakes provides 3.11.15-1+jammy1, an actual stable release, which
+      # is what a build toolchain should run. gpg-agent is installed alongside
+      # software-properties-common because without it add-apt-repository exits
+      # non-zero (measured) and would abort this step.
+      #
+      # Why a venv rather than update-alternatives: the venv's bin/ supplies
+      # BOTH `python` and `python3`, so every existing call site in this file
+      # keeps working unchanged, while /usr/bin/python3 stays 3.10 so apt's own
+      # python tooling is untouched. It also brings a working pip via ensurepip
+      # (measured: pip 24.0), avoiding the get-pip/distutils dance.
+      - name: Provision Python 3.11 inside the container (no hostedtoolcache)
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends software-properties-common gpg-agent
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update
+          apt-get install -y --no-install-recommends python3.11 python3.11-venv
+          python3.11 -m venv /opt/ceyx-py311
+          echo "/opt/ceyx-py311/bin" >> "$GITHUB_PATH"
+
+      # Leave-behind (a): EXECUTE the interpreter right after provisioning.
+      # The round-3 failure existed because the provisioning step never ran what
+      # it installed; this step exists so a dead interpreter can never report
+      # green again. It runs AFTER the step above, so $GITHUB_PATH has taken
+      # effect and this validates the PATH wiring too, not just the binary.
+      - name: Verify the interpreter is alive and not from hostedtoolcache
+        # WI-23: migrated to ci/provision.py's verify_interpreter() (impl-16).
+        # No marker-shaped tokens in the original (only plain diagnostic
+        # text and one ::error:: on the hostedtoolcache-glibc-mismatch
+        # path, CI run 34703203982) -- error text preserved verbatim, not
+        # reworded, per R11.
+        run: |
+          python3 native/scripts/ci.py verify-interpreter --forbid-hostedtoolcache
+
+      - name: Install pytest for deps suite
+        run: python -m pip install --disable-pip-version-check pytest
+
+      # R4: the suite now also covers the EXECUTION layer (deps/execute.py) and
+      # the Unix HEIF assembly (deps/heif.py, the port of fetch_heif_deps.sh),
+      # including a demonstrated-red case for every capability, licence and
+      # architecture assertion the shell script made. LINUX-HEIF (round 3):
+      # this leg now ALSO builds the HEIF dist for real (see the "Build HEIF
+      # stack" step below), so the carrier's Linux-specific code paths —
+      # `nm -D`, `ldd`, and the readelf SONAME check whose missing instrument is
+      # a FAILURE rather than a skip — are exercised HERE (unit-level, against
+      # captured text) as well as against the real artefact further down.
+      - name: Deps manifest/render/execute/heif test suite + no-shell lint
+        run: python3 -m pytest native/scripts/deps/ -q
+
+      - name: Install build prerequisites (apt)
+        # android_build.yml's set plus the Vulkan trio:
+        #   libvulkan-dev -> Vulkan HEADERS, so find_package(Vulkan QUIET) in
+        #     tests.cmake's capability-probe wiring finds the target rather than
+        #     silently skipping it (a SKIPPED warning is treated as failure).
+        #   libvulkan1 -> the loader the Halide Vulkan runtime dlopen()s at
+        #     runtime (not linked at build time; see ffi.cmake's Linux branch).
+        #   mesa-vulkan-drivers / vulkan-tools -> lavapipe ICD + vulkaninfo, for
+        #     completeness on the runner (build-only job does not exercise them).
+        #   nasm / yasm -> LINUX-HEIF (round 3): vcpkg's aom port needs an x86_64
+        #     assembler for its optimized kernels (same requirement macos_build.yml
+        #     documents at its `brew install ... nasm yasm` step); this leg now
+        #     installs the `aom` vcpkg feature below, so the assembler must be
+        #     present before that install step runs.
+        # WI-14 step 14.5: `git curl python3 python3-pip ca-certificates` added
+        # to the set below -- the previously used rolling hosted runner image
+        # preinstalled these, a bare `ubuntu:22.04` container does not, and
+        # they are needed by the vcpkg bootstrap and
+        # native/scripts/build_deps.py. The rest of this set has identical
+        # package names on 22.04, so this addition is additive-only.
+        #
+        # The `sudo` that used to prefix these two lines is gone (2026-09-12),
+        # and `zip unzip` were added. Both facts are MEASURED, not reasoned:
+        # the leg was reproduced locally in the identical image
+        # (`docker run --platform linux/amd64 ubuntu:22.04`, artifacts under
+        # tmp/verify/linux/). That run showed, in the bare image:
+        #   - no `git`      -> the pre-checkout step above exists for this
+        #   - no `sudo`, uid 0 -> a `sudo` prefix here could only fail
+        #                         ("sudo: command not found"), never help
+        #   - no `zip`/`unzip` -> vcpkg's bootstrap-vcpkg.sh aborts with
+        #                         "Could not find zip. Please install it ..."
+        #                         (RC=1, no vcpkg binary produced), which would
+        #                         have been the NEXT red on this leg once
+        #                         checkout was fixed. `tar` and `curl` ARE
+        #                         present in the base image and are not added.
+        #   - no `pkg-config`  -> the layer after THAT: with zip/unzip present,
+        #                         bootstrap succeeds and `vcpkg install` gets as
+        #                         far as libwebp, then fails in
+        #                         vcpkg_fixup_pkgconfig with "Could not find
+        #                         pkg-config. Please install it via your package
+        #                         manager" (VCPKG_INSTALL_RC=1). Added only
+        #                         after observing that failure, not on suspicion.
+        #   - no `file`        -> the layer after THAT: the HEIF-stack carrier
+        #                         (native/scripts/deps) shells out to `file`
+        #                         when verifying the built dist and dies with
+        #                         FileNotFoundError: [Errno 2] ... 'file'
+        #                         AFTER libheif has already installed, so the
+        #                         build looks nearly done when it fails.
+        # Enumerated rather than guessed one-at-a-time: the external tools the
+        # deps carrier and the assertion scripts actually invoke are
+        # ar/cmake/file/git/ldd/nm/objdump/readelf/strip (plus the macOS-only
+        # otool/lipo/install_name_tool). Of those, `file` was the only one
+        # missing from this image. patchelf/meson/autoconf/libtool are also
+        # absent but are NOT referenced by this repo, so they are NOT added.
+        # The hosted runner image preinstalled all of these, which is why the
+        # container migration needed them enumerated explicitly.
+        # `sudo` is resolved conditionally rather than deleted outright so this
+        # step also keeps working if the leg is ever moved back to a non-root
+        # hosted runner.
+        #
+        # gcc-12/g++-12 (2026-09-12, measured): ubuntu:22.04's default compiler
+        # is gcc 11.4.0, and RawSpeed3 hard-errors at configure time --
+        # "GNU C compiler version 11.4.0 is too old and is unsupported.
+        #  Version 12+ is required" (rawspeed/cmake/compiler-versions.cmake:34).
+        # The hosted ubuntu-24.04 runner shipped a new enough gcc; the container
+        # does not, so it is installed explicitly. gcc-12 is available from
+        # 22.04's own repositories and does NOT move the glibc floor: with
+        # gcc-12 selected, `ldd --version` in this image still reports
+        # GLIBC 2.35, so the WI-14 step 14.5 floor ruling is preserved exactly.
+        # CC/CXX are NOT exported job-wide -- they are set only on the decoder
+        # build step, which is the only consumer that needs 12+ (vcpkg and the
+        # HEIF stack were both verified building fine with the default gcc-11).
+        run: |
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            zip unzip pkg-config file \
+            gcc-12 g++-12 \
+            cmake ninja-build build-essential libjpeg-dev zlib1g-dev \
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers vulkan-tools \
+            nasm yasm git curl python3 python3-pip ca-certificates clang
+
+      # WI-14 step 14.5 follow-up (2026-09-12, measured): ubuntu:22.04's apt
+      # cmake is 3.22.1, but the vendored Halide 21 distribution's own
+      # HalideConfig.cmake opens with `cmake_minimum_required(VERSION 3.28)`,
+      # so configure dies with "CMake 3.28 or higher is required. You are
+      # running version 3.22.1" before anything is compiled. The hosted
+      # ubuntu-24.04 runner had a new enough cmake; the container does not.
+      #
+      # Installed through pip rather than adding the Kitware APT repository:
+      # this leg already uses pip (the pytest step above), so this is the
+      # existing channel rather than a second package source to maintain.
+      # A FLOOR is pinned, not an exact version -- the constraint is Halide's
+      # 3.28 minimum, and pinning an exact build would silently rot.
+      # pip's cmake lands in the setup-python scripts dir, which precedes
+      # /usr/bin on PATH, so it shadows the apt cmake that the step above
+      # still installs for any tooling that looks for /usr/bin/cmake.
+      - name: Provide CMake >= 3.28 for Halide 21 (container has 3.22)
+        # WI-23: migrated to ci/provision.py's ensure_cmake() (impl-16). No
+        # marker-shaped tokens in the original; error text preserved
+        # verbatim.
+        run: |
+          python3 native/scripts/ci.py ensure-cmake --min 3.28
+
+      - name: Cache vendored Halide v21 distribution (host, Linux)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
+
+      - name: Fetch vendored Halide v21 distribution (host)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/build_deps.py fetch halide
+
+      # native/third_party/libraw is gitignored; DNG_ENABLE_GENERIC_RAW defaults
+      # ON (native/CMakeLists.txt) and cmake/tests.cmake hard-fails configure
+      # without it, so this has to run before the build. Not disabling the
+      # feature to route around the missing vendor tree: that would drop the
+      # generic RAW frontend from the shipped binary, not just fix CI.
+      - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+
+      - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/build_deps.py fetch libraw
+
+      # D5 (2026-08-31): libwebp now comes from vcpkg, pinned to exactly 1.6.0 in
+      # native/vcpkg/vcpkg.json, and cmake/encode.cmake HARD-FAILS the configure
+      # when it is absent. Before D5 this leg had no libwebp at all and silently
+      # compiled CEYX_ENABLE_WEBP=0 — a green build shipping no WebP encoder,
+      # which is exactly what the hard failure now prevents.
+      #
+      # LINUX-HEIF (round 3, user ruling 2026-09-01): --x-feature=de265
+      # --x-feature=aom now install the manifest's `heif` feature's vcpkg-side
+      # halves (libde265 dynamic + aom static), mirroring macos_build.yml's
+      # "vcpkg install libwebp + libde265 + aom" step. This leg no longer
+      # opts out of the HEIF stack — the heif-stack build step below consumes
+      # this exact vcpkg prefix (via CEYX_VCPKG_PREFIX) to build kvazaar +
+      # libheif from source against these two vcpkg-supplied halves, same
+      # division of labour as the macOS legs.
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        # WI-23: migrated to ci/provision.py's vcpkg_bootstrap() (impl-16),
+        # the identical body shared with macOS's equivalent step. No
+        # marker-shaped tokens in the original.
+        run: |
+          python3 native/scripts/ci.py vcpkg-bootstrap --baseline "${VCPKG_BASELINE}" --runner-temp "${RUNNER_TEMP}"
+
+      - name: vcpkg install libwebp + libde265 + aom (x64-linux-heif)
+        # WI-23: migrated to ci/provision.py's vcpkg_install() (impl-16).
+        # VCPKG_INSTALL_RC preserved as a report.marker() call -- confirmed
+        # markerdiff-visible (native/scripts/ci/markerdiff.py:32 anchors on
+        # a bare NAME=value at line start, which report.marker emits).
+        run: |
+          python3 native/scripts/ci.py vcpkg-install --triplet "${VCPKG_TRIPLET}" --workspace "${GITHUB_WORKSPACE}" --runner-temp "${RUNNER_TEMP}" --feature de265 --feature aom
+
+      # Prove the artefact before the product build consumes it. The linkage
+      # assertion is the one that was missing when the overlay triplets silently
+      # installed libwebp as a shared library.
+      - name: Assert the vcpkg libwebp artefact (static)
+        # WI-23: migrated to ci/provision.py's assert_vcpkg_artefacts()
+        # (impl-16), --platform linux branch. No marker-shaped tokens in
+        # the original (FAIL lines are plain text on the failure path
+        # only); text preserved verbatim.
+        run: |
+          python3 native/scripts/ci.py assert-vcpkg-artefacts --platform linux --triplet "${VCPKG_TRIPLET}" --runner-temp "${RUNNER_TEMP}"
+
+      # G1 fix (round-5 gap closure, task #9): cmake/jxl.cmake defaults
+      # CEYX_ENABLE_JXL=ON but SOFT-degrades to a message(WARNING) +
+      # CEYX_JXL_ENABLED=0 when native/third_party/libjxl-dist is absent — a
+      # silent codec-less build was indistinguishable from a real one in every
+      # green run before this fix. native/scripts/build_deps.py fetch libjxl builds
+      # it from source (no committed/vcpkg alternative exists for this dist,
+      # unlike libheif/libwebp), so fetch it here the same way macos_build.yml
+      # now does, and prove linkage on the built .so below (declaration vs
+      # usage, not just "the fetch step succeeded").
+      - name: Cache vendored libjxl distribution
+        id: cache-jxl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist
+          key: jxl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/deps/fetch_libjxl.py') }}
+
+      - name: Fetch vendored libjxl distribution
+        run: python3 native/scripts/build_deps.py fetch libjxl
+
+      # LINUX-HEIF (round 3, user ruling 2026-09-01, contract item 12): this
+      # leg now builds a real HEIF stack in-leg instead of opting out with
+      # -DDNG_ENABLE_HEIF=OFF (see the removed comment on the configure step
+      # below). Same carrier entry point as macos_build.yml's "Fetch vendored
+      # HEIF distribution (Python carrier)" step — native/scripts/deps/heif.py
+      # already has a full Linux traits row (readelf SONAME check, .so
+      # extensions, nm -D), it was simply never invoked here. Cache key
+      # mirrors macOS's: the carrier scripts + the manifest it reads
+      # versions/hashes/cmake options from, plus the vcpkg manifest + libde265
+      # overlay port (the dist's libde265 comes from that port).
+      - name: Cache vendored HEIF (libheif + libde265) distribution
+        id: cache-heif
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/heif-dist-linux
+          key: heif-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/build_deps.py', 'native/scripts/deps/*.py', 'native/deps/manifest.toml', 'native/deps/arch_map.toml', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
+
+      # CEYX_VCPKG_PREFIX is mandatory (heif.py's _vcpkg_prefix hard-fails
+      # otherwise): libde265 and aom are copied out of the vcpkg prefix
+      # installed above, not built from source here, same division of labour
+      # as the macOS legs. --platform linux selects heif.py's Linux traits
+      # row (readelf SONAME assertion instead of install_name_tool, .so
+      # instead of .dylib). ~20 minutes uncached (kvazaar + libheif built from
+      # source); accepted per the contract.
+      - name: Build HEIF stack (libheif + libde265 + kvazaar + aom, Python carrier)
+        run: |
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_deps.py build heif-stack \
+              --platform linux \
+              --arch x86_64 \
+              --dist "$GITHUB_WORKSPACE/native/third_party/heif-dist-linux"
+
+      - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
+        # Native single-stage build: on Linux the host IS the target, so the
+        # default --platform host path is correct (no cross-compile, unlike
+        # Android). halide_aot.cmake's `elseif(UNIX AND NOT APPLE)` branch
+        # selects host-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query
+        # and turns the split Stage 4 kernel ON automatically; ffi.cmake links
+        # no Vulkan library (the Halide runtime dlopen()s libvulkan.so.1).
+        # --idle-timeout-sec raised above the 60s default as a CI margin.
+        # Separate --build-dir build-linux so it never collides with build/.
+        # LINUX-HEIF (round 3): -DDNG_ENABLE_HEIF=OFF is REMOVED here. The
+        # "Build HEIF stack" step above now produces a real dist under
+        # native/third_party/heif-dist-linux; cmake/heif.cmake's new
+        # `elseif(UNIX AND NOT APPLE)` branch (added this round) points
+        # HEIF_DIST_HINTS there instead of the unsuffixed default, which is
+        # reserved for macOS's own dylib dist (see that branch's comment for
+        # why the two must not share a path).
+        working-directory: ${{ github.workspace }}
+        # CC/CXX are scoped to THIS step on purpose (2026-09-12). RawSpeed3,
+        # which only this step builds, refuses gcc < 12; vcpkg and the HEIF
+        # stack above were both verified building fine with the container's
+        # default gcc-11, so they are deliberately left alone rather than
+        # having the whole job's compiler swapped underneath them.
+        env:
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          # The watchdog locates the vcpkg prefix ITSELF (via CEYX_VCPKG_PREFIX,
+          # else a default path) and injects -DCMAKE_PREFIX_PATH; that resolver
+          # is mandatory and aborts the build when it finds nothing, even if the
+          # caller passed the prefix as an explicit --cmake-arg. So the env var
+          # is the supported channel — passing --cmake-arg alone fails before
+          # configure (run 33325970570). Exporting it also gets the watchdog's
+          # validation of the prefix (it checks share/WebP/WebPConfig.cmake is
+          # really there) instead of a bare string handoff.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_native_watchdog.py \
+            --platform host \
+            --target dng_decoder_native \
+            --build-dir build-linux \
+            --idle-timeout-sec 180
+
+      - name: Verify Linux artifact (AC-L2/L3/L4/L5)
+        # AC-L2/L3/L4 (file / nm -D vulkan symbol / ldd no-libvulkan) +
+        # S-B3 import-closure gate. Migrated to native/scripts/ci/verify_artifact.py
+        # (WI-7, pyci python-ization campaign); logic unchanged, only the
+        # carrier moved -- see that module's docstring for the two ported-as-is
+        # pre-existing gaps (C-G4).
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py verify-artifact --platform linux
+      - name: Import-closure gate (S-B3)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py import-closure --platform linux
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py min-runtime --platform linux
+      - name: Assert required FFI exports present in .so (AC-L5)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-exports --platform linux
+
+      # PORTABLE-BASELINE GATE (2026-09-08). The v0.1.19 Linux release SIGILL'd
+      # at dlopen() on every machine without AVX-512: RawSpeed3's CpuMarch.cmake
+      # compiled with -march=native on native (non-cross) builds, so an
+      # AVX-512-capable runner baked 254 EVEX-encoded instruction lines into the
+      # published .so — some reached during ELF static init, before any of our
+      # code could feature-check anything. The compile-side fix is
+      # native/cmake/tests.cmake "PORTABLE-BASELINE" (+ the pinned Halide AOT
+      # target in cmake/halide_aot.cmake); THIS step is the mechanical gate that
+      # judges the ARTIFACT rather than the flags, so any future reintroduction
+      # (new subproject, new -march, new host-derived Halide target) is caught
+      # here instead of by a user.
+      #
+      # Red-proof: the same script exits 1 with evex_lines=254 on the published
+      # v0.1.19 .so, and 0 on libheif.so.1 from the same tarball
+      # (docs/logs/2026-09-08/avx512-gate-redproof-v0.1.19.txt and
+      # avx512-gate-positive-control.txt — both controls run before this gate
+      # was wired in).
+      #
+      # SCOPE: libdng_decoder_native.so only. libde265.so.0 legitimately carries
+      # AVX-512 behind its own cpuid dispatch (859 EVEX lines in
+      # transform_32x32_add_8_avx512) and must NOT be fed to this gate.
+      #
+      # The script disassembles to a FILE and scans it in Python — never
+      # `objdump | grep -q`, which under pipefail returns 141 on a successful
+      # match (SIGPIPE to objdump) and inverts the verdict (G-9/R-16).
+      - name: Assert no AVX-512 in the Linux .so (portable-baseline gate)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-no-avx512 --platform linux
+
+      - name: Assert fused-orientation kernel signals present in Linux .so (Task 11 / G-E)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-orientation --platform linux
+
+      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
+      # an earlier nm-grep for JxlEncoderInitBasicInfo tested an unsatisfiable
+      # claim on every platform (the vendored static libjxl.a compiles that
+      # symbol with hidden visibility; it can never appear in any export
+      # table regardless of whether the codec is correctly linked in — see
+      # the diagnosis doc's macOS nm -m evidence, which extrapolates by
+      # mechanism to ELF's STV_HIDDEN/LOCAL binding here). The correct
+      # instrument is our OWN exported FFI capability surface: a green link
+      # with CEYX_ENABLE_JXL=1 entails libjxl.a was actually linked (a
+      # mismatch fails to link, not silently answers wrong), so calling
+      # ceyx_still_decode_supports/ceyx_encode_supports and checking the
+      # returned value is strictly stronger than a symbol-presence check.
+      # Linux is a single-arch host build (no cross-compile), so dlopen from
+      # this same process is always valid here.
+      #
+      # Round 3 (CI-T1 call-site replacement): generalised from the
+      # JXL-only single-format probe (now deleted) to the full 5-format
+      # x 2-direction vector via codec_capability_probe.py. The --expect
+      # tokens below are the linux-x86_64 leg's literal transcription of
+      # native/deps/codec_expectations.toml; render_expectations.py --check
+      # mechanically proves they have not drifted from the ledger.
+      - name: Assert full codec capability vector via probe (G1)
+        run: python3 native/scripts/ci.py capability-vector --platform linux --kind codec --expect jpeg:encode=1 --expect jpeg:decode=0 --expect webp:encode=1 --expect webp:decode=1 --expect heic:encode=1 --expect heic:decode=1 --expect avif:encode=1 --expect avif:decode=1 --expect jxl:encode=1 --expect jxl:decode=1
+
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, linux-x86_64
+      # leg. Vector transcribed from native/deps/codec_expectations.toml
+      # [linux-x86_64.capabilities]. ICC=0 on every leg (OQ-N4 option Z,
+      # WI-5): ENABLE_LCMS is forced OFF in native/cmake/tests.cmake; the
+      # forced value is itself the Linux-determinism fix -- previously
+      # nothing installed, asserted or documented liblcms2-dev on this leg
+      # and FindLCMS2 silently degraded, so the prior ICC value here was a
+      # runner-image accident.
+      - name: Assert build capability vector via probe (S-E2)
+        run: python3 native/scripts/ci.py capability-vector --platform linux --kind build --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1
+
+      # CI-T3 (task #11 spec; LINUX-HEIF round 3 adds the previously-held
+      # Linux leg): functional capability-bitmask probe against the dist the
+      # "Build HEIF stack" step produced two steps above, same
+      # native/scripts/deps/probe/probe_codecs.c binary the macOS/Windows legs
+      # compile (bit0=HEVC-ENC, bit1=AV1-ENC, bit2=HEVC-DEC, bit3=AV1-DEC; a
+      # SET bit means that capability is ABSENT). Plain clang + -Wl,-rpath
+      # (the macOS shape), not clang-cl: this is a native Linux compile, not
+      # a cross build. Stdout is captured to a file BEFORE the exit code is
+      # interpreted so a nonzero RC still leaves all four bits legible in the
+      # uploaded artifact.
+      - name: Compile + run functional capability probe (CI-T3)
+        run: python3 native/scripts/ci.py codec-probe --platform linux --workspace "$GITHUB_WORKSPACE"
+
+      - name: Stage native artifacts
+        # Companions added (task #18, 2026-09-01): since the Linux leg
+        # started building the HEIF stack (92a234c), dng_decoder_native.so
+        # dynamically links libheif.so.1/libde265.so.0 (staged next to it at
+        # build time by cmake/heif.cmake's POST_BUILD copy, same source dist
+        # this leg's earlier "Build HEIF stack" step produced). Omitting
+        # either one from the artifact/release asset produces a bundle that
+        # fails to dlopen on the consumer's machine with an error naming only
+        # the decoder -- the exact Windows DLL-trio failure mode, Linux
+        # variant. Migrated to native/scripts/ci/stage.py (WI-8); the
+        # round-6 POSIX shell (glob loop counting) is RETIRED, not
+        # translated -- see that module's docstring.
+        run: python3 native/scripts/ci.py stage --platform linux --artifact-dir "${ARTIFACT_DIR}" --native-dir "${NATIVE_DIR}"
+
+      # ATOMIC-GROUP GATE (task #18), mirrors windows_build.yml's "Assert the
+      # Windows DLL trio is complete" step for this leg's shared-library
+      # group. Folds the former "Fail if no shared library was produced" +
+      # "Assert the Linux shared-lib group is complete" steps into one
+      # `assert-staged-group` call (native/scripts/ci/stage.py, WI-8/9) --
+      # same emission order (SHARED_LIB_COUNT -> EXPECTED_SET/STAGED_SET ->
+      # ATOMIC_GROUP_COMPLETE), same short-circuit on a zero count.
+      - name: Assert the Linux shared-lib group is complete (atomic group)
+        run: python3 native/scripts/ci.py assert-staged-group --platform linux --artifact-dir "${ARTIFACT_DIR}"
+
+      # DT_NEEDED verification (AC1; fixed post-run-33455862800 diagnosis,
+      # task #18 follow-up). ORIGINAL BUG: this step asserted BOTH
+      # libheif.so.1 AND libde265.so.0 as direct DT_NEEDED entries of
+      # libdng_decoder_native.so. That is not what the linker produces --
+      # GNU ld's default --enable-new-dtags/--as-needed only records a
+      # DIRECT dependency for a symbol the .so actually references, and no
+      # translation unit in this project calls a de265_* symbol directly
+      # (only libheif ones); libheif.so.1 itself depends on libde265.so.0.
+      # This is the EXACT situation windows_build.yml already documents and
+      # gates in two separate steps ("dng_decoder_native.dll imports
+      # heif.dll only... it is heif.dll that imports libde265.dll") --
+      # verified against the actual run-33455862800 readelf -d output: the
+      # decoder's dynamic section lists NEEDED libheif.so.1 and nothing
+      # de265-named at all, RC=1 on the libde265.so.0 check was correct
+      # behaviour of a wrongly-designed check, not a build defect. Split
+      # into the same two levels here: (1) the decoder needs libheif.so.1
+      # directly, (2) the staged libheif.so.1 itself needs libde265.so.0
+      # transitively. De-pipelined (readelf output to a file, then grep the
+      # file) per the pipefail lesson (08-17): `readelf | grep -q` inverts
+      # on a SUCCESSFUL match under `set -o pipefail` (grep exits first,
+      # readelf dies of SIGPIPE, pipeline reports 141).
+      - name: Verify DT_NEEDED references the staged HEIF companions
+        # Migrated to native/scripts/ci/dt_needed.py (WI-8/9); same two
+        # de-pipelined levels (decoder -> libheif.so.1 -> libde265.so.0),
+        # same RC lines, same error text.
+        run: python3 native/scripts/ci.py dt-needed --platform linux --artifact-dir "${ARTIFACT_DIR}" --runner-temp "${RUNNER_TEMP}"
+
+      # Round 6, Plan B: the artifact name is now the SINGLE naming decision
+      # this workflow makes. It is also the release asset stem — the publish
+      # job in build.yml packages `<artifact name>.tar.gz` verbatim, so there
+      # is no rename step anywhere between here and the release. Canonical form
+      # is <component>-<platform>-<arch> with an underscore in x86_64
+      # (.github/CI-CONVENTIONS.md rule 2). The former "Name the release asset"
+      # + softprops/action-gh-release pair that used to follow this step is
+      # deleted: no workflow may attach release assets directly any more, that
+      # is the publish job's exclusive job (rule 3).
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-linux-x86_64
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
+
+      # Round 6 gap closure (r5-release-v016.md:174-182): this leg BUILDS a
+      # libjxl distribution from source (the "Fetch vendored libjxl
+      # distribution" step above) and then threw it away — the bytes that the
+      # shipped Linux .so links against had no artifact and no release
+      # presence, unlike the three Windows dists which each have their own
+      # dist workflow. Uploading it here makes the Linux JXL dist a first-class
+      # publishable artifact with a canonical name.
+      - name: Upload libjxl dist (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libjxl-dist-linux-x86_64
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist
+          if-no-files-found: error
+          retention-days: 7
+
+      # CI-T3 (task #11 spec; LINUX-HEIF round 3): probe_codecs.txt from the
+      # step above, alongside the other two desktop legs'
+      # probe_results_<platform>_<arch> artifacts (.github/CI-CONVENTIONS.md
+      # rule 2, underscore separators). `if: always()` so a failed probe still
+      # uploads its own diagnosis rather than leaving CI to guess.
+      - name: Upload probe_results_linux_x86_64
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe_results_linux_x86_64
+          path: native/scripts/deps/probe/probe_codecs.txt
+          if-no-files-found: error
+          retention-days: 7

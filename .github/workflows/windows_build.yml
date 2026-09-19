@@ -1,0 +1,731 @@
+name: Windows Build (Vulkan native)
+
+# REUSABLE WORKFLOW (round 6, Plan B). No triggers of its own: invoked
+# exclusively by .github/workflows/build.yml, which owns the push/PR/tag/
+# dispatch trigger set for every platform leg. See linux_build.yml's header
+# for why re-adding a standalone trigger here is a defect.
+on:
+  workflow_call:
+
+# Concurrency is inherited from the calling workflow; see linux_build.yml.
+
+jobs:
+  build-windows:
+    # BUILD-ONLY gate, same rationale as linux_build.yml: a GitHub-hosted
+    # windows-latest runner has no Vulkan-capable GPU and no ICD, so decode /
+    # PSNR gates cannot run here. This job proves that the Windows x86_64
+    # Vulkan native library genuinely COMPILES AND LINKS from current source
+    # (the committed plugin/windows/Libraries/dng_decoder_native.dll
+    # was hand-built on a developer machine and has had no CI provenance until
+    # now — see docs/logs/2026-08-26/Task_windows_build_verification.md §3/§4).
+    # Display name only; renders as "Windows / x86_64 Vulkan". See
+    # linux_build.yml for why the platform word is not repeated here.
+    name: x86_64 Vulkan
+    runs-on: windows-latest
+    timeout-minutes: 90
+    # `contents: write` was dropped in round 6 together with the release-attach
+    # step it existed for. This leg now only reads the repo and uploads
+    # artifacts; the publish job in build.yml holds the write scope.
+    permissions:
+      contents: read
+    steps:
+      # MUST run BEFORE actions/checkout. Git for Windows ships
+      # core.autocrlf=true in the system gitconfig, so a checkout done before
+      # this step writes native/patches/**/*.patch into the workspace with CRLF
+      # line endings. fetch_libraw_dist.sh then clones LibRaw/RawSpeed3 into
+      # fresh LF worktrees, and `git apply` compares a CRLF patch against LF
+      # source and fails on every hunk.
+      #
+      # This is exactly how run 33169091228 failed
+      # ("FAILED to apply 01.CameraMeta-extensibility.patch"), and the earlier
+      # version of this workflow made it worse rather than better: it set
+      # autocrlf=false INSIDE the fetch step, i.e. after the patches had already
+      # been checked out as CRLF, which guaranteed the mismatch instead of
+      # preventing it.
+      #
+      # Verified mechanically, not assumed — native/scripts/tmp/windows_eol_probe2.sh
+      # reconstructs the pristine RawSpeed3 file and forward-applies patch 01
+      # three ways: LF patch -> LF tree RC=0, CRLF patch -> LF tree RC=1 (the
+      # runner's state), LF patch -> CRLF tree RC=1. Log:
+      # docs/logs/2026-08-28/ci-verify/windows_eol_probe2.txt
+      #
+      # Setting it here makes the Windows workspace byte-identical to the Linux
+      # and macOS ones, which is why the identical fetch step is green there.
+      - name: Force LF line endings for all git operations
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          echo "core.autocrlf=$(git config --global core.autocrlf)"
+          echo "core.eol=$(git config --global core.eol)"
+          echo "system core.autocrlf=$(git config --system core.autocrlf || echo '<unset>')"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # R4: run the carrier's own unit suite on NATIVE WINDOWS PYTHON.
+      #
+      # This is the only leg that executes that code on the interpreter and the
+      # path semantics it actually targets. The value is not hypothetical: the
+      # equivalent Linux step, added in round 3, immediately exposed a genuine
+      # platform-dependent defect (a bare `Path` where `PureWindowsPath` was
+      # required) that was invisible on the developer's machine because it
+      # happened to run a newer Python. Windows is where the drive-letter,
+      # backslash and MSYS-rejection logic can be wrong in ways no macOS or
+      # Linux run can reveal.
+      #
+      # `shell: pwsh` deliberately: running the suite under Git-Bash would put
+      # it on an MSYS interpreter, which deps/run.py refuses by design — the
+      # tests would then be measuring the refusal rather than the code.
+      - name: Install pytest for deps suite
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Run deps unit suite (native Windows Python)
+        shell: pwsh
+        run: |
+          python -m pytest native/scripts/deps/ -q
+          $RC = $LASTEXITCODE
+          Write-Host "DEPS_PYTEST_RC=$RC"
+          exit $RC
+
+      # CMake ships with the runner image; Ninja does not reliably. pip's ninja
+      # wheel is a pinned, deterministic way to get it on PATH without choco.
+      - name: Install Ninja
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          ninja --version
+
+      # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
+      # LIB. On a developer machine that is vcvars64.bat; in CI this action is
+      # the equivalent (it exports the vcvars environment to later steps).
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # clang-cl is MANDATORY, not a preference: native/cmake/pipeline.cmake
+      # hard-fails on cl.exe because dng_sdk needs -ffp-contract=off for the
+      # byte-exact Stage4 colour contract, which cl.exe cannot express. LLVM is
+      # preinstalled on the windows runner image; this step proves it is on PATH
+      # and fails loudly (rather than at cmake configure) if the image changes.
+      # Migrated to native/scripts/ci/windows_toolchain.py's locate_clang_cl()
+      # (WI-24, pyci python-ization campaign). PATH-then-LLVM/bin-fallback
+      # order preserved exactly, including the single-backslash string
+      # appended to $GITHUB_PATH on the fallback branch (see the module's
+      # own docstring for the shell double-quote `\\` -> `\` collapse this
+      # replicates).
+      - name: Locate clang-cl
+        shell: bash
+        run: python3 native/scripts/ci.py locate-clang-cl --github-path "$GITHUB_PATH"
+
+      # WI-4 step 4.1 (S-B1/OQ-N2 ruled SHIP): the decoder's own import table
+      # names libomp140.x86_64.dll (rootcause-native-capability.md Item B), so
+      # an artifact shipped without it fails to load on a machine lacking the
+      # LLVM redistributable. This step only LOCATES the file next to the
+      # clang-cl install just verified above; it stays an observation (exits
+      # 0 even when absent) so its output is legible on a leg where the
+      # actual staging step (native/cmake/heif.cmake, WI-4 step 4.2) is what
+      # fails. The FATAL gate on absence lives in that CMake step, not here.
+      #
+      # WIDENED 2026-09-12 (CI run 34697591379 reported OMP_RUNTIME_DLL=ABSENT
+      # here). Searching only beside clang-cl was too narrow: the import name
+      # libomp140.x86_64.dll is the VISUAL STUDIO redistributable spelling of
+      # the LLVM OpenMP runtime (the LLVM installer's own copy is plain
+      # libomp.dll), so the file to ship lives under the VC redist tree, not in
+      # LLVM/bin. This step now searches both and, when it still finds nothing,
+      # prints a real directory survey -- the ABSENT line alone told the last
+      # round nothing about WHERE to look next. Kept as an OBSERVATION (always
+      # exits 0); the FATAL gate stays in native/cmake/heif.cmake so the
+      # failure surfaces at the place that actually stages the file.
+      - name: Locate the OpenMP runtime DLL
+        shell: bash
+        run: |
+          OMP_DLL_NAME="libomp140.x86_64.dll"
+          CLANG_CL_BIN="$(command -v clang-cl || echo "/c/Program Files/LLVM/bin/clang-cl.exe")"
+          LLVM_BIN_DIR="$(dirname "$CLANG_CL_BIN")"
+
+          OMP_RUNTIME_DLL="ABSENT"
+          # Ordered candidates: beside the compiler first, then the VS redist.
+          for d in "${LLVM_BIN_DIR}" "/c/Program Files/LLVM/bin"; do
+            if [ -f "${d}/${OMP_DLL_NAME}" ]; then
+              OMP_RUNTIME_DLL="${d}/${OMP_DLL_NAME}"
+              break
+            fi
+          done
+          if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
+            # `find` rather than a glob: the VS version/edition components of
+            # the path are not knowable ahead of time on a hosted runner.
+            FOUND="$(find "/c/Program Files/Microsoft Visual Studio" \
+                          "/c/Program Files (x86)/Microsoft Visual Studio" \
+                          -name "${OMP_DLL_NAME}" -print 2>/dev/null | head -n 1)"
+            if [ -n "$FOUND" ]; then
+              OMP_RUNTIME_DLL="$FOUND"
+            fi
+          fi
+
+          OMP_RUNTIME_RC=0
+          if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
+            OMP_RUNTIME_RC=1
+            # Diagnostic survey, printed ONLY on absence. This is what the
+            # previous round lacked: name every copy of any libomp* on the
+            # image so the next fix can be aimed rather than guessed.
+            echo "--- no ${OMP_DLL_NAME} found; surveying all libomp* on the image ---"
+            find "/c/Program Files" "/c/Program Files (x86)" \
+                 -name "libomp*" -print 2>/dev/null | head -n 50 || true
+            echo "--- end survey ---"
+          fi
+          echo "OMP_RUNTIME_DLL=${OMP_RUNTIME_DLL}"
+          echo "OMP_RUNTIME_RC=${OMP_RUNTIME_RC}"
+          echo "$OMP_RUNTIME_DLL" > omp_runtime_path.txt
+          exit 0
+
+      # Unlike Linux (where the Halide Vulkan runtime dlopen's libvulkan.so.1),
+      # native/cmake/ffi.cmake's WIN32 branch LINKS the loader import library
+      # vulkan-1.lib and hard-fails configure without it, so the SDK is a real
+      # build-time prerequisite here. stripdown is left off: it is exactly the
+      # Lib/ directory we need. install_runtime=false — nothing is executed.
+      - name: Install Vulkan SDK (provides vulkan-1.lib)
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: "1.3.290.0"
+          install_runtime: false
+          cache: true
+          stripdown: false
+
+      # Migrated to native/scripts/ci/windows_toolchain.py's
+      # verify_vulkan_lib() (WI-24, pyci python-ization campaign). The
+      # "ls -la ... || true" swallow on the missing-file path and the exact
+      # `exit 1` vs. last-command's-RC split are preserved -- see the
+      # module's own docstring.
+      - name: Verify vulkan-1.lib is present
+        shell: bash
+        run: python3 native/scripts/ci.py verify-vulkan-lib --vulkan-sdk "${VULKAN_SDK}"
+
+      - name: Cache vendored Halide v21 distribution (Windows x86_64)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
+
+      # Round 3 (2026-09-01 contract item 11 / ENTRY-POINT RULE): this was
+      # the last remaining call site of fetch_halide_v21_dist.sh (linux/macos/
+      # android already called the Python replacement); the .sh is now
+      # DELETED (frozen-transcription tests in
+      # native/scripts/deps/test_fetch_halide.py guard the pins that used to
+      # be diffed live against it). build_deps.py fetch halide's Windows
+      # branch resolves the same 64-bit-Intel zip asset upstream Halide
+      # publishes under native/scripts/deps/fetch_halide.py's own platform
+      # table, runs under the runner's native Python (not Git-Bash), and is
+      # exercised on every other desktop/android leg already.
+      - name: Fetch vendored Halide v21 distribution
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/build_deps.py fetch halide
+
+      - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/libraw/**', 'native/patches/rawspeed3/**') }}
+
+      # DNG_ENABLE_GENERIC_RAW defaults ON and cmake/tests.cmake hard-fails
+      # configure without this tree, so it must be fetched before configure.
+      # Line-ending handling lives in the pre-checkout step at the top of this
+      # job, deliberately not here — by the time this step runs it is already
+      # too late to change how the patch files were written to disk.
+      #
+      # Round 3: last remaining call site of fetch_libraw_dist.sh, now
+      # DELETED (see the Halide fetch step above for the same migration and
+      # native/scripts/deps/test_fetch_libraw.py for the frozen-pin guard).
+      - name: Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/build_deps.py fetch libraw
+
+      # fetch_libraw_dist.sh discards git apply's actual error (`2>/dev/null` on
+      # its --check probe) and prints only "FAILED to apply <name>", which is
+      # what made run 33169091228 cost a whole round to diagnose. This step runs
+      # only on failure and recovers the real error: the script exits before
+      # strip_git(), so the clone and its .git are still on disk.
+      - name: Diagnose LibRaw patch failure (on failure only)
+        if: failure()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          RS="native/third_party/libraw/RawSpeed3/rawspeed"
+          echo "== git config (all scopes) =="
+          git config --show-origin --get-all core.autocrlf || true
+          git config --show-origin --get-all core.eol || true
+          echo "== CR characters in the patch set as checked out =="
+          for p in native/patches/rawspeed3/*.patch; do
+            echo "$p CR_LINES=$(grep -c $'\r' "$p" || true)"
+          done
+          echo "== CR characters in the cloned RawSpeed3 tree =="
+          if [ -d "$RS" ]; then
+            grep -c $'\r' "$RS/src/librawspeed/metadata/CameraMetaData.h" || true
+          else
+            echo "$RS does not exist — failure was BEFORE the RawSpeed3 clone."
+          fi
+          echo "== verbose forward apply, real error text =="
+          for p in native/patches/rawspeed3/*.patch; do
+            echo "--- $p"
+            git -C "$RS" apply --check -v "$p" 2>&1 | head -20 || true
+          done
+
+      # RawSpeed3's CheckZLIB (cmake/Modules/CheckZLIB.cmake:57-66) LINK-tests
+      # uncompress() and zError() and hard-errors when they do not resolve. A
+      # find-module shim cannot satisfy that: third_party.cmake's Windows branch
+      # brings zlib in via FetchContent, so `zlibstatic` is an in-tree target
+      # that produces no .lib until BUILD time, and a configure-time try_compile
+      # has nothing to link. Run 33176207480 shows the signature exactly — every
+      # header/prototype check passed ("zlib.h - found", "Z_OK - found") and only
+      # the two link checks failed, i.e. the include paths were right and only
+      # the library was unresolvable.
+      #
+      # So build a REAL static zlib first and hand CMake its install prefix.
+      # third_party.cmake:34-39 already documents DNG_ZLIB_ROOT as the supported
+      # "a user-supplied build always wins" entry point, so this uses an existing
+      # seam rather than inventing one. ZLIB_ROOT is passed too so that
+      # RawSpeed3's own find_package(ZLIB) resolves to the same install.
+      #
+      # Same version and same SHA256 as third_party.cmake:44-45, so this does not
+      # fork the project's pin; and the same /MT runtime as the main build, or
+      # the two would not link together.
+      # Migrated to native/scripts/ci/zlib_build.py's build_zlib() (WI-24,
+      # pyci python-ization campaign). `set -e` abort-with-that-command's-
+      # own-RC semantics preserved exactly, including the "SHA_RC=$?"
+      # marker never printing on a sha256 mismatch (the shell's own abort
+      # happened before that echo ran) -- see the module's own docstring.
+      - name: Build zlib 1.3.1 (static, /MT) for the Windows toolchain
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py build-zlib --version 1.3.1 --workspace "${{ github.workspace }}"
+
+      # cmake is invoked directly rather than through
+      # native/scripts/build_native_watchdog.py: that script's watchdog loop
+      # uses select.select() on a subprocess pipe, which is POSIX-only (on
+      # Windows select accepts sockets only). GitHub Actions already provides
+      # the watchdog's function via timeout-minutes plus streamed logs.
+      #
+      # Cache variables mirror native/CMakePresets.json's `windows-vulkan`
+      # preset (clang-cl, static CRT). The preset itself is not used because CI
+      # needs a different binaryDir-independent set of extra flags and an
+      # explicit, greppable configure line in the log.
+      # HEIF is ENABLED here. The option defaults ON in native/CMakeLists.txt,
+      # so there is deliberately no -DDNG_ENABLE_HEIF=ON flag to flip. It used
+      # to be forced OFF because the libheif/libde265 dist was macOS-only; a
+      # committed Windows dist now exists at
+      # native/third_party/heif-dist-windows (see its PROVENANCE.md), and
+      # cmake/heif.cmake's WIN32 branch finds it and stages heif.dll and
+      # libde265.dll next to the built decoder. If this configure fails with
+      # "HEIF decode is enabled but the vendored dist is missing", the fix is to
+      # restore that dist -- NOT to turn the HEIF option back off, which would
+      # ship a binary reporting every HEIC file as unreadable while this job
+      # reports green.
+      #
+      # -DZLIB_USE_STATIC_LIBS=ON: zlib's CMake build emits BOTH zlib.lib (the
+      # import library for zlib.dll) and zlibstatic.lib, and FindZLIB prefers
+      # the former — run 33177220892 logged
+      # "Found ZLIB: .../zlib-install/lib/zlib.lib". Linking that would stamp a
+      # runtime dependency on zlib.dll into libdng_decoder_native, a DLL we do
+      # not ship, and would contradict the static-linking policy
+      # third_party.cmake:29-32 states for exactly this reason ("keeps the
+      # produced DLL free of an external zlib1.dll dependency"). This flag makes
+      # every find_package(ZLIB) in the build resolve to zlibstatic.lib.
+      # G1 fix v3 (round 2, task #6): native/third_party/libjxl-dist-windows
+      # is now a real committed dist (see its PROVENANCE.md) produced by the
+      # Python carrier (win_jxl_dist.py via `build_deps.py build jxl-stack`)
+      # -- the same status the HEIF dist reached in the G1 fix above. JXL is
+      # therefore no longer force-disabled: the explicit JXL opt-out flag
+      # round 5 added to this configure invocation was REMOVED here, so
+      # cmake/jxl.cmake's WIN32 branch finds the dist and links it
+      # statically. The assertion below flips from "prove the explicit-OFF
+      # branch ran" to "prove the static-link success branch ran" -- same
+      # G1 discipline (a captured configure.log line, not a silent default),
+      # inverted for the new capability instead of weakened.
+      - name: Configure (Ninja + clang-cl, Vulkan AOT target)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          # set +e around the command so the literal RC=$? below actually runs:
+          # the default `bash -eo pipefail` shell would otherwise abort the step
+          # before it, leaving a log that only ever records RC=0. pipefail stays
+          # active across the `| tee`, so $? still reflects cmake's own exit
+          # code (the last non-zero wins when not all stages succeed).
+          set +e
+          cmake -S native -B "native/build-windows" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-cl \
+            -DCMAKE_CXX_COMPILER=clang-cl \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DDNG_DIAGNOSTIC_BUILD=OFF \
+            -DDNG_VK_PIPELINE_CACHE=OFF \
+            -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
+            -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
+            -DZLIB_USE_STATIC_LIBS=ON 2>&1 | tee configure.log
+          RC=$?
+          set -e
+          echo "CONFIGURE_RC=$RC"
+          exit $RC
+
+      - name: Assert JXL was statically linked, not silently degraded (G1)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          grep -q "JXL: static" configure.log
+          rc=$?
+          set -e
+          echo "ASSERT JXL static-link RC=${rc}"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::configure.log does not show the expected 'JXL: static' line from cmake/jxl.cmake; native/third_party/libjxl-dist-windows may be missing or cmake/jxl.cmake fell back to the soft-degrade WARNING branch instead of finding it." >&2
+            exit 1
+          fi
+
+      # Rounds 1-3 each burned a full CI cycle because the real error sat one
+      # layer below what the log printed: git apply's message was discarded by
+      # the fetch script, and CMake's check_* failures print only
+      # "<symbol> - not found" while the actual compile/link command and linker
+      # error live in the build tree. CMake >= 3.26 writes them to
+      # CMakeConfigureLog.yaml; older layouts use CMakeError.log. Surface
+      # whichever exists, on failure only.
+      - name: Diagnose configure failure (on failure only)
+        if: failure()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          B="native/build-windows"
+          echo "== CMakeConfigureLog.yaml (last 200 lines) =="
+          if [ -f "$B/CMakeFiles/CMakeConfigureLog.yaml" ]; then
+            tail -200 "$B/CMakeFiles/CMakeConfigureLog.yaml"
+          else
+            echo "not present"
+          fi
+          echo "== CMakeError.log (last 200 lines) =="
+          if [ -f "$B/CMakeFiles/CMakeError.log" ]; then
+            tail -200 "$B/CMakeFiles/CMakeError.log"
+          else
+            echo "not present"
+          fi
+          echo "== zlib as CMake resolved it =="
+          grep -iE '^ZLIB_|^DNG_ZLIB_' "$B/CMakeCache.txt" || echo "no ZLIB entries in cache"
+          echo "== jpeg as CMake resolved it =="
+          grep -iE '^JPEG_' "$B/CMakeCache.txt" || echo "no JPEG entries in cache"
+
+      - name: Build dng_decoder_native
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          cmake --build "native/build-windows" --target dng_decoder_native -- -v -k 0
+          RC=$?
+          set -e
+          echo "BUILD_RC=$RC"
+          exit $RC
+
+      # AC-W3 evidence: the DLL exists, is a PE32+ x86_64 DLL, and has a
+      # non-zero size recorded in the log. A build step that silently produced
+      # nothing must not reach the upload step.
+      # The configure diagnostic above sits BEFORE this step, so it cannot fire
+      # for a BUILD failure — which is exactly what happened in round 4, where
+      # the decisive detail (the failing translation unit's include path) was
+      # again one layer below the printed error. This closes that gap: on build
+      # failure, dump how CMake resolved zlib/jpeg and the include directories
+      # actually attached to the RawSpeed3 targets.
+      - name: Diagnose build failure (on failure only)
+        if: failure()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          B="native/build-windows"
+          echo "== how CMake resolved ZLIB / JPEG =="
+          grep -iE '^ZLIB_|^JPEG_|^DNG_ZLIB_' "$B/CMakeCache.txt" || echo "no entries"
+          echo "== zlib headers actually on disk =="
+          ls -la "${GITHUB_WORKSPACE}/zlib-install/include" || echo "prefix missing"
+          echo "== include dirs on the rawspeed decompressors target =="
+          # The compile line is authoritative; recover it from the ninja graph
+          # rather than inferring it from CMake variables.
+          grep -m1 "DeflateDecompressor.cpp.obj" "$B/build.ninja" || echo "rule not found"
+
+      # Migrated to native/scripts/ci/verify_artifact.py (WI-21/WI-22,
+      # pyci python-ization campaign): AC-W3 file-exists + non-zero-size
+      # check only. Windows' export-table check (AC-W4) and its DLL
+      # dependency-closure gate ("Step 4") were split into their own steps
+      # below -- see those steps for why they could not fold into this one.
+      - name: Verify Windows artifact
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py verify-artifact --platform windows
+
+      # AC-W4 (2026-08-30): the DLL actually EXPORTS the FFI surface.
+      # Migrated to native/scripts/ci/verify_artifact.py's assert_exports()
+      # (WI-21/WI-22). Everything the prior step proves passes for a DLL
+      # that exports nothing at all -- exports here come only from
+      # __declspec(dllexport) (no CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS, no .def
+      # file in this tree), so a definition missing its FFI_EXPORT compiles,
+      # links, produces a correctly-sized DLL, and then fails at the
+      # consumer's Dart lookupFunction; src/ffi/encode_ffi_api.cpp shipped
+      # exactly that omission and Linux/macOS's default-visibility exports
+      # could never have caught it. Dump-then-assert logic (dumpbin with an
+      # llvm-nm fallback, output to a file and grepped -- never
+      # `dumpbin | grep -q`, which SIGPIPEs the producer under pipefail on a
+      # SUCCESSFUL match) now lives in the module; DUMPBIN_RC/LLVM_NM_RC/
+      # ASSERT_EXPORTS_RC marker names and every `::error::` message are
+      # transcribed verbatim from this step's pre-migration shell.
+      - name: Assert required FFI exports present in Windows DLL (AC-W4)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-exports --platform windows
+
+      # --- Step-4 load gate: the DLLs this decoder needs at load time ---
+      #
+      # Migrated to native/scripts/ci/verify_artifact.py's import_closure()
+      # windows leg (P-23, parking-lot round) -- the last unmigrated step of
+      # this workflow. The carry-forward note that used to sit here said this
+      # step was blocked because assert_import_closure.py "has no PE branch";
+      # that premise was stale. The PE branch landed with WI-4
+      # (grep native/scripts/assert_import_closure.py for parse_pe_dump) and
+      # the shell here was ALREADY calling it with --format pe. What was missing
+      # was a PE dump-CAPTURE leg inside import_closure() itself, plus the
+      # ci.py platform gate; both landed with this migration.
+      #
+      # Every marker and ::error:: string of the replaced shell is transcribed
+      # verbatim in the module (DEPENDENTS_RC / LLVM_OBJDUMP_RC /
+      # "ASSERT dep heif.dll RC=" / IMPORT_CLOSURE_RC / HEIF_DEPENDENTS_RC /
+      # HEIF_LLVM_OBJDUMP_RC / "ASSERT dep libde265.dll RC="), with ONE
+      # deliberate addition: the closure walk is now TRANSITIVE over staged
+      # companions instead of depth-one, aggregated into the SAME single
+      # IMPORT_CLOSURE_RC (sub-module output is prefixed lowercase so the
+      # step's marker multiset is unchanged -- see _pe_transitive_closure's
+      # docstring). Why it matters here: the decoder imports
+      # libomp140.x86_64.dll, which itself imports VCRUNTIME140/140_1, and a
+      # depth-one gate cannot see a companion shipped with an unsatisfied
+      # dependency of its own.
+      #
+      # The two failure modes this gate exists for, unchanged:
+      #   (a) HEIF silently NOT compiled in -- caught by the import table
+      #       not naming heif.dll;
+      #   (b) HEIF compiled in but the dependency DLLs are not beside the
+      #       decoder -- on a user's machine that is a total load failure
+      #       whose error names only dng_decoder_native.dll.
+      #
+      # DEPENDENCY DEPTH MATTERS (run 33294722901): libde265 is a TRANSITIVE
+      # dependency. dng_decoder_native.dll imports heif.dll only; it is
+      # heif.dll that imports libde265.dll, because no translation unit in
+      # this project references a de265_* symbol. Asserting libde265.dll in
+      # the DECODER's import table is red on a perfectly correct artifact.
+      # Each name is still asserted at the depth where it actually appears.
+      #
+      # The de265 runtime file is libde265.dll while its import library is
+      # de265.lib -- upstream's asymmetry, kept because heif.dll's import
+      # table names libde265.dll and renaming would break loading.
+      #
+      # Output to a file, then match in Python (never `dumpbin | grep -q`:
+      # under pipefail a SUCCESSFUL match kills the producer with SIGPIPE
+      # and the pipeline reports 141).
+      - name: Assert Windows DLL dependency closure
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py import-closure --platform windows
+
+      # G1 fix v3 (round 2, task #6): this leg now statically links a real
+      # committed libjxl dist (see the "Assert JXL was statically linked"
+      # step above), so the runtime CONSEQUENCE this step proves flips from
+      # "unsupported" to "supported" -- the built DLL's own exported
+      # capability surface must genuinely answer JXL as available, not just
+      # that a configure-log line appeared. windows-latest is the DLL's own
+      # target architecture (no cross-compile here), so dlopen from this
+      # same process is valid. Shares the same probe script as the
+      # macOS/Linux legs.
+      #
+      # Round 3 (CI-T1 call-site replacement, contract item CI-T1): the full
+      # end-state vector is now achievable -- W-T3 (encode-capable HEIF
+      # dist) and the JXL-CARRIER dist both landed this round, so this leg's
+      # ledger entry (native/deps/codec_expectations.toml
+      # [windows-x86_64]) is the same all-format vector as macOS/Linux, not
+      # JXL-only. The --expect tokens below are this leg's literal
+      # transcription of the ledger; render_expectations.py --check
+      # mechanically proves they have not drifted from it.
+      # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
+      # G-E) — user-ordered CI build-integrity probe, Windows variant.
+      #
+      # native/tests/orient_capability_probe.cpp's runtime-load approach
+      # (LoadLibraryA/GetProcAddress, calling the Halide-emitted `*_metadata()`
+      # introspection functions) is STRUCTURALLY invalid on this platform: a
+      # Windows DLL exports nothing by default (no default-export the way
+      # macOS/Linux .dylib/.so do), and this project's CMake build attaches no
+      # __declspec(dllexport)/.def file to Halide's AOT-generated
+      # `<kernel>_metadata()` entry points — only the hand-written FFI surface
+      # in native/src/ffi/ gets FFI_EXPORT. GetProcAddress on
+      # dng_render_stage4_metadata therefore fails on every build, fused or
+      # not, making the probe binary unable to answer the question it exists
+      # to ask. Do NOT add exports for these metadata symbols to make the
+      # probe work — that would widen the shipped ABI surface for a test's
+      # convenience, not fix a build defect.
+      #
+      # Same fallback android_build.yml already uses for the identical
+      # cross-arch constraint (there: no emulator to execute the .so on;
+      # here: no dllexport to call into): a static-data literal scan via
+      # `strings`, byte-scan with no PE/COFF awareness needed. The six
+      # orient_a_x/b_x/c_x/a_y/b_y/c_y coefficient names are Halide-generated
+      # const string data inside the Stage4 kernels' metadata structs (see
+      # orient_capability_probe.cpp's header), plus the kernel-name literal
+      # itself. Windows links the Vulkan split Stage4 kernel
+      # (DNG_STAGE4_SPLIT_KERNEL=ON, same as Linux/Android — only macOS/Metal
+      # links dng_render_stage4_scaled_preavg instead), so the checked kernel
+      # literal is dng_render_stage4_split, matching android_build.yml's
+      # LOCKSTEP NOTE convention: this literal set is coupled to
+      # orient_capability_probe.cpp's kRequiredArgs / kChecks by construction;
+      # any future kernel-signature change must update both together.
+      #
+      # llvm-strings ships beside the mandatory clang-cl toolchain (same LLVM
+      # install the "Locate clang-cl" step above already verified is on
+      # PATH); `strings` is not guaranteed present on windows-latest, so
+      # llvm-strings is preferred and `strings` is the fallback only if it is
+      # somehow unavailable.
+      #
+      # Output to a FILE, then grepped — never `strings | grep -q` (G-9/R-16:
+      # pipefail would turn a SIGPIPE on a successful match into a false
+      # failure).
+      - name: Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-orientation --platform windows
+
+      - name: Assert full codec capability vector via probe (G1)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py capability-vector --platform windows --kind codec --expect jpeg:encode=1 --expect jpeg:decode=0 --expect webp:encode=1 --expect webp:decode=1 --expect heic:encode=1 --expect heic:decode=1 --expect avif:encode=1 --expect avif:decode=1 --expect jxl:encode=1 --expect jxl:decode=1 --json-out native/scripts/deps/probe/capability.json
+
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, windows-x86_64
+      # leg. Vector transcribed from native/deps/codec_expectations.toml
+      # [windows-x86_64.capabilities]. ICC=0 on every leg (OQ-N4 option Z,
+      # WI-5): ENABLE_LCMS is forced OFF; nothing sourced lcms2 for Windows
+      # in the first place (zero lcms2 branches outside tests.cmake), so
+      # this leg moves from "silently non-deterministic" to "explicitly OFF"
+      # by the same forced value.
+      - name: Assert build capability vector via probe (S-E2)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py capability-vector --platform windows --kind build --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 --json-out native/scripts/deps/probe/capability_build.json
+
+      # CI-T3 (task #11 spec, native/scripts/tmp/ci-t3-probe-codecs-step-spec.md
+      # section 1): functional capability-bitmask probe against the committed
+      # Windows HEIF dist (native/third_party/heif-dist-windows). Compiles
+      # native/scripts/deps/probe/probe_codecs.c (read-only, F11) with
+      # clang-cl. Two Windows-specific pitfalls (R7):
+      #   (1) clang-cl does not accept -L/-l; pass the .lib as a positional
+      #       input instead.
+      #   (2) MSYS bash rewrites a leading "/X" argument into a Windows path
+      #       (see the AC-W4 step above's note on this same hazard) — this
+      #       command uses only "-I" and "-o", neither of which trips it.
+      # heif.dll/libde265.dll are copied beside the probe .exe because
+      # Windows resolves an imported DLL from the loading module's directory
+      # first, same as dng_decoder_native's own staging above.
+      - name: Compile + run functional capability probe (CI-T3)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE"
+
+      # Migrated to native/scripts/ci/stage.py's stage_windows() (WI-21/WI-22,
+      # pyci python-ization campaign). The two HEIF dependencies and the
+      # OpenMP runtime companion are hard-required (declared shipped files;
+      # a missing one is a hard failure, matching this step's original
+      # unguarded `cp`); the optional import library
+      # (dng_decoder_native.lib) is copied only if present, matching the
+      # original `2>/dev/null || echo ::notice::...` fallback exactly.
+      - name: Stage native artifacts
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py stage --platform windows --artifact-dir artifacts --source-dir native/build-windows
+
+      # WI-14 step 14.2 (S-F1): measure the floor of the file that actually
+      # ships (the decoder DLL, PE subsystem version).
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py min-runtime --platform windows
+
+      # ATOMIC-GROUP GATE. Preserved verbatim in intent from the deleted
+      # "Name the release assets" step, but with two round-6 changes:
+      #
+      #   1. It is no longer tag-gated. The trio assertion is a property of the
+      #      BUILD (dng_decoder_native.dll imports heif.dll and libde265.dll,
+      #      asserted by the verify step above, so shipping any subset is
+      #      unloadable). Running it only on tag pushes meant every ordinary
+      #      push had the packaging bug invisible until release day. It now
+      #      runs on every invocation of this leg.
+      #   2. It counts the DLLs in artifacts/native — the directory that is
+      #      actually uploaded — instead of a separate artifacts/release copy
+      #      that no longer exists. Counting the staged copy while uploading a
+      #      different directory would be an instrument that cannot see the
+      #      failure it exists to catch.
+      #
+      # Red line (contract): the Windows shipped-file group travels as one
+      # atomic group everywhere, so every member ships inside the SINGLE
+      # dng_decoder_native-windows-x86_64 artifact/asset rather than as
+      # independently-fetchable assets.
+      #
+      # WI-4 step 4.6 / WI-15: the member list is no longer hard-coded here
+      # (a hard-coded "trio"/count is exactly the drift WI-15 removes) -- it
+      # is read from native/deps/shipped_files.toml via
+      # native/scripts/read_shipped_files.py, the one declaration WI-4 step
+      # 4.2/4.5 and this step now share. Renamed from "...DLL trio..." to
+      # "...shipped-file group..." because "trio" bakes a count into a name.
+      # Migrated to native/scripts/ci/stage.py's assert_staged_group_windows()
+      # (WI-21/WI-22, pyci python-ization campaign). Symmetric *.dll-only
+      # compare (the optional .lib import library is never part of either
+      # set, matching the shell's `ls *.dll` glob) -- unlike Linux, no
+      # SHARED_LIB_COUNT-style marker and no atomic-group success line; this
+      # step stays silent on a match, same as the shell it replaces. The
+      # EXPECTED_DLL_SET/STAGED_DLL_SET marker values carry the shell's
+      # `sort | tr '\n' ' '` trailing space verbatim (verified byte-for-byte
+      # against the pre-migration shell with `od -c`); the comparison itself
+      # is on plain Python lists, matching this step's original
+      # `echo ... | xargs` whitespace-insensitive `!=`.
+      - name: Assert the Windows shipped-file group is complete (atomic group)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-staged-group --platform windows --artifact-dir artifacts
+
+      # Round 6, Plan B: this artifact name is also the release asset stem —
+      # the publish job in build.yml packages `<artifact name>.tar.gz`
+      # verbatim, so no rename step exists between here and the release. The
+      # former "Name the release assets" + softprops/action-gh-release pair is
+      # deleted; release attachment is the publish job's exclusive
+      # responsibility (.github/CI-CONVENTIONS.md rule 3).
+      #
+      # Consumer note: pre-round-6 releases shipped heif.dll and libde265.dll
+      # as SEPARATE flat assets (heif-windows-x86_64.dll,
+      # libde265-windows-x86_64.dll) because halcyon's build_apps.py verified a
+      # per-asset sha256 and placed each file individually. From v0.1.7 the
+      # trio ships inside this one tar.gz; halcyon's fetch table is updated in
+      # the same round to extract the group as a unit.
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-windows-x86_64
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
+
+      # CI-T3 (task #11 spec, section 1): probe diagnostics travel separately
+      # from the release asset. `if: always()` so a failed probe still
+      # uploads its own diagnosis (R3/R7) instead of leaving CI silent on
+      # why. Zero-hyphen name keeps it outside the publish job's
+      # `<component>-<platform>-<arch>` canonical-asset filter (C4/C6).
+      - name: Upload probe_results_windows_x86_64
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe_results_windows_x86_64
+          path: |
+            native/scripts/deps/probe/probe_codecs.txt
+            native/scripts/deps/probe/capability.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7

@@ -1,0 +1,911 @@
+name: macOS Native Build
+
+# Builds dng_decoder_native for both macOS CPU architectures. CI only verifies
+# "it builds" (produces a .dylib of the expected architecture) — decode-correctness
+# / PSNR gating is out of scope here because the sample DNGs are gitignored and
+# not present in the repository (see docs/logs/2026-08-26/Task_cicd_bootstrap.md).
+#
+# Consequence for user decision D3 (skip a test cleanly when its input file is
+# absent on the runner, rather than failing the job): this workflow contains no
+# step that consumes a test image, sample or test directory, so there is nothing
+# to guard here. The steps below are build steps and artifact checks, and they
+# are all meant to fail hard. Any future step added here that reads
+# image_samples/ (or any other gitignored input) must test for the input first
+# and `echo "::notice::..."` + skip when it is missing.
+#
+# REUSABLE WORKFLOW (round 6, Plan B). No triggers of its own: invoked
+# exclusively by .github/workflows/build.yml, which owns the push/PR/tag/
+# dispatch trigger set for every platform leg. See linux_build.yml's header
+# for why re-adding a standalone trigger here is a defect. The 2026-08-26
+# trigger note that used to live here (push.paths deliberately not applied to
+# tag pushes, so a tag could never silently skip the release attach) now
+# applies to build.yml's push trigger instead, and is restated there.
+on:
+  workflow_call:
+
+# `contents: write` was dropped in round 6 together with the release-attach
+# step it existed for. This workflow now only reads the repo and uploads
+# artifacts; the publish job in build.yml holds the write scope.
+permissions:
+  contents: read
+
+# Concurrency is inherited from the calling workflow; see linux_build.yml.
+
+jobs:
+  build:
+    # Display name only. Rendered by GitHub as "<caller job> / <this job>",
+    # i.e. "macOS / arm64" — the caller (build.yml) already supplies the
+    # platform word, so repeating it here produced "macOS / macOS ...".
+    # The legacy `apple-silicon` / `intel` matrix labels were retired in
+    # round 6: they were a third vocabulary for bytes the release already
+    # named arm64 / x86_64, and a reader had to know that "intel" and
+    # "x86_64" meant the same leg.
+    name: ${{ matrix.arch_tag }}
+    # Intel leg, 2026-08-28: GitHub retired the dedicated Intel macOS runner
+    # image. A job pinned to it is never scheduled — it simply sits in
+    # `queued` indefinitely (observed 8h+ with zero progress), which is a hang,
+    # not a failure, so nothing times out and nothing reports. Per user decision
+    # D1 the Intel leg is KEPT and is now produced by CROSS-COMPILING x86_64 on
+    # an Apple-silicon runner. Both legs therefore run on macos-14.
+    #
+    # The cross-compile reuses the two-stage machinery this project already has
+    # for Android (DNG_HOST_GENERATORS_ONLY -> DNG_CROSS_BUILD), rather than
+    # setting CMAKE_OSX_ARCHITECTURES=x86_64 over the whole tree in one pass:
+    # the Halide generators are build-time tools that must EXECUTE on the runner,
+    # so they have to stay arm64 (host) while the AOT code they emit targets
+    # x86_64. Stage 1 builds arm64 generators and runs them with
+    # DNG_AOT_TARGET_OVERRIDE set to the Halide Intel-macOS target triple (see
+    # X86_AOT_TARGET below); stage 2 compiles the actual
+    # library for x86_64 against those prebuilt AOT artifacts. A single-pass
+    # x86_64 configure would produce x86_64 generator binaries and then depend on
+    # Rosetta being present to run them.
+    #
+    # Two dependency-architecture blockers had to be resolved for stage 2:
+    #   * libjpeg-turbo — native/cmake/third_party.cmake probes
+    #     `brew --prefix jpeg-turbo`, and Homebrew installs the HOST arch only.
+    #     That file now verifies the probed libjpeg.a with `lipo -archs` and
+    #     falls back to building the vendored libjpeg-turbo from source for the
+    #     target arch when the archive does not contain it.
+    #   * libheif/libde265 — native/scripts/fetch_heif_deps.sh used to hard-pin
+    #     -DCMAKE_OSX_ARCHITECTURES=arm64. It now honours DNG_HEIF_ARCH and
+    #     records the arch in its version stamp, so an arm64 dist is not
+    #     mistaken for an x86_64 one.
+    # The remaining vendored dependencies of the x86_64 link were checked and
+    # need no arch handling: LibRaw, RawSpeed3 and the Adobe DNG SDK are built
+    # from source in-tree and follow CMAKE_OSX_ARCHITECTURES; zlib comes from
+    # the macOS SDK, which is universal; the Halide runtime is an AOT artifact
+    # emitted by stage 1 for the x86_64 target; and libomp is not involved at
+    # all because DNG_CROSS_BUILD turns the desktop OpenMP path off
+    # (native/cmake/tests.cmake).
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `arch_tag` is now the ONLY identifier for a leg: it drives both the
+          # job display name and the artifact name, so the two can no longer
+          # disagree. The former `label:` key (apple-silicon / intel) was
+          # deleted rather than left unused — a dead matrix key is an invitation
+          # to reintroduce the second vocabulary.
+          - runner: macos-14
+            arch_tag: arm64
+            cross: "false"
+            # D5: the overlay triplet whose VCPKG_OSX_ARCHITECTURES matches this
+            # leg's output. Getting this wrong yields a wrong-architecture
+            # libwebp.a and an architecture-mismatch link failure, not a silent
+            # miscompile.
+            vcpkg_triplet: arm64-osx-heif
+            # Directory holding the produced dylib, and the directory to cache.
+            dylib_dir: native/build
+            build_cache_path: native/build
+            # fetch_heif_deps.sh writes the HOST-arch dist here and a
+            # cross-arch dist to heif-dist-<arch>; heif.cmake searches both.
+            heif_dist_dir: native/third_party/heif-dist
+          - runner: macos-14
+            arch_tag: x86_64
+            cross: "true"
+            vcpkg_triplet: x64-osx-heif
+            dylib_dir: native/build-macos-x86_64/target
+            build_cache_path: native/build-macos-x86_64
+            heif_dist_dir: native/third_party/heif-dist-x86_64
+    env:
+      REPO_ROOT: ${{ github.workspace }}
+      NATIVE_DIR: ${{ github.workspace }}/native
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      DYLIB: ${{ github.workspace }}/${{ matrix.dylib_dir }}/libdng_decoder_native.dylib
+      # Halide AOT target for the cross leg. Kept here (not inline) so the
+      # string appears exactly once.
+      #
+      # DELIBERATE EXCEPTION to the "never write x86-64 with a hyphen" naming
+      # rule (.github/CI-CONVENTIONS.md rule 2): this is not one of OUR names.
+      # It is Halide's target-triple vocabulary, parsed by Halide itself, and
+      # `x86_64-osx-...` is not a triple Halide accepts. The rule governs
+      # artifact and asset names we choose; upstream tool vocabularies are
+      # quoted as-is. Rewriting this value to satisfy a grep would break the
+      # cross build, and obfuscating it to dodge the grep would be worse.
+      X86_AOT_TARGET: x86-64-osx-metal-no_asserts-no_bounds_query
+      HOST_GEN_DIR: ${{ github.workspace }}/native/build-macos-x86_64/host-generators
+      # VCPKG_BASELINE is NOT set here (ruling 5, 2026-09-01): a hardcoded
+      # literal here would be a second authority alongside
+      # native/vcpkg/vcpkg.json's "builtin-baseline", free to drift out of
+      # sync with it. It is derived at runtime instead by the "Derive vcpkg
+      # baseline from vcpkg.json" step below, which exports it via
+      # $GITHUB_ENV before any step that reads $VCPKG_BASELINE runs.
+      VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      # The vcpkg PATHS deliberately do NOT live here. The `runner` context is
+      # not available in a job-level `env:` block — using it there is a workflow
+      # STARTUP failure (the run reports its name as the file path and executes
+      # zero jobs), which is how the first D5 push failed. `matrix` IS available
+      # here, which is why VCPKG_TRIPLET above is fine; RUNNER_TEMP is available
+      # as an ordinary environment variable inside `run:` steps, so the paths
+      # are composed there.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # D6 layer-1 (below) resolves the deleted legacy script from the
+          # r5-pre-d9-legacy-scripts tag via `git show <tag>:<path>`.
+          # fetch-tags: true alone (with the default depth-1) fetches the
+          # tag REF but not the tagged commit's tree when that commit is
+          # outside the shallow history window (confirmed by CI failure:
+          # `git show <tag>:<path>` -> rc=128 not found). fetch-depth: 0
+          # (full history) is required so the tagged commit's tree is
+          # actually present. Do not remove this key or shrink the depth.
+          fetch-depth: 0
+
+      # Ruling 5 (2026-09-01): native/vcpkg/vcpkg.json's "builtin-baseline"
+      # is the ONLY authority for this SHA; every workflow reads it here
+      # instead of hardcoding its own copy that can drift.
+      # WI-24a (push 8): collapsed into ci.py's provision.vcpkg_baseline(),
+      # shared with linux_build.yml's identical shape. The vcpkg.json path
+      # is hardcoded in ci.py's own dispatch (not a flag here), matching
+      # this leg's own hardcoded "native/vcpkg/vcpkg.json" literal.
+      - name: Derive vcpkg baseline from vcpkg.json
+        run: python3 native/scripts/ci.py vcpkg-baseline --github-env "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # D6 layer 1 (round-5 task #1, snippet by impl-d6-opus,
+      # docs/logs/2026-08-31/r5-d6-ci-snippet.md): pure argv-rendering
+      # equivalence between the carrier renderer, the golden fixtures and the
+      # legacy shell scripts. No dist and no build required, so it runs here
+      # before any of the expensive fetch/build steps below and catches a
+      # renderer/manifest regression cheaply. The `echo` on its own line is
+      # deliberate self-captured-RC discipline (ledger 2026-08-23) — do not
+      # rewrite as a pipeline or add `| tee`.
+      - name: D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)
+        run: |
+          set -u
+          set +e
+          python3 native/tests/run_dist_equivalence.py \
+              --layers l1 \
+              --report "${GITHUB_WORKSPACE}/d6-layer1-report-${{ matrix.arch_tag }}.md"
+          D6_LAYER1_RC=$?
+          echo "D6_LAYER1_RC=${D6_LAYER1_RC}"
+          exit "${D6_LAYER1_RC}"
+
+      # nasm/yasm are required by fetch_heif_deps.sh's aom build: aom's x86_64
+      # codepath is hand-written assembly (unlike the arm64 codepath, which is
+      # NEON intrinsics compiled by the C compiler), and its cmake configure
+      # hard-fails ("Unable to find assembler") without an assembler on PATH.
+      # Confirmed via the macos-14 runner-images manifest (actions/runner-images
+      # images/macos/macos-14-Readme.md, Utilities section) that neither nasm nor
+      # yasm is preinstalled.
+      #
+      # yasm is installed (not just nasm): aom's build/cmake/aom_configure.cmake
+      # `find_program(CMAKE_ASM_NASM_COMPILER yasm ...)` looks for yasm FIRST and
+      # only falls back to nasm when yasm is absent or ENABLE_NASM is set (which
+      # this project does not set). When a real nasm IS selected, aom additionally
+      # runs test_nasm() (build/cmake/aom_optimization.cmake), which greps `nasm
+      # -hf` output for the literal substring "-Ox" to confirm multipass
+      # optimization support; Homebrew's current nasm (3.02) no longer prints
+      # "-Ox" under `-hf` (verified locally: `nasm -hf` lists only `-f` object
+      # formats, dropping the "-Ox" line older nasm releases used to include),
+      # so aom's version-probe now hard-fails configure even though nasm 3.02 is
+      # fully capable. yasm has no such probe and is unaffected. nasm is kept
+      # installed alongside yasm as a harmless secondary assembler (aom will not
+      # select it while yasm is present) and because other vendored deps in this
+      # tree may still expect it on PATH; removing it is not necessary to fix
+      # this failure.
+      # lcms2 is deliberately NOT installed here (OQ-N4 option Z, WI-5,
+      # 2026-09-12): ENABLE_LCMS is forced OFF in native/cmake/tests.cmake
+      # on every platform -- lcms2 is dead code, reachable only through
+      # LibRaw's dcraw_process(), which ceyx never calls. No lcms2
+      # dependency, vendored tree, or shipped dylib remains.
+      - name: Install build prerequisites (Homebrew)
+        run: |
+          brew update
+          brew install cmake ninja jpeg-turbo nasm yasm
+
+      - name: Cache vendored Halide v21 distribution
+        id: cache-halide
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/halide
+          key: halide-v21-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/deps/fetch_halide.py') }}
+
+      - name: Fetch vendored Halide v21 distribution
+        run: python3 native/scripts/build_deps.py fetch halide
+
+      # Configure fails without this (cmake/tests.cmake requires LibRaw
+      # unless DNG_ENABLE_GENERIC_RAW=OFF, which we will not disable just to
+      # skip a fetch step — see fetch_libraw_dist.sh for what it vendors).
+      # Cached like the Halide distribution: the script is idempotent (each
+      # component checks a .vendor-rev sidecar and skips its clone when the
+      # pinned revision already matches), so restoring third_party/libraw and
+      # third_party/libraw-cmake from cache lets the script no-op instead of
+      # doing three separate network clones + patch-apply passes per run.
+      # ~7.5MB is small, but network clones are the part worth avoiding
+      # (latency/flakiness), not the bytes. Key includes the patch files
+      # because a patch-set change requires re-applying, not just re-cloning.
+      - name: Cache vendored LibRaw distribution
+        id: cache-libraw
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/native/third_party/libraw
+            ${{ github.workspace }}/native/third_party/libraw-cmake
+          key: libraw-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/deps/fetch_libraw.py', 'native/patches/rawspeed3/*.patch', 'native/patches/libraw/*.patch') }}
+
+      - name: Fetch vendored LibRaw distribution
+        run: python3 native/scripts/build_deps.py fetch libraw
+
+      # G1 fix (round-5 gap closure, task #9): cmake/jxl.cmake defaults
+      # CEYX_ENABLE_JXL=ON but SOFT-degrades to CEYX_JXL_ENABLED=0 with only a
+      # message(WARNING) when native/third_party/libjxl-dist is absent — a
+      # configure that silently ships no JPEG XL codec was indistinguishable
+      # from one that ships it, in every green run before this fix. Fetch the
+      # real dist (native/scripts/build_deps.py fetch libjxl builds it from source;
+      # same script the plan intends, unlike the HEIF/libwebp dists this one
+      # has no committed/vcpkg alternative) so this leg can prove ENABLED=1
+      # after the product build below, not just attempt it.
+      #
+      # CEYX_JXL_ARCH mirrors DNG_HEIF_ARCH/fetch_heif_deps.sh's arch-suffixed
+      # dist convention (native/cmake/jxl.cmake's WIN32/APPLE hint search):
+      # matrix.arch_tag equals the host arch on the native leg (unsuffixed
+      # dist) and differs on the cross leg (arch-suffixed dist), exactly what
+      # jxl.cmake's CMAKE_OSX_ARCHITECTURES search expects.
+      - name: Cache vendored libjxl distribution
+        id: cache-jxl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist${{ matrix.cross == 'true' && format('-{0}', matrix.arch_tag) || '' }}
+          key: jxl-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/deps/fetch_libjxl.py') }}
+
+      - name: Fetch vendored libjxl distribution
+        env:
+          CEYX_JXL_ARCH: ${{ matrix.arch_tag }}
+        run: python3 native/scripts/build_deps.py fetch libjxl
+
+      # D5 (2026-08-31): libwebp is supplied by vcpkg, pinned to exactly 1.6.0 in
+      # native/vcpkg/vcpkg.json. cmake/encode.cmake resolves it with
+      # find_package(WebP CONFIG) and HARD-FAILS the configure when it is
+      # absent, so this step is load-bearing, not best-effort.
+      #
+      # D5 leg 2 (2026-08-31): libde265 now comes from here too, via the
+      # manifest's `de265` feature, and fetch_heif_deps.sh COPIES it out of this
+      # prefix instead of building it. That is why this block runs BEFORE the
+      # HEIF dist step below rather than after it.
+      #
+      # --x-no-default-features --x-feature=de265 installs the core dependency
+      # set (libwebp) plus libde265, and nothing else. The full `heif` feature is
+      # NOT wanted here: this leg still builds libheif itself from source with
+      # the kvazaar HEVC encoder, which no registry libheif offers (Spec §3.2),
+      # so installing it from vcpkg would build a second unused copy and pay for
+      # aom+kvazaar twice.
+      #
+      # Bootstrap (clone, checkout the pinned baseline, bootstrap-vcpkg.sh)
+      # rather than using a marketplace action, matching this repo's other
+      # vcpkg-consuming workflows (e.g. linux_build.yml).
+      # WI-24a (push 8): collapsed into ci.py's provision.vcpkg_bootstrap(),
+      # shared with linux_build.yml's IDENTICAL shell body (no per-platform
+      # branch in the module).
+      - name: Bootstrap vcpkg at the pinned baseline (D5)
+        run: python3 native/scripts/ci.py vcpkg-bootstrap --baseline "$VCPKG_BASELINE" --runner-temp "$RUNNER_TEMP"
+
+      # WI-24a (push 8): collapsed into ci.py's provision.vcpkg_install(),
+      # shared with linux_build.yml -- IDENTICAL shape, differing only in
+      # the caller-supplied --triplet/--feature (workflow matrix values,
+      # R13, not a platform branch). --feature is repeatable and matches
+      # this leg's two --x-feature= flags verbatim (de265, aom -- see the
+      # comment above this step's original body for why NOT --feature=heif).
+      # The module already emits VCPKG_INSTALL_RC= via report.marker(),
+      # matching the old echo line's exact name (no restoration needed,
+      # unlike WI-20's LCMS2 step).
+      - name: vcpkg install libwebp + libde265 + aom (${{ matrix.vcpkg_triplet }})
+        run: python3 native/scripts/ci.py vcpkg-install --triplet "$VCPKG_TRIPLET" --workspace "$GITHUB_WORKSPACE" --runner-temp "$RUNNER_TEMP" --feature de265 --feature aom
+
+      # Prove the artefacts before the product build consumes them. libwebp: a
+      # STATIC archive of the RIGHT architecture — the linkage half is the
+      # assertion that was missing when the triplets silently produced a dylib
+      # here; the architecture half is what the cross leg gets wrong if
+      # vcpkg_triplet and CMAKE_OSX_ARCHITECTURES disagree. libde265: a SHARED
+      # library (A5.2 — LGPL-3 §4(d)(1); the default triplets are static, so this
+      # assertion is the only thing between a triplet typo and a compliance
+      # breach) of the same architecture.
+      # WI-24a (push 8): collapsed into ci.py's provision.assert_vcpkg_artefacts()
+      # -> _assert_vcpkg_artefacts_macos() (74e1bb8b, after impl-14 caught the
+      # module's earlier version silently dropping this shell's aom arch
+      # check -- see that commit and provision.py's own docstring). The
+      # migrated step exercises the RESTORED aom check: three libraries,
+      # three properties (libwebp static, libde265 SHARED per LGPL-3
+      # 4(d)(1) [A5.2], aom static), all three arch-checked against
+      # --arch-tag, none symmetrised. No markers in the pre-migration shell
+      # (verified: zero echo lines here match markerdiff's bare NAME=value
+      # shape, only "FAIL: ..."/"libNNN.a archs: ..." diagnostic text), so
+      # none to restore.
+      - name: Assert the vcpkg artefacts (libwebp static, libde265 shared)
+        run: python3 native/scripts/ci.py assert-vcpkg-artefacts --platform macos --triplet "$VCPKG_TRIPLET" --runner-temp "$RUNNER_TEMP" --arch-tag "${{ matrix.arch_tag }}"
+
+      # macOS is the one platform that genuinely ships the HEIC decode route, so
+      # unlike the Linux/Android workflows (which configure with
+      # -DDNG_ENABLE_HEIF=OFF) it FETCHES the dist rather than disabling it.
+      # Without this, configure hard-fails at native/cmake/heif.cmake:31 with
+      # "HEIF decode is enabled but the vendored dist is missing".
+      #
+      # Cached in the same shape as Halide/LibRaw above, and for a much stronger
+      # reason: the carrier does not download a prebuilt dist, it BUILDS libheif
+      # (and kvazaar) from source, which is minutes of runner time per job.
+      #
+      # R4 (2026-08-31): the dist is now produced by the Python carrier
+      # (native/scripts/build_deps.py, the port of fetch_heif_deps.sh), so the
+      # cache key hashes the carrier and the MANIFEST it reads its versions,
+      # hashes and cmake options from — not the retired shell script. Missing
+      # native/deps/manifest.toml from this key would be the exact defect the
+      # libde265 clause below already guards against: a version bump that
+      # restores a stale dist from cache and reports success. The vcpkg manifest
+      # + libde265 overlay port stay in the key because since D5 leg 2 the
+      # dist's libde265 comes from that port. arch_tag is part of the key
+      # because the two legs need different-architecture dylibs.
+      - name: Cache vendored HEIF (libheif + libde265) distribution
+        id: cache-heif
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/${{ matrix.heif_dist_dir }}
+          key: heif-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/scripts/build_deps.py', 'native/scripts/deps/*.py', 'native/deps/manifest.toml', 'native/deps/arch_map.toml', 'native/vcpkg/vcpkg.json', 'native/vcpkg/ports/libde265/**') }}
+
+      # CEYX_VCPKG_PREFIX is mandatory here since D5 leg 2: the libde265 stage
+      # copies the dylib out of it and hard-fails when it is unset, rather than
+      # falling back to a source build (a silent fallback would hide exactly the
+      # wiring this change exists to prove).
+      #
+      # --arch is passed EXPLICITLY rather than through the old DNG_HEIF_ARCH
+      # environment variable, and --dist names the same directory the cache
+      # step above and the assertions below use. The cross leg's dist path is a
+      # matrix value, so the carrier is never left to infer "host arch or not"
+      # from a runner it is cross-compiling on.
+      - name: Fetch vendored HEIF distribution (Python carrier)
+        run: |
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_deps.py build heif-stack \
+              --platform macos \
+              --arch "${{ matrix.arch_tag }}" \
+              --dist "$GITHUB_WORKSPACE/${{ matrix.heif_dist_dir }}"
+
+      # THE load-bearing evidence for D5 leg 2. A green build proves nothing
+      # here: libheif links fine against a dylib whose recorded dependency is an
+      # absolute path into $RUNNER_TEMP, and the failure only appears on a
+      # machine that has no such directory — i.e. never on CI. So assert the
+      # LOAD COMMANDS of the shipped artefacts, positively (@rpath present) and
+      # negatively (no build-machine absolute path).
+      #
+      # Skipped when the dist came from cache: the cache key covers the fetch
+      # script, the manifest and the overlay port, so a hit means these exact
+      # bytes were asserted on the run that produced them — but a hit ALSO means
+      # the copy path did not execute, so saying so out loud beats a PASS that
+      # silently means "not checked" (lesson 2026-08-25).
+      - name: Assert libde265's linkage in the produced dist (A5.2/A5.3)
+        run: |
+          set -e
+          DIST="$GITHUB_WORKSPACE/${{ matrix.heif_dist_dir }}"
+          echo "cache-hit=${{ steps.cache-heif.outputs.cache-hit }}"
+          ls -la "$DIST/lib"
+          test -f "$DIST/lib/libde265.0.dylib" \
+            || { echo "FAIL: $DIST/lib/libde265.0.dylib absent — heif.cmake stages exactly this name next to dng_decoder_native"; exit 1; }
+          test -e "$DIST/lib/libde265.dylib" \
+            || { echo "FAIL: $DIST/lib/libde265.dylib absent — fetch_heif_deps.sh points libheif at the UNVERSIONED name"; exit 1; }
+          id_out=$(otool -D "$DIST/lib/libde265.0.dylib")
+          echo "$id_out"
+          grep -q '^@rpath/libde265.0.dylib$' <<< "$id_out" \
+            || { echo "FAIL: libde265's install name is not @rpath/libde265.0.dylib; libheif would record whatever this says and resolve it on the BUILD machine only"; exit 1; }
+          heif_deps=$(otool -L "$DIST/lib/libheif.1.dylib" | tail -n +2)
+          echo "$heif_deps"
+          grep -q '@rpath/libde265' <<< "$heif_deps" \
+            || { echo "FAIL: libheif does not reference libde265 via @rpath"; exit 1; }
+          if grep -q "$RUNNER_TEMP" <<< "$heif_deps"; then
+            echo "FAIL: libheif carries a load command into the build machine's vcpkg prefix ($RUNNER_TEMP) — this ships a dylib that loads nowhere else"
+            exit 1
+          fi
+
+      # D4/R-7 (round-5 contract AC4): native/scripts/deps/probe/probe_codecs.c
+      # has never been compiled or run anywhere (Spec §5.6). It is run here,
+      # on the native (non-cross) arm64 leg only, against the dist this same
+      # job just fetched two steps above -- the dist is NOT committed to git
+      # (native/third_party/heif-dist/* is gitignored except PROVENANCE.md),
+      # so the probe must consume the freshly-built dist in this job rather
+      # than assuming a checked-in one. The dist carries kvazaar (HEVC
+      # encoder) + aom (AV1 encoder/decoder) + libde265 (HEVC decoder) per
+      # Spec §3.2, so all four capability bits are expected clear (RC=0).
+      #
+      # Restricted to matrix.cross == 'false': the cross leg's dist
+      # (heif-dist-x86_64) is built for x86_64 and cannot be exec'd on this
+      # arm64 runner without Rosetta, which this workflow does not provision.
+      # CI-T3 (task #11 spec, native/scripts/tmp/ci-t3-probe-codecs-step-spec.md
+      # section 2): stdout now goes to a file (previously printed straight to
+      # the step log only) so it can travel as an artifact alongside the
+      # Windows leg's equivalent.
+      - name: Compile + run functional capability probe (D4/R-7)
+        if: matrix.cross == 'false'
+        run: python3 native/scripts/ci.py codec-probe --platform macos --workspace "$GITHUB_WORKSPACE" --dist-dir "${{ matrix.heif_dist_dir }}"
+
+      - name: Cache CMake build directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/${{ matrix.build_cache_path }}
+          key: native-build-${{ runner.os }}-${{ matrix.arch_tag }}-${{ hashFiles('native/CMakeLists.txt') }}
+          restore-keys: |
+            native-build-${{ runner.os }}-${{ matrix.arch_tag }}-
+
+      # CI-T11 (MACOS-ASSET, follow-up, 2026-09-01): `shell: bash` is required
+      # here (not the default keyless `bash -e {0}`, which has NO pipefail on
+      # macOS runners — see the cross-stage2 step's comment below for the
+      # same reasoning) so that piping through `tee` cannot mask a nonzero
+      # exit from the watchdog itself.
+      - name: Build dng_decoder_native via watchdog (native arm64)
+        if: matrix.cross == 'false'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          # CEYX_VCPKG_PREFIX, not --cmake-arg: the watchdog's own resolver runs
+          # before every non-Android configure, is mandatory, and aborts when it
+          # locates no prefix — even if one was passed as an explicit cmake arg
+          # (run 33325970570). The env var is the supported channel and gets the
+          # watchdog's prefix validation for free.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_native_watchdog.py \
+            --target dng_decoder_native \
+            --idle-timeout-sec 180 2>&1 | tee "${{ github.workspace }}/native_build_native_arm64.log"
+
+          # WI-5 (OQ-N4 option Z, 2026-09-12): lcms2 is dead code on every
+          # platform and ENABLE_LCMS is now forced OFF, so the former
+          # "LCMS support ... YES" assertion here would always fail post-
+          # removal by design -- it asserted the wrong thing. The
+          # replacement instrument asserts the intended NEGATIVE: the
+          # configure log must carry the disabled-status line
+          # (native/cmake/tests.cmake's forced-OFF block), proving the
+          # removal actually took effect on this runner rather than
+          # ENABLE_LCMS silently staying ON.
+          #
+          # WI-20 (push 7): collapsed into ci.py's generic
+          # assert-configure-log (native/scripts/ci/configure_log.py,
+          # WI-19a), the same module android_build.yml's HEIF/JXL
+          # configure-log assertions use. Pattern is a Python regex, not a
+          # grep BRE: `(` and `)` are metacharacters in re and must be
+          # escaped to match literally (configure_log.py's own docstring
+          # correction). Reads the saved log file directly, never through a
+          # pipe, so there is nothing for a zero-match to SIGPIPE-kill.
+          #
+          # AC-2 remediation (push 8): the original `echo
+          # "LCMS_CONFIGURE_RC=${LCMS_RC}"` marker was lost when this step
+          # first collapsed to assert-configure-log -- configure_log.py's
+          # own "ASSERT <label> RC=<rc>" line does not match markerdiff's
+          # `[A-Z][A-Z0-9_]*=` marker shape. A shell-side rc-capture
+          # wrapper stood in as a temporary stopgap; now that
+          # assert_configure_log() takes a `--marker NAME` argument
+          # (65caa3ac) and emits it unconditionally on both the match and
+          # mismatch paths via report.marker() (a conforming NAME=value,
+          # order: ASSERT line, error (if any), marker), the stopgap is
+          # gone and this is a clean one-line body again.
+          python3 native/scripts/ci.py assert-configure-log --log-path "${{ github.workspace }}/native_build_native_arm64.log" --pattern "\[ceyx\] LCMS2: disabled \(OQ-N4 option Z\)" --label "LCMS2 disabled" --error "configure log does not show the expected '[ceyx] LCMS2: disabled (OQ-N4 option Z)' line — ENABLE_LCMS may not be forced OFF on this runner, or the configure step was silently skipped. See native_build_native_arm64.log." --marker LCMS_CONFIGURE_RC
+
+      # Cross leg, stage 1: arm64 host generators, emitting x86_64 AOT code.
+      - name: Build host Halide generators + x86_64 AOT (cross stage 1)
+        if: matrix.cross == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Needed even though this stage sets DNG_HOST_GENERATORS_ONLY (which
+          # makes cmake/encode.cmake a no-op): the watchdog's vcpkg resolver
+          # runs before EVERY non-Android configure regardless of what the
+          # configure will go on to do, so a stage that does not use libwebp
+          # still cannot start without a locatable prefix.
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_native_watchdog.py \
+            --build-dir "${HOST_GEN_DIR}" \
+            --target dng_all_aot \
+            --idle-timeout-sec 600 \
+            --cmake-arg=-DDNG_HOST_GENERATORS_ONLY=ON \
+            "--cmake-arg=-DDNG_AOT_TARGET_OVERRIDE=${X86_AOT_TARGET}"
+          echo "--- AOT artifacts:"
+          ls -la "${HOST_GEN_DIR}/halide_generated"
+          echo "--- architecture of an emitted AOT archive (expect x86_64):"
+          lipo -archs "${HOST_GEN_DIR}/halide_generated/dng_render_stage4.a"
+
+      # Cross leg, stage 2: compile the shipped library for x86_64 against the
+      # stage-1 AOT artifacts.
+      - name: Cross-compile dng_decoder_native for x86_64 (cross stage 2)
+        if: matrix.cross == 'true'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          # round-5-review BLOCKER fix: the explicit `shell: bash` key above is
+          # what supplies pipefail — GitHub's default for a keyless `run:` on
+          # macOS runners is `bash -e {0}` (NO pipefail), which silently makes
+          # `rc=$?` below capture tee's exit code (always 0), not the build's.
+          # Removing this key re-inverts the gate; do not remove it.
+          #
+          # Output is captured to a file (in addition to the live log) so the
+          # G1 cross-leg assertion below can grep the configure line without
+          # depending on the watchdog itself persisting one — with `shell: bash`
+          # in effect, pipefail keeps $? as the watchdog's own exit code (last
+          # non-zero wins).
+          set +e
+          export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
+          python3 native/scripts/build_native_watchdog.py \
+            --build-dir "${{ github.workspace }}/${{ matrix.dylib_dir }}" \
+            --target dng_decoder_native \
+            --idle-timeout-sec 600 \
+            --cmake-arg=-DDNG_CROSS_BUILD=ON \
+            "--cmake-arg=-DDNG_PREBUILT_AOT_DIR=${HOST_GEN_DIR}/halide_generated" \
+            --cmake-arg=-DCMAKE_OSX_ARCHITECTURES=x86_64 2>&1 | tee cross_stage2_build.log
+          rc=$?
+          set -e
+          echo "CROSS_STAGE2_RC=${rc}"
+          exit "${rc}"
+
+      # AC: the run log must show the cross-built dylib reporting x86_64. `lipo -archs`
+      # output is both printed and asserted — printing alone would let a wrong
+      # architecture pass unnoticed, and asserting alone would leave no evidence
+      # in the log.
+      # WI-35 (push 8b, Task #15): collapsed into ci.py verify-artifact
+      # --platform macos, calling verify_artifact.verify_artifact()'s macOS
+      # branch (verify_artifact.py:57-124, written FROM this exact step --
+      # its docstring cites macos_build.yml:581-593). Byte-verified before
+      # migrating (mechanical, not visual): both "Expected dylib not found
+      # at ..." and "Expected architecture '...' but the dylib reports
+      # '...'" reproduced exactly via a real missing-path run and a real
+      # wrong-arch dylib compiled locally; neither error line has a
+      # stderr redirect on either side, matching the shell's own convention
+      # here. No markers in the pre-migration shell (no bare NAME=value
+      # echo, only file/lipo/otool diagnostic output) -- none to restore.
+      - name: Verify dylib was produced and has the expected architecture
+        run: python3 native/scripts/ci.py verify-artifact --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB"
+
+      # Task 11 (docs/logs/2026-09-07/gpu_orient_productionization_plan.md,
+      # G-E in that plan's gate ledger) — user-ordered CI build-integrity
+      # probe: does the just-built dylib export the fused-orientation Halide
+      # kernels? Not a functional test (G-14): the probe never decodes a
+      # file or dispatches over real pixels, it only inspects the compiled
+      # kernel's Halide-emitted argument metadata (see
+      # native/tests/orient_capability_probe.cpp header for the full
+      # rationale, including why symbol NAME presence alone cannot detect a
+      # stale pre-fusion kernel — the generator names never changed).
+      #
+      # Native leg only (matrix.cross == 'false'): dlopen requires a
+      # same-architecture host process, same constraint the D4/R-7 probe
+      # above already applies — an arm64 host cannot dlopen the cross leg's
+      # x86_64 dylib.
+      #
+      # RC is read directly from the probe's own process exit code, never
+      # through a pipe — the G-9/R-16 `nm | grep -q` pipefail-inversion trap
+      # (a PRESENT symbol reads as failure because grep exits before the
+      # producer finishes writing, SIGPIPE-killing it) cannot occur here
+      # because nothing pipes the probe's stdout into grep for the pass/fail
+      # decision; the probe's own exit code is `$?`, captured immediately.
+      - name: Build + run orientation capability probe (Task 11 / G-E)
+        if: matrix.cross == 'false'
+        run: python3 native/scripts/ci.py assert-orientation --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB"
+
+      # G1 fix v2 (task #9, per docs/logs/2026-08-31/r5-jxl-diagnosis.md):
+      # the original nm-grep assertion tested an UNSATISFIABLE claim.
+      # JxlEncoderInitBasicInfo is compiled into the vendored static libjxl.a
+      # with hidden visibility (JXL_STATIC_DEFINE -> JXL_EXPORT expands to
+      # nothing in jxl_export.h), so it can never appear in ANY export table
+      # regardless of whether the codec is correctly linked — confirmed via
+      # nm -m on the archive (`private external`) vs. the linked dylib
+      # (`non-external`), a disabled-build control (identical 0-hit result),
+      # and the +5.2MB size delta / 548-symbol full-symtab count proving the
+      # code IS present. The correct instrument is OUR OWN exported FFI
+      # capability surface, called end-to-end: a green link with
+      # CEYX_ENABLE_JXL=1 entails libjxl.a was linked (a mismatch would fail
+      # to link at all, not silently answer wrong), so calling
+      # ceyx_still_decode_supports/ceyx_encode_supports and checking the
+      # returned value is strictly stronger than a symbol-presence check.
+      #
+      # Native (non-cross) leg only: dlopen requires a same-architecture,
+      # same-OS process, exactly the same constraint the D4/R-7 probe above
+      # already applies (matrix.cross == 'false') — an arm64 host process
+      # cannot dlopen the Intel leg's x86_64 dylib.
+      #
+      # Round 3 (CI-T1 call-site replacement): generalised from the
+      # JXL-only single-format probe (now deleted) to the full 5-format
+      # x 2-direction vector via codec_capability_probe.py. The --expect
+      # tokens below are the macos-arm64 leg's literal transcription of
+      # native/deps/codec_expectations.toml (see that file's header for the
+      # schema); render_expectations.py --check mechanically proves they
+      # have not drifted from the ledger. This step is the ledger's
+      # `step_anchor = "native leg"` anchor for macos-arm64 — do not rename
+      # without updating codec_expectations.toml.
+      - name: Assert full codec capability vector via probe (G1, native leg)
+        if: matrix.cross == 'false'
+        run: python3 native/scripts/ci.py capability-vector --platform macos --kind codec --dylib-path "$DYLIB" --expect jpeg:encode=1 --expect jpeg:decode=0 --expect webp:encode=1 --expect webp:decode=1 --expect heic:encode=1 --expect heic:decode=1 --expect avif:encode=1 --expect avif:decode=1 --expect jxl:encode=1 --expect jxl:decode=1 --json-out native/scripts/deps/probe/capability.json
+
+      # WI-5 step 5.4 (S-E2): ceyx_build_capabilities vector, macos-arm64 leg.
+      # Vector transcribed from native/deps/codec_expectations.toml
+      # [macos-arm64.capabilities] -- render_expectations.py --check proves
+      # this has not drifted from the ledger. ICC=0 on every leg (OQ-N4
+      # option Z, WI-5): ENABLE_LCMS is forced OFF, lcms2 is dead code.
+      - name: Assert build capability vector via probe (S-E2, native leg)
+        if: matrix.cross == 'false'
+        run: python3 native/scripts/ci.py capability-vector --platform macos --kind build --dylib-path "$DYLIB" --expect-cap ICC=0 --expect-cap OPENMP=1 --expect-cap HEIF=1 --expect-cap WEBP=1 --expect-cap JXL=1 --expect-cap RAW=1 --json-out native/scripts/deps/probe/capability_build.json
+
+      # Cross leg: cannot dlopen a foreign-arch (x86_64) dylib from this
+      # arm64 host process, so the achievable proof is the compile-time one —
+      # the SAME configure that produced this dylib printed cmake/jxl.cmake's
+      # success line, which is only reachable from the branch that also sets
+      # CEYX_JXL_ENABLED=1 (see the diagnosis doc's falsification of "cmake
+      # took the soft-degrade path"). Weaker than the native leg's runtime
+      # call, but honest about what this leg can actually prove.
+      #
+      # Round 3 (CI-T1 call-site replacement): this leg's `instrument =
+      # "configure-log"` (codec_expectations.toml) cannot dlopen, so it has
+      # no --expect flags to call; the ledger's full vector for this leg is
+      # instead transcribed here as a literal comment so
+      # render_expectations.py --check can still prove it has not drifted.
+      # avif:*=0 is the DP-8 honest zero (owner CI-T11); jpeg:decode=0 is
+      # deliberate on every leg (libjpeg-only decode route). This step is the
+      # ledger's `step_anchor = "cross leg"` anchor for macos-x86_64 — do not
+      # rename without updating codec_expectations.toml.
+      - name: Assert codec capability vector via configure log (G1, cross leg)
+        if: matrix.cross == 'true'
+        run: |
+          python3 native/scripts/ci.py capability-vector --platform macos --kind codec --source configure-log --log-path cross_stage2_build.log
+          # LEDGER VECTOR (macos-x86_64), transcribed from
+          # native/deps/codec_expectations.toml -- kept INSIDE this step
+          # (not in the comment block above the `- name:` header) so
+          # render_expectations.py's per-leg step_anchor scan attributes
+          # these tokens to THIS step and not the preceding "native leg"
+          # step (SF2 fix; a token in the trailing comments before a step
+          # header is inside the PREVIOUS step's slice, not this one's).
+          # jpeg:encode=1 jpeg:decode=0
+          # webp:encode=1 webp:decode=1 heic:encode=1 heic:decode=1
+          # avif:encode=0 avif:decode=0 jxl:encode=1 jxl:decode=1
+
+      # WI-5 step 5.4 (S-E2), macos-x86_64 cross leg: this leg cannot dlopen
+      # a foreign-arch artifact (same reason the codec vector above uses
+      # configure-log), so its capability vector is asserted from the
+      # configure log too -- ledger's `instrument = "configure-log"`
+      # (codec_expectations.toml [macos-x86_64.capabilities]). Interaction
+      # with step 5.2b: the old lcms2 arch-guard's own "[ceyx] LCMS2: ..."
+      # status line was deleted with the rest of that apparatus, so the
+      # forced-OFF replacement one-liner (native/cmake/tests.cmake) prints
+      # its own "[ceyx] LCMS2: disabled (OQ-N4 option Z)" line -- otherwise
+      # this leg's ICC evidence would degrade into proving a negative
+      # (absence of a line is also what a silently-skipped configure
+      # produces).
+      # LEDGER VECTOR (macos-x86_64.capabilities): ICC=0 OPENMP=1 HEIF=1 WEBP=1 JXL=1 RAW=1
+      - name: Assert build capability vector via probe (S-E2, cross leg)
+        if: matrix.cross == 'true'
+        run: |
+          python3 native/scripts/ci.py capability-vector --platform macos --kind build --source configure-log --log-path cross_stage2_build.log
+          # LEDGER VECTOR (macos-x86_64.capabilities), transcribed from
+          # native/deps/codec_expectations.toml -- kept INSIDE this step
+          # (not the comment block above the `- name:` header) so
+          # render_expectations.py's capabilities_step_anchor scan
+          # attributes these tokens to THIS step, not the preceding
+          # "native leg" capability step (same SF2-family fix as the codec
+          # cross-leg step above).
+          # OPENMP=1 HEIF=1 WEBP=1 JXL=1 RAW=1
+          # LEDGER VECTOR ICC=0 -- literal token kept for render_expectations.py's static per-step scan; the assertion itself now runs inside ci.py capability-vector (pre-migration this token was satisfied incidentally by the "ASSERT cross-leg ICC=0 RC=" echo).
+
+      # G3 fix (task #9): macOS had no FFI export-symbol assertion at all,
+      # unlike Linux (AC-L5) and Windows (AC-W4) — a definition missing
+      # FFI_EXPORT would pass every check above and fail only at a Dart
+      # consumer's lookupFunction. ceyx_decode_into_buffer_oriented is the
+      # POSITIVE CONTROL (always compiled and always CEYX_FFI_EXPORT'd, no
+      # per-platform guard -- see native/src/ffi/ceyx_decode_into_ffi.cpp:1-8
+      # and :277); its absence means this check itself is broken, not that
+      # the build regressed. Output to a file, then grepped, same
+      # pipefail-avoidance reasoning as above.
+      # (dng_decode_and_process, the prior control, was removed in 53d61d1.)
+      #
+      # WI-13 (S-G4): the hand-kept three-name allowlist loop is replaced by
+      # the Dart-derived manifest (native/deps/export_manifest.toml) and
+      # native/scripts/assert_exports.py, so macOS gains the SAME
+      # manifest-driven check as the other three legs, not a parallel one.
+      # The manifest's mandatory set still carries
+      # ceyx_decode_into_buffer_oriented as its own positive control.
+      # WI-20 (push 7): collapsed into ci.py's generalised assert-exports
+      # (verify_artifact.assert_exports(), WI-22), unblocked by the exports
+      # self-sufficiency change that moved the `nm -gU` dump itself inside
+      # the module (a `tool > file` dump line could never be a compliant
+      # one-liner on its own). Every RC marker and ::error:: message is
+      # transcribed verbatim, including this leg's genuine absence of any
+      # ::error:: text on an assert_exports.py (non-zero-exit) failure --
+      # only the nm dump failure gets an ::error:: line, same as before.
+      - name: Assert required FFI exports present in dylib (G3)
+        run: python3 native/scripts/ci.py assert-exports --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB"
+
+      # CI-T11 (MACOS-ASSET, user ruling 4a / contract AC9, 2026-09-01): the
+      # release asset used to carry only the decoder itself. Five downstream
+      # consumers require all six interdependent dylibs together (the
+      # committed plugin/macos/Libraries tree this asset is meant to replace,
+      # plugin/macos/ceyx.podspec:46-51's `vendored_libraries`, and Halcyon's
+      # verify_macos_heif_rpaths / HEIF_RUNTIME_LIBS checks) — a release
+      # containing only the decoder would place 1 file where 6 are required.
+      # bundle_macos_dylib_deps.py (native/cmake/pipeline.cmake:151-160)
+      # already vendors liblcms2/libjpeg next to the decoder at build time,
+      # and heif.cmake's POST_BUILD copy already stages libheif/libde265
+      # there too, so all six exist side by side in $(dirname "$DYLIB")
+      # by this point in the job — confirmed empirically from a real
+      # successful CI run's `otool -L` output on the built dylib (run
+      # 33343548641, apple-silicon leg), not inferred from a local dev
+      # build. libomp is vendored from this repo's own
+      # native/third_party/libomp (not Homebrew), so it is reproducible on
+      # every run, not just this dev machine's.
+      #
+      # WIDENED TO BOTH LEGS (2026-09-01, user ruling: Intel artifact must
+      # carry the same six files as Apple Silicon). Previously restricted to
+      # matrix.cross == 'false' because the cross leg could not yet produce
+      # libomp/lcms2/jpeg-turbo companions at all; the OMP-CROSS-FIX /
+      # OMP-BINARY-SOURCE / LCMS2-X86_64 / JPEG-X86_64 chain (commits
+      # 2c40d17..dd91eea) now vendors and correctly wires all three on the
+      # x86_64 leg too. Companion list is derived ONCE (COMPANIONS below) and
+      # reused for staging and all three verification gates, so the four
+      # lists can never drift apart.
+      #
+      # THREE INDEPENDENT GATES, none implies the others (each was proven to
+      # catch a distinct real or realistic defect before being written here):
+      #   1. Architecture: `lipo -archs` on the staged file itself. A file
+      #      can be present and wrong-architecture.
+      #   2. Reachability: the companion's basename appears somewhere in the
+      #      decoder's OWN dependency listing (self-reference excluded — see
+      #      below). A file can be right-architecture and dead (nothing
+      #      depends on it).
+      #   3. Path convention: that dependency line must specifically begin
+      #      `@rpath/<companion>`, not an absolute path or an unresolved
+      #      package-manager token. A file can be present, right-arch, and
+      #      genuinely depended upon through a reference that only resolves
+      #      on the build machine — this is the exact defect that shipped in
+      #      run 33472670989 (Intel decoder linked liblcms2.2.dylib through
+      #      the literal unresolved Homebrew bottle token
+      #      "@@HOMEBREW_PREFIX@@/opt/little-cms2/lib/liblcms2.2.dylib",
+      #      fixed in b0a0573) and check 2 alone would NOT have caught it —
+      #      reachability-by-substring still matches a broken absolute-path
+      #      line.
+      #
+      # Self-reference handling: `otool -L`'s line 1 is the inspected file's
+      # own path header, but line 2 is the file's OWN LC_ID_DYLIB entry (a
+      # self-dependency) — `tail -n +2` alone does NOT strip it (measured
+      # directly: the decoder's own otool -L line 2 names itself). Stripped
+      # by NAME (`grep -v "@rpath/${DYLIB_BASENAME}"`), not by a positional
+      # line offset, since an offset silently rots if the output shape ever
+      # changes. Proven: a naive loop iterating the decoder alongside the
+      # five companions against unstripped `tail -n +2` output reports a
+      # FALSE PASS for the decoder-depends-on-itself entry (verified against
+      # a real downloaded artifact); the fix here iterates the five
+      # companions only, never the decoder's own name.
+      # WI-35 (push 8b, Task #15): collapsed into ci.py stage --platform
+      # macos, calling stage.stage_macos() (companion list from the same
+      # read_shipped_files.py --platform macos --companions declaration the
+      # inline body read). Byte-verified mechanically before migrating:
+      # WI-39 (d8848cb1) had just restored this function's companion-
+      # missing error text to use an em dash (U+2014) matching this exact
+      # step, not the ASCII "--" an earlier version of the module emitted --
+      # re-verified myself at runtime (real fixture, grep -c on stderr) that
+      # the em dash is actually there before wiring this, rather than
+      # trusting the fix commit's message. No markers in the pre-migration
+      # shell body -- none to restore.
+      #
+      # FIX (push 8b CI red, run 34741474983): the line above shipped
+      # without --arch, which argparse accepts (--arch is optional at the
+      # parser level for `stage`, same as every other _add_platform_command
+      # verb) but ci.py's post-parse `_enforce_arch_requirement` (C-G9)
+      # then rejects at runtime for macos, which has `requires_arch=True`
+      # in targets.py -- exit 2, "--arch is required for --platform
+      # 'macos'". The fully-green local gate could not see this: argparse
+      # itself never complains, so nothing short of actually invoking the
+      # command exercises the check. Every other of this file's twelve
+      # `--platform macos` call sites already carries `--arch` where its
+      # command's contract requires it (verified individually against
+      # ci.py's own `_add_platform_command`/`with_arch` calls, not
+      # reasserted from memory); this was the only omission.
+      - name: Stage native artifact
+        run: python3 native/scripts/ci.py stage --platform macos --arch "${{ matrix.arch_tag }}" --artifact-dir "${ARTIFACT_DIR}" --dylib-path "$DYLIB"
+
+      # WI-20 (push 7): the copy above stays inline shell for now -- its
+      # migration to ci.py's `stage` dispatch verb (which DOES already
+      # cover macOS, via stage.stage_macos()) is scheduled separately as
+      # WI-35/Task #15 (push 8b), not pulled forward here. The three
+      # verification gates below are collapsed into
+      # verify_artifact.verify_staged_companions() (WI-22), which ports this
+      # exact step's companion list, Gate-1/Gates-2+3 header text, self-
+      # reference-by-name stripping, and no->&2 error-stream behaviour
+      # verbatim -- do not re-add >&2 to failures from this command, that
+      # would be a semantics change from what this step asserted before.
+      - name: Verify staged companion dylibs (arch + reachability + rpath)
+        run: python3 native/scripts/ci.py assert-staged-companions --platform macos --arch "${{ matrix.arch_tag }}" --dylib-path "$DYLIB" --artifact-dir "$ARTIFACT_DIR"
+
+      # WI-14 step 14.2 (S-F1): measure the floor of the WHOLE staged group
+      # (decoder + every companion just verified above), not the decoder
+      # alone -- the macOS pin comment records the OpenMP runtime, not the
+      # decoder, as what actually sets the macOS 15 floor.
+      - name: Measure and emit the minimum runtime floor (S-F1)
+        run: python3 native/scripts/ci.py min-runtime --platform macos --arch "${{ matrix.arch_tag }}"
+
+      # Round 6, Plan B naming normalization: the artifact name is built from
+      # `matrix.arch_tag` (arm64 / x86_64). Before round 6 it was built from a
+      # separate `matrix.label` key (apple-silicon / intel), which no longer
+      # exists — the v0.1.6 release already used arm64/x86_64 in its asset
+      # names while CI used the marketing words, so two vocabularies described
+      # the same bytes. `arch_tag` now drives the job display name AND this
+      # filename, so they cannot drift apart again
+      # (.github/CI-CONVENTIONS.md rule 2).
+      #
+      # This name is also the release asset stem: the publish job in build.yml
+      # packages `<artifact name>.tar.gz` verbatim, so there is no rename step
+      # between here and the release. The former "Attach artifact to GitHub
+      # Release" step (raw `gh release create` / `gh release upload`, with its
+      # documented two-leg TOCTOU race on release creation) is deleted —
+      # release attachment is the publish job's exclusive responsibility
+      # (rule 3), and running it once per matrix leg is precisely the race the
+      # single publish job removes.
+      #
+      # Contract note (updated CI-T11 MACOS-ASSET, 2026-09-01): the native
+      # (arm64) leg's artifact now carries all six dylibs the podspec vendors
+      # (see the "Stage native artifact" step above), not just the decoder —
+      # a necessary but not yet sufficient condition for release-fetch
+      # consumption. As of this change halcyon STILL does NOT consume macOS
+      # from releases; it continues to use the committed dylibs under
+      # plugin/macos/Libraries. Halcyon's own migration to fetching this
+      # asset (CEYX_FETCH_SPECS["macos"] + ceyx_release_pin.json) is a
+      # separate, sequenced step (plan-ci-codec-integration.md CI-T11) that
+      # requires a tagged release built from this workflow to exist first —
+      # do not read the artifact carrying six files as halcyon already
+      # consuming them.
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-macos-${{ matrix.arch_tag }}
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 14
+
+      # CI-T11 (MACOS-ASSET follow-up): preserves the configure log this job
+      # actually produced (docs/logs/2026-09-01/ci-t11-findings.md's "no
+      # artifact answers this question either way" gap) so the LCMS/OpenMP
+      # support lines are a re-readable build artifact instead of only
+      # existing inside the ephemeral Actions step log. `if: always()` so a
+      # failed LCMS assertion above still uploads the evidence that failed
+      # it (R3/R7). Native leg only — the cross leg does not produce this log.
+      - name: Upload native build log (native arm64)
+        if: always() && matrix.cross == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native_build_log_macos_arm64
+          path: ${{ github.workspace }}/native_build_native_arm64.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # CI-T3 (task #11 spec, section 2): probe_codecs.txt/capability.json
+      # are only produced on the native (arm64) leg (matrix.cross == 'false'
+      # gates both the probe_codecs compile+run step above and the codec
+      # capability vector step); the cross leg never creates them, so this
+      # upload is scoped the same way rather than uploading an empty/missing
+      # artifact for x86_64. `if: always()` so a failed probe still uploads
+      # its own diagnosis (R3/R7).
+      - name: Upload probe_results_macos_arm64
+        if: always() && matrix.cross == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe_results_macos_arm64
+          path: |
+            native/scripts/deps/probe/probe_codecs.txt
+            native/scripts/deps/probe/capability.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
