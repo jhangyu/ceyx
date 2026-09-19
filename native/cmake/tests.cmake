@@ -378,6 +378,10 @@ add_executable(raw_corpus_hash_baseline tests/raw_corpus_hash_baseline.cpp)
 target_include_directories(raw_corpus_hash_baseline PRIVATE ${INC_DIR})
 target_link_libraries(raw_corpus_hash_baseline PRIVATE dng_decoder_native)
 
+add_executable(raw_corpus_ev_gate tests/raw_corpus_ev_gate.cpp)
+target_include_directories(raw_corpus_ev_gate PRIVATE ${INC_DIR})
+target_link_libraries(raw_corpus_ev_gate PRIVATE dng_decoder_native)
+
 # AC1 gate (plan §9.1): per-lane persistent device arena allocation counters.
 add_executable(test_persistent_device_arena tests/test_persistent_device_arena.cpp)
 target_include_directories(test_persistent_device_arena PRIVATE ${INC_DIR})
