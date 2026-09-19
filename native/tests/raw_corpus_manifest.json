@@ -106,7 +106,7 @@
     {
       "id": "natural_libraw_fallback",
       "path": "image_samples/raw_corpus/natural_fallback.rw2",
-      "sha256": "",
+      "sha256": "7fb8eb119e7bf26ffee5abe35cd5e828b9d429361789f69b0aaac9332b478855",
       "vendor": "panasonic",
       "camera": "(a body RawSpeed3 does not list)",
       "extension": "rw2",
