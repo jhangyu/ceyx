@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +27,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>   // mem8 T3: sysconf(_SC_PAGESIZE) for decommit()'s length
 #endif
 
 class dng_host;
@@ -82,6 +84,10 @@ class DecodeArena {
     if (bytes > capacity_ - aligned) return nullptr;   // overflow-safe bound
     offset_ = aligned + bytes;
     if (offset_ > high_water_) high_water_ = offset_;
+    // mem8 T3 (SR-6): committed_ tracks pages touched SINCE the last
+    // decommit(), so it re-grows naturally after a decommit while high_water_
+    // keeps its monotonic, process-lifetime meaning.
+    if (offset_ > committed_) committed_ = offset_;
     return base_ + aligned;
   }
 
@@ -89,11 +95,136 @@ class DecodeArena {
   size_t high_water() const { return high_water_; }
   size_t capacity() const { return capacity_; }
 
+  // mem8 T3 (SR-6). Bytes this arena has actually TOUCHED and not yet handed
+  // back to the OS. Distinct from high_water() on purpose:
+  //   high_water() is MONOTONIC and is the process's disclosure figure
+  //                 (dng_decode_arena_high_water_bytes). D-P1-4 pins it: a
+  //                 decommit must NOT move it, or the existing disclosure
+  //                 silently changes meaning. D6 is the test that pins this.
+  //   committed_bytes() is RESETTABLE and is what decommit() zeroes, i.e. the
+  //                 quantity that answers "is this idle context still holding
+  //                 physical pages".
+  size_t committed_bytes() const { return committed_; }
+
+  // mem8 T3 (SR-6): hand the touched pages back to the OS, keeping the mapping
+  // and capacity_ intact so the next decode needs no re-commit step.
+  //
+  // PRECONDITION, asserted rather than documented-only: offset_ == 0, i.e. this
+  // arena has been reset() and its owning context is sitting in the pool's free
+  // list. Discarding pages under a live bump offset would hand undefined
+  // contents to a decode that still holds pointers into them.
+  //
+  // WINDOWS MUST NOT USE MEM_DECOMMIT. The constructor commits the whole
+  // reserve and allocate() assumes committed memory with no re-commit step, so
+  // MEM_DECOMMIT would fault the next decode. DiscardVirtualMemory is the true
+  // analogue of MADV_FREE: the commit charge stays, the physical pages go back,
+  // the contents become undefined — which is sound precisely because reset()
+  // already means "nothing here is live". MEM_RESET is the documented fallback
+  // when DiscardVirtualMemory is unavailable at the configured SDK level.
+  // D3 is the test that would catch a violation, and it must be run on a real
+  // Windows host before release — a compile-only CI leg cannot catch it.
+  void decommit() {
+    assert(offset_ == 0 &&
+           "DecodeArena::decommit() requires a reset() arena — a context in "
+           "the pool's free list. Discarding pages under a live bump offset "
+           "hands undefined contents to a decode still holding pointers.");
+    if (!base_ || high_water_ == 0) return;
+    // Only the touched prefix, never the whole 1.5 GiB reserve: the untouched
+    // tail has no physical pages to return.
+    size_t len = round_up_to_page(high_water_);
+    if (len > capacity_) len = capacity_;
+    if (len == 0) return;
+#if defined(_WIN32)
+    if (!discard_pages_win32(base_, len)) {
+      // Never MEM_DECOMMIT — see the contract above.
+      VirtualAlloc(base_, len, MEM_RESET, PAGE_READWRITE);
+    }
+#elif defined(__APPLE__) && defined(MADV_FREE_REUSABLE)
+    // APPLE: MADV_FREE_REUSABLE, not plain MADV_FREE. The difference is
+    // load-bearing, and it was MEASURED on this host rather than assumed — one
+    // variant per PROCESS, so no reading started from a baseline an earlier
+    // call had already collapsed (native/tests/tmp/t3-12-isolated-variants.txt;
+    // 64 MiB anonymous private mapping, each re-touched afterwards to confirm
+    // the mapping survives):
+    //
+    //   MADV_FREE (5)          rc=0   phys_footprint drop = 0
+    //   MADV_DONTNEED (4)      rc=0   phys_footprint drop = 0
+    //   MADV_FREE_REUSABLE (7) rc=0   phys_footprint drop = 67108864 (exact)
+    //
+    // Note what that says about return codes: ALL THREE REPORT SUCCESS and two
+    // of them reclaim nothing, so a decommit validated by checking madvise's rc
+    // would pass while returning no memory at all. MADV_FREE_REUSABLE is the
+    // primitive libmalloc itself uses for this and decrements the footprint
+    // immediately. Contents become undefined, which is sound because reset()
+    // already means "nothing here is live"; the next touch re-faults (D3).
+    //
+    // resident_size moved for NONE of the three — it is not the observable for
+    // this question on Darwin, which is why D7 reads phys_footprint.
+    if (madvise(base_, len, MADV_FREE_REUSABLE) != 0) {
+      // Reached only if the kernel refuses the range. Plain MADV_FREE returns
+      // the pages on the kernel's own schedule rather than immediately; the
+      // measurement above shows that is weaker, so it is a fallback and never
+      // the primary path.
+      madvise(base_, len, MADV_FREE);
+    }
+#elif defined(MADV_FREE)
+    madvise(base_, len, MADV_FREE);
+#else
+    // Older Linux kernels (< 4.5) have no MADV_FREE. MADV_DONTNEED on a
+    // PRIVATE ANONYMOUS mapping is the correct analogue there: it drops the
+    // pages and the next touch faults in a fresh zero page. It is NOT correct
+    // for shared or file-backed mappings, which is why it is reached only from
+    // this arena's own private anonymous mmap.
+    madvise(base_, len, MADV_DONTNEED);
+#endif
+    committed_ = 0;
+  }
+
  private:
+  static size_t round_up_to_page(size_t n) {
+    const size_t page = page_size();
+    if (page == 0) return n;
+    const size_t rounded = (n + page - 1) & ~(page - 1);
+    return rounded < n ? n : rounded;  // overflow guard
+  }
+
+  static size_t page_size() {
+#if defined(_WIN32)
+    static const size_t p = [] {
+      SYSTEM_INFO si;
+      GetSystemInfo(&si);
+      return static_cast<size_t>(si.dwPageSize);
+    }();
+#else
+    static const size_t p = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+#endif
+    return p;
+  }
+
+#if defined(_WIN32)
+  // Resolved at runtime so the build does not hard-require a Win8+ SDK
+  // baseline just for this call. Returns false when unavailable, which sends
+  // decommit() to the MEM_RESET fallback.
+  static bool discard_pages_win32(void *addr, size_t len) {
+    using DiscardFn = DWORD(WINAPI *)(PVOID, SIZE_T);
+    static const DiscardFn fn = [] {
+      HMODULE m = GetModuleHandleW(L"kernel32.dll");
+      return m ? reinterpret_cast<DiscardFn>(
+                     GetProcAddress(m, "DiscardVirtualMemory"))
+               : nullptr;
+    }();
+    if (!fn) return false;
+    return fn(addr, len) == ERROR_SUCCESS;
+  }
+#endif
+
   uint8_t *base_ = nullptr;
   size_t capacity_ = 0;
   size_t offset_ = 0;
   size_t high_water_ = 0;
+  // mem8 T3 (SR-6): see committed_bytes(). Maintained in allocate() with one
+  // comparison on an already-hot-but-cheap path.
+  size_t committed_ = 0;
 };
 
 // M-5: Value object grouping the writeback destination pointer and its
@@ -204,6 +335,41 @@ struct DecodeContext {
   // so a cached pointer would alias the NEXT decode's allocations.
   void reset_for_reuse() {
     arena.reset();
+    stage3_workspace = nullptr;
+    stage3_workspace_elements = 0;
+  }
+
+  // mem8 T3 (SR-6). The IDLE counterpart of reset_for_reuse(): that one makes a
+  // context ready for the next decode and deliberately keeps everything warm;
+  // this one hands the memory back because no decode is expected soon.
+  //
+  // CALLED ONLY FROM THE POOL, ONLY FOR A CONTEXT IN free_. That is the same
+  // eligibility rule trim_free_surplus_locked() uses, and it is what makes the
+  // device free below safe.
+  //
+  // NOT static-destruction time: this runs from a live app's idle-shrink timer,
+  // so the deliberate-leak rationale at dng_pipeline.cpp:236-247 is untouched —
+  // the POOL is still never destroyed, only its idle contexts are emptied.
+  void release_idle_state() {
+    // A11a: pages back to the OS; mapping and capacity survive.
+    arena.decommit();
+
+    // A11b: swap, NOT clear(). clear() sets size to 0 and KEEPS the capacity,
+    // so the scratch would stay fully resident and this whole function would
+    // silently do a fraction of its job while every arena assertion still went
+    // green. Do not "simplify" this back — D2 asserts the CAPACITY, not just
+    // the arena, precisely to catch that edit.
+    std::vector<uint16_t>().swap(handoff.poly3_scratch);
+
+    // A11c: the Stage-2 device-resident scratch. Its destructor issues a Metal
+    // device free — the same class of teardown as T1's release_metal_buffer,
+    // with the same precondition (quiescent, this context is in the free list,
+    // no in-flight command buffer), which the caller guarantees.
+    stage2_device_dst = Halide::Runtime::Buffer<uint16_t>();
+    stage2_dst_w = 0;
+    stage2_dst_h = 0;
+
+    handoff.buffer.reset();
     stage3_workspace = nullptr;
     stage3_workspace_elements = 0;
   }
@@ -342,6 +508,61 @@ class DecodeSlotPool {
     cv_.notify_all();
   }
 
+  // mem8 T3 (SR-6). Idle-release the arenas and scratch of FREE contexts in
+  // excess of `floor`, keeping the first `floor` entries of free_ warm.
+  // Returns the committed arena bytes released, for the funnel's byte figure.
+  //
+  // FLOOR SEMANTICS deliberately mirror
+  // raw_persistent_device_arena_shrink_to_lane_floor (whose full contract lives
+  // on its own declaration and is not restated here): floor == 0 is legal and
+  // releases every free context; a call with fewer free contexts than the floor
+  // is a NO-OP RETURNING 0, and that is SUCCESS, not failure.
+  //
+  // CHECKED-OUT CONTEXTS ARE SKIPPED ENTIRELY, not deferred. free_ is by
+  // construction the set provably not checked out — the same eligibility rule
+  // trim_free_surplus_locked() relies on. A context that was busy simply stays
+  // warm until the next idle shrink. D5 pins this: it is the use-after-free
+  // hazard, since release_idle_state() issues a Metal device free.
+  //
+  // NEVER ERASES FROM contexts_. This changes no target_, admits nothing, and
+  // is not a second lane-width policy; resize() remains the only width funnel.
+  size_t decommit_free_to_floor(size_t floor) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (free_.size() <= floor) return 0;  // degenerate case (D4): success.
+    size_t released = 0;
+    for (size_t i = floor; i < free_.size(); ++i) {
+      DecodeContext *ctx = free_[i];
+      released += ctx->arena.committed_bytes();
+      released += ctx->handoff.poly3_scratch.capacity() * sizeof(uint16_t);
+      ctx->release_idle_state();
+    }
+    ++decommit_calls_;
+    contexts_decommitted_ += free_.size() - floor;
+    return released;
+  }
+
+  // Sum of committed arena bytes across every context, checked out or not.
+  // This is the accessor the T3 acceptance reads; it is an instantaneous
+  // quantity, unlike high_water_bytes() which is monotonic by design.
+  size_t committed_context_bytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t total = 0;
+    for (const auto &c : contexts_) total += c->arena.committed_bytes();
+    return total;
+  }
+
+  // Process-wide totals since construction, in the same shape as the arena
+  // side's shrink counters: they exist so a decommit that quietly did nothing
+  // is distinguishable from one that had nothing to do.
+  size_t decommit_calls() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return decommit_calls_;
+  }
+  size_t contexts_decommitted() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return contexts_decommitted_;
+  }
+
  private:
   // Destroys free contexts while there are more contexts than the target.
   // Caller holds mu_. Only contexts sitting in free_ are eligible, which is
@@ -384,6 +605,10 @@ class DecodeSlotPool {
   size_t in_flight_ = 0;
   size_t high_water_in_flight_ = 0;
   size_t target_ = 1;
+  // mem8 T3 (SR-6) idle-decommit bookkeeping; guarded by mu_ like every other
+  // counter here.
+  size_t decommit_calls_ = 0;
+  size_t contexts_decommitted_ = 0;
   const size_t arena_reserve_bytes_;
 };
 

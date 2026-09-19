@@ -90,6 +90,61 @@ size_t dng_decode_physical_slot_count();
 // construct the entire pool as a side effect of a bookkeeping question.
 size_t dng_decode_slot_count_relaxed();
 
+// --- mem8 T3 (SR-6): DNG-route idle decommit -----------------------------
+//
+// SCOPE HONESTY, binding on anything that reports these numbers: the saving
+// here is STRUCTURAL and CONDITIONAL. No DNG corpus exists on the development
+// host (OQ-3) and DNG-vs-RAW additivity is UNTESTED. These entries are covered
+// by mechanism-level gates driving the arena synthetically, not by a measured
+// decode. Do not quote a DNG saving from them.
+
+// True once the decode slot pool has ACTUALLY been constructed. Reading it can
+// never construct one, which is why the idle funnel asks this rather than
+// dng_decode_slot_count(): a pure-RAW session must not mmap 8 x 1.5 GiB to
+// answer an idle timer's bookkeeping question.
+//
+// NOT interchangeable with "g_configured_slots != 0". That atomic is written by
+// only two of the pool accessor's callers; the decode path constructs the pool
+// without setting it, so it reads 0 on a process that has decoded DNGs. See the
+// definition's comment in dng_pipeline.cpp.
+bool dng_decode_slot_pool_exists();
+
+// Instrumentation only: the RAW published slot count, 0 meaning "never
+// published", with no default fallback and no side effect. This is the frozen
+// spec's REJECTED predicate, exposed so the guard swap can be asserted
+// mechanically instead of argued — D8 constructs the pool through a
+// non-publishing path and pins this to 0 while the accessor above reads true.
+size_t dng_decode_published_slot_count_raw();
+
+// Idle-release arenas and scratch of FREE contexts in excess of `floor`,
+// keeping the first `floor` warm. Returns bytes released.
+//
+// floor == 0 is legal (release every free context). Fewer free contexts than
+// the floor is a NO-OP RETURNING 0, and that is SUCCESS, not failure — the same
+// floor semantics as the lane arena's shrink, whose full contract lives on
+// raw_persistent_device_arena_shrink_to_lane_floor and is not restated here.
+//
+// Checked-out contexts are SKIPPED, never deferred: release_idle_state() issues
+// a Metal device free, so the caller must guarantee decode quiescence and the
+// free-list rule is the backstop, not a lock.
+//
+// A second entry on the slot pool but NOT a second lane-width policy: it
+// changes no target_, admits nothing and erases no context.
+// dng_decode_resize_slots remains the single width funnel.
+size_t dng_decode_decommit_free_slots_to_floor(size_t floor);
+
+// Instantaneous committed arena bytes across every context. DISTINCT from
+// dng_decode_arena_high_water_bytes(), which is monotonic and is the existing
+// disclosure figure — D-P1-4 pins high-water to stay UNCHANGED across a
+// decommit so that disclosure does not silently change meaning.
+size_t dng_decode_committed_context_bytes();
+
+// Decommit bookkeeping. A call count that moves with zero contexts touched is
+// the degenerate floor case (success); a call count that never moves means the
+// idle path is not wired at all.
+size_t dng_decode_decommit_call_count();
+size_t dng_decode_contexts_decommitted_count();
+
 // Round 5 review F2: the same bound observed from OUTSIDE the pool's
 // bookkeeping. dng_decode_max_in_flight_observed() reads a counter the pool
 // maintains against its own free list, so it cannot exceed the slot count by

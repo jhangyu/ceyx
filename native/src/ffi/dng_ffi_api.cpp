@@ -325,9 +325,78 @@ FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
       floor < 0 ? size_t{0} : static_cast<size_t>(floor);
   const ceyx::RawArenaShrinkOutcome outcome =
       ceyx::raw_persistent_device_arena_shrink_to_lane_floor(clamped_floor);
+
+  // mem8 T3 (SR-6): the DNG-route half, INSIDE this funnel rather than beside
+  // it. That placement is the whole one-funnel rule (D-P1-1) — a second export
+  // for DNG idle release would be the defect, not the feature.
+  //
+  // It is a no-op returning 0 when no DNG slot pool has ever been constructed,
+  // and asking that question cannot construct one: a pure-RAW session must not
+  // mmap 8 x 1.5 GiB because an idle timer wanted a bookkeeping answer. The
+  // predicate deliberately is NOT "configured slots != 0" — see
+  // dng_decode_slot_pool_exists() in dng_pipeline.h for why that one reads 0 on
+  // a process that has decoded DNGs, and would silently disable this half
+  // forever while every synthetic gate stayed green.
+  //
+  // Order is irrelevant to the result; only the log reads in sequence.
+  const size_t dng_bytes =
+      dng_decode_decommit_free_slots_to_floor(clamped_floor);
+
   // Bytes, not lanes: the lane counts are available through the probe below,
-  // while the byte figure is the one the Dart idle path logs.
-  return static_cast<int64_t>(outcome.bytes_released);
+  // while the byte figure is the one the Dart idle path logs. The two
+  // subsystems' byte counts are SUMMED — a caller sees one number for "what
+  // this idle pass handed back", which is what the one-funnel rule implies.
+  return static_cast<int64_t>(outcome.bytes_released) +
+         static_cast<int64_t>(dng_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// T3 — DNG slot residency probe. Debug/probe surface only: not Dart-visible,
+// nothing added to DngResult.
+//
+// SCOPE HONESTY (SR-6, OQ-3): these numbers describe the MECHANISM. No DNG
+// corpus exists on the development host and DNG-vs-RAW additivity is untested,
+// so nothing read here may be quoted as a measured DNG saving.
+//
+// Four out-parameters, fixed at this first release for the same ABI reason
+// ceyx_debug_arena_shrink_counters shipped with six: widening a released
+// signature silently mismatches every harness already built against the
+// narrower typedef.
+//
+// Null-pointer convention, as elsewhere in this file: any out-pointer may be
+// null and is then skipped; -1 only when all four are null.
+// ---------------------------------------------------------------------------
+
+FFI_EXPORT int32_t ceyx_debug_dng_slot_residency_counters(
+    uint64_t *out_committed_context_bytes, uint64_t *out_decommit_calls,
+    uint64_t *out_contexts_decommitted, uint64_t *out_physical_slots) {
+  if (!out_committed_context_bytes && !out_decommit_calls &&
+      !out_contexts_decommitted && !out_physical_slots) {
+    return -1;
+  }
+  // Every accessor below is itself guarded by dng_decode_slot_pool_exists()
+  // and answers 0 without constructing the pool, so this probe is safe to call
+  // on a pure-RAW session — including the physical-slot count, which is the one
+  // a reader would most expect to force construction.
+  if (out_committed_context_bytes) {
+    *out_committed_context_bytes =
+        static_cast<uint64_t>(dng_decode_committed_context_bytes());
+  }
+  if (out_decommit_calls) {
+    *out_decommit_calls =
+        static_cast<uint64_t>(dng_decode_decommit_call_count());
+  }
+  if (out_contexts_decommitted) {
+    *out_contexts_decommitted =
+        static_cast<uint64_t>(dng_decode_contexts_decommitted_count());
+  }
+  if (out_physical_slots) {
+    *out_physical_slots =
+        dng_decode_slot_pool_exists()
+            ? static_cast<uint64_t>(dng_decode_physical_slot_count())
+            : 0u;
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

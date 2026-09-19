@@ -233,6 +233,21 @@ bool applyOpcodeList3(dng_host &host, dng_negative &negative,
 //
 // PipelineConfig::decodeSlotCount() supplies only the pre-configuration
 // default. See docs/logs/2026-09-05/slot-memory-rederivation.md.
+// mem8 T3 (SR-6). "Has the slot pool actually been constructed?", recorded at
+// the single place construction can happen (decodeSlotPool() below).
+//
+// WHY NOT g_configured_slots (dng_pipeline.cpp:421): that atomic is written by
+// only TWO of decodeSlotPool()'s callers — dng_decode_resize_slots and
+// dng_decode_slot_count — while the DECODE PATH ITSELF constructs the pool
+// without ever writing it (decodeSlotPool().acquire() at :1647 and :1803). A
+// process that has decoded DNGs, i.e. exactly the state whose pages T3 exists
+// to reclaim, can therefore still read g_configured_slots == 0. Guarding the
+// idle funnel on it would skip the DNG half forever while every synthetic test
+// stayed green, because those tests construct their own DecodeSlotPool and
+// never consult this global. Recording construction at the construction site
+// is the predicate that cannot drift from the thing it claims to describe.
+static std::atomic<bool> g_slot_pool_constructed{false};
+
 DecodeSlotPool &decodeSlotPool() {
   // Round 5 review F5: DELIBERATELY LEAKED. A by-value function-local static
   // would run N Metal device_free calls (stage2_device_dst survives
@@ -242,10 +257,21 @@ DecodeSlotPool &decodeSlotPool() {
   // contexts were stack-scoped per decode, and no gate covers it for the
   // dylib-inside-a-host-app case. Nothing observable depends on running these
   // destructors: the OS reclaims the mapping and the device at process exit.
-  static DecodeSlotPool *pool =
-      new DecodeSlotPool(PipelineConfig::decodeSlotCount(),
-                         PipelineConfig::kDecodeArenaReserveBytes);
+  static DecodeSlotPool *pool = [] {
+    auto *p = new DecodeSlotPool(PipelineConfig::decodeSlotCount(),
+                                 PipelineConfig::kDecodeArenaReserveBytes);
+    g_slot_pool_constructed.store(true, std::memory_order_release);
+    return p;
+  }();
   return *pool;
+}
+
+// mem8 T3 (SR-6). Answers the idle funnel's "is there a DNG slot pool at all?"
+// WITHOUT constructing one — which is the entire point, since touching the
+// accessor above would mmap 8 x 1.5 GiB on a pure-RAW session just to answer a
+// bookkeeping question (T3.5 hazard row 3).
+bool dng_decode_slot_pool_exists() {
+  return g_slot_pool_constructed.load(std::memory_order_acquire);
 }
 
 // Round 5 review F2: decode-body occupancy census, deliberately INDEPENDENT of
@@ -425,6 +451,23 @@ size_t dng_decode_slot_count_relaxed() {
   return published > 0 ? published : PipelineConfig::decodeSlotCount();
 }
 
+// mem8 T3 (SR-6), instrumentation only. The RAW value of g_configured_slots —
+// 0 meaning "never published" — with NO fallback to the configured default and
+// NO side effect. The accessor directly above cannot serve this purpose: it
+// substitutes PipelineConfig::decodeSlotCount() when the atomic is 0, so it can
+// never report the "not published yet" state that is the whole subject here.
+//
+// It exists so the T3 guard swap is MECHANICALLY CHECKABLE rather than argued.
+// D8 constructs the pool through a path that does not publish (the same shape
+// as the decode path at :1647/:1803) and then asserts this reads 0 — i.e. the
+// frozen spec's `g_configured_slots != 0` predicate would SKIP the DNG idle
+// half — while dng_decode_slot_pool_exists() reads true and the half FIRES.
+// Without this accessor that discrimination could only be asserted by reading
+// the source, which is exactly the kind of claim that rots silently.
+size_t dng_decode_published_slot_count_raw() {
+  return g_configured_slots.load(std::memory_order_relaxed);
+}
+
 // R4 item 1 (ruling r-5): live reconfiguration of the slot pool. Clamping is
 // the CALLER's job (dng_ffi_api.cpp bounds it only by the allocation-sanity
 // constant, per ruling r-6 — there is deliberately no memory-derived clamp);
@@ -440,6 +483,25 @@ void dng_decode_resize_slots(size_t n) {
   // lane's first decode (§2.2, ruling R-2026-09-11-2). Do not add a second
   // hook site elsewhere.
   ceyx::raw_persistent_device_arena_configure_lane_count(n);
+}
+
+// mem8 T3 (SR-6). Idle-release the arenas and scratch of FREE decode contexts
+// in excess of `floor`. Returns bytes released.
+//
+// THIS IS A SECOND ENTRY ON THE SLOT POOL, BUT NOT A SECOND LANE-WIDTH POLICY.
+// It changes no target_, admits nothing, erases no context, and leaves
+// dng_decode_resize_slots directly above as the single width funnel. Read that
+// function's comment before adding anything here.
+//
+// Callers must guarantee decode quiescence; the free-list eligibility rule is a
+// backstop, not a lock. Reached only from ceyx_native_idle_shrink, the one
+// native idle funnel.
+size_t dng_decode_decommit_free_slots_to_floor(size_t floor) {
+  // Never construct the pool to answer this. A pure-RAW session has no DNG
+  // contexts to reclaim and must not pay 8 x 1.5 GiB of mmap for an idle
+  // timer's bookkeeping question (T3.5 hazard row 3).
+  if (!dng_decode_slot_pool_exists()) return 0;
+  return decodeSlotPool().decommit_free_to_floor(floor);
 }
 
 // Reports the CONFIGURED count (target_), not the container size. This is the
@@ -462,6 +524,32 @@ size_t dng_decode_max_in_flight_observed() {
 }
 size_t dng_decode_arena_high_water_bytes() {
   return decodeSlotPool().high_water_bytes();
+}
+
+// mem8 T3 (SR-6). Instantaneous committed arena bytes across every context.
+//
+// DELIBERATELY NOT the same quantity as dng_decode_arena_high_water_bytes()
+// directly above. High-water is MONOTONIC and is the existing disclosure
+// figure; D-P1-4 pins it to stay unchanged across a decommit, so that
+// disclosure does not silently change meaning. This one is RESETTABLE and is
+// what a decommit zeroes — it answers "is this process still holding those
+// pages", which high-water structurally cannot.
+size_t dng_decode_committed_context_bytes() {
+  if (!dng_decode_slot_pool_exists()) return 0;
+  return decodeSlotPool().committed_context_bytes();
+}
+
+// mem8 T3 (SR-6) decommit bookkeeping, for the probe. A call count that moves
+// with zero contexts touched is the degenerate case (free_.size() <= floor),
+// which is success; a call count that never moves means the idle path is not
+// wired at all.
+size_t dng_decode_decommit_call_count() {
+  if (!dng_decode_slot_pool_exists()) return 0;
+  return decodeSlotPool().decommit_calls();
+}
+size_t dng_decode_contexts_decommitted_count() {
+  if (!dng_decode_slot_pool_exists()) return 0;
+  return decodeSlotPool().contexts_decommitted();
 }
 
 namespace {

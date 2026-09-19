@@ -398,6 +398,18 @@ target_include_directories(test_persistent_device_arena_shrink PRIVATE
     ${HALIDE_DIR}/include)
 target_link_libraries(test_persistent_device_arena_shrink PRIVATE dng_decoder_native)
 
+# T3 gate (mem8 SR-6): DNG-route DecodeContext idle decommit, cases D1-D6 plus
+# acceptance item 2. Needs ${SRC_DIR}/pipeline for decode_context.h and
+# ${HALIDE_DIR}/include for the HalideBuffer.h that header pulls in.
+# It constructs its OWN small DecodeSlotPool and never calls decodeSlotPool():
+# touching the process-wide accessor would mmap 8 x 1.5 GiB just to run a test.
+add_executable(test_dng_slot_decommit tests/test_dng_slot_decommit.cpp)
+target_include_directories(test_dng_slot_decommit PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}/pipeline
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_dng_slot_decommit PRIVATE dng_decoder_native)
+
 # Multi-lane RAW concurrency gate (R2.5): per-lane arena isolation under
 # concurrent generic-RAW decodes; prerequisite evidence for C2's under-load AC4.
 add_executable(test_concurrent_raw_decode tests/test_concurrent_raw_decode.cpp)

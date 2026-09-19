@@ -297,6 +297,40 @@ int32_t ceyx_debug_arena_shrink_counters(
     uint64_t *out_volatile_device_bytes);
 
 /* ===================================================================== */
+/* mem8 T3 (SR-6) — DNG slot residency probe.                            */
+/*                                                                        */
+/* The DNG-route counterpart of the arena probe above. Debug/probe        */
+/* surface only: not Dart-visible, nothing added to DngResult.            */
+/*                                                                        */
+/* SCOPE HONESTY, binding on anything that reports these numbers: they    */
+/* describe the MECHANISM. No DNG corpus exists on the development host   */
+/* (OQ-3) and DNG-vs-RAW additivity is UNTESTED, so no value read here    */
+/* may be quoted as a measured DNG saving.                                */
+/*                                                                        */
+/* out_committed_context_bytes — instantaneous committed arena bytes      */
+/*   across every decode context. DISTINCT from the monotonic high-water  */
+/*   disclosure, which a decommit deliberately does NOT move.             */
+/* out_decommit_calls / out_contexts_decommitted — a call count that      */
+/*   moves with zero contexts touched is the degenerate floor case and is */
+/*   SUCCESS; a call count that never moves means the DNG half of         */
+/*   ceyx_native_idle_shrink is not wired at all.                         */
+/* out_physical_slots — contexts that physically exist right now.         */
+/*                                                                        */
+/* SAFE ON A PURE-RAW SESSION: every value answers 0 without constructing */
+/* the slot pool, so calling this probe can never cost 8 x 1.5 GiB of     */
+/* mmap. Four out-parameters are FINAL at this first release, for the     */
+/* same ABI reason the probe above shipped with six.                      */
+/*                                                                        */
+/* Null-pointer convention, as above: individual out-pointers may be null */
+/* and are then skipped; -1 only when ALL are null.                       */
+/* ===================================================================== */
+int32_t ceyx_debug_dng_slot_residency_counters(
+    uint64_t *out_committed_context_bytes,
+    uint64_t *out_decommit_calls,
+    uint64_t *out_contexts_decommitted,
+    uint64_t *out_physical_slots);
+
+/* ===================================================================== */
 /* C2 zero-copy capability-gate probe (R3-T4, GPU copy-elimination        */
 /* campaign, docs/logs/2026-09-11/plan-gpu-copy-elimination.md §4.5).      */
 /*                                                                        */
