@@ -4,7 +4,7 @@
     {
       "id": "sony_a7r4_bayer",
       "path": "image_samples/raw_corpus/sony_a7r4.arw",
-      "sha256": "",
+      "sha256": "3421b919ee81224d59f78872ee099a021bff0e2a47ae5fbbac385b182ac7241e",
       "vendor": "sony",
       "camera": "ILCE-7RM4",
       "extension": "arw",
@@ -12,13 +12,13 @@
       "expect_layout": "bayer2x2",
       "expect_backend": "rawspeed3",
       "expect_error": "kRawSuccess",
-      "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
+      "license": "Sourced from the raw.pixls.us public raw-sample archive (https://raw.pixls.us/data/Sony/ILCE-7RM4/DSC00396.ARW), an archive intended for raw-decoder development/testing use; no explicit per-file redistribution license was found, so the file is kept untracked/git-ignored.",
       "notes": "Primary Bayer gate sample."
     },
     {
       "id": "canon_r5_bayer",
       "path": "image_samples/raw_corpus/canon_r5.cr3",
-      "sha256": "",
+      "sha256": "21430c36387efe65bd09ac0fcd724bfd959d93dd391ec811a1b741c8663becb5",
       "vendor": "canon",
       "camera": "EOS R5",
       "extension": "cr3",
@@ -26,13 +26,13 @@
       "expect_layout": "bayer2x2",
       "expect_backend": "rawspeed3",
       "expect_error": "kRawSuccess",
-      "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
+      "license": "Sourced from the raw.pixls.us public raw-sample archive (https://raw.pixls.us/data/Canon/EOS%20R5/Canon_EOS_R5_RAW_ISO_100_nocrop_nodual.CR3), an archive intended for raw-decoder development/testing use; no explicit per-file redistribution license was found, so the file is kept untracked/git-ignored.",
       "notes": "CR3 is ISO-BMFF, exercises the non-TIFF probe branch."
     },
     {
       "id": "nikon_z7_bayer",
       "path": "image_samples/raw_corpus/nikon_z7.nef",
-      "sha256": "",
+      "sha256": "1172f414821cec2fd1e51e0ba9fde48476f5d40ee85b9268d54aedcae6d9ee70",
       "vendor": "nikon",
       "camera": "NIKON Z 7",
       "extension": "nef",
@@ -40,7 +40,7 @@
       "expect_layout": "bayer2x2",
       "expect_backend": "rawspeed3",
       "expect_error": "kRawSuccess",
-      "license": "Owner-supplied sample, redistribution not permitted; keep untracked.",
+      "license": "Sourced from the raw.pixls.us public raw-sample archive (https://raw.pixls.us/data/Nikon/Z%207/6-Nikon-Z7-RAW-12bit-lossless-compressed-L.NEF), an archive intended for raw-decoder development/testing use; no explicit per-file redistribution license was found, so the file is kept untracked/git-ignored.",
       "notes": "Third Bayer vendor for the three-vendor minimum."
     },
     {
@@ -148,7 +148,7 @@
     {
       "id": "malformed_truncated",
       "path": "image_samples/raw_corpus/sony_a7r4.arw.trunc.raw",
-      "sha256": "",
+      "sha256": "17be6a65d449f2ba022011ef795f9e24dca9b41ec1db88f9e2b9a4c8366af4e5",
       "vendor": "sony",
       "camera": "ILCE-7RM4",
       "extension": "arw",
@@ -162,7 +162,7 @@
     {
       "id": "malformed_pitch",
       "path": "image_samples/raw_corpus/sony_a7r4.arw.pitch.raw",
-      "sha256": "",
+      "sha256": "63ee0bf52817e91e6a9cf6b1e84b6f96e1b8caa968899c6f11f10258b9531ac1",
       "vendor": "sony",
       "camera": "ILCE-7RM4",
       "extension": "arw",
@@ -176,7 +176,7 @@
     {
       "id": "malformed_cfa",
       "path": "image_samples/raw_corpus/sony_a7r4.arw.cfa.raw",
-      "sha256": "",
+      "sha256": "f7629596a41472334288dc80f9272987a4453e94c22121b81c9d92c006c7e577",
       "vendor": "sony",
       "camera": "ILCE-7RM4",
       "extension": "arw",
