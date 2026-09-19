@@ -24,10 +24,10 @@
       "extension": "cr3",
       "expect_route": "generic",
       "expect_layout": "bayer2x2",
-      "expect_backend": "rawspeed3",
+      "expect_backend": "libraw_native",
       "expect_error": "kRawSuccess",
       "license": "Sourced from the raw.pixls.us public raw-sample archive (https://raw.pixls.us/data/Canon/EOS%20R5/Canon_EOS_R5_RAW_ISO_100_nocrop_nodual.CR3), an archive intended for raw-decoder development/testing use; no explicit per-file redistribution license was found, so the file is kept untracked/git-ignored.",
-      "notes": "CR3 is ISO-BMFF, exercises the non-TIFF probe branch."
+      "notes": "CR3 is ISO-BMFF, exercises the non-TIFF probe branch. rawspeed3 declines CR3 at this pin: forcing RawForcedBackend::kRawSpeed3 silently falls back to libraw_native inside unpack() (rc=kRawSuccess, diag.unpack_backend=libraw_native, warnings=0x00000000) -- per-file capability, not a dispatch bug; evidence native/scripts/tmp/e2e_samples/canon_r5_forced_rawspeed3.txt."
     },
     {
       "id": "nikon_z7_bayer",
