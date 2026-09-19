@@ -73,13 +73,18 @@ using MsgSendConstCharPointer = const char *(*)(void *, SEL);
 // CFTimeInterval (double) returns. On arm64 objc_msgSend returns floating
 // point in d0 and objc_msgSend_fpret does not exist; on x86_64 a double return
 // must go through objc_msgSend_fpret or the value read back is garbage.
+// objc/message.h already declares objc_msgSend_fpret with a deliberately
+// untyped placeholder prototype ("must be cast to an appropriate function
+// pointer type before being called" per its own comment). Redeclaring it
+// here with our own extern "C" signature conflicts with that declaration
+// (return types differ) and is a hard error on the x86_64 leg; cast the SDK
+// symbol via reinterpret_cast instead of redeclaring it.
+using MsgSendDouble = double (*)(void *, SEL);
 #if defined(__x86_64__)
-extern "C" double objc_msgSend_fpret(void *, SEL, ...);
-#define CEYX_MSGSEND_DOUBLE objc_msgSend_fpret
+#define CEYX_MSGSEND_DOUBLE reinterpret_cast<MsgSendDouble>(objc_msgSend_fpret)
 #else
 #define CEYX_MSGSEND_DOUBLE objc_msgSend
 #endif
-using MsgSendDouble = double (*)(void *, SEL);
 
 bool object_responds_to_selector(void *object, SEL selector) {
   if (!object) return false;
