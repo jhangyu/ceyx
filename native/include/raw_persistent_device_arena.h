@@ -172,12 +172,46 @@ class RawPersistentDeviceArena {
   // synchronisation to read or write its own bindings.
   bool has_live_binding() const;
 
+  // --- Purgeable marking (SR-10, R-F; mem8 T17) -------------------------
+  // These are MEMBER functions and nothing more: T17 adds no exported C
+  // symbol, no second clock and no policy knob. The only caller of
+  // mark_regions_volatile() is the shrink funnel
+  // (raw_persistent_device_arena_shrink_to_lane_floor), and the only callers
+  // of restore_regions_nonvolatile() are this class's own hand-out paths. If
+  // a future change appears to need an FFI entry point here, that is the
+  // signal to stop and report, not to add one.
+
+  // Marks every resident region of this lane volatile — telling the OS its
+  // contents MAY be discarded under memory pressure. This frees nothing and
+  // guarantees no footprint reduction; it converts "bytes the OS must keep"
+  // into "bytes the OS may take", and that alone is SR-10's deliverable.
+  // Returns bytes NEWLY marked (0 if already volatile, if the lane has a live
+  // binding, or off Metal).
+  uint64_t mark_regions_volatile();
+
+  // Restores every volatile region to non-volatile. MUST be called before any
+  // write reaches a region and before any region is handed to Halide — see
+  // the call sites in bind_region() and ensure_region_host_pointer().
+  // Returns true if EVERY region's contents survived; false if the OS
+  // discarded any, in which case those regions have already been reset to the
+  // released state and will re-allocate on the next bind. A discard is a
+  // CACHE MISS, never an error and never a crash.
+  bool restore_regions_nonvolatile();
+
+  // Bytes of this lane currently marked volatile. Test/diagnostic accessor:
+  // it is what lets a gate assert the per-lane partition (which lanes were
+  // marked) rather than only the process-wide total.
+  uint64_t volatile_region_bytes() const;
+
  private:
   struct ArenaRegionStorage {
     void *metal_buffer = nullptr;  // retained MTLBuffer, or nullptr
     size_t byte_count = 0;         // allocated length of metal_buffer
     halide_buffer_t *bound_halide_buffer = nullptr;  // at most one, see §3.3
     bool unavailable = false;  // a prior allocation failed; stop retrying
+    // Currently marked volatile (SR-10). Never true at the same time as a
+    // released region: clause (f) below makes release dominate volatile.
+    bool is_volatile = false;
   };
 
   ArenaRegionStorage regions_[kRawDeviceArenaRegionCount];

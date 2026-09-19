@@ -273,6 +273,33 @@ void release_metal_buffer(void *metal_buffer) {
       metal_buffer, sel_registerName("release"));
 }
 
+// setPurgeableState: takes and RETURNS an NSUInteger MTLPurgeableState.
+// Values RE-READ FROM THE SDK at implementation time rather than copied from
+// the plan on trust (recorded in docs/logs/2026-09-20/t17-premise.txt, from
+// $(xcrun --show-sdk-path)/System/Library/Frameworks/Metal.framework/Headers/
+// MTLResource.h:30-37):
+//     KeepCurrent = 1   NonVolatile = 2   Volatile = 3   Empty = 4
+//
+// TWO THINGS THAT ARE EASY TO GET WRONG AND SILENT WHEN WRONG:
+//  1. The selector returns the PREVIOUS state, NOT the one just set. Reading
+//     the return value as confirmation of the state you asked for is a
+//     misread that never announces itself.
+//  2. NonVolatile(2) and Volatile(3) are adjacent. Transposing them compiles,
+//     runs, and produces exactly the opposite behaviour with no diagnostic.
+using ObjectiveCSendPurgeable = unsigned long (*)(void *, SEL, unsigned long);
+
+constexpr unsigned long kMetalPurgeableStateNonVolatile = 2;
+constexpr unsigned long kMetalPurgeableStateVolatile = 3;
+constexpr unsigned long kMetalPurgeableStateEmpty = 4;
+
+// Returns the PREVIOUS purgeable state (see above), or 0 for a null buffer.
+unsigned long set_metal_buffer_purgeable(void *metal_buffer,
+                                         unsigned long state) {
+  if (!metal_buffer) return 0;
+  return reinterpret_cast<ObjectiveCSendPurgeable>(objc_msgSend)(
+      metal_buffer, sel_registerName("setPurgeableState:"), state);
+}
+
 void *metal_buffer_contents(void *metal_buffer) {
   if (!metal_buffer) return nullptr;
   return reinterpret_cast<ObjectiveCSendNoArgument>(objc_msgSend)(
@@ -320,6 +347,14 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *halide_buffer,
   if (halide_buffer == nullptr || required_byte_count == 0) return false;
   const size_t index = static_cast<size_t>(region);
   if (index >= kRawDeviceArenaRegionCount) return false;
+
+  // T17 (SR-10): a volatile region must be restored BEFORE anything can be
+  // written into it or handed to Halide. This is the first statement that
+  // touches region state for exactly that reason — every early return above
+  // it hands nothing out. A false return means the OS discarded some
+  // region's contents; that is a cache miss, the region has already been
+  // reset, and the allocation path below re-allocates it.
+  restore_regions_nonvolatile();
 
   ArenaRegionStorage &storage = regions_[index];
   if (storage.unavailable) return false;
@@ -447,6 +482,14 @@ void *RawPersistentDeviceArena::ensure_region_host_pointer(
   const size_t index = static_cast<size_t>(region);
   if (index >= kRawDeviceArenaRegionCount) return nullptr;
 
+  // T17 (SR-10): the SECOND hand-out path, and it must restore too. This one
+  // returns the region's CPU-visible memory directly for the caller to memcpy
+  // into, so it writes to the region even more directly than bind_region
+  // does. A restore only in the bind path would leave this route handing out
+  // a pointer into storage the OS is free to discard — the one way T17 can
+  // cause corruption rather than merely failing to save memory.
+  restore_regions_nonvolatile();
+
   ArenaRegionStorage &storage = regions_[index];
   if (storage.unavailable) return nullptr;
 
@@ -557,6 +600,19 @@ void RawPersistentDeviceArena::release_all_regions() {
       live_binding_count_.fetch_sub(1, std::memory_order_relaxed);
     }
     if (storage.metal_buffer != nullptr) {
+      // RELEASE DOMINATES VOLATILE (header clause (f)). A region being
+      // released must stop counting toward g_volatile_device_bytes here,
+      // BEFORE its byte_count is cleared — otherwise a released region's
+      // bytes stay counted as volatile forever, which is precisely the
+      // "a region is both released and volatile" state clause (f) forbids,
+      // and the counter would drift upward on every idle/burst cycle.
+      // No setPurgeableState: call is needed: the buffer itself is about to
+      // be released, so there is no state left to restore.
+      if (storage.is_volatile) {
+        g_volatile_device_bytes.fetch_sub(storage.byte_count,
+                                          std::memory_order_relaxed);
+        storage.is_volatile = false;
+      }
       release_metal_buffer(storage.metal_buffer);
       g_resident_device_bytes.fetch_sub(storage.byte_count,
                                        std::memory_order_relaxed);
@@ -565,6 +621,7 @@ void RawPersistentDeviceArena::release_all_regions() {
     }
     storage.metal_buffer = nullptr;
     storage.byte_count = 0;
+    storage.is_volatile = false;
     // A released region may be allocated again on a later bind; the
     // unavailable latch exists to stop retrying a FAILING allocation, not to
     // retire a healthy region.
@@ -578,6 +635,70 @@ uint64_t RawPersistentDeviceArena::resident_device_bytes() const {
     total += static_cast<uint64_t>(regions_[i].byte_count);
   }
   return total;
+}
+
+uint64_t RawPersistentDeviceArena::volatile_region_bytes() const {
+  uint64_t total = 0;
+  for (size_t i = 0; i < kRawDeviceArenaRegionCount; ++i) {
+    if (regions_[i].is_volatile) {
+      total += static_cast<uint64_t>(regions_[i].byte_count);
+    }
+  }
+  return total;
+}
+
+uint64_t RawPersistentDeviceArena::mark_regions_volatile() {
+  // Backstop, matching the convention the shrink path already uses: the
+  // caller guarantees quiescence, and a lane that is demonstrably in use is
+  // never marked (the fourth row of T17's lane partition).
+  if (has_live_binding()) return 0;
+  uint64_t newly_marked = 0;
+  for (size_t i = 0; i < kRawDeviceArenaRegionCount; ++i) {
+    ArenaRegionStorage &storage = regions_[i];
+    if (storage.metal_buffer == nullptr) continue;
+    if (storage.is_volatile) continue;  // already marked; not "newly"
+    set_metal_buffer_purgeable(storage.metal_buffer,
+                               kMetalPurgeableStateVolatile);
+    storage.is_volatile = true;
+    newly_marked += storage.byte_count;
+    log_arena_event("mark_volatile", lane_identifier_,
+                    static_cast<RawDeviceArenaRegion>(i), storage.byte_count);
+  }
+  g_volatile_device_bytes.fetch_add(newly_marked, std::memory_order_relaxed);
+  return newly_marked;
+}
+
+bool RawPersistentDeviceArena::restore_regions_nonvolatile() {
+  bool all_survived = true;
+  for (size_t i = 0; i < kRawDeviceArenaRegionCount; ++i) {
+    ArenaRegionStorage &storage = regions_[i];
+    if (storage.metal_buffer == nullptr || !storage.is_volatile) continue;
+    // The RETURN is the PREVIOUS state. Empty means the OS reclaimed the
+    // contents while the region was volatile — that is the documented way to
+    // learn a discard happened, and the only way.
+    const unsigned long previous = set_metal_buffer_purgeable(
+        storage.metal_buffer, kMetalPurgeableStateNonVolatile);
+    storage.is_volatile = false;
+    g_volatile_device_bytes.fetch_sub(storage.byte_count,
+                                      std::memory_order_relaxed);
+    if (previous == kMetalPurgeableStateEmpty) {
+      // A CACHE MISS, never an error and never a crash. Drop the region
+      // exactly as release_all_regions() would, so the next bind re-allocates
+      // and the re-warm cost shows up in allocation_count instead of hiding.
+      all_survived = false;
+      release_metal_buffer(storage.metal_buffer);
+      g_resident_device_bytes.fetch_sub(storage.byte_count,
+                                        std::memory_order_relaxed);
+      log_arena_event("volatile_discarded", lane_identifier_,
+                      static_cast<RawDeviceArenaRegion>(i), storage.byte_count);
+      storage.metal_buffer = nullptr;
+      storage.byte_count = 0;
+      // As in release_all_regions(): `unavailable` latches a FAILING
+      // allocation, it does not retire a healthy region.
+      storage.unavailable = false;
+    }
+  }
+  return all_survived;
 }
 
 RawPersistentDeviceArena *raw_persistent_device_arena_for_current_lane() {
@@ -732,6 +853,23 @@ RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
     ++outcome.lanes_released;
   }
 
+  // T17 / SR-10 / R-F: a SECOND pass, over the lanes this call deliberately
+  // KEPT, marking them volatile. Still inside the same lock and the same
+  // funnel — no second mechanism and no second clock, which is the whole
+  // point of D-P1-1.
+  //
+  // Only lanes BELOW the floor are marked. Above it, outright release
+  // strictly dominates (header clause (f)): a released region holds zero
+  // bytes, so marking there would buy nothing and add a state to reason
+  // about. mark_regions_volatile() itself declines a lane with a live
+  // binding, which covers the fourth row of the partition.
+  for (auto &entry : lane_map()) {
+    auto *arena = entry.second.arena;
+    if (arena == nullptr) continue;
+    if (entry.second.lane_index >= floor) continue;  // kept lanes only
+    arena->mark_regions_volatile();
+  }
+
   // One fetch_add each, after the loop: the counters are a report, never a
   // running commentary another thread could read mid-pass.
   g_shrink_lanes_released.fetch_add(
@@ -805,6 +943,15 @@ void RawPersistentDeviceArena::release_all_regions() {}
 bool RawPersistentDeviceArena::has_live_binding() const { return false; }
 
 uint64_t RawPersistentDeviceArena::resident_device_bytes() const { return 0; }
+
+// T17 (SR-10) off Metal. No region exists to mark, so 0 bytes newly marked
+// and "everything survived" are both the TRUTH here, not a stub's placeholder
+// standing in for an answer we could not compute.
+uint64_t RawPersistentDeviceArena::mark_regions_volatile() { return 0; }
+
+bool RawPersistentDeviceArena::restore_regions_nonvolatile() { return true; }
+
+uint64_t RawPersistentDeviceArena::volatile_region_bytes() const { return 0; }
 
 RawPersistentDeviceArena *raw_persistent_device_arena_for_current_lane() {
   return nullptr;

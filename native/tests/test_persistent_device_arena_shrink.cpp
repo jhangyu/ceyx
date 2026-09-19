@@ -233,16 +233,30 @@ int main(int argc, char** argv) {
   // Phase 0 — clean baseline.
   ceyx::raw_persistent_device_arena_release_all_lanes();
 
-  // Phase 1 — warm N lanes on N parked worker threads.
+  // Phase 1 — warm N lanes: the MAIN thread takes one of them, N-1 parked
+  // worker threads take the rest.
+  //
+  // WHY THE MAIN THREAD DECODES FIRST, and it is load-bearing for T17's V4/V5
+  // rather than a stylistic choice: lane_index is assigned in first-touch
+  // order, so decoding here before any worker starts makes the main thread
+  // lane 0 — deterministically a BELOW-FLOOR lane under the floor-2 shrink,
+  // i.e. one of the lanes T17 marks. The main thread is also the only lane
+  // whose RawPersistentDeviceArena* this driver can hold, because an arena is
+  // reachable only from its own thread. Together that is what lets V4 and V5
+  // assert the PER-LANE partition ("this kept lane is / is not marked")
+  // instead of only the process-wide total, which cannot distinguish "the
+  // right lanes were marked" from "some lanes were marked".
+  const bool main_lane_decoded = decode_one(path.c_str());
+
   std::vector<WorkerLane*> workers;
-  workers.reserve(static_cast<size_t>(lane_count));
-  for (int i = 0; i < lane_count; ++i) {
+  workers.reserve(static_cast<size_t>(lane_count - 1));
+  for (int i = 0; i < lane_count - 1; ++i) {
     workers.push_back(new WorkerLane(path, i));
   }
   for (auto* w : workers) w->request_decode();
   for (auto* w : workers) w->wait_idle();
 
-  bool all_decoded = true;
+  bool all_decoded = main_lane_decoded;
   for (auto* w : workers) all_decoded = all_decoded && w->ok();
   CHECK("warmup_decodes_succeeded", all_decoded,
         "every warm-up decode must succeed before any shrink assertion means "
@@ -356,15 +370,29 @@ int main(int argc, char** argv) {
           counters_s1.resident_lane_count == 2, detail);
   }
 
-  // ---- A2 baseline: with T17 not yet landed the volatile counter reads 0.
-  // This is the red-before-green baseline T17 flips.
+  // ---- A2, FLIPPED BY T17 (was: "the volatile counter reads 0 before T17").
+  //
+  // T1 shipped this assertion pinning volatile_device_bytes == 0, explicitly
+  // as the baseline T17 would flip, and flipping it is recorded rather than
+  // quietly rewritten: the observed failure of the old form against the T17
+  // implementation is the red for this task
+  // (docs/logs/2026-09-20/t17-a2-flip-red.txt).
+  //
+  // The new form asserts the invariant that OUTLIVES the flip: volatile bytes
+  // are a strict subset of resident bytes, never a separate pool and never
+  // something to subtract. It is deliberately NOT "volatile > 0" here — V1
+  // owns that claim, and under fusion (v3 P1.A) a kept lane may hold no
+  // Stage-3 region at all, making 0 the correct answer on this line.
   {
-    char detail[160];
+    char detail[200];
     std::snprintf(detail, sizeof(detail),
-                  "volatile_device_bytes=%llu, want 0 before T17 lands",
-                  (unsigned long long)counters_s1.volatile_device_bytes);
-    CHECK("A2_volatile_counter_zero_before_T17",
-          counters_s1.volatile_device_bytes == 0, detail);
+                  "volatile_device_bytes=%llu must be <= "
+                  "resident_device_bytes=%llu",
+                  (unsigned long long)counters_s1.volatile_device_bytes,
+                  (unsigned long long)after_s1.resident_device_bytes);
+    CHECK("A2_volatile_is_a_subset_of_resident",
+          counters_s1.volatile_device_bytes <=
+              after_s1.resident_device_bytes, detail);
   }
 
   // ---- S4: degenerate repeat. Nothing to do is SUCCESS, not failure.
@@ -465,6 +493,200 @@ int main(int argc, char** argv) {
                   (unsigned long long)final_counters.resident_lane_count);
     CHECK("S6_resident_lane_count_zero",
           final_counters.resident_lane_count == 0, detail);
+  }
+
+  // =====================================================================
+  // T17 (SR-10, R-F) — purgeable marking for floor lanes.
+  //
+  // Every case below asserts the PARTITION of v2's four-row lane table, never
+  // a particular non-zero byte total. That distinction is required by v3's
+  // P1.A: once fusion lands, a fused lane may hold no Stage-3 region at all,
+  // and `volatile_device_bytes == 0` on such a lane is the CORRECT answer
+  // rather than a failure. A gate written against "some bytes must be
+  // volatile" would then have to be loosened by whoever lands fusion, and the
+  // usual outcome of loosening a gate under deadline is that it stops testing
+  // anything. Asserting the partition survives that change.
+  //
+  // What the premise probe did and did not establish is recorded in
+  // docs/logs/2026-09-20/t17-premise.txt: setPurgeableState: is accepted AND
+  // the state is retained on this arena's shared-storage buffers. It is NOT
+  // established that the OS ever actually reclaims the pages, so nothing
+  // below asserts a footprint reduction — only reclaimability, which is
+  // SR-10's actual deliverable.
+  // =====================================================================
+
+  // Re-warms every lane: the main thread's own (lane 0) plus every worker.
+  auto warm_all_lanes = [&]() {
+    decode_one(path.c_str());
+    for (auto* w : workers) w->request_decode();
+    for (auto* w : workers) w->wait_idle();
+  };
+
+  // ---- V1: floor lanes are marked; above-floor lanes are released, not
+  // marked.
+  warm_all_lanes();
+  {
+    const AllocCounters before = read_alloc_counters();
+    CHECK("V1_precondition_lanes_are_warm", before.resident_device_bytes > 0,
+          "V1 needs resident bytes before a shrink can mark anything");
+    const ceyx::RawArenaShrinkOutcome v1 =
+        ceyx::raw_persistent_device_arena_shrink_to_lane_floor(2);
+    const AllocCounters after = read_alloc_counters();
+    const ShrinkCounters counters = read_shrink_counters();
+    std::printf(
+        "[ArenaShrink] V1: lanes_released=%zu resident_lane_count=%llu "
+        "volatile_device_bytes=%llu resident_device_bytes=%llu\n",
+        v1.lanes_released, (unsigned long long)counters.resident_lane_count,
+        (unsigned long long)counters.volatile_device_bytes,
+        (unsigned long long)after.resident_device_bytes);
+    CHECK("V1_two_lanes_kept", counters.resident_lane_count == 2,
+          "the floor-2 partition: exactly two lanes keep their regions");
+    CHECK("V1_floor_lanes_were_marked", counters.volatile_device_bytes > 0,
+          "the kept lanes must be marked volatile — 0 here with lanes kept "
+          "and Metal present means the marking never ran, or Volatile(3) and "
+          "NonVolatile(2) were transposed");
+    // UPPER bound, not an equality: a kept lane may legitimately hold fewer
+    // regions, and under fusion it may hold none.
+    CHECK("V1_volatile_bounded_by_resident",
+          counters.volatile_device_bytes <= after.resident_device_bytes,
+          "volatile bytes are a SUBSET of resident bytes; exceeding residency "
+          "would mean released or absent regions are being counted");
+  }
+
+  // ---- V2: marking does NOT change residency. The anti-conflation test: it
+  // fails the moment anyone reports resident-minus-volatile as residency.
+  {
+    const AllocCounters after_first = read_alloc_counters();
+    const ceyx::RawArenaShrinkOutcome again =
+        ceyx::raw_persistent_device_arena_shrink_to_lane_floor(2);
+    const AllocCounters after_second = read_alloc_counters();
+    CHECK("V2_repeat_shrink_releases_nothing",
+          again.lanes_released == 0 && again.bytes_released == 0,
+          "the surplus lanes are already released; a second pass must be a "
+          "no-op");
+    CHECK("V2_marking_leaves_residency_byte_identical",
+          after_second.resident_device_bytes ==
+              after_first.resident_device_bytes,
+          "a volatile region is STILL RESIDENT until the OS actually reclaims "
+          "it; marking must never move the residency figure");
+  }
+
+  // ---- V3: released regions are never also counted volatile (clause (f)).
+  {
+    ceyx::raw_persistent_device_arena_shrink_to_lane_floor(0);
+    const AllocCounters after = read_alloc_counters();
+    const ShrinkCounters counters = read_shrink_counters();
+    std::printf(
+        "[ArenaShrink] V3: resident_lane_count=%llu volatile_device_bytes=%llu "
+        "resident_device_bytes=%llu\n",
+        (unsigned long long)counters.resident_lane_count,
+        (unsigned long long)counters.volatile_device_bytes,
+        (unsigned long long)after.resident_device_bytes);
+    CHECK("V3_floor_zero_keeps_no_lanes",
+          counters.resident_lane_count == 0 &&
+              after.resident_device_bytes == 0,
+          "floor 0 keeps nothing, so there is nothing left to mark");
+    CHECK("V3_release_dominates_volatile",
+          counters.volatile_device_bytes == 0,
+          "a released region must stop counting as volatile — a non-zero "
+          "figure here is the counter drifting upward on every idle cycle, "
+          "the exact state header clause (f) forbids");
+  }
+
+  // ---- V4: THE LOAD-BEARING ONE. No region is handed out while still
+  // volatile. Failure here is silent corruption, not a missed saving: the
+  // caller would be writing into, or handing Halide, storage the OS is free
+  // to discard underneath it.
+  //
+  // WHAT V4 PROVES, AND WHAT IT DOES NOT — measured, not assumed
+  // (docs/logs/2026-09-20/t17-mutation.txt):
+  //   deleting the restore in bind_region() ALONE      -> V4 still PASSES
+  //   deleting the restore in BOTH hand-out paths      -> V4 FAILS
+  // So V4 is not vacuous, but it proves only "at least one hand-out path
+  // restores the lane". It cannot isolate a single path, because
+  // restore_regions_nonvolatile() works on the whole lane and a decode
+  // reaches ensure_region_host_pointer() before bind_region() — whichever
+  // runs first satisfies a per-lane assertion on behalf of the other.
+  // Consequence worth stating plainly: a FUTURE hand-out path added ahead of
+  // both existing ones that forgot to restore would leave V4 green. The
+  // defence against that is the contract on restore_regions_nonvolatile() in
+  // the header, not this assertion.
+  warm_all_lanes();
+  {
+    ceyx::raw_persistent_device_arena_shrink_to_lane_floor(2);
+    ceyx::RawPersistentDeviceArena* lane0 =
+        ceyx::raw_persistent_device_arena_for_current_lane();
+    if (lane0 == nullptr) {
+      CHECK("V4_no_volatile_region_is_ever_bound", false,
+            "the main thread has no arena, so the restore path cannot be "
+            "exercised — gate-procedure failure, not a defect");
+    } else {
+      // First prove the marking actually reached this lane, otherwise the
+      // assertion below passes for the wrong reason: a lane that was never
+      // marked trivially has no volatile bytes after a decode.
+      const uint64_t marked_before = lane0->volatile_region_bytes();
+      CHECK("V4_precondition_lane0_was_marked", marked_before > 0,
+            "lane 0 is below the floor and must have been marked, or V4 "
+            "cannot distinguish 'restored' from 'never marked'");
+      const bool decoded = decode_one(path.c_str());
+      const uint64_t marked_after = lane0->volatile_region_bytes();
+      const AllocCounters after = read_alloc_counters();
+      const ShrinkCounters counters = read_shrink_counters();
+      std::printf(
+          "[ArenaShrink] V4: lane0_volatile_before=%llu lane0_volatile_after="
+          "%llu volatile_device_bytes=%llu resident_device_bytes=%llu\n",
+          (unsigned long long)marked_before, (unsigned long long)marked_after,
+          (unsigned long long)counters.volatile_device_bytes,
+          (unsigned long long)after.resident_device_bytes);
+      CHECK("V4_decode_succeeded_on_restored_lane", decoded,
+            "the decode itself must succeed; a restore that corrupts the "
+            "region would surface here first");
+      CHECK("V4_no_volatile_region_is_ever_bound", marked_after == 0,
+            "the bind path must restore EVERY volatile region of the lane "
+            "before handing any of them out");
+      CHECK("V4_volatile_total_below_resident",
+            counters.volatile_device_bytes < after.resident_device_bytes,
+            "after a decode on a kept lane, at least that lane's bytes are "
+            "resident but no longer volatile");
+    }
+  }
+
+  // ---- V5: a lane with a live binding is never marked (row 4 of the
+  // partition).
+  {
+    ceyx::RawPersistentDeviceArena* lane0 =
+        ceyx::raw_persistent_device_arena_for_current_lane();
+    if (lane0 == nullptr) {
+      CHECK("V5_live_binding_never_marked", false,
+            "the main thread has no arena — gate-procedure failure");
+    } else {
+      halide_buffer_t probe_buffer{};
+      {
+        ceyx::RawDeviceArenaRegionBinding binding(
+            lane0, &probe_buffer,
+            ceyx::RawDeviceArenaRegion::kSourceMosaicRegion, 1u << 20);
+        CHECK("V5_probe_binding_established", static_cast<bool>(binding),
+              "V5 needs a live binding on the kept lane before it can assert "
+              "the lane is skipped");
+        ceyx::raw_persistent_device_arena_shrink_to_lane_floor(2);
+        const uint64_t lane0_volatile = lane0->volatile_region_bytes();
+        const ShrinkCounters counters = read_shrink_counters();
+        std::printf(
+            "[ArenaShrink] V5: lane0_volatile=%llu volatile_device_bytes=%llu\n",
+            (unsigned long long)lane0_volatile,
+            (unsigned long long)counters.volatile_device_bytes);
+        CHECK("V5_live_binding_never_marked", lane0_volatile == 0,
+              "a lane in use must never be marked volatile, even though it is "
+              "below the floor and would otherwise be a mark candidate");
+        // The discriminator: the OTHER kept lane has no binding and IS
+        // marked. Without this, V5 would also pass if the mark pass had
+        // simply stopped working altogether.
+        CHECK("V5_other_kept_lane_still_marked",
+              counters.volatile_device_bytes > 0,
+              "the mark pass must still be running — this separates 'skipped "
+              "the bound lane' from 'marked nothing at all'");
+      }
+    }
   }
 
   for (auto* w : workers) { w->stop(); delete w; }
