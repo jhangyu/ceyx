@@ -1,0 +1,70 @@
+diff --git a/src/decoders/nikon_he/nikon_he_bayer.cpp b/src/decoders/nikon_he/nikon_he_bayer.cpp
+index b7a1c390..ca9ca488 100644
+--- a/src/decoders/nikon_he/nikon_he_bayer.cpp
++++ b/src/decoders/nikon_he/nikon_he_bayer.cpp
+@@ -20,7 +20,6 @@ it under the terms of the one of two licenses as you choose:
+ // See nikon_he_bayer.h for the public API.
+ 
+ #include "nikon_he_bayer.h"
+-#include "nikon_he_simd.h"
+ 
+ namespace nikon_he {
+ 
+diff --git a/src/decoders/nikon_he/nikon_he_tile.cpp b/src/decoders/nikon_he/nikon_he_tile.cpp
+index 57279872..05a3026a 100644
+--- a/src/decoders/nikon_he/nikon_he_tile.cpp
++++ b/src/decoders/nikon_he/nikon_he_tile.cpp
+@@ -105,8 +105,8 @@ bool decode_tile_entropy_horizontal(
+             scratch.bufA.data(), scratch.bufB.data());
+         if (!prec.success) return false;
+ 
+-        int32_t* ha = store.a(p);
+-        int32_t* hb = store.b(p);
++        int32_t* ha = store.pass_a_row(p);
++        int32_t* hb = store.pass_b_row(p);
+         std::memset(ha, 0, static_cast<size_t>(h_len) * sizeof(int32_t));
+         std::memset(hb, 0, static_cast<size_t>(h_len) * sizeof(int32_t));
+         std::memset(scratch.h_work.data(), 0, scratch.h_work.size() * sizeof(int32_t));
+@@ -174,7 +174,7 @@ void apply_tile_vertical_idwt(
+     };
+ 
+     for (int p = 0; p < store.precinct_count; ++p) {
+-        const int32_t* ha = store.a(p);
++        const int32_t* ha = store.pass_a_row(p);
+         std::memcpy(scratch.tile_buf.data() + memcpy_cursor + 3 * kBand,
+                     ha + 2 * lift_st,
+                     static_cast<size_t>(memcpy_st) * sizeof(int32_t));
+@@ -186,7 +186,7 @@ void apply_tile_vertical_idwt(
+             if (pre_tick > 5) x1_write_offset += 4;
+         }
+ 
+-        const int32_t* hb = store.b(p);
++        const int32_t* hb = store.pass_b_row(p);
+         std::memcpy(scratch.tile_buf.data() + memcpy_cursor + 3 * kBand,
+                     hb + 2 * lift_st,
+                     static_cast<size_t>(memcpy_st) * sizeof(int32_t));
+diff --git a/src/decoders/nikon_he/nikon_he_tile.h b/src/decoders/nikon_he/nikon_he_tile.h
+index b369f619..606796e9 100644
+--- a/src/decoders/nikon_he/nikon_he_tile.h
++++ b/src/decoders/nikon_he/nikon_he_tile.h
+@@ -97,16 +97,16 @@ struct TileHorizStore {
+ 
+     void ensure(int store_precincts, int store_h_len);
+ 
+-    int32_t* a(int p) {
++    int32_t* pass_a_row(int p) {
+         return pass_a.data() + static_cast<size_t>(p) * h_len;
+     }
+-    int32_t* b(int p) {
++    int32_t* pass_b_row(int p) {
+         return pass_b.data() + static_cast<size_t>(p) * h_len;
+     }
+-    const int32_t* a(int p) const {
++    const int32_t* pass_a_row(int p) const {
+         return pass_a.data() + static_cast<size_t>(p) * h_len;
+     }
+-    const int32_t* b(int p) const {
++    const int32_t* pass_b_row(int p) const {
+         return pass_b.data() + static_cast<size_t>(p) * h_len;
+     }
+ };
