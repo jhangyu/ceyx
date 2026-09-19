@@ -227,6 +227,52 @@ void raw_persistent_device_arena_configure_lane_count(size_t lane_count);
 // warmup baseline. Safe to call with no lanes alive.
 void raw_persistent_device_arena_release_all_lanes();
 
+// What one shrink pass did. Reported rather than logged-only because the Dart
+// idle path (T2) logs the byte figure and the T1 gate asserts on the lane
+// counts.
+struct RawArenaShrinkOutcome {
+  size_t lanes_released = 0;
+  size_t lanes_refused = 0;  // live binding at check time
+  uint64_t bytes_released = 0;
+};
+
+// IDLE RELEASE (mem8 SR-1, plan docs/logs/2026-09-12/mem8-plan.md T1).
+// Releases the device regions of every lane in excess of `floor`, so a process
+// that has gone quiet hands its arena bytes back instead of holding a full
+// lane-width of Stage-3 intermediates until exit.
+//
+// (a) FLOOR SEMANTICS: lanes in excess of the floor count — i.e. lanes whose
+//     `lane_index >= floor` — are candidates. Lanes below it are NEVER
+//     touched, whatever they hold. `lane_index` is assigned once at lane
+//     creation and never reused, so the same lanes are deterministically the
+//     candidates on every call.
+// (b) `floor == 0` is legal and releases every quiescent lane.
+// (c) A call made when the number of lanes holding regions is already <= floor
+//     is a NO-OP RETURNING ALL ZEROS — that is SUCCESS, not failure. Callers
+//     must not treat a zero outcome as an error.
+// (d) Objects are never destroyed here, only regions released: no arena is
+//     deleted and no map entry is erased, so the deliberate-leak teardown
+//     ordering (see LIFETIME above) is untouched, and so is `lane_index`
+//     stability. Erasing released lanes to make a lane count drop would break
+//     both — `next_index` is the map size — and nothing needs it: residency is
+//     reported by raw_persistent_device_arena_resident_lane_count() below,
+//     which counts arenas actually holding bytes.
+// (e) THE CALLER MUST GUARANTEE DECODE QUIESCENCE. The per-lane
+//     has_live_binding() check below is a BACKSTOP that refuses an obviously
+//     busy lane; it is not a lock and cannot exclude a binding that starts
+//     after it reads. The only real clock is the pool's own quiescence window
+//     (T2).
+// (f) Release dominates volatile. A region that shrink_to_lane_floor releases
+//     is released outright; it is never merely marked volatile. Volatile
+//     marking (SR-10/R-F, T17) applies only to regions this call has decided
+//     NOT to release — below-floor lanes. A region can therefore never be
+//     both, and volatile_device_bytes is never counted against a released
+//     region's bytes. Re-binding a volatile region must restore it to
+//     non-volatile BEFORE any write reaches it, and must treat a "contents
+//     were discarded" answer as a cache miss, not an error.
+RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
+    size_t floor);
+
 // R2.5 review S-3: the free-function raw_persistent_device_arena_owns_buffer()
 // (a lock-held scan across every lane's arena) was removed after the S-2
 // call-site fix left it with zero callers — it was itself the cross-lane data
@@ -254,6 +300,43 @@ uint64_t raw_persistent_device_arena_binding_count();
 uint64_t raw_persistent_device_arena_resident_device_bytes();
 
 size_t raw_persistent_device_arena_live_lane_count();
+
+// --- Idle-release counters (mem8 SR-1, T1.2 step 6) ---------------------
+// Process-wide totals since process start, in the same shape as the five
+// above. They exist so a shrink that quietly did nothing is distinguishable
+// from one that had nothing to do: a call count that moves with zero lanes
+// released and zero refused is the degenerate case (c), while a call count
+// that never moves means the idle path is not wired at all.
+
+uint64_t raw_persistent_device_arena_shrink_call_count();
+uint64_t raw_persistent_device_arena_shrink_lanes_released();
+uint64_t raw_persistent_device_arena_shrink_lanes_refused();
+uint64_t raw_persistent_device_arena_shrink_bytes_released();
+
+// Of the resident bytes, how many sit in regions currently marked volatile —
+// i.e. reclaimable by the OS at its discretion (SR-10, T17).
+//
+// THIS IS A SEPARATE QUANTITY, NEVER A SUBTRACTION. A volatile region is
+// STILL RESIDENT until the OS actually reclaims it, so reporting
+// `resident - volatile` as "real" residency would publish a number describing
+// a state that may never occur, and would let a purely advisory change look
+// like a footprint win. SR-10's deliverable is reclaimability, not guaranteed
+// footprint.
+//
+// Ships from T1 returning 0, before anything marks a region volatile, so that
+// the probe's out-parameter list is final at its first release: widening
+// ceyx_debug_arena_shrink_counters later would silently mismatch every harness
+// already built against the narrower typedef — the same trap that keeps
+// ceyx_debug_persistent_device_arena_counters at five parameters.
+uint64_t raw_persistent_device_arena_volatile_device_bytes();
+
+// Lanes that currently hold at least one region with device bytes. DERIVED on
+// each call by walking the lane map under its lock — deliberately not cached,
+// because a cached copy is one more thing that can drift from the truth, and
+// this is read once per measurement, never per decode. Distinct from
+// live_lane_count(), which counts lanes that EXIST; after a shrink the two
+// differ, and that difference is precisely what the shrink accomplished.
+size_t raw_persistent_device_arena_resident_lane_count();
 
 }  // namespace ceyx
 

@@ -387,6 +387,17 @@ add_executable(test_persistent_device_arena tests/test_persistent_device_arena.c
 target_include_directories(test_persistent_device_arena PRIVATE ${INC_DIR})
 target_link_libraries(test_persistent_device_arena PRIVATE dng_decoder_native)
 
+# T1 gate (mem8 SR-1): arena idle release down to a lane floor. Needs
+# ${HALIDE_DIR}/include on top of ${INC_DIR}, unlike its AC1 sibling above,
+# because S3 constructs a halide_buffer_t of its own to hold a live region
+# binding open across a shrink call.
+add_executable(test_persistent_device_arena_shrink
+    tests/test_persistent_device_arena_shrink.cpp)
+target_include_directories(test_persistent_device_arena_shrink PRIVATE
+    ${INC_DIR}
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_persistent_device_arena_shrink PRIVATE dng_decoder_native)
+
 # Multi-lane RAW concurrency gate (R2.5): per-lane arena isolation under
 # concurrent generic-RAW decodes; prerequisite evidence for C2's under-load AC4.
 add_executable(test_concurrent_raw_decode tests/test_concurrent_raw_decode.cpp)

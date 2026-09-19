@@ -235,6 +235,68 @@ int32_t ceyx_debug_persistent_device_arena_counters(
     uint64_t *out_live_lane_count);
 
 /* ===================================================================== */
+/* Arena idle release (mem8 SR-1, T1; plan Halcyon                        */
+/* docs/logs/2026-09-12/mem8-plan.md T1.2 step 7).                        */
+/*                                                                        */
+/* THE ONE NATIVE IDLE FUNNEL. ceyx_native_idle_shrink is the single      */
+/* entry through which a quiescent host asks the native side to give      */
+/* device bytes back; every native idle-release subsystem is reached      */
+/* through it rather than through a mechanism of its own. Defined in      */
+/* native/src/ffi/dng_ffi_api.cpp beside the arena probe above.           */
+/*                                                                        */
+/* Releases the device regions of every arena lane in excess of `floor`   */
+/* and returns the BYTE COUNT released, so the Dart idle path has         */
+/* something non-trivial to log. A negative floor is clamped to 0 (itself */
+/* a legal floor, meaning "release every quiescent lane"), so -1 is       */
+/* reserved and is not returned by the current implementation. A call     */
+/* with nothing to release returns 0, which is SUCCESS, not an error.     */
+/*                                                                        */
+/* This export forwards verbatim to                                       */
+/* raw_persistent_device_arena_shrink_to_lane_floor                       */
+/* (native/include/raw_persistent_device_arena.h), whose contract it      */
+/* carries in full -- INCLUDING clause (e): THE CALLER MUST GUARANTEE     */
+/* DECODE QUIESCENCE. The per-lane live-binding refusal is a backstop,    */
+/* not a lock; the pool's quiescence window is the only clock.            */
+/*                                                                        */
+/* Present on every platform: the non-Metal build compiles the portable   */
+/* stub, which truthfully answers 0 because it holds no regions.          */
+/* ===================================================================== */
+int64_t ceyx_native_idle_shrink(int32_t floor);
+
+/* ===================================================================== */
+/* Arena idle-release probe (mem8 SR-1, T1; SR-10's volatile counter).    */
+/*                                                                        */
+/* DEBUG/PROBE API, same category as the two probes above: NOT part of    */
+/* the Dart-visible surface and nothing is added to DngResult.            */
+/*                                                                        */
+/* Reports PROCESS-WIDE totals since process start, except                */
+/* out_resident_lane_count, which is an INSTANTANEOUS derived reading:    */
+/* lanes currently holding device bytes, distinct from the live lane      */
+/* count, which counts lanes that EXIST. After a shrink the two differ,   */
+/* and that difference is what the shrink accomplished.                   */
+/*                                                                        */
+/* out_volatile_device_bytes is a SEPARATE quantity, never a subtraction: */
+/* a volatile region is still RESIDENT until the OS actually reclaims it, */
+/* so `resident - volatile` would publish a number describing a state     */
+/* that may never occur. It reads 0 until T17's purgeable marking lands,  */
+/* and is present from this export's FIRST release on purpose -- widening */
+/* the signature later would silently mismatch every harness already      */
+/* built against the narrower typedef, which is exactly the trap that     */
+/* keeps ceyx_debug_persistent_device_arena_counters above at five.       */
+/*                                                                        */
+/* Null-pointer convention, same as the probes above: individual          */
+/* out-pointers may be null and are then skipped; returns 0 if at least   */
+/* one was filled, -1 only when ALL are null.                             */
+/* ===================================================================== */
+int32_t ceyx_debug_arena_shrink_counters(
+    uint64_t *out_shrink_calls,
+    uint64_t *out_lanes_released,
+    uint64_t *out_lanes_refused,
+    uint64_t *out_bytes_released,
+    uint64_t *out_resident_lane_count,
+    uint64_t *out_volatile_device_bytes);
+
+/* ===================================================================== */
 /* C2 zero-copy capability-gate probe (R3-T4, GPU copy-elimination        */
 /* campaign, docs/logs/2026-09-11/plan-gpu-copy-elimination.md §4.5).      */
 /*                                                                        */

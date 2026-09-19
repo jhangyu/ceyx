@@ -58,6 +58,18 @@ std::atomic<uint64_t> g_binding_count{0};
 std::atomic<uint64_t> g_resident_device_bytes{0};
 std::atomic<size_t> g_live_lane_count{0};
 
+// Idle-release counters (mem8 SR-1, T1.2 step 6). Same shape and same reason
+// as the five above.
+std::atomic<uint64_t> g_shrink_call_count{0};
+std::atomic<uint64_t> g_shrink_lanes_released{0};
+std::atomic<uint64_t> g_shrink_lanes_refused{0};
+std::atomic<uint64_t> g_shrink_bytes_released{0};
+// Reserved for T17's purgeable marking (SR-10). Zero until something marks a
+// region volatile; shipped now so the probe's parameter list is final at its
+// first release (see the header comment on
+// raw_persistent_device_arena_volatile_device_bytes()).
+std::atomic<uint64_t> g_volatile_device_bytes{0};
+
 // 0 means "never configured": the budget then falls back to the absolute
 // ceiling. Relaxed, exactly like g_configured_slots (dng_pipeline.cpp:421-426):
 // a lane reading a stale budget for one decode gets a correct-but-different
@@ -166,6 +178,26 @@ uint64_t raw_persistent_device_arena_resident_device_bytes() {
 
 size_t raw_persistent_device_arena_live_lane_count() {
   return g_live_lane_count.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_persistent_device_arena_shrink_call_count() {
+  return g_shrink_call_count.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_persistent_device_arena_shrink_lanes_released() {
+  return g_shrink_lanes_released.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_persistent_device_arena_shrink_lanes_refused() {
+  return g_shrink_lanes_refused.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_persistent_device_arena_shrink_bytes_released() {
+  return g_shrink_bytes_released.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_persistent_device_arena_volatile_device_bytes() {
+  return g_volatile_device_bytes.load(std::memory_order_relaxed);
 }
 
 void raw_persistent_device_arena_configure_lane_count(size_t lane_count) {
@@ -395,7 +427,16 @@ bool RawPersistentDeviceArena::bind_region(halide_buffer_t *halide_buffer,
   }
 
   storage.bound_halide_buffer = halide_buffer;
-  live_binding_count_.fetch_add(1, std::memory_order_relaxed);
+  // RELEASE, paired with the ACQUIRE load in has_live_binding() (mem8 T1.2
+  // step 4). WHAT THIS CLOSES: a binding established BEFORE another thread's
+  // has_live_binding() read is now guaranteed visible to that read, so an
+  // idle shrink can no longer miss an already-live binding through staleness
+  // alone. WHAT IT DOES NOT CLOSE, and must never be mistaken for: a binding
+  // that starts AFTER the read is still unseen. This is not a lock and not
+  // synchronisation of the shrink against an arriving decode — only the
+  // caller-side quiescence precondition (header clause (e)) excludes that
+  // case. Cost is nil on arm64.
+  live_binding_count_.fetch_add(1, std::memory_order_release);
   g_binding_count.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
@@ -502,7 +543,9 @@ bool RawPersistentDeviceArena::owns_buffer(
 }
 
 bool RawPersistentDeviceArena::has_live_binding() const {
-  return live_binding_count_.load(std::memory_order_relaxed) > 0;
+  // ACQUIRE, paired with the RELEASE increment in bind_region(); see that
+  // site's comment for exactly which race this closes and which it does not.
+  return live_binding_count_.load(std::memory_order_acquire) > 0;
 }
 
 void RawPersistentDeviceArena::release_all_regions() {
@@ -633,6 +676,94 @@ void raw_persistent_device_arena_release_all_lanes() {
   g_live_lane_count.store(0, std::memory_order_relaxed);
 }
 
+RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
+    size_t floor) {
+  // IDLE RELEASE (mem8 SR-1). The full contract — floor semantics, the legal
+  // zero floor, the all-zeros no-op, "objects are never destroyed", the
+  // caller-side quiescence precondition and the release-dominates-volatile
+  // lifecycle rule — is stated once on the declaration in
+  // raw_persistent_device_arena.h and is not restated here.
+  //
+  // NO NEW RELEASE LOGIC IS WRITTEN. Each lane goes through the SAME
+  // release_all_regions() the surplus-lane path in
+  // raw_persistent_device_arena_for_current_lane() already calls: it detaches
+  // (never device-frees, invariant I-D), releases the MTLBuffer, decrements
+  // g_resident_device_bytes, logs an event=release line per region, and
+  // clears `unavailable` so a later bind re-allocates rather than staying
+  // retired.
+  //
+  // LOCK NOTE (invariant I-B deserves a second look here, and the answer is
+  // recorded in code rather than only in the plan): release_all_regions()
+  // does call into Metal while lane_map_lock() is held. That is not GPU work
+  // — it is a CFRelease-class teardown of a buffer with no live binding and
+  // no in-flight command buffer, both guaranteed by the caller's quiescence
+  // precondition plus the has_live_binding() backstop below.
+  // raw_persistent_device_arena_release_all_lanes() already destroys arenas
+  // under this same lock, so no new precedent is set. Holding the lock across
+  // the release is what PREVENTS a concurrently-arriving for_current_lane()
+  // from observing a half-released arena; dropping it to "avoid Metal under a
+  // lock" would introduce exactly that window. Do not change this without
+  // replacing that guarantee.
+  RawArenaShrinkOutcome outcome;
+  g_shrink_call_count.fetch_add(1, std::memory_order_relaxed);
+
+  std::lock_guard<std::mutex> guard(lane_map_lock());
+  for (auto &entry : lane_map()) {
+    auto *arena = entry.second.arena;
+    if (arena == nullptr) continue;
+    // Lanes in excess of the floor ONLY; lane_index is stable for the process
+    // lifetime, so the candidate set is deterministic across calls.
+    if (entry.second.lane_index < floor) continue;
+    // Already released: not a release. Counting it would make lanes_released
+    // report "lanes visited" rather than "lanes that gave bytes back", and
+    // the degenerate case (c) would stop being all-zeros.
+    if (arena->resident_device_bytes() == 0) continue;
+    if (arena->has_live_binding()) {
+      ++outcome.lanes_refused;
+      std::fprintf(stderr,
+                   "[RawPersistentDeviceArena] event=shrink_lane_refused "
+                   "reason=live_binding lane_identifier=0x%llx\n",
+                   static_cast<unsigned long long>(entry.first));
+      std::fflush(stderr);
+      continue;
+    }
+    outcome.bytes_released += arena->resident_device_bytes();
+    arena->release_all_regions();
+    ++outcome.lanes_released;
+  }
+
+  // One fetch_add each, after the loop: the counters are a report, never a
+  // running commentary another thread could read mid-pass.
+  g_shrink_lanes_released.fetch_add(
+      static_cast<uint64_t>(outcome.lanes_released),
+      std::memory_order_relaxed);
+  g_shrink_lanes_refused.fetch_add(
+      static_cast<uint64_t>(outcome.lanes_refused), std::memory_order_relaxed);
+  g_shrink_bytes_released.fetch_add(outcome.bytes_released,
+                                    std::memory_order_relaxed);
+
+  std::fprintf(stderr,
+               "[RawPersistentDeviceArena] event=shrink_to_lane_floor "
+               "floor=%zu lanes_released=%zu lanes_refused=%zu "
+               "bytes_released=%llu\n",
+               floor, outcome.lanes_released, outcome.lanes_refused,
+               static_cast<unsigned long long>(outcome.bytes_released));
+  std::fflush(stderr);
+  return outcome;
+}
+
+size_t raw_persistent_device_arena_resident_lane_count() {
+  // DERIVED, not cached (see the header). Walks the map under its lock and
+  // counts arenas that actually hold device bytes.
+  size_t count = 0;
+  std::lock_guard<std::mutex> guard(lane_map_lock());
+  for (const auto &entry : lane_map()) {
+    if (entry.second.arena == nullptr) continue;
+    if (entry.second.arena->resident_device_bytes() > 0) ++count;
+  }
+  return count;
+}
+
 }  // namespace ceyx
 
 #else  // portable stub
@@ -680,6 +811,17 @@ RawPersistentDeviceArena *raw_persistent_device_arena_for_current_lane() {
 }
 
 void raw_persistent_device_arena_release_all_lanes() {}
+
+// A non-Metal target holds no regions at all, so all-zeros is the TRUTH here,
+// not a stub's placeholder — the degenerate case (c) of the contract, which is
+// success. The symbol exists on every leg, which is what lets the FFI export's
+// expected_on cover all four platforms (T2.4) instead of needing a
+// per-platform absence rule.
+RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(size_t) {
+  return {};
+}
+
+size_t raw_persistent_device_arena_resident_lane_count() { return 0; }
 
 }  // namespace ceyx
 

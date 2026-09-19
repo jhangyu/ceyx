@@ -300,4 +300,85 @@ FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// T1 (mem8 SR-1) — arena idle release.
+//
+// ceyx_native_idle_shrink is THE ONE NATIVE IDLE FUNNEL: every native
+// idle-release subsystem is reached through this single export rather than
+// through a mechanism of its own. A second entry point added later for some
+// other subsystem would be the defect, not the feature.
+//
+// The full contract (floor semantics, zero floor legal, all-zeros no-op is
+// success, the caller-side quiescence precondition, release-dominates-volatile)
+// lives on the declaration in raw_ffi_api.h and, in full, on
+// raw_persistent_device_arena_shrink_to_lane_floor in
+// raw_persistent_device_arena.h. It is not restated here, so there is exactly
+// one copy of it to keep true.
+// ---------------------------------------------------------------------------
+
+FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
+  // A negative floor is CLAMPED, not rejected: 0 is itself a legal floor
+  // meaning "release every quiescent lane", so clamping lands on a defined
+  // behaviour rather than inventing an error for an input that has an obvious
+  // reading.
+  const size_t clamped_floor =
+      floor < 0 ? size_t{0} : static_cast<size_t>(floor);
+  const ceyx::RawArenaShrinkOutcome outcome =
+      ceyx::raw_persistent_device_arena_shrink_to_lane_floor(clamped_floor);
+  // Bytes, not lanes: the lane counts are available through the probe below,
+  // while the byte figure is the one the Dart idle path logs.
+  return static_cast<int64_t>(outcome.bytes_released);
+}
+
+// ---------------------------------------------------------------------------
+// T1 — arena idle-release probe. Debug/probe surface only (see the contract
+// comment in raw_ffi_api.h): not Dart-visible, nothing added to DngResult.
+//
+// Six out-parameters from the FIRST release on purpose: out_volatile_device_
+// bytes reads 0 until T17's purgeable marking lands, and widening this
+// signature afterwards would silently mismatch every harness already built
+// against a five-argument typedef — the same trap that keeps
+// ceyx_debug_persistent_device_arena_counters above at five.
+//
+// Null-pointer convention, as above: any out-pointer may be null and is then
+// skipped; -1 only when all six are null.
+// ---------------------------------------------------------------------------
+
+FFI_EXPORT int32_t ceyx_debug_arena_shrink_counters(
+    uint64_t *out_shrink_calls, uint64_t *out_lanes_released,
+    uint64_t *out_lanes_refused, uint64_t *out_bytes_released,
+    uint64_t *out_resident_lane_count, uint64_t *out_volatile_device_bytes) {
+  if (!out_shrink_calls && !out_lanes_released && !out_lanes_refused &&
+      !out_bytes_released && !out_resident_lane_count &&
+      !out_volatile_device_bytes) {
+    return -1;
+  }
+  if (out_shrink_calls) {
+    *out_shrink_calls = ceyx::raw_persistent_device_arena_shrink_call_count();
+  }
+  if (out_lanes_released) {
+    *out_lanes_released =
+        ceyx::raw_persistent_device_arena_shrink_lanes_released();
+  }
+  if (out_lanes_refused) {
+    *out_lanes_refused =
+        ceyx::raw_persistent_device_arena_shrink_lanes_refused();
+  }
+  if (out_bytes_released) {
+    *out_bytes_released =
+        ceyx::raw_persistent_device_arena_shrink_bytes_released();
+  }
+  if (out_resident_lane_count) {
+    // Instantaneous and derived (it walks the lane map under its lock), unlike
+    // the four process-wide totals above.
+    *out_resident_lane_count = static_cast<uint64_t>(
+        ceyx::raw_persistent_device_arena_resident_lane_count());
+  }
+  if (out_volatile_device_bytes) {
+    *out_volatile_device_bytes =
+        ceyx::raw_persistent_device_arena_volatile_device_bytes();
+  }
+  return 0;
+}
+
 } // extern "C"

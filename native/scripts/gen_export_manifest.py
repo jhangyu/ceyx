@@ -81,6 +81,15 @@ KNOWN_GROUP_IDS = {
     "ceyx_decode_into_buffer_oriented": "oriented",
     "ceyx_pool_aligned_alloc": "pool_aligned",
     "ceyx_pool_pressure_relief": "pool_pressure_relief",
+    # mem8 T1 (SR-1). Deliberately NOT in LEGACY_OPTIONAL_GROUPS, so
+    # expected_on defaults to all four legs -- justified by the portable stub
+    # in raw_persistent_device_arena.cpp, which defines
+    # raw_persistent_device_arena_shrink_to_lane_floor on non-Metal targets as
+    # well, so the symbol exists everywhere even where it has nothing to
+    # release. This id reaches the generated manifest only once a Dart
+    # lookupFunction for ceyx_native_idle_shrink exists (T2); T1 registers the
+    # id here and does not hand-edit the manifest, which forbids it.
+    "ceyx_native_idle_shrink": "arena_idle_shrink",
 }
 
 # Receiver: a dotted identifier, optionally call-suffixed (`.process()`),
