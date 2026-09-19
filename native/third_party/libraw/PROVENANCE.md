@@ -143,6 +143,7 @@ gate patch exists.
 | 09.fuji-stdthread-parallel.patch | 204118881f11640dd35a82acd56fe87acdfb37d584091b905c08746a5320e8b7 |
 | 10.fuji-qtable-cache.patch | d2230b5810b1595482cd337ecf98809ab181c11ad5d8cd0044dd81aeaafac568 |
 | 12.normalize-model-orig-race.patch | 9197b31fc32b090ab73635d3c69a3554348ab1b458c0c2f04b5e60fd7a4962ff |
+| 13.neon-validation-sweep.patch | 2fb7f7f4875a574b32634ab24390dffae5ef35f01e8f8ae2d8d363f924c78d9f |
 
 R4 item 2 (2026-09-05): `src/metadata/normalize_model.cpp:406` declared a
 function-local `static const char *orig;` inside `LibRaw::GetNormalizedModel()`

@@ -1,0 +1,127 @@
+--- a/src/decoders/generic.cpp
++++ b/src/decoders/generic.cpp
+@@ -18,6 +18,52 @@
+ 
+ #include "../../internal/dcraw_defs.h"
+ 
++/* Project patch 13 (2026-09-19, T-V1): NEON uint16x8 vectorisation of the
++   per-pixel validation sweep below. Behaviour-preserving -- derror() fires
++   for exactly the same (row, col) pairs, the same number of times, as the
++   scalar loop. Design: docs/logs/2026-09-19/spec-cpu-levers.md §4.3.
++
++   load_flags != 0 makes `(RAW(row,col) >>= load_flags)` a destructive
++   store-back, not just a test; that case falls back to the verbatim scalar
++   loop (the spec's recommended default -- §4.3). The NEON path only ever
++   runs when load_flags == 0, where the store-back is a value no-op.
++
++   The row-invariant margin test is hoisted (a row outside
++   [top_margin, top_margin+height) can never trigger derror(), regardless of
++   col, so it is skipped entirely) and the column loop is restricted to the
++   visible span [left_margin, left_margin+width) clamped to
++   [0, raw_width) -- columns outside that span can never trigger derror()
++   either and are not visited.
++
++   Within the visible span, 8 lanes are compared against the overflow
++   threshold (1 << bits) and OR-reduced; a chunk with no overflow (the
++   common case on well-formed data) costs one reduction and zero derror()
++   calls. A chunk where the reduction is non-zero falls back to a per-lane
++   scalar re-check of just that chunk so that derror() is still called once
++   per matching pixel, exactly as many times as the scalar loop would --
++   `data_error` in utils_libraw.cpp:187 is an unconditional per-call counter,
++   not a latch, so call *count* is part of the preserved behaviour, not just
++   whether it fires.
++
++   bits can reach 16 (see the `while` above; maximum is capped at 0xffff for
++   a ushort sample), at which point `RAW(row,col) >> bits` is always 0 for
++   any 16-bit sample -- no derror() is reachable for that row at all -- so
++   that case takes the checkCancel()-only fast path with no column work. */
++#if defined(__ARM_NEON)
++#include <arm_neon.h>
++#endif
++
++/* T-V1 §4.5 corpus-reach instrument: gated by CEYX_V1_PROBE so it costs
++   nothing in production. Anchored line shape
++   ('^\[CEYX_V1_PROBE\] unpacked_load_raw '), per the measurement
++   protocol's rule against bare-name matching (09.3 rule 11). Reports, for
++   this call, whether unpacked_load_raw() was the decoder actually reached
++   (its mere execution proves that) and whether the sweep guard
++   `maximum < 0xffff || load_flags` evaluated true -- the exact predicate
++   from generic.cpp, not a re-derivation of it. */
++#include <cstdio>
++#include <cstdlib>
++
+ void LibRaw::unpacked_load_raw()
+ {
+   int row, col, bits = 0;
+@@ -25,7 +71,63 @@
+     ;
+   read_shorts(raw_image, raw_width * raw_height);
+   fseek(ifp, -2, SEEK_CUR); // avoid EOF error
++  const bool ceyx_v1_probe_sweep_guard = (maximum < 0xffff || load_flags);
++  if (getenv("CEYX_V1_PROBE"))
++    fprintf(stderr,
++            "[CEYX_V1_PROBE] unpacked_load_raw guard=%d maximum=%u load_flags=%d\n",
++            ceyx_v1_probe_sweep_guard ? 1 : 0, (unsigned)maximum, (int)load_flags);
+   if (maximum < 0xffff || load_flags)
++  {
++#if defined(__ARM_NEON)
++    if (load_flags == 0)
++    {
++      if (bits >= 16)
++      {
++        // No 16-bit sample can ever satisfy `RAW(row,col) >> bits` here;
++        // derror() is unreachable. Preserve checkCancel() cadence only.
++        for (row = 0; row < raw_height; row++)
++          checkCancel();
++        return;
++      }
++
++      const uint16_t overflow_threshold = (uint16_t)(1u << bits);
++      const uint16x8_t vthreshold = vdupq_n_u16(overflow_threshold);
++
++      long left = (long)left_margin;
++      long right = left + (long)width; // exclusive
++      if (left < 0) left = 0;
++      if (left > (long)raw_width) left = (long)raw_width;
++      if (right < 0) right = 0;
++      if (right > (long)raw_width) right = (long)raw_width;
++      const int lo = (int)left;
++      const int hi = (int)right;
++
++      for (row = 0; row < raw_height; row++)
++      {
++        checkCancel();
++        if ((unsigned)(row - top_margin) >= height)
++          continue; // row outside the visible rectangle: no col can fire
++        if (lo >= hi)
++          continue; // empty visible column span
++
++        uint16_t *rowptr = raw_image + (size_t)row * raw_width;
++        col = lo;
++        for (; col + 8 <= hi; col += 8)
++        {
++          uint16x8_t v = vld1q_u16(rowptr + col);
++          uint16x8_t over = vcgeq_u16(v, vthreshold);
++          if (vmaxvq_u16(over) != 0)
++            for (int k = 0; k < 8; k++)
++              if (rowptr[col + k] >= overflow_threshold)
++                derror();
++        }
++        for (; col < hi; col++)
++          if (rowptr[col] >= overflow_threshold)
++            derror();
++      }
++      return;
++    }
++#endif
+     for (row = 0; row < raw_height; row++)
+     {
+       checkCancel();
+@@ -35,6 +137,7 @@
+             (unsigned)(col - left_margin) < width)
+           derror();
+     }
++  }
+ }
+ 
+ void LibRaw::packed_load_raw()
