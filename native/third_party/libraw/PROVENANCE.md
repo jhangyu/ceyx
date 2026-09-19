@@ -144,6 +144,7 @@ gate patch exists.
 | 10.fuji-qtable-cache.patch | d2230b5810b1595482cd337ecf98809ab181c11ad5d8cd0044dd81aeaafac568 |
 | 12.normalize-model-orig-race.patch | 9197b31fc32b090ab73635d3c69a3554348ab1b458c0c2f04b5e60fd7a4962ff |
 | 13.neon-validation-sweep.patch | 2fb7f7f4875a574b32634ab24390dffae5ef35f01e8f8ae2d8d363f924c78d9f |
+| 14.nikon-he-decoder-import.patch | 9cf860eccd14deda168b6929a9a4f28f394a657f0706e4f522a0e588c2733f8b |
 
 R4 item 2 (2026-09-05): `src/metadata/normalize_model.cpp:406` declared a
 function-local `static const char *orig;` inside `LibRaw::GetNormalizedModel()`
