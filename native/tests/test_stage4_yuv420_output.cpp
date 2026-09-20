@@ -271,10 +271,42 @@ void oracle_forward_yuv420(const uint8_t *rgba, int32_t w, int32_t h,
 /*   (b) the descriptor is ZEROED for an rgba8 request (there are no        */
 /*       planes) while struct_size survives — a descriptor that came back   */
 /*       populated would mean a yuv420 layout was published for a 4 B/px    */
-/*       buffer.                                                            */
-/* The hash is PRINTED so the on-device run can be compared against it.     */
-/* Mutation M5 (a Stage-4 colour constant) is what proves (a) can fail.     */
+/*       buffer;                                                            */
+/*   (c) the rgba8 output hash equals a GOLDEN LITERAL.                     */
+/*                                                                          */
+/* (c) WAS ADDED AFTER MUTATION M5 EXPOSED ITS ABSENCE, and the history is  */
+/* kept here because it is the more useful half of the story. M5 perturbed  */
+/* a Stage-4 colour constant (255.0f -> 254.0f, T20's own probe value) and  */
+/* Y1 STAYED GREEN — while every rgba8 hash moved. The reason: (a) compares */
+/* the two ENTRIES against EACH OTHER, and under M5 both changed together,  */
+/* so the identity held. Y1 printed the hash and asserted nothing about it. */
+/* It was the "assertion that cannot fail" shape, in the case whose whole   */
+/* job is detecting a default-path regression — and it was found by the     */
+/* mutation designed to prove the assertion could fail. That is what        */
+/* red-first is for.                                                        */
+/*                                                                          */
+/* WHY THE LITERALS ARE LEGITIMATE RATHER THAN CIRCULAR: raw_sample.arw's   */
+/* 0409d0d2c5116a9a independently reproduces the Metal reference already    */
+/* recorded in t12-baton-1, arrived at before this suite existed. The other */
+/* two are this suite's first green, frozen deliberately.                   */
+/*                                                                          */
+/* SCOPED TO THE NON-SPLIT (METAL) ARM. A different backend may legitimately*/
+/* differ in the last bit, so on a split build the same numbers are REPORTED*/
+/* as the cross-backend comparison (on-device obligation D3) rather than    */
+/* asserted locally. Asserting them there would convert a backend           */
+/* difference into a test failure with no way to tell the two apart.        */
 /* ====================================================================== */
+struct GoldenRgba8 {
+    const char *path;
+    uint64_t fnv1a64;
+};
+const GoldenRgba8 kGoldenRgba8[] = {
+    {"image_samples/raw_sample.arw", 0x0409d0d2c5116a9aULL},
+    {"image_samples/raw_corpus/fuji_xt3.raf", 0xb4d193d3414c5896ULL},
+    {"image_samples/raw_corpus/sigma_sd_quattro_h_23.x3f",
+     0xdff593ab758aaeb0ULL},
+};
+
 void run_y1(const std::vector<std::pair<std::string, std::string>> &corpus) {
     for (const auto &entry : corpus) {
         const char *path = entry.first.c_str();
@@ -318,12 +350,36 @@ void run_y1(const std::vector<std::pair<std::string, std::string>> &corpus) {
 
         const uint64_t hash =
             fnv1a64(via_default.bytes.data(), via_default.bytes.size());
+
+        /* (c) the golden literal. */
+        uint64_t golden = 0;
+        for (const GoldenRgba8 &g : kGoldenRgba8) {
+            if (strcmp(g.path, path) == 0) golden = g.fnv1a64;
+        }
+        const bool have_golden = (golden != 0);
+        const bool hash_matches = have_golden && hash == golden;
+#if defined(DNG_STAGE4_SPLIT_KERNEL)
+        /* Split/Vulkan build: REPORT the comparison, do not assert it — a
+         * genuine backend difference must stay distinguishable from a
+         * regression. This line IS the cross-backend evidence (D3). */
+        const bool golden_gates = false;
+#else
+        const bool golden_gates = true;
+#endif
+
         snprintf(detail, sizeof(detail),
                  "%s %dx%d rgba8_fnv1a64=%016" PRIx64
-                 " identical=%d descriptor_zeroed_for_rgba8=%d",
-                 path, via_default.w, via_default.h, hash, identical ? 1 : 0,
-                 descriptor_zeroed ? 1 : 0);
-        verdict("Y1", route, host_arm(), identical && descriptor_zeroed,
+                 " GOLDEN=%016" PRIx64 " match=%d (%s) identical=%d "
+                 "descriptor_zeroed_for_rgba8=%d",
+                 path, via_default.w, via_default.h, hash, golden,
+                 hash_matches ? 1 : 0,
+                 golden_gates ? "ASSERTED on the Metal arm"
+                              : "REPORTED only — split arm, cross-backend "
+                                "evidence for D3, not a local assertion",
+                 identical ? 1 : 0, descriptor_zeroed ? 1 : 0);
+        verdict("Y1", route, host_arm(),
+                identical && descriptor_zeroed && have_golden &&
+                    (!golden_gates || hash_matches),
                 detail);
     }
 }
