@@ -44,8 +44,9 @@ void main() {
       'kCeyxEncodeErrBadFormat': CeyxEncodeErrorCode.badFormat,
       'kCeyxEncodeErrLosslessUnsupported':
           CeyxEncodeErrorCode.losslessUnsupported,
+      'kCeyxEncodeErrBadBufferSize': CeyxEncodeErrorCode.badBufferSize,
     };
-    expect(cValues.length, 12, reason: 'header gained or lost a code');
+    expect(cValues.length, 13, reason: 'header gained or lost a code');
     for (final entry in cValues.entries) {
       expect(dartValues, contains(entry.key),
           reason: '${entry.key} exists in C but has no Dart mirror');
@@ -55,11 +56,11 @@ void main() {
   });
 
   test('encode codes are disjoint from every other scale', () {
-    // -401..-411 is encode, -501..-511 still-decode, -301..-310 heif,
+    // -401..-412 is encode, -501..-511 still-decode, -301..-310 heif,
     // <= -201 raw -- a shared int32 error field must never be ambiguous.
     for (final v in cValues.values.where((v) => v != 0)) {
       expect(v, lessThanOrEqualTo(-401));
-      expect(v, greaterThanOrEqualTo(-411));
+      expect(v, greaterThanOrEqualTo(-412));
     }
   });
 }

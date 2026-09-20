@@ -1202,6 +1202,64 @@ class CeyxDecodePool {
   // distinct native buffer, unlike a decode's `(type, path, maxDim)` key).
   int _nextEncodeKey = 0;
 
+  /// 2026-09-20 direct-encode contract: encodes a PLANAR 4:2:0 frame that
+  /// already lives in native memory at [srcAddress] as a baseline JPEG,
+  /// without the yuv420->rgba8 materialise step [submitEncode] would need.
+  ///
+  /// [srcCapacity] is the real allocation size at [srcAddress] (may exceed
+  /// the tight `ceyxOutputFormatByteCount(yuv420, ...)` figure for a
+  /// pool-slot-backed buffer); it rides the wire so the native side's
+  /// `kCeyxEncodeErrBadBufferSize` check sees the ACTUAL allocation, not a
+  /// recomputed guess that could be wrong for a padded slot.
+  ///
+  /// Same non-cancellable, non-coalesced contract as [submitEncode]. Throws
+  /// [CeyxFormatUnsupportedException] (format: yuv420, missingSymbol:
+  /// 'ceyx_encode_jpeg_yuv420') when the loaded dylib predates this entry —
+  /// R-J's rule: no silent fallback to the rgba8 encoder, which would
+  /// misinterpret the planar bytes.
+  Future<Uint8List> submitEncodeYuv420({
+    required int srcAddress,
+    required int srcCapacity,
+    required int width,
+    required int height,
+    required int quality,
+  }) {
+    if (_disposed) {
+      return Future.error(
+        CeyxPoolUnavailableException('pool disposed'),
+        StackTrace.current,
+      );
+    }
+    final job = _PoolJob(
+      key: (
+        CeyxPoolJobType.encode,
+        'encode-yuv420:${_nextEncodeKey++}',
+        null,
+        1,
+        CeyxOutputFormat.yuv420,
+      ),
+      type: CeyxPoolJobType.encode,
+      path: '',
+      maxDim: null,
+      generation: _generation,
+      // Trailing 'yuv420' tag disambiguates this 6-element shape from
+      // submitEncode's 4-element [rgbaAddress, width, height, quality] on the
+      // worker side (see _encodeOnPoolWorker).
+      encodeArgs: <Object?>[
+        srcAddress,
+        srcCapacity,
+        width,
+        height,
+        quality,
+        'yuv420',
+      ],
+    );
+    _byKey[job.key] = job;
+    _queue.add(job);
+    _pump();
+    return job.completer.future.then((outcome) => outcome.value! as Uint8List);
+  }
+
   /// Stops every worker. In-flight jobs fail rather than hang.
   Future<void> dispose() async {
     _disposed = true;
@@ -2217,9 +2275,10 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
   // back the SAME image `service`'s bindings already mapped rather than
   // loading a second copy; it merely gives this worker its own
   // `DynamicLibrary` handle to look the encode symbols up from.
-  final DynamicLibrary lib = libraryPath == null
-      ? DngNativeBindings.load().library
-      : DngNativeBindings.fromPath(libraryPath).library;
+  final DngNativeBindings encodeBindingsHost = libraryPath == null
+      ? DngNativeBindings.load()
+      : DngNativeBindings.fromPath(libraryPath);
+  final DynamicLibrary lib = encodeBindingsHost.library;
 
   // Configure the PROCESS-global native slot cap from the host's setting
   // BEFORE serving any job, so this worker never runs a decode at a stale cap.
@@ -2404,7 +2463,11 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
             poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
           }
         case CeyxPoolJobType.encode:
-          final result = _encodeOnPoolWorker(lib, encodeArgs!);
+          final result = _encodeOnPoolWorker(
+            lib,
+            encodeArgs!,
+            encodeBindingsHost.loadedLibraryPath,
+          );
           poolPort.send(<Object?>[kMsgResult, requestId, result]);
       }
     } catch (e) {
@@ -2495,8 +2558,12 @@ void _freeAddress(int address) =>
     malloc.free(Pointer<Uint8>.fromAddress(address));
 
 /// WP3a: the encode job's worker-side implementation. `args` is
-/// `[rgbaAddress, width, height, quality]`. Called on an ALREADY-RUNNING pool
-/// worker (`lib` was resolved once at boot, see [ceyxDecodeWorkerMain]).
+/// `[rgbaAddress, width, height, quality]` for the rgba8 arm, or
+/// `[srcAddress, srcCapacity, width, height, quality, 'yuv420']` (2026-09-20
+/// direct-encode contract) for the yuv420 arm — the trailing tag and the
+/// length difference (4 vs 6) are what [_encodeOnPoolWorker] dispatches on.
+/// Called on an ALREADY-RUNNING pool worker (`lib` was resolved once at boot,
+/// see [ceyxDecodeWorkerMain]).
 ///
 /// Deliberately mirrors `CeyxEncodeService._encodeOnWorker`
 /// (`encode_service.dart:193-252`) EXCEPT for what is ABSENT: no `malloc` of
@@ -2506,7 +2573,11 @@ void _freeAddress(int address) =>
 TransferableTypedData _encodeOnPoolWorker(
   DynamicLibrary lib,
   List<Object?> args,
+  String libraryPath,
 ) {
+  if (args.length >= 6 && args[5] == 'yuv420') {
+    return _encodeYuv420OnPoolWorker(lib, args, libraryPath);
+  }
   final bindings = CeyxEncodeBindings.fromLibrary(lib);
   if (!bindings.available) {
     throw CeyxEncodeUnavailableException();
@@ -2549,6 +2620,83 @@ TransferableTypedData _encodeOnPoolWorker(
       return TransferableTypedData.fromList([encoded]);
     } finally {
       bindings.free(buffer);
+    }
+  } finally {
+    calloc.free(outPtr);
+    calloc.free(outLenPtr);
+  }
+}
+
+/// 2026-09-20 direct-encode contract: the yuv420 arm of [_encodeOnPoolWorker].
+/// `args` is `[srcAddress, srcCapacity, width, height, quality, 'yuv420']`.
+///
+/// Throws [CeyxFormatUnsupportedException] (R-J) rather than falling back to
+/// the rgba8 encoder when the loaded dylib predates this entry — a silent
+/// rgba8 call on planar bytes would misinterpret them, not merely degrade.
+TransferableTypedData _encodeYuv420OnPoolWorker(
+  DynamicLibrary lib,
+  List<Object?> args,
+  String libraryPath,
+) {
+  final bindings = CeyxEncodeYuv420Bindings.fromLibrary(lib);
+  if (!bindings.available) {
+    throw CeyxFormatUnsupportedException(
+      format: CeyxOutputFormat.yuv420,
+      missingSymbol: 'ceyx_encode_jpeg_yuv420',
+      libraryPath: libraryPath,
+    );
+  }
+
+  final srcPtr = Pointer<Uint8>.fromAddress(args[0] as int);
+  final srcCapacity = args[1] as int;
+  final width = args[2] as int;
+  final height = args[3] as int;
+  final quality = args[4] as int;
+
+  // ceyx_encode_free is the SAME release entry the rgba8/webp arm uses
+  // (ceyx_encode_api.h:206-207: "Releases a buffer handed out by either
+  // encoder"), so the legacy group's binding is reused here rather than
+  // re-declaring a fourth guarded lookup for one symbol.
+  final freeBindings = CeyxEncodeBindings.fromLibrary(lib);
+
+  final outPtr = calloc<Pointer<Uint8>>();
+  final outLenPtr = calloc<Size>();
+  try {
+    final result = bindings.encode(
+      srcPtr,
+      srcCapacity,
+      width,
+      height,
+      quality,
+      outPtr,
+      outLenPtr,
+    );
+
+    if (result != CeyxEncodeErrorCode.success) {
+      // Contract: *out is NULL and *out_len is 0 on failure, so nothing to
+      // free here.
+      throw CeyxEncodeException(
+        result,
+        freeBindings.available ? freeBindings.errorName(result) : 'code:$result',
+      );
+    }
+
+    final buffer = outPtr.value;
+    final len = outLenPtr.value;
+    if (buffer == nullptr || len == 0) {
+      throw CeyxEncodeException(
+        CeyxEncodeErrorCode.encodeFailed,
+        freeBindings.available
+            ? freeBindings.errorName(CeyxEncodeErrorCode.encodeFailed)
+            : 'code:${CeyxEncodeErrorCode.encodeFailed}',
+      );
+    }
+
+    try {
+      final encoded = Uint8List.fromList(buffer.asTypedList(len));
+      return TransferableTypedData.fromList([encoded]);
+    } finally {
+      if (freeBindings.available) freeBindings.free(buffer);
     }
   } finally {
     calloc.free(outPtr);

@@ -53,6 +53,8 @@ abstract final class CeyxEncodeErrorCode {
   static const int metadataRejected = -409;
   static const int badFormat = -410;
   static const int losslessUnsupported = -411;
+  /* --- appended 2026-09-20, planar yuv420 encode. Append-only. --- */
+  static const int badBufferSize = -412;
 }
 
 /// Guarded bindings to the encode entry points of `dng_decoder_native`.
@@ -119,5 +121,61 @@ class CeyxEncodeBindings {
       errorName = null;
     }
     return CeyxEncodeBindings._(jpeg, webp, free, errorName);
+  }
+}
+
+typedef CeyxEncodeJpegYuv420Native =
+    ffi.Int32 Function(
+      ffi.Pointer<ffi.Uint8> src,
+      ffi.Size srcCapacity,
+      ffi.Int32 width,
+      ffi.Int32 height,
+      ffi.Int32 quality,
+      ffi.Pointer<ffi.Pointer<ffi.Uint8>> out,
+      ffi.Pointer<ffi.Size> outLen,
+    );
+typedef CeyxEncodeJpegYuv420Dart =
+    int Function(
+      ffi.Pointer<ffi.Uint8> src,
+      int srcCapacity,
+      int width,
+      int height,
+      int quality,
+      ffi.Pointer<ffi.Pointer<ffi.Uint8>> out,
+      ffi.Pointer<ffi.Size> outLen,
+    );
+
+/// Guarded binding to `ceyx_encode_jpeg_yuv420` (2026-09-20 direct-encode
+/// contract), looked up INDEPENDENTLY of [CeyxEncodeBindings]'s rgba8/webp
+/// group and of [CeyxEncodeV2Bindings]'s generic group.
+///
+/// This is the fix for the hazard both of those classes' comments already
+/// name: a group `try`/`catch` that nulls every symbol in the group when ONE
+/// lookup throws is correct for symbols that always ship together, but wrong
+/// here — a library exporting rgba8/webp encode but predating this entry must
+/// keep those working. A THIRD class, with its own lookup and its own
+/// [available] flag, is what keeps the yuv420 entry's absence from taking
+/// down the rgba8 arm (and vice versa): each format's caller sees exactly its
+/// own capability, never a capability it never asked about.
+class CeyxEncodeYuv420Bindings {
+  CeyxEncodeYuv420Bindings._(this._encode);
+
+  final CeyxEncodeJpegYuv420Dart? _encode;
+
+  bool get available => _encode != null;
+
+  CeyxEncodeJpegYuv420Dart get encode => _encode!;
+
+  factory CeyxEncodeYuv420Bindings.fromLibrary(ffi.DynamicLibrary lib) {
+    CeyxEncodeJpegYuv420Dart? encode;
+    try {
+      encode = lib
+          .lookupFunction<CeyxEncodeJpegYuv420Native, CeyxEncodeJpegYuv420Dart>(
+        'ceyx_encode_jpeg_yuv420',
+      );
+    } catch (_) {
+      encode = null;
+    }
+    return CeyxEncodeYuv420Bindings._(encode);
   }
 }

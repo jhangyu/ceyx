@@ -210,6 +210,84 @@ class CeyxEncodeService {
     }
   }
 
+  /// Memoized [CeyxFormatUnsupportedException] outcomes for the yuv420 entry,
+  /// keyed by resolved [libraryPath] — deliberately SEPARATE from
+  /// [_unavailableCache]: that map remembers "this dylib lacks the
+  /// rgba8/webp/generic group", which is an unrelated symbol set to
+  /// `ceyx_encode_jpeg_yuv420`. Caching the two under one key would let a
+  /// library with rgba8 but not yuv420 (or vice versa) poison the other
+  /// format's fast path.
+  static final Map<String?, CeyxFormatUnsupportedException>
+  _yuv420UnavailableCache = {};
+
+  /// Test-only: clears [_yuv420UnavailableCache].
+  @visibleForTesting
+  static void resetYuv420AvailabilityCacheForTesting() =>
+      _yuv420UnavailableCache.clear();
+
+  /// Test-only: seeds the memoized-unavailable cache for [libraryPath],
+  /// mirroring [debugMarkUnavailableForTesting] for the rgba8/webp cache.
+  @visibleForTesting
+  static void debugMarkYuv420UnavailableForTesting(String? libraryPath) {
+    _yuv420UnavailableCache[libraryPath] = const CeyxFormatUnsupportedException(
+      format: CeyxOutputFormat.yuv420,
+      missingSymbol: 'ceyx_encode_jpeg_yuv420',
+      libraryPath: kCeyxNoLibraryLoaded,
+    );
+  }
+
+  /// 2026-09-20 direct-encode contract: encodes a PLANAR 4:2:0 frame that
+  /// already lives in native memory at [srcAddress] as a baseline JPEG,
+  /// without materialising it to rgba8 first. Mirrors
+  /// [encodeJpegFromNativeRgba]'s zero-copy-input, pool-dispatched shape.
+  ///
+  /// [srcCapacity] is the real allocation size at [srcAddress] (see
+  /// [ceyxOutputFormatByteCount] for the tight figure a caller sizing a fresh
+  /// buffer should use; a pool-slot-backed buffer may be larger).
+  ///
+  /// Throws [CeyxFormatUnsupportedException] when the loaded dylib predates
+  /// this entry — R-J's rule: no silent fallback to
+  /// [encodeJpegFromNativeRgba], which would encode the wrong number of bytes
+  /// per pixel. Throws [ArgumentError] when [srcAddress] is 0.
+  Future<Uint8List> encodeJpegFromNativeYuv420({
+    required int srcAddress,
+    required int srcCapacity,
+    required int width,
+    required int height,
+    required int quality,
+    ffi.Finalizable? keepAlive,
+  }) async {
+    if (srcAddress == 0) {
+      throw ArgumentError.value(
+        srcAddress,
+        'srcAddress',
+        'must be a live native buffer',
+      );
+    }
+    final libraryPath = _libraryPath;
+    final memoized = _yuv420UnavailableCache[libraryPath];
+    if (memoized != null) {
+      throw memoized;
+    }
+    try {
+      final bytes = await CeyxDecodePool.shared.submitEncodeYuv420(
+        srcAddress: srcAddress,
+        srcCapacity: srcCapacity,
+        width: width,
+        height: height,
+        quality: quality,
+      );
+      // `keepAlive` is read here so the VM cannot treat the owner as
+      // unreachable before the native encode above has finished reading its
+      // buffer.
+      _keepAlive(keepAlive);
+      return bytes;
+    } on CeyxFormatUnsupportedException catch (e) {
+      _yuv420UnavailableCache[libraryPath] = e;
+      rethrow;
+    }
+  }
+
   @pragma('vm:never-inline')
   static void _keepAlive(Object? o) {}
 
