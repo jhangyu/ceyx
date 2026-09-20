@@ -63,6 +63,16 @@ if(ANDROID AND DNG_CROSS_BUILD)
     if(DNG_USE_LIBJPEG)
         target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
     endif()
+    # T20-fix F1: this target compiles dng_render_halide.cpp, whose Stage-4
+    # from-device entry dispatches raw_bayer_fused_render on the fused Bayer
+    # route. The split branch carries a fused dispatch arm too (T20-fix F2), so
+    # the archive is required on EVERY target that compiles that TU, exactly as
+    # ffi.cmake:59 links it into the shipping library.
+    target_link_libraries(test_decode_android PRIVATE
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    if(TARGET raw_bayer_fused_render_aot_target)
+        add_dependencies(test_decode_android raw_bayer_fused_render_aot_target)
+    endif()
     add_dependencies(test_decode_android test_android_vulkan_capability)
 
     # P14-W4-4 measurement: Android cross-build of the production C ABI harness.
@@ -102,6 +112,12 @@ if(ANDROID AND DNG_CROSS_BUILD)
     if(DNG_USE_LIBJPEG)
         target_link_libraries(dng_ffi_harness_android PRIVATE ${JPEG_LIBRARIES})
     endif()
+    # T20-fix F1: see the test_decode_android block above.
+    target_link_libraries(dng_ffi_harness_android PRIVATE
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    if(TARGET raw_bayer_fused_render_aot_target)
+        add_dependencies(dng_ffi_harness_android raw_bayer_fused_render_aot_target)
+    endif()
 
     # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
     # PSNR gate (Stage3->Stage4 device-dirty handoff vs host-copy fallback), mirroring
@@ -137,6 +153,12 @@ if(ANDROID AND DNG_CROSS_BUILD)
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
     if(DNG_USE_LIBJPEG)
         target_link_libraries(test_device_handoff_android PRIVATE ${JPEG_LIBRARIES})
+    endif()
+    # T20-fix F1: see the test_decode_android block above.
+    target_link_libraries(test_device_handoff_android PRIVATE
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    if(TARGET raw_bayer_fused_render_aot_target)
+        add_dependencies(test_device_handoff_android raw_bayer_fused_render_aot_target)
     endif()
 
     # T-V0 (2026-09-19, spec-cpu-levers.md section 3.3b): Android cross-build of
@@ -1601,6 +1623,15 @@ add_dependencies(test_device_handoff dng_warp_aot_target)
 add_dependencies(test_device_handoff dng_render_aot_target)
 add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
 add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
+# T20-fix F1: compiles dng_render_halide.cpp, whose Stage-4 from-device entry
+# dispatches raw_bayer_fused_render on the fused Bayer route (both branches
+# after T20-fix F2), so the archive must be linked here as ffi.cmake:59 does
+# for the shipping library.
+target_link_libraries(test_device_handoff
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+if(TARGET raw_bayer_fused_render_aot_target)
+    add_dependencies(test_device_handoff raw_bayer_fused_render_aot_target)
+endif()
 # F-T4-1 (found by T3's Linux run): the mirror image of the
 # `if(NOT DNG_STAGE4_SPLIT_KERNEL)` scaled_preavg block above. This target
 # compiles dng_render_halide.cpp, whose split branch calls
@@ -1668,6 +1699,12 @@ add_dependencies(test_stage4_oriented dng_warp_aot_target)
 add_dependencies(test_stage4_oriented dng_render_aot_target)
 add_dependencies(test_stage4_oriented dng_opcode_polynomial_aot_target)
 add_dependencies(test_stage4_oriented dng_opcode_polynomial3_aot_target)
+# T20-fix F1: see the test_device_handoff block above.
+target_link_libraries(test_stage4_oriented
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+if(TARGET raw_bayer_fused_render_aot_target)
+    add_dependencies(test_stage4_oriented raw_bayer_fused_render_aot_target)
+endif()
 if(APPLE)
     target_link_libraries(test_stage4_oriented ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
 endif()
@@ -1724,6 +1761,12 @@ add_dependencies(test_concurrent_decode dng_warp_aot_target)
 add_dependencies(test_concurrent_decode dng_render_aot_target)
 add_dependencies(test_concurrent_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_concurrent_decode dng_opcode_polynomial3_aot_target)
+# T20-fix F1: see the test_device_handoff block above.
+target_link_libraries(test_concurrent_decode
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+if(TARGET raw_bayer_fused_render_aot_target)
+    add_dependencies(test_concurrent_decode raw_bayer_fused_render_aot_target)
+endif()
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_concurrent_decode
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
@@ -1929,6 +1972,12 @@ add_dependencies(test_sized_decode dng_render_aot_target)
 add_dependencies(test_sized_decode dng_render_scaled_preavg_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
+# T20-fix F1: see the test_device_handoff block above.
+target_link_libraries(test_sized_decode
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+if(TARGET raw_bayer_fused_render_aot_target)
+    add_dependencies(test_sized_decode raw_bayer_fused_render_aot_target)
+endif()
 # F-T4-1: tests/test_sized_decode.cpp #includes dng_render_halide.cpp (see the
 # add_executable note above), so the split archive is required here too.
 if(DNG_STAGE4_SPLIT_KERNEL)
@@ -2025,6 +2074,12 @@ add_dependencies(test_decode dng_warp_aot_target)
 add_dependencies(test_decode dng_render_aot_target)
 add_dependencies(test_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_decode dng_opcode_polynomial3_aot_target)
+# T20-fix F1: see the test_device_handoff block above.
+target_link_libraries(test_decode
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+if(TARGET raw_bayer_fused_render_aot_target)
+    add_dependencies(test_decode raw_bayer_fused_render_aot_target)
+endif()
 # F-T4-1: test_decode compiles dng_render_halide.cpp as a source, so it needs
 # the split archive on every split-kernel platform (see the test_device_handoff
 # block above for the full rationale).

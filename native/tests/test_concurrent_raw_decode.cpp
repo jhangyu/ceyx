@@ -184,6 +184,13 @@ int main(int argc, char** argv) {
       corpus.push_back(argument);
     }
   }
+  // T20-fix F3: whether this run uses the built-in corpus below. That corpus
+  // CONTAINS image_samples/raw_sample.arw, an unscaled Bayer file, so on it the
+  // fused route MUST engage. The flag is set from the command line, never from
+  // the fused counter, which is what makes the fusion_engaged check below able
+  // to go red when fusion stops engaging (a precondition derived from the
+  // counter would go vacuous in exactly that case).
+  const bool default_corpus = corpus.empty();
   if (corpus.empty()) {
     corpus = {
         "image_samples/raw_sample.arw",
@@ -390,6 +397,31 @@ int main(int argc, char** argv) {
   // would catch neither.
   // The route selector is raw_fused_bayer_render_count(), read from the
   // pipeline; it is NOT inferred from the allocation count being asserted.
+  // T20-fix F3: the fused-route counter is now PRINTED, and asserted non-zero
+  // on the default corpus. Before this, every arm below was satisfiable with
+  // fusion completely disengaged: fused_delta==0 takes the no_decode_fused arm
+  // (delta==3N, PASS) and the binding lower bound only rises, so the whole gate
+  // stayed green while the route under test never ran.
+  std::printf(
+      "[ConcurrentRawDecode] mem8-T20: raw_fused_bayer_render_count %llu -> "
+      "%llu (fused_delta=%lld of %d decodes, two_stage_decodes=%lld)\n",
+      (unsigned long long)baseline_fused_count,
+      (unsigned long long)after_fused_count, (long long)fused_delta,
+      expected_decodes, (long long)two_stage_decodes);
+  if (default_corpus) {
+    CHECK("fusion_engaged", fused_delta > 0,
+          "the built-in corpus contains an unscaled Bayer file "
+          "(image_samples/raw_sample.arw), so at least one decode must take "
+          "the fused route; zero means the fused selector stopped engaging and "
+          "every route assertion below silently describes the two-stage path");
+  } else {
+    std::printf(
+        "[ConcurrentRawDecode] fusion_engaged SKIPPED: custom corpus given on "
+        "the command line, so this driver cannot know it contains an unscaled "
+        "Bayer file (observed fused_delta=%lld)\n",
+        (long long)fused_delta);
+  }
+
   const bool every_decode_fused = (fused_delta == expected_decodes);
   const bool no_decode_fused = (fused_delta == 0);
   const int64_t expected_regions_per_lane = every_decode_fused ? 2ll : 3ll;

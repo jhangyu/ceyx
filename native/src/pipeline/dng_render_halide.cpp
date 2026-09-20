@@ -1457,20 +1457,40 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // inside halide_vulkan_run), so the Stage3/Stage2 producer kernel has
     // already finished — no extra sync needed. Evidence + patch plan:
     // docs/logs/2026-07-04/Task_g1_vulkan_handoff_spike.md.
-    const int sw = stage3_device_buf->dim[0].extent;
-    const int sh = stage3_device_buf->dim[1].extent;
-    const int sp = stage3_device_buf->dim[2].extent;
-    if (sp < 3) {
-        return false;
+    int sw = 0;
+    int sh = 0;
+    int src_row_stride_px = 0;
+    int flat_len = 0;
+    // T20-fix F2: the FUSED route's source is the 2-D CFA MOSAIC, not the 3-D
+    // interleaved RGB16 Stage-3 frame, so none of the flat-1D reshape below
+    // applies to it — raw_bayer_fused_render declares a 2-D `src` input on
+    // every backend (RawBayerFusedRenderGenerator.cpp:84), and reading dim[2]
+    // on a 2-dimensional buffer would be an out-of-bounds dim read. The mosaic
+    // is passed WHOLE and the crop travels as crop_l/crop_t scalars, exactly as
+    // on the non-split branch.
+    const bool fused_route = (fused_bayer_source != nullptr);
+    if (fused_route) {
+        sw = stage3_device_buf->dim[0].extent;
+        sh = stage3_device_buf->dim[1].extent;
+        if (sw <= 0 || sh <= 0) {
+            return false;
+        }
+    } else {
+        sw = stage3_device_buf->dim[0].extent;
+        sh = stage3_device_buf->dim[1].extent;
+        const int sp = stage3_device_buf->dim[2].extent;
+        if (sp < 3) {
+            return false;
+        }
+        const int s_row = stage3_device_buf->dim[1].stride;  // = row_stride_px * 3
+        // Row-dense interleaved contract (same assumption the old host flatten
+        // made, now guarded explicitly).
+        if (s_row <= 0 || (s_row % 3) != 0 || sh <= 0) {
+            return false;
+        }
+        src_row_stride_px = s_row / 3;
+        flat_len = s_row * sh;                // elements in the flat plane
     }
-    const int s_row = stage3_device_buf->dim[1].stride;  // = row_stride_px * 3
-    // Row-dense interleaved contract (same assumption the old host flatten made,
-    // now guarded explicitly).
-    if (s_row <= 0 || (s_row % 3) != 0 || sh <= 0) {
-        return false;
-    }
-    const int src_row_stride_px = s_row / 3;
-    const int flat_len = s_row * sh;          // elements in the flat plane
     // Shallow flat-1D view borrowing the device handle at offset 0 — a pure
     // 3D→1D reshape of the same allocation; the crop is absorbed by the
     // kernel's crop_l/crop_t scalars, so no device_crop offset (and none of
@@ -1498,8 +1518,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // where this code actually runs. See gate-results.md section 6.5.
     halide_dimension_t flat_dim(0, flat_len, 1);
     halide_buffer_t src_flat = *stage3_device_buf;  // copies device + flags (device_dirty)
-    src_flat.dimensions = 1;
-    src_flat.dim = &flat_dim;
+    if (!fused_route) {
+        src_flat.dimensions = 1;
+        src_flat.dim = &flat_dim;
+    }
+    // T20-fix F2: on the fused route src_flat stays the borrowed 2-D mosaic
+    // view (dimensions/dim untouched, pointing at the producer buffer's own dim
+    // array, whose lifetime bounds this call). The borrow discipline — raw
+    // halide_buffer_t, never a Runtime::Buffer — is identical and holds for the
+    // same reason stated above.
     if (src_flat.device == 0) {
         // Producer fell back to host memory — upload path (pre-G1 behavior
         // minus the redundant D2H, which is a no-op without a device buffer).
@@ -1555,12 +1582,32 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                             static_cast<int>(params.encode_gamma.size()));
     Buffer<float> cw_buf(const_cast<float*>(params.camera_white), 3);
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-    Buffer<float> c2r_buf(const_cast<float*>(params.camera_to_rgb), 9);
-    Buffer<float> r2f_buf(const_cast<float*>(params.rgb_to_final), 9);
-    Buffer<float> hs_table_buf(const_cast<float*>(params.huesat_table.data()),
-                               static_cast<int>(params.huesat_table.size()));
-    Buffer<float> look_table_buf(const_cast<float*>(params.look_table.data()),
-                                 static_cast<int>(params.look_table.size()));
+    // T20-fix F2: dng_render_stage4_split declares these four FLAT;
+    // raw_bayer_fused_render declares them in the same 2-D shapes the
+    // non-split Stage-4 family uses (RawBayerFusedRenderGenerator.cpp:123-125,
+    // 133 — one generator, one signature, both backends). Only the declared
+    // shape differs; the element data is identical. With fused_bayer_source ==
+    // nullptr every construction below is exactly the previous one.
+    Buffer<float> c2r_buf =
+        fused_bayer_source
+            ? Buffer<float>(const_cast<float*>(params.camera_to_rgb), 3, 3)
+            : Buffer<float>(const_cast<float*>(params.camera_to_rgb), 9);
+    Buffer<float> r2f_buf =
+        fused_bayer_source
+            ? Buffer<float>(const_cast<float*>(params.rgb_to_final), 3, 3)
+            : Buffer<float>(const_cast<float*>(params.rgb_to_final), 9);
+    Buffer<float> hs_table_buf =
+        fused_bayer_source
+            ? Buffer<float>(const_cast<float*>(params.huesat_table.data()),
+                            static_cast<int>(params.huesat_table.size() / 3), 3)
+            : Buffer<float>(const_cast<float*>(params.huesat_table.data()),
+                            static_cast<int>(params.huesat_table.size()));
+    Buffer<float> look_table_buf =
+        fused_bayer_source
+            ? Buffer<float>(const_cast<float*>(params.look_table.data()),
+                            static_cast<int>(params.look_table.size() / 3), 3)
+            : Buffer<float>(const_cast<float*>(params.look_table.data()),
+                            static_cast<int>(params.look_table.size()));
 #else
     Buffer<float> c2r_buf(const_cast<float*>(params.camera_to_rgb), 3, 3);
     Buffer<float> r2f_buf(const_cast<float*>(params.rgb_to_final), 3, 3);
@@ -1780,7 +1827,66 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
     // output geometry.
-    const int result = dng_render_stage4_split(
+    // mem8 v3 T20-fix F2: the FUSED dispatch arm on the SPLIT (Vulkan) branch.
+    // Selected by the presence of fused_bayer_source and by nothing else —
+    // the identical selector the non-split arm uses, which is what makes the
+    // route parity rather than platform divergence (repo rule: no multi-platform
+    // implementation forking). raw_bayer_fused_render is ONE archive built for
+    // every backend from one generator (halide_aot.cmake:178-190,
+    // ffi.cmake:59), so the argument list below is the non-split arm's verbatim,
+    // differing only in the destination buffer name (dst_rgba_buf here,
+    // dst_buf there — same interleaved RGBA8 layout).
+    //
+    // src_flat on this route is the borrowed 2-D CFA mosaic (see the
+    // fused_route block above), passed WHOLE with the crop travelling as the
+    // crop_l/crop_t/src_w/src_h scalars.
+    Buffer<float> fused_black_buf;
+    if (fused_bayer_source) {
+        fused_black_buf = Buffer<float>(
+            const_cast<float*>(fused_bayer_source->black_values),
+            fused_bayer_source->black_width,
+            fused_bayer_source->black_height);
+        fused_black_buf.set_host_dirty();
+    }
+    const int result =
+        fused_bayer_source
+        ? raw_bayer_fused_render(&src_flat,
+                                 fused_bayer_source->red_x,
+                                 fused_bayer_source->red_y,
+                                 fused_black_buf.raw_buffer(),
+                                 fused_bayer_source->inv_range,
+                                 crop_l, crop_t, src_w, src_h,
+                                 src_scale,
+                                 // T7b: six affine coefficients immediately
+                                 // after src_scale, same order and meaning as
+                                 // in the split kernel call below.
+                                 orient_coeffs[0], orient_coeffs[1],
+                                 orient_coeffs[2], orient_coeffs[3],
+                                 orient_coeffs[4], orient_coeffs[5],
+                                 exp_buf.raw_buffer(),
+                                 tone_buf.raw_buffer(),
+                                 gamma_buf.raw_buffer(),
+                                 cw_buf.raw_buffer(),
+                                 c2r_buf.raw_buffer(),
+                                 r2f_buf.raw_buffer(),
+                                 hs_table_buf.raw_buffer(),
+                                 hs_encode_buf.raw_buffer(),
+                                 hs_decode_buf.raw_buffer(),
+                                 params.huesat_hue_div,
+                                 params.huesat_sat_div,
+                                 params.huesat_val_div,
+                                 params.huesat_has_table,
+                                 params.huesat_has_encoding,
+                                 look_table_buf.raw_buffer(),
+                                 look_encode_buf.raw_buffer(),
+                                 look_decode_buf.raw_buffer(),
+                                 params.look_hue_div,
+                                 params.look_sat_div,
+                                 params.look_val_div,
+                                 params.look_has_table,
+                                 params.look_has_encoding,
+                                 dst_rgba_buf.raw_buffer())
+        : dng_render_stage4_split(
         &src_flat,
         sw,
         sh,
