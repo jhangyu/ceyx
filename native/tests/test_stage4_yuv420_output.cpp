@@ -1806,6 +1806,225 @@ void run_y9() {
 }
 
 /* ====================================================================== */
+/* Y12 — FUSED-RGB PROVENANCE DISCRIMINATOR                               */
+/*                                                                        */
+/* PRE-REGISTERED IN FULL, BEFORE THIS CODE EXISTED:                      */
+/*   native/tests/tmp/t126/t128-00-y12-prereg.txt                          */
+/* Read that file before reading this one. It contains the decision table  */
+/* (D1..D5), the anti-false-green obligations (G1..G3) and the explicit    */
+/* statement of what Y12 does NOT claim. Nothing below may be reinterpreted */
+/* against it after the fact.                                              */
+/*                                                                        */
+/* THE QUESTION THIS CASE ANSWERS, AND WHY NOTHING ELSE COULD              */
+/* ---------------------------------------------------------------------- */
+/* The fused yuv420 arm is wrong on Vulkan (Y7: max_abs 81/137/129 on      */
+/* 12-14% of every plane) and byte-perfect on Metal. Two explanations      */
+/* survive and the existing cases cannot tell them apart:                  */
+/*   (i)  the fused demosaic+colour EXPRESSION TREE is miscompiled on this */
+/*        driver, in which case the SHIPPING rgba8 fused kernel is wrong   */
+/*        too and the problem is much wider than T12.6; or                 */
+/*   (ii) the tree is fine evaluated once, and what breaks is the fused    */
+/*        yuv420 KERNEL SHAPE -- that same deep tree re-evaluated at five  */
+/*        coordinates per output pixel and inlined into three plane        */
+/*        kernels.                                                          */
+/*                                                                        */
+/* Y1 cannot decide it: it compares Vulkan against METAL goldens, and that */
+/* yardstick is refuted (t126-baton.md S4 H2 — Y1 mismatches on xtrans and */
+/* x3f as well, and neither of those routes fuses, so the mismatch is      */
+/* general cross-backend noise, not evidence about fusion).                */
+/*                                                                        */
+/* Y4b cannot decide it either, and this is the subtle one: on bayer-arw   */
+/* Y4b's "host-forward control" is built from decode_rgba8_default (:976), */
+/* which on an unscaled Bayer decode IS the fused rgba8 kernel. So on that */
+/* route the control's provenance is the very kernel family under          */
+/* suspicion. A Y4b red there is real but it is UNATTRIBUTABLE.            */
+/*                                                                        */
+/* Y12 breaks the circle by decoding the same file FOUR ways in one        */
+/* process, driving the pipeline's own route flag (raw_gpu_pipeline.cpp    */
+/* :540-543), which since bda80348 gates fusion on SCALE alone and so      */
+/* applies to BOTH output formats:                                         */
+/*      A_rgba8 = rgba8 , fusion ON      B_rgba8 = rgba8 , fusion OFF      */
+/*      A_yuv   = yuv420, fusion ON      B_yuv   = yuv420, fusion OFF      */
+/* and reading M_rgb (A_rgba8 vs B_rgba8) against M_B (two-stage yuv420 vs */
+/* its own host control). M_rgb asks the tree question with the yuv420     */
+/* kernel shape removed; M_B asks the plane-write question with the fused  */
+/* tree removed. Together they localise the defect to one of the two.      */
+/*                                                                        */
+/* WHY THE PASS CONDITION EXCLUDES M_A, deliberately: Y12 is a LOCALISER,  */
+/* not a second copy of Y7. It must stay GREEN while the defect it         */
+/* localises is still present, otherwise it merely duplicates Y7's red and */
+/* stops being readable as an independent signal. M_A is REPORTED.         */
+/*                                                                        */
+/* THE BOUND ON M_rgb IS 1, NOT 0, and that is not a relaxation: the       */
+/* fused-vs-two-stage rgba8 1-LSB cross-kernel residue is a pre-existing   */
+/* recorded and closed finding (see Y7's header above, and the same        */
+/* statement in the prereg). A tree miscompile of the kind (i) predicts    */
+/* would land in the 81-137 range already measured, roughly two orders of  */
+/* magnitude clear of this bound, so the two outcomes cannot be confused.  */
+/* ====================================================================== */
+void run_y12() {
+    const char *path = "image_samples/raw_sample.arw";
+    char detail[1600];
+
+    /* RAII, same discipline as Y7/Y11: the flag is cleared on EVERY exit
+     * path. A leaked flag would silently de-fuse every later case in this
+     * process, which would look like a fix. */
+    struct FusionOff {
+        FusionOff() { setenv("DNG_RAW_FUSED_BAYER_RENDER", "0", 1); }
+        ~FusionOff() { unsetenv("DNG_RAW_FUSED_BAYER_RENDER"); }
+    };
+
+    Rgba a_rgba, b_rgba;
+    Yuv a_yuv, b_yuv;
+    int32_t e1 = 0, e2 = 0, e3 = 0, e4 = 0;
+    bool ok1, ok2, ok3, ok4;
+
+    /* G1 — each leg's fused-dispatch delta is captured around that leg only,
+     * so "fusion never engaged anywhere" cannot masquerade as agreement. */
+    const uint64_t c0 = raw_fused_bayer_render_count();
+    ok1 = decode_rgba8_default(path, &a_rgba, &e1);
+    const uint64_t c1 = raw_fused_bayer_render_count();
+    ok3 = decode_yuv420(path, &a_yuv, &e3);
+    const uint64_t c2 = raw_fused_bayer_render_count();
+    uint64_t c3 = c2, c4 = c2;
+    {
+        FusionOff off;
+        ok2 = decode_rgba8_default(path, &b_rgba, &e2);
+        c3 = raw_fused_bayer_render_count();
+        ok4 = decode_yuv420(path, &b_yuv, &e4);
+        c4 = raw_fused_bayer_render_count();
+    }
+
+    if (!ok1 || !ok2 || !ok3 || !ok4) {
+        snprintf(detail, sizeof(detail),
+                 "%s: decode failed A_rgba8=%d(err=%d) B_rgba8=%d(err=%d) "
+                 "A_yuv=%d(err=%d) B_yuv=%d(err=%d)",
+                 path, ok1 ? 1 : 0, e1, ok2 ? 1 : 0, e2, ok3 ? 1 : 0, e3,
+                 ok4 ? 1 : 0, e4);
+        verdict("Y12", "bayer-arw", "fused-rgb-provenance", false, detail);
+        return;
+    }
+
+    const bool g1 = (c1 - c0 == 1u) && (c2 - c1 == 1u) && (c3 - c2 == 0u) &&
+                    (c4 - c3 == 0u);
+
+    /* G2 — extents agree across all four legs, and the two yuv420 legs agree
+     * with each other in size, so every comparison below spans real data. */
+    const bool g2 = a_rgba.w == b_rgba.w && a_rgba.h == b_rgba.h &&
+                    a_yuv.w == a_rgba.w && a_yuv.h == a_rgba.h &&
+                    b_yuv.w == a_rgba.w && b_yuv.h == a_rgba.h &&
+                    a_rgba.bytes.size() == b_rgba.bytes.size() &&
+                    a_yuv.bytes.size() == b_yuv.bytes.size();
+
+    /* ---- M_rgb: the fused rgba8 kernel against the two-stage rgba8 kernel,
+     * per COLOUR CHANNEL. Alpha is skipped: it is a kernel-written constant
+     * and including it would dilute the diff fraction by a quarter. */
+    int32_t rgb_max[3] = {0, 0, 0};
+    size_t rgb_diff[3] = {0, 0, 0};
+    size_t pixels = 0;
+    if (g2) {
+        pixels = static_cast<size_t>(a_rgba.w) * a_rgba.h;
+        for (size_t i = 0; i < pixels; ++i) {
+            for (int ch = 0; ch < 3; ++ch) {
+                const int32_t d =
+                    static_cast<int32_t>(a_rgba.bytes[i * 4 + ch]) -
+                    static_cast<int32_t>(b_rgba.bytes[i * 4 + ch]);
+                const int32_t ad = d < 0 ? -d : d;
+                if (ad > rgb_max[ch]) rgb_max[ch] = ad;
+                if (ad != 0) ++rgb_diff[ch];
+            }
+        }
+    }
+
+    /* ---- the three plane comparisons. G3: spans come from the LITERAL
+     * descriptor geometry of the arm being measured, never from an assumed
+     * layout, so a descriptor defect cannot fold two planes into one
+     * comparison. */
+    struct PlaneCmp {
+        size_t diff_bytes[3] = {0, 0, 0};
+        int32_t max_abs[3] = {0, 0, 0};
+        bool spans_ok = false;
+    };
+    auto compare_planes = [](const std::vector<uint8_t> &kernel,
+                             const std::vector<uint8_t> &control,
+                             const CeyxYuv420PlaneDescriptor &d) {
+        PlaneCmp r;
+        if (kernel.size() != control.size()) return r;
+        size_t offset = 0;
+        for (int p = 0; p < 3; ++p) {
+            const size_t n = static_cast<size_t>(d.plane_width[p]) *
+                             static_cast<size_t>(d.plane_height[p]);
+            if (offset + n > kernel.size()) return r;
+            for (size_t i = 0; i < n; ++i) {
+                const int32_t delta =
+                    static_cast<int32_t>(kernel[offset + i]) -
+                    static_cast<int32_t>(control[offset + i]);
+                const int32_t ad = delta < 0 ? -delta : delta;
+                if (ad > r.max_abs[p]) r.max_abs[p] = ad;
+                if (ad != 0) ++r.diff_bytes[p];
+            }
+            offset += n;
+        }
+        r.spans_ok = true;
+        return r;
+    };
+
+    std::vector<uint8_t> host_from_a, host_from_b;
+    PlaneCmp m_a, m_b, m_x;
+    if (g2) {
+        oracle_forward_yuv420(a_rgba.bytes.data(), a_rgba.w, a_rgba.h,
+                              &host_from_a);
+        oracle_forward_yuv420(b_rgba.bytes.data(), b_rgba.w, b_rgba.h,
+                              &host_from_b);
+        m_a = compare_planes(a_yuv.bytes, host_from_a, a_yuv.planes);
+        m_b = compare_planes(b_yuv.bytes, host_from_b, b_yuv.planes);
+        m_x = compare_planes(a_yuv.bytes, host_from_b, a_yuv.planes);
+    }
+
+    const bool rgb_within_1 =
+        g2 && rgb_max[0] <= 1 && rgb_max[1] <= 1 && rgb_max[2] <= 1;
+    const bool b_exact = m_b.spans_ok && m_b.diff_bytes[0] == 0 &&
+                         m_b.diff_bytes[1] == 0 && m_b.diff_bytes[2] == 0;
+
+    /* The pre-registered verdict, verbatim from the prereg's VERDICT POLICY:
+     * G1 && G2 && G3 && (M_rgb max <= 1) && (M_B diff_bytes == 0). M_A is
+     * reported and is NOT a pass condition — see this case's header. */
+    const bool ok = g1 && g2 && m_a.spans_ok && m_b.spans_ok && m_x.spans_ok &&
+                    rgb_within_1 && b_exact;
+
+    snprintf(
+        detail, sizeof(detail),
+        "%s %dx%d | G1 counter_delta=[A_rgba8:%llu A_yuv:%llu B_rgba8:%llu "
+        "B_yuv:%llu expect 1,1,0,0]=%d G2 extents=%d | M_rgb "
+        "fused_vs_twostage_rgba8 max_abs=[R:%d G:%d B:%d] bound=1 "
+        "diff_fraction=[R:%f G:%f B:%f] | M_B twostage_yuv_vs_hostctl "
+        "diff_bytes=[%zu,%zu,%zu] max_abs=[%d,%d,%d] | M_A "
+        "fused_yuv_vs_hostctl(fused_rgba8) diff_bytes=[%zu,%zu,%zu] "
+        "max_abs=[%d,%d,%d] REPORTED-NOT-ASSERTED | M_X "
+        "fused_yuv_vs_hostctl(twostage_rgba8) diff_bytes=[%zu,%zu,%zu] "
+        "max_abs=[%d,%d,%d] | fnv A_rgba8=%016" PRIx64 " B_rgba8=%016" PRIx64
+        " A_yuv=%016" PRIx64 " B_yuv=%016" PRIx64
+        " | prereg=native/tests/tmp/t126/t128-00-y12-prereg.txt",
+        path, a_rgba.w, a_rgba.h, (unsigned long long)(c1 - c0),
+        (unsigned long long)(c2 - c1), (unsigned long long)(c3 - c2),
+        (unsigned long long)(c4 - c3), g1 ? 1 : 0, g2 ? 1 : 0, rgb_max[0],
+        rgb_max[1], rgb_max[2],
+        pixels ? (double)rgb_diff[0] / (double)pixels : 0.0,
+        pixels ? (double)rgb_diff[1] / (double)pixels : 0.0,
+        pixels ? (double)rgb_diff[2] / (double)pixels : 0.0,
+        m_b.diff_bytes[0], m_b.diff_bytes[1], m_b.diff_bytes[2],
+        m_b.max_abs[0], m_b.max_abs[1], m_b.max_abs[2], m_a.diff_bytes[0],
+        m_a.diff_bytes[1], m_a.diff_bytes[2], m_a.max_abs[0], m_a.max_abs[1],
+        m_a.max_abs[2], m_x.diff_bytes[0], m_x.diff_bytes[1],
+        m_x.diff_bytes[2], m_x.max_abs[0], m_x.max_abs[1], m_x.max_abs[2],
+        fnv1a64(a_rgba.bytes.data(), a_rgba.bytes.size()),
+        fnv1a64(b_rgba.bytes.data(), b_rgba.bytes.size()),
+        fnv1a64(a_yuv.bytes.data(), a_yuv.bytes.size()),
+        fnv1a64(b_yuv.bytes.data(), b_yuv.bytes.size()));
+    verdict("Y12", "bayer-arw", "fused-rgb-provenance", ok, detail);
+}
+
+/* ====================================================================== */
 /* The piggybacked fused-Bayer-route hash (arm A's RGBA8 route).          */
 /*                                                                        */
 /* Not a Y case. It exists so the SAME binary that runs on-device also     */
@@ -1872,6 +2091,10 @@ int main(int argc, char **argv) {
     run_y7();
     run_y8();
     run_y9();
+    /* Y12 runs LAST among the assertions: it drives the fusion route flag,
+     * and placing it after every other case means even a leaked flag (which
+     * its own RAII forbids) could not re-route an earlier case. */
+    run_y12();
     run_fused_hash();
 
     printf("\n=== SUMMARY pass=%d fail=%d n/a=%d arm=%s ===\n", g_pass, g_fail,

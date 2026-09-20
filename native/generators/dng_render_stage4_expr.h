@@ -56,17 +56,34 @@
 
 namespace ceyx {
 
-// Builds `rendered_rgb(x, y)` as a Tuple of three uint8_t.
+// Builds the display-referred R, G and B as THREE PLAIN uint8 Exprs.
 //
-// Templated rather than taking concrete parameter types so that each caller
-// instantiates it on its OWN generator's input types, producing the identical
-// Halide IR the un-extracted code produced. A non-template signature would
-// have required wrapping the Inputs (e.g. into Funcs), and that wrapping would
-// itself perturb the emitted code -- which the SHA gate would then report as a
-// failure indistinguishable from a real extraction defect.
+// WHY THIS FORM EXISTS, AND WHY IT IS THE PRIMARY ONE (mem8 v3 T12.6-fix)
+// -----------------------------------------------------------------------
+// The Tuple-returning entry below (build_dng_render_stage4_rgb) was the only
+// form until 2026-09-20, and a caller that consumes its Tuple BY INDEX at
+// several coordinates per output pixel is miscompiled on the Vulkan driver
+// this project targets. That is the D2 defect, already recorded in
+// ceyx_yuv420_write.h:69-84, where the SPLIT Stage-4 family hit it and was
+// fixed by taking channels un-Tupled.
+//
+// The fused Bayer yuv420 kernel then walked into the identical trap: it called
+// the Tuple form and the plane write evaluated the channels at FIVE
+// coordinates per output pixel (one luma + four chroma). MEASURED on device,
+// two independent reproductions (native/tests/tmp/t126/android-vk5.txt):
+// max|delta| up to 137 on 12-14% of every plane against the two-stage arm, and
+// against a host-computed forward control. Metal was byte-perfect throughout,
+// which is exactly why a host-only gate could not see it.
+//
+// So the colour body now ends HERE, in three separate Exprs, and the Tuple is
+// constructed only by the wrapper below for the callers that genuinely want a
+// Tuple Func. THE ARITHMETIC IS NOT DUPLICATED: there is one body, and the two
+// entry points differ only in how they hand back the last three values.
+//
+// Templated for the same reason the wrapper is -- see its comment.
 template <typename SampleFn, typename BufferInput1D, typename BufferInput2D,
           typename ScalarInput>
-void build_dng_render_stage4_rgb(
+void build_dng_render_stage4_rgb8_exprs(
     Halide::Var x, Halide::Var y,
     SampleFn sample,
     Halide::Expr src_extent_0,
@@ -96,7 +113,8 @@ void build_dng_render_stage4_rgb(
     ScalarInput& look_val_div,
     ScalarInput& look_has_table,
     ScalarInput& look_has_encoding,
-    Halide::Func& rendered_rgb) {
+    Halide::Expr& out_encoded_r, Halide::Expr& out_encoded_g,
+    Halide::Expr& out_encoded_b) {
     using namespace Halide;
 
 // ---- BEGIN verbatim slice of DngRenderGenerator.cpp:97-467 ----------------
@@ -470,10 +488,131 @@ void build_dng_render_stage4_rgb(
             return clamp(g * 255.0f + 0.5f, 0.0f, 255.0f);
         };
 
-        rendered_rgb(x, y) = Tuple(cast<uint8_t>(encode8(f_r)),
-                                   cast<uint8_t>(encode8(f_g)),
-                                   cast<uint8_t>(encode8(f_b)));
+        // ARCH2-A PORT (2026-09-20, T12.6 root-cause fix). The three values
+        // leave as the CLAMPED FLOAT and each caller performs its OWN birth
+        // cast. They are deliberately not born here, and that is the point.
+        //
+        // WHY THE BIRTH MOVED OUT TO THE CALLERS
+        // ---------------------------------------
+        // This function used to end in cast<uint8_t>(...), so every consumer
+        // inherited a uint8 birth. For the RGBA8 consumers that is correct and
+        // harmless: the value goes straight into a uint8 store and is never an
+        // arithmetic operand. For the yuv420 consumer it is the defect -- the
+        // channel is immediately widened again and multiplied by coefficients
+        // up to 19235, so an 8-bit birth sits in the middle of wide integer
+        // arithmetic. That is exactly what type rule (a) (304e3abd) forbids on
+        // the yuv420 path, and this file was violating it while the fused
+        // yuv420 class's own header claimed compliance.
+        //
+        // THE SPLIT STAGE-4 FAMILY ALREADY FIXED THIS and shipped it as
+        // ARCH2-A: dng_render_stage4_split_expr.h:432-436 emits
+        // cast<int32_t>(encode8(...)) with this same value-identity argument,
+        // and that family's yuv420 arm is byte-exact against the host-forward
+        // control on device. The FUSED family never received the port. This
+        // change is that port, so the two families now agree; it is a
+        // conformance fix across arms, NOT a platform guard -- both backends
+        // emit the identical shape.
+        //
+        // MEASURED, not argued (native/tests/tmp/t126/t128-08-y12-verdict.md,
+        // device vk7): the fused colour tree is CORRECT on Vulkan evaluated
+        // once per pixel (Y12 M_rgb max_abs <= 1), and the plane arithmetic is
+        // CORRECT on Vulkan when fed from a materialised buffer (Y12 M_B
+        // diff_bytes = 0). Only the combination is wrong, and the uint8 birth
+        // is the one documented structural difference between the arm that
+        // works and the arm that does not.
+        //
+        // VALUE-IDENTITY, which is why this cannot move an output byte:
+        // encode8 already clamps to [0.0f, 255.0f], so its result is
+        // non-negative and in range for both conversions, and cast<uint8_t>
+        // and cast<int32_t> return the same integer for every input. The RGBA8
+        // wrapper below re-narrows with cast<uint8_t> at its own store,
+        // reproducing this function's previous emission exactly -- asserted
+        // mechanically by the unchanged dng_render_stage4.a and
+        // raw_bayer_fused_render.a archive hashes, never assumed.
+        out_encoded_r = encode8(f_r);
+        out_encoded_g = encode8(f_g);
+        out_encoded_b = encode8(f_b);
 // ---- END verbatim slice -----------------------------------------------------
+}
+
+// Builds `rendered_rgb(x, y)` as a Tuple of three uint8_t.
+//
+// THE ORIGINAL ENTRY POINT, unchanged for every existing caller. It is now a
+// thin wrapper over the Expr form above: same arithmetic, same expressions,
+// the Tuple simply constructed one level out. Callers that want a Tuple Func
+// (the RGBA8 Stage-4 kernels and the fused RGBA8 kernel) keep calling this and
+// must emit byte-identical archives -- dng_render_stage4.a and
+// raw_bayer_fused_render.a are pinned gate artifacts.
+//
+// DO NOT call this from a yuv420 path. Consuming the resulting Tuple by index
+// at several coordinates per output pixel is the D2 defect and is miscompiled
+// on Vulkan; use build_dng_render_stage4_rgb8_exprs directly and wrap each
+// channel in its own single-value Func, exactly as the split family does.
+//
+// Templated rather than taking concrete parameter types so that each caller
+// instantiates it on its OWN generator's input types, producing the identical
+// Halide IR the un-extracted code produced. A non-template signature would
+// have required wrapping the Inputs (e.g. into Funcs), and that wrapping would
+// itself perturb the emitted code -- which the SHA gate would then report as a
+// failure indistinguishable from a real extraction defect.
+template <typename SampleFn, typename BufferInput1D, typename BufferInput2D,
+          typename ScalarInput>
+void build_dng_render_stage4_rgb(
+    Halide::Var x, Halide::Var y,
+    SampleFn sample,
+    Halide::Expr src_extent_0,
+    Halide::Expr src_extent_1,
+    Halide::Expr src_scale,
+    Halide::Expr orient_a_x, Halide::Expr orient_b_x, Halide::Expr orient_c_x,
+    Halide::Expr orient_a_y, Halide::Expr orient_b_y, Halide::Expr orient_c_y,
+    BufferInput1D& exp_ramp,
+    BufferInput1D& tone_curve,
+    BufferInput1D& encode_gamma,
+    BufferInput1D& camera_white,
+    BufferInput2D& camera_to_rgb,
+    BufferInput2D& rgb_to_final,
+    BufferInput2D& huesat_table,
+    BufferInput1D& huesat_encode,
+    BufferInput1D& huesat_decode,
+    ScalarInput& huesat_hue_div,
+    ScalarInput& huesat_sat_div,
+    ScalarInput& huesat_val_div,
+    ScalarInput& huesat_has_table,
+    ScalarInput& huesat_has_encoding,
+    BufferInput2D& look_table,
+    BufferInput1D& look_encode,
+    BufferInput1D& look_decode,
+    ScalarInput& look_hue_div,
+    ScalarInput& look_sat_div,
+    ScalarInput& look_val_div,
+    ScalarInput& look_has_table,
+    ScalarInput& look_has_encoding,
+    Halide::Func& rendered_rgb) {
+    Halide::Expr enc_r, enc_g, enc_b;
+    build_dng_render_stage4_rgb8_exprs(
+        x, y, sample, src_extent_0, src_extent_1, src_scale,
+        orient_a_x, orient_b_x, orient_c_x,
+        orient_a_y, orient_b_y, orient_c_y,
+        exp_ramp, tone_curve, encode_gamma, camera_white,
+        camera_to_rgb, rgb_to_final,
+        huesat_table, huesat_encode, huesat_decode,
+        huesat_hue_div, huesat_sat_div, huesat_val_div,
+        huesat_has_table, huesat_has_encoding,
+        look_table, look_encode, look_decode,
+        look_hue_div, look_sat_div, look_val_div,
+        look_has_table, look_has_encoding,
+        enc_r, enc_g, enc_b);
+    // THE RGBA8 BIRTH, and it stays exactly here. This reproduces the emission
+    // the Expr builder used to perform internally -- cast<uint8_t> applied to
+    // the same clamped-float expression -- so the IR every RGBA8 caller sees is
+    // unchanged and the pinned archives (dng_render_stage4.a,
+    // raw_bayer_fused_render.a) must not move. An 8-bit birth is CORRECT on
+    // this path: the value's only consumer is a uint8 store, and it is never an
+    // arithmetic operand. That is precisely the condition type rule (a) draws
+    // the line on, which is why the yuv420 consumer births int32 instead.
+    rendered_rgb(x, y) = Halide::Tuple(Halide::cast<uint8_t>(enc_r),
+                                       Halide::cast<uint8_t>(enc_g),
+                                       Halide::cast<uint8_t>(enc_b));
 }
 
 }  // namespace ceyx

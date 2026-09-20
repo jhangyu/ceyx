@@ -274,9 +274,22 @@ public:
 //
 // TYPE RULES, both load-bearing and both paid for on device this campaign:
 //   (a) 304e3abd -- never birth a colour channel in an 8/16-bit type on the
-//       yuv420 path. Nothing here births one: build_dng_render_stage4_rgb is
-//       the sibling's verbatim, and build_yuv420_planes immediately casts each
-//       channel to int32 before any arithmetic.
+//       yuv420 path. The channel is born int32 in generate() (ARCH2-A), and
+//       the ONLY narrow type on the path is the uint8 plane store itself,
+//       which is never an arithmetic operand.
+//
+//       THIS COMMENT PREVIOUSLY CLAIMED COMPLIANCE AND WAS WRONG, which is
+//       recorded here rather than tidied away because the false claim is what
+//       kept the real defect hidden for four rounds. It read: "Nothing here
+//       births one: build_dng_render_stage4_rgb is the sibling's verbatim, and
+//       build_yuv420_planes immediately casts each channel to int32 before any
+//       arithmetic." The second half is true and irrelevant -- casting to int32
+//       at the CONSUMER does not undo a birth that already happened at the
+//       PRODUCER. dng_render_stage4_expr.h ended in cast<uint8_t>(...), so the
+//       channel was in fact born uint8 and then widened, which is exactly the
+//       shape the rule forbids. The reasoning-only verification recorded as
+//       "C7 UNVERIFIED" in native/tests/tmp/t126/t126-baton.md reached the
+//       wrong answer for this reason; the rule is now satisfied structurally.
 //   (b) T22/T20 -- a Func materialised at a GPU loop level becomes a Workgroup
 //       array and this driver miscompiles it below 32 bits, silently. NOTHING
 //       is staged here on the GPU path (schedule_yuv420_planes has no
@@ -340,7 +353,10 @@ public:
 
     Func normalized{"normalized"};
     Func demosaiced{"demosaiced"};
-    Func rendered_rgb{"rendered_rgb"};
+    // NOTE: deliberately NO `rendered_rgb` Func member here, unlike the rgba8
+    // sibling. This class must never form a Tuple Func -- see the fix note in
+    // generate(). Its absence is the structural guarantee; a future edit that
+    // wants one has to add it back and will meet this comment first.
 
     void generate() {
         Var x("x"), y("y"), c("c");
@@ -374,7 +390,22 @@ public:
 
         // THE SEAM, identical to the sibling's: the render reads the demosaic
         // directly, so no Stage-3 intermediate exists on this route either.
-        ceyx::build_dng_render_stage4_rgb(
+        //
+        // T12.6-fix: this calls the EXPR form of the colour body, NOT the
+        // Tuple-Func form its rgba8 sibling uses. That is the whole fix, and
+        // it is a conformance change rather than a platform guard -- both
+        // backends get this identical shape.
+        //
+        // WHY, in one line: a Tuple Func consumed BY INDEX at five coordinates
+        // per output pixel is miscompiled on this project's Vulkan driver.
+        // This class shipped that shape for exactly one round and it was wrong
+        // on device by up to 137 levels on 12-14% of every plane, while being
+        // byte-perfect on Metal -- see native/tests/tmp/t126/android-vk5.txt
+        // and the D2 note in ceyx_yuv420_write.h:69-84. The split Stage-4
+        // family had already hit this and had already been fixed this way; the
+        // fused kernel simply had to conform to the same rule.
+        Expr enc_r, enc_g, enc_b;
+        ceyx::build_dng_render_stage4_rgb8_exprs(
             x, y,
             [&](Expr sample_x, Expr sample_y, int channel) {
                 return demosaiced(sample_x + crop_x, sample_y + crop_y, channel);
@@ -390,16 +421,37 @@ public:
             look_table, look_encode, look_decode,
             look_hue_div, look_sat_div, look_val_div,
             look_has_table, look_has_encoding,
-            rendered_rgb);
+            enc_r, enc_g, enc_b);
 
-        // Un-Tupled channels: build_yuv420_planes takes three single-value
-        // Funcs (its D2 root-cause note). These three are INLINE, so no
-        // Workgroup array is materialised and the tuple expression is
-        // evaluated exactly as the rgba8 sibling evaluates it.
+        // ARCH2-A: THE CHANNEL IS BORN int32 HERE, NEVER uint8. This is the
+        // T12.6 root-cause fix and it is a PORT, not an invention -- the split
+        // Stage-4 family already births int32 at
+        // dng_render_stage4_split_expr.h:432-436, and its yuv420 arm is
+        // byte-exact against the host-forward control on device while this one
+        // was wrong by up to 137 levels.
+        //
+        // Type rule (a) (304e3abd) forbids birthing a colour channel in an
+        // 8/16-bit type on the yuv420 path, and the reason is visible two
+        // files away: build_yuv420_planes immediately multiplies this value by
+        // coefficients up to 19235. A uint8 birth therefore sits in the middle
+        // of wide integer arithmetic, which is the Adreno carry-loss shape this
+        // project has already paid for twice. Consumers that need 8-bit BYTES
+        // re-narrow at their own store, so the only narrow type on the path is
+        // the store itself and it is never an arithmetic operand.
+        //
+        // WHY THIS CANNOT MOVE AN OUTPUT BYTE: encode8 clamps to
+        // [0.0f, 255.0f], so cast<int32_t> and cast<uint8_t> return the same
+        // integer for every input. Metal byte-identity is the mechanical check
+        // on that claim, not this comment.
+        //
+        // Three single-value Funcs, NO Tuple anywhere on this path, all three
+        // INLINE (never compute_at'd) so no Workgroup array is materialised.
+        // This is character-for-character the shape DngRenderStage4SplitYuv420
+        // uses -- both the un-Tupling and now the int32 birth.
         Func rgb8_r("rgb8_r"), rgb8_g("rgb8_g"), rgb8_b("rgb8_b");
-        rgb8_r(x, y) = rendered_rgb(x, y)[0];
-        rgb8_g(x, y) = rendered_rgb(x, y)[1];
-        rgb8_b(x, y) = rendered_rgb(x, y)[2];
+        rgb8_r(x, y) = cast<int32_t>(enc_r);
+        rgb8_g(x, y) = cast<int32_t>(enc_g);
+        rgb8_b(x, y) = cast<int32_t>(enc_b);
 
         // The luma plane's extents ARE the oriented output extents, so the
         // odd-extent edge clamp reads them from there rather than from a
