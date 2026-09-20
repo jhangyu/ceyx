@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Optional
 
 try:  # pragma: no cover - import style depends on how the caller invokes us
-    from .run import run
+    from .run import SubprocessError, run
 except ImportError:  # pragma: no cover - fallback for direct script execution
-    from run import run  # type: ignore[no-redef]
+    from run import SubprocessError, run  # type: ignore[no-redef]
 
 
 class FetchError(RuntimeError):
@@ -120,3 +120,66 @@ def fetch_git(repo: str, ref: str, dest: Path, *, depth: Optional[int] = 1) -> P
     argv += [repo, str(dest)]
     run(argv)
     return dest
+
+
+def find_worktree_main_tree_root(start: Path) -> Optional[Path]:
+    """If ``start`` sits inside a linked ``git worktree``, return the
+    absolute path to the MAIN tree's repository root (the checkout whose
+    ``.git`` is a real directory, not a worktree pointer file); else
+    ``None``.
+
+    2026-09-20 parking-lot fix (item 2): a fresh ``git worktree add`` gets
+    none of the vendored, gitignored dist directories the main tree already
+    fetched (e.g. ``native/third_party/halide``, ~540MB) -- every worktree
+    otherwise pays a full re-fetch. Resolution goes through ``git rev-parse
+    --git-common-dir``/``--git-dir`` (both agree, at the same path, only in
+    the main tree -- a linked worktree's ``--git-common-dir`` points at the
+    main tree's ``.git``) rather than string-matching ``.git/worktrees/`` in
+    a path, so it is correct regardless of where either checkout lives.
+    """
+    try:
+        common = run(["git", "-C", str(start), "rev-parse", "--git-common-dir"]).stdout.strip()
+        own = run(["git", "-C", str(start), "rev-parse", "--git-dir"]).stdout.strip()
+    except (SubprocessError, OSError):
+        return None
+    common_path = Path(common).resolve()
+    own_path = Path(own).resolve()
+    if common_path == own_path:
+        return None  # not a linked worktree -- this checkout IS the main tree
+    return common_path.parent
+
+
+def reuse_worktree_dist(dest: Path, *, is_valid, this_native_dir: Optional[Path] = None) -> bool:
+    """If ``dest`` does not yet exist, this checkout is a linked worktree,
+    and the main tree already has a valid dist at the same relative path
+    (checked via ``is_valid``, e.g. :func:`deps.fetch_halide.already_present`),
+    symlink ``dest`` to the main tree's copy and return True. Returns False
+    (does nothing, leaving the caller to fetch normally) in every other
+    case -- a missing/invalid main-tree dist, ``dest`` already existing, or
+    this not being a worktree at all.
+
+    ``this_native_dir`` defaults to this checkout's own ``native/`` (derived
+    from ``__file__``); it is a parameter purely so a test can point it at a
+    throwaway worktree instead.
+    """
+    dest = Path(dest)
+    if dest.exists():
+        return False
+    this_native_dir = Path(this_native_dir) if this_native_dir is not None else Path(__file__).resolve().parents[2]
+    # Anchored on this_native_dir (always resolvable) rather than dest.parent
+    # (which may not exist yet for a never-before-fetched dist) -- `git
+    # rev-parse` works fine against any existing ancestor directory inside
+    # the checkout.
+    main_root = find_worktree_main_tree_root(this_native_dir)
+    if main_root is None:
+        return False
+    try:
+        relative = dest.resolve().relative_to(this_native_dir.resolve())
+    except ValueError:
+        return False  # dest isn't under this checkout's native/ dir -- no sibling to resolve in the main tree
+    main_dist = (main_root / "native" / relative).resolve()
+    if main_dist == dest.resolve() or not is_valid(main_dist):
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.symlink_to(main_dist, target_is_directory=True)
+    return True

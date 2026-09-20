@@ -111,5 +111,74 @@ class TestFetchTarball(unittest.TestCase):
             self.assertFalse(dest.with_name(dest.name + ".part").exists())
 
 
+class TestWorktreeDistReuse(unittest.TestCase):
+    """2026-09-20 parking-lot item 2: a fresh `git worktree add` should
+    reuse the main tree's already-fetched gitignored dist dirs instead of
+    re-fetching. Exercised against real throwaway git repos (main tree +
+    linked worktree), no network."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.main_root = Path(self._tmp.name) / "main"
+        self.main_root.mkdir()
+        run = fetch_module.run
+        run(["git", "init", "-q", str(self.main_root)])
+        run(["git", "-C", str(self.main_root), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"])
+        self.worktree_root = Path(self._tmp.name) / "wt"
+        run(["git", "-C", str(self.main_root), "worktree", "add", "-q", str(self.worktree_root), "-b", "wt-branch"])
+
+    def test_not_a_worktree_returns_none(self) -> None:
+        self.assertIsNone(fetch_module.find_worktree_main_tree_root(self.main_root))
+
+    def test_linked_worktree_resolves_main_root(self) -> None:
+        resolved = fetch_module.find_worktree_main_tree_root(self.worktree_root)
+        self.assertEqual(resolved, self.main_root.resolve())
+
+    def test_symlinks_to_main_tree_dist_when_present_and_valid(self) -> None:
+        main_dist = self.main_root / "native" / "third_party" / "halide"
+        main_dist.mkdir(parents=True)
+        (main_dist / "marker").write_text("real dist\n", encoding="utf-8")
+
+        wt_native = self.worktree_root / "native"
+        wt_dest = wt_native / "third_party" / "halide"
+        # mirrors the real repo, where native/third_party/ itself is tracked
+        # (it holds other non-gitignored vendored dirs) even though the
+        # individual halide subdirectory is gitignored/untracked.
+        wt_dest.parent.mkdir(parents=True)
+        reused = fetch_module.reuse_worktree_dist(
+            wt_dest,
+            is_valid=lambda p: (p / "marker").is_file(),
+            this_native_dir=wt_native,
+        )
+        self.assertTrue(reused)
+        self.assertTrue(wt_dest.is_symlink())
+        self.assertEqual((wt_dest / "marker").read_text(encoding="utf-8"), "real dist\n")
+
+    def test_does_not_reuse_when_main_tree_dist_missing(self) -> None:
+        wt_native = self.worktree_root / "native"
+        wt_dest = wt_native / "third_party" / "halide"
+        reused = fetch_module.reuse_worktree_dist(
+            wt_dest, is_valid=lambda p: (p / "marker").is_file(), this_native_dir=wt_native
+        )
+        self.assertFalse(reused)
+        self.assertFalse(wt_dest.exists())
+
+    def test_does_not_reuse_when_dest_already_exists(self) -> None:
+        main_dist = self.main_root / "native" / "third_party" / "halide"
+        main_dist.mkdir(parents=True)
+        (main_dist / "marker").write_text("real dist\n", encoding="utf-8")
+
+        wt_native = self.worktree_root / "native"
+        wt_dest = wt_native / "third_party" / "halide"
+        wt_dest.mkdir(parents=True)
+        reused = fetch_module.reuse_worktree_dist(
+            wt_dest, is_valid=lambda p: (p / "marker").is_file(), this_native_dir=wt_native
+        )
+        self.assertFalse(reused)
+        self.assertFalse(wt_dest.is_symlink())
+
+
 if __name__ == "__main__":
     unittest.main()

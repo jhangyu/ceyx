@@ -187,25 +187,45 @@ def apply_patches(repo_dir: Path, patch_dir: Path, *, label: str) -> None:
         _apply_or_skip(repo_dir, patch, label=label)
 
 
-def fetch(native_dir: Optional[Path] = None) -> Path:
-    """Vendor LibRaw + RawSpeed3 + LibRaw-cmake into
-    ``native_dir/third_party/{libraw,libraw-cmake}``. Mirrors
-    fetch_libraw_dist.sh's ordering: clone all three -> overlay the
+def fetch(dest: Optional[Path] = None) -> Path:
+    """Vendor LibRaw + RawSpeed3 + LibRaw-cmake.
+
+    ``dest`` is the exact directory the LibRaw source tree lands in
+    (default ``native/third_party/libraw``) -- this mirrors the ``--dest``
+    contract of :func:`deps.fetch_halide.fetch`/:func:`deps.fetch_libjxl.build`,
+    where the flag overrides the destination directory itself rather than
+    some ancestor of it. RawSpeed3 is always nested inside whatever ``dest``
+    resolves to (``dest/RawSpeed3/rawspeed``) and LibRaw-cmake is always its
+    sibling (``dest.parent/libraw-cmake``), so a caller-supplied ``--dest``
+    propagates to every subcomponent this command fetches, not just LibRaw
+    itself (2026-09-20 parking-lot fix -- previously the CLI reinterpreted
+    ``--dest`` as a project-native-dir override, which only worked by
+    coincidence when the path already matched the
+    ``.../third_party/libraw`` convention and otherwise fetched everything
+    under a wrong location derived from it).
+
+    Patch sources (``native/patches/{libraw,libraw-cmake,rawspeed3}``) are
+    always resolved from THIS project's own tree, never from ``dest`` --
+    they are part of the repo, not part of the fetched/vendored artifact,
+    so overriding the fetch destination must not change where patches are
+    read from.
+
+    Mirrors fetch_libraw_dist.sh's ordering: clone all three -> overlay the
     project's RawSpeed3 patch set -> apply RawSpeed3 patches -> apply
     project LibRaw patches -> strip .git from all three."""
-    native_dir = Path(native_dir) if native_dir is not None else Path(__file__).resolve().parents[2]
-    dest = native_dir / "third_party" / "libraw"
+    project_native_dir = Path(__file__).resolve().parents[2]
+    dest = Path(dest).resolve() if dest is not None else project_native_dir / "third_party" / "libraw"
     rs_dest = dest / "RawSpeed3" / "rawspeed"
-    libraw_cmake_dest = native_dir / "third_party" / "libraw-cmake"
-    project_patch_dir = native_dir / "patches" / "libraw"
-    libraw_cmake_patch_dir = native_dir / "patches" / "libraw-cmake"
+    libraw_cmake_dest = dest.parent / "libraw-cmake"
+    project_patch_dir = project_native_dir / "patches" / "libraw"
+    libraw_cmake_patch_dir = project_native_dir / "patches" / "libraw-cmake"
 
     clone_at(LIBRAW_URL, LIBRAW_REV, dest)
     clone_at(RAWSPEED_URL, RAWSPEED_REV, rs_dest)
     clone_at(LIBRAW_CMAKE_URL, LIBRAW_CMAKE_REV, libraw_cmake_dest)
 
     patch_dir = dest / "RawSpeed3" / "patches"
-    rawspeed_patch_src = native_dir / "patches" / "rawspeed3"
+    rawspeed_patch_src = project_native_dir / "patches" / "rawspeed3"
     overlay_rawspeed_patches(rawspeed_patch_src, patch_dir)
 
     apply_patches(rs_dest, patch_dir, label="")
@@ -228,10 +248,10 @@ def main(argv: Optional[list] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="deps.fetch_libraw")
-    parser.add_argument("--native-dir", default=None)
+    parser.add_argument("--dest", default=None, help="override native/third_party/libraw")
     args = parser.parse_args(argv)
     try:
-        fetch(Path(args.native_dir) if args.native_dir else None)
+        fetch(Path(args.dest) if args.dest else None)
     except (LibrawFetchError, SubprocessError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

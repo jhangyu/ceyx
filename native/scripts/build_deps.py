@@ -412,9 +412,16 @@ def _run_fetch(argv: list) -> int:
         from deps import fetch_libraw  # noqa: PLC0415
         from deps.run import SubprocessError as _SubprocessError  # noqa: PLC0415
 
-        native_dir = dest.parents[1] if dest else None  # dest would be .../third_party/libraw
+        # `dest` (when given) is the exact LibRaw destination directory --
+        # fetch_libraw.fetch() nests RawSpeed3 inside it and places
+        # LibRaw-cmake as its sibling, so passing it straight through
+        # propagates --dest to every subcomponent this command fetches
+        # (2026-09-20 parking-lot fix; previously this reinterpreted `dest`
+        # as a project-native-dir override via `dest.parents[1]`, which only
+        # worked when the path already matched the
+        # `.../third_party/libraw` convention).
         try:
-            fetch_libraw.fetch(native_dir)
+            fetch_libraw.fetch(dest)
         except (fetch_libraw.LibrawFetchError, _SubprocessError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
