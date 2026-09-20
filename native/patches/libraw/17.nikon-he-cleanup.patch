@@ -1,0 +1,299 @@
+diff --git a/src/decoders/nikon_he/nikon_he_bayer.cpp b/src/decoders/nikon_he/nikon_he_bayer.cpp
+index ca9ca488..e6c6f4f8 100644
+--- a/src/decoders/nikon_he/nikon_he_bayer.cpp
++++ b/src/decoders/nikon_he/nikon_he_bayer.cpp
+@@ -50,6 +50,8 @@ void step1_merge_4_to_2(
+         int32_t* L_row = out_L + r * stride_out;
+         int32_t* H_row = out_H + r * stride_out;
+ 
++        int32_t carry_pred;
++        int32_t carry_next_pred;
+         {
+             const int c = 0;
+             const int cp = (w_cols == 1) ? 0 : 1;
+@@ -68,16 +70,9 @@ void step1_merge_4_to_2(
+             const int32_t hh_predicted = p3_row[c]
+                 - ((ll_hl_sum + p4_row[c] + p1_next[c]) >> 3);
+             H_row[c] = hh_predicted + (pred_2x >> 2);
+-        }
+ 
+-        int32_t carry_pred = 0;
+-        int32_t carry_next_pred = 0;
+-        {
+-            const int c = 0;
+-            const int cp = (w_cols == 1) ? 0 : 1;
+-            const int32_t hh_sum = p3_row[c] + p3_row[cp];
+-            carry_pred = p2_row[c] - ((hh_sum + p3_prev[c] + p3_prev[cp]) >> 3);
+-            carry_next_pred = p2_next[c] - ((hh_sum + p3_next[c] + p3_next[cp]) >> 3);
++            carry_pred = lh_predicted;
++            carry_next_pred = lh_next_predicted;
+         }
+ 
+         const int last = w_cols - 1;
+@@ -106,7 +101,7 @@ void step1_merge_4_to_2(
+         if (last >= 1) {
+             const int c = last;
+             const int cp = c;
+-            const int32_t hh_col_sum = p3_row[c] + p3_row[cp];
++            const int32_t hh_col_sum = 2 * p3_row[c];
+             const int32_t cur_predict = p2_row[c]
+                 - ((hh_col_sum + p3_prev[cp] + p3_prev[c]) >> 3);
+             const int32_t next_predict = p2_next[c]
+diff --git a/src/decoders/nikon_he/nikon_he_bayer.h b/src/decoders/nikon_he/nikon_he_bayer.h
+index 608c38ac..ca9ec15b 100644
+--- a/src/decoders/nikon_he/nikon_he_bayer.h
++++ b/src/decoders/nikon_he/nikon_he_bayer.h
+@@ -90,7 +90,7 @@ void step1_merge_4_to_2(
+ //   lut              — tone-curve LUT (kLutSize entries)
+ //   out_bayer        — output uint16 Bayer buffer (image-wide)
+ //   image_w          — full image width in pixels
+-//   w4_row_start     — starting row within the full image
++//   tile_row_start   — starting row within the full image
+ //   is_first_tile
+ //   is_last_tile
+ //
+diff --git a/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp b/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp
+index a53ead5d..9e4bc234 100644
+--- a/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_coefficient_decode.cpp
+@@ -74,7 +74,10 @@ bool unpack_sign_and_dequantize(
+             }
+         }
+ 
+-        if (gcli <= gtli || num_bitplanes < 1 || num_bitplanes > 15) {
++        // gcli <= gtli and num_bitplanes < 1 are unreachable here: the
++        // num_bitplanes <= 0 case (equivalent to gcli <= gtli) already
++        // `continue`s at line 47/49 above.
++        if (num_bitplanes > 15) {
+             dst[0] = dst[1] = dst[2] = dst[3] = 0;
+             continue;
+         }
+diff --git a/src/decoders/nikon_he/nikon_he_decode.cpp b/src/decoders/nikon_he/nikon_he_decode.cpp
+index 3eafa0be..2754fac1 100644
+--- a/src/decoders/nikon_he/nikon_he_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_decode.cpp
+@@ -77,7 +77,6 @@ HeDecodeResult decode_nikon_he_image(
+ 
+     const uint8_t* cursor = precinct_data;
+     size_t remaining = precinct_stream_size;
+-    int n_walked = 0;
+ 
+     for (int p = 0; p < n_file_precincts; p++) {
+         if (remaining < 3) break;
+@@ -89,14 +88,12 @@ HeDecodeResult decode_nikon_he_image(
+         prec_sizes[static_cast<size_t>(p)] = full_size;
+         cursor += full_size;
+         remaining -= full_size;
+-        n_walked++;
+ 
+         if ((p & 0xF) == 15 && remaining >= 6) {
+             cursor += 6;
+             remaining -= 6;
+         }
+     }
+-    (void)n_walked;
+ 
+     const size_t coeff_count =
+         static_cast<size_t>(n_tiles) * kStripesPerTile * stripe_ints;
+diff --git a/src/decoders/nikon_he/nikon_he_idwt_horizontal.cpp b/src/decoders/nikon_he/nikon_he_idwt_horizontal.cpp
+index 4a86ace2..6f885938 100644
+--- a/src/decoders/nikon_he/nikon_he_idwt_horizontal.cpp
++++ b/src/decoders/nikon_he/nikon_he_idwt_horizontal.cpp
+@@ -36,8 +36,6 @@ void idwt53_inverse_one_level(
+ 
+     const int n = n_L + n_H;
+     if (n == 0) return;
+-    (void)n_L;
+-    (void)n_H;
+ 
+     // n_L = ceil(n/2), n_H = floor(n/2) for a 5/3 level.
+     const int n_pairs = n >> 1;
+@@ -125,10 +123,20 @@ void idwt53_horizontal_lift_all(
+     }
+ }
+ 
+-void idwt_horizontal_pass(
++// The pass-A (5 lift levels) and pass-B (1 lift level) halves of
++// idwt_horizontal_pass() were byte-for-byte identical apart from three values:
++// the lift level count, the per-level group-count source used to build the
++// HL offset table, and the SubbandConfig index whose band is memcpy'd straight
++// through. Everything else -- the four logical bands, their stripe offsets and
++// the lift/memcpy ordering -- is shared, so both call this one helper.
++//
++// `ng_source` must supply (levels + 1) entries.
++static void idwt_horizontal_pass_levels(
+     const int32_t* buf,
+     const SubbandConfig config[26],
+-    bool is_passA,
++    int levels,
++    const int* ng_source,
++    int memcpy_config_index,
+     int32_t* out_stripe,
+     int32_t* work) {
+ 
+@@ -138,81 +146,63 @@ void idwt_horizontal_pass(
+     const int n          = li->ng_LL * 4;
+     const int lift_st    = lift_LB * 4;
+ 
++    int hl_offsets[6];
++    int acc = 0;
++    int cum[6];
++    for (int i = 0; i <= levels; ++i) {
++        acc += round_up(ng_source[i], 8);
++        cum[i] = acc;
++    }
++    for (int k = 0; k <= levels; ++k) {
++        hl_offsets[k] = 4 * cum[levels - k];
++    }
++
++    const int lb0_out = 0;
++    const int lb1_out = lift_st;
++    const int lb2_out = 2 * lift_st;
++    const int lb3_out = 2 * lift_st + memcpy_LB * 4;
++
++    int32_t* lb0_in = const_cast<int32_t*>(buf) + 0;
++    int32_t* lb1_in = const_cast<int32_t*>(buf) + lift_st;
++    int32_t* lb3_in = const_cast<int32_t*>(buf) + 2 * lift_st + memcpy_LB * 4;
++
++    idwt53_horizontal_lift_all(lb0_in, n, levels,
++                               hl_offsets,
++                               out_stripe + lb0_out, work);
++    idwt53_horizontal_lift_all(lb1_in, n, levels,
++                               hl_offsets,
++                               out_stripe + lb1_out, work);
++
++    std::memcpy(out_stripe + lb2_out,
++                buf + config[memcpy_config_index].x24 * 4,
++                static_cast<size_t>(config[memcpy_config_index].ng * 4)
++                * sizeof(int32_t));
++
++    idwt53_horizontal_lift_all(lb3_in, n, levels,
++                               hl_offsets,
++                               out_stripe + lb3_out, work);
++}
++
++void idwt_horizontal_pass(
++    const int32_t* buf,
++    const SubbandConfig config[26],
++    bool is_passA,
++    int32_t* out_stripe,
++    int32_t* work) {
++
++    const LayoutInfo* li = config[0].layout_info;
++
+     if (is_passA) {
+         const int passA_levels = 5;
+-        int hl_offsets[6];
+-        int acc = 0;
+-        int cum[6];
+-        for (int i = 0; i < 6; ++i) {
+-            acc += round_up(li->ng_lift[i], 8);
+-            cum[i] = acc;
+-        }
+-        for (int k = 0; k <= 5; ++k) {
+-            hl_offsets[k] = 4 * cum[5 - k];
+-        }
+-
+-        const int lb0_out = 0;
+-        const int lb1_out = lift_st;
+-        const int lb2_out = 2 * lift_st;
+-        const int lb3_out = 2 * lift_st + memcpy_LB * 4;
+-
+-        int32_t* lb0_in = const_cast<int32_t*>(buf) + 0;
+-        int32_t* lb1_in = const_cast<int32_t*>(buf) + lift_st;
+-        int32_t* lb3_in = const_cast<int32_t*>(buf) + 2 * lift_st + memcpy_LB * 4;
+-
+-        idwt53_horizontal_lift_all(lb0_in, n, passA_levels,
+-                                   hl_offsets,
+-                                   out_stripe + lb0_out, work);
+-        idwt53_horizontal_lift_all(lb1_in, n, passA_levels,
+-                                   hl_offsets,
+-                                   out_stripe + lb1_out, work);
+-
+-        std::memcpy(out_stripe + lb2_out,
+-                    buf + config[12].x24 * 4,
+-                    static_cast<size_t>(config[12].ng * 4)
+-                    * sizeof(int32_t));
+-
+-        idwt53_horizontal_lift_all(lb3_in, n, passA_levels,
+-                                   hl_offsets,
+-                                   out_stripe + lb3_out, work);
++        idwt_horizontal_pass_levels(buf, config, passA_levels,
++                                    li->ng_lift, 12,
++                                    out_stripe, work);
+     } else {
+         const int passB_levels = 1;
+         const int ng_passB[2] = { li->ng_max, li->ng_max };
+-        int hl_offsets[2];
+-        int acc = 0;
+-        int cum[2];
+-        for (int i = 0; i < 2; ++i) {
+-            acc += round_up(ng_passB[i], 8);
+-            cum[i] = acc;
+-        }
+-        for (int k = 0; k <= 1; ++k) {
+-            hl_offsets[k] = 4 * cum[1 - k];
+-        }
+-
+-        const int lb4_out = 0;
+-        const int lb5_out = lift_st;
+-        const int lb6_out = 2 * lift_st;
+-        const int lb7_out = 2 * lift_st + memcpy_LB * 4;
+-
+-        int32_t* lb4_in = const_cast<int32_t*>(buf) + 0;
+-        int32_t* lb5_in = const_cast<int32_t*>(buf) + lift_st;
+-        int32_t* lb7_in = const_cast<int32_t*>(buf) + 2 * lift_st + memcpy_LB * 4;
+-
+-        idwt53_horizontal_lift_all(lb4_in, n, passB_levels,
+-                                   hl_offsets,
+-                                   out_stripe + lb4_out, work);
+-        idwt53_horizontal_lift_all(lb5_in, n, passB_levels,
+-                                   hl_offsets,
+-                                   out_stripe + lb5_out, work);
+-
+-        std::memcpy(out_stripe + lb6_out,
+-                    buf + config[23].x24 * 4,
+-                    static_cast<size_t>(config[23].ng * 4)
+-                    * sizeof(int32_t));
+-
+-        idwt53_horizontal_lift_all(lb7_in, n, passB_levels,
+-                                   hl_offsets,
+-                                   out_stripe + lb7_out, work);
++        idwt_horizontal_pass_levels(buf, config, passB_levels,
++                                    ng_passB, 23,
++                                    out_stripe, work);
+     }
+ }
+ 
+diff --git a/src/decoders/nikon_he/nikon_he_simd.h b/src/decoders/nikon_he/nikon_he_simd.h
+index 6e066282..d4e8cede 100644
+--- a/src/decoders/nikon_he/nikon_he_simd.h
++++ b/src/decoders/nikon_he/nikon_he_simd.h
+@@ -100,14 +100,6 @@ inline int count_leading_zeros64(uint64_t x) {
+ #endif
+ }
+ 
+-inline int openmp_max_threads() {
+-#if defined(_OPENMP)
+-    return omp_get_max_threads();
+-#else
+-    return 1;
+-#endif
+-}
+-
+ }  // namespace nikon_he
+ 
+ #endif  // LIBRAW_NIKON_HE_SIMD_H
+diff --git a/src/decoders/nikon_he/nikon_he_tile.h b/src/decoders/nikon_he/nikon_he_tile.h
+index 91d3e647..b64235ce 100644
+--- a/src/decoders/nikon_he/nikon_he_tile.h
++++ b/src/decoders/nikon_he/nikon_he_tile.h
+@@ -50,8 +50,6 @@ namespace nikon_he {
+ // Number of precincts per tile.
+ constexpr int kPrecinctsPerTile = 18;
+ 
+-// Number of ver_lift loops per tile (18 precincts × 2 passes).
+-constexpr int kVerLiftLoopsPerTile = 36;
+ 
+ // Number of output stripes per tile.
+ constexpr int kStripesPerTile = 32;
