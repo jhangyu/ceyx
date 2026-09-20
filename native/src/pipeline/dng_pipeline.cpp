@@ -87,6 +87,10 @@ functions:
 #include <dng_pixel_buffer.h>
 #include <dng_render.h>
 
+// T12.7: THE output-format sizing oracle, the same header the FFI capacity
+// refusal and the Stage-4 runners use. The DNG route's own capacity checks go
+// through it so one formula governs every destination on both routes.
+#include "ceyx_output_format_size.h"
 #include "concurrent_dng_host.h"
 #include "decode_context.h"
 #include "dng_cfa_phase.h"
@@ -635,9 +639,23 @@ uint32_t stage4MaximumSize(uint32_t inputWidth, uint32_t inputHeight,
 // full-resolution RGBA output, the precise thing this campaign removed.
 bool acquireStage4OutputBuffer(const PipelineConfig &config,
                                uint32_t width, uint32_t height,
-                               uint8_t *&ptr, size_t &size) {
+                               uint8_t *&ptr, size_t &size,
+                               int32_t output_format) {
   (void)config;
-  const size_t need = static_cast<size_t>(width) * height * 4;
+  // T12.7: the floor is the FORMAT's byte count, from the one sizing oracle --
+  // w*h*4 for rgba8 exactly as before, w*h + 2*ceil(w/2)*ceil(h/2) for yuv420.
+  // Keeping the *4 here would refuse every yuv420 decode with a buffer that is
+  // in fact correctly sized, and (in the opposite direction, had the check been
+  // dropped) is precisely the 4-B/px-into-a-1.5-B/px-destination overrun that
+  // T12.5's route refusal existed to prevent.
+  const int64_t need_signed = ceyx::output_format_byte_count(
+      output_format, static_cast<int32_t>(width), static_cast<int32_t>(height));
+  if (need_signed < 0) {
+    fprintf(stderr, "[Pipeline] acquireStage4OutputBuffer: unknown output "
+            "format %d; refusing\n", output_format);
+    return false;
+  }
+  const size_t need = static_cast<size_t>(need_signed);
   if (!ptr) {
     fprintf(stderr, "[Pipeline] acquireStage4OutputBuffer: no caller buffer; "
             "the library does not allocate decode output\n");
@@ -1051,7 +1069,12 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     int32_t maxDim,
                     uint8_t *&stage4_out_ptr, size_t &stage4_out_size,
                     uint32_t &outW, uint32_t &outH,
-                    int32_t exif_orientation);
+                    int32_t exif_orientation,
+                    // T12.7: the CeyxOutputFormat, threaded exactly the way
+                    // exif_orientation is. Stated here as well as at the
+                    // definition below, because this declaration is what the
+                    // fused path's fallback call binds against.
+                    int32_t output_format);
 
 // Phase 8.2.2 — Stage3→Stage4 GPU device handoff.
 // Dispatches Stage3 (async), does Stage4 CPU prep while GPU runs, then calls
@@ -1071,7 +1094,8 @@ bool runHalideStage3And4Fused(dng_host &host,
                                size_t &stage4_out_size,
                                uint32_t &outW,
                                uint32_t &outH,
-                               int32_t exif_orientation) {
+                               int32_t exif_orientation,
+                               int32_t output_format) {
   if (!config.route.fused_demosaic_warp || !config.route.stage3_stage4_device_handoff)
     return false;
 
@@ -1144,7 +1168,7 @@ bool runHalideStage3And4Fused(dng_host &host,
   uint32_t plannedH = inputHeight;
   dng_render_stage4_output_size(negative, renderer, plannedW, plannedH);
   if (!acquireStage4OutputBuffer(config, plannedW, plannedH, stage4_out_ptr,
-                                 stage4_out_size))
+                                 stage4_out_size, output_format))
     return false;
 
   // 3. Stage3 stub: deferred to success/fallback paths (M-7).
@@ -1160,7 +1184,8 @@ bool runHalideStage3And4Fused(dng_host &host,
   if (deviceBuf) {
     stage4Ok = render_stage4_halide_from_device_buffer(
         host, negative, renderer, deviceBuf, srcScale, config,
-        stage4_out_ptr, stage4_out_size, outW, outH, exif_orientation);
+        stage4_out_ptr, stage4_out_size, outW, outH, exif_orientation,
+        output_format);
   }
 
   const auto fusedEnd = Clock::now();
@@ -1215,7 +1240,7 @@ bool runHalideStage3And4Fused(dng_host &host,
 
   if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight, maxDim,
                       stage4_out_ptr, stage4_out_size, outW, outH,
-                      exif_orientation))
+                      exif_orientation, output_format))
     return false;
 
   if (timing) {
@@ -1269,7 +1294,8 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
                     int32_t maxDim,
                     uint8_t *&stage4_out_ptr, size_t &stage4_out_size,
                     uint32_t &outW, uint32_t &outH,
-                    int32_t exif_orientation) {
+                    int32_t exif_orientation,
+                    int32_t output_format) {
   dng_render renderer(host, negative);
   renderer.SetMaximumSize(stage4MaximumSize(inputWidth, inputHeight, maxDim));
   renderer.SetFinalPixelType(ttByte);
@@ -1283,14 +1309,14 @@ bool runStage4ToRgb(dng_host &host, dng_negative &negative,
   uint32_t plannedH = inputHeight;
   dng_render_stage4_output_size(negative, renderer, plannedW, plannedH);
   if (!acquireStage4OutputBuffer(config, plannedW, plannedH, stage4_out_ptr,
-                                 stage4_out_size))
+                                 stage4_out_size, output_format))
     return false;
 
   bool ok = render_stage4_halide(host, negative, renderer,
                                  RenderHalideMode::HALIDE_GPU,
                                  config,
                                  stage4_out_ptr, stage4_out_size, outW, outH,
-                                 exif_orientation);
+                                 exif_orientation, output_format);
   if (ok)
     return true;
 
@@ -1308,7 +1334,8 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
                                         uint32_t &outW,
                                         uint32_t &outH,
                                         bool &restoreFailed,
-                                        int32_t exif_orientation) {
+                                        int32_t exif_orientation,
+                                        int32_t output_format) {
   restoreFailed = false;
   if (!config.route.stage2_stage4_device_handoff)
     return false;
@@ -1332,7 +1359,7 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
   // Acquire the caller-supplied output buffer before calling render to avoid
   // page fault. Always RGBA8 (width*height*4 bytes); no pool, no RGB8 format.
   if (!acquireStage4OutputBuffer(config, inputWidth, inputHeight, stage4_out_ptr,
-                                 stage4_out_size))
+                                 stage4_out_size, output_format))
     return restoreHostStage2();
 
   // R2 sized decode: this is the non-Bayer (lossy) route, which has no Stage3
@@ -1347,7 +1374,8 @@ bool runLossyStage2Stage4DeviceHandoff(dng_host &host,
   const float srcScale = 1.0f / static_cast<float>(handoff.pixel_range);
   const bool ok = render_stage4_halide_from_device_buffer(
       host, negative, renderer, handoff.device_buffer, srcScale, config,
-      stage4_out_ptr, stage4_out_size, outW, outH, exif_orientation);
+      stage4_out_ptr, stage4_out_size, outW, outH, exif_orientation,
+      output_format);
   if (ok) {
     halide_stage2_ol2_clear_device_handoff(host);
     return true;
@@ -1397,7 +1425,8 @@ bool decodeStages(ConcurrentDngHost &host,
                   int32_t maxDim,
                   const Clock::time_point &decodeStart,
                   DngPipelineResult &result,
-                  int32_t exif_orientation) {
+                  int32_t exif_orientation,
+                  int32_t output_format) {
   const bool isBayer = metadata.isBayer;
   const uint32_t inputWidth = metadata.inputWidth;
   const uint32_t inputHeight = metadata.inputHeight;
@@ -1477,13 +1506,13 @@ bool decodeStages(ConcurrentDngHost &host,
         host, negative, config, inputWidth, inputHeight, effectiveMaxDim,
         &stage3Timing, &stage3Workspace,
         result.rgba_ptr, result.rgba_size, result.width, result.height,
-        exif_orientation);
+        exif_orientation, output_format);
   } else {
     bool restoreFailed = false;
     allDone = runLossyStage2Stage4DeviceHandoff(
         host, negative, config, inputWidth, inputHeight,
         result.rgba_ptr, result.rgba_size, result.width, result.height,
-        restoreFailed, exif_orientation);
+        restoreFailed, exif_orientation, output_format);
     if (restoreFailed) {
       result.error_code = kDngErrStage2HandoffRestoreFailed;
       return false;
@@ -1513,7 +1542,8 @@ bool decodeStages(ConcurrentDngHost &host,
   const auto processStart = Clock::now();
   if (!runStage4ToRgb(host, negative, config, inputWidth, inputHeight,
                       effectiveMaxDim, result.rgba_ptr, result.rgba_size,
-                      result.width, result.height, exif_orientation)) {
+                      result.width, result.height, exif_orientation,
+                      output_format)) {
     result.error_code = kDngErrStage4Failed;
     return false;
   }
@@ -1837,7 +1867,8 @@ namespace {
 bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
                           uint8_t *dst, size_t dst_capacity,
                           DngPipelineResult &result,
-                          int32_t exif_orientation) {
+                          int32_t exif_orientation,
+                          int32_t output_format) {
   // L-4: signal pending decode so warmup yields between sub-steps.  Counter
   // is incremented before the mutex lock so warmup (which checks the counter
   // after releasing the mutex between steps) detects this decode immediately.
@@ -1933,7 +1964,7 @@ bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
     }
     const bool ok =
         decodeStages(host, config, *negative, metadata, max_dim, decodeStart,
-                     result, exif_orientation);
+                     result, exif_orientation, output_format);
     // WP1 phase 3: decodeStages now writes directly into result.rgba_ptr —
     // RGB8 output no longer exists, so there is nothing left to promote.
     return ok;
@@ -1963,7 +1994,8 @@ bool decodeToRgbSizedImpl(const char *file_path, int32_t max_dim,
 bool dng_pipeline_decode_to_rgb_sized(const char *file_path, int32_t max_dim,
                                       DngPipelineResult &result) {
   return decodeToRgbSizedImpl(file_path, max_dim, nullptr, 0, result,
-                              /*exif_orientation=*/1);
+                              /*exif_orientation=*/1,
+                              /*output_format=*/0);
 }
 
 // WP10: the caller-owned-buffer sibling. Additive; the two entries share one
@@ -1972,7 +2004,8 @@ bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
                                      uint8_t *dst, size_t dst_capacity,
                                      DngPipelineResult &result) {
   return decodeToRgbSizedImpl(file_path, max_dim, dst, dst_capacity, result,
-                              /*exif_orientation=*/1);
+                              /*exif_orientation=*/1,
+                              /*output_format=*/0);
 }
 
 // Productionization plan §1.4 (Task 3, Step 3.2): the oriented sibling.
@@ -1983,7 +2016,8 @@ bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
 bool dng_pipeline_decode_to_rgb_into_oriented(const char *file_path, int32_t max_dim,
                                               uint8_t *dst, size_t dst_capacity,
                                               int32_t exif_orientation,
-                                              DngPipelineResult &result) {
+                                              DngPipelineResult &result,
+                                              int32_t output_format) {
   return decodeToRgbSizedImpl(file_path, max_dim, dst, dst_capacity, result,
-                              exif_orientation);
+                              exif_orientation, output_format);
 }

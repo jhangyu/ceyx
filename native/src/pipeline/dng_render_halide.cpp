@@ -1088,7 +1088,8 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               const RenderParams& params,
                               uint8_t* dst,
                               DecodeContext* ctx,
-                              int32_t exif_orientation) {
+                              int32_t exif_orientation,
+                              int32_t output_format) {
     // Plan section 1.6: reset before any validation or early return, so a
     // direct caller of this runner sees kNone rather than a reason inherited
     // from an earlier call on this thread.
@@ -1101,6 +1102,25 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     g_stage4_failure_reason = Stage4FailureReason::kNone;
 
     if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || src_p < 3) {
+        return false;
+    }
+
+    // mem8 v3 T12.7 — the output-format decision, made ONCE here and read by
+    // the destination, dispatch and copy-back blocks below. Deliberately the
+    // VERBATIM shape of runRenderStage4HalideAotFromDevice's decision (this
+    // file, the from-device runner): same axis, same refusals, same wording,
+    // so the two entries cannot drift into two different notions of "format".
+    //
+    // THE AXIS THIS BRANCHES ON IS FORMAT, NOT PLATFORM: everything it gates is
+    // gated identically on Metal and on Vulkan, and there is no OS test and no
+    // backend test anywhere in it. An unrecognised format is refused outright
+    // rather than silently decoded as rgba8 — a caller that asked for 1.5 B/px
+    // and received 4 B/px would overrun its own destination. That refusal is
+    // the same correctness obligation T12.5's DNG-route carve-out discharged by
+    // refusing the whole route; serving the route means honouring it HERE, at
+    // the one place that knows the destination's real shape.
+    const bool yuv420_output = (output_format == 1);  // kCeyxOutputFormatYuv420
+    if (output_format != 0 && !yuv420_output) {
         return false;
     }
 
@@ -1137,8 +1157,14 @@ bool runRenderStage4HalideAot(const uint16_t* src,
             static_cast<size_t>(src_h);
         const size_t src_bytes =
             (dense_elems > strided_elems ? dense_elems : strided_elems) * sizeof(uint16_t);
-        const size_t dst_bytes =
-            static_cast<size_t>(out_w_oriented) * out_h_oriented * 4;
+        // T12.7: the destination extent this check reasons about is FORMAT-
+        // dependent, exactly as in the from-device runner. Keeping the *4 here
+        // would over-state the yuv420 destination by 2.67x and refuse decodes
+        // whose buffers do not actually overlap.
+        const int64_t dst_bytes_signed = ceyx::output_format_byte_count(
+            output_format, out_w_oriented, out_h_oriented);
+        if (dst_bytes_signed < 0) return false;
+        const size_t dst_bytes = static_cast<size_t>(dst_bytes_signed);
         if (s < dst + dst_bytes && dst < s + src_bytes) {
             fprintf(stderr, "[Stage4] refusing overlapping src/dst (orientation %d)\n",
                     exif_orientation);
@@ -1212,21 +1238,63 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                                   static_cast<int>(params.look_encode.size()));
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
+    // ======================================================================
+    // mem8 v3 T12.7 — THE yuv420 destination: three host views over the ONE
+    // contiguous caller allocation, built here for BOTH #if arms below, so
+    // there is a single implementation of the plane geometry rather than one
+    // per backend family. This block is the from-device runner's verbatim; the
+    // layout contract it spells is raw_ffi_api.h's:
+    //   Y  at base,                     w x h
+    //   Cb at base + w*h,               ceil(w/2) x ceil(h/2)
+    //   Cr at base + w*h + cw*ch,       ceil(w/2) x ceil(h/2)
+    // Every plane is TIGHTLY PACKED: Buffer(ptr, w, h) gives dim(0).stride == 1
+    // and dim(1).stride == w, which is what the generator's dim(0).set_stride(1)
+    // asserts on the kernel side. ceil, not w/2 — chroma_extent is the oracle's
+    // (ceyx_yuv420_oracle.h) and the odd-dimension case is exactly where a
+    // naive halving diverges.
+    const int chroma_w_oriented = ceyx::yuv420::chroma_extent(out_w_oriented);
+    const int chroma_h_oriented = ceyx::yuv420::chroma_extent(out_h_oriented);
+    Buffer<uint8_t> y_plane_buf;
+    Buffer<uint8_t> cb_plane_buf;
+    Buffer<uint8_t> cr_plane_buf;
+    if (yuv420_output) {
+        const size_t luma_bytes =
+            static_cast<size_t>(out_w_oriented) * out_h_oriented;
+        const size_t chroma_bytes =
+            static_cast<size_t>(chroma_w_oriented) * chroma_h_oriented;
+        y_plane_buf = Buffer<uint8_t>(dst, out_w_oriented, out_h_oriented);
+        cb_plane_buf = Buffer<uint8_t>(dst + luma_bytes, chroma_w_oriented,
+                                       chroma_h_oriented);
+        cr_plane_buf = Buffer<uint8_t>(dst + luma_bytes + chroma_bytes,
+                                       chroma_w_oriented, chroma_h_oriented);
+    }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: the kernel writes interleaved RGBA8 directly (macOS layout; Probe-A
     // verified). The caller's buffer is already RGBA8 (W*H*4) — the D2H lands
     // there with zero host repack.
+    //
+    // T12.7: constructed ONLY on the rgba8 path. Left default-constructed under
+    // yuv420 deliberately — a descriptor claiming w*h*4 bytes over a buffer the
+    // caller sized at w*h*1.5 would be a live mis-description even if nothing
+    // dereferenced it.
     (void)ctx;
     uint8_t* dst_rgba = dst;
-    Buffer<uint8_t> dst_rgba_buf =
-        Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented, out_h_oriented, 4);
+    Buffer<uint8_t> dst_rgba_buf;
+    if (!yuv420_output) {
+        dst_rgba_buf = Buffer<uint8_t>::make_interleaved(
+            dst_rgba, out_w_oriented, out_h_oriented, 4);
+    }
 #else
     // W7 (M-11): macOS generator outputs RGBA8 (4 channels, alpha=255 in-kernel).
     // The caller's buffer is already RGBA8 (W*H*4) — write directly.
+    // T12.7: same rgba8-only construction as the split arm above.
     (void)ctx;
     uint8_t* dst_rgba = dst;
-    Buffer<uint8_t> dst_buf =
-        Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented, out_h_oriented, 4);
+    Buffer<uint8_t> dst_buf;
+    if (!yuv420_output) {
+        dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba, out_w_oriented,
+                                                    out_h_oriented, 4);
+    }
 #endif
 
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1251,18 +1319,74 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     look_table_buf.set_host_dirty();
     look_encode_buf.set_host_dirty();
     look_decode_buf.set_host_dirty();
+    // T12.7: the destination is three planes under yuv420 and one interleaved
+    // buffer otherwise; each is marked not-host-dirty for the same reason (the
+    // kernel is about to overwrite it, so uploading its current contents would
+    // be pure waste).
+    if (yuv420_output) {
+        y_plane_buf.set_host_dirty(false);
+        cb_plane_buf.set_host_dirty(false);
+        cr_plane_buf.set_host_dirty(false);
+    } else {
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-    dst_rgba_buf.set_host_dirty(false);
+        dst_rgba_buf.set_host_dirty(false);
 #else
-    dst_buf.set_host_dirty(false);
+        dst_buf.set_host_dirty(false);
 #endif
+    }
 
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
     const int32_t look_entry_count = static_cast<int32_t>(params.look_table.size() / 3);
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
     // output geometry.
-    const int result = dng_render_stage4_split(
+    // T12.7: the yuv420 dispatch arm of the SPLIT family on the HOST-SOURCE
+    // entry. Selected by FORMAT and by nothing else — the identical selector
+    // the from-device runner uses, which is what keeps this parity rather than
+    // a platform (or route) fork. The argument list is dng_render_stage4_split's
+    // verbatim; only the destination differs (three plane buffers instead of one
+    // interleaved RGBA8 buffer), because both kernels are generated from the
+    // same colour body (dng_render_stage4_split_expr.h).
+    const int result =
+        yuv420_output
+        ? dng_render_stage4_split_yuv420(
+              src_rgb_buf.raw_buffer(),
+              src_w,
+              src_h,
+              src_row_stride_px,
+              /*crop_l=*/0,
+              /*crop_t=*/0,
+              src_scale,
+              orient_coeffs[0], orient_coeffs[1], orient_coeffs[2],
+              orient_coeffs[3], orient_coeffs[4], orient_coeffs[5],
+              exp_buf.raw_buffer(),
+              tone_buf.raw_buffer(),
+              gamma_buf.raw_buffer(),
+              cw_buf.raw_buffer(),
+              c2r_buf.raw_buffer(),
+              r2f_buf.raw_buffer(),
+              hs_table_buf.raw_buffer(),
+              hs_encode_buf.raw_buffer(),
+              hs_decode_buf.raw_buffer(),
+              huesat_entry_count,
+              params.huesat_hue_div,
+              params.huesat_sat_div,
+              params.huesat_val_div,
+              params.huesat_has_table,
+              params.huesat_has_encoding,
+              look_table_buf.raw_buffer(),
+              look_encode_buf.raw_buffer(),
+              look_decode_buf.raw_buffer(),
+              look_entry_count,
+              params.look_hue_div,
+              params.look_sat_div,
+              params.look_val_div,
+              params.look_has_table,
+              params.look_has_encoding,
+              y_plane_buf.raw_buffer(),
+              cb_plane_buf.raw_buffer(),
+              cr_plane_buf.raw_buffer())
+        : dng_render_stage4_split(
         src_rgb_buf.raw_buffer(),
         src_w,
         src_h,
@@ -1302,7 +1426,44 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     auto t2 = verbose_timing ? std::chrono::high_resolution_clock::now()
                              : std::chrono::high_resolution_clock::time_point{};
 #else
-    const int result = dng_render_stage4(src_buf.raw_buffer(),
+    // T12.7: the yuv420 dispatch arm of the NON-SPLIT family, mirroring the
+    // split arm above. Selected by FORMAT and by nothing else. The argument
+    // list is dng_render_stage4's verbatim; only the destination differs,
+    // because both kernels come from the same colour body
+    // (dng_render_stage4_expr.h).
+    const int result =
+        yuv420_output
+        ? dng_render_stage4_yuv420(src_buf.raw_buffer(),
+                                   src_scale,
+                                   orient_coeffs[0], orient_coeffs[1],
+                                   orient_coeffs[2], orient_coeffs[3],
+                                   orient_coeffs[4], orient_coeffs[5],
+                                   exp_buf.raw_buffer(),
+                                   tone_buf.raw_buffer(),
+                                   gamma_buf.raw_buffer(),
+                                   cw_buf.raw_buffer(),
+                                   c2r_buf.raw_buffer(),
+                                   r2f_buf.raw_buffer(),
+                                   hs_table_buf.raw_buffer(),
+                                   hs_encode_buf.raw_buffer(),
+                                   hs_decode_buf.raw_buffer(),
+                                   params.huesat_hue_div,
+                                   params.huesat_sat_div,
+                                   params.huesat_val_div,
+                                   params.huesat_has_table,
+                                   params.huesat_has_encoding,
+                                   look_table_buf.raw_buffer(),
+                                   look_encode_buf.raw_buffer(),
+                                   look_decode_buf.raw_buffer(),
+                                   params.look_hue_div,
+                                   params.look_sat_div,
+                                   params.look_val_div,
+                                   params.look_has_table,
+                                   params.look_has_encoding,
+                                   y_plane_buf.raw_buffer(),
+                                   cb_plane_buf.raw_buffer(),
+                                   cr_plane_buf.raw_buffer())
+        : dng_render_stage4(src_buf.raw_buffer(),
                                          src_scale,
                                          // T7b: six affine coefficients
                                          // immediately after src_scale.
@@ -1342,11 +1503,33 @@ bool runRenderStage4HalideAot(const uint16_t* src,
         return false;
     }
 
+    // T12.7: under yuv420 the destination is three plane buffers, so the D2H is
+    // three copies rather than one. Shared by both #if arms below for the same
+    // reason the plane construction is: one implementation of the geometry.
+    const auto copy_yuv420_planes_to_host = [&]() -> bool {
+        const int plane_rc[3] = {y_plane_buf.copy_to_host(),
+                                 cb_plane_buf.copy_to_host(),
+                                 cr_plane_buf.copy_to_host()};
+        for (int i = 0; i < 3; ++i) {
+            if (plane_rc[i] != 0) {
+                fprintf(stderr,
+                        "[Stage4] yuv420 plane %d copy_to_host failed rc=%d\n",
+                        i, plane_rc[i]);
+                // Same class as a kernel failure — the FFI layer reports -403.
+                g_stage4_failure_reason = Stage4FailureReason::kKernel;
+                return false;
+            }
+        }
+        return true;
+    };
+
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
     // G-7: capture and check copy_to_host()'s return code.
-    {
+    if (yuv420_output) {
+        if (!copy_yuv420_planes_to_host()) return false;
+    } else {
         const int cth = dst_rgba_buf.copy_to_host();
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
@@ -1367,7 +1550,9 @@ bool runRenderStage4HalideAot(const uint16_t* src,
     }
 #else
     // G-7: capture and check copy_to_host()'s return code.
-    {
+    if (yuv420_output) {
+        if (!copy_yuv420_planes_to_host()) return false;
+    } else {
         const int cth = dst_buf.copy_to_host();
         if (cth != 0) {
             fprintf(stderr, "[Stage4] copy_to_host failed rc=%d\n", cth);
@@ -2528,7 +2713,8 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                 size_t out_rgb_size,
                                 uint32_t& out_w,
                                 uint32_t& out_h,
-                                int32_t exif_orientation) {
+                                int32_t exif_orientation,
+                                int32_t output_format) {
     const dng_point dst_size = computeOutputSize(negative, renderer);
     out_w = static_cast<uint32_t>(dst_size.h);
     out_h = static_cast<uint32_t>(dst_size.v);
@@ -2537,8 +2723,19 @@ bool runHalideFullOrSdkFallback(dng_host& host,
     // Plan section 1.3: the needed byte count is invariant under transposition
     // (w*h*C), so the capacity check below is correct for every orientation and
     // is deliberately made against the UNORIENTED extent.
-    const size_t needed_out_size =
-        static_cast<size_t>(out_w) * out_h * 4;  // WP1 phase 3: always RGBA8
+    //
+    // T12.7: the floor is the FORMAT's byte count, from the one sizing oracle
+    // (ceyx_output_format_size.h) the FFI capacity refusal and the plane
+    // descriptor also use — w*h*4 for rgba8 exactly as before. Both formulas
+    // are symmetric in w and h, so the invariance-under-transposition note
+    // above still holds. A negative answer means an unknown format; refuse
+    // rather than fall through to a kernel that would write the wrong shape.
+    const int64_t needed_signed = ceyx::output_format_byte_count(
+        output_format, static_cast<int32_t>(out_w), static_cast<int32_t>(out_h));
+    if (needed_signed < 0) {
+        return false;
+    }
+    const size_t needed_out_size = static_cast<size_t>(needed_signed);
     if (out_rgb_size < needed_out_size || !out_rgb_ptr) {
         return false;
     }
@@ -2610,7 +2807,8 @@ bool runHalideFullOrSdkFallback(dng_host& host,
                                                          params,
                                                          out_rgb_ptr,
                                                          dng_decode_context_for(host),
-                                                         exif_orientation);
+                                                         exif_orientation,
+                                                         output_format);
         if (render_ok) {
             // Plan section 1.3: report the ORIENTED extent. The runner shaped the
             // dst as (H, W) for 5..8; every caller above reads out_w/out_h.
@@ -2897,7 +3095,8 @@ bool render_stage4_halide(dng_host& host,
                           size_t out_rgb_size,
                           uint32_t& out_w,
                           uint32_t& out_h,
-                          int32_t exif_orientation) {
+                          int32_t exif_orientation,
+                          int32_t output_format) {
     if (mode == RenderHalideMode::SDK) {
         return false;
     }
@@ -2939,7 +3138,8 @@ bool render_stage4_halide(dng_host& host,
                                       out_rgb_size,
                                       out_w,
                                       out_h,
-                                      exif_orientation);
+                                      exif_orientation,
+                                      output_format);
 }
 
 bool render_stage4_halide_from_device_buffer(dng_host& host,
@@ -2952,7 +3152,8 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               size_t out_rgb_size,
                                               uint32_t& out_w,
                                               uint32_t& out_h,
-                                              int32_t exif_orientation) {
+                                              int32_t exif_orientation,
+                                              int32_t output_format) {
     if (!stage3_device_buf) {
         return false;
     }
@@ -2968,8 +3169,14 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
 
     // Pool path: buffer is already committed — no resize, no page fault.
     // W7-B: fused path outputs RGBA8.
-    const size_t needed =
-        static_cast<size_t>(out_w) * out_h * 4;  // WP1 phase 3: always RGBA8
+    // T12.7: format-sized floor, from the same oracle as every other capacity
+    // decision on this route — see runHalideFullOrSdkFallback above.
+    const int64_t needed_signed = ceyx::output_format_byte_count(
+        output_format, static_cast<int32_t>(out_w), static_cast<int32_t>(out_h));
+    if (needed_signed < 0) {
+        return false;
+    }
+    const size_t needed = static_cast<size_t>(needed_signed);
     if (out_rgb_size < needed || !out_rgb_ptr) {
         return false;
     }
@@ -2985,7 +3192,14 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         static_cast<int>(src_area.W()), static_cast<int>(src_area.H()),
         static_cast<int>(out_w), static_cast<int>(out_h),
         params, out_rgb_ptr,
-        dng_decode_context_for(host), exif_orientation);
+        dng_decode_context_for(host), exif_orientation,
+        // T12.7: the DNG route passes no arena, no caller MTLBuffer and no
+        // fused source — those three stay nullptr exactly as before; only the
+        // format is new, and it reaches the SAME runner the generic-RAW route
+        // reaches, so the two routes share one dispatch decision.
+        /*persistent_device_arena=*/nullptr,
+        /*caller_destination_metal_buffer=*/nullptr,
+        /*fused_bayer_source=*/nullptr, output_format);
     if (ok && ceyx_orientation_transposes_inline(exif_orientation)) {
         // Plan section 1.3: report the ORIENTED extent back to the caller.
         std::swap(out_w, out_h);

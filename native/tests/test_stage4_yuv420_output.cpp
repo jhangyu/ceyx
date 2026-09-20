@@ -1146,16 +1146,24 @@ void run_y5(const char *path, const char *route) {
 }
 
 /* ====================================================================== */
-/* Y6 — THE DNG ROUTE AND THE EXISTING rgba8 PATH ARE UNDISTURBED         */
+/* Y6 — THE DNG ROUTE SERVES yuv420, AND ITS rgba8 PATH IS UNDISTURBED    */
 /*                                                                        */
-/* The DNG route has no format parameter (T12.5). Two assertions:          */
+/* AMENDED by T12.7 (user no-divergence ruling 2026-09-20). (b) used to    */
+/* assert the T12.5 CARVE-OUT: that a yuv420 request on a DNG file was     */
+/* REFUSED with kCeyxErrFormatUnsupportedInBuild. The ruling retired that  */
+/* carve-out — the DNG route is the main path for this library's largest   */
+/* consumer — so the same case now asserts the opposite fact. Two          */
+/* assertions:                                                             */
 /*   (a) its rgba8 decode still succeeds and both entries agree byte for    */
 /*       byte — the shared-seam regression, the highest blast radius here;  */
-/*   (b) a yuv420 request on a DNG file is REFUSED LOUDLY with              */
-/*       kCeyxErrFormatUnsupportedInBuild. A silent rgba8 service would     */
-/*       hand 4 B/px to a caller that sized 1.5 B/px and is about to read   */
-/*       it as planes — a heap overrun in the caller, not a mismatch.       */
-/* Mutation M4 (removing the refusal) is what proves (b) can fail.         */
+/*   (b) a yuv420 request on a DNG file SUCCEEDS, and the descriptor it     */
+/*       returns describes the frozen plane layout exactly: bases at        */
+/*       0 / w*h / w*h+cw*ch, extents w x h and ceil(w/2) x ceil(h/2), row  */
+/*       stride == plane width. The overrun the refusal protected against   */
+/*       is now prevented by every destination on this route being sized    */
+/*       through ceyx_output_format_byte_count, which is what makes         */
+/*       serving it safe; asserting the EXTENTS (not merely err==0) is what */
+/*       makes that claim checkable here.                                   */
 /* ====================================================================== */
 void run_y6() {
     const char *dngs[] = {"image_samples/lossless_dng_sample.dng",
@@ -1163,7 +1171,7 @@ void run_y6() {
     for (const char *path : dngs) {
         Rgba via_default, via_format;
         int32_t e1 = 0, e2 = 0;
-        char detail[448];
+        char detail[768];
         const bool d1 = decode_rgba8_default(path, &via_default, &e1);
         const bool d2 = decode_rgba8_format(path, &via_format, nullptr, &e2);
         const bool identical =
@@ -1171,28 +1179,50 @@ void run_y6() {
             memcmp(via_default.bytes.data(), via_format.bytes.data(),
                    via_default.bytes.size()) == 0;
 
-        /* The refusal. Sized to the yuv420 requirement so the refusal cannot
-         * be confused with kCeyxErrDstTooSmall. */
-        const int64_t need = ceyx_output_format_byte_count(
-            kCeyxOutputFormatYuv420, via_default.w, via_default.h);
-        std::vector<uint8_t> dst(need > 0 ? static_cast<size_t>(need) : 4u, 0);
-        CeyxYuv420PlaneDescriptor planes{};
-        memset(&planes, 0, sizeof(planes));
-        planes.struct_size = static_cast<uint32_t>(sizeof(planes));
-        DngResult *r = ceyx_decode_into_buffer_format(
-            path, 0, dst.data(), dst.size(), kCeyxOutputFormatYuv420, &planes);
-        const int32_t refuse_code = r ? r->error_code : -999;
-        if (r) dng_free_result(r);
-        const bool refused = (refuse_code == kCeyxErrFormatUnsupportedInBuild);
+        /* T12.7: the yuv420 DNG decode must SUCCEED, through the ordinary
+         * helper every other case uses (so this asserts the shipped entry,
+         * not a bespoke call), and its descriptor must spell the frozen
+         * layout. Extents are recomputed here from the oracle rather than
+         * copied from the descriptor — a descriptor compared against itself
+         * would pass whatever it said. */
+        Yuv yuv;
+        int32_t e3 = 0;
+        const bool yuv_ok = decode_yuv420(path, &yuv, &e3);
+        namespace o = ceyx::yuv420;
+        const int32_t cw = yuv_ok ? o::chroma_extent(yuv.w) : 0;
+        const int32_t ch = yuv_ok ? o::chroma_extent(yuv.h) : 0;
+        const size_t luma = static_cast<size_t>(yuv.w) * yuv.h;
+        const size_t chroma = static_cast<size_t>(cw) * ch;
+        const uint8_t *base = yuv_ok ? yuv.bytes.data() : nullptr;
+        const bool size_ok =
+            yuv_ok && yuv.bytes.size() == luma + 2u * chroma &&
+            yuv.w == via_default.w && yuv.h == via_default.h;
+        const bool planes_ok =
+            yuv_ok && yuv.planes.plane_base[0] == base &&
+            yuv.planes.plane_base[1] == base + luma &&
+            yuv.planes.plane_base[2] == base + luma + chroma &&
+            yuv.planes.plane_width[0] == yuv.w &&
+            yuv.planes.plane_height[0] == yuv.h &&
+            yuv.planes.plane_width[1] == cw && yuv.planes.plane_width[2] == cw &&
+            yuv.planes.plane_height[1] == ch &&
+            yuv.planes.plane_height[2] == ch &&
+            yuv.planes.plane_row_stride[0] == yuv.planes.plane_width[0] &&
+            yuv.planes.plane_row_stride[1] == yuv.planes.plane_width[1] &&
+            yuv.planes.plane_row_stride[2] == yuv.planes.plane_width[2];
 
         snprintf(detail, sizeof(detail),
                  "%s rgba8_ok=%d/%d identical=%d rgba8_fnv1a64=%016" PRIx64
-                 " | yuv420 refusal code=%d (expect %d)",
+                 " | yuv420 decode ok=%d err=%d %dx%d chroma=%dx%d "
+                 "bytes=%zu (expect %zu) size_ok=%d planes_ok=%d "
+                 "yuv_fnv1a64=%016" PRIx64,
                  path, d1 ? 1 : 0, d2 ? 1 : 0, identical ? 1 : 0,
                  d1 ? fnv1a64(via_default.bytes.data(), via_default.bytes.size())
                     : 0,
-                 refuse_code, kCeyxErrFormatUnsupportedInBuild);
-        verdict("Y6", "dng", host_arm(), identical && refused, detail);
+                 yuv_ok ? 1 : 0, e3, yuv.w, yuv.h, cw, ch, yuv.bytes.size(),
+                 luma + 2u * chroma, size_ok ? 1 : 0, planes_ok ? 1 : 0,
+                 yuv_ok ? fnv1a64(yuv.bytes.data(), yuv.bytes.size()) : 0);
+        verdict("Y6", "dng", host_arm(),
+                identical && yuv_ok && size_ok && planes_ok, detail);
     }
 
     /* A SCALED yuv420 request must also refuse rather than silently crop.
@@ -1221,6 +1251,257 @@ void run_y6() {
                  w, h, code);
         verdict("Y6", "bayer-arw-scaled", host_arm(), code != 0, detail);
     }
+}
+
+/* ====================================================================== */
+/* Y10 — yuv420 FIDELITY ON A REAL CORPUS DNG (T12.7)                     */
+/*                                                                        */
+/* Y4b already measures round-trip fidelity, but only on generic-RAW       */
+/* files. The consumer that motivated T12.7 opens DNGs almost exclusively, */
+/* so the route this task newly serves needs its own fidelity number       */
+/* rather than inheriting one measured on a different route's kernels.     */
+/*                                                                        */
+/* Same method and same reading discipline as Y4b: decode rgba8, decode    */
+/* yuv420, convert back with ceyx_yuv420_to_rgba8 (T13), and report the    */
+/* kernel's delta BESIDE the host-forward control — the ideal 4:2:0 loss   */
+/* for this exact content, computed without the GPU. One number alone      */
+/* cannot separate "the kernel's transform diverges" from "this content's  */
+/* chroma detail is finer than 4:2:0 can carry"; the pair can.             */
+/*                                                                        */
+/* AMENDED ASSERTION (lead ruling, T12.7). The statistical bound below was */
+/* pre-registered, measured, and FAILED on within16/max while the host     */
+/* control — the theoretical best any correct implementation can reach on  */
+/* this content — failed it IDENTICALLY, to four decimals and on the same  */
+/* worst case. An instrument that a provably-ideal implementation also     */
+/* fails is measuring the subject (4:2:0's information loss on real camera */
+/* content), not the kernel. The assertion is therefore the kernel's       */
+/* EQUALITY WITH THAT CONTROL, byte for byte across all three planes,      */
+/* which is strictly STRONGER as a kernel-correctness claim than any       */
+/* statistical bound: it admits no error at all rather than a budget of    */
+/* it. The original bound is retained and PRINTED on every run as a        */
+/* diagnostic, never asserted — superseded, not deleted.                   */
+/*                                                                        */
+/* The pattern is anchored, not re-argued: Y4b above was amended the same  */
+/* way for the same reason (its linearrgb-x3f route fails the same style   */
+/* of bound today and is accepted as content loss), and this round's       */
+/* independent review of the identical control-equality amendment on T13's */
+/* C5 returned LEGITIMATE-TIGHTENING                                       */
+/* (Halcyon docs/logs/2026-09-20/t13-c5-amendment-review.md).              */
+/*                                                                        */
+/* The sample lives outside this repo (the consumer's corpus) and is not   */
+/* vendored, so its absence is an explicit N/A with its reason, never a    */
+/* silent skip. CEYX_T127_DNG overrides the path.                          */
+/* ====================================================================== */
+void run_y10() {
+    const char *env = getenv("CEYX_T127_DNG");
+    const char *path =
+        env && env[0] ? env
+            : "../Halcyon/local_data/photo_samples/DNG/IMG_20251112_092839.dng";
+    char detail[1024];
+
+    FILE *probe = fopen(path, "rb");
+    if (!probe) {
+        snprintf(detail, sizeof(detail),
+                 "sample not present at %s (set CEYX_T127_DNG): fidelity on a "
+                 "real corpus DNG NOT MEASURED in this run", path);
+        verdict_na("Y10", "dng-corpus", host_arm(), detail);
+        return;
+    }
+    fclose(probe);
+
+    /* Pre-registered in native/tests/tmp/t127/prereg.txt, RUN 3, before any
+     * of these numbers existed. */
+    const double kMeanBound = 6.0;
+    const double kWithin16Bound = 0.98;
+    const int32_t kMaxBound = 96;
+
+    Rgba reference;
+    Yuv yuv;
+    int32_t e1 = 0, e2 = 0;
+    if (!decode_rgba8_default(path, &reference, &e1)) {
+        snprintf(detail, sizeof(detail), "%s: rgba8 decode failed err=%d", path,
+                 e1);
+        verdict("Y10", "dng-corpus", host_arm(), false, detail);
+        return;
+    }
+    if (!decode_yuv420(path, &yuv, &e2)) {
+        snprintf(detail, sizeof(detail), "%s: yuv420 decode failed err=%d", path,
+                 e2);
+        verdict("Y10", "dng-corpus", host_arm(), false, detail);
+        return;
+    }
+    /* F4: a fidelity number over two different extents is meaningless. */
+    if (yuv.w != reference.w || yuv.h != reference.h) {
+        snprintf(detail, sizeof(detail),
+                 "%s: extent mismatch rgba8=%dx%d yuv420=%dx%d", path,
+                 reference.w, reference.h, yuv.w, yuv.h);
+        verdict("Y10", "dng-corpus", host_arm(), false, detail);
+        return;
+    }
+
+    const size_t pixels = static_cast<size_t>(reference.w) * reference.h;
+    std::vector<uint8_t> restored(pixels * 4, 0);
+    const int32_t rc =
+        ceyx_yuv420_to_rgba8(yuv.bytes.data(), yuv.bytes.size(),
+                             restored.data(), restored.size(), yuv.w, yuv.h);
+    if (rc != 0) {
+        snprintf(detail, sizeof(detail), "%s: converter rc=%d", path, rc);
+        verdict("Y10", "dng-corpus", host_arm(), false, detail);
+        return;
+    }
+    const DeltaStats s = compare_rgb(restored, reference.bytes, pixels);
+
+    std::vector<uint8_t> host_yuv;
+    oracle_forward_yuv420(reference.bytes.data(), reference.w, reference.h,
+                          &host_yuv);
+    std::vector<uint8_t> host_restored(pixels * 4, 0);
+    DeltaStats hs;
+    bool host_ok = false;
+    if (ceyx_yuv420_to_rgba8(host_yuv.data(), host_yuv.size(),
+                             host_restored.data(), host_restored.size(),
+                             reference.w, reference.h) == 0) {
+        hs = compare_rgb(host_restored, reference.bytes, pixels);
+        host_ok = true;
+    }
+
+    /* THE ASSERTION: the kernel's own planes, byte for byte against the
+     * host-forward control's. Compared on the PLANES, not on the restored
+     * RGBA — the round trip through the converter could mask a forward-
+     * transform error that the planes would expose. */
+    size_t plane_diff_count = 0;
+    size_t first_plane_diff = 0;
+    bool planes_identical = host_ok && host_yuv.size() == yuv.bytes.size();
+    if (planes_identical) {
+        for (size_t i = 0; i < host_yuv.size(); ++i) {
+            if (host_yuv[i] != yuv.bytes[i]) {
+                if (plane_diff_count == 0) first_plane_diff = i;
+                ++plane_diff_count;
+            }
+        }
+        planes_identical = (plane_diff_count == 0);
+    }
+
+    /* The superseded bound, still evaluated and still printed. */
+    const bool passes_original_bound =
+        s.mean[0] <= kMeanBound && s.mean[1] <= kMeanBound &&
+        s.mean[2] <= kMeanBound &&
+        s.fraction_within_16 >= kWithin16Bound && s.max_abs <= kMaxBound;
+
+    const bool ok = host_ok && planes_identical;
+
+    snprintf(detail, sizeof(detail),
+             "%s %dx%d ASSERTION kernel_planes==host_forward_control=%d "
+             "(diff_bytes=%zu first@%zu) | diagnostics: KERNEL "
+             "mean=(%.4f,%.4f,%.4f) within16=%.5f max=%d | CONTROL "
+             "mean=(%.4f,%.4f,%.4f) within16=%.5f max=%d ok=%d | ORIGINAL "
+             "PRE-REGISTERED BOUND (mean<=%.1f within16>=%.3f max<=%d) -> %s | "
+             "yuv_fnv1a64=%016" PRIx64,
+             path, reference.w, reference.h, planes_identical ? 1 : 0,
+             plane_diff_count, first_plane_diff, s.mean[0], s.mean[1],
+             s.mean[2], s.fraction_within_16, s.max_abs, hs.mean[0], hs.mean[1],
+             hs.mean[2], hs.fraction_within_16, hs.max_abs, host_ok ? 1 : 0,
+             kMeanBound, kWithin16Bound, kMaxBound,
+             passes_original_bound
+                 ? "pass-as-written"
+                 : "FAIL-AS-WRITTEN (superseded: a provably-ideal host control "
+                   "fails this bound identically on this content, so the bound "
+                   "measures 4:2:0's loss, not the kernel)",
+             fnv1a64(yuv.bytes.data(), yuv.bytes.size()));
+    verdict("Y10", "dng-corpus", host_arm(), ok, detail);
+}
+
+/* ====================================================================== */
+/* Y11 — THE HOST-SOURCE STAGE-4 FALLBACK, yuv420 (T12.7)                 */
+/*                                                                        */
+/* WHY THIS CASE EXISTS, recorded so it is not deleted as redundant: the   */
+/* DNG route has TWO Stage-4 entries. The pipeline tries the device-handoff */
+/* runner first and falls back to the HOST-SOURCE runner when that is not  */
+/* applicable or fails. Every other case here exercises only the first.    */
+/* T12.7 added the yuv420 arm to BOTH, and a mutation planted in the       */
+/* host-source arm left the whole suite green — proving that arm was       */
+/* written but never executed. Unexercised fallback code first runs in     */
+/* production, on a real photo, the day a device handoff fails; that is    */
+/* the worst possible place to discover it.                                */
+/*                                                                        */
+/* The route is selected the way production selects it — by the pipeline's */
+/* own env-loaded route config, re-read on every decode — not by a test    */
+/* hook, so this drives the real fallback rather than a simulation of it.  */
+/* Assertion is Y10's: three-plane byte equality with the host-forward     */
+/* control. The env is restored on every exit path; a leaked flag would    */
+/* silently re-route every later case in this process.                     */
+/* ====================================================================== */
+void run_y11() {
+    const char *path = "image_samples/lossless_dng_sample.dng";
+    char detail[768];
+
+    /* RAII: the three route flags are cleared on EVERY exit path below,
+     * including the early returns. */
+    struct RouteOverride {
+        RouteOverride() {
+            setenv("DNG_FUSED_DEMOSAIC_WARP", "0", 1);
+            setenv("DNG_STAGE3_STAGE4_DEVICE_HANDOFF", "0", 1);
+            setenv("DNG_STAGE2_STAGE4_DEVICE_HANDOFF", "0", 1);
+        }
+        ~RouteOverride() {
+            unsetenv("DNG_FUSED_DEMOSAIC_WARP");
+            unsetenv("DNG_STAGE3_STAGE4_DEVICE_HANDOFF");
+            unsetenv("DNG_STAGE2_STAGE4_DEVICE_HANDOFF");
+        }
+    } route_override;
+
+    Rgba reference;
+    Yuv yuv;
+    int32_t e1 = 0, e2 = 0;
+    if (!decode_rgba8_default(path, &reference, &e1)) {
+        snprintf(detail, sizeof(detail),
+                 "%s: rgba8 decode failed err=%d on the host-source route", path,
+                 e1);
+        verdict("Y11", "dng-hostsrc-fallback", host_arm(), false, detail);
+        return;
+    }
+    if (!decode_yuv420(path, &yuv, &e2)) {
+        snprintf(detail, sizeof(detail),
+                 "%s: yuv420 decode failed err=%d on the host-source route",
+                 path, e2);
+        verdict("Y11", "dng-hostsrc-fallback", host_arm(), false, detail);
+        return;
+    }
+    if (yuv.w != reference.w || yuv.h != reference.h) {
+        snprintf(detail, sizeof(detail),
+                 "%s: extent mismatch rgba8=%dx%d yuv420=%dx%d", path,
+                 reference.w, reference.h, yuv.w, yuv.h);
+        verdict("Y11", "dng-hostsrc-fallback", host_arm(), false, detail);
+        return;
+    }
+
+    const size_t pixels = static_cast<size_t>(reference.w) * reference.h;
+    std::vector<uint8_t> host_yuv;
+    oracle_forward_yuv420(reference.bytes.data(), reference.w, reference.h,
+                          &host_yuv);
+
+    size_t plane_diff_count = 0;
+    size_t first_plane_diff = 0;
+    bool planes_identical = (host_yuv.size() == yuv.bytes.size());
+    if (planes_identical) {
+        for (size_t i = 0; i < host_yuv.size(); ++i) {
+            if (host_yuv[i] != yuv.bytes[i]) {
+                if (plane_diff_count == 0) first_plane_diff = i;
+                ++plane_diff_count;
+            }
+        }
+        planes_identical = (plane_diff_count == 0);
+    }
+
+    snprintf(detail, sizeof(detail),
+             "%s %dx%d HOST-SOURCE Stage-4 route (device handoff + fusion "
+             "disabled via the pipeline's own route config) ASSERTION "
+             "kernel_planes==host_forward_control=%d (diff_bytes=%zu "
+             "first@%zu) sizes=%zu/%zu yuv_fnv1a64=%016" PRIx64,
+             path, reference.w, reference.h, planes_identical ? 1 : 0,
+             plane_diff_count, first_plane_diff, yuv.bytes.size(),
+             host_yuv.size(), fnv1a64(yuv.bytes.data(), yuv.bytes.size()));
+    verdict("Y11", "dng-hostsrc-fallback", host_arm(), planes_identical,
+            detail);
 }
 
 /* ====================================================================== */
@@ -1437,6 +1718,8 @@ int main(int argc, char **argv) {
     run_y4b(corpus);
     run_y5("image_samples/raw_sample.arw", "bayer-arw");
     run_y6();
+    run_y10();
+    run_y11();
     run_y7();
     run_y8();
     run_y9();

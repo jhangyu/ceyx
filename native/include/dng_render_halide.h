@@ -32,7 +32,14 @@ bool render_stage4_halide(dng_host& host,
                           uint32_t& out_w,
                           uint32_t& out_h,
                           // Productionization plan section 1.3 (Task 2).
-                          int32_t exif_orientation = 1);
+                          int32_t exif_orientation = 1,
+                          // mem8 v3 T12.7: a CeyxOutputFormat value
+                          // (raw_ffi_api.h). 0 = rgba8, the default, so every
+                          // existing caller is bit-identical; 1 = planar
+                          // yuv420, in which case out_rgb_ptr is ONE contiguous
+                          // allocation of ceyx_output_format_byte_count bytes
+                          // holding the three planes at the frozen offsets.
+                          int32_t output_format = 0);
 
 // R2 sized decode: the output extent the Stage4 render will produce for this
 // negative + renderer (honours renderer.MaximumSize()). Lets the pipeline size
@@ -66,7 +73,13 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
                                               uint32_t& out_h,
                                               // Productionization plan section 1.3
                                               // (Task 2).
-                                              int32_t exif_orientation = 1);
+                                              int32_t exif_orientation = 1,
+                                              // mem8 v3 T12.7: see
+                                              // render_stage4_halide above —
+                                              // same CeyxOutputFormat meaning,
+                                              // forwarded to the from-device
+                                              // runner's own format parameter.
+                                              int32_t output_format = 0);
 
 // W7-E: idle-time prewarm of the Stage4 render AOT kernel
 // (dng_render_stage4_split) at the actual image size, so the GPU pipeline

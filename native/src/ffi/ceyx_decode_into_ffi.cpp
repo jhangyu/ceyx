@@ -281,21 +281,24 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
                                  int32_t output_format,
                                  DngResult *result) {
   if (route == kRawRouteDng) {
-    // mem8 v3 T12.5: the DNG route is UNCHANGED by this task and has no format
-    // parameter -- its Stage-4 entry is the host-source runner, not the
-    // device-handoff one the format thread reaches. A yuv420 request on a DNG
-    // file is therefore REFUSED, loudly, rather than silently served as rgba8:
-    // handing back 4 B/px to a caller who sized 1.5 B/px and is about to read
-    // it as planes is a heap overrun in the caller, not a cosmetic mismatch.
-    // Y6 is the test that this refusal did not disturb the rgba8 DNG path.
-    if (output_format != 0) {
-      result->error_code = kCeyxErrFormatUnsupportedInBuild;
-      return;
-    }
+    // mem8 v3 T12.7 (user no-divergence ruling 2026-09-20): the DNG route now
+    // SERVES the format instead of refusing it. T12.5's refusal lived here
+    // because the DNG route's Stage-4 entry is the host-source runner rather
+    // than the device-handoff one the format thread first reached; that runner
+    // takes the format now, dispatching the SAME yuv420 AOT variants from the
+    // SAME colour body as the generic-RAW route (dng_render_halide.cpp), so
+    // there is one implementation, not two.
+    //
+    // The refusal's REASONING is not discarded, it is discharged: the 4-B/px-
+    // into-a-1.5-B/px-destination overrun it protected against is now
+    // prevented by sizing every destination on this route through
+    // ceyx::output_format_byte_count -- in ceyxDecodeIntoPrepare above, in
+    // acquireStage4OutputBuffer, and in both Stage-4 capacity checks. An
+    // unknown format still refuses, in the runner and in the sizing oracle.
     DngPipelineResult pipeline;
     if (!dng_pipeline_decode_to_rgb_into_oriented(
             file_path, max_dim, dst, dst_capacity, exif_orientation,
-            pipeline)) {
+            pipeline, output_format)) {
       result->error_code = pipeline.error_code;
       result->decode_ms = pipeline.decode_ms;
       result->process_ms = pipeline.process_ms;

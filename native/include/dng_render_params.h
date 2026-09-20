@@ -160,7 +160,21 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               // EXIF 1..8; anything else is treated as 1. dst_w/dst_h
                               // stay the UNORIENTED extent; this runner is the ONLY
                               // place that converts them to the oriented extent.
-                              int32_t exif_orientation = 1);
+                              int32_t exif_orientation = 1,
+                              // mem8 v3 T12.7: a CeyxOutputFormat value
+                              // (raw_ffi_api.h) -- 0 = rgba8 (today's behaviour
+                              // and the default, so every existing caller is
+                              // bit-identical), 1 = planar yuv420. Identical
+                              // meaning, identical plane layout and the same
+                              // FORMAT-not-PLATFORM branch rule as the
+                              // from-device runner below. This is the
+                              // HOST-SOURCE entry, which is the one the DNG
+                              // route reaches; it takes the format so the DNG
+                              // route is served by the SAME colour body as the
+                              // generic-RAW route rather than by a second
+                              // implementation (user no-divergence ruling
+                              // 2026-09-20, which retired T12.5's carve-out).
+                              int32_t output_format = 0);
 
 // mem8 v3 T20 (fusion): the extra inputs the FUSED Bayer demosaic+render kernel
 // needs beyond the Stage-4 render parameters. Present => the fused entry is

@@ -266,7 +266,26 @@ bool dng_pipeline_decode_to_rgb_into(const char *file_path, int32_t max_dim,
 bool dng_pipeline_decode_to_rgb_into_oriented(const char *file_path, int32_t max_dim,
                                               uint8_t *dst, size_t dst_capacity,
                                               int32_t exif_orientation,
-                                              DngPipelineResult &result);
+                                              DngPipelineResult &result,
+                                              // mem8 v3 T12.7: a CeyxOutputFormat
+                                              // value (raw_ffi_api.h). 0 = rgba8,
+                                              // the default, so every existing
+                                              // caller is bit-identical; 1 =
+                                              // planar yuv420, in which case
+                                              // `dst` is ONE contiguous
+                                              // allocation of
+                                              // ceyx_output_format_byte_count
+                                              // bytes holding the three planes
+                                              // at the frozen offsets, and
+                                              // dst_capacity is checked against
+                                              // that same figure. This is what
+                                              // retires T12.5's DNG-route
+                                              // refusal (user no-divergence
+                                              // ruling 2026-09-20): the route
+                                              // is SERVED by the same Stage-4
+                                              // colour body as the generic-RAW
+                                              // route, not carved out of it.
+                                              int32_t output_format = 0);
 
 // WP10: metadata-only output-extent probe. Same sizing rules as
 // dng_pipeline_decode_to_rgb_sized (the same stage4MaximumSize() +
