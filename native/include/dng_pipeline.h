@@ -116,6 +116,32 @@ bool dng_decode_slot_pool_exists();
 // non-publishing path and pins this to 0 while the accessor above reads true.
 size_t dng_decode_published_slot_count_raw();
 
+// mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY: each decode arena's mapped
+// range, so a test can ask the kernel how many of EXACTLY those pages are
+// host-resident. Read-only, side-effect free, and — like
+// dng_decode_slot_pool_exists() above — it CANNOT CONSTRUCT THE POOL: on a
+// process that has never decoded a DNG it returns 0 and writes nothing, rather
+// than mmap'ing 8 x 1.5 GiB to answer an instrumentation question.
+//
+// Why a production accessor exists for a test's benefit: host residency cannot
+// be attributed to the arenas by scanning VM regions. Three heuristics were
+// tried and all three failed SILENTLY, each returning a plausible number —
+// most dangerously "any region >= 1 GiB", which is UNFALSIFIABLE because the
+// kernel splits a reservation at the touched/untouched boundary, leaving the
+// untouched tail as the only large region and reading zero whether the arena
+// is empty or full. Only the arena knows its own range. Evidence:
+// native/tests/tmp/t3real-90-signoff-facts.txt.
+//
+// `out` may be nullptr to query the count. Writes at most `cap` entries and
+// returns the TOTAL context count, so truncation is detectable by comparing the
+// return value with cap. Never dereference a returned base: it is an address to
+// MEASURE, and after a decommit its contents are undefined by construction.
+struct DngDebugArenaRange {
+  const void *base;
+  size_t bytes;
+};
+size_t dng_debug_arena_ranges(DngDebugArenaRange *out, size_t cap);
+
 // Idle-release arenas and scratch of FREE contexts in excess of `floor`,
 // keeping the first `floor` warm. Returns bytes released.
 //

@@ -95,6 +95,25 @@ class DecodeArena {
   size_t high_water() const { return high_water_; }
   size_t capacity() const { return capacity_; }
 
+  // mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY — the mapping's base, so a
+  // test can ask the kernel how many of THESE pages are host-resident.
+  //
+  // Exists because no region-scanning heuristic can answer that question
+  // soundly. Three were tried and three were wrong, each failing silently with
+  // a plausible number (native/tests/tmp/t3real-90-signoff-facts.txt): matching
+  // a region by size finds nothing; matching any region ">= 1 GiB" is
+  // UNFALSIFIABLE, because the kernel SPLITS a reservation at the
+  // touched/untouched boundary so the surviving large region is always the
+  // UNTOUCHED tail and reads zero whether the arena is empty or full; matching
+  // contiguous runs over-attributes, because the reserves are allocated
+  // adjacently and coalesce with unrelated neighbours. Exact ranges are the
+  // only sound attribution, and only the arena knows its own range.
+  //
+  // Returns nullptr for a zero-reserve arena. Never dereference this — it is an
+  // address to MEASURE, not to read: after decommit() the contents are
+  // undefined by construction.
+  const void *base_address() const { return base_; }
+
   // mem8 T3 (SR-6). Bytes this arena has actually TOUCHED and not yet handed
   // back to the OS. Distinct from high_water() on purpose:
   //   high_water() is MONOTONIC and is the process's disclosure figure
@@ -375,6 +394,16 @@ struct DecodeContext {
   }
 };
 
+// mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY: one decode arena's mapped
+// range, for host-residency measurement over exactly those bytes. `bytes` is
+// the arena's monotonic high_water, i.e. the widest prefix it has ever handed
+// out, which is the correct span to interrogate precisely because it survives
+// the decommit whose effect is under test.
+struct DecodeArenaRange {
+  const void *base = nullptr;
+  size_t bytes = 0;
+};
+
 // Fixed-size decode slot pool. Spec R7: without this, the in-flight decode
 // count is whatever the FFI caller supplies (dng_ffi_api.cpp is a plain
 // synchronous call with no admission control), so peak native memory is
@@ -549,6 +578,36 @@ class DecodeSlotPool {
     size_t total = 0;
     for (const auto &c : contexts_) total += c->arena.committed_bytes();
     return total;
+  }
+
+  // mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY. Copies out each context's
+  // arena range so a test can measure host residency over EXACTLY those bytes.
+  //
+  // READ-ONLY and side-effect free: it takes the same lock every sibling
+  // accessor takes, touches no arena state, and cannot construct anything. The
+  // caller-side entry point is guarded by dng_decode_slot_pool_exists() for the
+  // same reason that guard exists at all — asking an idle-timer's bookkeeping
+  // question must never mmap 8 x 1.5 GiB on a pure-RAW session.
+  //
+  // `bytes` is high_water(), NOT committed_bytes(): the question is "which
+  // pages could this arena ever have faulted in", and high_water is monotonic
+  // so it stays correct across a decommit that zeroes committed_. Using
+  // committed_bytes() here would collapse the measured range to zero at exactly
+  // the moment the measurement matters.
+  //
+  // Writes at most `cap` entries and returns the TOTAL number of contexts, so a
+  // caller can detect truncation by comparing the return value against cap.
+  size_t debug_arena_ranges(DecodeArenaRange *out, size_t cap) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t n = 0;
+    for (const auto &c : contexts_) {
+      if (out != nullptr && n < cap) {
+        out[n].base = c->arena.base_address();
+        out[n].bytes = c->arena.high_water();
+      }
+      ++n;
+    }
+    return n;
   }
 
   // Process-wide totals since construction, in the same shape as the arena

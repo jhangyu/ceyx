@@ -468,6 +468,31 @@ size_t dng_decode_published_slot_count_raw() {
   return g_configured_slots.load(std::memory_order_relaxed);
 }
 
+// mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY — see the contract on the
+// declaration in dng_pipeline.h.
+//
+// The guard is load-bearing and is the SAME one the idle funnel uses: reading
+// it cannot construct the pool, so a pure-RAW session asking this question
+// pays nothing. Returning 0 here is the honest answer for "there are no decode
+// arenas", not an error.
+size_t dng_debug_arena_ranges(DngDebugArenaRange *out, size_t cap) {
+  if (!dng_decode_slot_pool_exists()) return 0;
+  // Two layouts, one field-for-field copy: DecodeArenaRange is internal to
+  // decode_context.h and must not leak into the public header, which is
+  // consumed by translation units that cannot see the pool's definition.
+  std::vector<DecodeArenaRange> tmp(cap);
+  const size_t n =
+      decodeSlotPool().debug_arena_ranges(cap > 0 ? tmp.data() : nullptr, cap);
+  if (out != nullptr) {
+    const size_t copied = n < cap ? n : cap;
+    for (size_t i = 0; i < copied; ++i) {
+      out[i].base = tmp[i].base;
+      out[i].bytes = tmp[i].bytes;
+    }
+  }
+  return n;
+}
+
 // R4 item 1 (ruling r-5): live reconfiguration of the slot pool. Clamping is
 // the CALLER's job (dng_ffi_api.cpp bounds it only by the allocation-sanity
 // constant, per ruling r-6 — there is deliberately no memory-derived clamp);
