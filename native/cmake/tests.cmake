@@ -2361,6 +2361,34 @@ endforeach()
 # shipping code, so a green from that shape says nothing about the artifact,
 # and WP10's whole risk is "the symbol is not in the shipped binary".
 # ---------------------------------------------------------------------------
+# --- mem8 v3 T12 milestone 4: the yuv420 output arm's correctness suite -----
+# Y1..Y9. Same shared-dylib linkage rationale as test_ceyx_decode_into below
+# and tests.cmake:1741-1749: compiling the pipeline sources into a test links
+# none of the shipping code, so a green from that shape says nothing about the
+# artifact -- and "the yuv420 symbol is not in the shipped binary" is exactly
+# the silently-absent-feature failure this campaign has already paid for.
+#
+# NO if(DNG_ENABLE_GENERIC_RAW) guard, for the same reason the target below
+# carries none: the ceyx_* entries are always compiled, and the cases report
+# their own failures rather than failing to build.
+#
+# It reaches libjpeg through the dylib's own encode/still surface
+# (ceyx_encode_rgba8 / ceyx_still_decode_rgba), which is Y4a's INDEPENDENT
+# authority -- asserting the converter against the oracle it was transcribed
+# from cannot fail, so the comparison has to run real libjpeg.
+add_executable(test_stage4_yuv420_output tests/test_stage4_yuv420_output.cpp)
+target_include_directories(test_stage4_yuv420_output PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${DNG_SDK_DIR}
+    ${HALIDE_OUTPUT_DIR}
+    ${HALIDE_DIR}/include
+    ${JPEG_INCLUDE_DIRS})
+target_link_libraries(test_stage4_yuv420_output dng_decoder_native
+                      ${JPEG_LIBRARIES})
+add_dependencies(test_stage4_yuv420_output dng_decoder_native)
+# --- end T12 milestone 4 ----------------------------------------------------
+
 add_executable(test_ceyx_decode_into tests/test_ceyx_decode_into.cpp)
 target_include_directories(test_ceyx_decode_into PRIVATE
     ${INC_DIR}
