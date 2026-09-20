@@ -27,6 +27,51 @@ def _load_extract_markers():
 extract_markers = _load_extract_markers()
 
 
+_BASELINE_DIR = Path(__file__).parent / "golden" / "baseline"
+
+
+def _baseline_legs():
+    """Leg name encoded in each baseline fixture filename.
+
+    Fixture names are `r<round>-<run-id>-<sha>-<leg>.markers`, so the leg is
+    everything after the third hyphen -- a bounded split, because leg names
+    themselves contain hyphens ("macos-arm64", "macos-x86_64").
+    """
+    return {p.stem.split("-", 3)[3] for p in _BASELINE_DIR.glob("*.markers")}
+
+
+class RosterCoverageTests(unittest.TestCase):
+    """AC-2 roster and the committed baseline set must be the same set.
+
+    Without this, a leg could be added to LEG_TO_JOB_NAME with no fixture (or
+    a fixture could be orphaned by a rename) and every existing test would
+    still pass -- the roster size was not observable by any assertion, which
+    is the failure mode this repo keeps re-learning. Deliberately a set
+    equality and not a hardcoded `assertEqual(len(...), 10)`: pinning the
+    count here would be a second counter for a number whose single source is
+    LEG_TO_JOB_NAME itself.
+    """
+
+    def test_every_roster_leg_has_exactly_one_baseline_fixture(self):
+        roster = set(extract_markers.LEG_TO_JOB_NAME)
+        self.assertEqual(
+            roster,
+            _baseline_legs(),
+            "AC-2 roster and golden/baseline/*.markers disagree; every leg needs "
+            "exactly one committed fixture and every fixture needs a roster entry",
+        )
+
+    def test_fixture_filenames_are_unique_per_leg(self):
+        # Set equality above would silently tolerate two fixtures for one leg.
+        names = [p.stem.split("-", 3)[3] for p in _BASELINE_DIR.glob("*.markers")]
+        self.assertEqual(sorted(names), sorted(set(names)))
+
+    def test_guardscontainer_leg_is_covered(self):
+        # The roster extension this fixture set was grown for (9 -> 10).
+        self.assertIn("guardscontainer", extract_markers.LEG_TO_JOB_NAME)
+        self.assertIn("guardscontainer", _baseline_legs())
+
+
 class ZeroMarkerPlaceholderTests(unittest.TestCase):
     def test_placeholder_text_for_dartanalyze(self):
         self.assertEqual(

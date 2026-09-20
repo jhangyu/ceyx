@@ -32,7 +32,7 @@ exception: a genuinely empty 0-byte baseline is indistinguishable from a
 failed capture (this campaign produced one this week), and a WI-28 AC
 carve-out for "this one leg doesn't have to regenerate byte-identically"
 would be a carve-out for precisely the hardest-to-verify case. Making the
-placeholder a first-class output of THIS script means all nine baselines
+placeholder a first-class output of THIS script means all ten baselines
 regenerate identically via the same one-liner, no exceptions.
 """
 
@@ -45,7 +45,9 @@ from pathlib import Path
 # Maps this campaign's leg names to the exact GitHub Actions job display
 # name they correspond to in a combined run log. Provenance:
 # tmp/verify/pyci-AC2-BASELINE-r7-34707800234-d33cc607-ALLGREEN.log
-# (`cut -f1 <log> | sort -u`).
+# (`cut -f1 <log> | sort -u`); "guardscontainer" provenance:
+# tmp/verify/pyci-AC2-guardscontainer-35362405158-d4e9a7d7-ALLGREEN.log
+# (CI-architecture migration contract, AC-2 roster extension 9->10).
 LEG_TO_JOB_NAME = {
     "linux": "Linux / x86_64 Vulkan",
     "macos-arm64": "macOS / arm64",
@@ -56,6 +58,7 @@ LEG_TO_JOB_NAME = {
     "publish": "Publish release assets",
     "nativetests": "Build native test targets",
     "dartanalyze": "dart analyze (compile-only)",
+    "guardscontainer": "Repo-static guards (digest-pinned container)",
 }
 
 _KNOWN_JOB_NAMES = frozenset(LEG_TO_JOB_NAME.values())
