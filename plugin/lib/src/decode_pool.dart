@@ -1331,6 +1331,34 @@ class CeyxDecodePool {
   }
 
   void _dispatch(_PoolWorker worker, _PoolJob job) {
+    // T12.8: R-J's rule, one step later than submit.
+    //
+    // The format element only rides the wire on the POOLED arm (see the
+    // collection-if below: `slot != null && job.format != rgba8`). Without a
+    // slot the element is absent, the worker reads rgba8 by construction, and
+    // the self-allocating arm hands back 4 B/px pixels for a 1.5 B/px request
+    // — a silent format substitution, which is the corrupt-image-with-no-error
+    // outcome R-J exists to forbid. Submit cannot catch it: whether a slot is
+    // obtainable is not knowable until preparation has run, so THIS is the
+    // first point the divergence is visible.
+    //
+    // Scoped to the format, NOT to the route: the no-slot route is the normal
+    // one for rgba8 on any library without the decode-into pair, and it stays
+    // fully supported.
+    if (job.type == CeyxPoolJobType.decode &&
+        job.format != CeyxOutputFormat.rgba8 &&
+        job.slot == null) {
+      _byKey.remove(job.key);
+      job.completeError(
+        StateError(
+          'decode of ${job.path} requested ${job.format.name} but reached '
+          'dispatch with no destination buffer, so the format cannot be put '
+          'on the wire and the worker would answer rgba8. Failing instead of '
+          'substituting a format the caller is about to misread.',
+        ),
+      );
+      return;
+    }
     // WP10: a resize retry REUSES its request id on purpose. The retry is the
     // same job, and reusing the id is what makes "dispatched exactly twice"
     // observable instead of being two unrelated ids that have to be correlated
