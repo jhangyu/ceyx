@@ -521,15 +521,26 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     const uint32_t src_h = crop.height;
     uint32_t out_w = 0, out_h = 0;
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-    // mem8 v3 T12: `&& output_format == rgba8` because ARM A -- the fused
-    // kernel's own yuv420 output variant -- is T12.6 and has not landed; no
-    // fused yuv420 archive exists yet. A yuv420 request therefore takes the
-    // two-stage path, which DOES have a yuv420 variant on both families.
-    // Scope boundary on the FORMAT axis, not a platform guard: both backend
-    // families behave identically here, and Stage4 carries the same refusal as
-    // a structural backstop.
+    // mem8 v3 T12.6: the `&& output_format == rgba8` condition that used to sit
+    // here is GONE. Arm A (raw_bayer_fused_render_yuv420) has landed, so BOTH
+    // output formats fuse, on both backend families, and Stage4's matching
+    // refusal was removed in the same commit -- they were always a pair.
+    // Fusion is now gated on SCALE alone, which is T20.0's scope boundary (no
+    // fused _scaled archive exists on either format).
+    //
+    // DNG_RAW_FUSED_BAYER_RENDER=0 forces the two-stage route. Read once per
+    // decode through the same getenv discipline PipelineConfig and
+    // raw_pipeline_gpu_available() already use, and consulted nowhere else. It
+    // exists because the two yuv420 arms must be comparable ON THE SAME INPUT
+    // inside one process (test Y7): with fusion unconditional for an unscaled
+    // Bayer decode, arm B would be unreachable on this route and the cross-arm
+    // agreement claim would have no control to compare against. Same purpose
+    // and same mechanism as the DNG route's DNG_FUSED_DEMOSAIC_WARP, which Y11
+    // already drives.
+    const char* fused_env = std::getenv("DNG_RAW_FUSED_BAYER_RENDER");
+    const bool fused_disabled_by_env = (fused_env && fused_env[0] == '0');
     const bool use_fused_bayer_render =
-        (src_w == out_w && src_h == out_h) && develop.output_format == 0;
+        (src_w == out_w && src_h == out_h) && !fused_disabled_by_env;
 
     Halide::Runtime::Buffer<uint16_t> stage3;
 

@@ -188,6 +188,39 @@ add_custom_target(raw_bayer_fused_render_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
 
+# mem8 v3 T12.6: ARM A -- the yuv420 output variant of the fused kernel above.
+# Emitted from the SAME generator binary via -g/-f, exactly like the Stage-4
+# yuv420 variants, so raw_bayer_fused_render itself stays byte-identical (its
+# hash is a pinned gate artifact). Unconditional and target-identical to its
+# rgba8 sibling: which FORMAT a decode uses is the host choosing an entry, never
+# a kernel branch and never a platform test.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420.h
+    COMMAND raw_bayer_fused_render_generator -g raw_bayer_fused_render_yuv420 -f raw_bayer_fused_render_yuv420
+            -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS raw_bayer_fused_render_generator
+    COMMENT "Generating Halide AOT fused Bayer demosaic+render (yuv420 planes)..."
+)
+add_custom_target(raw_bayer_fused_render_yuv420_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT})
+
+# THE FUSED FAMILY, AS ONE NAME (mem8 v3 T12.6).
+#
+# runRenderStage4HalideAotFromDevice dispatches BOTH fused entries from the
+# same function, so anything that links one must link the other or it fails to
+# link at all -- which is what happened when the yuv420 entry was added and the
+# eight hand-maintained copies of the rgba8 archive path in tests.cmake were
+# not updated with it. These two variables exist so the family has ONE
+# declaration site: a future third fused entry is added here and every consumer
+# picks it up, instead of the maintainer having to find eight lists.
+set(DNG_FUSED_BAYER_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT})
+set(DNG_FUSED_BAYER_AOT_TARGETS
+    raw_bayer_fused_render_aot_target
+    raw_bayer_fused_render_yuv420_aot_target)
+
 # P17 T11: generic-RAW fused normalize + X-Trans demosaic AOT kernel.
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic.h

@@ -263,6 +263,44 @@ void build_yuv420_planes(Halide::Var x, Halide::Var y,
 #endif
 }
 
+// mem8 v3 T12: the ONE schedule for a yuv420 plane triple, so arm B's two
+// generators (DngRenderGenerator.cpp) and arm A's fused generator
+// (RawBayerFusedRenderGenerator.cpp) cannot drift into per-family or per-arm
+// scheduling. It lived as a file-static in DngRenderGenerator.cpp until arm A
+// landed (T12.6); moving it here is the same body verbatim, and the move is
+// asserted inert by the unchanged dng_render_stage4_yuv420 /
+// dng_render_stage4_split_yuv420 archives.
+//
+// Templated on the output type only because the generators' Output<> types are
+// distinct C++ types; the body is identical for all callers and contains no
+// backend branch beyond has_gpu_feature(), which is the same branch every
+// Stage-4-class generator already makes.
+//
+// Deliberately NO compute_at anywhere: a staged producer becomes a Workgroup
+// array and is miscompiled below 32 bits on the Vulkan driver this project
+// targets, silently. check_gpu_producer_width.py is the mechanical enforcement.
+template <typename OutputT>
+void schedule_yuv420_planes(const Halide::Target &t, bool guard_tail,
+                            Halide::Var x, Halide::Var y, OutputT &y_plane,
+                            OutputT &cb_plane, OutputT &cr_plane) {
+    using namespace Halide;
+    OutputT *planes[3] = {&y_plane, &cb_plane, &cr_plane};
+    for (OutputT *plane : planes) {
+        if (t.has_gpu_feature()) {
+            Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
+            if (guard_tail) {
+                plane->gpu_tile(x, y, xo, yo, xi, yi, 16, 16,
+                                TailStrategy::GuardWithIf);
+            } else {
+                plane->gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+            }
+        } else {
+            Var yo("yo"), yi("yi");
+            plane->split(y, yo, yi, 32).parallel(yo).vectorize(x, 8);
+        }
+    }
+}
+
 }  // namespace ceyx
 
 #endif  // CEYX_YUV420_WRITE_H

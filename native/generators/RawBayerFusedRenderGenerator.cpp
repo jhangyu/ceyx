@@ -68,6 +68,7 @@
 // In particular `rendered_rgb` is a Tuple of three uint8_t, so it could never
 // be staged here as-is even if the bounds problem above were solved.
 #include "Halide.h"
+#include "ceyx_yuv420_write.h"
 #include "dng_halide_utils.h"
 #include "dng_render_stage4_expr.h"
 
@@ -245,4 +246,183 @@ public:
     }
 };
 
+// =============================================================================
+// mem8 v3 T12.6 -- ARM A: the yuv420 OUTPUT VARIANT of the fused kernel.
+//
+// WHY A SECOND CLASS AND NOT A GeneratorParam: a Halide generator cannot switch
+// output ARITY on a GeneratorParam, and yuv420 is three outputs where RGBA8 is
+// one. Same reason the two arm-B yuv420 classes are separate
+// (DngRenderGenerator.cpp:1599-1638). Format selection is therefore the HOST
+// choosing which AOT entry to call; it is never an Expr inside a kernel.
+//
+// WHAT IS SHARED -- which is the whole point:
+//   * the demosaic taps      -- build_demosaic_expr (dng_halide_utils.h)
+//   * the colour arithmetic  -- ceyx::build_dng_render_stage4_rgb
+//                               (dng_render_stage4_expr.h)
+//   * the plane write        -- ceyx::build_yuv420_planes
+//                               (ceyx_yuv420_write.h), the same body arm B
+//                               calls, so the two arms CANNOT differ in HOW
+//                               yuv420 is written. Test Y7 is the mechanical
+//                               check on that claim.
+//   * the plane schedule     -- ceyx::schedule_yuv420_planes, likewise one body.
+// The only thing not shared with the rgba8 sibling above is the final store,
+// which is exactly the difference the two formats ARE.
+//
+// BACKEND PARITY: no platform guard here either. The selector is FORMAT (which
+// entry the host calls) and the kernel shape is identical on Metal and Vulkan,
+// for the same reasons the rgba8 sibling's header comment gives.
+//
+// TYPE RULES, both load-bearing and both paid for on device this campaign:
+//   (a) 304e3abd -- never birth a colour channel in an 8/16-bit type on the
+//       yuv420 path. Nothing here births one: build_dng_render_stage4_rgb is
+//       the sibling's verbatim, and build_yuv420_planes immediately casts each
+//       channel to int32 before any arithmetic.
+//   (b) T22/T20 -- a Func materialised at a GPU loop level becomes a Workgroup
+//       array and this driver miscompiles it below 32 bits, silently. NOTHING
+//       is staged here on the GPU path (schedule_yuv420_planes has no
+//       compute_at, and `normalized` -- which IS 32-bit by rule (b) already --
+//       is only staged on the CPU path). check_gpu_producer_width.py is the
+//       mechanical enforcement, not this comment.
+// =============================================================================
+class RawBayerFusedRenderYuv420
+    : public Halide::Generator<RawBayerFusedRenderYuv420> {
+public:
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
+
+    // Input list is RawBayerFusedRender's verbatim -- same order, same names,
+    // same shapes -- so the host's argument list differs between the two
+    // entries only in the destination tail.
+    Input<Buffer<uint16_t>> src{"src", 2};
+    Input<int32_t> red_x{"red_x"};
+    Input<int32_t> red_y{"red_y"};
+    Input<Buffer<float>> black{"black", 2};
+    Input<float> inv_range{"inv_range"};
+    Input<int32_t> crop_x{"crop_x"};
+    Input<int32_t> crop_y{"crop_y"};
+    Input<int32_t> src_w{"src_w"};
+    Input<int32_t> src_h{"src_h"};
+    Input<float> src_scale{"src_scale"};
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
+    Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
+    Input<Buffer<float>> tone_curve{"tone_curve", 1};
+    Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
+    Input<Buffer<float>> camera_white{"camera_white", 1};
+    Input<Buffer<float>> camera_to_rgb{"camera_to_rgb", 2};
+    Input<Buffer<float>> rgb_to_final{"rgb_to_final", 2};
+    Input<Buffer<float>> huesat_table{"huesat_table", 2};
+    Input<Buffer<float>> huesat_encode{"huesat_encode", 1};
+    Input<Buffer<float>> huesat_decode{"huesat_decode", 1};
+    Input<int32_t> huesat_hue_div{"huesat_hue_div"};
+    Input<int32_t> huesat_sat_div{"huesat_sat_div"};
+    Input<int32_t> huesat_val_div{"huesat_val_div"};
+    Input<int32_t> huesat_has_table{"huesat_has_table"};
+    Input<int32_t> huesat_has_encoding{"huesat_has_encoding"};
+    Input<Buffer<float>> look_table{"look_table", 2};
+    Input<Buffer<float>> look_encode{"look_encode", 1};
+    Input<Buffer<float>> look_decode{"look_decode", 1};
+    Input<int32_t> look_hue_div{"look_hue_div"};
+    Input<int32_t> look_sat_div{"look_sat_div"};
+    Input<int32_t> look_val_div{"look_val_div"};
+    Input<int32_t> look_has_table{"look_has_table"};
+    Input<int32_t> look_has_encoding{"look_has_encoding"};
+
+    // Y, Cb, Cr. Extents are the caller's: w x h and ceil(w/2) x ceil(h/2).
+    // The HOST computes the three plane offsets into one contiguous
+    // destination, exactly as on arm B -- the kernel decides no layout.
+    Output<Buffer<uint8_t>> y_plane{"y_plane", 2};
+    Output<Buffer<uint8_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<uint8_t>> cr_plane{"cr_plane", 2};
+
+    Func normalized{"normalized"};
+    Func demosaiced{"demosaiced"};
+    Func rendered_rgb{"rendered_rgb"};
+
+    void generate() {
+        Var x("x"), y("y"), c("c");
+
+        src.dim(0).set_stride(1);
+        // Tight packing is the frozen contract, not a Halide default we hope
+        // holds: asserted on every plane, same as arm B.
+        y_plane.dim(0).set_stride(1);
+        cb_plane.dim(0).set_stride(1);
+        cr_plane.dim(0).set_stride(1);
+
+        Expr width = src.dim(0).extent();
+        Expr height = src.dim(1).extent();
+        Expr bw = max(black.dim(0).extent(), 1);
+        Expr bh = max(black.dim(1).extent(), 1);
+
+        {
+            Expr mx = map_repeat_coord(x, width);
+            Expr my = map_repeat_coord(y, height);
+            Expr level = black(mx % bw, my % bh);
+            Expr norm = (cast<float>(src(mx, my)) - level) * inv_range;
+            // 32-bit by rule (b), identical to the rgba8 sibling.
+            normalized(x, y) = cast<uint32_t>(clamp(norm, 0.0f, 65535.0f));
+        }
+
+        auto sample_normalized = [&](Expr sx, Expr sy) {
+            return cast<uint16_t>(normalized(sx, sy));
+        };
+        demosaiced(x, y, c) =
+            build_demosaic_expr(x, y, c, sample_normalized, red_x, red_y);
+
+        // THE SEAM, identical to the sibling's: the render reads the demosaic
+        // directly, so no Stage-3 intermediate exists on this route either.
+        ceyx::build_dng_render_stage4_rgb(
+            x, y,
+            [&](Expr sample_x, Expr sample_y, int channel) {
+                return demosaiced(sample_x + crop_x, sample_y + crop_y, channel);
+            },
+            src_w, src_h, src_scale,
+            orient_a_x, orient_b_x, orient_c_x,
+            orient_a_y, orient_b_y, orient_c_y,
+            exp_ramp, tone_curve, encode_gamma, camera_white,
+            camera_to_rgb, rgb_to_final,
+            huesat_table, huesat_encode, huesat_decode,
+            huesat_hue_div, huesat_sat_div, huesat_val_div,
+            huesat_has_table, huesat_has_encoding,
+            look_table, look_encode, look_decode,
+            look_hue_div, look_sat_div, look_val_div,
+            look_has_table, look_has_encoding,
+            rendered_rgb);
+
+        // Un-Tupled channels: build_yuv420_planes takes three single-value
+        // Funcs (its D2 root-cause note). These three are INLINE, so no
+        // Workgroup array is materialised and the tuple expression is
+        // evaluated exactly as the rgba8 sibling evaluates it.
+        Func rgb8_r("rgb8_r"), rgb8_g("rgb8_g"), rgb8_b("rgb8_b");
+        rgb8_r(x, y) = rendered_rgb(x, y)[0];
+        rgb8_g(x, y) = rendered_rgb(x, y)[1];
+        rgb8_b(x, y) = rendered_rgb(x, y)[2];
+
+        // The luma plane's extents ARE the oriented output extents, so the
+        // odd-extent edge clamp reads them from there rather than from a
+        // separate scalar the host could get wrong.
+        ceyx::build_yuv420_planes(x, y, rgb8_r, rgb8_g, rgb8_b,
+                                  y_plane.dim(0).extent(),
+                                  y_plane.dim(1).extent(),
+                                  y_plane, cb_plane, cr_plane);
+    }
+
+    void schedule() {
+        Var x("x"), y("y");
+        // NOTHING beyond the shared plane schedule. In particular `normalized`
+        // is left INLINE on every target, unlike the rgba8 sibling which stages
+        // it at the CPU dst's row-block: here it feeds THREE outputs (Y, Cb and
+        // Cr), so there is no single loop level to compute it at, and a
+        // per-plane staging would be three different schedules for one Func.
+        // Inline is the only shape that keeps one body for all three planes.
+        ceyx::schedule_yuv420_planes(get_target(), guard_tail, x, y, y_plane,
+                                     cb_plane, cr_plane);
+    }
+};
+
 HALIDE_REGISTER_GENERATOR(RawBayerFusedRender, raw_bayer_fused_render)
+HALIDE_REGISTER_GENERATOR(RawBayerFusedRenderYuv420,
+                          raw_bayer_fused_render_yuv420)

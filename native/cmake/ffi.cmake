@@ -32,6 +32,11 @@ if(NOT DNG_CROSS_BUILD)
     add_dependencies(dng_decoder_native raw_bayer_demosaic_aot_target)
     # mem8 T20: fused Bayer demosaic+render AOT entry.
     add_dependencies(dng_decoder_native raw_bayer_fused_render_aot_target)
+    # mem8 v3 T12.6: arm A, the same kernel's yuv420 output variant. Declared
+    # beside its RGBA8 sibling and unconditionally, so a build that links one
+    # links the other -- a half-linked format pair is exactly how "the symbol is
+    # not in the shipped binary" happens.
+    add_dependencies(dng_decoder_native raw_bayer_fused_render_yuv420_aot_target)
     # P17 T11: the same reference TU also calls the raw_xtrans_demosaic AOT
     # entry.
     add_dependencies(dng_decoder_native raw_xtrans_demosaic_aot_target)
@@ -63,6 +68,7 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by

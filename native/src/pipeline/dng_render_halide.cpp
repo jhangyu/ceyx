@@ -166,6 +166,10 @@ functions:
 // unconditionally -- it is built for every backend (no platform guard), which
 // is the whole point of the parity design.
 #include "raw_bayer_fused_render.h"
+// mem8 v3 T12.6 (arm A): the fused kernel's own yuv420 output variant.
+// Unconditional for the same reason its RGBA8 sibling is -- one archive, every
+// backend.
+#include "raw_bayer_fused_render_yuv420.h"
 // mem8 v3 T12: the yuv420 OUTPUT VARIANT of each Stage-4 family. Each sits
 // under the SAME conditional as its RGBA8 sibling below, because it is the same
 // kernel family with a different destination arity -- selecting between them is
@@ -1653,18 +1657,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     if (output_format != 0 && !yuv420_output) {
         return false;
     }
-    // ARM A (the fused Bayer kernel's own yuv420 output variant) is T12.6 and a
-    // SEPARATE commit; no fused yuv420 archive exists yet. Refuse rather than
-    // silently fall back to the two-stage path, which would be an unannounced
-    // divergence, or dispatch the fused RGBA8 entry into a 1.5 B/px
-    // destination, which would be a heap overrun. Same structural-guard
-    // reasoning as the fused-plus-scaled refusal below. Format axis again, not
-    // platform: the refusal is identical on Metal and on Vulkan, and the
-    // caller (raw_gpu_pipeline.cpp) keeps fusion off for yuv420 requests so
-    // this is a backstop rather than the live path.
-    if (yuv420_output && fused_bayer_source) {
-        return false;
-    }
+    // mem8 v3 T12.6: ARM A HAS LANDED. The refusal that used to sit here
+    // ("fused + yuv420 is not implemented") is gone together with the caller's
+    // matching fusion-off condition in raw_gpu_pipeline.cpp -- they were always
+    // a pair, and removing one alone would leave a path that silently
+    // disagrees with the other. A fused yuv420 request now dispatches
+    // raw_bayer_fused_render_yuv420 in both dispatch blocks below, on every
+    // backend, selected by FORMAT and by the presence of fused_bayer_source
+    // and by nothing else.
 
     // Productionization plan section 1.3 — identical derivation to
     // runRenderStage4HalideAot. dst_w/dst_h stay UNORIENTED; the kernel writes
@@ -2241,8 +2241,52 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // plane buffers instead of one interleaved RGBA8 buffer), because both
     // kernels are generated from the same colour body
     // (dng_render_stage4_split_expr.h).
+    // T12.6 (arm A): fused AND yuv420 -- the fused kernel's own plane-writing
+    // entry. Tested FIRST because it is the intersection of the two selectors
+    // below; both of those remain exactly as they were for the other three
+    // combinations. The argument list is raw_bayer_fused_render's verbatim with
+    // the single interleaved destination replaced by the three plane views, and
+    // both entries come from one generator file sharing one colour body and one
+    // plane-write body.
     const int result =
-        yuv420_output
+        (yuv420_output && fused_bayer_source)
+        ? raw_bayer_fused_render_yuv420(
+              &src_flat,
+              fused_bayer_source->red_x,
+              fused_bayer_source->red_y,
+              fused_black_buf.raw_buffer(),
+              fused_bayer_source->inv_range,
+              crop_l, crop_t, src_w, src_h,
+              src_scale,
+              orient_coeffs[0], orient_coeffs[1],
+              orient_coeffs[2], orient_coeffs[3],
+              orient_coeffs[4], orient_coeffs[5],
+              exp_buf.raw_buffer(),
+              tone_buf.raw_buffer(),
+              gamma_buf.raw_buffer(),
+              cw_buf.raw_buffer(),
+              c2r_buf.raw_buffer(),
+              r2f_buf.raw_buffer(),
+              hs_table_buf.raw_buffer(),
+              hs_encode_buf.raw_buffer(),
+              hs_decode_buf.raw_buffer(),
+              params.huesat_hue_div,
+              params.huesat_sat_div,
+              params.huesat_val_div,
+              params.huesat_has_table,
+              params.huesat_has_encoding,
+              look_table_buf.raw_buffer(),
+              look_encode_buf.raw_buffer(),
+              look_decode_buf.raw_buffer(),
+              params.look_hue_div,
+              params.look_sat_div,
+              params.look_val_div,
+              params.look_has_table,
+              params.look_has_encoding,
+              y_plane_buf.raw_buffer(),
+              cb_plane_buf.raw_buffer(),
+              cr_plane_buf.raw_buffer())
+        : yuv420_output
         ? dng_render_stage4_split_yuv420(
               &src_flat,
               sw,
@@ -2385,8 +2429,49 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // arm above. Selected by FORMAT and by nothing else. The argument list is
     // dng_render_stage4's verbatim; only the destination differs, because both
     // kernels come from the same colour body (dng_render_stage4_expr.h).
+    //
+    // T12.6 (arm A): fused AND yuv420, the non-split family's copy of the split
+    // arm's new branch above -- same selector, same order, same argument list
+    // modulo this family's source buffer. Neither is a platform guard: both
+    // branches exist on both families and are chosen by format alone.
     const int result =
-        yuv420_output
+        (yuv420_output && fused_bayer_source)
+        ? raw_bayer_fused_render_yuv420(src_buf.raw_buffer(),
+                                        fused_bayer_source->red_x,
+                                        fused_bayer_source->red_y,
+                                        fused_black_buf.raw_buffer(),
+                                        fused_bayer_source->inv_range,
+                                        crop_l, crop_t, src_w, src_h,
+                                        src_scale,
+                                        orient_coeffs[0], orient_coeffs[1],
+                                        orient_coeffs[2], orient_coeffs[3],
+                                        orient_coeffs[4], orient_coeffs[5],
+                                        exp_buf.raw_buffer(),
+                                        tone_buf.raw_buffer(),
+                                        gamma_buf.raw_buffer(),
+                                        cw_buf.raw_buffer(),
+                                        c2r_buf.raw_buffer(),
+                                        r2f_buf.raw_buffer(),
+                                        hs_table_buf.raw_buffer(),
+                                        hs_encode_buf.raw_buffer(),
+                                        hs_decode_buf.raw_buffer(),
+                                        params.huesat_hue_div,
+                                        params.huesat_sat_div,
+                                        params.huesat_val_div,
+                                        params.huesat_has_table,
+                                        params.huesat_has_encoding,
+                                        look_table_buf.raw_buffer(),
+                                        look_encode_buf.raw_buffer(),
+                                        look_decode_buf.raw_buffer(),
+                                        params.look_hue_div,
+                                        params.look_sat_div,
+                                        params.look_val_div,
+                                        params.look_has_table,
+                                        params.look_has_encoding,
+                                        y_plane_buf.raw_buffer(),
+                                        cb_plane_buf.raw_buffer(),
+                                        cr_plane_buf.raw_buffer())
+        : yuv420_output
         ? dng_render_stage4_yuv420(src_buf.raw_buffer(),
                                    src_scale,
                                    orient_coeffs[0], orient_coeffs[1],

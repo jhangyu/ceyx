@@ -16,35 +16,18 @@ static bool uses_vulkan_planar_layout(const Target &t) {
     return t.os == Target::Android || t.has_feature(Target::Vulkan);
 }
 
-// mem8 v3 T12: the ONE schedule for a yuv420 plane triple, so the two arm-B
-// generators below (and arm A's fused generator) cannot drift into per-family
-// scheduling. Templated on the output type only because the two generators'
-// Output<> types are distinct C++ types; the body is identical for all callers
-// and contains no backend branch beyond has_gpu_feature(), which is the same
-// branch every generator in this file already makes.
-//
-// Deliberately NO compute_at anywhere: a staged producer becomes a Workgroup
-// array and is miscompiled below 32 bits on the Vulkan driver this project
-// targets, silently. check_gpu_producer_width.py is the mechanical enforcement.
+// mem8 v3 T12: the ONE schedule for a yuv420 plane triple now lives in
+// ceyx_yuv420_write.h as ceyx::schedule_yuv420_planes, next to the ONE plane
+// write, because arm A's fused generator (RawBayerFusedRenderGenerator.cpp)
+// needs the identical schedule and a file-static here could not be shared.
+// The body moved verbatim; the two archives below are unchanged across the
+// move.
 template <typename OutputT>
 static void scheduleYuv420Planes(const Target &t, bool guard_tail, Var x, Var y,
                                  OutputT &y_plane, OutputT &cb_plane,
                                  OutputT &cr_plane) {
-    OutputT *planes[3] = {&y_plane, &cb_plane, &cr_plane};
-    for (OutputT *plane : planes) {
-        if (t.has_gpu_feature()) {
-            Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
-            if (guard_tail) {
-                plane->gpu_tile(x, y, xo, yo, xi, yi, 16, 16,
-                                TailStrategy::GuardWithIf);
-            } else {
-                plane->gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
-            }
-        } else {
-            Var yo("yo"), yi("yi");
-            plane->split(y, yo, yi, 32).parallel(yo).vectorize(x, 8);
-        }
-    }
+    ceyx::schedule_yuv420_planes(t, guard_tail, x, y, y_plane, cb_plane,
+                                 cr_plane);
 }
 
 

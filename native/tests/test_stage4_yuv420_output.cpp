@@ -41,6 +41,11 @@
 #include "ceyx_encode_api.h"
 #include "ceyx_yuv420_oracle.h"
 #include "raw_ffi_api.h"
+/* T12.6 / Y7-B0: raw_fused_bayer_render_count(), the pipeline's own
+ * fused-dispatch counter. Taken from the real header rather than re-declared
+ * locally, so a signature change breaks the build instead of silently linking
+ * to a different symbol. The header is plain-C-contract only (no Halide). */
+#include "raw_gpu_pipeline.h"
 
 /* Y4a talks to libjpeg-turbo DIRECTLY rather than through the dylib's still
  * surface. That is not a shortcut, it is the only available route and it is
@@ -1505,26 +1510,170 @@ void run_y11() {
 }
 
 /* ====================================================================== */
-/* Y7 — CROSS-ARM AGREEMENT                                               */
+/* Y7 — CROSS-ARM AGREEMENT (T12.6: arm A has landed, this is now REAL)   */
 /*                                                                        */
-/* PRE-DECLARED N/A with its reason (plan T12.3 Y7: recorded, never        */
-/* omitted). Arm A's yuv420 output variant does not exist — it is T12.6, a */
-/* separate commit. raw_gpu_pipeline.cpp:532 keeps fusion off for a yuv420 */
-/* request at the call site, and dng_render_halide.cpp:1480 refuses        */
-/* fused+yuv420 as a structural backstop. Both refusals come out TOGETHER  */
-/* when arm A lands; removing one leaves a path that silently disagrees    */
-/* with the other.                                                        */
+/* Arm A is the fused Bayer demosaic+render kernel writing yuv420 planes;  */
+/* arm B is raw_bayer_demosaic -> Stage-4 -> yuv420 planes. Both are       */
+/* driven here on the SAME file, in the SAME process, on the SAME backend, */
+/* so a disagreement can only come from the kernels.                       */
 /*                                                                        */
-/* Cross-BACKEND agreement (Metal vs Vulkan) is a different claim and is   */
-/* delivered by the on-device artifact, not by this binary.               */
+/* THE BOUND IS PRE-REGISTERED, in native/tests/tmp/t126-00-y7-prereg.txt, */
+/* written before the new kernel produced a single byte. ONE CLAUSE (B5',  */
+/* the differing-byte fraction) was added AFTER a mutation defeated the    */
+/* original max-only bound; that amendment, and the fact that it was       */
+/* authored with the numbers already in hand, is disclosed in full in the  */
+/* prereg file's AMENDMENT A1 section. It is a tightening, never a         */
+/* widening. Byte equality is                                             */
+/* deliberately NOT the assertion: arm A reads the demosaic inline while   */
+/* arm B reads it back out of a materialised uint16 Stage-3 buffer, and    */
+/* the fused kernel's rgba8 route already carries a recorded, closed       */
+/* 1-LSB cross-kernel residue against the two-stage route. If a number     */
+/* here exceeds the bound: STOP AND REPORT. Do not widen the bound and do  */
+/* not add a guard — that is the evidenced-exception path and it is a user */
+/* ruling, not a team judgement.                                           */
+/*                                                                        */
+/* B0 IS THE CASE'S OWN ANTI-FALSE-GREEN CHECK. Without it, a build where  */
+/* fusion silently never engages runs the SAME two-stage decode twice and  */
+/* reports a perfect zero diff — the most convincing possible green over   */
+/* the exact defect this case exists to catch. The pipeline's fused        */
+/* dispatch counter must move by exactly 1 on arm A and exactly 0 on arm   */
+/* B.                                                                      */
+/*                                                                        */
+/* Arm B is reached through the pipeline's own env-loaded route flag,      */
+/* re-read per decode, exactly as Y11 reaches the DNG host-source arm —    */
+/* not through a test hook. The env is cleared on every exit path.         */
+/*                                                                        */
+/* Cross-BACKEND agreement (Metal vs Vulkan) remains a different claim,    */
+/* delivered by the on-device artifact running this same binary.           */
 /* ====================================================================== */
 void run_y7() {
-    verdict_na("Y7", "bayer-arw", "A-fused-vs-B-two-stage",
-               "arm A yuv420 variant NOT SHIPPED (T12.6, separate commit): "
-               "raw_gpu_pipeline.cpp:532 disables fusion for yuv420 and "
-               "dng_render_halide.cpp:1480 refuses fused+yuv420 as a backstop. "
-               "Cross-BACKEND (Metal vs Vulkan) agreement is the on-device "
-               "artifact's claim, not this binary's.");
+    const char *path = "image_samples/raw_sample.arw";
+    char detail[1024];
+
+    /* RAII: the route flag is cleared on EVERY exit path below. A leaked
+     * flag would silently de-fuse every later case in this process. */
+    struct FusionOff {
+        FusionOff() { setenv("DNG_RAW_FUSED_BAYER_RENDER", "0", 1); }
+        ~FusionOff() { unsetenv("DNG_RAW_FUSED_BAYER_RENDER"); }
+    };
+
+    Yuv fused;
+    Yuv two_stage;
+    int32_t e_a = 0, e_b = 0;
+
+    const uint64_t c0 = raw_fused_bayer_render_count();
+    const bool ok_a = decode_yuv420(path, &fused, &e_a);
+    const uint64_t c1 = raw_fused_bayer_render_count();
+    bool ok_b = false;
+    uint64_t c2 = c1;
+    {
+        FusionOff off;
+        ok_b = decode_yuv420(path, &two_stage, &e_b);
+        c2 = raw_fused_bayer_render_count();
+    }
+
+    if (!ok_a || !ok_b) {
+        snprintf(detail, sizeof(detail),
+                 "%s: decode failed armA_ok=%d err=%d armB_ok=%d err=%d", path,
+                 ok_a ? 1 : 0, e_a, ok_b ? 1 : 0, e_b);
+        verdict("Y7", "bayer-arw", "A-fused-vs-B-two-stage", false, detail);
+        return;
+    }
+
+    /* B0 — the arm-A decode really fused, and the arm-B decode really did
+     * not. */
+    const uint64_t fused_delta_a = c1 - c0;
+    const uint64_t fused_delta_b = c2 - c1;
+    const bool b0 = (fused_delta_a == 1u) && (fused_delta_b == 0u);
+
+    /* B1 — sizes, extents and the full plane descriptor agree exactly. */
+    const bool b1 =
+        fused.w == two_stage.w && fused.h == two_stage.h &&
+        fused.bytes.size() == two_stage.bytes.size() &&
+        fused.planes.plane_width[0] == two_stage.planes.plane_width[0] &&
+        fused.planes.plane_width[1] == two_stage.planes.plane_width[1] &&
+        fused.planes.plane_width[2] == two_stage.planes.plane_width[2] &&
+        fused.planes.plane_height[0] == two_stage.planes.plane_height[0] &&
+        fused.planes.plane_height[1] == two_stage.planes.plane_height[1] &&
+        fused.planes.plane_height[2] == two_stage.planes.plane_height[2] &&
+        fused.planes.plane_row_stride[0] ==
+            two_stage.planes.plane_row_stride[0] &&
+        fused.planes.plane_row_stride[1] ==
+            two_stage.planes.plane_row_stride[1] &&
+        fused.planes.plane_row_stride[2] ==
+            two_stage.planes.plane_row_stride[2];
+
+    /* B2/B3/B4 — per-plane max |delta| <= 1. Plane spans are computed from
+     * the LITERAL geometry the descriptor reports, so a descriptor defect
+     * cannot fold two planes into one comparison. */
+    int32_t max_abs[3] = {0, 0, 0};
+    size_t diff_count[3] = {0, 0, 0};
+    size_t plane_bytes[3] = {0, 0, 0};
+    bool spans_ok = b1;
+    if (spans_ok) {
+        size_t offset = 0;
+        for (int p = 0; p < 3; ++p) {
+            plane_bytes[p] =
+                static_cast<size_t>(fused.planes.plane_width[p]) *
+                static_cast<size_t>(fused.planes.plane_height[p]);
+            if (offset + plane_bytes[p] > fused.bytes.size()) {
+                spans_ok = false;
+                break;
+            }
+            for (size_t i = 0; i < plane_bytes[p]; ++i) {
+                const int32_t d =
+                    static_cast<int32_t>(fused.bytes[offset + i]) -
+                    static_cast<int32_t>(two_stage.bytes[offset + i]);
+                const int32_t a = d < 0 ? -d : d;
+                if (a > max_abs[p]) max_abs[p] = a;
+                if (a != 0) ++diff_count[p];
+            }
+            offset += plane_bytes[p];
+        }
+    }
+
+    const bool b2 = spans_ok && max_abs[0] <= 1;
+    const bool b3 = spans_ok && max_abs[1] <= 1;
+    const bool b4 = spans_ok && max_abs[2] <= 1;
+    /* B5' (prereg AMENDMENT A1, disclosed there in full): the differing-byte
+     * FRACTION is a pass condition, not a report. It was a report until
+     * mutation M2 was run: a deliberate +1 bias on ONE channel of ONE arm
+     * moved 17.5-49.9% of every plane while keeping max|delta| at 1, so the
+     * max-only bound was green over a planted cross-arm divergence. 1% is a
+     * coarse tripwire sized ~3000x above the only measured honest residue
+     * (32/11198070 on Vulkan luma) and ~17x below that mutant. Exceeding it is
+     * STOP-AND-REPORT; it must not be raised to accommodate a result. */
+    bool b5 = spans_ok;
+    double diff_fraction[3] = {0.0, 0.0, 0.0};
+    for (int p = 0; p < 3 && spans_ok; ++p) {
+        if (plane_bytes[p] == 0) {
+            b5 = false;
+            break;
+        }
+        diff_fraction[p] = static_cast<double>(diff_count[p]) /
+                           static_cast<double>(plane_bytes[p]);
+        if (diff_fraction[p] > 0.01) b5 = false;
+    }
+    const bool ok = b0 && b1 && b2 && b3 && b4 && b5;
+
+    snprintf(detail, sizeof(detail),
+             "%s %dx%d B0 fused_delta=[A:%llu expect 1, B:%llu expect 0]=%d "
+             "B1 sizes/descriptor=%d spans=%d "
+             "max_abs=[Y:%d Cb:%d Cr:%d] bound=1 "
+             "B5' diff_fraction=[Y:%.6f Cb:%.6f Cr:%.6f] bound=0.01 pass=%d "
+             "diff_bytes=[Y:%zu/%zu Cb:%zu/%zu Cr:%zu/%zu] "
+             "fusedA_fnv1a64=%016" PRIx64 " twostageB_fnv1a64=%016" PRIx64
+             " prereg=native/tests/tmp/t126-00-y7-prereg.txt",
+             path, fused.w, fused.h,
+             static_cast<unsigned long long>(fused_delta_a),
+             static_cast<unsigned long long>(fused_delta_b), b0 ? 1 : 0,
+             b1 ? 1 : 0, spans_ok ? 1 : 0, max_abs[0], max_abs[1], max_abs[2],
+             diff_fraction[0], diff_fraction[1], diff_fraction[2], b5 ? 1 : 0,
+             diff_count[0], plane_bytes[0], diff_count[1], plane_bytes[1],
+             diff_count[2], plane_bytes[2],
+             fnv1a64(fused.bytes.data(), fused.bytes.size()),
+             fnv1a64(two_stage.bytes.data(), two_stage.bytes.size()));
+    verdict("Y7", "bayer-arw", "A-fused-vs-B-two-stage", ok, detail);
 }
 
 /* ====================================================================== */
