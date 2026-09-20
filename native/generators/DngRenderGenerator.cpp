@@ -382,9 +382,14 @@ public:
     // kernel had, now with coalesced 4-byte interleaved stores.
     void finalize(Var x, Var y) {
         Var c("c");
-        dst(x, y, c) = select(c == 0, out8_r,
-                              c == 1, out8_g,
-                              c == 2, out8_b,
+        // ARCH2-A: out8_* are now int32-valued in [0,255] (the colour body no
+        // longer BIRTHS an 8-bit type; see dng_render_stage4_split_expr.h).
+        // This store is where the bytes are formed and is the only narrow
+        // conversion left on this path; it is exact, because the value was
+        // already clamped in float to [0,255] before quantisation.
+        dst(x, y, c) = select(c == 0, cast<uint8_t>(out8_r),
+                              c == 1, cast<uint8_t>(out8_g),
+                              c == 2, cast<uint8_t>(out8_b),
                                       cast<uint8_t>(255));
     }
 

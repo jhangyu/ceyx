@@ -153,8 +153,18 @@ void build_dng_render_stage4_split_rgb8(
         Expr s_g = cast<float>(src_rgb(clamp(base + 1, 0, max_idx))) * src_scale;
         Expr s_b = cast<float>(src_rgb(clamp(base + 2, 0, max_idx))) * src_scale;
 
+        // ARCH2-A (validation round, Task #14). The channel is quantised to
+        // the SAME integer value but is BORN int32, never uint8. The argument
+        // is already clamped to [0.0f, 255.0f], so it is non-negative and in
+        // range for both conversions, and cast<uint8_t> / cast<int32_t>
+        // (OpConvertFToU %uchar / OpConvertFToS %int) return the same integer
+        // for every input: value-identical by construction. Consumers that
+        // need 8-bit BYTES re-narrow at their own store, which is then the
+        // only narrow type on the path and is never an arithmetic operand.
+        // (This lambda serves the diag_stage 0..7 ladder only; the shipping
+        // path's birth is the encode8 emit at the end of this function.)
         auto linear8 = [&](Expr v) {
-            return cast<uint8_t>(clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
+            return cast<int32_t>(clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
         };
 
         // Stash the three channel results; finalize() wires them into dst_rgb.
@@ -418,9 +428,12 @@ void build_dng_render_stage4_split_rgb8(
             return clamp(g * 255.0f + 0.5f, 0.0f, 255.0f);
         };
 
-        emit_rgb8(cast<uint8_t>(encode8(f_r)),
-                  cast<uint8_t>(encode8(f_g)),
-                  cast<uint8_t>(encode8(f_b)));
+        // ARCH2-A: THE SHIPPING PATH'S 8-BIT BIRTH (diag_stage = -1 ends here).
+        // encode8 already clamps to [0.0f, 255.0f], so cast<int32_t> yields
+        // the identical integer cast<uint8_t> yielded, for every input.
+        emit_rgb8(cast<int32_t>(encode8(f_r)),
+                  cast<int32_t>(encode8(f_g)),
+                  cast<int32_t>(encode8(f_b)));
 // ---- END verbatim slice -----------------------------------------------------
 }
 
