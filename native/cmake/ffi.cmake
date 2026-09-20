@@ -17,8 +17,13 @@ if(NOT DNG_CROSS_BUILD)
     add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
     add_dependencies(dng_decoder_native dng_warp_aot_target)
     add_dependencies(dng_decoder_native dng_render_aot_target)
+    # mem8 v3 T12: the yuv420 output variants, one per Stage-4 family. Declared
+    # beside their RGBA8 siblings and under the same conditional, so a build
+    # that links one links the other.
+    add_dependencies(dng_decoder_native dng_render_yuv420_aot_target)
     if(TARGET dng_render_android_aot_target)
         add_dependencies(dng_decoder_native dng_render_android_aot_target)
+        add_dependencies(dng_decoder_native dng_render_split_yuv420_aot_target)
     endif()
     add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
     add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
@@ -53,6 +58,7 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
@@ -72,7 +78,8 @@ endif()
 # W7: link the split Stage4 kernel wherever it is generated (Vulkan targets).
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(dng_decoder_native
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
     target_compile_definitions(dng_decoder_native PRIVATE
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()

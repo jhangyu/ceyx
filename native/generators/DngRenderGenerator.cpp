@@ -1,6 +1,7 @@
 #include "Halide.h"
 #include "dng_render_stage4_expr.h"
 #include "dng_render_stage4_split_expr.h"
+#include "ceyx_yuv420_write.h"
 
 using namespace Halide;
 
@@ -13,6 +14,37 @@ using namespace Halide;
 // `os == Target::Android` used to be.
 static bool uses_vulkan_planar_layout(const Target &t) {
     return t.os == Target::Android || t.has_feature(Target::Vulkan);
+}
+
+// mem8 v3 T12: the ONE schedule for a yuv420 plane triple, so the two arm-B
+// generators below (and arm A's fused generator) cannot drift into per-family
+// scheduling. Templated on the output type only because the two generators'
+// Output<> types are distinct C++ types; the body is identical for all callers
+// and contains no backend branch beyond has_gpu_feature(), which is the same
+// branch every generator in this file already makes.
+//
+// Deliberately NO compute_at anywhere: a staged producer becomes a Workgroup
+// array and is miscompiled below 32 bits on the Vulkan driver this project
+// targets, silently. check_gpu_producer_width.py is the mechanical enforcement.
+template <typename OutputT>
+static void scheduleYuv420Planes(const Target &t, bool guard_tail, Var x, Var y,
+                                 OutputT &y_plane, OutputT &cb_plane,
+                                 OutputT &cr_plane) {
+    OutputT *planes[3] = {&y_plane, &cb_plane, &cr_plane};
+    for (OutputT *plane : planes) {
+        if (t.has_gpu_feature()) {
+            Var xo("xo"), yo("yo"), xi("xi"), yi("yi");
+            if (guard_tail) {
+                plane->gpu_tile(x, y, xo, yo, xi, yi, 16, 16,
+                                TailStrategy::GuardWithIf);
+            } else {
+                plane->gpu_tile(x, y, xo, yo, xi, yi, 16, 16);
+            }
+        } else {
+            Var yo("yo"), yi("yi");
+            plane->split(y, yo, yi, 32).parallel(yo).vectorize(x, 8);
+        }
+    }
 }
 
 
@@ -1558,8 +1590,248 @@ public:
     }
 };
 
+// =============================================================================
+// mem8 v3 T12 — the yuv420 OUTPUT VARIANTS of the two Stage-4 families.
+//
+// These are ARM B (two-stage), which the plan requires first because it is the
+// arm every platform needs: the non-split class serves the Metal family, the
+// split class serves the Vulkan family (Android / Windows / Linux). Arm A —
+// the same output variant grafted onto T20's fused kernel — is a separate
+// generator and a separate commit.
+//
+// WHY TWO CLASSES AND NOT A GeneratorParam. A Halide generator cannot switch
+// output ARITY on a GeneratorParam, and yuv420 is three outputs where RGBA8 is
+// one. That is also why the format is never an Expr inside a kernel: format
+// selection is the host choosing which AOT entry to call.
+//
+// WHAT IS SHARED, AND WHY THAT IS THE WHOLE POINT
+//   * the colour arithmetic — dng_render_stage4_expr.h (non-split, extracted by
+//     T20) and dng_render_stage4_split_expr.h (split, extracted by T12-pre).
+//     Each yuv420 class calls the SAME header its RGBA8 sibling calls, so a
+//     colour-science change cannot land on one output format and not the other.
+//   * the plane math — ceyx_yuv420_write.h, ONE implementation used by both
+//     classes here and by arm A. The arms may differ in where the RGB comes
+//     from; they must not differ in how yuv420 is written (test Y7, and the
+//     standing no-divergence ruling).
+//
+// LAYOUT: shape 1 — three separate 2-D uint8 outputs, each tightly packed
+// (row stride == plane width, asserted here by set_stride(1) on dim 0). The
+// HOST computes the three plane offsets into one contiguous caller-owned
+// destination and passes three halide_buffer_t views over it, so the FFI
+// destination stays a single buffer and the frozen byte-count formula
+// w*h + 2*ceil(w/2)*ceil(h/2) (raw_ffi_api.h) is unchanged. Shape 2 — one
+// output with a computed linear plane index — is BARRED: that is plan (a) /
+// W4-1, already recorded as mis-lowering on Vulkan (Gotcha #93, :604-606).
+//
+// NO STAGED PRODUCER on either class, for the reason the class comment above
+// DngRenderStage4Android records: a Func materialised at a GPU loop level
+// becomes a Workgroup array, and this driver miscompiles that array below
+// 32 bits — silently. The colour body is inlined, which costs ~2x evaluation
+// (once for luma, once more per contributing chroma pixel) and is the price of
+// the shape; check_gpu_producer_width.py is the mechanical check that no
+// producer sneaks in.
+// =============================================================================
+class DngRenderStage4Yuv420 : public Halide::Generator<DngRenderStage4Yuv420> {
+public:
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
+
+    Input<Buffer<uint16_t>> src{"src", 3};          // x, y, c
+    Input<float> src_scale{"src_scale"};
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
+    Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
+    Input<Buffer<float>> tone_curve{"tone_curve", 1};
+    Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
+    Input<Buffer<float>> camera_white{"camera_white", 1};
+    Input<Buffer<float>> camera_to_rgb{"camera_to_rgb", 2};
+    Input<Buffer<float>> rgb_to_final{"rgb_to_final", 2};
+    Input<Buffer<float>> huesat_table{"huesat_table", 2};
+    Input<Buffer<float>> huesat_encode{"huesat_encode", 1};
+    Input<Buffer<float>> huesat_decode{"huesat_decode", 1};
+    Input<int32_t> huesat_hue_div{"huesat_hue_div"};
+    Input<int32_t> huesat_sat_div{"huesat_sat_div"};
+    Input<int32_t> huesat_val_div{"huesat_val_div"};
+    Input<int32_t> huesat_has_table{"huesat_has_table"};
+    Input<int32_t> huesat_has_encoding{"huesat_has_encoding"};
+    Input<Buffer<float>> look_table{"look_table", 2};
+    Input<Buffer<float>> look_encode{"look_encode", 1};
+    Input<Buffer<float>> look_decode{"look_decode", 1};
+    Input<int32_t> look_hue_div{"look_hue_div"};
+    Input<int32_t> look_sat_div{"look_sat_div"};
+    Input<int32_t> look_val_div{"look_val_div"};
+    Input<int32_t> look_has_table{"look_has_table"};
+    Input<int32_t> look_has_encoding{"look_has_encoding"};
+
+    // Y, Cb, Cr. Extents are set by the caller: w x h and ceil(w/2) x ceil(h/2).
+    Output<Buffer<uint8_t>> y_plane{"y_plane", 2};
+    Output<Buffer<uint8_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<uint8_t>> cr_plane{"cr_plane", 2};
+
+    Func rendered_rgb{"rendered_rgb"};
+
+    void generate() {
+        Var x("x"), y("y"), c("c");
+
+        // src layout: identical to DngRenderStage4's, because it reads the same
+        // Stage-3 buffer. Backend predicate, never the OS.
+        if (uses_vulkan_planar_layout(get_target())) {
+            src.dim(0).set_stride(1);
+            src.dim(1).set_stride(src.dim(0).extent());
+            src.dim(2).set_bounds(0, 3);
+            src.dim(2).set_stride(src.dim(0).extent() * src.dim(1).extent());
+        } else {
+            src.dim(0).set_stride(3);
+            src.dim(2).set_bounds(0, 3);
+            src.dim(2).set_stride(1);
+        }
+
+        // Tight packing is the frozen contract, not a Halide default we hope
+        // holds: assert it on every plane.
+        y_plane.dim(0).set_stride(1);
+        cb_plane.dim(0).set_stride(1);
+        cr_plane.dim(0).set_stride(1);
+
+        Func src_f("src_f");
+        src_f(x, y, c) = src(x, y, c);
+        ceyx::build_dng_render_stage4_rgb(
+            x, y,
+            [&](Expr sample_x, Expr sample_y, int channel) {
+                return src_f(sample_x, sample_y, channel);
+            },
+            src.dim(0).extent(), src.dim(1).extent(), src_scale,
+            orient_a_x, orient_b_x, orient_c_x,
+            orient_a_y, orient_b_y, orient_c_y,
+            exp_ramp, tone_curve, encode_gamma, camera_white,
+            camera_to_rgb, rgb_to_final,
+            huesat_table, huesat_encode, huesat_decode,
+            huesat_hue_div, huesat_sat_div, huesat_val_div,
+            huesat_has_table, huesat_has_encoding,
+            look_table, look_encode, look_decode,
+            look_hue_div, look_sat_div, look_val_div,
+            look_has_table, look_has_encoding,
+            rendered_rgb);
+
+        // The luma plane's extents ARE the oriented output extents, so the
+        // odd-extent edge clamp reads them from there rather than from a
+        // separate scalar the host could get wrong.
+        ceyx::build_yuv420_planes(x, y, rendered_rgb,
+                                  y_plane.dim(0).extent(),
+                                  y_plane.dim(1).extent(),
+                                  y_plane, cb_plane, cr_plane);
+    }
+
+    void schedule() {
+        Var x("x"), y("y");
+        scheduleYuv420Planes(get_target(), guard_tail, x, y,
+                             y_plane, cb_plane, cr_plane);
+    }
+};
+
+class DngRenderStage4SplitYuv420
+    : public Halide::Generator<DngRenderStage4SplitYuv420> {
+public:
+    GeneratorParam<int32_t> diag_stage{"diag_stage", -1};
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
+
+    Input<Buffer<uint16_t>> src_rgb{"src_rgb", 1};
+    Input<int32_t> src_width{"src_width"};
+    Input<int32_t> src_height{"src_height"};
+    Input<int32_t> src_row_stride_px{"src_row_stride_px"};
+    Input<int32_t> crop_l{"crop_l"};
+    Input<int32_t> crop_t{"crop_t"};
+    Input<float> src_scale{"src_scale"};
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
+    Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
+    Input<Buffer<float>> tone_curve{"tone_curve", 1};
+    Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
+    Input<Buffer<float>> camera_white{"camera_white", 1};
+    Input<Buffer<float>> camera_to_rgb{"camera_to_rgb", 1};
+    Input<Buffer<float>> rgb_to_final{"rgb_to_final", 1};
+    Input<Buffer<float>> huesat_table{"huesat_table", 1};
+    Input<Buffer<float>> huesat_encode{"huesat_encode", 1};
+    Input<Buffer<float>> huesat_decode{"huesat_decode", 1};
+    Input<int32_t> huesat_entry_count{"huesat_entry_count"};
+    Input<int32_t> huesat_hue_div{"huesat_hue_div"};
+    Input<int32_t> huesat_sat_div{"huesat_sat_div"};
+    Input<int32_t> huesat_val_div{"huesat_val_div"};
+    Input<int32_t> huesat_has_table{"huesat_has_table"};
+    Input<int32_t> huesat_has_encoding{"huesat_has_encoding"};
+    Input<Buffer<float>> look_table{"look_table", 1};
+    Input<Buffer<float>> look_encode{"look_encode", 1};
+    Input<Buffer<float>> look_decode{"look_decode", 1};
+    Input<int32_t> look_entry_count{"look_entry_count"};
+    Input<int32_t> look_hue_div{"look_hue_div"};
+    Input<int32_t> look_sat_div{"look_sat_div"};
+    Input<int32_t> look_val_div{"look_val_div"};
+    Input<int32_t> look_has_table{"look_has_table"};
+    Input<int32_t> look_has_encoding{"look_has_encoding"};
+
+    Output<Buffer<uint8_t>> y_plane{"y_plane", 2};
+    Output<Buffer<uint8_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<uint8_t>> cr_plane{"cr_plane", 2};
+
+    void generate() {
+        Var x("x"), y("y");
+
+        y_plane.dim(0).set_stride(1);
+        cb_plane.dim(0).set_stride(1);
+        cr_plane.dim(0).set_stride(1);
+
+        // The split family's colour body produces three Exprs over (x, y). The
+        // yuv420 write needs to evaluate them at the four source coordinates of
+        // a chroma block, so they are wrapped in one Func -- the same 3-Tuple
+        // uint8 shape the non-split family's rendered_rgb already has, which is
+        // what lets ONE plane-write implementation serve both families. The
+        // Func is INLINE (never compute_at'd), so no Workgroup array is
+        // materialised.
+        Expr out8_r, out8_g, out8_b;
+        ceyx::build_dng_render_stage4_split_rgb8(
+            x, y, diag_stage,
+            src_rgb, src_width, src_height, src_row_stride_px,
+            crop_l, crop_t, src_scale,
+            orient_a_x, orient_b_x, orient_c_x,
+            orient_a_y, orient_b_y, orient_c_y,
+            exp_ramp, tone_curve, encode_gamma, camera_white,
+            camera_to_rgb, rgb_to_final,
+            huesat_table, huesat_encode, huesat_decode,
+            huesat_entry_count,
+            huesat_hue_div, huesat_sat_div, huesat_val_div,
+            huesat_has_table, huesat_has_encoding,
+            look_table, look_encode, look_decode,
+            look_entry_count,
+            look_hue_div, look_sat_div, look_val_div,
+            look_has_table, look_has_encoding,
+            out8_r, out8_g, out8_b);
+
+        Func rendered_rgb("rendered_rgb");
+        rendered_rgb(x, y) = Tuple(out8_r, out8_g, out8_b);
+
+        ceyx::build_yuv420_planes(x, y, rendered_rgb,
+                                  y_plane.dim(0).extent(),
+                                  y_plane.dim(1).extent(),
+                                  y_plane, cb_plane, cr_plane);
+    }
+
+    void schedule() {
+        Var x("x"), y("y");
+        scheduleYuv420Planes(get_target(), guard_tail, x, y,
+                             y_plane, cb_plane, cr_plane);
+    }
+};
+
 HALIDE_REGISTER_GENERATOR(DngRenderStage4, dng_render_stage4)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4Scaled, dng_render_stage4_scaled)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4ScaledPreAvg, dng_render_stage4_scaled_preavg)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4Android, dng_render_stage4_split)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4AndroidProbe, dng_render_stage4_split_probe)
+HALIDE_REGISTER_GENERATOR(DngRenderStage4Yuv420, dng_render_stage4_yuv420)
+HALIDE_REGISTER_GENERATOR(DngRenderStage4SplitYuv420, dng_render_stage4_split_yuv420)

@@ -256,6 +256,22 @@ add_custom_command(
 add_custom_target(dng_render_scaled_preavg_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
 
+# mem8 v3 T12: the yuv420 output variant of the non-split Stage-4 kernel
+# (arm B, Metal family). Emitted from the SAME generator binary via -g/-f,
+# exactly like the scaled variants above, so dng_render_stage4 itself stays
+# byte-identical (its output SHAs are pinned gate artifacts — Gotcha #99).
+# Unconditional, matching dng_render_stage4 above: which of the two Stage-4
+# families a build DISPATCHES is decided by DNG_STAGE4_SPLIT_KERNEL, and the
+# format is decided by which entry the host calls — never by a kernel branch.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420.h
+    COMMAND dng_render_generator -g dng_render_stage4_yuv420 -f dng_render_stage4_yuv420 -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS dng_render_generator
+    COMMENT "Generating Halide AOT Stage4 Render (yuv420 planes)..."
+)
+add_custom_target(dng_render_yuv420_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+
 # Phase 14: Vulkan three-channel-split Stage4 generator (was Android-only; see
 # the DNG_STAGE4_SPLIT_KERNEL note above).
 # Eliminates Tuple + dim(2) codegen that triggers Halide v21 SPIR-V R==G bug.
@@ -279,6 +295,19 @@ if(DNG_STAGE4_SPLIT_KERNEL)
     )
     add_custom_target(dng_render_android_probe_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
     list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
+
+    # mem8 v3 T12: the yuv420 output variant of the split Stage-4 kernel
+    # (arm B, Vulkan family). Same colour header and the SAME plane-write
+    # helper as the non-split variant above; the two differ only in where the
+    # RGB comes from, which is the whole point of the shared helper.
+    add_custom_command(
+        OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420.h
+        COMMAND dng_render_generator -g dng_render_stage4_split_yuv420 -f dng_render_stage4_split_yuv420 -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET} diag_stage=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE}
+        DEPENDS dng_render_generator
+        COMMENT "Generating Halide AOT Stage4 Render (3-channel split, yuv420 planes)..."
+    )
+    add_custom_target(dng_render_split_yuv420_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
+    list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
 endif()
 
 # Phase 10 Sprint C1: MapPolynomial AOT (Stage 2 OpcodeList2 GPU).
