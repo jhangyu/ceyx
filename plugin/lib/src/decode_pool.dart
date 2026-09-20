@@ -400,6 +400,18 @@ class CeyxDecodePool {
   @visibleForTesting
   static bool? debugYuv420Available;
 
+  /// Test-only override for the UPCONVERT half alone
+  /// (`ceyx_yuv420_to_rgba8`). Null means "fall back to
+  /// [debugYuv420Available], then ask the library".
+  ///
+  /// Exists because the two halves are independently resolved symbol sets,
+  /// so "decode present, upconvert absent" is a REACHABLE library state — and
+  /// without a per-half override it is a branch of
+  /// [checkYuv420Supported] that no test can enter. An untestable failure
+  /// branch is how a wrong diagnostic ships.
+  @visibleForTesting
+  static bool? debugYuv420UpconvertAvailable;
+
   @visibleForTesting
   void debugSeedSizeCache(
     String path,
@@ -861,6 +873,78 @@ class CeyxDecodePool {
   }
 
   bool? _yuv420Cache;
+
+  /// Whether the loaded library exports the yuv420 DECODE entries.
+  ///
+  /// Public form of [_yuv420Available], for a host that must decide BEFORE it
+  /// submits anything — mem8 v3 T15a step 6 raises the R-J typed failure at
+  /// decode-service construction, not at first decode, and that is unwritable
+  /// without a probe on this surface. Honours [debugYuv420Available] and the
+  /// one-shot cache, because it IS [_yuv420Available]: a second resolution
+  /// path is a second thing to keep in sync, and the override exists so
+  /// forced-absence tests drive the real one.
+  bool get yuv420DecodeAvailable => _yuv420Available;
+
+  /// Whether the loaded library exports T13's upconvert
+  /// (`ceyx_yuv420_to_rgba8`).
+  ///
+  /// SEPARATE FROM [yuv420DecodeAvailable] ON PURPOSE. The two are different
+  /// symbol sets resolved independently (`dng_bindings.dart:527` vs `:531`),
+  /// and a library carrying one without the other is exactly the stale-dylib
+  /// state R-J exists to report. Folding them into a single bool would name
+  /// the wrong missing symbol in the exception and send a maintainer to the
+  /// wrong half of the library.
+  bool get yuv420UpconvertAvailable {
+    final override = debugYuv420UpconvertAvailable ?? debugYuv420Available;
+    if (override != null) return override;
+    final cached = _yuv420UpconvertCache;
+    if (cached != null) return cached;
+    bool resolved;
+    try {
+      resolved = _freeBindings.yuv420UpconvertAvailable;
+    } catch (e) {
+      logger('pool|YUV420_UPCONVERT_UNAVAILABLE|$e');
+      resolved = false;
+    }
+    _yuv420UpconvertCache = resolved;
+    return resolved;
+  }
+
+  bool? _yuv420UpconvertCache;
+
+  /// Both halves of the yuv420 route are present.
+  ///
+  /// A convenience only — [checkYuv420Supported] is what a caller that is
+  /// about to FAIL should use, because a bare `false` cannot say which half
+  /// is missing.
+  bool get yuv420Available => yuv420DecodeAvailable && yuv420UpconvertAvailable;
+
+  /// Throws the R-J typed failure when this library cannot service yuv420;
+  /// returns normally when it can.
+  ///
+  /// Exists so the exception is CONSTRUCTED IN ONE PLACE per half. The three
+  /// fields are frozen (T12.0.2: format, missing symbol, loaded library path —
+  /// a fourth is ruled out), so "report both halves separately" is carried by
+  /// [CeyxFormatUnsupportedException.missingSymbol] naming the half that is
+  /// actually absent rather than by a new field. The decode half is checked
+  /// first: without it there is nothing to upconvert, so it is the more
+  /// useful diagnosis when both are missing.
+  void checkYuv420Supported() {
+    if (!yuv420DecodeAvailable) {
+      throw CeyxFormatUnsupportedException(
+        format: CeyxOutputFormat.yuv420,
+        missingSymbol: 'ceyx_decode_into_buffer_format',
+        libraryPath: _loadedLibraryPath,
+      );
+    }
+    if (!yuv420UpconvertAvailable) {
+      throw CeyxFormatUnsupportedException(
+        format: CeyxOutputFormat.yuv420,
+        missingSymbol: 'ceyx_yuv420_to_rgba8',
+        libraryPath: _loadedLibraryPath,
+      );
+    }
+  }
 
   /// Absolute path of the library actually loaded, for the R-J exception.
   /// Never throws: this runs on the failure path, where a second failure

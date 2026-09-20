@@ -24,6 +24,7 @@ void main() {
 
   tearDown(() {
     CeyxDecodePool.debugYuv420Available = null;
+    CeyxDecodePool.debugYuv420UpconvertAvailable = null;
     CeyxDecodePool.debugDecodeIntoAvailable = null;
   });
 
@@ -108,6 +109,104 @@ void main() {
             'SR-11: there is ONE upconvert implementation and it is native; '
             'Dart must never open-code a fallback',
       );
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // mem8 v3 T15a step 6 — the SAME failure, raised at decode-service
+  // CONSTRUCTION instead of at first decode. The host cannot ask "can this
+  // library service yuv420?" before submitting without a public probe, and a
+  // failure that only appears on the first photo has already cost the user a
+  // load by the time it is reported.
+  //
+  // Both halves get their own case because they are independently resolved
+  // symbol sets: naming the wrong one sends a maintainer to the wrong half of
+  // the library, and "decode present, upconvert absent" is a reachable state.
+  // ---------------------------------------------------------------------
+
+  test(
+    'TC-1350 (T15a.6): checkYuv420Supported throws at CONSTRUCTION time, '
+    'naming the decode entry, when the decode half is absent',
+    () {
+      // setUp already forced both halves absent.
+      final pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
+      addTearDown(pool.dispose);
+
+      expect(pool.yuv420DecodeAvailable, isFalse);
+      expect(pool.yuv420Available, isFalse);
+
+      Object? caught;
+      try {
+        pool.checkYuv420Supported();
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<CeyxFormatUnsupportedException>());
+      final e = caught! as CeyxFormatUnsupportedException;
+      expect(e.format, CeyxOutputFormat.yuv420);
+      expect(
+        e.missingSymbol,
+        'ceyx_decode_into_buffer_format',
+        reason:
+            'the decode half is checked first: without it there is nothing to '
+            'upconvert, so it is the more useful diagnosis when both are gone',
+      );
+      expect(e.libraryPath, isNotEmpty);
+    },
+  );
+
+  test(
+    'TC-1351 (T15a.6): decode present but upconvert absent names the '
+    'UPCONVERT symbol — the half a single bool would have hidden',
+    () {
+      CeyxDecodePool.debugYuv420Available = true;
+      CeyxDecodePool.debugYuv420UpconvertAvailable = false;
+      final pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
+      addTearDown(pool.dispose);
+
+      expect(pool.yuv420DecodeAvailable, isTrue);
+      expect(pool.yuv420UpconvertAvailable, isFalse);
+      expect(
+        pool.yuv420Available,
+        isFalse,
+        reason: 'the ANDed form must not call a half-equipped library usable',
+      );
+
+      Object? caught;
+      try {
+        pool.checkYuv420Supported();
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<CeyxFormatUnsupportedException>());
+      expect(
+        (caught! as CeyxFormatUnsupportedException).missingSymbol,
+        'ceyx_yuv420_to_rgba8',
+        reason:
+            'reporting the decode entry here would send a maintainer to the '
+            'wrong half of the library',
+      );
+    },
+  );
+
+  test(
+    'TC-1352 (T15a.6): with both halves present the check is silent and the '
+    'getters agree',
+    () {
+      CeyxDecodePool.debugYuv420Available = true;
+      final pool = CeyxDecodePool(width: 1, entryPoint: fakePoolWorker);
+      addTearDown(pool.dispose);
+
+      expect(pool.yuv420DecodeAvailable, isTrue);
+      expect(
+        pool.yuv420UpconvertAvailable,
+        isTrue,
+        reason:
+            'the upconvert half falls back to debugYuv420Available when its '
+            'own override is null, so the existing seam still governs both',
+      );
+      expect(pool.yuv420Available, isTrue);
+      expect(pool.checkYuv420Supported, returnsNormally);
     },
   );
 }
