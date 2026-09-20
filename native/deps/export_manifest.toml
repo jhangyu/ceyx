@@ -27,6 +27,10 @@
 # symbol-absence tests, so ABSENT there is never a failure.
 
 [[group]]
+id          = "arena_idle_shrink"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
 id          = "debug_pool"
 expected_on = []
 
@@ -133,6 +137,13 @@ platforms  = "all"
 group      = "encode"
 source     = "native/src/ffi/encode_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/encode_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_native_idle_shrink"
+platforms  = "all"
+group      = "arena_idle_shrink"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
 name       = "ceyx_pool_aligned_alloc"

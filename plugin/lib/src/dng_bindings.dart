@@ -224,6 +224,14 @@ const int kCeyxPressureReliefUnsupported = -1;
 typedef CeyxPoolPressureReliefNative = ffi.Int64 Function();
 typedef CeyxPoolPressureReliefDart = int Function();
 
+// mem8 T1/T2 (SR-1): THE ONE NATIVE IDLE FUNNEL. A quiescent host asks the
+// native side to release device regions of every arena lane above `floor`;
+// the return value is the BYTE COUNT released (0 means "nothing to release",
+// which is SUCCESS, not an error -- see native/include/raw_ffi_api.h).
+// ADDITIVE and its OWN guarded lookup, same reasoning as the pair above.
+typedef CeyxNativeIdleShrinkNative = ffi.Int64 Function(ffi.Int32 floor);
+typedef CeyxNativeIdleShrinkDart = int Function(int floor);
+
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
@@ -288,6 +296,7 @@ class DngNativeBindings {
   // Pool idle-shrink campaign: its OWN guarded field, independent of the pair
   // above — see the typedef comment for why.
   CeyxPoolPressureReliefDart? _ceyxPoolPressureRelief;
+  CeyxNativeIdleShrinkDart? _ceyxNativeIdleShrink;
 
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
@@ -369,6 +378,16 @@ class DngNativeBindings {
   /// native/include/ceyx_decode_into.h).
   CeyxPoolPressureReliefDart? get ceyxPoolPressureRelief =>
       _ceyxPoolPressureRelief;
+
+  /// Guarded access to the mem8 T1 arena idle-release funnel
+  /// (`ceyx_native_idle_shrink`). Null when the loaded dylib predates it —
+  /// callers SKIP the shrink and count a skip; see
+  /// `CeyxNativeBufferPool._nativeIdleShrink` for why tolerating an absent
+  /// symbol is right HERE and wrong for the yuv420 output entry (T14).
+  CeyxNativeIdleShrinkDart? get ceyxNativeIdleShrink => _ceyxNativeIdleShrink;
+
+  /// Whether this library exposes the native idle-shrink funnel.
+  bool get nativeIdleShrinkAvailable => _ceyxNativeIdleShrink != null;
 
   /// True only when BOTH WP10 symbols resolved. Partial availability is a
   /// corrupt build and reports as unsupported, so the host falls back to the
@@ -557,6 +576,18 @@ class DngNativeBindings {
           >('ceyx_pool_pressure_relief');
     } catch (_) {
       _ceyxPoolPressureRelief = null;
+    }
+
+    // mem8 T1/T2 (SR-1): the arena idle-release funnel. Its OWN try block,
+    // same reasoning as every guarded lookup above — a dylib predating this
+    // campaign must not null out the groups already resolved.
+    try {
+      _ceyxNativeIdleShrink = _lib
+          .lookupFunction<CeyxNativeIdleShrinkNative, CeyxNativeIdleShrinkDart>(
+            'ceyx_native_idle_shrink',
+          );
+    } catch (_) {
+      _ceyxNativeIdleShrink = null;
     }
 
     dngDecoderWarmupForSize = _lib

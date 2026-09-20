@@ -16,10 +16,15 @@ void main() {
   group('onShrink notification', () {
     setUp(() {
       CeyxNativeBufferPool.debugPressureReliefOverride = () => 0;
+      // mem8 T2: the arena idle funnel now runs between the relief and
+      // onShrink. Stubbed here so these cases exercise the real tail ordering
+      // instead of the absent-symbol skip.
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) => 0;
     });
 
     tearDown(() {
       CeyxNativeBufferPool.debugPressureReliefOverride = null;
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = null;
       CeyxNativeBufferPool.debugFreeHook = null;
     });
 
@@ -102,5 +107,32 @@ void main() {
       expect(order.last, 'onShrink:3');
       expect(order, <String>['free', 'free', 'free', 'relief', 'onShrink:3']);
     });
+
+    test(
+      'TC-1315: onShrink still fires LAST with the mem8 T2 arena release '
+      'wired in between',
+      () async {
+        final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 1);
+        addTearDown(pool.debugDisposeIdle);
+        final order = <String>[];
+        await fillIdle(pool, 4);
+        CeyxNativeBufferPool.debugPressureReliefOverride = () {
+          order.add('relief');
+          return 0;
+        };
+        CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+          order.add('arena:$floor');
+          return 0;
+        };
+        pool.onShrink = (freed) => order.add('onShrink:$freed');
+
+        expect(pool.shrinkToFloor(), 3);
+
+        // The host's contract is unchanged by T2: onShrink observes a
+        // COMPLETED shrink, now including the native arena release.
+        expect(order, <String>['relief', 'arena:1', 'onShrink:3']);
+        expect(pool.debugArenaIdleShrinkCalls, 1);
+      },
+    );
   });
 }

@@ -103,6 +103,13 @@ class CeyxNativeBufferPool {
   @visibleForTesting
   static int Function()? debugPressureReliefOverride;
 
+  /// Test seam standing in for the native `ceyx_native_idle_shrink` symbol
+  /// (mem8 T1, SR-1). Takes the lane floor, returns bytes released. When
+  /// null, the binding is consulted; when the binding is also absent the
+  /// shrink is simply skipped and counted — see [_nativeIdleShrink].
+  @visibleForTesting
+  static int Function(int floor)? debugArenaIdleShrinkOverride;
+
   // --- R4 (gpu-copy-elimination campaign): page-aligned pooled allocations --
   //
   // The C2 zero-copy wrap only engages when the caller's destination pointer
@@ -366,6 +373,22 @@ class CeyxNativeBufferPool {
   /// Non-zero on a release build means the dylib predates the symbol.
   @visibleForTesting
   int debugPressureReliefSkips = 0;
+
+  /// Times the native idle shrink actually reached a function (override or
+  /// binding). MUST be at most one per shrink batch.
+  @visibleForTesting
+  int debugArenaIdleShrinkCalls = 0;
+
+  /// Bytes the native arena idle shrink reported releasing on its last call.
+  /// Null before the first call that reached a function. A real 0 ("nothing
+  /// above the floor") is SUCCESS, not an error.
+  @visibleForTesting
+  int? debugLastArenaIdleShrinkBytes;
+
+  /// Shrink batches that freed memory but found no idle-shrink symbol to
+  /// call. Non-zero on a release build means the dylib predates mem8 T1.
+  @visibleForTesting
+  int debugArenaIdleShrinkSkips = 0;
 
   /// Shrink batches that refused because the pool was not idle
   /// (`_waiting` non-empty or something still checked out).
@@ -764,6 +787,15 @@ class CeyxNativeBufferPool {
     debugShrinkEvents++;
     debugBuffersFreedByShrink += freed;
     _pressureRelief();
+    // mem8 T2 (SR-1): arena (T1) + DNG contexts (T3), same trigger, same
+    // floor. Placed AFTER _pressureRelief and BEFORE onShrink on purpose —
+    // the native release must have happened before onShrink fires, or the
+    // host's working-set trim runs before the pages it is meant to return
+    // have been handed back. Both the refusal path above and the
+    // `freed == 0` early exit correctly skip it: an outstanding checkout
+    // means a decode may still be live, which is exactly the state T1's own
+    // refusal exists for and which we should not even reach.
+    _nativeIdleShrink();
     // LAST statement by design: a listener must observe a completed shrink,
     // pages already returned. Reached only past the `freed == 0` early exit
     // and never on the refusal path above.
@@ -797,6 +829,56 @@ class CeyxNativeBufferPool {
     }
     debugLastPressureReliefResult = fn();
     debugPressureReliefCalls++;
+  }
+
+  /// Asks the native side (mem8 T1's one idle funnel) to release arena device
+  /// regions above [idleFloor]. Called only from [shrinkToFloor]'s tail, so
+  /// the pool is provably quiescent — which is clause (e) of the native
+  /// contract: the per-lane live-binding refusal there is a backstop, not a
+  /// lock, and this pool's quiescence window is the only clock.
+  ///
+  /// ABSENT-SYMBOL RULE — TOLERATE, and that is specific to THIS symbol.
+  /// `ceyx_native_idle_shrink` is an OPTIMISATION: a dylib without it means
+  /// "no idle shrink", and the app is still fully correct, merely using more
+  /// memory. So a missing symbol counts a skip and returns, exactly like
+  /// [_pressureRelief]. Do NOT generalise this to the next guarded lookup
+  /// added in this file: mem8 T14's yuv420 output-format entry is
+  /// LOAD-BEARING FOR CORRECTNESS (a dylib without it cannot produce the
+  /// pixels the host is about to interpret as planar yuv, so degrading
+  /// silently yields a wrong image with no error) and must throw a typed
+  /// failure instead. The one-line test for which rule applies: *if this
+  /// symbol is missing, is the app still correct?* Yes → tolerate (T2).
+  /// No → throw (T14).
+  ///
+  /// Never throws: an unexpected native error must not escape into the shrink
+  /// path and strand the pool mid-batch (the [onShrink] listener still has to
+  /// run).
+  void _nativeIdleShrink() {
+    final fn =
+        debugArenaIdleShrinkOverride ??
+        _resolveNativeBindings()?.ceyxNativeIdleShrink;
+    if (fn == null) {
+      debugArenaIdleShrinkSkips++;
+      assert(() {
+        // ignore: avoid_print
+        print(
+          'CeyxNativeBufferPool: ceyx_native_idle_shrink unavailable; '
+          'shrink freed buffers but did not release arena device regions.',
+        );
+        return true;
+      }());
+      return;
+    }
+    try {
+      debugLastArenaIdleShrinkBytes = fn(idleFloor);
+      debugArenaIdleShrinkCalls++;
+    } catch (error) {
+      assert(() {
+        // ignore: avoid_print
+        print('CeyxNativeBufferPool: ceyx_native_idle_shrink threw: $error');
+        return true;
+      }());
+    }
   }
 
   /// Test-only: frees every idle buffer so a unit test leaves no native
