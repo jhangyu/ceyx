@@ -50,7 +50,10 @@ enum CeyxEncodeErrorCode {
   kCeyxEncodeErrBadOptions       = -408, /**< opts NULL, bad struct_size, reserved != 0 */
   kCeyxEncodeErrMetadataRejected = -409, /**< the container refused the metadata block */
   kCeyxEncodeErrBadFormat        = -410, /**< format is not a CeyxImageFormat value */
-  kCeyxEncodeErrLosslessUnsupported = -411 /**< lossless requested, codec cannot */
+  kCeyxEncodeErrLosslessUnsupported = -411, /**< lossless requested, codec cannot */
+  /* --- appended 2026-09-20, planar yuv420 encode. Append-only. --- */
+  kCeyxEncodeErrBadBufferSize    = -412  /**< src_capacity below the format's
+                                          *   required byte count */
 };
 
 /** Mirrors the spelling used by the Dart side, for comparable log lines. */
@@ -66,6 +69,36 @@ const char *ceyx_encode_error_name(int32_t code);
 int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len);
+
+/** Encodes a PLANAR 4:2:0 frame -- exactly the layout a yuv420 decode writes
+ * (raw_ffi_api.h:436-469) -- as a baseline JPEG, WITHOUT an intermediate
+ * RGBA8 materialisation.
+ *
+ * `src` is ONE tightly-packed contiguous allocation holding, in this order:
+ *   Y  : width x height,                     stride == width
+ *   Cb : ceil(w/2) x ceil(h/2),              stride == ceil(w/2)
+ *   Cr : ceil(w/2) x ceil(h/2),              stride == ceil(w/2)
+ * i.e. ceyx_output_format_byte_count(kCeyxOutputFormatYuv420, w, h) bytes;
+ * `src_capacity` is the real allocation size and is CHECKED against that
+ * (kCeyxEncodeErrBadBufferSize, -412) -- unlike ceyx_encode_jpeg_rgba8, whose
+ * length contract the ABI cannot verify.
+ *
+ * The samples are consumed by libjpeg's raw-data path (jpeg_write_raw_data,
+ * 2h2v sampling), so NO colour conversion and NO chroma downsampling happens:
+ * the decoder's planes are already full-range BT.601 JFIF YCbCr produced from
+ * libjpeg's own coefficients (ceyx_yuv420_oracle.h), which is why this is
+ * lossless-in-convention with respect to the rgba8 entry rather than an
+ * approximation of it.
+ *
+ * Odd widths/heights are handled here: libjpeg's raw path requires whole iMCU
+ * rows, and this entry pads by replicating the last valid column/row, so the
+ * caller never has to over-allocate or pre-pad.
+ *
+ * `quality` is the standard libjpeg 1..100 scale.
+ * Returns kCeyxEncodeSuccess (0) or a negative CeyxEncodeErrorCode. */
+int32_t ceyx_encode_jpeg_yuv420(const uint8_t *src, size_t src_capacity,
+                                int32_t width, int32_t height, int32_t quality,
+                                uint8_t **out, size_t *out_len);
 
 /** Same contract and same pixel layout as ceyx_encode_jpeg_rgba8, producing a
  * lossy WebP (alpha preserved). `quality` is libwebp's 1..100 quality factor.

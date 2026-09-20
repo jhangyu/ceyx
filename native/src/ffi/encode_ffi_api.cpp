@@ -11,6 +11,13 @@
 
 #include "ceyx_encode_api.h"
 
+// The yuv420 entry below consumes EXACTLY the destination layout a yuv420
+// decode writes, so both the layout contract and its sizing function are taken
+// from their single definitions rather than restated here (raw_ffi_api.h:436-487
+// rules that open-coding the arithmetic is a defect by contract).
+#include "raw_ffi_api.h"
+#include "ceyx_yuv420_oracle.h"
+
 #include "still_codec_internal.h"
 
 #include <csetjmp>
@@ -92,6 +99,7 @@ FFI_EXPORT const char *ceyx_encode_error_name(int32_t code) {
     case kCeyxEncodeErrMetadataRejected: return "kCeyxEncodeErrMetadataRejected";
     case kCeyxEncodeErrBadFormat: return "kCeyxEncodeErrBadFormat";
     case kCeyxEncodeErrLosslessUnsupported: return "kCeyxEncodeErrLosslessUnsupported";
+    case kCeyxEncodeErrBadBufferSize: return "kCeyxEncodeErrBadBufferSize";
     default: return "kCeyxEncodeErrUnknown";
   }
 }
@@ -170,6 +178,176 @@ FFI_EXPORT int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
   jpeg_finish_compress(&cinfo);
   jpeg_destroy_compress(&cinfo);
   if (row_scratch) free(row_scratch);
+
+  if (!buffer || buffer_len == 0) {
+    if (buffer) free(buffer);
+    return kCeyxEncodeErrEncodeFailed;
+  }
+  *out = static_cast<uint8_t *>(buffer);
+  *out_len = static_cast<size_t>(buffer_len);
+  return kCeyxEncodeSuccess;
+}
+
+// Planar 4:2:0 -> JPEG, via libjpeg's raw-data path. See the contract comment
+// on the declaration in ceyx_encode_api.h.
+//
+// WHY THIS IS NOT "rgba8 with a conversion in front": jpeg_write_raw_data
+// bypasses BOTH jccolor (RGB->YCbCr) and jcsample (chroma downsample). The
+// decoder already produced its planes with libjpeg's own coefficients and its
+// own 2x2 box average (ceyx_yuv420_oracle.h, whose provenance is jccolor.c /
+// jcsample.c on this tree), so feeding them in raw reproduces what the rgba8
+// entry would have computed from the same frame -- it does not approximate it.
+//
+// PADDING: doc/libjpeg.txt:2866-2933 requires whole iMCU rows and a per-
+// component row length of width_in_blocks*DCTSIZE. Those fields only exist
+// after jpeg_start_compress, so the scratch bands are sized from them rather
+// than from a hand-derived ceil(). Rows/columns past the valid extent replicate
+// the last valid sample (the "usually ... replicating the last column and/or
+// row" the doc names), which is why an odd width or height never overreads
+// `src` and never needs the caller to pre-pad.
+//
+// ONE implementation, no platform branch: this body is identical on every
+// target (the FFI_EXPORT macro above is the Windows export attribute, not a
+// second code path), as required by the repo's no-divergence rule.
+FFI_EXPORT int32_t ceyx_encode_jpeg_yuv420(const uint8_t *src,
+                                           size_t src_capacity, int32_t width,
+                                           int32_t height, int32_t quality,
+                                           uint8_t **out, size_t *out_len) {
+  const int32_t bad = ValidateArgs(src, width, height, quality, out, out_len);
+  if (bad != kCeyxEncodeSuccess) return bad;
+
+  // Unlike the rgba8 entry (see ValidateArgs' note), this one is handed the
+  // real allocation size, so the length contract is CHECKED here instead of
+  // being delegated to the caller.
+  const int64_t required =
+      ceyx_output_format_byte_count(kCeyxOutputFormatYuv420, width, height);
+  if (required <= 0 || src_capacity < static_cast<size_t>(required)) {
+    return kCeyxEncodeErrBadBufferSize;
+  }
+
+  const int32_t chroma_w = ceyx::yuv420::chroma_extent(width);
+  const int32_t chroma_h = ceyx::yuv420::chroma_extent(height);
+  const uint8_t *const plane_y = src;
+  const uint8_t *const plane_cb =
+      src + static_cast<size_t>(width) * static_cast<size_t>(height);
+  const uint8_t *const plane_cr =
+      plane_cb + static_cast<size_t>(chroma_w) * static_cast<size_t>(chroma_h);
+
+  struct jpeg_compress_struct cinfo;
+  JpegErrorMgr jerr;
+  unsigned char *buffer = nullptr;  // allocated by libjpeg via malloc/realloc
+  unsigned long buffer_len = 0;
+  // volatile for the same C11 7.13.2.1 reason the rgba8 entry documents: these
+  // are assigned after setjmp() and freed inside the longjmp handler.
+  uint8_t *volatile band_y = nullptr;
+  uint8_t *volatile band_cb = nullptr;
+  uint8_t *volatile band_cr = nullptr;
+
+  cinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = JpegErrorExit;
+  jerr.pub.output_message = JpegSilentOutput;
+  if (setjmp(jerr.setjmp_buffer)) {
+    jpeg_destroy_compress(&cinfo);
+    if (buffer) free(buffer);
+    if (band_y) free(band_y);
+    if (band_cb) free(band_cb);
+    if (band_cr) free(band_cr);
+    *out = nullptr;
+    *out_len = 0;
+    return kCeyxEncodeErrEncodeFailed;
+  }
+
+  jpeg_create_compress(&cinfo);
+  jpeg_mem_dest(&cinfo, &buffer, &buffer_len);
+  cinfo.image_width = static_cast<JDIMENSION>(width);
+  cinfo.image_height = static_cast<JDIMENSION>(height);
+  cinfo.input_components = 3;
+  cinfo.in_color_space = JCS_YCbCr;
+  jpeg_set_defaults(&cinfo);
+  // Explicit, not inherited: doc/libjpeg.txt:2882-2889 warns that with colour
+  // conversion bypassed, in_color_space is ignored and the sampling factors
+  // describe the data being supplied, so both are stated rather than assumed.
+  jpeg_set_colorspace(&cinfo, JCS_YCbCr);
+  jpeg_set_quality(&cinfo, quality, TRUE);
+  cinfo.raw_data_in = TRUE;
+  cinfo.comp_info[0].h_samp_factor = 2;
+  cinfo.comp_info[0].v_samp_factor = 2;
+  cinfo.comp_info[1].h_samp_factor = 1;
+  cinfo.comp_info[1].v_samp_factor = 1;
+  cinfo.comp_info[2].h_samp_factor = 1;
+  cinfo.comp_info[2].v_samp_factor = 1;
+  jpeg_start_compress(&cinfo, TRUE);
+
+  // Rows libjpeg will READ per component, now that start_compress has filled
+  // width_in_blocks (doc/libjpeg.txt:2904-2913).
+  const size_t y_pad_w =
+      static_cast<size_t>(cinfo.comp_info[0].width_in_blocks) * DCTSIZE;
+  const size_t c_pad_w =
+      static_cast<size_t>(cinfo.comp_info[1].width_in_blocks) * DCTSIZE;
+  const int kYBandRows = 2 * DCTSIZE;  // max_v_samp_factor * DCTSIZE
+  const int kCBandRows = DCTSIZE;
+
+  band_y = static_cast<uint8_t *>(malloc(y_pad_w * kYBandRows));
+  band_cb = static_cast<uint8_t *>(malloc(c_pad_w * kCBandRows));
+  band_cr = static_cast<uint8_t *>(malloc(c_pad_w * kCBandRows));
+  if (!band_y || !band_cb || !band_cr) {
+    jpeg_destroy_compress(&cinfo);
+    if (buffer) free(buffer);
+    if (band_y) free(band_y);
+    if (band_cb) free(band_cb);
+    if (band_cr) free(band_cr);
+    return kCeyxEncodeErrAllocationFailed;
+  }
+
+  // Copies one source row into a padded scratch row, replicating the last
+  // valid column across the pad. `src_row` is already clamped by the caller,
+  // which is what makes the bottom pad a row replication.
+  const auto fill_row = [](uint8_t *dst, const uint8_t *plane, int32_t row,
+                           int32_t valid_w, size_t padded_w) {
+    memcpy(dst, plane + static_cast<size_t>(row) * valid_w,
+           static_cast<size_t>(valid_w));
+    for (size_t x = static_cast<size_t>(valid_w); x < padded_w; ++x) {
+      dst[x] = dst[valid_w - 1];
+    }
+  };
+
+  JSAMPROW y_rows[2 * DCTSIZE];
+  JSAMPROW cb_rows[DCTSIZE];
+  JSAMPROW cr_rows[DCTSIZE];
+  JSAMPARRAY planes[3] = {y_rows, cb_rows, cr_rows};
+
+  uint8_t *const by = band_y;
+  uint8_t *const bcb = band_cb;
+  uint8_t *const bcr = band_cr;
+
+  int mcu_row = 0;
+  while (cinfo.next_scanline < cinfo.image_height) {
+    for (int r = 0; r < kYBandRows; ++r) {
+      int32_t sy = mcu_row * kYBandRows + r;
+      if (sy > height - 1) sy = height - 1;
+      uint8_t *dst = by + static_cast<size_t>(r) * y_pad_w;
+      fill_row(dst, plane_y, sy, width, y_pad_w);
+      y_rows[r] = reinterpret_cast<JSAMPROW>(dst);
+    }
+    for (int r = 0; r < kCBandRows; ++r) {
+      int32_t sy = mcu_row * kCBandRows + r;
+      if (sy > chroma_h - 1) sy = chroma_h - 1;
+      uint8_t *dst_cb = bcb + static_cast<size_t>(r) * c_pad_w;
+      uint8_t *dst_cr = bcr + static_cast<size_t>(r) * c_pad_w;
+      fill_row(dst_cb, plane_cb, sy, chroma_w, c_pad_w);
+      fill_row(dst_cr, plane_cr, sy, chroma_w, c_pad_w);
+      cb_rows[r] = reinterpret_cast<JSAMPROW>(dst_cb);
+      cr_rows[r] = reinterpret_cast<JSAMPROW>(dst_cr);
+    }
+    jpeg_write_raw_data(&cinfo, planes, static_cast<JDIMENSION>(kYBandRows));
+    ++mcu_row;
+  }
+
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  free(by);
+  free(bcb);
+  free(bcr);
 
   if (!buffer || buffer_len == 0) {
     if (buffer) free(buffer);
