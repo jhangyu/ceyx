@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart' show calloc, malloc;
 import 'package:meta/meta.dart';
 
+import 'codec_format.dart';
 import 'dng_bindings.dart';
 import 'dng_decoder_service.dart';
 import 'encode_bindings.dart';
@@ -393,13 +394,47 @@ class CeyxDecodePool {
   @visibleForTesting
   static bool? debugDecodeIntoAvailable;
 
+  /// Test-only override for "the loaded library exports the yuv420 entries".
+  /// Null means "ask the library". Forcing it FALSE is how the R-J throw is
+  /// exercised without a pre-T12 dylib on hand.
   @visibleForTesting
-  void debugSeedSizeCache(String path, int? maxDim, int bytes) =>
-      _sizeCache['$path|$maxDim'] = bytes;
+  static bool? debugYuv420Available;
 
   @visibleForTesting
-  int? debugSizeCacheFor(String path, int? maxDim) =>
-      _sizeCache['$path|$maxDim'];
+  void debugSeedSizeCache(
+    String path,
+    int? maxDim,
+    int bytes, [
+    CeyxOutputFormat format = CeyxOutputFormat.rgba8,
+  ]) => _sizeCache[_sizeKey(path, maxDim, format)] = bytes;
+
+  /// Test-only read of the same cache THROUGH the real key function, so a
+  /// cross-format collision is observable (F3) rather than hidden behind a
+  /// hand-built key string that could drift from the production one.
+  @visibleForTesting
+  int? debugSizeCacheLookup(
+    String path,
+    int? maxDim, [
+    CeyxOutputFormat format = CeyxOutputFormat.rgba8,
+  ]) => _sizeCache[_sizeKey(path, maxDim, format)];
+
+  /// Test-only view of the coalescing record key. Returned as [Object] because
+  /// `_JobKey` is private; equality is all a caller can and should assert.
+  @visibleForTesting
+  Object debugJobKey(
+    CeyxPoolJobType type,
+    String path,
+    int? maxDim,
+    CeyxOutputFormat format, {
+    int exifOrientation = 1,
+  }) => (type, path, maxDim, exifOrientation, format);
+
+  @visibleForTesting
+  int? debugSizeCacheFor(
+    String path,
+    int? maxDim, [
+    CeyxOutputFormat format = CeyxOutputFormat.rgba8,
+  ]) => _sizeCache[_sizeKey(path, maxDim, format)];
 
   @visibleForTesting
   int debugDispatchCountFor(String path) => _dispatchCounts[path] ?? 0;
@@ -703,6 +738,7 @@ class CeyxDecodePool {
     int? maxDim,
     int? generation,
     int exifOrientation = 1,
+    CeyxOutputFormat format = CeyxOutputFormat.rgba8,
   }) {
     if (_disposed) {
       return Future.error(
@@ -710,12 +746,30 @@ class CeyxDecodePool {
         StackTrace.current,
       );
     }
+    // R-J, checked at SUBMIT and not in the worker: the caller's own stack
+    // still holds the path and the requested format, and no job has been
+    // admitted or slot acquired yet. A worker-side throw arrives through the
+    // pool's error plumbing with that context already gone.
+    //
+    // The OPPOSITE rule to mem8 T2's tolerated `ceyx_native_idle_shrink`:
+    // that symbol is an optimisation, this one is load-bearing for
+    // correctness. A silent rgba8 fallback would hand back 4 B/px bytes the
+    // caller is about to read as 1.5 B/px planar yuv — a corrupt image with
+    // no error, strictly worse than a crash. Returning null, falling back, or
+    // catching this inside ceyx are all forbidden.
+    if (format != CeyxOutputFormat.rgba8 && !_yuv420Available) {
+      throw CeyxFormatUnsupportedException(
+        format: format,
+        missingSymbol: 'ceyx_decode_into_buffer_format',
+        libraryPath: _loadedLibraryPath,
+      );
+    }
     final gen = generation ?? _generation;
     // exifOrientation is part of the identity: an unoriented submit must not
     // coalesce onto an in-flight oriented job (it would receive already
     // rotated pixels while its DecodedRgba defaults appliedOrientation to 1,
     // and the host would rotate a second time).
-    final key = (type, path, maxDim, exifOrientation);
+    final key = (type, path, maxDim, exifOrientation, format);
     final existing = _byKey[key];
     if (existing != null) {
       debugCoalescedCount++;
@@ -731,6 +785,7 @@ class CeyxDecodePool {
       maxDim: maxDim,
       generation: gen,
       exifOrientation: exifOrientation,
+      format: format,
     );
     _byKey[key] = job;
     // Admission is the ONLY way to leave quiescence, so this note is what
@@ -786,6 +841,38 @@ class CeyxDecodePool {
 
   bool? _decodeIntoCache;
 
+  /// Whether the loaded library can service a non-rgba8 format at all.
+  /// Resolved once, like [_libraryDecodeInto]; "cannot ask" is "not present",
+  /// and the R-J throw then reports the sentinel path.
+  bool get _yuv420Available {
+    final override = debugYuv420Available;
+    if (override != null) return override;
+    final cached = _yuv420Cache;
+    if (cached != null) return cached;
+    bool resolved;
+    try {
+      resolved = _freeBindings.yuv420DecodeAvailable;
+    } catch (e) {
+      logger('pool|YUV420_UNAVAILABLE|$e');
+      resolved = false;
+    }
+    _yuv420Cache = resolved;
+    return resolved;
+  }
+
+  bool? _yuv420Cache;
+
+  /// Absolute path of the library actually loaded, for the R-J exception.
+  /// Never throws: this runs on the failure path, where a second failure
+  /// would replace a precise diagnosis with a load error.
+  String get _loadedLibraryPath {
+    try {
+      return _freeBindings.loadedLibraryPath;
+    } catch (_) {
+      return kCeyxNoLibraryLoaded;
+    }
+  }
+
   /// WP10 preparation: learn the output extent (probing once per
   /// `(path, maxDim)`), acquire a slot of that size, then enqueue the job.
   ///
@@ -794,9 +881,9 @@ class CeyxDecodePool {
   /// will not probe must still open.
   Future<void> _prepareAndEnqueue(_PoolJob job) async {
     try {
-      var bytes = _sizeCache[_sizeKey(job.path, job.maxDim)];
+      var bytes = _sizeCache[_sizeKey(job.path, job.maxDim, job.format)];
       if (bytes == null) {
-        bytes = await _probeSizeFor(job.path, job.maxDim);
+        bytes = await _probeSizeFor(job.path, job.maxDim, job.format);
         if (_disposed || job.completer.isCompleted) return;
       }
       if (bytes != null && bytes > 0) {
@@ -815,7 +902,7 @@ class CeyxDecodePool {
       // transposing request; a non-transposing/identity job never verifies
       // against it.
       if (_transposesOrientation(job.exifOrientation)) {
-        final extent = _extentCache[_sizeKey(job.path, job.maxDim)];
+        final extent = _extentCache[_sizeKey(job.path, job.maxDim, job.format)];
         if (extent != null) {
           job.probedWidth = extent.$1;
           job.probedHeight = extent.$2;
@@ -838,15 +925,20 @@ class CeyxDecodePool {
   /// the extent is not knowable, which is itself cached (as [_kNoPooledRoute])
   /// so an unprobeable path costs one probe for the session, not one per
   /// decode.
-  Future<int?> _probeSizeFor(String path, int? maxDim) async {
-    final key = _sizeKey(path, maxDim);
+  Future<int?> _probeSizeFor(
+    String path,
+    int? maxDim,
+    CeyxOutputFormat format,
+  ) async {
+    final key = _sizeKey(path, maxDim, format);
     debugProbeSizeCount++;
     final probe = _PoolJob(
-      key: (CeyxPoolJobType.probeSize, path, maxDim, 1),
+      key: (CeyxPoolJobType.probeSize, path, maxDim, 1, format),
       type: CeyxPoolJobType.probeSize,
       path: path,
       maxDim: maxDim,
       generation: _generation,
+      format: format,
     );
     _byKey[probe.key] = probe;
     _queue.add(probe);
@@ -878,7 +970,10 @@ class CeyxDecodePool {
       _putSizeCache(key, _kNoPooledRoute);
       return null;
     }
-    final bytes = width * height * 4;
+    // mem8 T14: size for the format actually requested. THE CONTRACT'S
+    // sizing function (T12.0 clause 2b), never open-coded arithmetic — under
+    // yuv420 an under-allocation is a heap overrun, not a miscount.
+    final bytes = ceyxOutputFormatByteCount(format, width, height);
     _putSizeCache(key, bytes, extent: (width, height));
     return bytes;
   }
@@ -890,7 +985,14 @@ class CeyxDecodePool {
   /// `ceyx_orient.h`. If that constant changes, change this one with it.
   static const int _kMaxProbedPixels = 268435456;
 
-  static String _sizeKey(String path, int? maxDim) => '$path|$maxDim';
+  // mem8 T14: the format is PART OF THIS KEY. Without it an rgba8 and a
+  // yuv420 request for the same path+maxDim collide SILENTLY and the second
+  // is served the first's byte count — a 1.5 B/px figure handed to an rgba8
+  // decode overflows the slot. Test F3 in output_format_threading_test.dart
+  // is the red-first proof; all four call sites move together, because
+  // leaving one behind reproduces the collision on a narrower path.
+  static String _sizeKey(String path, int? maxDim, CeyxOutputFormat format) =>
+      '$path|$maxDim|${format.name}';
 
   /// [extent] is the same probe's unoriented (width, height), cached in
   /// [_extentCache] under the identical key/eviction discipline as
@@ -929,6 +1031,9 @@ class CeyxDecodePool {
     int? maxDim,
     int? generation,
     int exifOrientation = 1,
+    // R-B: ceyx's default NEVER changes. A host that wants yuv420 asks for
+    // it explicitly (Halcyon flips its own default on its own side).
+    CeyxOutputFormat format = CeyxOutputFormat.rgba8,
   }) async {
     final outcome = await submit(
       CeyxPoolJobType.decode,
@@ -936,6 +1041,7 @@ class CeyxDecodePool {
       maxDim: maxDim,
       generation: generation,
       exifOrientation: exifOrientation,
+      format: format,
     );
     if (outcome.discarded) {
       throw CeyxPoolDiscardedException(outcome.generation, _generation);
@@ -985,7 +1091,16 @@ class CeyxDecodePool {
       );
     }
     final job = _PoolJob(
-      key: (CeyxPoolJobType.encode, 'encode:${_nextEncodeKey++}', null, 1),
+      // T14: written OUT, not defaulted — an encode always operates on an
+      // already-materialised RGBA8 buffer, and stating it is what makes that
+      // fact reviewable at the site.
+      key: (
+        CeyxPoolJobType.encode,
+        'encode:${_nextEncodeKey++}',
+        null,
+        1,
+        CeyxOutputFormat.rgba8,
+      ),
       type: CeyxPoolJobType.encode,
       path: '',
       maxDim: null,
@@ -1166,7 +1281,23 @@ class CeyxDecodePool {
       // pre-Task-4 length-8 pooled shape, so a pre-existing wire-shape
       // assertion sized on "5 base fields + placeholder + address + capacity"
       // is untouched by a caller that never asks for rotation.
-      if (slot != null &&
+      // mem8 T14: a NON-rgba8 job sends the FULL pooled tail — orientation
+      // at 8, probed extent at 9/10 (nullable), format at 11 — so the format
+      // has a FIXED index. Appending it to the shorter arms instead would put
+      // an int at index 8, where the worker reads exifOrientation, and a
+      // yuv420 identity-orientation decode would silently be dispatched as an
+      // orientation-2 rgba8 one. Every rgba8 shape below is therefore
+      // untouched, which is what keeps the existing wire-shape assertions
+      // (native_buffer_pool_test.dart's length probes) valid.
+      if (slot != null && job.format != CeyxOutputFormat.rgba8) ...<Object?>[
+        encodeArgs,
+        slot.address,
+        slot.capacity,
+        job.exifOrientation,
+        job.probedWidth,
+        job.probedHeight,
+        job.format.index,
+      ] else if (slot != null &&
           job.exifOrientation != 1 &&
           job.probedWidth != null &&
           job.probedHeight != null)
@@ -1200,7 +1331,10 @@ class CeyxDecodePool {
   void _onResize(_PoolWorker worker, int requestId, int width, int height) {
     final job = _byRequestId[requestId];
     if (job == null) return;
-    final bytes = width * height * 4;
+    // T14: the re-acquire is sized in the job's OWN format. Using rgba8 here
+    // would re-acquire 4 B/px for a yuv420 job and defeat the whole saving,
+    // and the reverse would re-acquire too little and overflow.
+    final bytes = ceyxOutputFormatByteCount(job.format, width, height);
 
     if (job.pooledAbandoned) {
       // A refusal on the UNPOOLED fallback, where this job was handed no
@@ -1259,7 +1393,7 @@ class CeyxDecodePool {
       return;
     }
     job.resized = true;
-    _putSizeCache(_sizeKey(job.path, job.maxDim), bytes);
+    _putSizeCache(_sizeKey(job.path, job.maxDim, job.format), bytes);
     // B-1 fix (P4 review blocker): a resize means the probe extent this job
     // carried was WRONG, so the stale probedWidth/probedHeight must not ride
     // the retry's wire message into `selfVerifiedAppliedOrientation` — that
@@ -1823,7 +1957,12 @@ class CeyxDecodePool {
   }
 }
 
-typedef _JobKey = (CeyxPoolJobType, String, int?, int);
+// mem8 T14: the 5th element is the requested output format. POSITIONAL on
+// purpose — every construction site fails to COMPILE until it is updated,
+// which is the good failure mode. Its sibling string key `_sizeKey` has no
+// such protection and collides silently, which is why that one gets a
+// dedicated red-first test (F3) and this one does not.
+typedef _JobKey = (CeyxPoolJobType, String, int?, int, CeyxOutputFormat);
 
 class _PoolJob {
   _PoolJob({
@@ -1834,6 +1973,7 @@ class _PoolJob {
     required this.generation,
     this.encodeArgs,
     this.exifOrientation = 1,
+    this.format = CeyxOutputFormat.rgba8,
   });
 
   final _JobKey key;
@@ -1846,6 +1986,9 @@ class _PoolJob {
   // native rotation. Threaded onto the job message at a fixed trailing index
   // (see _dispatch) so _probeSizeFor's cache key stays untouched.
   final int exifOrientation;
+  // mem8 T14: the pixel layout this job's destination is sized for and that
+  // the native entry must produce. rgba8 for every non-decode job type.
+  final CeyxOutputFormat format;
   // Productionization plan Task 9 (reconciliation 2/3): the file's UNORIENTED
   // extent, when [exifOrientation] transposes AND `_prepareAndEnqueue` already
   // has it cached from the probe it ran for slot sizing — the "already
@@ -2041,9 +2184,42 @@ void ceyxDecodeWorkerMain(List<Object?> bootstrap) {
           // orientation (see kMsgJob's doc comment) — forwarded so
           // `selfVerifiedAppliedOrientation` has a real reference to verify
           // against instead of trusting a null pair.
-          final probedWidth = message.length > 9 ? message[9] as int : null;
-          final probedHeight = message.length > 10 ? message[10] as int : null;
-          if (dstAddress != 0 &&
+          // `as int?`: the T14 arm always occupies 9/10 so index 11 is
+          // fixed, and it sends null there when no extent was probed.
+          final probedWidth = message.length > 9 ? message[9] as int? : null;
+          final probedHeight = message.length > 10 ? message[10] as int? : null;
+          // mem8 T14: present ONLY on the non-rgba8 arm (see _dispatch), so
+          // every pre-T14 shape reads rgba8 by construction.
+          final format = message.length > 11
+              ? CeyxOutputFormat.values[message[11] as int]
+              : CeyxOutputFormat.rgba8;
+          if (dstAddress != 0 && format != CeyxOutputFormat.rgba8) {
+            // T14: the format-taking entries. No rgba8 fallback here either
+            // (R-J) — the pool refused this job at submit unless the library
+            // exports them, so reaching this arm without them is a corrupt
+            // build and the service throws rather than producing a layout the
+            // caller will misread.
+            try {
+              final image = service.decodeIntoPointerFormat(
+                path,
+                dstAddress,
+                dstCapacity,
+                format: format,
+                maxDim: maxDim,
+                exifOrientation: exifOrientation,
+                probedWidth: probedWidth,
+                probedHeight: probedHeight,
+              );
+              poolPort.send(<Object?>[kMsgResult, requestId, ...image]);
+            } on DngBufferTooSmallException catch (e) {
+              poolPort.send(<Object?>[
+                kMsgResize,
+                requestId,
+                e.width,
+                e.height,
+              ]);
+            }
+          } else if (dstAddress != 0 &&
               exifOrientation != 1 &&
               service.decodeIntoBufferOrientedAvailable) {
             try {

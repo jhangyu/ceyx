@@ -87,6 +87,10 @@ export 'src/codec_format.dart'
         CeyxFormatUnsupportedException,
         ceyxOutputFormatByteCount;
 
+// mem8 T14: the SINGLE yuv420 -> RGBA8 upconvert binding (SR-11) and the
+// sentinel the R-J exception reports when no library could be opened at all.
+export 'src/dng_bindings.dart' show ceyxYuv420ToRgba8, kCeyxNoLibraryLoaded;
+
 export 'src/still_error_codes.dart'
     show
         CeyxStillErrorCode,

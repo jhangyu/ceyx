@@ -2,8 +2,16 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:meta/meta.dart';
 
+import 'codec_format.dart';
 import 'raw_bindings.dart';
+
+/// Stands in for [DngNativeBindings.loadedLibraryPath] when NO library could
+/// be opened at all. A sentinel rather than an empty string, because
+/// [CeyxFormatUnsupportedException]'s reader needs to tell "a stale library
+/// at this path" from "nothing was loaded" — the two have different fixes.
+const String kCeyxNoLibraryLoaded = '<no native library loaded>';
 
 /*
 ---
@@ -232,6 +240,98 @@ typedef CeyxPoolPressureReliefDart = int Function();
 typedef CeyxNativeIdleShrinkNative = ffi.Int64 Function(ffi.Int32 floor);
 typedef CeyxNativeIdleShrinkDart = int Function(int floor);
 
+// mem8 T14 (SR-9b): the FORMAT-TAKING siblings of the three format-agnostic
+// decode-into entries, frozen by T12.0 in native/include/raw_ffi_api.h. The
+// originals are UNCHANGED and remain rgba8 (R-B), so this block is additive:
+// format selection is a host-side choice of WHICH ENTRY to call.
+//
+// `out_planes` (CeyxYuv420PlaneDescriptor*) may be NULL, and Dart always
+// passes null: the plane layout is fixed by contract (single contiguous
+// allocation, plane order Y/Cb/Cr, tightly packed, chroma ceil(w/2) x
+// ceil(h/2)), so there is nothing for Dart to learn from the descriptor that
+// ceyxOutputFormatByteCount does not already state. Typed as Pointer<Void>
+// for the same reason — mirroring the struct would create a second source of
+// truth for a shape nobody reads.
+typedef CeyxProbeOutputSizeFormatNative =
+    ffi.Int32 Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+      ffi.Int32 outputFormat,
+      ffi.Pointer<ffi.Int32> outWidth,
+      ffi.Pointer<ffi.Int32> outHeight,
+      ffi.Pointer<ffi.Int64> outByteCount,
+    );
+typedef CeyxProbeOutputSizeFormatDart =
+    int Function(
+      ffi.Pointer<Utf8> filePath,
+      int maxDim,
+      int outputFormat,
+      ffi.Pointer<ffi.Int32> outWidth,
+      ffi.Pointer<ffi.Int32> outHeight,
+      ffi.Pointer<ffi.Int64> outByteCount,
+    );
+
+typedef CeyxDecodeIntoBufferFormatNative =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      ffi.Size dstCapacity,
+      ffi.Int32 outputFormat,
+      ffi.Pointer<ffi.Void> outPlanes,
+    );
+typedef CeyxDecodeIntoBufferFormatDart =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      int maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      int dstCapacity,
+      int outputFormat,
+      ffi.Pointer<ffi.Void> outPlanes,
+    );
+
+typedef CeyxDecodeIntoBufferOrientedFormatNative =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      ffi.Int32 maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      ffi.Size dstCapacity,
+      ffi.Int32 exifOrientation,
+      ffi.Int32 outputFormat,
+      ffi.Pointer<ffi.Void> outPlanes,
+    );
+typedef CeyxDecodeIntoBufferOrientedFormatDart =
+    ffi.Pointer<DngResult> Function(
+      ffi.Pointer<Utf8> filePath,
+      int maxDim,
+      ffi.Pointer<ffi.Uint8> dst,
+      int dstCapacity,
+      int exifOrientation,
+      int outputFormat,
+      ffi.Pointer<ffi.Void> outPlanes,
+    );
+
+// The SINGLE yuv420 -> RGBA8 upconvert implementation (SR-11, T13). Dart
+// binds it; Dart never open-codes one. Returns 0, kCeyxErrDstTooSmall, or -1.
+typedef CeyxYuv420ToRgba8Native =
+    ffi.Int32 Function(
+      ffi.Pointer<ffi.Uint8> src,
+      ffi.Size srcCapacity,
+      ffi.Pointer<ffi.Uint8> dst,
+      ffi.Size dstCapacity,
+      ffi.Int32 width,
+      ffi.Int32 height,
+    );
+typedef CeyxYuv420ToRgba8Dart =
+    int Function(
+      ffi.Pointer<ffi.Uint8> src,
+      int srcCapacity,
+      ffi.Pointer<ffi.Uint8> dst,
+      int dstCapacity,
+      int width,
+      int height,
+    );
+
 /// Bindings to the native dng_decoder_native library
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
@@ -297,6 +397,15 @@ class DngNativeBindings {
   // above — see the typedef comment for why.
   CeyxPoolPressureReliefDart? _ceyxPoolPressureRelief;
   CeyxNativeIdleShrinkDart? _ceyxNativeIdleShrink;
+
+  // mem8 T14: the format-taking entries and the upconvert. Guarded
+  // PER-SYMBOL, each in its own try — never as one group. A grouped lookup
+  // that nulls four fields because one symbol is missing ships a silently
+  // absent feature, which is the failure this file already records twice.
+  CeyxProbeOutputSizeFormatDart? _ceyxProbeOutputSizeFormat;
+  CeyxDecodeIntoBufferFormatDart? _ceyxDecodeIntoBufferFormat;
+  CeyxDecodeIntoBufferOrientedFormatDart? _ceyxDecodeIntoBufferOrientedFormat;
+  CeyxYuv420ToRgba8Dart? _ceyxYuv420ToRgba8;
 
   late final DngDecoderWarmupForSizeDart dngDecoderWarmupForSize;
   // R3-3: pipeline cache persistence controls.
@@ -388,6 +497,49 @@ class DngNativeBindings {
 
   /// Whether this library exposes the native idle-shrink funnel.
   bool get nativeIdleShrinkAvailable => _ceyxNativeIdleShrink != null;
+
+  // --- mem8 T14: the yuv420 arm ------------------------------------------
+
+  /// Guarded access to the format-aware probe. Null on a library predating
+  /// T12.0's contract.
+  CeyxProbeOutputSizeFormatDart? get ceyxProbeOutputSizeFormat =>
+      _ceyxProbeOutputSizeFormat;
+
+  /// Guarded access to the format-aware decode-into entry.
+  CeyxDecodeIntoBufferFormatDart? get ceyxDecodeIntoBufferFormat =>
+      _ceyxDecodeIntoBufferFormat;
+
+  /// Guarded access to the format-aware oriented decode-into entry.
+  CeyxDecodeIntoBufferOrientedFormatDart?
+  get ceyxDecodeIntoBufferOrientedFormat => _ceyxDecodeIntoBufferOrientedFormat;
+
+  /// Guarded access to the single native yuv420 -> RGBA8 upconvert (SR-11).
+  CeyxYuv420ToRgba8Dart? get ceyxYuv420ToRgba8 => _ceyxYuv420ToRgba8;
+
+  /// Whether this library can service a non-rgba8 output format at all.
+  ///
+  /// Requires BOTH the probe and the unoriented decode entry: a decode whose
+  /// slot was sized by a format-blind probe is sized in the wrong units, and
+  /// under yuv420 the wrong direction is a heap overrun. The ORIENTED entry
+  /// is deliberately not in this conjunction — it is resolved per-symbol like
+  /// its format-agnostic sibling, and an oriented request degrades to the
+  /// unoriented path exactly as it does today.
+  bool get yuv420DecodeAvailable =>
+      _ceyxProbeOutputSizeFormat != null && _ceyxDecodeIntoBufferFormat != null;
+
+  /// Whether this library exports T13's upconvert.
+  bool get yuv420UpconvertAvailable => _ceyxYuv420ToRgba8 != null;
+
+  /// Absolute path of the image this instance was actually loaded from, for
+  /// [CeyxFormatUnsupportedException]'s third field.
+  ///
+  /// Asked of the LOADER (dladdr / GetModuleFileName), not reconstructed from
+  /// a candidate string: the first candidate is a bare filename that the
+  /// dynamic loader resolves through its own search paths, so the candidate
+  /// says nothing about which copy was opened — and "a stale copy at a path
+  /// nobody checked" is the exact condition the exception exists to report.
+  /// Computed once, lazily, because it costs an FFI round trip.
+  late final String loadedLibraryPath = _resolvedImagePath(_lib, '');
 
   /// True only when BOTH WP10 symbols resolved. Partial availability is a
   /// corrupt build and reports as unsupported, so the host falls back to the
@@ -588,6 +740,49 @@ class DngNativeBindings {
           );
     } catch (_) {
       _ceyxNativeIdleShrink = null;
+    }
+
+    // mem8 T14 (T12.0's frozen contract): four separate try blocks, one per
+    // symbol. A library predating the contract resolves none of them and the
+    // binding raises a HARD typed failure at submit (R-J) — never a null,
+    // never a silent rgba8 fallback.
+    try {
+      _ceyxProbeOutputSizeFormat = _lib
+          .lookupFunction<
+            CeyxProbeOutputSizeFormatNative,
+            CeyxProbeOutputSizeFormatDart
+          >('ceyx_probe_output_size_format');
+    } catch (_) {
+      _ceyxProbeOutputSizeFormat = null;
+    }
+
+    try {
+      _ceyxDecodeIntoBufferFormat = _lib
+          .lookupFunction<
+            CeyxDecodeIntoBufferFormatNative,
+            CeyxDecodeIntoBufferFormatDart
+          >('ceyx_decode_into_buffer_format');
+    } catch (_) {
+      _ceyxDecodeIntoBufferFormat = null;
+    }
+
+    try {
+      _ceyxDecodeIntoBufferOrientedFormat = _lib
+          .lookupFunction<
+            CeyxDecodeIntoBufferOrientedFormatNative,
+            CeyxDecodeIntoBufferOrientedFormatDart
+          >('ceyx_decode_into_buffer_oriented_format');
+    } catch (_) {
+      _ceyxDecodeIntoBufferOrientedFormat = null;
+    }
+
+    try {
+      _ceyxYuv420ToRgba8 = _lib
+          .lookupFunction<CeyxYuv420ToRgba8Native, CeyxYuv420ToRgba8Dart>(
+            'ceyx_yuv420_to_rgba8',
+          );
+    } catch (_) {
+      _ceyxYuv420ToRgba8 = null;
     }
 
     dngDecoderWarmupForSize = _lib
@@ -905,5 +1100,85 @@ class DngNativeBindings {
     }
 
     return DngNativeBindings._(lib);
+  }
+}
+
+// --- mem8 T14: the single upconvert binding (SR-11) -----------------------
+
+/// Process-wide resolution latch for the top-level [ceyxYuv420ToRgba8].
+///
+/// Mirrors `CeyxNativeBufferPool`'s latch rather than inventing a second
+/// policy: one attempt per process, a failure to open the library is "not
+/// present" (a plain Dart test process has no dylib), and a test resets it.
+DngNativeBindings? _sharedBindings;
+bool _sharedBindingsAttempted = false;
+
+/// Test-only override for the resolution above.
+@visibleForTesting
+DngNativeBindings? debugSharedBindingsOverride;
+
+DngNativeBindings? _resolveSharedBindings() {
+  final override = debugSharedBindingsOverride;
+  if (override != null) return override;
+  if (_sharedBindingsAttempted) return _sharedBindings;
+  _sharedBindingsAttempted = true;
+  try {
+    _sharedBindings = DngNativeBindings.load();
+  } catch (_) {
+    _sharedBindings = null;
+  }
+  return _sharedBindings;
+}
+
+/// Test-only: forces the next [ceyxYuv420ToRgba8] call to re-attempt
+/// resolution instead of reusing a cached (possibly null) result.
+@visibleForTesting
+void debugResetSharedBindingsCache() {
+  _sharedBindings = null;
+  _sharedBindingsAttempted = false;
+}
+
+/// Converts planar yuv420 at [srcAddress] into RGBA8 at [dstAddress].
+///
+/// THE SINGLE UPCONVERT IMPLEMENTATION IS NATIVE (SR-11, T13). This is a
+/// binding, not an implementation: Dart must never open-code the colour
+/// maths, because two implementations of one conversion eventually disagree
+/// and the disagreement shows up as a subtly wrong image, not as an error.
+///
+/// Throws [CeyxFormatUnsupportedException] when the loaded library predates
+/// T13 — R-J's hard failure. A missing converter cannot be worked around in
+/// Dart, so returning silently (or falling back) is forbidden.
+/// Throws [ArgumentError] when the native entry rejects the arguments (a
+/// destination smaller than `w*h*4`, a null pointer, a non-positive extent).
+void ceyxYuv420ToRgba8({
+  required int srcAddress,
+  required int srcCapacity,
+  required int dstAddress,
+  required int dstCapacity,
+  required int width,
+  required int height,
+}) {
+  final bindings = _resolveSharedBindings();
+  final convert = bindings?.ceyxYuv420ToRgba8;
+  if (convert == null) {
+    throw CeyxFormatUnsupportedException(
+      format: CeyxOutputFormat.yuv420,
+      missingSymbol: 'ceyx_yuv420_to_rgba8',
+      libraryPath: bindings?.loadedLibraryPath ?? kCeyxNoLibraryLoaded,
+    );
+  }
+  final rc = convert(
+    ffi.Pointer<ffi.Uint8>.fromAddress(srcAddress),
+    srcCapacity,
+    ffi.Pointer<ffi.Uint8>.fromAddress(dstAddress),
+    dstCapacity,
+    width,
+    height,
+  );
+  if (rc != 0) {
+    throw ArgumentError(
+      'ceyx_yuv420_to_rgba8 rejected the request (rc=$rc) for '
+      '${width}x$height: dstCapacity=$dstCapacity, srcCapacity=$srcCapacity',
+    );
   }
 }

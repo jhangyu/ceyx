@@ -90,6 +90,18 @@ KNOWN_GROUP_IDS = {
     # lookupFunction for ceyx_native_idle_shrink exists (T2); T1 registers the
     # id here and does not hand-edit the manifest, which forbids it.
     "ceyx_native_idle_shrink": "arena_idle_shrink",
+    # mem8 T12.0's frozen yuv420 contract, bound by T14. FOUR entries, ONE
+    # group id on purpose: the Dart lookups are guarded PER-SYMBOL (each in
+    # its own try, so a partially-updated library cannot null the rest), but
+    # they are ONE CAPABILITY for manifest purposes -- a library exporting
+    # three of the four cannot service a yuv420 request, and T5's released
+    # asset assertion names a single group. Without these entries the
+    # generator invents four `grp_*` ids, which would split one capability
+    # into four independently-passing gates.
+    "ceyx_probe_output_size_format": "yuv420",
+    "ceyx_decode_into_buffer_format": "yuv420",
+    "ceyx_decode_into_buffer_oriented_format": "yuv420",
+    "ceyx_yuv420_to_rgba8": "yuv420",
 }
 
 # Receiver: a dotted identifier, optionally call-suffixed (`.process()`),

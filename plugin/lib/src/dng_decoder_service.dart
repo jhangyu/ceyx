@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
+import 'codec_format.dart';
 import 'dng_bindings.dart';
 import 'native_buffer_pool.dart';
 import 'raw_error_codes.dart';
@@ -820,6 +821,95 @@ class DngDecoderService {
         filePathForError: filePath,
       );
 
+      return <Object?>[...transfer, appliedOrientation];
+    } finally {
+      if (resultPtr != nullptr) {
+        _bindings.dngFreeResult(resultPtr);
+      }
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// mem8 T14: the FORMAT-TAKING decode-into entry (T12.0's frozen contract).
+  ///
+  /// One method for both orientations, because the native side has one
+  /// format-taking pair and the orientation argument is what selects between
+  /// them — keeping a separate `…OrientedFormat` wrapper in Dart would be a
+  /// second place for the two to drift.
+  ///
+  /// Throws [CeyxFormatUnsupportedException] (R-J) when the loaded library
+  /// lacks the entry. NEVER falls back to the rgba8 entries: the caller is
+  /// about to read these bytes as [format], so wrong-layout bytes are a
+  /// corrupt image with no error, which is worse than the throw.
+  List<Object?> decodeIntoPointerFormat(
+    String filePath,
+    int dstAddress,
+    int dstCapacity, {
+    required CeyxOutputFormat format,
+    int? maxDim,
+    int exifOrientation = 1,
+    int? probedWidth,
+    int? probedHeight,
+  }) {
+    if (!_initialized) {
+      initialize();
+    }
+    final oriented = exifOrientation != 1;
+    final decodeFormat = _bindings.ceyxDecodeIntoBufferFormat;
+    final decodeOrientedFormat = _bindings.ceyxDecodeIntoBufferOrientedFormat;
+    if (decodeFormat == null || (oriented && decodeOrientedFormat == null)) {
+      throw CeyxFormatUnsupportedException(
+        format: format,
+        missingSymbol: oriented
+            ? 'ceyx_decode_into_buffer_oriented_format'
+            : 'ceyx_decode_into_buffer_format',
+        libraryPath: _bindings.loadedLibraryPath,
+      );
+    }
+
+    final pathPtr = filePath.toNativeUtf8();
+    Pointer<DngResult> resultPtr = nullptr;
+    try {
+      // out_planes is NULL by contract-permitted choice: the layout is fixed
+      // (tightly packed, plane order Y/Cb/Cr, chroma ceil(w/2) x ceil(h/2)),
+      // so the descriptor would restate what ceyxOutputFormatByteCount
+      // already computes — a second source of truth for one shape.
+      resultPtr = oriented
+          ? decodeOrientedFormat!(
+              pathPtr.cast(),
+              maxDim ?? 0,
+              Pointer<Uint8>.fromAddress(dstAddress),
+              dstCapacity,
+              exifOrientation,
+              format.value,
+              nullptr,
+            )
+          : decodeFormat(
+              pathPtr.cast(),
+              maxDim ?? 0,
+              Pointer<Uint8>.fromAddress(dstAddress),
+              dstCapacity,
+              format.value,
+              nullptr,
+            );
+      if (resultPtr != nullptr &&
+          resultPtr.ref.errorCode == CeyxDecodeIntoError.dstTooSmall) {
+        throw DngBufferTooSmallException(
+          resultPtr.ref.width,
+          resultPtr.ref.height,
+        );
+      }
+      final transfer = _finishPointerTransfer(resultPtr, isRaw: false);
+      if (!oriented) return transfer;
+
+      final appliedOrientation = selfVerifiedAppliedOrientation(
+        requested: exifOrientation,
+        width: transfer[1] as int,
+        height: transfer[2] as int,
+        probedWidth: probedWidth,
+        probedHeight: probedHeight,
+        filePathForError: filePath,
+      );
       return <Object?>[...transfer, appliedOrientation];
     } finally {
       if (resultPtr != nullptr) {

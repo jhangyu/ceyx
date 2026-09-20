@@ -82,6 +82,10 @@ expected_on = ["macos", "linux", "windows", "android"]
 id          = "wp10_decode_into_buffer"
 expected_on = ["macos", "linux", "windows", "android"]
 
+[[group]]
+id          = "yuv420"
+expected_on = ["macos", "linux", "windows", "android"]
+
 [[symbol]]
 name       = "ceyx_decode_into_buffer"
 platforms  = "all"
@@ -90,10 +94,24 @@ source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
+name       = "ceyx_decode_into_buffer_format"
+platforms  = "all"
+group      = "yuv420"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
 name       = "ceyx_decode_into_buffer_oriented"
 platforms  = "all"
 group      = "oriented"
 source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_decode_into_buffer_oriented_format"
+platforms  = "all"
+group      = "yuv420"
+source     = ""
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
@@ -174,6 +192,13 @@ source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
+name       = "ceyx_probe_output_size_format"
+platforms  = "all"
+group      = "yuv420"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
 name       = "ceyx_still_decode_rgba"
 platforms  = "all"
 group      = "still"
@@ -207,6 +232,13 @@ platforms  = "all"
 group      = "still"
 source     = "native/src/ffi/still_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/still_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_yuv420_to_rgba8"
+platforms  = "all"
+group      = "yuv420"
+source     = ""
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
 name       = "dng_debug_pool_checked_out"
