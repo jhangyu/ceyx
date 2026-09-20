@@ -170,7 +170,12 @@ class TestFetchOrdering(unittest.TestCase):
              mock.patch.object(fetch_libraw, "apply_patches", side_effect=lambda *a, **k: calls.append(("apply", a[0] if a else None))), \
              mock.patch.object(fetch_libraw, "strip_git", side_effect=lambda d: calls.append(("strip", d))):
             with TemporaryDirectory() as tmp:
-                dest = fetch_libraw.fetch(Path(tmp))
+                # `dest` is now the exact LibRaw destination directory
+                # (2026-09-20 parking-lot fix), not a native_dir to derive
+                # it from -- pass the equivalent nested path explicitly to
+                # keep this test's structure (libraw-cmake as a sibling)
+                # unchanged.
+                dest = fetch_libraw.fetch(Path(tmp) / "third_party" / "libraw")
         kinds = [c[0] if isinstance(c, tuple) else c for c in calls]
         self.assertEqual(kinds.count("clone"), 3)
         self.assertIn("overlay", kinds)

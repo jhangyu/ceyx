@@ -26,9 +26,9 @@ from tempfile import TemporaryDirectory
 from typing import Optional, Tuple
 
 try:  # pragma: no cover - import style depends on how the caller invokes us
-    from .fetch import FetchError, download
+    from .fetch import FetchError, download, reuse_worktree_dist
 except ImportError:  # pragma: no cover - fallback for direct script execution
-    from fetch import FetchError, download  # type: ignore[no-redef]
+    from fetch import FetchError, download, reuse_worktree_dist  # type: ignore[no-redef]
 
 HALIDE_VERSION = "21.0.0"
 # Every asset name below shares this build commit (verified against the live
@@ -150,6 +150,15 @@ def fetch(dest: Optional[Path] = None, *, force: bool = False) -> Path:
     dest = Path(dest) if dest is not None else native_dir / "third_party" / "halide"
     if not force and already_present(dest):
         _log(f"third_party/halide already present ({dest}) -- nothing to do.")
+        return dest
+
+    # 2026-09-20 parking-lot fix (item 2): a fresh `git worktree add` has no
+    # copy of this ~540MB gitignored dist -- if the main tree already fetched
+    # it, symlink to that instead of re-downloading. No-ops (returns False)
+    # outside a linked worktree, or if the main tree has no valid dist of its
+    # own yet, in which case the normal download below still runs.
+    if not force and reuse_worktree_dist(dest, is_valid=already_present):
+        _log(f"third_party/halide symlinked from the main tree's dist ({dest} -> {dest.resolve()}) -- nothing to fetch.")
         return dest
 
     system = platform_module.system()
