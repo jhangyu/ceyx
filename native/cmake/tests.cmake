@@ -410,6 +410,21 @@ target_include_directories(test_dng_slot_decommit PRIVATE
     ${HALIDE_DIR}/include)
 target_link_libraries(test_dng_slot_decommit PRIVATE dng_decoder_native)
 
+# T3-real gate (mem8 SR-6): the same funnel, driven by a REAL DNG decode
+# through the shipping FFI entry instead of a synthetic arena. Closes the one
+# gap the sibling gate above structurally cannot: that the production decode
+# path reaches the state the guard is meant to detect.
+# Takes the DNG path as argv[1]; exits 2 (not 0) if the file cannot be decoded,
+# so a skipped real decode can never read as a pass.
+add_executable(test_dng_slot_decommit_real tests/test_dng_slot_decommit_real.cpp)
+target_include_directories(test_dng_slot_decommit_real PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}
+    ${SRC_DIR}/pipeline
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_dng_slot_decommit_real PRIVATE dng_decoder_native)
+add_dependencies(test_dng_slot_decommit_real dng_decoder_native)
+
 # Multi-lane RAW concurrency gate (R2.5): per-lane arena isolation under
 # concurrent generic-RAW decodes; prerequisite evidence for C2's under-load AC4.
 add_executable(test_concurrent_raw_decode tests/test_concurrent_raw_decode.cpp)
