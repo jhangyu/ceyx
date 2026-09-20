@@ -1716,7 +1716,7 @@ class CeyxDecodePool {
       } else {
         job.complete(
           CeyxPoolOutcome<Object?>.value(
-            _materialize(job.type, payload!),
+            _materialize(job.type, job.format, payload!),
             job.generation,
           ),
         );
@@ -1729,7 +1729,16 @@ class CeyxDecodePool {
     _pump();
   }
 
-  Object? _materialize(CeyxPoolJobType type, List<Object?> payload) {
+  // T12.8: the FORMAT rides in because a decode result's length is
+  // format-dependent. It is the job's own format — the same value
+  // `_probeSizeFor` sized the slot with — so the advertised view and the
+  // allocation behind it cannot disagree. Hard-coding 4 B/px here handed a
+  // yuv420 caller a view 2.67x past the end of a correctly sized slot.
+  Object? _materialize(
+    CeyxPoolJobType type,
+    CeyxOutputFormat format,
+    List<Object?> payload,
+  ) {
     switch (type) {
       case CeyxPoolJobType.probe:
         final transfer = payload[0] as TransferableTypedData?;
@@ -1743,7 +1752,11 @@ class CeyxDecodePool {
         // index 5, behind the same widening guard idiom; a pre-Task-4 (or
         // 5-element) payload from an older worker defaults to identity.
         final appliedOrientation = payload.length > 5 ? payload[5] as int : 1;
-        final rgbaData = _wrapNativeRgba(address, width * height * 4, type);
+        final rgbaData = _wrapNativeRgba(
+          address,
+          ceyxOutputFormatByteCount(format, width, height),
+          type,
+        );
         return DngImage(
           rgbaData: rgbaData,
           width: width,
