@@ -1715,10 +1715,22 @@ public:
             look_has_table, look_has_encoding,
             rendered_rgb);
 
+        // build_dng_render_stage4_rgb produces this family's usual 3-Tuple
+        // Func; split it into three single-value Funcs here, because the plane
+        // write now takes channels un-Tupled (ceyx_yuv420_write.h, D2 root
+        // cause). These three are INLINE, so the tuple expression is evaluated
+        // exactly as it was before and the change is a no-op on this arm --
+        // and the signature is the same one the split arm calls, so the two
+        // arms still share one plane-write body.
+        Func rgb8_r("rgb8_r"), rgb8_g("rgb8_g"), rgb8_b("rgb8_b");
+        rgb8_r(x, y) = rendered_rgb(x, y)[0];
+        rgb8_g(x, y) = rendered_rgb(x, y)[1];
+        rgb8_b(x, y) = rendered_rgb(x, y)[2];
+
         // The luma plane's extents ARE the oriented output extents, so the
         // odd-extent edge clamp reads them from there rather than from a
         // separate scalar the host could get wrong.
-        ceyx::build_yuv420_planes(x, y, rendered_rgb,
+        ceyx::build_yuv420_planes(x, y, rgb8_r, rgb8_g, rgb8_b,
                                   y_plane.dim(0).extent(),
                                   y_plane.dim(1).extent(),
                                   y_plane, cb_plane, cr_plane);
@@ -1788,11 +1800,20 @@ public:
 
         // The split family's colour body produces three Exprs over (x, y). The
         // yuv420 write needs to evaluate them at the four source coordinates of
-        // a chroma block, so they are wrapped in one Func -- the same 3-Tuple
-        // uint8 shape the non-split family's rendered_rgb already has, which is
-        // what lets ONE plane-write implementation serve both families. The
-        // Func is INLINE (never compute_at'd), so no Workgroup array is
-        // materialised.
+        // a chroma block, so each is wrapped in its OWN single-value Func.
+        //
+        // These were ONE 3-Tuple Func until 2026-09-20. That was the D2 root
+        // cause: this whole kernel family exists to keep Vulkan away from Tuple
+        // codegen (halide_aot.cmake:86-92), its rgba8 sibling forms no Tuple
+        // (:383-389), and the Tuple here was introduced only to match the
+        // plane-write signature -- which then consumed it by tuple index at
+        // five coordinates per output pixel. On device that produced planes
+        // disagreeing with this same device's rgba8 on 12-33% of pixels with a
+        // bimodal error histogram. The signature now takes channels un-Tupled
+        // and BOTH families pass three Funcs, so this is a conformance fix, not
+        // a platform guard, and the two arms still share one write body.
+        // All three Funcs are INLINE (never compute_at'd), so no Workgroup
+        // array is materialised.
         Expr out8_r, out8_g, out8_b;
         ceyx::build_dng_render_stage4_split_rgb8(
             x, y, diag_stage,
@@ -1812,10 +1833,12 @@ public:
             look_has_table, look_has_encoding,
             out8_r, out8_g, out8_b);
 
-        Func rendered_rgb("rendered_rgb");
-        rendered_rgb(x, y) = Tuple(out8_r, out8_g, out8_b);
+        Func rgb8_r("rgb8_r"), rgb8_g("rgb8_g"), rgb8_b("rgb8_b");
+        rgb8_r(x, y) = out8_r;
+        rgb8_g(x, y) = out8_g;
+        rgb8_b(x, y) = out8_b;
 
-        ceyx::build_yuv420_planes(x, y, rendered_rgb,
+        ceyx::build_yuv420_planes(x, y, rgb8_r, rgb8_g, rgb8_b,
                                   y_plane.dim(0).extent(),
                                   y_plane.dim(1).extent(),
                                   y_plane, cb_plane, cr_plane);

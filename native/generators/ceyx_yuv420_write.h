@@ -55,9 +55,26 @@
 
 namespace ceyx {
 
-// `rgb8` must be a Func over (x, y) whose value is a 3-Tuple of uint8_t: the
-// display-referred R, G, B at OUTPUT coordinate (x, y), orientation already
-// applied. Both Stage-4 families already produce exactly that shape.
+// `rgb8_r` / `rgb8_g` / `rgb8_b` are THREE SEPARATE single-value Funcs over
+// (x, y), each producing the display-referred R, G or B at OUTPUT coordinate
+// (x, y), orientation already applied.
+//
+// WHY THREE FUNCS AND NOT ONE 3-TUPLE FUNC (2026-09-20, D2 root cause)
+// ---------------------------------------------------------------------
+// This took a 3-Tuple Func until the tier-1 on-device Vulkan run. The split
+// Stage-4 family exists precisely to avoid Vulkan Tuple codegen
+// (halide_aot.cmake:86-92), and its rgba8 sibling never forms a Tuple -- but
+// the split yuv420 class wrapped its three channel Exprs in a Tuple Func
+// purely to match this signature, then this file consumed it by tuple index at
+// FIVE coordinates per output pixel. On device that produced planes
+// disagreeing with the same device's own rgba8 on 12-33% of pixels, with a
+// bimodal error histogram (a one-sided +1 population and a gross population
+// separated by a hard gap at d=3..8) -- not the shape float-strictness noise
+// makes. Taking the channels un-Tupled conforms the yuv420 classes to the
+// split family's own documented design rule. It is NOT a platform guard: both
+// families pass three Funcs through this one signature, so the arms still
+// cannot diverge in HOW yuv420 is written, which is the whole point of the
+// file.
 //
 // luma_width / luma_height are the ORIENTED output extents, used only to clamp
 // the odd-extent edge block.
@@ -67,7 +84,9 @@ namespace ceyx {
 // every caller.
 template <typename PlaneOut>
 void build_yuv420_planes(Halide::Var x, Halide::Var y,
-                         Halide::Func rgb8,
+                         Halide::Func rgb8_r,
+                         Halide::Func rgb8_g,
+                         Halide::Func rgb8_b,
                          Halide::Expr luma_width,
                          Halide::Expr luma_height,
                          PlaneOut &y_plane,
@@ -76,8 +95,18 @@ void build_yuv420_planes(Halide::Var x, Halide::Var y,
     using namespace Halide;
     namespace o = ceyx::yuv420;
 
+    // `index` is a C++ int, resolved at generator time -- this selects one of
+    // three Funcs, it does not emit a select() into the pipeline.
     auto ch = [&](Expr px, Expr py, int index) {
-        return cast<int32_t>(rgb8(px, py)[index]);
+        Expr v;
+        if (index == 0) {
+            v = rgb8_r(px, py);
+        } else if (index == 1) {
+            v = rgb8_g(px, py);
+        } else {
+            v = rgb8_b(px, py);
+        }
+        return cast<int32_t>(v);
     };
 
     // --- luma, one sample per output pixel ---------------------------------
