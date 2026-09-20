@@ -226,6 +226,43 @@ if(ANDROID AND DNG_CROSS_BUILD)
     target_link_libraries(probe_concurrent_raw_android PRIVATE dng_decoder_native)
     add_dependencies(probe_concurrent_raw_android dng_decoder_native)
 
+    # mem8 v3 T12 milestone 4, on-device leg (2026-09-20): Android cross-build
+    # of the SAME tests/test_stage4_yuv420_output.cpp the host target below
+    # builds. No source-file change -- identical sources, linked against the
+    # shipped dng_decoder_native SHARED lib exactly as the host target does, so
+    # a Metal/Vulkan comparison cannot drift because the two binaries were
+    # built from different code. The suite self-labels its arm via host_arm(),
+    # which reports the split (Vulkan) arm automatically under
+    # DNG_STAGE4_SPLIT_KERNEL, so the on-device artifact is self-describing.
+    # libjpeg: Y4a compresses with libjpeg-turbo directly, and the Android
+    # branch of third_party.cmake builds the vendored jpeg-static, so
+    # ${JPEG_LIBRARIES} resolves here exactly as it does for the host target.
+    add_executable(test_stage4_yuv420_output_android
+        tests/test_stage4_yuv420_output.cpp)
+    target_include_directories(test_stage4_yuv420_output_android PRIVATE
+        ${INC_DIR}
+        ${SRC_DIR}
+        ${DNG_SDK_DIR}
+        ${HALIDE_OUTPUT_DIR}
+        ${HALIDE_DIR}/include
+        ${JPEG_INCLUDE_DIRS})
+    target_link_libraries(test_stage4_yuv420_output_android PRIVATE
+        dng_decoder_native
+        ${JPEG_LIBRARIES}
+        ${LOG_LIBRARY})
+    # host_arm() and Y1's golden-literal SCOPING both key off this macro
+    # (test_stage4_yuv420_output.cpp:107 and :361). Without it the on-device
+    # artifact self-labels "METAL-nonsplit" and ASSERTS the Metal goldens,
+    # which turns the intended cross-backend REPORT into a FAIL and makes the
+    # artifact misdescribe the machine that produced it. ffi.cmake:82 sets the
+    # same macro on dng_decoder_native; this keeps the test binary's view of
+    # the build configuration identical to the library's.
+    if(DNG_STAGE4_SPLIT_KERNEL)
+        target_compile_definitions(test_stage4_yuv420_output_android PRIVATE
+            DNG_STAGE4_SPLIT_KERNEL=1)
+    endif()
+    add_dependencies(test_stage4_yuv420_output_android dng_decoder_native)
+
     # ------------------------------------------------------------------------
     # R3-3: Halide Vulkan runtime fork (VkPipelineCache persistence).
     # See native/halide_runtime_fork/README.md for the weak-override mechanism.
