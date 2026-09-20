@@ -480,8 +480,9 @@ int main(int argc, char** argv) {
     std::printf(
         "[ConcurrentRawDecode] mem8_t4_positive_control_has_a_two_stage_file "
         "-> FAIL (every corpus file takes the fused route, so the Stage-3 "
-        "host fallback cannot be exercised; include an X-Trans or linear-RGB "
-        "file)\n");
+        "host fallback cannot be exercised; add a two-stage file -- e.g. "
+        "image_samples/raw_corpus/fuji_xt3.raf, which is what the default "
+        "corpus uses -- or run with no file arguments)\n");
     ++failures;
     std::printf("[ConcurrentRawDecode] TOTAL failures=%d\n", failures);
     std::fflush(stdout);
