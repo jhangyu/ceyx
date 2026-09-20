@@ -1230,31 +1230,103 @@ void run_y6() {
                 identical && yuv_ok && size_ok && planes_ok, detail);
     }
 
-    /* A SCALED yuv420 request must also refuse rather than silently crop.
-     * Recorded here because it is the other structural refusal on this path
-     * and its absence would be invisible to every other case. */
+    /* A SCALED yuv420 request must SUCCEED and must agree byte-for-byte with
+     * the host-forward oracle.
+     *
+     * THIS ASSERTION WAS INVERTED ON 2026-09-20 (T7), and the inversion needs
+     * justifying rather than just doing, because "a test failed so the test was
+     * changed" is the shape of the worst thing one can do to a suite.
+     *
+     * As written by T12 this case asserted err != 0 — that a scaled yuv420
+     * request REFUSES. That was correct at the time and for exactly one reason,
+     * stated in its own message: "a scaled yuv420 archive exists on neither
+     * family". The refusal was never desirable behaviour; it was a structural
+     * guard truthfully reporting a hole in the kernel set, and this case existed
+     * to stop that hole being papered over by a silent crop.
+     *
+     * The hole is now filled. dng_render_stage4_scaled_preavg_yuv420 exists and
+     * is dispatched, so the premise the old assertion rested on is gone —
+     * keeping it would mean the capability could never land, and would have the
+     * suite assert that every Halcyon preview (yuv420 at max_dim=2800) must
+     * fail. What must NOT weaken is the protection against a silent crop, so the
+     * replacement does not merely check err == 0: it demands the extents the
+     * probe promised AND byte-identity with the same host-forward oracle
+     * Y4b/Y10/Y12 use. A crop, a wrong box filter, a wrong orientation
+     * permutation, or carry loss in the plane math each break byte-identity.
+     * That is strictly stronger than the refusal check it replaces. */
     int32_t w = 0, h = 0;
     int64_t bytes = 0;
     const char *arw = "image_samples/raw_sample.arw";
+    const int32_t kScaledDim = 2048;
     const int32_t prc = ceyx_probe_output_size_format(
-        arw, 2048, kCeyxOutputFormatYuv420, &w, &h, &bytes);
-    char detail[320];
+        arw, kScaledDim, kCeyxOutputFormatYuv420, &w, &h, &bytes);
+    char detail[640];
     if (prc != 0) {
         snprintf(detail, sizeof(detail), "scaled probe rc=%d", prc);
         verdict("Y6", "bayer-arw-scaled", host_arm(), false, detail);
     } else {
         std::vector<uint8_t> dst(static_cast<size_t>(bytes), 0);
         DngResult *r = ceyx_decode_into_buffer_format(
-            arw, 2048, dst.data(), dst.size(), kCeyxOutputFormatYuv420,
+            arw, kScaledDim, dst.data(), dst.size(), kCeyxOutputFormatYuv420,
             nullptr);
         const int32_t code = r ? r->error_code : -999;
+        const int32_t got_w = r ? r->width : 0;
+        const int32_t got_h = r ? r->height : 0;
         if (r) dng_free_result(r);
+
+        /* The reference: the SAME request in rgba8 — i.e. the already-gated
+         * pre-average scaled kernel — pushed through the host oracle's forward
+         * transform. Both formats come from the same geometry and the same
+         * colour body, so byte-identity is the correct expectation here and not
+         * a hopeful bound. */
+        int32_t rw = 0, rh = 0;
+        int64_t rbytes = 0;
+        bool ref_ok = false;
+        bool identical = false;
+        size_t diff_bytes = 0;
+        size_t first_diff = 0;
+        if (code == 0 &&
+            ceyx_probe_output_size_format(arw, kScaledDim,
+                                          kCeyxOutputFormatRgba8, &rw, &rh,
+                                          &rbytes) == 0 &&
+            rw == w && rh == h) {
+            std::vector<uint8_t> rgba(static_cast<size_t>(rbytes), 0);
+            DngResult *rr = ceyx_decode_into_buffer_format(
+                arw, kScaledDim, rgba.data(), rgba.size(),
+                kCeyxOutputFormatRgba8, nullptr);
+            const bool rok = (rr != nullptr && rr->error_code == 0);
+            if (rr) dng_free_result(rr);
+            if (rok) {
+                std::vector<uint8_t> host_yuv;
+                oracle_forward_yuv420(rgba.data(), rw, rh, &host_yuv);
+                ref_ok = true;
+                if (host_yuv.size() == dst.size()) {
+                    for (size_t i = 0; i < dst.size(); ++i) {
+                        if (host_yuv[i] != dst[i]) {
+                            if (diff_bytes == 0) first_diff = i;
+                            ++diff_bytes;
+                        }
+                    }
+                    identical = (diff_bytes == 0);
+                } else {
+                    diff_bytes = static_cast<size_t>(-1);  // size mismatch
+                }
+            }
+        }
+
+        const bool ok =
+            (code == 0) && (got_w == w) && (got_h == h) && ref_ok && identical;
         snprintf(detail, sizeof(detail),
-                 "scaled yuv420 request %dx%d -> err=%d (must be NON-ZERO: a "
-                 "scaled yuv420 archive exists on neither family, so this "
-                 "refuses on every backend)",
-                 w, h, code);
-        verdict("Y6", "bayer-arw-scaled", host_arm(), code != 0, detail);
+                 "scaled yuv420 request %dx%d -> err=%d got=%dx%d bytes=%lld | "
+                 "ASSERTION kernel_planes==host_forward_control=%d (ref_ok=%d "
+                 "diff_bytes=%zu first@%zu) | T7: a scaled yuv420 archive NOW "
+                 "EXISTS on the non-split family "
+                 "(dng_render_stage4_scaled_preavg_yuv420), so this must "
+                 "SUCCEED and match the oracle byte-for-byte; the pre-T7 "
+                 "assertion required err!=0 because no such archive existed",
+                 w, h, code, got_w, got_h, (long long)bytes, identical ? 1 : 0,
+                 ref_ok ? 1 : 0, diff_bytes, first_diff);
+        verdict("Y6", "bayer-arw-scaled", host_arm(), ok, detail);
     }
 }
 

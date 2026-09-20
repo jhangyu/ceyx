@@ -1851,6 +1851,239 @@ public:
     }
 };
 
+// =============================================================================
+// T7 (2026-09-20) — the SCALED yuv420 variant, i.e. the missing cross of the
+// two axes this file already varies independently: geometry (1:1 vs
+// box-averaged downscale) and output format (RGBA8 vs yuv420 planes).
+//
+// WHY IT HAS TO EXIST AT ALL. Halcyon requests yuv420 at max_dim=2800 for every
+// preview. Any RAW whose long edge exceeds 2800 px is therefore a SCALED yuv420
+// request, and until this class existed dng_render_halide.cpp refused exactly
+// that combination (kRawErrKernelFailed / -208) because no archive covered it —
+// so every photo from a modern camera failed to preview. The refusal was a
+// correct structural guard over a real hole; this class fills the hole. Routing
+// scaled yuv420 through the RGBA8 kernel instead would have been a silent
+// format divergence and is forbidden by the standing no-divergence ruling.
+//
+// WHAT IS SHARED, WHICH IS THE ENTIRE DESIGN
+//   * the colour arithmetic: ceyx::build_dng_render_stage4_rgb8_exprs
+//     (dng_render_stage4_expr.h) — the SAME body DngRenderStage4 and the fused
+//     kernel use, so a colour-science change cannot land on one geometry or one
+//     format and not the others. Note this is the Expr form, not the Tuple
+//     wrapper: the header forbids the Tuple form on any yuv420 path (D2 defect,
+//     miscompiled on Vulkan when a Tuple is consumed by index at the five
+//     coordinates a plane write touches).
+//   * the plane math: ceyx::build_yuv420_planes / schedule_yuv420_planes
+//     (ceyx_yuv420_write.h) — ONE implementation, shared with both arm-B
+//     classes above and with the fused arm.
+//
+// WHAT IS LOCAL TO THIS CLASS: only the box filter, and only in ONE place — the
+// `sample` seam the colour header exposes. DngRenderStage4ScaledPreAvg (above)
+// predates the colour extraction and still carries an inline copy of the colour
+// body; this class deliberately does NOT clone that copy. Instead it exploits
+// the fact that src_extent_0/1 feed nothing but the orientation clamp: passing
+// the OUTPUT extents there makes the header hand `sample` an unoriented OUTPUT
+// coordinate, and the box average is computed at that coordinate. The resulting
+// expression is the pre-average variant's, term for term:
+//   preavg inline:  xx = clamp(ux, 0, ow-1);   box cell from xx;  avg*src_scale
+//   here:           sx = clamp(ux, 0, ow-1) [header];  box_avg(sx,..);  *src_scale
+//                                                      [src_scale by header]
+//
+// PRE-AVERAGE, not post-average: the cell is averaged in Stage-3 camera space
+// BEFORE the colour math, matching dng_render_stage4_scaled_preavg (Variant A)
+// and not dng_render_stage4_scaled. That is the variant the host dispatches for
+// RGBA8 sized decodes, so the two formats agree on geometry as well as colour.
+//
+// box_avg IS INLINE and must stay inline, like the pre-average class's. A Func
+// materialised at a GPU loop level becomes a Workgroup array, which this driver
+// miscompiles below 32 bits — the reason no yuv420 class on either family has a
+// staged producer (check_gpu_producer_width.py is the mechanical check). Inline
+// costs re-evaluation of the cell once per luma sample plus once per
+// contributing chroma sample; the cell is small on the sizes this path serves
+// (a 6024->2800 request averages ~2x2 taps).
+//
+// TYPE RULE (a) (304e3abd), non-negotiable on this path: the channel is born
+// int32, never uint8/uint16 — build_yuv420_planes immediately multiplies it by
+// coefficients up to 19235, and an 8-bit birth in the middle of wide integer
+// arithmetic is the Adreno carry-loss shape this project has already paid for
+// twice (T12.6 defect #2). encode8 clamps to [0.0f, 255.0f], so cast<int32_t>
+// and cast<uint8_t> return the same integer for every input; the narrowing
+// happens at the plane store and nowhere else.
+//
+// SCOPE: dispatched on the non-split (macOS/Metal) branch, exactly like its
+// RGBA8 sibling dng_render_stage4_scaled_preavg. The split (Vulkan) family
+// refuses EVERY scaled request, RGBA8 included, and has done so since before
+// this change — that pre-existing gap is not widened, narrowed, or hidden here.
+// =============================================================================
+class DngRenderStage4ScaledPreAvgYuv420
+    : public Halide::Generator<DngRenderStage4ScaledPreAvgYuv420> {
+public:
+    GeneratorParam<bool> guard_tail{"guard_tail", true};
+
+    Input<Buffer<uint16_t>> src{"src", 3};          // x, y, c (Stage3 output)
+    Input<float> src_scale{"src_scale"};
+    Input<int32_t> orient_a_x{"orient_a_x"};
+    Input<int32_t> orient_b_x{"orient_b_x"};
+    Input<int32_t> orient_c_x{"orient_c_x"};
+    Input<int32_t> orient_a_y{"orient_a_y"};
+    Input<int32_t> orient_b_y{"orient_b_y"};
+    Input<int32_t> orient_c_y{"orient_c_y"};
+    // Requested output size in UNORIENTED geometry, same meaning and same
+    // argument position as dng_render_stage4_scaled_preavg's: the box cells
+    // tile the SOURCE, so this must not be the swapped extent for a transposing
+    // orientation. (The plane extents, by contrast, ARE oriented.)
+    Input<int32_t> out_w{"out_w"};
+    Input<int32_t> out_h{"out_h"};
+    Input<Buffer<float>> exp_ramp{"exp_ramp", 1};
+    Input<Buffer<float>> tone_curve{"tone_curve", 1};
+    Input<Buffer<float>> encode_gamma{"encode_gamma", 1};
+    Input<Buffer<float>> camera_white{"camera_white", 1};
+    Input<Buffer<float>> camera_to_rgb{"camera_to_rgb", 2};
+    Input<Buffer<float>> rgb_to_final{"rgb_to_final", 2};
+    Input<Buffer<float>> huesat_table{"huesat_table", 2};
+    Input<Buffer<float>> huesat_encode{"huesat_encode", 1};
+    Input<Buffer<float>> huesat_decode{"huesat_decode", 1};
+    Input<int32_t> huesat_hue_div{"huesat_hue_div"};
+    Input<int32_t> huesat_sat_div{"huesat_sat_div"};
+    Input<int32_t> huesat_val_div{"huesat_val_div"};
+    Input<int32_t> huesat_has_table{"huesat_has_table"};
+    Input<int32_t> huesat_has_encoding{"huesat_has_encoding"};
+    Input<Buffer<float>> look_table{"look_table", 2};
+    Input<Buffer<float>> look_encode{"look_encode", 1};
+    Input<Buffer<float>> look_decode{"look_decode", 1};
+    Input<int32_t> look_hue_div{"look_hue_div"};
+    Input<int32_t> look_sat_div{"look_sat_div"};
+    Input<int32_t> look_val_div{"look_val_div"};
+    Input<int32_t> look_has_table{"look_has_table"};
+    Input<int32_t> look_has_encoding{"look_has_encoding"};
+
+    // Y, Cb, Cr. Extents are set by the caller: w x h and ceil(w/2) x ceil(h/2).
+#ifdef CEYX_DBGVK_WIDE32
+    Output<Buffer<int32_t>> y_plane{"y_plane", 2};
+    Output<Buffer<int32_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<int32_t>> cr_plane{"cr_plane", 2};
+#else
+    Output<Buffer<uint8_t>> y_plane{"y_plane", 2};
+    Output<Buffer<uint8_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<uint8_t>> cr_plane{"cr_plane", 2};
+#endif
+
+    Func box_avg{"box_avg"};
+
+    void generate() {
+        Var x("x"), y("y"), c("c");
+
+        // src layout: identical to every other member of this family, because
+        // they all read the same Stage-3 buffer. Backend predicate, never the OS.
+        if (uses_vulkan_planar_layout(get_target())) {
+            src.dim(0).set_stride(1);
+            src.dim(1).set_stride(src.dim(0).extent());
+            src.dim(2).set_bounds(0, 3);
+            src.dim(2).set_stride(src.dim(0).extent() * src.dim(1).extent());
+        } else {
+            src.dim(0).set_stride(3);
+            src.dim(2).set_bounds(0, 3);
+            src.dim(2).set_stride(1);
+        }
+
+        // Tight packing is the frozen FFI contract, not a Halide default we
+        // hope holds: assert it on every plane, as the other yuv420 classes do.
+        y_plane.dim(0).set_stride(1);
+        cb_plane.dim(0).set_stride(1);
+        cr_plane.dim(0).set_stride(1);
+
+        Func src_f("src_f");
+        src_f(x, y, c) = src(x, y, c);
+
+        // ---- box-filter downscale of the Stage3 source ---------------------
+        // Term for term dng_render_stage4_scaled_preavg's, with ONE difference:
+        // box_avg's (x, y) is the already-permuted, already-clamped UNORIENTED
+        // output coordinate the colour header hands to `sample`, whereas the
+        // pre-average class recomputes the permutation and the clamp itself.
+        // The values are the same; the permutation simply lives in the one
+        // place both formats share.
+        //
+        // Cell convention: output pixel x covers source columns
+        // [x*src_w/out_w, (x+1)*src_w/out_w), an exact integer-ratio box, so
+        // cells tile the source exactly and neighbours differ by at most one
+        // pixel. The RDom is sized to the worst-case cell — its bounds depend
+        // only on the inputs, never on x/y, as Halide requires — surplus taps
+        // are masked by `in_cell`, and the divisor is the true cell area.
+        Expr src_w = src.dim(0).extent();
+        Expr src_h = src.dim(1).extent();
+        Expr ow = max(out_w, 1);
+        Expr oh = max(out_h, 1);
+
+        Expr x0 = (x * src_w) / ow;
+        Expr x1 = ((x + 1) * src_w) / ow;
+        Expr y0 = (y * src_h) / oh;
+        Expr y1 = ((y + 1) * src_h) / oh;
+        Expr cnt_x = max(x1 - x0, 1);
+        Expr cnt_y = max(y1 - y0, 1);
+
+        Expr max_cw = (src_w + ow - 1) / ow + 1;
+        Expr max_ch = (src_h + oh - 1) / oh + 1;
+        RDom r(0, max_cw, 0, max_ch, "r");
+        Expr in_cell = (r.x < cnt_x) && (r.y < cnt_y);
+        Expr rsx = clamp(x0 + r.x, 0, src_w - 1);
+        Expr rsy = clamp(y0 + r.y, 0, src_h - 1);
+
+        box_avg(x, y, c) =
+            sum(select(in_cell, cast<float>(src_f(rsx, rsy, c)), 0.0f)) /
+            cast<float>(cnt_x * cnt_y);
+        // ---- end box filter -----------------------------------------------
+
+        // THE SEAM. src_extent_0/1 feed nothing in the header but the
+        // orientation clamp (dng_render_stage4_expr.h:157-158), so handing it
+        // the OUTPUT extents makes `sample` receive an unoriented OUTPUT
+        // coordinate — which is exactly the coordinate box_avg is indexed by.
+        // src_scale is applied by the header, once, for every caller.
+        Expr enc_r, enc_g, enc_b;
+        ceyx::build_dng_render_stage4_rgb8_exprs(
+            x, y,
+            [&](Expr sample_x, Expr sample_y, int channel) {
+                return box_avg(sample_x, sample_y, channel);
+            },
+            ow, oh, src_scale,
+            orient_a_x, orient_b_x, orient_c_x,
+            orient_a_y, orient_b_y, orient_c_y,
+            exp_ramp, tone_curve, encode_gamma, camera_white,
+            camera_to_rgb, rgb_to_final,
+            huesat_table, huesat_encode, huesat_decode,
+            huesat_hue_div, huesat_sat_div, huesat_val_div,
+            huesat_has_table, huesat_has_encoding,
+            look_table, look_encode, look_decode,
+            look_hue_div, look_sat_div, look_val_div,
+            look_has_table, look_has_encoding,
+            enc_r, enc_g, enc_b);
+
+        // Type rule (a): born int32. See the class comment; this is
+        // character-for-character the shape the fused yuv420 arm uses
+        // (RawBayerFusedRenderGenerator.cpp:450-453). Three single-value Funcs,
+        // no Tuple anywhere, all three INLINE so no Workgroup array appears.
+        Func rgb8_r("rgb8_r"), rgb8_g("rgb8_g"), rgb8_b("rgb8_b");
+        rgb8_r(x, y) = cast<int32_t>(enc_r);
+        rgb8_g(x, y) = cast<int32_t>(enc_g);
+        rgb8_b(x, y) = cast<int32_t>(enc_b);
+
+        // The luma plane's extents ARE the oriented output extents, so the
+        // odd-extent edge clamp reads them from there rather than from a
+        // separate scalar the host could get wrong.
+        ceyx::build_yuv420_planes(x, y, rgb8_r, rgb8_g, rgb8_b,
+                                  y_plane.dim(0).extent(),
+                                  y_plane.dim(1).extent(),
+                                  y_plane, cb_plane, cr_plane);
+    }
+
+    void schedule() {
+        Var x("x"), y("y");
+        // Nothing beyond the shared plane schedule — in particular box_avg is
+        // left INLINE on every target (see the class comment).
+        scheduleYuv420Planes(get_target(), guard_tail, x, y,
+                             y_plane, cb_plane, cr_plane);
+    }
+};
+
 HALIDE_REGISTER_GENERATOR(DngRenderStage4, dng_render_stage4)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4Scaled, dng_render_stage4_scaled)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4ScaledPreAvg, dng_render_stage4_scaled_preavg)
@@ -1858,3 +2091,5 @@ HALIDE_REGISTER_GENERATOR(DngRenderStage4Android, dng_render_stage4_split)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4AndroidProbe, dng_render_stage4_split_probe)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4Yuv420, dng_render_stage4_yuv420)
 HALIDE_REGISTER_GENERATOR(DngRenderStage4SplitYuv420, dng_render_stage4_split_yuv420)
+HALIDE_REGISTER_GENERATOR(DngRenderStage4ScaledPreAvgYuv420,
+                          dng_render_stage4_scaled_preavg_yuv420)

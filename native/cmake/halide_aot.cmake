@@ -289,6 +289,24 @@ add_custom_command(
 add_custom_target(dng_render_scaled_preavg_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
 
+# T7 (2026-09-20): the yuv420 output variant of the pre-average SCALED kernel —
+# the missing cross of the geometry axis (above) with the format axis (below).
+# Halcyon requests yuv420 at max_dim=2800, so every RAW larger than that is a
+# scaled yuv420 request; without this archive the host had to refuse them all
+# (kRawErrKernelFailed / -208). Emitted from the SAME generator binary via
+# -g/-f, exactly like every variant around it, so dng_render_stage4 itself stays
+# byte-identical (its output SHAs are pinned gate artifacts — Gotcha #99).
+# Declared unconditionally, matching its RGBA8 sibling above; which family a
+# build DISPATCHES is decided by DNG_STAGE4_SPLIT_KERNEL at link time.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420.h
+    COMMAND dng_render_generator -g dng_render_stage4_scaled_preavg_yuv420 -f dng_render_stage4_scaled_preavg_yuv420 -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS dng_render_generator
+    COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled, pre-average, yuv420 planes)..."
+)
+add_custom_target(dng_render_scaled_preavg_yuv420_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
+
 # mem8 v3 T12: the yuv420 output variant of the non-split Stage-4 kernel
 # (arm B, Metal family). Emitted from the SAME generator binary via -g/-f,
 # exactly like the scaled variants above, so dng_render_stage4 itself stays

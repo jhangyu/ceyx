@@ -186,6 +186,9 @@ functions:
 // only — the split (Android/Vulkan) branch has no scaled AOT and refuses
 // sized requests instead (see runRenderStage4HalideAotFromDevice).
 #include "dng_render_stage4_scaled_preavg.h"
+// T7: and its yuv420 output variant, linked under the same condition by
+// cmake/ffi.cmake. Same geometry, same colour body, different destination.
+#include "dng_render_stage4_scaled_preavg_yuv420.h"
 #endif
 #if defined(__ANDROID__)
 #include <arm_neon.h>
@@ -1725,15 +1728,17 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     if (fused_bayer_source && scaled) {
         return false;
     }
-    // T12, same structural-guard reasoning, FORMAT axis: there is no
-    // yuv420 variant of the scaled/pre-average archive on either family, so a
-    // scaled yuv420 request refuses on EVERY backend rather than silently
-    // cropping. (The split branch already refuses every scaled request a few
-    // lines below; this one covers the non-split branch too, where scaled
-    // decodes are otherwise supported.)
-    if (yuv420_output && scaled) {
-        return false;
-    }
+    // T7 (2026-09-20): the scaled x yuv420 cross USED to refuse here, because
+    // no archive covered it. It now has one — dng_render_stage4_scaled_preavg_
+    // yuv420, dispatched in the arm below — so the refusal is gone rather than
+    // relaxed: the hole it guarded was filled, which is the only legitimate way
+    // to remove a structural guard. That refusal was also the -208 every
+    // Halcyon preview hit, since previews request yuv420 at max_dim=2800 and
+    // any RAW longer than that is a scaled request.
+    //
+    // The SPLIT (Vulkan) family still refuses every scaled request a few lines
+    // below, RGBA8 included. That is pre-existing and untouched: it is a
+    // geometry gap on that family, not a format divergence introduced here.
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // Android/Vulkan has no scaled AOT (Gotcha #93/#96 unverifiable without a
     // real device). Refuse rather than crop; the caller falls back to the host
@@ -2471,6 +2476,49 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         y_plane_buf.raw_buffer(),
                                         cb_plane_buf.raw_buffer(),
                                         cr_plane_buf.raw_buffer())
+        // T7: scaled AND yuv420. Ordered BEFORE the unscaled yuv420 arm for the
+        // same reason the fused-and-yuv420 arm precedes it: the more specific
+        // selector must win. Its argument list is
+        // dng_render_stage4_scaled_preavg's verbatim — including dst_w/dst_h in
+        // the same position, so the box geometry stays on the UNORIENTED scaled
+        // extent — with the single RGBA8 destination replaced by the three
+        // planes, exactly as the yuv420 arm below replaces dng_render_stage4's.
+        // src_buf has already been cropped to the SOURCE extent by the `scaled`
+        // branch of the crop block above, shared with the RGBA8 sized path.
+        : (yuv420_output && scaled)
+        ? dng_render_stage4_scaled_preavg_yuv420(
+                                   src_buf.raw_buffer(),
+                                   src_scale,
+                                   orient_coeffs[0], orient_coeffs[1],
+                                   orient_coeffs[2], orient_coeffs[3],
+                                   orient_coeffs[4], orient_coeffs[5],
+                                   dst_w,
+                                   dst_h,
+                                   exp_buf.raw_buffer(),
+                                   tone_buf.raw_buffer(),
+                                   gamma_buf.raw_buffer(),
+                                   cw_buf.raw_buffer(),
+                                   c2r_buf.raw_buffer(),
+                                   r2f_buf.raw_buffer(),
+                                   hs_table_buf.raw_buffer(),
+                                   hs_encode_buf.raw_buffer(),
+                                   hs_decode_buf.raw_buffer(),
+                                   params.huesat_hue_div,
+                                   params.huesat_sat_div,
+                                   params.huesat_val_div,
+                                   params.huesat_has_table,
+                                   params.huesat_has_encoding,
+                                   look_table_buf.raw_buffer(),
+                                   look_encode_buf.raw_buffer(),
+                                   look_decode_buf.raw_buffer(),
+                                   params.look_hue_div,
+                                   params.look_sat_div,
+                                   params.look_val_div,
+                                   params.look_has_table,
+                                   params.look_has_encoding,
+                                   y_plane_buf.raw_buffer(),
+                                   cb_plane_buf.raw_buffer(),
+                                   cr_plane_buf.raw_buffer())
         : yuv420_output
         ? dng_render_stage4_yuv420(src_buf.raw_buffer(),
                                    src_scale,

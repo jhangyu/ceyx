@@ -1671,8 +1671,10 @@ endif()
 # needs the scaled kernel the sized dispatch calls (macOS/Metal branch only).
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_device_handoff
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
     add_dependencies(test_device_handoff dng_render_scaled_preavg_aot_target)
+    add_dependencies(test_device_handoff dng_render_scaled_preavg_yuv420_aot_target)
 endif()
 add_dependencies(test_device_handoff halide_runtime_target)
 add_dependencies(test_device_handoff dng_demosaic_aot_target)
@@ -1757,8 +1759,10 @@ else()
 endif()
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_stage4_oriented
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
     add_dependencies(test_stage4_oriented dng_render_scaled_preavg_aot_target)
+    add_dependencies(test_stage4_oriented dng_render_scaled_preavg_yuv420_aot_target)
 endif()
 add_dependencies(test_stage4_oriented halide_runtime_target)
 add_dependencies(test_stage4_oriented dng_demosaic_aot_target)
@@ -1825,8 +1829,10 @@ else()
 endif()
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_concurrent_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
     add_dependencies(test_concurrent_decode dng_render_scaled_preavg_aot_target)
+    add_dependencies(test_concurrent_decode dng_render_scaled_preavg_yuv420_aot_target)
 endif()
 add_dependencies(test_concurrent_decode halide_runtime_target)
 add_dependencies(test_concurrent_decode dng_demosaic_aot_target)
@@ -2043,6 +2049,7 @@ target_link_libraries(test_sized_decode
     ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 if(DNG_USE_LIBJPEG)
@@ -2054,6 +2061,7 @@ add_dependencies(test_sized_decode dng_demosaic_warp_aot_target)
 add_dependencies(test_sized_decode dng_warp_aot_target)
 add_dependencies(test_sized_decode dng_render_aot_target)
 add_dependencies(test_sized_decode dng_render_scaled_preavg_aot_target)
+add_dependencies(test_sized_decode dng_render_scaled_preavg_yuv420_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
 # T20-fix F1: see the test_device_handoff block above.
@@ -2158,8 +2166,10 @@ endif()
 # R2 sized decode: same as test_device_handoff — compiles the render TU directly.
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
     add_dependencies(test_decode dng_render_scaled_preavg_aot_target)
+    add_dependencies(test_decode dng_render_scaled_preavg_yuv420_aot_target)
 endif()
 add_dependencies(test_decode halide_runtime_target)
 add_dependencies(test_decode dng_demosaic_aot_target)

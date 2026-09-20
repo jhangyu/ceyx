@@ -74,11 +74,18 @@ target_link_libraries(dng_decoder_native
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by
 # dng_render_halide.cpp on the non-split (macOS/Metal) branch only, so it is
 # linked only there. The split branch refuses sized requests instead.
+# T7: its yuv420 sibling is linked in the SAME breath and under the same
+# condition, deliberately. A format pair where one half is linked and the other
+# is not is exactly how "the symbol is not in the shipped binary" happens — the
+# same reasoning already recorded for the fused pair above.
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(dng_decoder_native
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
     if(NOT DNG_CROSS_BUILD)
         add_dependencies(dng_decoder_native dng_render_scaled_preavg_aot_target)
+        add_dependencies(dng_decoder_native
+                         dng_render_scaled_preavg_yuv420_aot_target)
     endif()
 endif()
 # W7: link the split Stage4 kernel wherever it is generated (Vulkan targets).
