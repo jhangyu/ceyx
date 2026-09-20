@@ -97,7 +97,7 @@ dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 name       = "ceyx_decode_into_buffer_format"
 platforms  = "all"
 group      = "yuv420"
-source     = ""
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
@@ -111,7 +111,7 @@ dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 name       = "ceyx_decode_into_buffer_oriented_format"
 platforms  = "all"
 group      = "yuv420"
-source     = ""
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
@@ -195,7 +195,7 @@ dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 name       = "ceyx_probe_output_size_format"
 platforms  = "all"
 group      = "yuv420"
-source     = ""
+source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
@@ -237,7 +237,7 @@ dart_sites = ["plugin/lib/src/still_bindings.dart"]
 name       = "ceyx_yuv420_to_rgba8"
 platforms  = "all"
 group      = "yuv420"
-source     = ""
+source     = "native/src/ffi/raw_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]

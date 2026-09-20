@@ -48,11 +48,12 @@ import os
 import re
 import sys
 
-DEFAULT_GENERATOR = os.path.join(
+GENERATORS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "generators",
-    "DngRenderGenerator.cpp",
 )
+
+DEFAULT_GENERATOR = os.path.join(GENERATORS_DIR, "DngRenderGenerator.cpp")
 
 START_MARKER = "// Fused EXIF orientation:"
 END_MARKER = "// ---- end fused orientation permutation ----"
@@ -65,6 +66,72 @@ REQUIRED_CLASSES = ("DngRenderStage4", "DngRenderStage4ScaledPreAvg",
 OPTIONAL_CLASSES = ()
 
 CLASS_RE = re.compile(r"^class\s+(\w+)\s*:\s*public\s+Halide::Generator", re.M)
+
+# --- Refactored layout (T12-pre / T20) -------------------------------------
+# The permutation block no longer has to sit INLINE in each generator class:
+# d40c7ea3 / 8d301350 hoisted the colour body (permutation included) into
+# shared headers next to the generator (dng_render_stage4_expr.h,
+# dng_render_stage4_split_expr.h), and the classes now reach it by calling the
+# shared builder.  Re-inlining it would undo exactly the deduplication those
+# refactors bought, so the guard follows the code instead:
+#
+#   * every block found anywhere (inline in a class, or in a shared builder)
+#     must still be byte-identical -- unchanged, that is the whole point;
+#   * every REQUIRED class must still REACH a block: either it carries one
+#     inline, or its body calls a shared builder that carries one (possibly
+#     transitively, e.g. build_dng_render_stage4_rgb -> ..._rgb8_exprs), and
+#     the header defining that builder must actually be #included here.
+#
+# A class that silently stops reaching the block -- call deleted, include
+# deleted, or the builder's block removed -- is still a hard failure.
+HEADER_FN_RE = re.compile(r"^void\s+(\w+)\s*\(", re.M)
+CALL_RE = re.compile(r"\b(?:ceyx::)?(build_\w+)\s*\(")
+INCLUDE_RE = re.compile(r'^\s*#include\s+"([^"]+)"', re.M)
+
+
+def header_builders(generators_dir: str) -> "dict[str, tuple[str, str | None, list[str]]]":
+    """name -> (header_basename, block_or_None, names_it_calls) for every
+    `void build_*(...)` defined in a header beside the generators."""
+    out = {}
+    for fname in sorted(os.listdir(generators_dir)):
+        if not fname.endswith(".h"):
+            continue
+        with open(os.path.join(generators_dir, fname), "r", encoding="utf-8") as fh:
+            text = fh.read()
+        matches = list(HEADER_FN_RE.finditer(text))
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            body = text[m.start():end]
+            out[m.group(1)] = (fname, extract_block(body),
+                               [c for c in CALL_RE.findall(body)
+                                if c != m.group(1)])
+    return out
+
+
+def resolve_via_builders(class_body: str, builders: "dict", includes: "set[str]",
+                         ) -> "tuple[str | None, str | None, str | None]":
+    """Follow the class's shared-builder calls to a permutation block.
+
+    Returns (block, provenance, error).  `error` is set when a builder is
+    reached but its defining header is not included by the generator file.
+    """
+    seen = set()
+    queue = [(c, [c]) for c in CALL_RE.findall(class_body)]
+    err = None
+    while queue:
+        name, chain = queue.pop(0)
+        if name in seen or name not in builders:
+            continue
+        seen.add(name)
+        header, block, calls = builders[name]
+        if header not in includes:
+            err = (f"reaches {name}() defined in {header}, but that header is "
+                   f"not #included by the generator file")
+            continue
+        if block is not None:
+            return block, f"{header}:{' -> '.join(chain)}", None
+        queue.extend((c, chain + [c]) for c in calls)
+    return None, None, err
 
 
 def class_spans(text: str) -> "dict[str, tuple[int, int]]":
@@ -216,23 +283,41 @@ def main() -> int:
         text = fh.read()
 
     spans = class_spans(text)
+    includes = set(INCLUDE_RE.findall(text))
+    builders = header_builders(GENERATORS_DIR)
     blocks = {}
     missing_required = []
+
+    # The shared headers' blocks are compared too, not just the classes': a
+    # hoisted block that drifts against an inline one must still be caught.
+    for bname, (header, blk, _calls) in sorted(builders.items()):
+        if blk is not None:
+            blocks[f"{header}:{bname}"] = blk
+
     for name in REQUIRED_CLASSES + OPTIONAL_CLASSES:
         if name not in spans:
             if name in REQUIRED_CLASSES:
                 missing_required.append(f"class {name} not found in {args.file}")
             continue
         lo, hi = spans[name]
-        blk = extract_block(text[lo:hi])
+        body = text[lo:hi]
+        blk = extract_block(body)
+        via = "inline"
         if blk is None:
-            if name in REQUIRED_CLASSES:
-                missing_required.append(
-                    f"class {name} carries no permutation block "
-                    f"(markers: {START_MARKER!r} .. {END_MARKER!r})")
-            else:
-                print(f"DERIVATION ABSENT {name} (optional; lands in Task 7)")
-            continue
+            blk, via, err = resolve_via_builders(body, builders, includes)
+            if blk is None:
+                if name in REQUIRED_CLASSES:
+                    detail = err or (
+                        "no inline block and no call to a shared builder that "
+                        "carries one")
+                    missing_required.append(
+                        f"class {name} does not reach the permutation block: "
+                        f"{detail} (markers: {START_MARKER!r} .. "
+                        f"{END_MARKER!r})")
+                else:
+                    print(f"DERIVATION ABSENT {name} (optional; lands in Task 7)")
+                continue
+        print(f"DERIVATION REACHES {name} via {via}")
         blocks[name] = blk
 
     if args.do_print:
