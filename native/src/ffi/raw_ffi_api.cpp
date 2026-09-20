@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "ceyx_output_format_size.h"
 #include "dng_pipeline.h"
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
@@ -188,6 +189,21 @@ RAW_FFI_EXPORT int32_t ceyx_debug_zero_copy_capability_counters(
         *out_source_mosaic_wrap_count = ceyx::zero_copy_source_mosaic_wrap_count();
     }
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// mem8 v3 T12 — the FROZEN contract's sizing function (raw_ffi_api.h, T12.0
+// clause 2b). A one-line forward on purpose: the arithmetic itself is inline in
+// ceyx_output_format_size.h so the pipeline's internal sizing (Stage-4's
+// destination views, the RGBA checkout in raw_gpu_pipeline.cpp) and this
+// exported entry cannot drift apart. Chroma extents come from the oracle's
+// chroma_extent (ceil, not truncation) — the odd-dimension case is exactly
+// where a naive w/2 under-allocates, which is a heap overrun, not a miscount.
+// ---------------------------------------------------------------------------
+RAW_FFI_EXPORT int64_t ceyx_output_format_byte_count(int32_t output_format,
+                                                      int32_t width,
+                                                      int32_t height) {
+    return ceyx::output_format_byte_count(output_format, width, height);
 }
 
 }  // extern "C"

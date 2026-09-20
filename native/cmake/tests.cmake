@@ -50,6 +50,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
@@ -69,9 +70,15 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # the archive is required on EVERY target that compiles that TU, exactly as
     # ffi.cmake:59 links it into the shipping library.
     target_link_libraries(test_decode_android PRIVATE
-        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET raw_bayer_fused_render_aot_target)
         add_dependencies(test_decode_android raw_bayer_fused_render_aot_target)
+        add_dependencies(test_decode_android dng_render_yuv420_aot_target)
     endif()
     add_dependencies(test_decode_android test_android_vulkan_capability)
 
@@ -103,6 +110,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
@@ -114,9 +122,15 @@ if(ANDROID AND DNG_CROSS_BUILD)
     endif()
     # T20-fix F1: see the test_decode_android block above.
     target_link_libraries(dng_ffi_harness_android PRIVATE
-        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET raw_bayer_fused_render_aot_target)
         add_dependencies(dng_ffi_harness_android raw_bayer_fused_render_aot_target)
+        add_dependencies(dng_ffi_harness_android dng_render_yuv420_aot_target)
     endif()
 
     # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
@@ -145,6 +159,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
         ${VULKAN_LIBRARY}
@@ -156,9 +171,15 @@ if(ANDROID AND DNG_CROSS_BUILD)
     endif()
     # T20-fix F1: see the test_decode_android block above.
     target_link_libraries(test_device_handoff_android PRIVATE
-        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET raw_bayer_fused_render_aot_target)
         add_dependencies(test_device_handoff_android raw_bayer_fused_render_aot_target)
+        add_dependencies(test_device_handoff_android dng_render_yuv420_aot_target)
     endif()
 
     # T-V0 (2026-09-19, spec-cpu-levers.md section 3.3b): Android cross-build of
@@ -1628,9 +1649,15 @@ add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
 # after T20-fix F2), so the archive must be linked here as ffi.cmake:59 does
 # for the shipping library.
 target_link_libraries(test_device_handoff
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
 if(TARGET raw_bayer_fused_render_aot_target)
     add_dependencies(test_device_handoff raw_bayer_fused_render_aot_target)
+    add_dependencies(test_device_handoff dng_render_yuv420_aot_target)
 endif()
 # F-T4-1 (found by T3's Linux run): the mirror image of the
 # `if(NOT DNG_STAGE4_SPLIT_KERNEL)` scaled_preavg block above. This target
@@ -1643,9 +1670,13 @@ endif()
 # that produces the archive; the TARGET guard mirrors ffi.cmake:20.
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_device_handoff
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET dng_render_android_aot_target)
         add_dependencies(test_device_handoff dng_render_android_aot_target)
+    endif()
+    if(TARGET dng_render_split_yuv420_aot_target)
+        add_dependencies(test_device_handoff dng_render_split_yuv420_aot_target)
     endif()
 endif()
 if(APPLE)
@@ -1701,9 +1732,15 @@ add_dependencies(test_stage4_oriented dng_opcode_polynomial_aot_target)
 add_dependencies(test_stage4_oriented dng_opcode_polynomial3_aot_target)
 # T20-fix F1: see the test_device_handoff block above.
 target_link_libraries(test_stage4_oriented
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
 if(TARGET raw_bayer_fused_render_aot_target)
     add_dependencies(test_stage4_oriented raw_bayer_fused_render_aot_target)
+    add_dependencies(test_stage4_oriented dng_render_yuv420_aot_target)
 endif()
 if(APPLE)
     target_link_libraries(test_stage4_oriented ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
@@ -1763,15 +1800,25 @@ add_dependencies(test_concurrent_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_concurrent_decode dng_opcode_polynomial3_aot_target)
 # T20-fix F1: see the test_device_handoff block above.
 target_link_libraries(test_concurrent_decode
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
 if(TARGET raw_bayer_fused_render_aot_target)
     add_dependencies(test_concurrent_decode raw_bayer_fused_render_aot_target)
+    add_dependencies(test_concurrent_decode dng_render_yuv420_aot_target)
 endif()
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_concurrent_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET dng_render_android_aot_target)
         add_dependencies(test_concurrent_decode dng_render_android_aot_target)
+    endif()
+    if(TARGET dng_render_split_yuv420_aot_target)
+        add_dependencies(test_concurrent_decode dng_render_split_yuv420_aot_target)
     endif()
 endif()
 if(APPLE)
@@ -1974,17 +2021,27 @@ add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
 # T20-fix F1: see the test_device_handoff block above.
 target_link_libraries(test_sized_decode
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
 if(TARGET raw_bayer_fused_render_aot_target)
     add_dependencies(test_sized_decode raw_bayer_fused_render_aot_target)
+    add_dependencies(test_sized_decode dng_render_yuv420_aot_target)
 endif()
 # F-T4-1: tests/test_sized_decode.cpp #includes dng_render_halide.cpp (see the
 # add_executable note above), so the split archive is required here too.
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_sized_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET dng_render_android_aot_target)
         add_dependencies(test_sized_decode dng_render_android_aot_target)
+    endif()
+    if(TARGET dng_render_split_yuv420_aot_target)
+        add_dependencies(test_sized_decode dng_render_split_yuv420_aot_target)
     endif()
 endif()
 if(APPLE)
@@ -2076,18 +2133,28 @@ add_dependencies(test_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_decode dng_opcode_polynomial3_aot_target)
 # T20-fix F1: see the test_device_handoff block above.
 target_link_libraries(test_decode
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
+        # Required on every target that compiles dng_render_halide.cpp, for
+        # exactly the reason the fused archive above is (ffi.cmake links it
+        # into the shipping library the same way).
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
 if(TARGET raw_bayer_fused_render_aot_target)
     add_dependencies(test_decode raw_bayer_fused_render_aot_target)
+    add_dependencies(test_decode dng_render_yuv420_aot_target)
 endif()
 # F-T4-1: test_decode compiles dng_render_halide.cpp as a source, so it needs
 # the split archive on every split-kernel platform (see the test_device_handoff
 # block above for the full rationale).
 if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(test_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT})
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
     if(TARGET dng_render_android_aot_target)
         add_dependencies(test_decode dng_render_android_aot_target)
+    endif()
+    if(TARGET dng_render_split_yuv420_aot_target)
+        add_dependencies(test_decode dng_render_split_yuv420_aot_target)
     endif()
 endif()
 if(APPLE)

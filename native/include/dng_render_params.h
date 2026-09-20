@@ -243,7 +243,33 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         // nullptr keeps every existing caller
                                         // bit-identical.
                                         const FusedBayerSource* fused_bayer_source =
-                                            nullptr);
+                                            nullptr,
+                                        // mem8 v3 T12: a CeyxOutputFormat value
+                                        // (raw_ffi_api.h) -- 0 = rgba8 (today's
+                                        // behaviour and the default, so every
+                                        // existing caller is bit-identical),
+                                        // 1 = planar yuv420.
+                                        //
+                                        // `dst` remains ONE contiguous caller
+                                        // allocation in both formats. Under
+                                        // yuv420 the runner lays three plane
+                                        // views over it at the frozen offsets
+                                        // (raw_ffi_api.h's layout contract) and
+                                        // dispatches the yuv420 AOT entry; the
+                                        // format is never an Expr inside a
+                                        // kernel.
+                                        //
+                                        // THE BRANCH THIS PARAMETER DRIVES TURNS
+                                        // ON FORMAT, NEVER ON PLATFORM: under
+                                        // yuv420 both the caller-MTLBuffer wrap
+                                        // and the arena destination region are
+                                        // refused IDENTICALLY on Metal and on
+                                        // Vulkan (halide_metal_wrap_buffer takes
+                                        // no offset, so three views over one
+                                        // MTLBuffer would all alias offset 0 --
+                                        // wrong pixels, not a slower path; and
+                                        // kDestinationRgba8Region is RGBA8-sized).
+                                        int32_t output_format = 0);
 
 // Lead-assigned scope addition (2026-09-11, plan §6.2 item 1 — C4
 // device->host copy bracket). Owned by impl-2-sonnet alongside

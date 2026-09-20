@@ -68,7 +68,13 @@ static_assert(offsetof(RawDevelopParams, exif_orientation) == 28,
 // caller_destination_is_page_aligned, appended at the end. Same guard pattern.
 static_assert(offsetof(RawDevelopParams, caller_destination_is_page_aligned) == 32,
              "caller_destination_is_page_aligned offset moved - must stay APPENDED, never inserted");
-static_assert(sizeof(RawDevelopParams) == 36, "RawDevelopParams size changed");
+// mem8 v3 T12, contract version 7: RawDevelopParams gains output_format,
+// appended at the end. Offset 36, not 33: an int32_t cannot occupy the bool's
+// tail padding, so every preceding offset is unchanged and the struct grows by
+// one aligned word.
+static_assert(offsetof(RawDevelopParams, output_format) == 36,
+             "output_format offset moved - must stay APPENDED, never inserted");
+static_assert(sizeof(RawDevelopParams) == 40, "RawDevelopParams size changed");
 
 namespace {
 

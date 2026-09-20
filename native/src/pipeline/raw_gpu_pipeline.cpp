@@ -13,6 +13,10 @@
 
 #include "HalideBuffer.h"
 #include "ceyx_decode_into.h"   // WP10 A3: caller-buffer forwarding on the DNG route
+// mem8 v3 T12: THE sizing arithmetic for CeyxOutputFormat. The destination byte
+// count is format-dependent from this task on, and open-coding it here would be
+// a defect by contract (raw_ffi_api.h, T12.0 clause 2b).
+#include "ceyx_output_format_size.h"
 #include "ceyx_orient.h"
 #include "dng_ffi_api.h"
 #include "dng_halide_device.h"
@@ -517,7 +521,15 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     const uint32_t src_h = crop.height;
     uint32_t out_w = 0, out_h = 0;
     scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-    const bool use_fused_bayer_render = (src_w == out_w && src_h == out_h);
+    // mem8 v3 T12: `&& output_format == rgba8` because ARM A -- the fused
+    // kernel's own yuv420 output variant -- is T12.6 and has not landed; no
+    // fused yuv420 archive exists yet. A yuv420 request therefore takes the
+    // two-stage path, which DOES have a yuv420 variant on both families.
+    // Scope boundary on the FORMAT axis, not a platform guard: both backend
+    // families behave identically here, and Stage4 carries the same refusal as
+    // a structural backstop.
+    const bool use_fused_bayer_render =
+        (src_w == out_w && src_h == out_h) && develop.output_format == 0;
 
     Halide::Runtime::Buffer<uint16_t> stage3;
 
@@ -622,7 +634,19 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         ceyx_orientation_transposes_inline(develop.exif_orientation);
     const uint32_t oriented_w = transposes ? out_h : out_w;
     const uint32_t oriented_h = transposes ? out_w : out_h;
-    const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
+    // mem8 v3 T12: the destination byte requirement is FORMAT-dependent, and
+    // the frozen contract's own sizing function is the only place that
+    // arithmetic lives (raw_ffi_api.h: open-coding it is a defect by
+    // contract). The name `rgba_bytes` is kept so the surrounding zero-copy /
+    // checkout / diagnostics code reads unchanged; under yuv420 it holds
+    // w*h + 2*ceil(w/2)*ceil(h/2). A negative answer means an unknown format:
+    // the format-taking FFI entry validates before reaching here, so this is a
+    // backstop, never the caller-facing diagnostic.
+    const int64_t dst_bytes_for_format = ceyx::output_format_byte_count(
+        develop.output_format, static_cast<int32_t>(oriented_w),
+        static_cast<int32_t>(oriented_h));
+    if (dst_bytes_for_format < 0) return kRawErrMetadataInvalid;
+    const size_t rgba_bytes = static_cast<size_t>(dst_bytes_for_format);
 
     // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
     // all three branches stay structurally identical to one another.
@@ -657,8 +681,17 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // wrapped for alignment reasons -- the one decision this file is in a
     // position to see (Stage4 cannot distinguish "degraded" from "plain
     // fallback"; both arrive there as a null caller_destination_metal_buffer).
+    // mem8 v3 T12: not attempted at all under yuv420, on every backend. Stage4
+    // refuses the wrap for a three-plane destination anyway
+    // (halide_metal_wrap_buffer takes no offset), so creating the MTLBuffer
+    // here would be a pure cost; and this is NOT an alignment degradation, so
+    // that counter must not move either -- a format with no wrap path is a
+    // different fact from a buffer that failed the alignment contract.
+    const bool destination_wrap_is_applicable = (develop.output_format == 0);
     std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
-    if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+    if (!destination_wrap_is_applicable) {
+        // no wrap, no degradation counter
+    } else if (use_zero_copy && develop.caller_destination_is_page_aligned) {
         // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
         // LENGTH argument itself to be a page multiple (§4.3), not just the
         // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
@@ -725,7 +758,12 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             caller_destination_metal_buffer,
                                             use_fused_bayer_render
                                                 ? &fused_source
-                                                : nullptr)) {
+                                                : nullptr,
+                                            // mem8 v3 T12: the requested output
+                                            // format, threaded through to the
+                                            // one place that chooses which AOT
+                                            // entry to dispatch.
+                                            develop.output_format)) {
         return kRawErrKernelFailed;
     }
 
@@ -929,7 +967,19 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         ceyx_orientation_transposes_inline(develop.exif_orientation);
     const uint32_t oriented_w = transposes ? out_h : out_w;
     const uint32_t oriented_h = transposes ? out_w : out_h;
-    const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
+    // mem8 v3 T12: the destination byte requirement is FORMAT-dependent, and
+    // the frozen contract's own sizing function is the only place that
+    // arithmetic lives (raw_ffi_api.h: open-coding it is a defect by
+    // contract). The name `rgba_bytes` is kept so the surrounding zero-copy /
+    // checkout / diagnostics code reads unchanged; under yuv420 it holds
+    // w*h + 2*ceil(w/2)*ceil(h/2). A negative answer means an unknown format:
+    // the format-taking FFI entry validates before reaching here, so this is a
+    // backstop, never the caller-facing diagnostic.
+    const int64_t dst_bytes_for_format = ceyx::output_format_byte_count(
+        develop.output_format, static_cast<int32_t>(oriented_w),
+        static_cast<int32_t>(oriented_h));
+    if (dst_bytes_for_format < 0) return kRawErrMetadataInvalid;
+    const size_t rgba_bytes = static_cast<size_t>(dst_bytes_for_format);
 
     // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
     // all three branches stay structurally identical to one another.
@@ -947,8 +997,17 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     // wrap attempt (gated on develop.caller_destination_is_page_aligned),
     // same degraded-counter bookkeeping, same fallback shape, same RAII
     // lifetime.
+    // mem8 v3 T12: not attempted at all under yuv420, on every backend. Stage4
+    // refuses the wrap for a three-plane destination anyway
+    // (halide_metal_wrap_buffer takes no offset), so creating the MTLBuffer
+    // here would be a pure cost; and this is NOT an alignment degradation, so
+    // that counter must not move either -- a format with no wrap path is a
+    // different fact from a buffer that failed the alignment contract.
+    const bool destination_wrap_is_applicable = (develop.output_format == 0);
     std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
-    if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+    if (!destination_wrap_is_applicable) {
+        // no wrap, no degradation counter
+    } else if (use_zero_copy && develop.caller_destination_is_page_aligned) {
         // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
         // LENGTH argument itself to be a page multiple (§4.3), not just the
         // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
@@ -986,7 +1045,12 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation,
                                             arena,
-                                            caller_destination_metal_buffer)) {
+                                            caller_destination_metal_buffer,
+                                            // mem8 v3 T12: no fused source on
+                                            // this route; the format is the
+                                            // parameter after it.
+                                            /*fused_bayer_source=*/nullptr,
+                                            develop.output_format)) {
         return kRawErrKernelFailed;
     }
 
@@ -1185,7 +1249,19 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         ceyx_orientation_transposes_inline(develop.exif_orientation);
     const uint32_t oriented_w = transposes ? out_h : out_w;
     const uint32_t oriented_h = transposes ? out_w : out_h;
-    const size_t rgba_bytes = static_cast<size_t>(oriented_w) * oriented_h * 4;
+    // mem8 v3 T12: the destination byte requirement is FORMAT-dependent, and
+    // the frozen contract's own sizing function is the only place that
+    // arithmetic lives (raw_ffi_api.h: open-coding it is a defect by
+    // contract). The name `rgba_bytes` is kept so the surrounding zero-copy /
+    // checkout / diagnostics code reads unchanged; under yuv420 it holds
+    // w*h + 2*ceil(w/2)*ceil(h/2). A negative answer means an unknown format:
+    // the format-taking FFI entry validates before reaching here, so this is a
+    // backstop, never the caller-facing diagnostic.
+    const int64_t dst_bytes_for_format = ceyx::output_format_byte_count(
+        develop.output_format, static_cast<int32_t>(oriented_w),
+        static_cast<int32_t>(oriented_h));
+    if (dst_bytes_for_format < 0) return kRawErrMetadataInvalid;
+    const size_t rgba_bytes = static_cast<size_t>(dst_bytes_for_format);
 
     // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
     // all three branches stay structurally identical to one another.
@@ -1203,8 +1279,17 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     // wrap attempt (gated on develop.caller_destination_is_page_aligned),
     // same degraded-counter bookkeeping, same fallback shape, same RAII
     // lifetime.
+    // mem8 v3 T12: not attempted at all under yuv420, on every backend. Stage4
+    // refuses the wrap for a three-plane destination anyway
+    // (halide_metal_wrap_buffer takes no offset), so creating the MTLBuffer
+    // here would be a pure cost; and this is NOT an alignment degradation, so
+    // that counter must not move either -- a format with no wrap path is a
+    // different fact from a buffer that failed the alignment contract.
+    const bool destination_wrap_is_applicable = (develop.output_format == 0);
     std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
-    if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+    if (!destination_wrap_is_applicable) {
+        // no wrap, no degradation counter
+    } else if (use_zero_copy && develop.caller_destination_is_page_aligned) {
         // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
         // LENGTH argument itself to be a page multiple (§4.3), not just the
         // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
@@ -1242,7 +1327,12 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation,
                                             arena,
-                                            caller_destination_metal_buffer)) {
+                                            caller_destination_metal_buffer,
+                                            // mem8 v3 T12: no fused source on
+                                            // this route; the format is the
+                                            // parameter after it.
+                                            /*fused_bayer_source=*/nullptr,
+                                            develop.output_format)) {
         return kRawErrKernelFailed;
     }
 
@@ -1549,18 +1639,17 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // orientation historically, caller_destination_is_page_aligned this
     // round) with no structural guard between them; this assert is that
     // guard.
-    static_assert(sizeof(RawDevelopParams) == 36 &&
-                      offsetof(RawDevelopParams,
-                               caller_destination_is_page_aligned) == 32,
+    static_assert(sizeof(RawDevelopParams) == 40 &&
+                      offsetof(RawDevelopParams, output_format) == 36,
                   "RawDevelopParams changed size or its last field moved: a "
                   "field was added, removed, or reordered. Update the "
                   "caller-knob restoration list at raw_gpu_pipeline.cpp "
                   "(this block) to include the new field, then update both "
                   "the sizeof literal and the offsetof literal above. A "
-                  "same-size field appended after "
-                  "caller_destination_is_page_aligned would land in tail "
-                  "padding and stay silent under the sizeof check alone -- "
-                  "that is exactly the failure this offsetof check closes.");
+                  "same-size field appended after the CURRENT last field "
+                  "(output_format) would land in tail padding and stay silent "
+                  "under the sizeof check alone -- that is exactly the failure "
+                  "this offsetof check closes.");
     effective.max_output_long_edge = develop.max_output_long_edge;
     effective.exposure_ev = develop.exposure_ev;
     effective.tone_curve_strength = develop.tone_curve_strength;
@@ -1578,6 +1667,12 @@ RawErrorCode decodeFileImpl(const char* file_path,
     // (destination_wrap_count delta 0, alignment_degradation delta nonzero).
     effective.caller_destination_is_page_aligned =
         develop.caller_destination_is_page_aligned;
+    // mem8 v3 T12: the requested output format is a CALLER knob, so it belongs
+    // in this list for the same reason exif_orientation and the alignment probe
+    // do -- adapter.build() would otherwise reset it to rgba8 and every yuv420
+    // request through this entry would silently decode rgba8 into a
+    // 1.5 B/px-sized destination.
+    effective.output_format = develop.output_format;
     if (build_rc != kRawSuccess) {
         std::fprintf(stderr, "[RawPipeline] contract FAIL (%s: %s)\n",
                      raw_error_name(build_rc), reason);

@@ -166,8 +166,17 @@ functions:
 // unconditionally -- it is built for every backend (no platform guard), which
 // is the whole point of the parity design.
 #include "raw_bayer_fused_render.h"
+// mem8 v3 T12: the yuv420 OUTPUT VARIANT of each Stage-4 family. Each sits
+// under the SAME conditional as its RGBA8 sibling below, because it is the same
+// kernel family with a different destination arity -- selecting between them is
+// a FORMAT decision made here on the host, never an Expr inside a kernel.
+#include "dng_render_stage4_yuv420.h"
+// THE sizing arithmetic for CeyxOutputFormat (raw_ffi_api.h's frozen contract).
+// Open-coding w*h + 2*ceil(w/2)*ceil(h/2) here would be a defect by contract.
+#include "ceyx_output_format_size.h"
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
 #include "dng_render_stage4_split.h"
+#include "dng_render_stage4_split_yuv420.h"
 #else
 // R2 sized decode: pre-average (Variant A) scaled Stage4 kernel. macOS/Metal
 // only — the split (Android/Vulkan) branch has no scaled AOT and refuses
@@ -1350,7 +1359,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int32_t exif_orientation,
                                          ceyx::RawPersistentDeviceArena* persistent_device_arena,
                                          void* caller_destination_metal_buffer,
-                                         const FusedBayerSource* fused_bayer_source) {
+                                         const FusedBayerSource* fused_bayer_source,
+                                         int32_t output_format) {
     // Plan section 1.6: reset before any validation or early return, so a
     // direct caller of this runner sees kNone rather than a reason inherited
     // from an earlier call on this thread.
@@ -1381,6 +1391,43 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         return false;
     }
 
+    // mem8 v3 T12 — the output-format decision, made ONCE here and read by the
+    // destination, dispatch and copy-back blocks below.
+    //
+    // THE AXIS THIS BRANCHES ON IS FORMAT, NOT PLATFORM. Everything it gates is
+    // gated identically on Metal and on Vulkan; there is no OS test and no
+    // backend test anywhere in the yuv420 path. Two things are refused under
+    // yuv420 on EVERY backend:
+    //   * the caller-MTLBuffer destination wrap — halide_metal_wrap_buffer
+    //     takes no offset, so three plane views over one MTLBuffer would all
+    //     alias offset 0. That is wrong pixels, not a slower path, so the wrap
+    //     is not expressible for a three-plane destination at all;
+    //   * the arena's kDestinationRgba8Region — it is RGBA8-sized. Plan step 6
+    //     rules that it is left alone and that a yuv420 decode must size
+    //     correctly or REFUSE; refusing is the sanctioned reading.
+    // A consequence worth claiming rather than discovering: with both refused
+    // there is no full-frame RGBA scratch anywhere on the yuv420 path.
+    //
+    // An unrecognised format is refused outright rather than silently decoded
+    // as rgba8 — a caller that asked for 1.5 B/px and received 4 B/px would
+    // overrun its own destination.
+    const bool yuv420_output = (output_format == 1);  // kCeyxOutputFormatYuv420
+    if (output_format != 0 && !yuv420_output) {
+        return false;
+    }
+    // ARM A (the fused Bayer kernel's own yuv420 output variant) is T12.6 and a
+    // SEPARATE commit; no fused yuv420 archive exists yet. Refuse rather than
+    // silently fall back to the two-stage path, which would be an unannounced
+    // divergence, or dispatch the fused RGBA8 entry into a 1.5 B/px
+    // destination, which would be a heap overrun. Same structural-guard
+    // reasoning as the fused-plus-scaled refusal below. Format axis again, not
+    // platform: the refusal is identical on Metal and on Vulkan, and the
+    // caller (raw_gpu_pipeline.cpp) keeps fusion off for yuv420 requests so
+    // this is a backstop rather than the live path.
+    if (yuv420_output && fused_bayer_source) {
+        return false;
+    }
+
     // Productionization plan section 1.3 — identical derivation to
     // runRenderStage4HalideAot. dst_w/dst_h stay UNORIENTED; the kernel writes
     // an oriented dst and this is the only place the conversion happens.
@@ -1408,8 +1455,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     if (stage3_device_buf->host != nullptr) {
         const uint8_t* s = stage3_device_buf->host;
         const size_t src_bytes = stage3_device_buf->size_in_bytes();
-        const size_t dst_bytes =
-            static_cast<size_t>(out_w_oriented) * out_h_oriented * 4;
+        // T12: the destination extent this check reasons about is FORMAT-
+        // dependent. Keeping the *4 here would over-state the yuv420
+        // destination by 2.67x and refuse decodes whose buffers do not
+        // actually overlap.
+        const int64_t dst_bytes_signed = ceyx::output_format_byte_count(
+            output_format, out_w_oriented, out_h_oriented);
+        if (dst_bytes_signed < 0) return false;
+        const size_t dst_bytes = static_cast<size_t>(dst_bytes_signed);
         if (s < dst + dst_bytes && dst < s + src_bytes) {
             fprintf(stderr, "[Stage4] refusing overlapping src/dst (orientation %d)\n",
                     exif_orientation);
@@ -1432,6 +1485,15 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // only pass a fused source on the unscaled path, so this is a structural
     // guard against a future caller widening the scope by accident.
     if (fused_bayer_source && scaled) {
+        return false;
+    }
+    // T12, same structural-guard reasoning, FORMAT axis: there is no
+    // yuv420 variant of the scaled/pre-average archive on either family, so a
+    // scaled yuv420 request refuses on EVERY backend rather than silently
+    // cropping. (The split branch already refuses every scaled request a few
+    // lines below; this one covers the non-split branch too, where scaled
+    // decodes are otherwise supported.)
+    if (yuv420_output && scaled) {
         return false;
     }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
@@ -1624,13 +1686,56 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                   static_cast<int>(params.look_encode.size()));
     Buffer<float> look_decode_buf(const_cast<float*>(params.look_decode.data()),
                                   static_cast<int>(params.look_decode.size()));
+    // ======================================================================
+    // mem8 v3 T12 — THE yuv420 destination: three host views over the ONE
+    // contiguous caller allocation, built here for BOTH #if arms below, so
+    // there is a single implementation of the plane geometry rather than one
+    // per backend family.
+    //
+    // Offsets are raw_ffi_api.h's frozen layout contract verbatim:
+    //   Y  at base,                     w x h
+    //   Cb at base + w*h,               ceil(w/2) x ceil(h/2)
+    //   Cr at base + w*h + cw*ch,       ceil(w/2) x ceil(h/2)
+    // Every plane is TIGHTLY PACKED: Halide::Runtime::Buffer(ptr, w, h) gives
+    // dim(0).stride == 1 and dim(1).stride == w, which is what the generator's
+    // dim(0).set_stride(1) asserts on the kernel side. A padded row would make
+    // the frozen byte-count formula UNDER-count, i.e. a heap overrun rather
+    // than a miscount, which is why the packing is asserted on both sides.
+    //
+    // ceil, not w/2: chroma_extent is the oracle's (ceyx_yuv420_oracle.h) and
+    // the odd-dimension case is exactly where a naive halving diverges.
+    const int chroma_w_oriented = ceyx::yuv420::chroma_extent(out_w_oriented);
+    const int chroma_h_oriented = ceyx::yuv420::chroma_extent(out_h_oriented);
+    Buffer<uint8_t> y_plane_buf;
+    Buffer<uint8_t> cb_plane_buf;
+    Buffer<uint8_t> cr_plane_buf;
+    if (yuv420_output) {
+        const size_t luma_bytes =
+            static_cast<size_t>(out_w_oriented) * out_h_oriented;
+        const size_t chroma_bytes =
+            static_cast<size_t>(chroma_w_oriented) * chroma_h_oriented;
+        y_plane_buf = Buffer<uint8_t>(dst, out_w_oriented, out_h_oriented);
+        cb_plane_buf = Buffer<uint8_t>(dst + luma_bytes, chroma_w_oriented,
+                                       chroma_h_oriented);
+        cr_plane_buf = Buffer<uint8_t>(dst + luma_bytes + chroma_bytes,
+                                       chroma_w_oriented, chroma_h_oriented);
+    }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: interleaved RGBA8 dst (macOS layout; Probe-A verified). The caller's
     // RGBA buffer is written directly.
+    //
+    // T12: constructed ONLY on the rgba8 path. Left default-constructed under
+    // yuv420 deliberately — a descriptor claiming w*h*4 bytes over a buffer the
+    // caller sized at w*h*1.5 would be a live mis-description even if nothing
+    // dereferenced it, and size_in_bytes() on it is what the arena binding
+    // below would have used.
     (void)ctx;
     uint8_t* dst_rgba_and = dst;
-    Buffer<uint8_t> dst_rgba_buf =
-        Buffer<uint8_t>::make_interleaved(dst_rgba_and, out_w_oriented, out_h_oriented, 4);
+    Buffer<uint8_t> dst_rgba_buf;
+    if (!yuv420_output) {
+        dst_rgba_buf = Buffer<uint8_t>::make_interleaved(
+            dst_rgba_and, out_w_oriented, out_h_oriented, 4);
+    }
     // Round 2 plan §3.2 item 3 / §3.5: when the caller supplied a persistent
     // device arena, bind the destination's DEVICE side to the arena's
     // kDestinationRgba8Region. The host side stays the caller's buffer (`dst`)
@@ -1652,7 +1757,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     bool destination_is_caller_wrapped = false;
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
     std::optional<CallerDestinationMetalBufferBinding> dst_caller_binding;
-    if (caller_destination_metal_buffer != nullptr) {
+    // T12: REFUSED under yuv420, on every backend (see the format comment at
+    // the top of this function). halide_metal_wrap_buffer takes no offset, so
+    // the three plane views would all alias offset 0 of the caller's MTLBuffer
+    // — wrong pixels, not a slower path.
+    if (!yuv420_output && caller_destination_metal_buffer != nullptr) {
         dst_caller_binding.emplace(dst_rgba_buf.raw_buffer(),
                                    caller_destination_metal_buffer);
         destination_is_caller_wrapped = static_cast<bool>(*dst_caller_binding);
@@ -1672,7 +1781,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     (void)caller_destination_metal_buffer;
 #endif
     std::optional<ceyx::RawDeviceArenaRegionBinding> dst_arena_binding;
-    if (!destination_is_caller_wrapped && persistent_device_arena != nullptr) {
+    // T12: REFUSED under yuv420, on every backend. kDestinationRgba8Region is
+    // RGBA8-sized; plan step 6 rules it must size correctly or refuse, and no
+    // full-frame RGBA scratch exists on this path by design.
+    if (!yuv420_output && !destination_is_caller_wrapped &&
+        persistent_device_arena != nullptr) {
         dst_arena_binding.emplace(persistent_device_arena, dst_rgba_buf.raw_buffer(),
                                    ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
                                    dst_rgba_buf.raw_buffer()->size_in_bytes());
@@ -1682,8 +1795,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // directly.
     (void)ctx;
     uint8_t* dst_rgba_fd = dst;
-    Buffer<uint8_t> dst_buf =
-        Buffer<uint8_t>::make_interleaved(dst_rgba_fd, out_w_oriented, out_h_oriented, 4);
+    // T12: constructed ONLY on the rgba8 path — same reasoning as the split
+    // arm's dst_rgba_buf above. The yuv420 destination is the three plane views
+    // built before this #if, shared by both arms.
+    Buffer<uint8_t> dst_buf;
+    if (!yuv420_output) {
+        dst_buf = Buffer<uint8_t>::make_interleaved(dst_rgba_fd, out_w_oriented,
+                                                    out_h_oriented, 4);
+    }
     // Round 2 plan §3.2 item 3 / §3.5: see the split-kernel arm's comment
     // above — same gating, same RAII detach-on-scope-exit discipline (I-D),
     // applied to the fused/macOS destination buffer instead.
@@ -1694,7 +1813,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     bool destination_is_caller_wrapped = false;
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
     std::optional<CallerDestinationMetalBufferBinding> dst_caller_binding;
-    if (caller_destination_metal_buffer != nullptr) {
+    // T12: REFUSED under yuv420, on every backend (see the format comment at
+    // the top of this function). halide_metal_wrap_buffer takes no offset, so
+    // the three plane views would all alias offset 0 of the caller's MTLBuffer
+    // — wrong pixels, not a slower path.
+    if (!yuv420_output && caller_destination_metal_buffer != nullptr) {
         dst_caller_binding.emplace(dst_buf.raw_buffer(),
                                    caller_destination_metal_buffer);
         destination_is_caller_wrapped = static_cast<bool>(*dst_caller_binding);
@@ -1708,7 +1831,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     (void)caller_destination_metal_buffer;
 #endif
     std::optional<ceyx::RawDeviceArenaRegionBinding> dst_arena_binding;
-    if (!destination_is_caller_wrapped && persistent_device_arena != nullptr) {
+    // T12: REFUSED under yuv420, on every backend — see the split arm.
+    if (!yuv420_output && !destination_is_caller_wrapped &&
+        persistent_device_arena != nullptr) {
         dst_arena_binding.emplace(persistent_device_arena, dst_buf.raw_buffer(),
                                    ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
                                    dst_buf.raw_buffer()->size_in_bytes());
@@ -1816,11 +1941,21 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     look_table_buf.set_host_dirty(!look_table_wrapped);
     look_encode_buf.set_host_dirty(!look_encode_wrapped);
     look_decode_buf.set_host_dirty(!look_decode_wrapped);
+    // T12: the destination is three planes under yuv420 and one interleaved
+    // buffer otherwise; each is marked not-host-dirty for the same reason (the
+    // kernel is about to overwrite it, so uploading its current contents would
+    // be pure waste).
+    if (yuv420_output) {
+        y_plane_buf.set_host_dirty(false);
+        cb_plane_buf.set_host_dirty(false);
+        cr_plane_buf.set_host_dirty(false);
+    } else {
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
-    dst_rgba_buf.set_host_dirty(false);
+        dst_rgba_buf.set_host_dirty(false);
 #else
-    dst_buf.set_host_dirty(false);
+        dst_buf.set_host_dirty(false);
 #endif
+    }
 
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     const int32_t huesat_entry_count = static_cast<int32_t>(params.huesat_table.size() / 3);
@@ -1848,8 +1983,53 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
             fused_bayer_source->black_height);
         fused_black_buf.set_host_dirty();
     }
+    // T12: the yuv420 dispatch arm of the SPLIT family. Selected by FORMAT and
+    // by nothing else — the same selector the non-split arm below uses, which
+    // is what keeps this parity rather than a platform fork. The argument list
+    // is dng_render_stage4_split's verbatim; only the destination differs (three
+    // plane buffers instead of one interleaved RGBA8 buffer), because both
+    // kernels are generated from the same colour body
+    // (dng_render_stage4_split_expr.h).
     const int result =
-        fused_bayer_source
+        yuv420_output
+        ? dng_render_stage4_split_yuv420(
+              &src_flat,
+              sw,
+              sh,
+              src_row_stride_px,
+              crop_l,
+              crop_t,
+              src_scale,
+              orient_coeffs[0], orient_coeffs[1], orient_coeffs[2],
+              orient_coeffs[3], orient_coeffs[4], orient_coeffs[5],
+              exp_buf.raw_buffer(),
+              tone_buf.raw_buffer(),
+              gamma_buf.raw_buffer(),
+              cw_buf.raw_buffer(),
+              c2r_buf.raw_buffer(),
+              r2f_buf.raw_buffer(),
+              hs_table_buf.raw_buffer(),
+              hs_encode_buf.raw_buffer(),
+              hs_decode_buf.raw_buffer(),
+              huesat_entry_count,
+              params.huesat_hue_div,
+              params.huesat_sat_div,
+              params.huesat_val_div,
+              params.huesat_has_table,
+              params.huesat_has_encoding,
+              look_table_buf.raw_buffer(),
+              look_encode_buf.raw_buffer(),
+              look_decode_buf.raw_buffer(),
+              look_entry_count,
+              params.look_hue_div,
+              params.look_sat_div,
+              params.look_val_div,
+              params.look_has_table,
+              params.look_has_encoding,
+              y_plane_buf.raw_buffer(),
+              cb_plane_buf.raw_buffer(),
+              cr_plane_buf.raw_buffer())
+        : fused_bayer_source
         ? raw_bayer_fused_render(&src_flat,
                                  fused_bayer_source->red_x,
                                  fused_bayer_source->red_y,
@@ -1950,8 +2130,43 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // takes dst_w/dst_h as explicit scalars so its box geometry never depends
     // on output bounds inference. scaled==false reproduces the previous call
     // exactly.
+    // T12: the yuv420 dispatch arm of the NON-SPLIT family, mirroring the split
+    // arm above. Selected by FORMAT and by nothing else. The argument list is
+    // dng_render_stage4's verbatim; only the destination differs, because both
+    // kernels come from the same colour body (dng_render_stage4_expr.h).
     const int result =
-        fused_bayer_source
+        yuv420_output
+        ? dng_render_stage4_yuv420(src_buf.raw_buffer(),
+                                   src_scale,
+                                   orient_coeffs[0], orient_coeffs[1],
+                                   orient_coeffs[2], orient_coeffs[3],
+                                   orient_coeffs[4], orient_coeffs[5],
+                                   exp_buf.raw_buffer(),
+                                   tone_buf.raw_buffer(),
+                                   gamma_buf.raw_buffer(),
+                                   cw_buf.raw_buffer(),
+                                   c2r_buf.raw_buffer(),
+                                   r2f_buf.raw_buffer(),
+                                   hs_table_buf.raw_buffer(),
+                                   hs_encode_buf.raw_buffer(),
+                                   hs_decode_buf.raw_buffer(),
+                                   params.huesat_hue_div,
+                                   params.huesat_sat_div,
+                                   params.huesat_val_div,
+                                   params.huesat_has_table,
+                                   params.huesat_has_encoding,
+                                   look_table_buf.raw_buffer(),
+                                   look_encode_buf.raw_buffer(),
+                                   look_decode_buf.raw_buffer(),
+                                   params.look_hue_div,
+                                   params.look_sat_div,
+                                   params.look_val_div,
+                                   params.look_has_table,
+                                   params.look_has_encoding,
+                                   y_plane_buf.raw_buffer(),
+                                   cb_plane_buf.raw_buffer(),
+                                   cr_plane_buf.raw_buffer())
+        : fused_bayer_source
         ? raw_bayer_fused_render(src_buf.raw_buffer(),
                                          fused_bayer_source->red_x,
                                          fused_bayer_source->red_y,
@@ -2073,6 +2288,30 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         return false;
     }
 
+    // T12: ONE device->host copy-back for the three planes, shared by both #if
+    // arms below so the plane copy exists once rather than once per backend
+    // family. The C4 bracket spans all three copies, which is the honest
+    // reading: collectively they ARE this path's device->host transfer.
+    const auto copy_yuv420_planes_to_host = [&]() -> bool {
+        const double copy_t0 = nowMsForDeviceToHostCopyBracket();
+        const int plane_rc[3] = {y_plane_buf.copy_to_host(),
+                                 cb_plane_buf.copy_to_host(),
+                                 cr_plane_buf.copy_to_host()};
+        g_last_device_to_host_copy_ms =
+            nowMsForDeviceToHostCopyBracket() - copy_t0;
+        for (int i = 0; i < 3; ++i) {
+            if (plane_rc[i] != 0) {
+                fprintf(stderr,
+                        "[Stage4] yuv420 plane %d copy_to_host failed rc=%d\n",
+                        i, plane_rc[i]);
+                // Same class as a kernel failure — the FFI layer reports -403.
+                g_stage4_failure_reason = Stage4FailureReason::kKernel;
+                return false;
+            }
+        }
+        return true;
+    };
+
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // G2: one D2H copy of the interleaved RGBA output. On the fused path this
     // lands directly in the caller's RGBA buffer — no host repack at all.
@@ -2111,6 +2350,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
         // g_last_device_to_host_copy_ms stays at its entry value 0.0 — the C4
         // bracket reports ~0 output copy on the wrapped path, which is the
         // honest reading: no device->host copy ran.
+    } else if (yuv420_output) {
+        // T12: three plane copies instead of one interleaved copy. Reached on
+        // every backend, because the wrapped path above is refused under
+        // yuv420 everywhere.
+        if (!copy_yuv420_planes_to_host()) return false;
     } else {
         const double copy_t0 = nowMsForDeviceToHostCopyBracket();
         const int cth = dst_rgba_buf.copy_to_host();
@@ -2181,6 +2425,9 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #endif
         dst_buf.raw_buffer()->set_device_dirty(false);
         // g_last_device_to_host_copy_ms stays 0.0 — no device->host copy ran.
+    } else if (yuv420_output) {
+        // T12: see the split arm — same three plane copies, same condition.
+        if (!copy_yuv420_planes_to_host()) return false;
     } else {
         const double copy_t0 = nowMsForDeviceToHostCopyBracket();
         const int cth = dst_buf.copy_to_host();

@@ -310,6 +310,22 @@ typedef struct RawDevelopParams {
      * memset(0) call site keeps behaving byte-for-byte as before this field
      * existed. */
     bool caller_destination_is_page_aligned = false;
+
+    /* mem8 v3 T12, contract version 7. Appended at the end on purpose: no
+     * existing field's offset changes.
+     *
+     * A CeyxOutputFormat value (raw_ffi_api.h): 0 = kCeyxOutputFormatRgba8,
+     * 1 = kCeyxOutputFormatYuv420. Held as int32_t rather than as the enum so
+     * this contract header keeps its current include set -- the enum crosses
+     * the FFI boundary BY VALUE and its enumerators are append-only, so the
+     * int is the same frozen quantity.
+     *
+     * This selects a FORMAT axis, never a platform one: the branch it drives
+     * in Stage-4 (dng_render_halide.cpp) behaves identically on Metal and on
+     * Vulkan. Default-member-initialised to 0, so every existing
+     * `RawDevelopParams{}` / memset(0) call site keeps decoding rgba8
+     * byte-for-byte as before this field existed. */
+    int32_t output_format = 0;
 } RawDevelopParams;
 
 /* Every field required by spec section 6.5. */
