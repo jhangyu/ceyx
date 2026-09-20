@@ -368,6 +368,44 @@ int32_t ceyx_debug_zero_copy_capability_counters(
     uint64_t *out_source_mosaic_wrap_count);
 
 /* ===================================================================== */
+/* mem8 v3 T12 (Y5) -- Stage-4 RGBA8 destination-scratch probe.           */
+/*                                                                        */
+/* DEBUG/PROBE API, same category as the probes above: NOT part of the    */
+/* Dart-visible surface and nothing is added to DngResult. Declared HERE, */
+/* OUTSIDE the T12.0 block below, on purpose: that block is FROZEN and    */
+/* this is not part of the contract its four consumers depend on -- it is */
+/* an instrument, added beside the other instruments.                     */
+/*                                                                        */
+/* WHAT IS MEASURED: the RGBA8-shaped DESTINATION bytes a decode caused   */
+/* to exist IN ADDITION to the caller's own buffer -- in practice the     */
+/* arena's destination region, or Halide's own device allocation for the  */
+/* destination. Full definition at the sole writer,                       */
+/* native/src/pipeline/dng_render_halide.cpp.                             */
+/*                                                                        */
+/* out_last_decode_bytes is THREAD-LOCAL and describes the last Stage-4   */
+/* device-handoff call ON THE CALLING THREAD. out_high_water_bytes is     */
+/* process-wide and monotonic. They answer different questions and        */
+/* neither substitutes for the other: a single-decode yuv420 assertion    */
+/* needs the per-decode value (a preceding rgba8 decode would otherwise   */
+/* poison it), while "no decode in this whole run ever materialised a     */
+/* full frame" needs the high-water.                                      */
+/*                                                                        */
+/* READING A ZERO HONESTLY: on the yuv420 path both read 0, because that  */
+/* path's destination is three planes totalling 1.5 B/px and no RGBA8     */
+/* scratch exists on it. That zero is EVIDENCE only once the SAME build   */
+/* has been shown to report a full w*h*4 on the rgba8 arena/device path;  */
+/* an unwired counter's 0 is indistinguishable from a real one. Quote the */
+/* positive control alongside it or do not quote the zero.                */
+/*                                                                        */
+/* Null-pointer convention, as above: individual out-pointers may be null */
+/* and are then skipped; returns 0 if at least one was filled, -1 only    */
+/* when BOTH are null.                                                    */
+/* ===================================================================== */
+int32_t ceyx_debug_stage4_rgba_scratch_counters(
+    uint64_t *out_last_decode_bytes,
+    uint64_t *out_high_water_bytes);
+
+/* ===================================================================== */
 /* T12.0 -- FROZEN OUTPUT-FORMAT CONTRACT (mem8 v3 campaign, Phase P0,    */
 /* Halcyon/docs/logs/2026-09-19/mem8-v3-plan.md "T12.0 -- Freeze the      */
 /* yuv420 format contract").                                              */

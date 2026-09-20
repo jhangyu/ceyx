@@ -6,8 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "ceyx_decode_into.h"        // kCeyxErrDstTooSmall (the shared code)
 #include "ceyx_output_format_size.h"
 #include "dng_pipeline.h"
+#include "dng_render_params.h"       // T12 Y5: the Stage-4 scratch accessors
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 
@@ -192,6 +194,22 @@ RAW_FFI_EXPORT int32_t ceyx_debug_zero_copy_capability_counters(
 }
 
 // ---------------------------------------------------------------------------
+// mem8 v3 T12 (Y5) — the Stage-4 RGBA8 destination-scratch probe. A forward to
+// the pipeline's accessors; the accounting itself lives at the sole writer.
+// ---------------------------------------------------------------------------
+RAW_FFI_EXPORT int32_t ceyx_debug_stage4_rgba_scratch_counters(
+    uint64_t* out_last_decode_bytes, uint64_t* out_high_water_bytes) {
+    if (!out_last_decode_bytes && !out_high_water_bytes) return -1;
+    if (out_last_decode_bytes) {
+        *out_last_decode_bytes = runRenderStage4LastRgbaScratchBytes();
+    }
+    if (out_high_water_bytes) {
+        *out_high_water_bytes = runRenderStage4RgbaScratchHighWaterBytes();
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // mem8 v3 T12 — the FROZEN contract's sizing function (raw_ffi_api.h, T12.0
 // clause 2b). A one-line forward on purpose: the arithmetic itself is inline in
 // ceyx_output_format_size.h so the pipeline's internal sizing (Stage-4's
@@ -204,6 +222,67 @@ RAW_FFI_EXPORT int64_t ceyx_output_format_byte_count(int32_t output_format,
                                                       int32_t width,
                                                       int32_t height) {
     return ceyx::output_format_byte_count(output_format, width, height);
+}
+
+// ---------------------------------------------------------------------------
+// mem8 v3 T12 milestone 3 / SR-11 — THE yuv420 -> RGBA8 upconvert. Dart must
+// never open-code one, which is the whole reason this is an export.
+//
+// Every coefficient and every rounding term comes from ceyx_yuv420_oracle.h,
+// whose inverse half is transcribed from the libjpeg-turbo vendored on this
+// tree (jdcolor.c:236-250 + jdcolext.c:61-65, provenance in the header). Not
+// one numeric literal appears below: if a coefficient is ever wrong it is
+// wrong in ONE place, for the encoder, the two kernels and this converter
+// alike.
+//
+// CHROMA UPSAMPLING IS NEAREST-NEIGHBOUR (plane_index >> 1), the box filter's
+// inverse. libjpeg's decoder offers a fancy triangular upsample too, but the
+// contract this implements is the 2x2 box average's counterpart -- a smarter
+// upsampler here would make a decode->upconvert round trip disagree with the
+// oracle by more than rounding, which is exactly the bound Y4/Y7 assert on.
+// ---------------------------------------------------------------------------
+RAW_FFI_EXPORT int32_t ceyx_yuv420_to_rgba8(const uint8_t *src,
+                                             size_t src_capacity, uint8_t *dst,
+                                             size_t dst_capacity, int32_t width,
+                                             int32_t height) {
+    if (!src || !dst || width <= 0 || height <= 0) return -1;
+    const int64_t need_src = ceyx::output_format_byte_count(1, width, height);
+    const int64_t need_dst = ceyx::output_format_byte_count(0, width, height);
+    if (need_src < 0 || need_dst < 0) return -1;
+    // The SOURCE shortfall is a null/extent-class argument error (-1), not
+    // kCeyxErrDstTooSmall: that code names a DESTINATION that cannot hold the
+    // result, and reporting it for a truncated input would send the caller off
+    // to grow the wrong buffer.
+    if (src_capacity < static_cast<size_t>(need_src)) return -1;
+    if (dst_capacity < static_cast<size_t>(need_dst)) return kCeyxErrDstTooSmall;
+
+    const int32_t chroma_w = ceyx::yuv420::chroma_extent(width);
+    const int32_t chroma_h = ceyx::yuv420::chroma_extent(height);
+    const uint8_t *y_plane = src;
+    const uint8_t *cb_plane = y_plane + static_cast<size_t>(width) * height;
+    const uint8_t *cr_plane =
+        cb_plane + static_cast<size_t>(chroma_w) * chroma_h;
+
+    for (int32_t y = 0; y < height; ++y) {
+        const int32_t chroma_row = y >> 1;   // never out of range: ceil(h/2)
+        const uint8_t *y_row = y_plane + static_cast<size_t>(y) * width;
+        const uint8_t *cb_row =
+            cb_plane + static_cast<size_t>(chroma_row) * chroma_w;
+        const uint8_t *cr_row =
+            cr_plane + static_cast<size_t>(chroma_row) * chroma_w;
+        uint8_t *out_row = dst + static_cast<size_t>(y) * width * 4;
+        for (int32_t x = 0; x < width; ++x) {
+            const int32_t chroma_col = x >> 1;
+            uint8_t r = 0, g = 0, b = 0;
+            ceyx::yuv420::rgb_from_ycbcr(y_row[x], cb_row[chroma_col],
+                                          cr_row[chroma_col], &r, &g, &b);
+            out_row[x * 4 + 0] = r;
+            out_row[x * 4 + 1] = g;
+            out_row[x * 4 + 2] = b;
+            out_row[x * 4 + 3] = 255;
+        }
+    }
+    return 0;
 }
 
 }  // extern "C"

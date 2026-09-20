@@ -902,6 +902,54 @@ bool runRenderStage4LastCallerDestinationWrapWasUsed() {
     return g_last_caller_destination_wrap_was_used;
 }
 
+// mem8 v3 T12 (Y5) — RGBA8 destination-scratch accounting.
+//
+// WHAT IS COUNTED, stated precisely because a vaguely-defined counter is worse
+// than none: the RGBA8-shaped DESTINATION bytes this decode caused to exist IN
+// ADDITION TO the caller's own delivered buffer. Concretely, the device-side
+// destination allocation Stage-4 needs when it is not writing the caller's own
+// pages -- the arena's kDestinationRgba8Region, or Halide's own device malloc
+// for the destination buffer.
+//
+// It is therefore ZERO in exactly three situations, and all three are honest:
+//   * the caller's own MTLBuffer was wrapped (the kernel wrote the caller's
+//     pages; nothing extra materialised);
+//   * no device destination is involved at all;
+//   * the output format is yuv420, whose destination is three planes totalling
+//     1.5 B/px -- there is no RGBA8 scratch anywhere on that path.
+// The third is Y5's claim. It is only readable AS a claim because the first
+// two make the counter capable of reporting nonzero: the rgba8 arena/device
+// path moves it to a full w*h*4, which is the positive control that keeps a
+// yuv420 zero from being indistinguishable from an unwired counter.
+//
+// TWO READINGS, deliberately, because they answer different questions:
+//   * the per-decode value is thread_local and reset at entry, same discipline
+//     as the C4 bracket above -- it says what THIS decode did, so a preceding
+//     rgba8 decode on the same process cannot poison a yuv420 assertion;
+//   * the high-water is process-wide and monotonic -- it says what the worst
+//     decode ever did, which is what a "no full frame ever materialises"
+//     assertion over a whole run needs.
+static thread_local uint64_t g_last_rgba_scratch_bytes = 0;
+static std::atomic<uint64_t> g_rgba_scratch_high_water_bytes{0};
+
+void noteStage4RgbaScratchBytes(uint64_t bytes) {
+    g_last_rgba_scratch_bytes = bytes;
+    uint64_t previous =
+        g_rgba_scratch_high_water_bytes.load(std::memory_order_relaxed);
+    while (bytes > previous &&
+           !g_rgba_scratch_high_water_bytes.compare_exchange_weak(
+               previous, bytes, std::memory_order_relaxed)) {
+    }
+}
+
+uint64_t runRenderStage4LastRgbaScratchBytes() {
+    return g_last_rgba_scratch_bytes;
+}
+
+uint64_t runRenderStage4RgbaScratchHighWaterBytes() {
+    return g_rgba_scratch_high_water_bytes.load(std::memory_order_relaxed);
+}
+
 // R4-T3 (S1 proof): TEST-ONLY fault injection. The S1 hazard is the
 // kernel-failure return that happens AFTER halide_metal_run has already
 // committed a command buffer writing the caller's pages; a real nonzero AOT
@@ -1377,6 +1425,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // Same reset discipline: a stale `true` from this lane's previous decode
     // would report a zero-copy decode that never happened.
     g_last_caller_destination_wrap_was_used = false;
+    // T12 (Y5): same discipline again. Without this reset a yuv420 decode that
+    // returns early would report the PRECEDING rgba8 decode's scratch and
+    // falsify Y5 in the pessimistic direction; a decode that never reaches the
+    // destination decision would report it in the optimistic one.
+    g_last_rgba_scratch_bytes = 0;
 
     // T20: on the fused route this buffer is a 2D CFA mosaic, not a 3D RGB16
     // frame, so the dimension floor differs. Everything else is validated
@@ -1790,6 +1843,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                    ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
                                    dst_rgba_buf.raw_buffer()->size_in_bytes());
     }
+    // T12 (Y5): recorded at the point the destination decision is FINAL, so it
+    // reports what this decode actually arranged rather than what was
+    // requested. Zero under yuv420 (no RGBA8 destination exists) and zero when
+    // the caller's own pages were wrapped (nothing extra materialised).
+    noteStage4RgbaScratchBytes(
+        (yuv420_output || destination_is_caller_wrapped)
+            ? 0u
+            : static_cast<uint64_t>(dst_rgba_buf.raw_buffer()->size_in_bytes()));
 #else
     // W7 (M-11): macOS generator outputs RGBA8. The caller's buffer is written
     // directly.
@@ -1838,6 +1899,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                    ceyx::RawDeviceArenaRegion::kDestinationRgba8Region,
                                    dst_buf.raw_buffer()->size_in_bytes());
     }
+    // T12 (Y5): see the split arm — same accounting, same three zero cases.
+    noteStage4RgbaScratchBytes(
+        (yuv420_output || destination_is_caller_wrapped)
+            ? 0u
+            : static_cast<uint64_t>(dst_buf.raw_buffer()->size_in_bytes()));
 #endif
 
     // Plan §5.3 (C3): route the twelve param buffers through the per-lane

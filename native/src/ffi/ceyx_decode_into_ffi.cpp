@@ -13,13 +13,21 @@
 #include <cstdlib>
 
 #include "ceyx_orient.h"
+// mem8 v3 T12: the frozen output-format contract (CeyxOutputFormat, the plane
+// descriptor, the format-taking entry declarations) and THE sizing arithmetic.
+// Included UNCONDITIONALLY, unlike the DNG_ENABLE_GENERIC_RAW block below,
+// because the format entries must EXIST in every build for the same reason
+// this file's header records for its format-agnostic siblings: a symbol that
+// is absent in some builds ships a feature that is silently missing, whereas a
+// specific error code is diagnosable.
+#include "ceyx_output_format_size.h"
 #include "dng_error_codes.h"
 #include "dng_ffi_api.h"
 #include "dng_pipeline.h"
 #include "dng_render_params.h"
+#include "raw_ffi_api.h"
 #include "raw_file_router.h"
 #if defined(DNG_ENABLE_GENERIC_RAW)
-#include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"  // R3-T4: kRawDeviceArenaAlignmentBytes
 #endif
@@ -183,7 +191,8 @@ CEYX_FFI_EXPORT int32_t ceyx_probe_output_size(const char *file_path,
 // callers of this function do not all need it.
 static bool ceyxDecodeIntoPrepare(const char *file_path, int32_t max_dim,
                                   const uint8_t *dst, size_t dst_capacity,
-                                  RawRoute *route, DngResult *result,
+                                  int32_t output_format, RawRoute *route,
+                                  DngResult *result,
                                   bool *out_destination_is_page_aligned) {
   *route = kRawRouteUnknown;
   const RawErrorCode prc = raw_probe_file(file_path, route);
@@ -211,7 +220,25 @@ static bool ceyxDecodeIntoPrepare(const char *file_path, int32_t max_dim,
   // this same refusal is correct for every orientation and the caller's
   // pre-acquired slot size never has to know which one was requested
   // (spec §1.3, asserted by AC-2.4).
-  const size_t need = static_cast<size_t>(w) * h * 4;
+  //
+  // mem8 v3 T12: the floor is the FORMAT's byte count, from the frozen
+  // contract's own sizing function -- w*h*4 for rgba8 exactly as before, and
+  // w*h + 2*ceil(w/2)*ceil(h/2) for yuv420. The invariance-under-transposition
+  // note above still holds for both formats: transposing swaps w and h, and
+  // both formulas are symmetric in them (ceil(w/2)*ceil(h/2) included).
+  //
+  // A negative answer means the caller named a format this build does not
+  // know. It is refused HERE, before any pixel work, and reported as
+  // kCeyxErrFormatUnsupportedInBuild -- the existing code whose meaning is
+  // "this build cannot produce that", which is exactly the situation. No new
+  // error code is invented for it (lead ruling): the alternative would be
+  // editing the frozen header.
+  const int64_t need_signed = ceyx::output_format_byte_count(output_format, w, h);
+  if (need_signed < 0) {
+    result->error_code = kCeyxErrFormatUnsupportedInBuild;
+    return false;
+  }
+  const size_t need = static_cast<size_t>(need_signed);
   if (!dst || dst_capacity < need) {
     result->error_code = kCeyxErrDstTooSmall;
     return false;
@@ -251,8 +278,20 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
                                  size_t dst_capacity,
                                  int32_t exif_orientation,
                                  bool destination_is_page_aligned,
+                                 int32_t output_format,
                                  DngResult *result) {
   if (route == kRawRouteDng) {
+    // mem8 v3 T12.5: the DNG route is UNCHANGED by this task and has no format
+    // parameter -- its Stage-4 entry is the host-source runner, not the
+    // device-handoff one the format thread reaches. A yuv420 request on a DNG
+    // file is therefore REFUSED, loudly, rather than silently served as rgba8:
+    // handing back 4 B/px to a caller who sized 1.5 B/px and is about to read
+    // it as planes is a heap overrun in the caller, not a cosmetic mismatch.
+    // Y6 is the test that this refusal did not disturb the rgba8 DNG path.
+    if (output_format != 0) {
+      result->error_code = kCeyxErrFormatUnsupportedInBuild;
+      return;
+    }
     DngPipelineResult pipeline;
     if (!dng_pipeline_decode_to_rgb_into_oriented(
             file_path, max_dim, dst, dst_capacity, exif_orientation,
@@ -293,6 +332,12 @@ static void ceyxDecodeIntoPhase3(const char *file_path, int32_t max_dim,
   // contract). Never a refusal signal -- false just means the degraded/
   // fallback destination shape is taken.
   develop.caller_destination_is_page_aligned = destination_is_page_aligned;
+  // mem8 v3 T12: the requested output format, on the same principle as
+  // exif_orientation above -- a field on RawDevelopParams, not a new pipeline
+  // entry, because `develop` is already built locally on every call. From here
+  // it reaches the three Stage-4 call sites and, through them, the one place
+  // that chooses which AOT entry to dispatch.
+  develop.output_format = output_format;
 
   RawPipelineResult out;
   const RawErrorCode rc =
@@ -407,13 +452,14 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer(const char *file_path,
 
   RawRoute route = kRawRouteUnknown;
   bool destination_is_page_aligned = false;
-  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity,
+                             /*output_format=*/kCeyxOutputFormatRgba8, &route,
                              result, &destination_is_page_aligned)) {
     return result;
   }
   ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
                        /*exif_orientation=*/1, destination_is_page_aligned,
-                       result);
+                       /*output_format=*/kCeyxOutputFormatRgba8, result);
   return result;
 }
 
@@ -426,7 +472,8 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
 
   RawRoute route = kRawRouteUnknown;
   bool destination_is_page_aligned = false;
-  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity, &route,
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity,
+                             /*output_format=*/kCeyxOutputFormatRgba8, &route,
                              result, &destination_is_page_aligned)) {
     return result;
   }
@@ -455,7 +502,8 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
   // ever reaching it.
   dngRenderStage4ResetFailureReason();
   ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
-                       exif_orientation, destination_is_page_aligned, result);
+                       exif_orientation, destination_is_page_aligned,
+                       /*output_format=*/kCeyxOutputFormatRgba8, result);
   if (result->error_code != 0) {
     // The read below is honest ONLY because of the reset immediately above:
     // many phase-3 failures (bad file, parse, OpcodeList2, the RAW
@@ -468,6 +516,139 @@ CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented(
     return result;
   }
   result->rgba_data = dst;   // pipeline already reported the ORIENTED extent
+  return result;
+}
+
+// ===========================================================================
+// mem8 v3 T12 milestone 3 — the FORMAT-TAKING entries of the frozen T12.0
+// contract (raw_ffi_api.h). Additive siblings of the three above, which are
+// UNCHANGED and remain rgba8.
+//
+// They live beside those siblings rather than in the FFI file the plan's file
+// table guessed at, because the value of the extraction above is that the
+// route probe, the extent probe and the capacity refusal exist ONCE. A second
+// copy of that sequence in another translation unit is precisely the drift the
+// comment on ceyxDecodeIntoPrepare exists to prevent -- so the format entries
+// call the SAME two helpers, with the format as one more argument.
+// ===========================================================================
+
+// Fills the caller's plane descriptor for a SUCCESSFUL decode. Zeroed for
+// rgba8 (there are no planes), which is the contract's own wording.
+//
+// struct_size is the caller's declared sizeof. It is honoured rather than
+// assumed: a caller built against a future, larger descriptor must not have
+// this build write past what it allocated, and a caller built against a
+// smaller one must not be handed fields it has no room for. A mismatch is not
+// an error here -- the fields this build knows are written only if they fit.
+static void ceyxFillYuv420PlaneDescriptor(CeyxYuv420PlaneDescriptor *out_planes,
+                                          int32_t output_format, uint8_t *dst,
+                                          int32_t width, int32_t height) {
+  if (!out_planes) return;
+  const uint32_t declared = out_planes->struct_size;
+  if (declared < sizeof(CeyxYuv420PlaneDescriptor)) return;
+  *out_planes = CeyxYuv420PlaneDescriptor{};
+  out_planes->struct_size = declared;
+  if (output_format != kCeyxOutputFormatYuv420) return;  // rgba8: stays zeroed
+
+  // The frozen layout, spelled from the same oracle the kernel and the sizing
+  // function use. Nothing here re-derives ceil(w/2).
+  const int32_t chroma_w = ceyx::yuv420::chroma_extent(width);
+  const int32_t chroma_h = ceyx::yuv420::chroma_extent(height);
+  const size_t luma_bytes = static_cast<size_t>(width) * height;
+  const size_t chroma_bytes = static_cast<size_t>(chroma_w) * chroma_h;
+
+  out_planes->plane_base[0] = dst;
+  out_planes->plane_base[1] = dst + luma_bytes;
+  out_planes->plane_base[2] = dst + luma_bytes + chroma_bytes;
+  out_planes->plane_width[0] = width;
+  out_planes->plane_width[1] = chroma_w;
+  out_planes->plane_width[2] = chroma_w;
+  out_planes->plane_height[0] = height;
+  out_planes->plane_height[1] = chroma_h;
+  out_planes->plane_height[2] = chroma_h;
+  // Row stride EQUALS plane width, by contract -- not by observation of what
+  // Halide happened to produce. The kernel asserts the same packing on its own
+  // side (dim(0).set_stride(1)), so the two agree by construction.
+  for (int i = 0; i < 3; ++i) {
+    out_planes->plane_row_stride[i] = out_planes->plane_width[i];
+  }
+}
+
+CEYX_FFI_EXPORT int32_t ceyx_probe_output_size_format(
+    const char *file_path, int32_t max_dim, int32_t output_format,
+    int32_t *out_width, int32_t *out_height, int64_t *out_byte_count) {
+  if (out_byte_count) *out_byte_count = 0;
+  const int32_t rc =
+      ceyx_probe_output_size(file_path, max_dim, out_width, out_height);
+  if (rc != 0) return rc;
+  // By construction this is exactly
+  // ceyx_output_format_byte_count(output_format, *out_width, *out_height) --
+  // the contract's wording -- because it IS that call.
+  const int64_t bytes = ceyx::output_format_byte_count(
+      output_format, *out_width, *out_height);
+  if (bytes < 0) return kCeyxErrFormatUnsupportedInBuild;
+  if (out_byte_count) *out_byte_count = bytes;
+  return 0;
+}
+
+CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_format(
+    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
+    int32_t output_format, CeyxYuv420PlaneDescriptor *out_planes) {
+  DngResult *result =
+      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
+  if (!result) return nullptr;
+
+  RawRoute route = kRawRouteUnknown;
+  bool destination_is_page_aligned = false;
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity,
+                             output_format, &route, result,
+                             &destination_is_page_aligned)) {
+    return result;
+  }
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
+                       /*exif_orientation=*/1, destination_is_page_aligned,
+                       output_format, result);
+  // Descriptor only on SUCCESS: a failed decode wrote no planes, and handing
+  // back plane pointers into a buffer nothing filled invites the caller to
+  // read uninitialised memory as an image.
+  if (result->error_code == 0) {
+    ceyxFillYuv420PlaneDescriptor(out_planes, output_format, dst,
+                                  result->width, result->height);
+  }
+  return result;
+}
+
+CEYX_FFI_EXPORT DngResult *ceyx_decode_into_buffer_oriented_format(
+    const char *file_path, int32_t max_dim, uint8_t *dst, size_t dst_capacity,
+    int32_t exif_orientation, int32_t output_format,
+    CeyxYuv420PlaneDescriptor *out_planes) {
+  DngResult *result =
+      static_cast<DngResult *>(std::calloc(1, sizeof(DngResult)));
+  if (!result) return nullptr;
+
+  RawRoute route = kRawRouteUnknown;
+  bool destination_is_page_aligned = false;
+  if (!ceyxDecodeIntoPrepare(file_path, max_dim, dst, dst_capacity,
+                             output_format, &route, result,
+                             &destination_is_page_aligned)) {
+    return result;
+  }
+  // Same B-2 reset as the rgba8 oriented entry above, for the same reason: a
+  // phase-3 failure that never reaches Stage-4 must not read a stale reason.
+  dngRenderStage4ResetFailureReason();
+  ceyxDecodeIntoPhase3(file_path, max_dim, route, dst, dst_capacity,
+                       exif_orientation, destination_is_page_aligned,
+                       output_format, result);
+  if (result->error_code != 0) {
+    ceyxMapStage4FailureReason(result);
+    return result;
+  }
+  result->rgba_data = dst;
+  // result->width/height are the ORIENTED extent here, which is what the
+  // contract says the plane extents describe -- so the descriptor is built
+  // from them and never from the unoriented probe.
+  ceyxFillYuv420PlaneDescriptor(out_planes, output_format, dst, result->width,
+                                result->height);
   return result;
 }
 

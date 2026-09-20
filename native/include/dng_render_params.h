@@ -296,6 +296,27 @@ double runRenderStage4LastDeviceToHostCopyMilliseconds();
 // RawTimingDiagnostics.unified_memory_path_active.
 bool runRenderStage4LastCallerDestinationWrapWasUsed();
 
+// mem8 v3 T12 (Y5) — RGBA8 destination-scratch accounting. The full definition
+// of what is and is not counted is at the writer (dng_render_halide.cpp); the
+// short form: the RGBA8-shaped destination bytes a decode materialised IN
+// ADDITION to the caller's own buffer, i.e. the arena destination region or
+// Halide's own device allocation for the destination.
+//
+// Reads 0 on the yuv420 path because that path's destination is three planes
+// totalling 1.5 B/px and no RGBA8 scratch exists on it. That zero is only
+// EVIDENCE because the same counter goes to a full w*h*4 on the rgba8
+// arena/device path -- a counter that cannot move is not an instrument, and
+// its 0 would be indistinguishable from never having been wired. Any report
+// quoting a yuv420 zero must show the rgba8 nonzero from the same build.
+//
+// Per-decode: thread_local, reset at entry of every
+// runRenderStage4HalideAotFromDevice call, same discipline as the two readings
+// above. Use this to assert about ONE decode.
+// High-water: process-wide and monotonic. Use this to assert that no decode in
+// a whole run ever materialised a full frame.
+uint64_t runRenderStage4LastRgbaScratchBytes();
+uint64_t runRenderStage4RgbaScratchHighWaterBytes();
+
 // R4-T3 (S1 proof) — TEST-ONLY fault injection, never called by shipping code.
 // When armed, runRenderStage4HalideAotFromDevice treats an otherwise
 // successful Stage4 dispatch as a kernel failure at the post-submission

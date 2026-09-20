@@ -114,6 +114,68 @@ inline uint8_t box_average_2x2(int32_t top_left, int32_t top_right,
          chroma_downsample_bias(output_column)) >> 2);
 }
 
+// ---------------------------------------------------------------------------
+// THE INVERSE (T12 milestone 3 / T13): YCbCr -> RGB, for ceyx_yuv420_to_rgba8.
+//
+// It lives beside the forward direction for the reason the file header gives:
+// one definition, every implementation derives from it. A separately written
+// inverse is exactly the silent drift this header exists to prevent -- and an
+// inverse that is not libjpeg's would make a decode->display round trip and a
+// decode->encode round trip disagree with nothing in the tree saying so.
+//
+// PROVENANCE, read from the vendored source on this tree (not from memory):
+//   native/third_party/libjpeg-turbo/src/jdcolor.c:236-250 (build_ycc_rgb_table)
+//       Cr=>R  = (FIX(1.40200) * x + ONE_HALF) >> SCALEBITS
+//       Cb=>B  = (FIX(1.77200) * x + ONE_HALF) >> SCALEBITS
+//       Cr=>G  = -FIX(0.71414) * x                 (kept SCALED)
+//       Cb=>G  = -FIX(0.34414) * x + ONE_HALF      (kept SCALED, ONE_HALF
+//                                                   pre-added so the inner
+//                                                   loop need not)
+//       where x = sample - CENTERJSAMPLE.
+//   native/third_party/libjpeg-turbo/src/jdcolext.c:61-65 (the inner loop)
+//       R = range_limit[y + Cr_r]
+//       G = range_limit[y + ((Cb_g + Cr_g) >> SCALEBITS)]
+//       B = range_limit[y + Cb_b]
+//
+// TWO THINGS THAT ARE EASY TO GET WRONG AND ARE THEREFORE SPELLED OUT:
+//   1. The red and blue terms are shifted when the TABLE is built; the green
+//      term is NOT -- its two contributions are summed at full scale and
+//      shifted ONCE. Shifting each green contribution separately is a
+//      different function (double rounding) and differs by an LSB.
+//   2. ONE_HALF is added to the Cb=>G table entry, never to the Cr=>G one. It
+//      appears exactly once in the green sum, which is what the single shift
+//      above needs. Adding it to both, or to neither, is a systematic bias.
+//
+// RANGE LIMITING: libjpeg indexes a sample_range_limit TABLE rather than
+// clamping, because DCT noise can push `y + delta` outside 0..MAXJSAMPLE. Over
+// the range reachable from 8-bit inputs that table IS a clamp to 0..255, and
+// this path has no DCT noise (its input is our own kernel's output), so a
+// clamp is the faithful reading here rather than an approximation of one.
+inline constexpr int32_t kCrToR = fix(1.40200);
+inline constexpr int32_t kCbToB = fix(1.77200);
+inline constexpr int32_t kCrToG = -fix(0.71414);
+inline constexpr int32_t kCbToG = -fix(0.34414);
+
+inline uint8_t clamp_to_sample(int32_t value) {
+    return static_cast<uint8_t>(value < 0 ? 0 : (value > 255 ? 255 : value));
+}
+
+// `cb`/`cr` are the stored 0..255 samples; the centering is applied here so no
+// caller has to remember it.
+inline void rgb_from_ycbcr(int32_t y, int32_t cb, int32_t cr, uint8_t *out_r,
+                           uint8_t *out_g, uint8_t *out_b) {
+    const int32_t cb_centered = cb - kCenterSample;
+    const int32_t cr_centered = cr - kCenterSample;
+    const int32_t r_term = (kCrToR * cr_centered + kOneHalf) >> kScaleBits;
+    const int32_t b_term = (kCbToB * cb_centered + kOneHalf) >> kScaleBits;
+    // Scaled sum, ONE shift, ONE_HALF added exactly once -- see note 1 and 2.
+    const int32_t g_term =
+        (kCbToG * cb_centered + kOneHalf + kCrToG * cr_centered) >> kScaleBits;
+    *out_r = clamp_to_sample(y + r_term);
+    *out_g = clamp_to_sample(y + g_term);
+    *out_b = clamp_to_sample(y + b_term);
+}
+
 // Plane geometry, from the T12.0 frozen contract (raw_ffi_api.h). Expressed
 // once so nobody re-derives ceil(w/2) with an integer division that silently
 // truncates -- the odd-dimension case Y3/Y9 exist to catch.
