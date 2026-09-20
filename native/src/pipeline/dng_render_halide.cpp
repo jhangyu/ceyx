@@ -162,6 +162,10 @@ functions:
 #include "raw_persistent_device_arena.h"
 #include "dng_rect.h"
 #include "dng_render_stage4.h"
+// mem8 v3 T20: the fused Bayer demosaic+render AOT entry. Included
+// unconditionally -- it is built for every backend (no platform guard), which
+// is the whole point of the parity design.
+#include "raw_bayer_fused_render.h"
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
 #include "dng_render_stage4_split.h"
 #else
@@ -1345,7 +1349,8 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          DecodeContext* ctx,
                                          int32_t exif_orientation,
                                          ceyx::RawPersistentDeviceArena* persistent_device_arena,
-                                         void* caller_destination_metal_buffer) {
+                                         void* caller_destination_metal_buffer,
+                                         const FusedBayerSource* fused_bayer_source) {
     // Plan section 1.6: reset before any validation or early return, so a
     // direct caller of this runner sees kNone rather than a reason inherited
     // from an earlier call on this thread.
@@ -1363,8 +1368,16 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // would report a zero-copy decode that never happened.
     g_last_caller_destination_wrap_was_used = false;
 
-    if (!stage3_device_buf || stage3_device_buf->dimensions < 3 ||
+    // T20: on the fused route this buffer is a 2D CFA mosaic, not a 3D RGB16
+    // frame, so the dimension floor differs. Everything else is validated
+    // identically.
+    const int minimum_source_dimensions = fused_bayer_source ? 2 : 3;
+    if (!stage3_device_buf ||
+        stage3_device_buf->dimensions < minimum_source_dimensions ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
+        return false;
+    }
+    if (fused_bayer_source && !fused_bayer_source->black_values) {
         return false;
     }
 
@@ -1411,6 +1424,16 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
 #endif
 
     const bool scaled = (src_w != dst_w || src_h != dst_h);
+    // T20.0 scope boundary, enforced rather than documented: the fused kernel
+    // covers the UNSCALED Stage-4 variant only. There is no fused _scaled or
+    // _scaled_preavg archive, so a scaled request must REFUSE here rather than
+    // silently crop (which would produce a wrong-sized image) or fall back to
+    // the two-stage path (which would be an unannounced divergence). Callers
+    // only pass a fused source on the unscaled path, so this is a structural
+    // guard against a future caller widening the scope by accident.
+    if (fused_bayer_source && scaled) {
+        return false;
+    }
 #if defined(DNG_STAGE4_SPLIT_KERNEL)
     // Android/Vulkan has no scaled AOT (Gotcha #93/#96 unverifiable without a
     // real device). Refuse rather than crop; the caller falls back to the host
@@ -1495,7 +1518,14 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     }
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);
-    if (scaled) {
+    // T20 fused route: the mosaic is passed WHOLE and the crop travels as
+    // kernel scalars instead (see FusedBayerSource's comment — cropping the
+    // mosaic would change both the CFA phase and the boundary wrap at the crop
+    // edge, and the result would no longer be byte-identical to the two-stage
+    // path). So none of the crop mutation below runs on that route.
+    if (fused_bayer_source) {
+        // Deliberately empty: no crop(), no dim[].min mutation.
+    } else if (scaled) {
         // Sized path: crop to the SOURCE extent (not dst) — the box geometry is
         // derived from the source extent against out_w/out_h, so the full source
         // area must be visible to the kernel. Cropped unconditionally, including
@@ -1790,12 +1820,69 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     auto t2_fd = verbose_timing_fd ? std::chrono::high_resolution_clock::now()
                                    : std::chrono::high_resolution_clock::time_point{};
 #else
+    // mem8 v3 T20: the FUSED Bayer demosaic+render kernel. Selected by the
+    // presence of fused_bayer_source and by nothing else -- no platform guard,
+    // no OS test. The fused archive's argument tail from src_scale onward is
+    // IDENTICAL to dng_render_stage4's, which is what lets this be one extra
+    // dispatch arm rather than a parallel copy of this whole function: every
+    // buffer above, the per-lane parameter upload cache, the destination
+    // arena/MTLBuffer decision, the device sync, the D2H bracket and the
+    // failure-reason publication below are shared verbatim.
+    //
+    // src_buf here is the CFA MOSAIC, uncropped; crop_l/crop_t and the CROPPED
+    // extents travel as scalars so the kernel reproduces the two-stage
+    // semantics exactly (demosaic over the full plane, clamp against the crop).
+    Buffer<float> fused_black_buf;
+    if (fused_bayer_source) {
+        fused_black_buf = Buffer<float>(
+            const_cast<float*>(fused_bayer_source->black_values),
+            fused_bayer_source->black_width,
+            fused_bayer_source->black_height);
+        fused_black_buf.set_host_dirty();
+    }
     // R2 sized decode: identical argument tail, two kernels. The scaled kernel
     // takes dst_w/dst_h as explicit scalars so its box geometry never depends
     // on output bounds inference. scaled==false reproduces the previous call
     // exactly.
     const int result =
-        scaled
+        fused_bayer_source
+        ? raw_bayer_fused_render(src_buf.raw_buffer(),
+                                         fused_bayer_source->red_x,
+                                         fused_bayer_source->red_y,
+                                         fused_black_buf.raw_buffer(),
+                                         fused_bayer_source->inv_range,
+                                         crop_l, crop_t, src_w, src_h,
+                                         src_scale,
+                                         // T7b: six affine coefficients
+                                         // immediately after src_scale, same
+                                         // order and meaning as below.
+                                         orient_coeffs[0], orient_coeffs[1],
+                                         orient_coeffs[2], orient_coeffs[3],
+                                         orient_coeffs[4], orient_coeffs[5],
+                                         exp_buf.raw_buffer(),
+                                         tone_buf.raw_buffer(),
+                                         gamma_buf.raw_buffer(),
+                                         cw_buf.raw_buffer(),
+                                         c2r_buf.raw_buffer(),
+                                         r2f_buf.raw_buffer(),
+                                         hs_table_buf.raw_buffer(),
+                                         hs_encode_buf.raw_buffer(),
+                                         hs_decode_buf.raw_buffer(),
+                                         params.huesat_hue_div,
+                                         params.huesat_sat_div,
+                                         params.huesat_val_div,
+                                         params.huesat_has_table,
+                                         params.huesat_has_encoding,
+                                         look_table_buf.raw_buffer(),
+                                         look_encode_buf.raw_buffer(),
+                                         look_decode_buf.raw_buffer(),
+                                         params.look_hue_div,
+                                         params.look_sat_div,
+                                         params.look_val_div,
+                                         params.look_has_table,
+                                         params.look_has_encoding,
+                                         dst_buf.raw_buffer())
+        : scaled
         ? dng_render_stage4_scaled_preavg(src_buf.raw_buffer(),
                                          src_scale,
                                          // T7b: six affine coefficients

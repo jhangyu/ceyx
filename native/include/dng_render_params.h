@@ -162,6 +162,27 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               // place that converts them to the oriented extent.
                               int32_t exif_orientation = 1);
 
+// mem8 v3 T20 (fusion): the extra inputs the FUSED Bayer demosaic+render kernel
+// needs beyond the Stage-4 render parameters. Present => the fused entry is
+// dispatched and `stage3_device_buf` carries the CFA MOSAIC rather than a
+// Stage-3 RGB16 frame.
+//
+// WHY THE MOSAIC IS PASSED WHOLE AND THE CROP TRAVELS SEPARATELY (load-bearing
+// for byte-identity): the two-stage path demosaics the FULL plane and only then
+// crops the Stage-3 result, so demosaicing the last in-crop column still reads
+// REAL out-of-crop pixels. Cropping the mosaic first would instead hit the CFA
+// boundary wrap there, and would also shift the CFA phase. So the kernel
+// receives the whole plane plus the crop origin, and clamps against the CROPPED
+// extents.
+struct FusedBayerSource {
+    int red_x = 0;              // CFA phase of the FULL plane, not of the crop
+    int red_y = 0;
+    const float* black_values = nullptr;   // black repeat tile, row-major
+    int black_width = 1;
+    int black_height = 1;
+    float inv_range = 1.0f;     // 65535 / (white - black_max)
+};
+
 // Device-handoff form. Signature transcribed from dng_render_halide.cpp:1182-1192
 // (note the crop_l/crop_t/src_w/src_h parameters the plan placeholder omitted).
 bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
@@ -208,7 +229,21 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         // bit-identical. Order fixed by plan
                                         // section 4.2.2: arena FIRST,
                                         // destination wrap SECOND.
-                                        void* caller_destination_metal_buffer = nullptr);
+                                        void* caller_destination_metal_buffer = nullptr,
+                                        // mem8 v3 T20 (fusion): non-null selects
+                                        // the FUSED kernel. Everything else on
+                                        // this path -- the per-lane render
+                                        // parameter upload cache, the destination
+                                        // arena/MTLBuffer decision, the device
+                                        // sync, the D2H copy bracket and the
+                                        // failure-reason publication -- is SHARED,
+                                        // not duplicated: the fused route differs
+                                        // only in which AOT entry is dispatched
+                                        // and which inputs it takes.
+                                        // nullptr keeps every existing caller
+                                        // bit-identical.
+                                        const FusedBayerSource* fused_bayer_source =
+                                            nullptr);
 
 // Lead-assigned scope addition (2026-09-11, plan §6.2 item 1 — C4
 // device->host copy bracket). Owned by impl-2-sonnet alongside

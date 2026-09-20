@@ -58,6 +58,12 @@ namespace {
 // raw_gpu_pipeline.h for why a counter is required and vmmap is not enough.
 std::atomic<uint64_t> g_stage3_host_allocation_count{0};
 
+// mem8 T20 (fusion). Process-wide count of decodes that took the FUSED Bayer
+// demosaic+render route. Same atomic discipline and same rationale as the
+// counter above; see raw_fused_bayer_render_count()'s comment in
+// raw_gpu_pipeline.h for why byte-identity alone cannot stand in for it.
+std::atomic<uint64_t> g_fused_bayer_render_count{0};
+
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 using ObjectiveCSendNewBufferNoCopy = void* (*)(void*, SEL, void*, unsigned long,
                                                 unsigned long, void*);
@@ -499,6 +505,20 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // that helper's comment before touching anything below; in particular the
     // declaration ORDER here is load-bearing (buffer first, binding second, so
     // the binding detaches before the buffer is destroyed).
+    // mem8 v3 T20 (fusion). Decided HERE, before the Stage-3 allocation, because
+    // the entire point is that the allocation never happens on this route.
+    //
+    // Scope (T20.0): Bayer route, UNSCALED Stage-4 variant only. The scaled
+    // variants have no fused archive, so a downscale request keeps the
+    // two-stage path. This is a scope boundary, not a platform guard -- there
+    // is deliberately no backend test here, and both backend families take the
+    // fused branch identically.
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+    const bool use_fused_bayer_render = (src_w == out_w && src_h == out_h);
+
     Halide::Runtime::Buffer<uint16_t> stage3;
 
     // C1 (plan §3.2 item 1-2, §2.6): wrap the source mosaic and Stage3
@@ -516,7 +536,12 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
     std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
-    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    if (!use_fused_bayer_render) {
+        // Declaration order stays load-bearing (buffer first, binding second)
+        // -- see makeStage3Buffer. Both are declared above this branch so the
+        // destruction order is unchanged whichever route ran.
+        makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    }
 
     // GPU targets only upload an input whose host_dirty flag is set; without
     // these the kernel reads freshly device-malloc'd memory. Same handshake as
@@ -565,7 +590,8 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     if (h2d_rc != 0) {
         return kRawErrKernelFailed;
     }
-    if (raw_bayer_demosaic(src_buf, red_x, red_y, black_buf,
+    if (!use_fused_bayer_render &&
+        raw_bayer_demosaic(src_buf, red_x, red_y, black_buf,
                            computeInvRange(input), stage3) != 0) {
         return kRawErrKernelFailed;
     }
@@ -581,10 +607,8 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
     // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
     // front (no scaled AOT exists there, matching the DNG path / AC-D1).
-    const uint32_t src_w = crop.width;
-    const uint32_t src_h = crop.height;
-    uint32_t out_w = 0, out_h = 0;
-    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+    // src_w/src_h/out_w/out_h are computed ABOVE, before the Stage-3
+    // allocation, because the fusion decision depends on them.
 
     // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
     // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
@@ -669,7 +693,25 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // mutation itself (never set_min/translate, which would trigger
     // device_deallocate — memory.md Key Gotchas); when they differ it dispatches
     // the pre-average scaled AOT instead (same entry the DNG path uses).
-    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
+    // mem8 v3 T20: on the fused route the source handed to Stage-4 is the CFA
+    // MOSAIC (uncropped -- the kernel applies crop.x/crop.y itself, see
+    // FusedBayerSource) and no Stage-3 buffer exists. Every other argument is
+    // identical, which is why this is one call site rather than two.
+    if (use_fused_bayer_render) {
+        // Incremented HERE, immediately before the dispatch that uses it, so
+        // the counter cannot report a route that an early return skipped.
+        g_fused_bayer_render_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    FusedBayerSource fused_source;
+    fused_source.red_x = red_x;
+    fused_source.red_y = red_y;
+    fused_source.black_values = input.black.values;
+    fused_source.black_width = static_cast<int>(bw);
+    fused_source.black_height = static_cast<int>(bh);
+    fused_source.inv_range = computeInvRange(input);
+    if (!runRenderStage4HalideAotFromDevice(use_fused_bayer_render
+                                                ? src_buf.raw_buffer()
+                                                : stage3.raw_buffer(),
                                             1.0f / 65535.0f,
                                             crop.x, crop.y,
                                             static_cast<int>(src_w),
@@ -680,7 +722,10 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
                                             /*ctx=*/nullptr,
                                             develop.exif_orientation,
                                             arena,
-                                            caller_destination_metal_buffer)) {
+                                            caller_destination_metal_buffer,
+                                            use_fused_bayer_render
+                                                ? &fused_source
+                                                : nullptr)) {
         return kRawErrKernelFailed;
     }
 
@@ -1231,6 +1276,10 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
 // mem8 T4 (SR-7). See the declaration's comment in raw_gpu_pipeline.h.
 uint64_t raw_stage3_host_allocation_count() {
     return g_stage3_host_allocation_count.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_fused_bayer_render_count() {
+    return g_fused_bayer_render_count.load(std::memory_order_relaxed);
 }
 
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,

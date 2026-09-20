@@ -91,6 +91,13 @@ if(NOT DNG_CROSS_BUILD)
     target_include_directories(raw_bayer_demosaic_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
     target_link_libraries(raw_bayer_demosaic_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
+    # mem8 T20: fused Bayer demosaic + Stage-4 render generator (single
+    # dispatch, no materialised intermediate; shares the Stage-4 colour
+    # arithmetic via dng_render_stage4_expr.h).
+    add_executable(raw_bayer_fused_render_generator ${GEN_DIR}/RawBayerFusedRenderGenerator.cpp)
+    target_include_directories(raw_bayer_fused_render_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
+    target_link_libraries(raw_bayer_fused_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+
     # P17 T11: fused normalize + X-Trans 6x6 demosaic generator for the
     # generic RAW route. Separate kernel from the Bayer one: the CFA is a
     # runtime 6x6 buffer, not a 2x2 phase pair.
@@ -156,21 +163,38 @@ if(NOT DNG_CROSS_BUILD)
         )
         add_custom_target(dng_stage_halide_dll DEPENDS ${DNG_STAGED_HALIDE_DLL})
 
-        set(DNG_HALIDE_GENERATORS
-            rectilinear_warp_generator
-            dng_demosaic_generator
-            dng_demosaic_warp_generator
-            dng_render_generator
-            dng_opcode_polynomial_generator
-            dng_opcode_polynomial3_generator
-            raw_bayer_demosaic_generator
-            raw_xtrans_demosaic_generator
-            raw_linear_rgb_normalize_generator)
-        if(DNG_DIAGNOSTIC_BUILD)
-            list(APPEND DNG_HALIDE_GENERATORS
-                rectilinear_warp_strict_float_generator
-                rectilinear_warp_debug_generator)
+        # DERIVED, not hand-maintained (mem8 T20).
+        #
+        # This list previously named its nine generators literally. That is a
+        # duplicate of the add_executable() calls above, and it drifted: the
+        # fused generator added for T20 was absent from it. The consequence was
+        # invisible on macOS and Linux and would have broken only WINDOWS --
+        # the generator would build, then fail to RUN for want of a staged
+        # Halide.dll, taking its AOT custom command down with it. The same
+        # silent-on-N-platforms shape has bitten this repo before with
+        # hand-maintained product lists.
+        #
+        # Deriving from the buildsystem's own targets means a generator added
+        # in future is covered automatically, with no second place to remember.
+        get_property(_dng_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        set(DNG_HALIDE_GENERATORS "")
+        foreach(_dng_target IN LISTS _dng_dir_targets)
+            if(_dng_target MATCHES "_generator$")
+                list(APPEND DNG_HALIDE_GENERATORS ${_dng_target})
+            endif()
+        endforeach()
+        # A derived list that silently derives NOTHING is worse than the literal
+        # one it replaced, so refuse to configure rather than stage zero DLLs.
+        list(LENGTH DNG_HALIDE_GENERATORS _dng_generator_count)
+        if(_dng_generator_count EQUAL 0)
+            message(FATAL_ERROR
+                "DNG_HALIDE_GENERATORS derived empty: no *_generator targets "
+                "found in this directory. Without the staged Halide.dll every "
+                "generator fails at run time on Windows.")
         endif()
+        message(STATUS
+            "DNG Halide generators staged with Halide.dll (derived): "
+            "${_dng_generator_count} -> ${DNG_HALIDE_GENERATORS}")
         foreach(_dng_gen IN LISTS DNG_HALIDE_GENERATORS)
             add_dependencies(${_dng_gen} dng_stage_halide_dll)
         endforeach()

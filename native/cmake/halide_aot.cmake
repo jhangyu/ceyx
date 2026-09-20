@@ -174,6 +174,20 @@ add_custom_target(raw_bayer_demosaic_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT})
 
+# mem8 T20: fused Bayer demosaic + Stage-4 render AOT kernel. Uses
+# DNG_RENDER_STAGE4_AOT_TARGET (not AOT_TARGET) because the fused kernel
+# emits the final RGBA8 and must match Stage-4's strict_float form.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render.h
+    COMMAND raw_bayer_fused_render_generator -g raw_bayer_fused_render -f raw_bayer_fused_render
+            -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS raw_bayer_fused_render_generator
+    COMMENT "Generating Halide AOT fused Bayer demosaic+render..."
+)
+add_custom_target(raw_bayer_fused_render_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT})
+
 # P17 T11: generic-RAW fused normalize + X-Trans demosaic AOT kernel.
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic.h

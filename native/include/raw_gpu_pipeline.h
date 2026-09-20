@@ -205,6 +205,24 @@ int raw_pipeline_gpu_available();
 // export and cannot widen any frozen probe signature.
 uint64_t raw_stage3_host_allocation_count();
 
+// mem8 T20 (fusion): how many decodes have taken the FUSED Bayer
+// demosaic+render route since process start, i.e. produced RGBA8 in one
+// dispatch with no Stage-3 intermediate allocated at all.
+//
+// WHY THIS COUNTER EXISTS: byte-identity cannot distinguish "the fused kernel
+// produced the right pixels" from "the fused route silently stopped engaging
+// and the two-stage path produced them". Both are green. The arena region
+// count discriminates indirectly (2 regions per lane instead of 3), but that
+// is a consequence, not the fact itself, and it would also read 3 if a future
+// change reintroduced a Stage-3 allocation while still calling the fused
+// kernel. This counter is the fact itself, so the per-route assertions in
+// test_concurrent_raw_decode.cpp can be EXACT rather than a lower bound.
+//
+// Declared HERE for the same reason as the counter above: a C++ accessor for
+// in-tree gates that link dng_decoder_native directly. It adds no FFI export
+// and no Dart-visible surface, which T20's interface contract requires.
+uint64_t raw_fused_bayer_render_count();
+
 // Non-zero return requests cancellation. Polled between open_file and unpack,
 // after unpack, and before GPU dispatch. Deliberately a plain function pointer:
 // no lock on the hot path.

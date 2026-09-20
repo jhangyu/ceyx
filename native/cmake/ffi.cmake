@@ -25,6 +25,8 @@ if(NOT DNG_CROSS_BUILD)
     # P17 T9: src/raw_demosaic_reference.cpp (auto-globbed above) calls the
     # raw_bayer_demosaic AOT entry, so the dylib depends on and links it.
     add_dependencies(dng_decoder_native raw_bayer_demosaic_aot_target)
+    # mem8 T20: fused Bayer demosaic+render AOT entry.
+    add_dependencies(dng_decoder_native raw_bayer_fused_render_aot_target)
     # P17 T11: the same reference TU also calls the raw_xtrans_demosaic AOT
     # entry.
     add_dependencies(dng_decoder_native raw_xtrans_demosaic_aot_target)
@@ -54,6 +56,7 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by

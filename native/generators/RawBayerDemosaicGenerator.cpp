@@ -5,11 +5,44 @@
 // artifacts (Gotcha #99), and the DNG route feeds already-linearised Stage2
 // data that must not be normalised a second time.
 //
-// Normalize is an EXPRESSION consumed by the demosaic - never a materialised
-// intermediate (spec section 7, stage R1). The schedule below therefore
-// contains no root-materialising directive; the acceptance gate greps this
-// file for that directive and requires zero occurrences, so the name is
-// deliberately not spelled out even in prose here.
+// NORMALIZE MUST NOT BE MATERIALISED AT ROOT. The schedule below contains no
+// root-materialising directive: `normalized` is staged per GPU TILE, which is
+// a different thing from a full-frame intermediate.
+//
+// This rule was NARROWED twice, and both narrowings are load-bearing:
+//
+// 1. The reason is ELEMENT WIDTH, not compute_at. The older wording here
+//    forbade any materialised producer and claimed "the acceptance gate greps
+//    this file for that directive and requires zero occurrences". No such gate
+//    ever existed anywhere in this tree -- the claim was prose describing an
+//    enforcer that was never written. T22 then measured the actual variable on
+//    Adreno 750 / Vulkan: a Func materialised at a GPU loop level becomes an
+//    array in the Workgroup storage class, and THAT driver miscompiles the
+//    array when its element type is narrower than 32 bits. uint8 gives
+//    24,000,000/24,000,000 wrong G/B; uint32 gives zero. Hence the deliberate
+//    uint32_t at the `normalized` definition below -- see its own comment, and
+//    do not narrow it back.
+//
+// 2. There IS an enforcer now, and it is mechanical:
+//    native/tests/check_gpu_producer_width.py reads the LOWERED STATEMENT
+//    (-e stmt) of an AOT target, finds every GPU dispatch, extracts the
+//    shared-memory argument (which Halide emits as element_count *
+//    element_width_bytes) and fails on any staged producer narrower than 32
+//    bits. It keys on that argument rather than on the kernel source because
+//    that is the only form textually identical on BOTH backend families: the
+//    Metal arm embeds readable Metal C++, the Vulkan arm embeds SPIR-V where
+//    the type is an opaque id. It enumerates whatever the statement actually
+//    stages, with no symbol allowlist, so producers added in future are
+//    covered without editing it. It has been observed FAILING on an injected
+//    uint32->uint16 narrowing on both backends.
+//
+// WHAT THE RULE DOES NOT FORBID, as of mem8 v3 T20: fusing this demosaic into
+// the Stage-4 render so no Stage-3 frame is ever allocated. That is
+// RawBayerFusedRenderGenerator.cpp, which reuses the same expression via
+// build_demosaic_expr(). Note it stages NOTHING at all -- not because of this
+// rule, but because its render gathers through a runtime orientation affine,
+// which makes any staged extent dynamic, and Vulkan below v1.3 refuses a
+// dynamic workgroup size. That constraint and this one are independent.
 #include "Halide.h"
 #include "dng_halide_utils.h"
 

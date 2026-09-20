@@ -216,9 +216,17 @@ int main(int argc, char** argv) {
 
   // Phase 1: single-lane reference on the main thread.
   std::vector<uint64_t> reference_hashes(corpus.size(), 0);
+  // mem8 T20: which route each file takes, MEASURED during this serial pass by
+  // reading the pipeline's own fused-route counter around each decode, rather
+  // than guessed from the filename or the CFA layout. Used to aim the T4
+  // positive control at a file that still has a Stage-3 buffer.
+  std::vector<bool> two_stage_files(corpus.size(), false);
   bool reference_ok = true;
   for (size_t i = 0; i < corpus.size(); ++i) {
+    const uint64_t fused_before_file = raw_fused_bayer_render_count();
     const DecodeOutcome outcome = decode_and_hash(corpus[i].c_str());
+    two_stage_files[i] =
+        (raw_fused_bayer_render_count() == fused_before_file);
     if (!outcome.ok) {
       std::printf("[ConcurrentRawDecode] reference decode FAILED (%s)\n",
                   corpus[i].c_str());
@@ -242,6 +250,7 @@ int main(int argc, char** argv) {
   // Phase 2: clean lane baseline, then the counter baseline for the deltas.
   ceyx::raw_persistent_device_arena_release_all_lanes();
   const ArenaCounters baseline = read_counters();
+  const uint64_t baseline_fused_count = raw_fused_bayer_render_count();
   std::printf(
       "[ConcurrentRawDecode] baseline: allocation_count=%llu "
       "growth_reallocation_count=%llu binding_count=%llu "
@@ -312,21 +321,31 @@ int main(int argc, char** argv) {
       (unsigned long long)after.resident_device_bytes,
       (unsigned long long)after.live_lane_count);
 
+  const uint64_t after_fused_count = raw_fused_bayer_render_count();
   const int64_t allocation_delta =
       static_cast<int64_t>(after.allocation_count) -
       static_cast<int64_t>(baseline.allocation_count);
   const int64_t growth_delta =
       static_cast<int64_t>(after.growth_reallocation_count) -
       static_cast<int64_t>(baseline.growth_reallocation_count);
+  const int expected_decodes =
+      thread_count * repeat * static_cast<int>(corpus.size());
   const int64_t binding_delta =
       static_cast<int64_t>(after.binding_count) -
       static_cast<int64_t>(baseline.binding_count);
+  // mem8 T20: how many of these decodes took the FUSED Bayer route. This is
+  // the ROUTE SELECTOR the per-route assertions below key on -- read from the
+  // pipeline itself, never inferred from the region counts those assertions
+  // are testing (that would be circular).
+  const int64_t fused_delta =
+      static_cast<int64_t>(after_fused_count) -
+      static_cast<int64_t>(baseline_fused_count);
+  const int64_t two_stage_decodes = expected_decodes - fused_delta;
   // mem8 T4 (SR-7), gate G1.
   const int64_t stage3_host_allocation_delta =
       static_cast<int64_t>(after.stage3_host_allocation_count) -
       static_cast<int64_t>(baseline.stage3_host_allocation_count);
-  const int expected_decodes =
-      thread_count * repeat * static_cast<int>(corpus.size());
+
   std::printf(
       "[ConcurrentRawDecode] deltas: allocation=%lld growth=%lld binding=%lld "
       "successful_decodes=%d expected_decodes=%d\n",
@@ -360,22 +379,53 @@ int main(int argc, char** argv) {
         "shared an arena or ran unarened; more means lane identity is not "
         "thread identity");
 
-  // (c) each lane allocated its own three regions exactly once.
-  CHECK("allocation_delta_equals_three_per_lane",
-        allocation_delta == 3ll * thread_count,
-        "three regions per lane from a clean baseline; a shared arena would "
-        "allocate 3 in total and an absent arena 0");
+  // (c) each lane allocated its own regions exactly once -- PER ROUTE.
+  //
+  // mem8 T20 made this route-dependent. The FUSED Bayer route allocates TWO
+  // regions per lane (source mosaic, destination RGBA8): there is no Stage-3
+  // intermediate at all. Every two-stage route still allocates THREE.
+  // Asserted EXACTLY, per route, rather than relaxed to ">= 2": an exact form
+  // fails both if fusion silently stops engaging (reads 3 on a fused corpus)
+  // and if a route loses a region it should have (reads 1). A lower bound
+  // would catch neither.
+  // The route selector is raw_fused_bayer_render_count(), read from the
+  // pipeline; it is NOT inferred from the allocation count being asserted.
+  const bool every_decode_fused = (fused_delta == expected_decodes);
+  const bool no_decode_fused = (fused_delta == 0);
+  const int64_t expected_regions_per_lane = every_decode_fused ? 2ll : 3ll;
+  if (every_decode_fused || no_decode_fused) {
+    CHECK(every_decode_fused
+              ? "allocation_delta_is_two_per_lane_fused_bayer_route"
+              : "allocation_delta_is_three_per_lane_two_stage_routes",
+          allocation_delta == expected_regions_per_lane * thread_count,
+          "fused Bayer route allocates 2 regions per lane (no Stage-3); every "
+          "two-stage route allocates 3. Exact per route: a shared arena would "
+          "allocate that many in total and an absent arena 0");
+  } else {
+    // Mixed corpus: lanes are reused across files of different routes, so a
+    // single exact per-lane number does not exist. Assert the reachable bound
+    // and say so, rather than pretend to an exactness this shape cannot have.
+    CHECK("allocation_delta_within_two_and_three_per_lane_mixed_corpus",
+          allocation_delta >= 2ll * thread_count &&
+              allocation_delta <= 3ll * thread_count,
+          "mixed fused/two-stage corpus: each lane allocates 2 or 3 regions "
+          "depending on which files it drew, so only the bracket is assertable");
+  }
 
   // (d) binding coverage / binding_failure proxy.
-  CHECK("binding_delta_at_least_three_per_decode",
-        binding_delta >= 3ll * expected_decodes,
+  // mem8 T20: bindings are per DECODE and per route -- 2 on the fused Bayer
+  // route, 3 on every two-stage route -- so the expected total is computed
+  // from the route split rather than from a single multiplier.
+  CHECK("binding_delta_matches_per_route_expectation",
+        binding_delta >= 2ll * fused_delta + 3ll * two_stage_decodes,
         // The literal token the artifact greps for is DELIBERATELY not spelled
         // in any string this driver prints: RUN 1 of this gate showed the
         // grep matching this very PASS message, so the check would have
         // reported a hit on a healthy run (the 2026-08-28 self-collision
         // family). The token lives only in the artifact and in comments.
-        "three regions bound per decode; a failed region binding lowers this, "
-        "and the artifact greps the arena log for the failure event");
+        "2 regions bound per fused decode, 3 per two-stage decode; a failed "
+        "region binding lowers this, and the artifact greps the arena log for "
+        "the failure event");
   // mem8 T4 (SR-7), gate G1. Meaningful ONLY together with the binding check
   // just above: a zero here on a run where the arena never bound anything
   // would be the trivial pass (no decode reached a Stage-3 allocation at all),
@@ -406,7 +456,37 @@ int main(int argc, char** argv) {
   // ---------------------------------------------------------------------
   ceyx::raw_persistent_device_arena_release_all_lanes();
   ceyx::raw_persistent_device_arena_configure_lane_count(1);
-  const char* const control_path = corpus[0].c_str();
+  // mem8 T20 (lead ruling): this control was previously aimed at corpus[0].
+  // With the Bayer route fused there is NO Stage-3 buffer on that route at
+  // all, so the control could no longer FIRE -- arena_off would allocate
+  // nothing and the delta would read 0 whether or not the fallback worked,
+  // leaving mem8_t4_stage3_host_allocation_delta_is_zero above passing
+  // vacuously. The control is therefore aimed at a TWO-STAGE file, where the
+  // Stage-3 host fallback still exists and is still the thing under test.
+  //
+  // The Bayer route's own "no Stage-3 is allocated" property is NOT orphaned
+  // by this move: it is covered non-vacuously by the fused-route assertions
+  // above (2 regions per lane, exact) plus the lowered-statement width/
+  // allocation gate (native/tests/check_gpu_producer_width.py) and T4's vmmap
+  // host size-class check. Do NOT re-add a Bayer control here: on the fused
+  // route it can only ever pass vacuously.
+  const char* control_path = nullptr;
+  for (size_t i = 0; i < corpus.size(); ++i) {
+    if (two_stage_files[i]) { control_path = corpus[i].c_str(); break; }
+  }
+  if (control_path == nullptr) {
+    // Refused rather than skipped: silently not running a positive control is
+    // how the thing it protects becomes unfalsifiable again.
+    std::printf(
+        "[ConcurrentRawDecode] mem8_t4_positive_control_has_a_two_stage_file "
+        "-> FAIL (every corpus file takes the fused route, so the Stage-3 "
+        "host fallback cannot be exercised; include an X-Trans or linear-RGB "
+        "file)\n");
+    ++failures;
+    std::printf("[ConcurrentRawDecode] TOTAL failures=%d\n", failures);
+    std::fflush(stdout);
+    return 1;
+  }
   const DecodeOutcome arena_on = decode_and_hash(control_path);
   const uint64_t before_control = raw_stage3_host_allocation_count();
   DecodeOutcome arena_off;
