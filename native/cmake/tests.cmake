@@ -2426,6 +2426,22 @@ target_link_libraries(test_stage4_yuv420_output dng_decoder_native
 add_dependencies(test_stage4_yuv420_output dng_decoder_native)
 # --- end T12 milestone 4 ----------------------------------------------------
 
+# --- mem8 v3 T13: the yuv420 -> RGBA8 CONVERTER's own suite (C1..C5) -------
+# Distinct target from test_stage4_yuv420_output on purpose: that one owns the
+# OUTPUT ARM (do the kernels write the right planes), this one owns the
+# CONVERTER alone (given planes, is the inverse libjpeg's, at every extent,
+# opaque, allocating nothing). Same shared-dylib linkage rationale as above --
+# linking the pipeline sources in would test none of the shipped binary.
+#
+# No libjpeg include/link: the suite's forward transform is deliberately an
+# INDEPENDENT transcription of the vendored sources (so C1 can fail), and its
+# real-output arm goes through the dylib's decode entries.
+add_executable(test_yuv420_to_rgba tests/test_yuv420_to_rgba.cpp)
+target_include_directories(test_yuv420_to_rgba PRIVATE ${INC_DIR} ${SRC_DIR})
+target_link_libraries(test_yuv420_to_rgba dng_decoder_native)
+add_dependencies(test_yuv420_to_rgba dng_decoder_native)
+# --- end T13 ----------------------------------------------------------------
+
 add_executable(test_ceyx_decode_into tests/test_ceyx_decode_into.cpp)
 target_include_directories(test_ceyx_decode_into PRIVATE
     ${INC_DIR}
