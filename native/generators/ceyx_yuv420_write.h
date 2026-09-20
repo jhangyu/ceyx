@@ -55,6 +55,13 @@
 
 namespace ceyx {
 
+#ifdef CEYX_DBGVK_WIDE32
+// Scratch-probe marker (Task #9). Arbitrary, but must be a value the real luma
+// arithmetic cannot produce, so a degenerate plane is distinguishable from a
+// real one. Not present in any shipping build.
+inline constexpr int32_t kDbgWideMarker = 0x5A5A5A;
+#endif
+
 // `rgb8_r` / `rgb8_g` / `rgb8_b` are THREE SEPARATE single-value Funcs over
 // (x, y), each producing the display-referred R, G or B at OUTPUT coordinate
 // (x, y), orientation already applied.
@@ -112,9 +119,110 @@ void build_yuv420_planes(Halide::Var x, Halide::Var y,
     // --- luma, one sample per output pixel ---------------------------------
     {
         Expr r = ch(x, y, 0), g = ch(x, y, 1), b = ch(x, y, 2);
-        y_plane(x, y) = cast<uint8_t>(
+
+        // THE LUMA DOT PRODUCT IS SUMMED IN SPLIT HIGH/LOW HALVES. This is
+        // ADOPTED ON MEASUREMENT ALONE (2026-09-20): on device it eliminates
+        // the "+1" error population that four rounds of downstream fixes could
+        // not touch. THE MECHANISM IS NOT ESTABLISHED. Do not add one to this
+        // comment without device evidence.
+        //
+        // Not a precision choice and not a platform guard: both arms and both
+        // backends get this identical body, so the arms cannot diverge in HOW
+        // yuv420 is written.
+        //
+        // THE EVIDENCE, and all that is claimed. Two builds differing ONLY in
+        // this expression, same shipping configuration, same device, md5 of the
+        // device pair verified both directions, V-checks on record:
+        //   Y |kernel-control| == 1 population, per route
+        //     HEAD form   3110547 / 11198070 / 15429072   (dbg-vf-24, verdict
+        //                                                  dbg-vf-25)
+        //     this form        32 /        0 /        0   (dbg-vf-17, verdict
+        //                                                  dbg-vf-18)
+        //     routes in order: bayer-arw, xtrans-raf, linearrgb-x3f.
+        // The residual 32 on bayer-arw is TWO-SIDED (15 above, 17 below) and
+        // bayer-arw alone takes its control from the FUSED kernel, whose 1-LSB
+        // cross-kernel residue is a closed non-defect. The "+1" defect was
+        // strictly one-sided. If bayer's residual is ever shown one-sided or
+        // growing, that attribution is falsified and this reopens.
+        //
+        // WHAT THIS DOES NOT FIX. A SECOND, INDEPENDENT defect remains and is
+        // tracked separately: a gross (>=9) error population, invariant under
+        // the luma expression -- the mid-gross bucket is bit-identical, count
+        // for count, between the two builds above (1187898 / 6483171 / 1149874
+        // in BOTH), so it is not produced by this arithmetic. Byte-exactness of
+        // the Y plane against the host control is therefore still RED on
+        // Vulkan, for a reason that is not this expression. Metal is exact.
+        //
+        // WHY EARLIER ATTEMPTS FAILED, as a do-not-retry list -- each refuted on
+        // its own device evidence, each with the identical affected population:
+        // clamping or casting before the store (dbg-vk2-13, t12d5-09-verdicts;
+        // the value is already wrong upstream of both), unsigned shift
+        // (dbg-vk2-44), int64 accumulation (dbg-vk2-94, the widening provably
+        // in the SPIR-V), fp32 evaluation (t12e2-27, the float constants
+        // provably in the SPIR-V).
+        //
+        // A PREVIOUS VERSION OF THIS COMMENT ARGUED that the split works
+        // because no intermediate it forms reaches 2^23. THAT ARGUMENT IS
+        // FALSIFIED, and it is recorded here so it is not re-derived: this same
+        // split was measured pre-cast through the wide32 instrument and was
+        // REFUTED there (t12e2-38), and chroma's coefficients produce
+        // intermediates above 2^23 while chroma is byte-perfect. Staying under
+        // 2^23 is neither necessary nor sufficient.
+        //
+        // The identity below is nonetheless exact, which is why adopting it is
+        // safe regardless of mechanism: with ti = 65536*hi + li, 0 <= li <
+        // 65536 (every ti is non-negative, so >> and & are exactly quotient and
+        // remainder), and 2*tg = 38470*g,
+        //     S = tr + 2*tg + tb + 32768 = 65536*H + L,  L >= 0
+        // hence floor(S/65536) = H + (L >> 16), which is what the oracle
+        // computes, for every input. Bounds: tr <= 4996725, tg <= 4904925,
+        // tb <= 1905105, L <= 294908, H <= 253, result <= 255 -- so the
+        // unclamped uint8 store below cannot overflow. The pre-registered
+        // content check that the simplifier does not refold the split back into
+        // a single dot product is native/tests/tmp/t12e2-30-runC-prereg.txt
+        // (%int_19235 present / 38470 absent; re-confirmed for the shipping
+        // build in dbg-vf-18 V2a).
+        static_assert(o::kGToY % 2 == 0,
+                      "the split below halves kGToY exactly; an odd "
+                      "coefficient voids the exactness proof");
+        Expr tr = Expr(o::kRToY) * r;
+        Expr tg = Expr(o::kGToY / 2) * g;
+        Expr tb = Expr(o::kBToY) * b;
+        Expr scale_mask = Expr((1 << o::kScaleBits) - 1);
+        Expr luma_hi = (tr >> o::kScaleBits) + 2 * (tg >> o::kScaleBits) +
+                       (tb >> o::kScaleBits);
+        Expr luma_lo = (tr & scale_mask) + 2 * (tg & scale_mask) +
+                       (tb & scale_mask) + Expr(o::kLumaRounding);
+        Expr luma_scaled = luma_hi + (luma_lo >> o::kScaleBits);
+
+#ifdef CEYX_DBGVK_WIDE32
+        // DBG-VK2 SCRATCH PROBE. Compile-time inert: no build configuration
+        // defines CEYX_DBGVK_WIDE32, and it is retained deliberately because it
+        // is the only instrument that can read this kernel's pre-cast value --
+        // the uint8 store destroys it -- and the defect-#2 investigation is
+        // still open.
+        // Row 0 carries a fixed marker so a degenerate all-zero plane cannot be
+        // mistaken for a clean result.
+        //
+        // CEYX_DBGVK_INTFORM re-publishes the OLD integer form through this
+        // same instrument. It is the negative control: on device it must still
+        // read S - 2^24 for S >= 2^23. Without it, "the float form reads
+        // clean" cannot be distinguished from "I changed the instrument and it
+        // stopped being able to see the defect".
+#ifdef CEYX_DBGVK_INTFORM
+        Expr dbg_val = cast<int32_t>(
             (o::kRToY * r + o::kGToY * g + o::kBToY * b + o::kLumaRounding) >>
             o::kScaleBits);
+#else
+        Expr dbg_val = cast<int32_t>(luma_scaled);
+#endif
+        y_plane(x, y) = select(y == 0, Expr(kDbgWideMarker), dbg_val);
+#else
+        // No clamp: luma_scaled is provably in [0,255] (see the bounds above),
+        // and a clamp here is a refuted route (dbg-vk2-13, t12d5-09-verdicts).
+        // This is HEAD's store idiom (t12e-01-head-write-h.txt:115-117).
+        y_plane(x, y) = cast<uint8_t>(luma_scaled);
+#endif
     }
 
     // --- chroma: convert per pixel, then box-average the 2x2 ---------------
@@ -145,8 +253,14 @@ void build_yuv420_planes(Halide::Var x, Halide::Var y,
             2);
     };
 
+#ifdef CEYX_DBGVK_WIDE32
+    (void)box;
+    cb_plane(x, y) = Expr(kDbgWideMarker);
+    cr_plane(x, y) = Expr(kDbgWideMarker);
+#else
     cb_plane(x, y) = box(o::kRToCb, o::kGToCb, o::kBToCb);
     cr_plane(x, y) = box(o::kRToCr, o::kGToCr, o::kBToCr);
+#endif
 }
 
 }  // namespace ceyx

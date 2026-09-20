@@ -1667,9 +1667,15 @@ public:
     Input<int32_t> look_has_encoding{"look_has_encoding"};
 
     // Y, Cb, Cr. Extents are set by the caller: w x h and ceil(w/2) x ceil(h/2).
+#ifdef CEYX_DBGVK_WIDE32
+    Output<Buffer<int32_t>> y_plane{"y_plane", 2};
+    Output<Buffer<int32_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<int32_t>> cr_plane{"cr_plane", 2};
+#else
     Output<Buffer<uint8_t>> y_plane{"y_plane", 2};
     Output<Buffer<uint8_t>> cb_plane{"cb_plane", 2};
     Output<Buffer<uint8_t>> cr_plane{"cr_plane", 2};
+#endif
 
     Func rendered_rgb{"rendered_rgb"};
 
@@ -1787,9 +1793,15 @@ public:
     Input<int32_t> look_has_table{"look_has_table"};
     Input<int32_t> look_has_encoding{"look_has_encoding"};
 
+#ifdef CEYX_DBGVK_WIDE32
+    Output<Buffer<int32_t>> y_plane{"y_plane", 2};
+    Output<Buffer<int32_t>> cb_plane{"cb_plane", 2};
+    Output<Buffer<int32_t>> cr_plane{"cr_plane", 2};
+#else
     Output<Buffer<uint8_t>> y_plane{"y_plane", 2};
     Output<Buffer<uint8_t>> cb_plane{"cb_plane", 2};
     Output<Buffer<uint8_t>> cr_plane{"cr_plane", 2};
+#endif
 
     void generate() {
         Var x("x"), y("y");
