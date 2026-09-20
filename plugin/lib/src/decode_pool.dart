@@ -105,6 +105,29 @@ class CeyxPoolWorkerDiedException implements Exception {
       'CeyxPoolWorkerDiedException(worker=$workerIndex): $detail';
 }
 
+/// Thrown when a worker's reply arrived but the POOL could not turn it into a
+/// result (a malformed payload, an unownable address, a failed wrap).
+///
+/// 2026-09-20 hang campaign: this case used to throw inside the pool's
+/// `ReceivePort` listener AFTER the job had been removed from every map, so
+/// nothing was left that could complete it — an eternal pending future, a
+/// spinning UI, and a pool slot that never came back. It is an ERROR, so it is
+/// delivered as one.
+class CeyxPoolResultLostException implements Exception {
+  CeyxPoolResultLostException(this.path, this.detail);
+
+  /// The job's path (empty for an encode).
+  final String path;
+
+  /// String form of the underlying failure.
+  final String detail;
+
+  @override
+  String toString() =>
+      'CeyxPoolResultLostException(path=$path): the worker replied but the '
+      'pool could not materialise the result: $detail';
+}
+
 /// Thrown when every worker failed to load the native library.
 class CeyxPoolUnavailableException implements Exception {
   CeyxPoolUnavailableException(this.detail);
@@ -964,6 +987,24 @@ class CeyxDecodePool {
   /// failing the decode: this whole path is an optimisation, and a photo that
   /// will not probe must still open.
   Future<void> _prepareAndEnqueue(_PoolJob job) async {
+    // 2026-09-20 hang campaign: a job between here and the `_queue.add` below
+    // lives in `_byKey` ALONE. `_byKey` is a coalescing index, not a failure
+    // index — neither [dispose] nor [_failQueuedForNoCapacity] walks it — so a
+    // job parked on `nativeBufferPool.acquire` (which waits without a timeout,
+    // by design) was reachable by NO failure path and its future could never
+    // complete. This set is what makes that window answerable.
+    _preparing.add(job);
+    try {
+      await _prepareAndEnqueueInner(job);
+    } finally {
+      _preparing.remove(job);
+    }
+  }
+
+  /// Jobs inside [_prepareAndEnqueue]'s await window. See that method.
+  final Set<_PoolJob> _preparing = <_PoolJob>{};
+
+  Future<void> _prepareAndEnqueueInner(_PoolJob job) async {
     try {
       var bytes = _sizeCache[_sizeKey(job.path, job.maxDim, job.format)];
       if (bytes == null) {
@@ -1267,7 +1308,15 @@ class CeyxDecodePool {
       _shutdown(worker);
     }
     _workers.clear();
-    final lost = List<_PoolJob>.from(_byRequestId.values)..addAll(_queue);
+    // `_preparing` FIRST: those jobs are parked on an untimed
+    // `nativeBufferPool.acquire` and appear in no other collection, so leaving
+    // them out is exactly the eternal-pending-future defect this campaign
+    // removes. Their own post-await guard sees `isCompleted` and returns the
+    // slot if one lands after this point.
+    final lost = List<_PoolJob>.from(_preparing)
+      ..addAll(_byRequestId.values)
+      ..addAll(_queue);
+    _preparing.clear();
     _queue.clear();
     _byRequestId.clear();
     for (final job in lost) {
@@ -1601,7 +1650,25 @@ class CeyxDecodePool {
     _pump();
   }
 
+  /// BACKSTOP for the whole message-handling path (2026-09-20 hang campaign).
+  ///
+  /// A throw anywhere in [_handleWorkerMessage] — a malformed wire shape whose
+  /// `as int` cast fails before the request id is even known — used to escape
+  /// into the `ReceivePort` listener as an uncaught async error, leaving the
+  /// worker's in-flight job pending forever. There is no request id to answer
+  /// on in that state, so the only honest reading is "this worker is speaking
+  /// nonsense": treat it as a worker loss, which fails its in-flight job with
+  /// [CeyxPoolWorkerDiedException] and respawns. A future that ends is the
+  /// point; ending it accurately is the second point.
   void _onWorkerMessage(_PoolWorker worker, Object? raw) {
+    try {
+      _handleWorkerMessage(worker, raw);
+    } catch (e) {
+      _onWorkerLost(worker, 'worker message handling failed: $e');
+    }
+  }
+
+  void _handleWorkerMessage(_PoolWorker worker, Object? raw) {
     if (raw == null) {
       // Isolate.spawn's onExit sends null.
       _onWorkerLost(worker, 'worker isolate exited');
@@ -1759,6 +1826,53 @@ class CeyxDecodePool {
   ) {
     final job = _byRequestId.remove(requestId);
     worker.currentJob = null;
+    // 2026-09-20 hang campaign: from here on the job is owned by NO map, so a
+    // throw below leaves nothing that could ever complete it. Every step is
+    // therefore inside this guard, and the catch delivers the failure on the
+    // job's own future instead of letting it escape into the listener as an
+    // uncaught async error (which is what produced the eternal spinner).
+    try {
+      _completeJobInner(worker, job, payload, error);
+    } catch (e) {
+      logger('pool|RESULT_LOST|${job?.path}|$e');
+      if (job != null) {
+        // Whatever this job borrowed must go back before the error
+        // propagates, or a run of failures drains the fixed slot set and the
+        // NEXT decode parks on `acquire` forever.
+        _releaseJobMemory(job, payload);
+        job.completeError(CeyxPoolResultLostException(job.path, '$e'));
+      }
+      if (worker.retiring) {
+        _shutdown(worker);
+        return;
+      }
+      _pump();
+    }
+  }
+
+  /// Returns everything [job] may still be holding: its pre-acquired slot, and
+  /// (on the self-allocating route) the address the pool adopted from the
+  /// payload. Safe to call twice — both releases are keyed on ownership the
+  /// first call clears.
+  void _releaseJobMemory(_PoolJob job, List<Object?>? payload) {
+    _releaseSlot(job);
+    if (job.type != CeyxPoolJobType.decode) return;
+    if (payload == null || payload.isEmpty) return;
+    final address = payload[0];
+    if (address is! int || address == 0) return;
+    try {
+      nativeBufferPool.tryReleaseByAddress(address);
+    } catch (e) {
+      logger('pool|RELEASE_ON_ERROR_FAILED|0x${address.toRadixString(16)}|$e');
+    }
+  }
+
+  void _completeJobInner(
+    _PoolWorker worker,
+    _PoolJob? job,
+    List<Object?>? payload,
+    Object? error,
+  ) {
     // WP2: a self-allocated payload carries its byte count as element 5. Adopt
     // it BEFORE any branch below runs, because all three of them consult
     // `ownsAddress`: the success branch decides finalizer-vs-safety-net, the

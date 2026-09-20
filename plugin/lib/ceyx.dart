@@ -47,6 +47,10 @@ export 'src/decode_pool.dart'
         CeyxPoolDiscardedException,
         CeyxPoolWorkerDiedException,
         CeyxPoolUnavailableException,
+        // 2026-09-20 hang campaign: a reply that ARRIVED but could not be
+        // turned into a result. Exported so a host can tell it apart from a
+        // decode that genuinely failed natively.
+        CeyxPoolResultLostException,
         ceyxDecodeWorkerMain,
         kMsgReady,
         kMsgUnavailable,
