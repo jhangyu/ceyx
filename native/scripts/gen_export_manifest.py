@@ -102,6 +102,12 @@ KNOWN_GROUP_IDS = {
     "ceyx_decode_into_buffer_format": "yuv420",
     "ceyx_decode_into_buffer_oriented_format": "yuv420",
     "ceyx_yuv420_to_rgba8": "yuv420",
+    # 2026-09-20 direct-encode entry. Its OWN id, not "encode"/"encode_v2":
+    # the Dart binding (CeyxEncodeYuv420Bindings, encode_bindings.dart) is
+    # looked up independently of both encode classes, so it is a separate
+    # capability. Not in LEGACY_OPTIONAL_GROUPS: encode_ffi_api.cpp is built
+    # on every leg, so absence on any leg is a failure.
+    "ceyx_encode_jpeg_yuv420": "encode_yuv420",
 }
 
 # Receiver: a dotted identifier, optionally call-suffixed (`.process()`),

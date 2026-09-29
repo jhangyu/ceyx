@@ -43,6 +43,10 @@ id          = "encode_v2"
 expected_on = ["macos", "linux", "windows", "android"]
 
 [[group]]
+id          = "encode_yuv420"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
 id          = "heif"
 expected_on = ["macos", "linux", "windows", "android"]
 
@@ -132,6 +136,13 @@ dart_sites = ["plugin/lib/src/encode_bindings.dart"]
 name       = "ceyx_encode_jpeg_rgba8"
 platforms  = "all"
 group      = "encode"
+source     = "native/src/ffi/encode_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/encode_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_encode_jpeg_yuv420"
+platforms  = "all"
+group      = "encode_yuv420"
 source     = "native/src/ffi/encode_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/encode_bindings.dart"]
 
