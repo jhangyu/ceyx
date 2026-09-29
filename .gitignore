@@ -195,6 +195,7 @@ AGENTS.md
 .claudito/
 graphify-out/
 native/scripts/tmp/
+native/tests/tmp/
 
 # Untracked dylib snapshots used as symbol-absent test fixtures (Phase 18 Task 1)
 /tmp/

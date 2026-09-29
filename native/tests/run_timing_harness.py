@@ -79,6 +79,7 @@ will get the wrong binary. Coordinate the window before using two arms.
 
 import argparse
 import glob
+import importlib.util
 import os
 import re
 import shutil
@@ -91,6 +92,111 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 BUILD_DIR = os.path.join(REPO, "native", "build")
 LIVE_DYLIB = os.path.join(BUILD_DIR, "libdng_decoder_native.dylib")
 PROBE_BIN = os.path.join(BUILD_DIR, "probe_concurrent_raw")
+
+# round-5 ticket A: reuse the mechanical latch-search rule from
+# native/scripts/tmp/mst_ovh_latch_check.py instead of re-implementing it.
+# Loaded lazily and cached, since it lives outside the native/tests package.
+LATCH_CHECK_PATH = os.path.join(REPO, "native", "scripts", "tmp",
+                                "mst_ovh_latch_check.py")
+LATCH_THRESHOLD_MS_DEFAULT = 2.0  # same default and rationale as that script
+_latch_module_cache = None
+
+
+def latch_module():
+    global _latch_module_cache
+    if _latch_module_cache is None:
+        spec = importlib.util.spec_from_file_location(
+            "mst_ovh_latch_check", LATCH_CHECK_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _latch_module_cache = module
+    return _latch_module_cache
+
+
+def classify_slow_state(gpu_records, threshold_ms):
+    """Slow-state classification for ONE run's [CEYX_GPU_TIMING] records.
+
+    Diagnostic/telemetry only -- round-5 contract ticket A explicitly
+    forbids any branch that reacts to this result by changing lane count or
+    submission strategy (the underlying state is irreversible within a run,
+    so reacting to it is a no-op dressed up as a fix; see
+    docs/logs/2026-09-20/mst-conclusions-zh.md recommendation 4).
+
+    Groups records by lane (matching mst_ovh_latch_check.py's own grouping),
+    keeps Stage-3 records (even submission index) in submission order, and
+    finds the latch point per lane with the shared find_latch_index rule.
+    entry_decode_index is the minimum latch index across lanes that latched
+    (the earliest point at which ANY lane entered the slow state); None if
+    no lane latched.
+    """
+    module = latch_module()
+    by_lane = {}
+    for fields in gpu_records:
+        try:
+            lane = int(fields["lane"])
+            submission = int(fields["submission"])
+            busy = float(fields["busy_ms"])
+        except (KeyError, ValueError):
+            continue
+        if submission % 2 != 0:
+            continue  # Stage 4 (odd); latch rule is defined over Stage 3 only
+        by_lane.setdefault(lane, []).append((submission, busy))
+
+    entered = False
+    entry_index = None
+    for lane, series in by_lane.items():
+        series.sort(key=lambda pair: pair[0])
+        busy_values = [busy for _, busy in series]
+        latch = module.find_latch_index(busy_values, threshold_ms)
+        if latch is not None:
+            entered = True
+            entry_index = latch if entry_index is None else min(entry_index, latch)
+    return entered, entry_index
+
+
+def read_gpu_perf_state():
+    """Best-effort, no-admin-rights read of a NAMED GPU performance-state
+    category (what mst-conclusions-zh.md background calls Minimum/Medium/
+    Maximum, no MHz). Telemetry only.
+
+    Investigated during this ticket: `ioreg -r -c IOAccelerator -d 1`
+    without sudo exposes IOPowerManagement's numeric CurrentPowerState
+    (0/1, a generic IOKit power state, NOT a GPU DVFS category) and
+    PerformanceStatistics utilization percentages -- neither is the named
+    category this field is asking for. `powermetrics` is the tool that
+    reports that category and it requires sudo (round-5 ticket C covers the
+    sudo-gated numeric-clock capture separately). So: report honestly that
+    the named category is unavailable without admin rights rather than
+    inventing a source.
+    """
+    try:
+        proc = subprocess.run(["ioreg", "-r", "-c", "IOAccelerator", "-d", "1"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=5)
+        text = proc.stdout.decode(errors="replace")
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        return "unavailable_no_admin_rights(ioreg_error:%s)" % exc
+    match = re.search(r'"GPU Performance State"\s*=\s*"?([A-Za-z]+)"?', text)
+    if match:
+        return match.group(1)
+    return "unavailable_no_admin_rights(no_named_state_category_without_sudo)"
+
+
+def median_submit_to_start_wait_ms(cpu_decodes):
+    """Telemetry-only median of gpu_submit_wait_ms (already emitted verbatim
+    in every [RawTiming] line by raw_timing_log.cpp -- no new instrumentation
+    needed). Uses ALL decodes of the run, not cold-dropped: this is a
+    diagnostic signal about the run, not part of the CPU_PHASES comparison
+    table and its cold-iteration rule.
+    """
+    values = []
+    for fields in cpu_decodes:
+        if "gpu_submit_wait_ms" in fields:
+            try:
+                values.append(float(fields["gpu_submit_wait_ms"]))
+            except ValueError:
+                pass
+    return statistics.median(values) if values else None
 # .txt, NOT .log, deliberately: .gitignore line 5 ignores *.log repo-wide, so a
 # canned fixture named .log is untrackable -- it would work on the machine that
 # wrote it and be missing for everyone else, turning the self-check into an
@@ -143,6 +249,11 @@ class RunRecords(object):
         self.gpu_invalid = 0
         self.return_code = None   # type: int | None
         self.wall_ms = None       # type: float | None
+        # round-5 ticket A: slow-state classification + telemetry, per run.
+        self.entered_slow_state = None    # type: bool | None
+        self.entry_decode_index = None    # type: int | None
+        self.gpu_perf_state = None        # type: str | None
+        self.submit_to_start_wait_ms = None  # type: float | None
 
     def key(self):
         return (self.arm, self.width)
@@ -380,7 +491,8 @@ def dylib_uuid(path=LIVE_DYLIB):
     return proc.stdout.decode(errors="replace").strip() or "UUID-UNAVAILABLE"
 
 
-def run_one(arm, width, round_index, sample, decodes, extra_args, handle):
+def run_one(arm, width, round_index, sample, decodes, extra_args, handle,
+            latch_threshold_ms=LATCH_THRESHOLD_MS_DEFAULT):
     """One probe invocation. Writes the raw instrument lines into the artifact.
 
     The artifact keeps the RAW lines, not just the summary: a summary whose
@@ -418,11 +530,31 @@ def run_one(arm, width, round_index, sample, decodes, extra_args, handle):
         for line in stream.decode(errors="replace").splitlines():
             if ingest_line(line, record):
                 handle.write(line.strip() + "\n")
-    handle.write("#RC arm=%s width=%d round=%d rc=%d cpu_lines=%d "
-                 "gpu_valid=%d gpu_invalid=%d\n"
-                 % (arm, width, round_index, record.return_code,
-                    len(record.cpu_decodes), len(record.gpu_records),
-                    record.gpu_invalid))
+
+    # round-5 ticket A (A1/A3): classify slow-state entry and compute the two
+    # telemetry fields, purely from the records just collected above. Nothing
+    # downstream of this reads these values to change width/threads, queue
+    # strategy, or submission behaviour -- they are written to the artifact
+    # and nowhere else.
+    record.entered_slow_state, record.entry_decode_index = classify_slow_state(
+        record.gpu_records, latch_threshold_ms)
+    record.gpu_perf_state = read_gpu_perf_state()
+    record.submit_to_start_wait_ms = median_submit_to_start_wait_ms(
+        record.cpu_decodes)
+
+    handle.write(
+        "#RC arm=%s width=%d round=%d rc=%d cpu_lines=%d "
+        "gpu_valid=%d gpu_invalid=%d entered_slow_state=%d "
+        "entry_decode_index=%s latch_threshold_ms=%.6f "
+        "gpu_perf_state=%s submit_to_start_wait_ms=%s\n"
+        % (arm, width, round_index, record.return_code,
+           len(record.cpu_decodes), len(record.gpu_records),
+           record.gpu_invalid, 1 if record.entered_slow_state else 0,
+           "n/a" if record.entry_decode_index is None
+           else str(record.entry_decode_index),
+           latch_threshold_ms, record.gpu_perf_state,
+           "n/a" if record.submit_to_start_wait_ms is None
+           else "%.6f" % record.submit_to_start_wait_ms))
     handle.flush()
     return record
 
@@ -467,7 +599,8 @@ def command_sweep(args):
                     for width in widths:
                         records.append(run_one(arm_name, width, round_index,
                                                args.sample, args.decodes,
-                                               extra_args, handle))
+                                               extra_args, handle,
+                                               latch_threshold_ms=args.latch_threshold_ms))
     finally:
         if backup:
             shutil.copy2(backup, LIVE_DYLIB)
@@ -615,6 +748,15 @@ def main(argv):
     sweep.add_argument("--arm-b", help="dylib for arm B")
     sweep.add_argument("--probe-arg", action="append",
                        help="extra argument passed through to the probe")
+    sweep.add_argument("--latch-threshold-ms", type=float,
+                       default=LATCH_THRESHOLD_MS_DEFAULT,
+                       help="round-5 ticket A: Stage-3 busy_ms threshold for "
+                            "slow-state latch classification, passed straight "
+                            "into mst_ovh_latch_check.find_latch_index. "
+                            "--latch-threshold-ms 0 must classify every run "
+                            "as entered; a very large value (e.g. 1e9) must "
+                            "classify every run as not entered -- the A2 "
+                            "two-way positive control.")
     sweep.add_argument("--artifact", required=True)
     sweep.set_defaults(func=command_sweep)
 
