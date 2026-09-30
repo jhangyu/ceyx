@@ -292,7 +292,7 @@ class CfaCheckResult:
     """2026-08-16 CFA phase gates (four-phase unit check + BGGR color check).
 
     `status` is one of PASS / FAIL / SKIP. SKIP is used when the binary or the
-    external BGGR sample is absent and was not explicitly requested; it never
+    BGGR sample is absent and was not explicitly requested; it never
     fails the run.
     """
     name: str
@@ -362,7 +362,7 @@ _DEFAULT_DEVICE_HANDOFF_HARNESS = "native/build/test_device_handoff"
 # extension via raw_file_router (see native/src/ffi/ceyx_decode_into_ffi.cpp)
 # -- passing a .arw file exercises the RAW route through the same production
 # C ABI entry the DNG cases use, no separate harness needed. Sample lives
-# in-repo (image_samples/raw_sample.arw), unlike the external BGGR sample.
+# in-repo (image_samples/raw_sample.arw).
 _DEFAULT_RAW_FFI_SAMPLE = "image_samples/raw_sample.arw"
 _DEFAULT_ANDROID_FFI_HARNESS = (
     "native/build-android/android-arm64/dng_ffi_harness_android"
@@ -373,11 +373,9 @@ _DEFAULT_ANDROID_DEVICE_HANDOFF_HARNESS = (
 # 2026-08-16 CFA phase gates.
 _DEFAULT_CFA_PHASE_BIN = "native/build/test_cfa_phase"
 _DEFAULT_CFA_COLOR_BIN = "native/build/test_cfa_color"
-# BGGR sample lives outside the repo on purpose (user decision: do not copy
-# camera DNGs into the tree). Absent -> the case prints SKIP and does not fail.
-_DEFAULT_BGGR_SAMPLE = (
-    "/Users/jhangyu/project/Halcyon/local_data/photo_samples/DNG/IMG_20251112_092839.dng"
-)
+# BGGR sample (CFAPattern 2,1,1,0) from the in-repo, git-ignored image_samples/.
+# Absent -> the case prints SKIP and does not fail.
+_DEFAULT_BGGR_SAMPLE = "image_samples/bayer_conc_a.dng"
 _CFA_PHASE_PASS_RE = re.compile(r"^\[CFA PHASE\] ALL PASS\s*$")
 _CFA_COLOR_RE = re.compile(r"^\[CFA COLOR\]\s+(.*)\[(PASS|FAIL)\]\s*$")
 # R2 sized decode gate (AC5 output extent / AC5-D crop-vs-scale / AC6 memory).
@@ -1736,7 +1734,7 @@ def _build_markdown(
         L.append("_Bayer phase must come from the file's CFAPattern tag. The phase check "
                  "covers all four phases on a synthetic mosaic; the color check decodes a "
                  "real BGGR sample end-to-end and asserts the sky is blue (B >> R). "
-                 "SKIP means the binary or the external sample is absent — it does not "
+                 "SKIP means the binary or the sample is absent — it does not "
                  "fail the run._")
         L.append("")
         L.append("| Check | Status | Detail |")
@@ -2698,7 +2696,7 @@ def main() -> int:
             "(relative to repo-root) driven through the FFI harness "
             "(--ffi-harness) with CEYX_RAW_TIMING_LOG=1, so [RawTiming] "
             f"appears in matrix output. Default: {_DEFAULT_RAW_FFI_SAMPLE}. "
-            "In-repo, unlike --bggr-sample; prints SKIP if absent."
+            "In-repo; prints SKIP if absent."
         ),
     )
     ap.add_argument(
@@ -2829,8 +2827,8 @@ def main() -> int:
         default="",
         help=(
             "Non-RGGB (BGGR) DNG sample for the color-correctness gate. "
-            f"Default: {_DEFAULT_BGGR_SAMPLE} (external path on purpose — camera "
-            "DNGs are not copied into the repo). When the default is used and the "
+            f"Default: {_DEFAULT_BGGR_SAMPLE} (in-repo image_samples/, git-ignored). "
+            "When the default is used and the "
             "file is absent, the case prints SKIP and does not fail the run; an "
             "explicitly passed path must exist."
         ),
