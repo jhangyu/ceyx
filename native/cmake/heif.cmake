@@ -17,6 +17,52 @@
 # come from the declaration.
 include(${CMAKE_CURRENT_LIST_DIR}/shipped_files.cmake)
 
+# Windows target arch (windows-arm64 leg, 2026-09-30). Derived from what the
+# COMPILER targets (CMAKE_CXX_COMPILER_ARCHITECTURE_ID, set by CMake's MSVC-
+# like compiler-id probe from _M_X64 / _M_ARM64 -- Modules/CMakePlatformId.h.in),
+# never from the host: the true precondition for every per-arch choice below
+# is the architecture of the objects being linked. Three facts hang off it:
+#   CEYX_WINDOWS_ARCH          canonical arch id (native/deps/arch_map.toml)
+#   CEYX_WINDOWS_DIST_SUFFIX   the committed third-party dist directory suffix
+#                              (heif-dist-/libjxl-dist-/libwebp-dist-<suffix>;
+#                              x86_64 keeps its historical "windows" path, so
+#                              the committed x64 trees are not renamed).
+#                              Consumed by cmake/encode.cmake and cmake/jxl.cmake
+#                              too, which native/CMakeLists.txt includes AFTER
+#                              this file.
+#   CEYX_SHIPPED_WINDOWS_COMPANIONS  this arch's companion list from the
+#                              generated shipped_files.cmake.
+# An unrecognised id is FATAL: falling through to x86_64 names would stage an
+# x64 OpenMP runtime next to an arm64 decoder.
+if(WIN32)
+    if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+        set(CEYX_WINDOWS_ARCH "x86_64")
+        set(CEYX_WINDOWS_DIST_SUFFIX "windows")
+        set(CEYX_WINDOWS_VC_REDIST_ARCH "x64")
+    elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+        set(CEYX_WINDOWS_ARCH "arm64")
+        set(CEYX_WINDOWS_DIST_SUFFIX "windows-arm64")
+        set(CEYX_WINDOWS_VC_REDIST_ARCH "arm64")
+    else()
+        message(FATAL_ERROR
+            "Unsupported Windows target architecture "
+            "CMAKE_CXX_COMPILER_ARCHITECTURE_ID='${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}' "
+            "(supported: x64, ARM64). native/deps/shipped_files.toml "
+            "[windows.companions_by_arch] and the committed dists only exist "
+            "for x86_64 and arm64.")
+    endif()
+    string(TOUPPER "${CEYX_WINDOWS_ARCH}" _ceyx_windows_arch_upper)
+    if(NOT DEFINED CEYX_SHIPPED_WINDOWS_${_ceyx_windows_arch_upper}_COMPANIONS)
+        message(FATAL_ERROR
+            "shipped_files.cmake defines no CEYX_SHIPPED_WINDOWS_${_ceyx_windows_arch_upper}_COMPANIONS "
+            "-- regenerate it with native/scripts/gen_shipped_files_cmake.py.")
+    endif()
+    set(CEYX_SHIPPED_WINDOWS_COMPANIONS
+        "${CEYX_SHIPPED_WINDOWS_${_ceyx_windows_arch_upper}_COMPANIONS}")
+    message(STATUS "Windows target arch: ${CEYX_WINDOWS_ARCH} "
+                   "(dist suffix ${CEYX_WINDOWS_DIST_SUFFIX})")
+endif()
+
 if(NOT DNG_HOST_GENERATORS_ONLY)
 
 if(DNG_ENABLE_HEIF)
@@ -46,7 +92,7 @@ if(DNG_ENABLE_HEIF)
         # than naming this mismatch. (Historically produced by the now-deleted
         # native/scripts/fetch_heif_deps.sh; same hazard applies to a dist left
         # behind by build_deps.py's heif-stack build.)
-        set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-windows")
+        set(HEIF_DIST_HINTS "${THIRD_PARTY_DIR}/heif-dist-${CEYX_WINDOWS_DIST_SUFFIX}")
     elseif(ANDROID)
         # ANDROID-HEIF (A-T8-FIX, 2026-09-01): the committed dist is
         # arch-suffixed (native/third_party/heif-dist-android-${ANDROID_ABI}),
@@ -124,8 +170,8 @@ if(DNG_ENABLE_HEIF)
                 "  heif.h    = '${HEIF_INCLUDE_DIR}'\n"
                 "  libheif   = '${HEIF_LIBRARY}'\n"
                 "  libde265  = '${DE265_LIBRARY}'\n"
-                "Restore native/third_party/heif-dist-windows by dispatching "
-                ".github/workflows/heif_dist_windows.yml.")
+                "Restore native/third_party/heif-dist-${CEYX_WINDOWS_DIST_SUFFIX} by dispatching "
+                ".github/workflows/heif_dist_windows.yml (${CEYX_WINDOWS_ARCH} leg).")
         else()
             message(FATAL_ERROR
                 "HEIF decode is enabled but the vendored dist is missing.\n"
@@ -348,8 +394,8 @@ if(DNG_ENABLE_HEIF)
             # listing it needs. That is the intended behaviour; it is NOT
             # acceptable to make this degrade quietly or to disable OpenMP.
             file(GLOB _ceyx_vs_omp_dirs
-                "C:/Program Files/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.OpenMP.LLVM"
-                "C:/Program Files (x86)/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.OpenMP.LLVM")
+                "C:/Program Files/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/${CEYX_WINDOWS_VC_REDIST_ARCH}/Microsoft.VC*.OpenMP.LLVM"
+                "C:/Program Files (x86)/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/${CEYX_WINDOWS_VC_REDIST_ARCH}/Microsoft.VC*.OpenMP.LLVM")
             set(_ceyx_omp_search_paths
                 "${_ceyx_clang_bin_dir}"
                 "C:/Program Files/LLVM/bin"

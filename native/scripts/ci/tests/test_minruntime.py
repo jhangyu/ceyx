@@ -71,9 +71,11 @@ class MinRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             minruntime.min_runtime("macos", arch=None)
 
-    def test_windows_rejects_arch(self):
+    def test_windows_requires_arch(self):
+        # windows is per-arch since the windows-arm64 leg (targets.py
+        # requires_arch): the declaration is [windows.x86_64]/[windows.arm64].
         with self.assertRaises(ValueError):
-            minruntime.min_runtime("windows", arch="x86_64")
+            minruntime.min_runtime("windows")
 
     def test_android_rejects_arch(self):
         with self.assertRaises(ValueError):
@@ -167,10 +169,10 @@ class MinRuntimeTests(unittest.TestCase):
             if "read_min_runtime.py" in joined:
                 captured["argv"] = argv
                 return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_windows=10.0\n")
-            return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_DRIFT_RESULT=PASS (measured=10.0, declared=10.0 from [windows])\n")
+            return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_DRIFT_RESULT=PASS (measured=10.0, declared=10.0 from [windows.x86_64])\n")
 
         with mock.patch.object(run_module, "run", side_effect=fake), _Cwd(self._tmp()):
-            rc, out, _ = _run_captured(minruntime.min_runtime, "windows")
+            rc, out, _ = _run_captured(minruntime.min_runtime, "windows", arch="x86_64")
         self.assertEqual(rc, 0)
         idx = captured["argv"].index("--artifact")
         self.assertEqual(captured["argv"][idx + 1], "artifacts/native/dng_decoder_native.dll")
@@ -211,10 +213,10 @@ class MinRuntimeTests(unittest.TestCase):
                 Path("artifacts").mkdir(exist_ok=True)
                 Path("artifacts/min_runtime.txt").write_text("MIN_RUNTIME_windows=10.0\n")
                 return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_windows=10.0\n")
-            return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_DRIFT_RESULT=PASS (measured=10.0, declared=10.0 from [windows])\n")
+            return _fake_run_result(returncode=0, stdout="MIN_RUNTIME_DRIFT_RESULT=PASS (measured=10.0, declared=10.0 from [windows.x86_64])\n")
 
         with mock.patch.object(run_module, "run", side_effect=fake), _Cwd(self._tmp()):
-            rc, out, _ = _run_captured(minruntime.min_runtime, "windows")
+            rc, out, _ = _run_captured(minruntime.min_runtime, "windows", arch="x86_64")
         self.assertEqual(rc, 0)
         expected = (_GOLDEN_DIR / "min-runtime-windows.markers").read_text()
         self.assertEqual(out, expected)

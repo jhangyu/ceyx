@@ -206,15 +206,18 @@ def parse_elf_dump(text: str) -> list[str]:
     return names
 
 
-def load_declared_companions(declaration_path: Path, platform: str) -> set[str]:
-    with declaration_path.open("rb") as fh:
-        data = tomllib.load(fh)
-    table = data.get(platform, {})
-    companions = set(table.get("companions", []))
-    decoder = table.get("decoder")
-    if decoder:
-        companions.add(decoder)
-    return companions
+def load_declared_companions(declaration_path: Path, platform: str,
+                              arch: str | None = None) -> set[str]:
+    """Decoder + companions for ``platform`` (and ``arch`` when the platform
+    declares ``companions_by_arch``), through read_shipped_files -- the one
+    reader of the declaration -- so a per-arch entry can never be read as an
+    empty set."""
+    import read_shipped_files
+
+    entry = read_shipped_files.load_declaration(declaration_path).get(platform)
+    if entry is None:
+        return set()
+    return {entry["decoder"], *read_shipped_files.companions_for(entry, arch)}
 
 
 def classify(name: str, allowlist: frozenset[str], prefixes: tuple[str, ...],
@@ -238,6 +241,9 @@ def main() -> int:
                      help="path to native/deps/shipped_files.toml")
     ap.add_argument("--platform", required=True, choices=sorted(ALLOWLISTS.keys()))
     ap.add_argument("--format", required=True, choices=("pe", "elf"))
+    ap.add_argument("--arch", default=None,
+                     help="canonical arch id; required when the platform's "
+                          "declaration is companions_by_arch (windows)")
     args = ap.parse_args()
 
     dump_path = Path(args.dump)
@@ -272,7 +278,7 @@ def main() -> int:
     # never rescues a MISSING declared companion (loud logging only, keeps
     # the check strict against the source of truth).
     declaration_path = Path(args.declaration)
-    declared = load_declared_companions(declaration_path, args.platform)
+    declared = load_declared_companions(declaration_path, args.platform, args.arch)
     undeclared_staged = sorted(staged_names - declared)
     if undeclared_staged:
         print(f"note: staged-dir contains undeclared files: {', '.join(undeclared_staged)}",

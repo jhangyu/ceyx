@@ -473,7 +473,7 @@ the other *_dist_*.yml twins). `shell:` deliberately left unset --
 preserves the pre-migration default (`pwsh` on windows-latest).""",
         ),
         (
-            'before step `Set up MSVC developer environment (x64)`',
+            'before step `Set up MSVC developer environment (${{ matrix.msvc_arch }})`',
             """\
 Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
 LIB; this action is CI's equivalent of vcvars64.bat.""",
@@ -603,7 +603,7 @@ dist twins' convention (WI-31); those run on a linux runner where
 nothing, but stating it here would be a real interpreter change.""",
         ),
         (
-            'before step `Set up MSVC developer environment (x64)`',
+            'before step `Set up MSVC developer environment (${{ matrix.msvc_arch }})`',
             """\
 Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
 LIB; this action is CI's equivalent of vcvars64.bat.""",
@@ -705,7 +705,7 @@ _WIN_DIST: dict = {
         "dist_prefix": "libwebp",
         "component": "webp-stack",
         "rc_marker": "WEBP_DIST_WINDOWS_RC",
-        "job_name": "libwebp dist (windows x86_64, clang-cl, static, encode+decode+mux)",
+        "job_name": "libwebp dist (windows ${{ matrix.arch_tag }}, clang-cl, static, encode+decode+mux)",
         "build_step_name": "Build the libwebp dist",
         "timeout_minutes": 45,
         "path_trigger": "native/scripts/deps/win_webp_dist.py",
@@ -725,7 +725,7 @@ _WIN_DIST: dict = {
         "dist_prefix": "libjxl",
         "component": "jxl-stack",
         "rc_marker": "JXL_DIST_WINDOWS_RC",
-        "job_name": "libjxl dist (windows x86_64, clang-cl, static, encode+decode)",
+        "job_name": "libjxl dist (windows ${{ matrix.arch_tag }}, clang-cl, static, encode+decode)",
         "build_step_name": "Build the libjxl dist (Python carrier)",
         "timeout_minutes": 90,
         "path_trigger": "native/scripts/deps/**",
@@ -847,11 +847,29 @@ jobs:
 """
 
 
+def _windows_matrix_rows(dist_prefix: str) -> str:
+    """One `include:` row per windows arch, in targets.py's arch_tags order.
+    Every value is read from targets.spec("windows")["arch_legs"]; the key is
+    `arch_tag` because that is the one matrix template
+    ci_conventions_check.py resolves statically in upload-artifact names."""
+    spec = targets.spec("windows")
+    rows = []
+    for arch in spec["arch_tags"]:
+        leg = spec["arch_legs"][arch]
+        rows.append(
+            f"          - arch_tag: {arch}\n"
+            f"            runner: {leg['runner']}\n"
+            f"            msvc_arch: {leg['msvc_arch']}\n"
+            f"            dist: native/third_party/{dist_prefix}-dist-{leg['dist_suffix']}\n"
+        )
+    return "".join(rows)
+
+
 def _render_windows_dist(name: str) -> str:
     d = _WIN_DIST[name]
-    arch = targets.spec("windows")["arch_tags"][0]
-    dist = f"native/third_party/{d['dist_prefix']}-dist-windows"
+    dist = "${{ matrix.dist }}"
     dist_arg = f'"${{{{ github.workspace }}}}/{dist}"' if d["dist_absolute"] else dist
+    rows = _windows_matrix_rows(d["dist_prefix"])
     return f"""\
 name: {d['title']}
 
@@ -873,9 +891,13 @@ concurrency:
 jobs:
   build-{d['short']}-dist:
     name: {d['job_name']}
-    runs-on: windows-latest
+    runs-on: ${{{{ matrix.runner }}}}
     timeout-minutes: {d['timeout_minutes']}
-    steps:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+{rows}    steps:
       - name: Force LF line endings for all git operations
         shell: bash
         run: |
@@ -894,10 +916,10 @@ jobs:
       - name: Install Ninja
         run: python native/scripts/ci.py provision ninja
 
-      - name: Set up MSVC developer environment (x64)
+      - name: Set up MSVC developer environment (${{{{ matrix.msvc_arch }}}})
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{{{ matrix.msvc_arch }}}}
 
       - name: Locate clang-cl
         shell: bash
@@ -907,7 +929,7 @@ jobs:
         shell: {d['build_shell']}
         working-directory: ${{{{ github.workspace }}}}
         run: |
-          {d['python_exe']} native/scripts/ci.py dist-build --component {d['component']} --platform windows --arch {arch} --dist {dist_arg} --rc-marker {d['rc_marker']}
+          {d['python_exe']} native/scripts/ci.py dist-build --component {d['component']} --platform windows --arch ${{{{ matrix.arch_tag }}}} --dist {dist_arg} --rc-marker {d['rc_marker']}
 
       - name: List the produced dist (complete)
         if: always()
@@ -918,7 +940,7 @@ jobs:
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
-          name: {d['dist_prefix']}-dist-windows-{arch}
+          name: {d['dist_prefix']}-dist-windows-${{{{ matrix.arch_tag }}}}
           path: ${{{{ github.workspace }}}}/{dist}
           if-no-files-found: error
           retention-days: 7
@@ -976,7 +998,7 @@ _COMMENT_KIND: dict = {
     # execute: a step-ORDER directive, not an explanation.
     "before step `Force LF line endings for all git operations`": "instruction",
     # names the action that supplies MSVC headers/libs to clang-cl.
-    "before step `Set up MSVC developer environment (x64)`": "evidence",
+    "before step `Set up MSVC developer environment (${{ matrix.msvc_arch }})`": "evidence",
     # records WI-32's reuse of windows_toolchain.locate_clang_cl and the
     # known error-text divergence it accepted.
     "before step `Locate clang-cl`": "evidence",

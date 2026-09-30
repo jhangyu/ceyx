@@ -45,7 +45,7 @@ def test_column2_equals_pin_true_when_sets_match():
     ]}}}
     gen._PLATFORM_TO_PIN_TARGET["_test_platform"] = "target"
     try:
-        status, equal = gen.column2_equals_pin("_test_platform", entry, pin)
+        status, equal = gen.column2_equals_pin("_test_platform", entry["decoder"], entry["companions"], pin)
         assert equal is True
         assert status == "True"
     finally:
@@ -61,7 +61,7 @@ def test_column2_equals_pin_false_negative_control():
     ]}}}
     gen._PLATFORM_TO_PIN_TARGET["_test_platform"] = "target"
     try:
-        status, equal = gen.column2_equals_pin("_test_platform", entry, pin)
+        status, equal = gen.column2_equals_pin("_test_platform", entry["decoder"], entry["companions"], pin)
         assert equal is False
         assert status == "False"
     finally:
@@ -69,7 +69,7 @@ def test_column2_equals_pin_false_negative_control():
 
 
 def test_column2_equals_pin_skip_when_pin_absent():
-    status, equal = gen.column2_equals_pin("windows", {"decoder": "x", "companions": []}, None)
+    status, equal = gen.column2_equals_pin("windows", "x", [], None)
     assert equal is None
     assert "SKIP" in status
 

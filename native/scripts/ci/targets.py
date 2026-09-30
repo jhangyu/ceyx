@@ -94,9 +94,13 @@ from __future__ import annotations
 #                        the renderer had nothing to render `--arch` from.
 #                        Transcribed from:
 #                          linux   "x86_64"     linux_build.yml:431
-#                          windows "x86_64"     heif_dist_windows.yml:208,
-#                                               jxl_dist_windows.yml:154,
-#                                               webp_dist_windows.yml:120
+#                          windows "x86_64","arm64"  windows_build.yml /
+#                                               heif_dist_windows.yml /
+#                                               jxl_dist_windows.yml /
+#                                               webp_dist_windows.yml matrix
+#                                               rows (windows-arm64 leg,
+#                                               2026-09-30, contract
+#                                               armci-contract.md R-6/R-7)
 #                          android "arm64-v8a"  heif_dist_android.yml:104,
 #                                               jxl_dist_android.yml:86,
 #                                               webp_dist_android.yml:87
@@ -115,6 +119,34 @@ from __future__ import annotations
 #                        truth, it names the FILENAME PATTERN a gate greps
 #                        for in a staged-set listing, e.g.
 #                        linux_build.yml:886-892 "libheif.so.1"/"libde265.so.0")
+#   readobj_tools        the COFF header reader for the PE machine-type gate
+#                        (windows only: "llvm-readobj --file-headers", LLVM's
+#                        own format "Machine: IMAGE_FILE_MACHINE_<X> (0x..)",
+#                        llvm/test/tools/llvm-readobj/COFF/file-headers.test);
+#                        empty elsewhere
+#   pe_machine_by_arch   windows only: canonical arch id -> the COFF machine
+#                        constant every staged DLL must carry
+#                        (IMAGE_FILE_MACHINE_AMD64 = 0x8664,
+#                        IMAGE_FILE_MACHINE_ARM64 = 0xAA64); None elsewhere
+#   arch_legs            windows only: canonical arch id -> the per-arch
+#                        facts every rendered windows matrix row needs:
+#                          runner       GitHub-hosted image the row runs on
+#                                       (native build: the dist carriers and
+#                                       the codec probes execute target-arch
+#                                       code, so each arch runs on its own
+#                                       machine -- windows-11-arm per the
+#                                       actions/partner-runner-images
+#                                       arm-windows-11-image.md listing)
+#                          msvc_arch    ilammy/msvc-dev-cmd `arch:` input
+#                                       (vcvarsall host/target spelling)
+#                          dist_suffix  committed third-party dist dir suffix,
+#                                       native/third_party/<c>-dist-<suffix>;
+#                                       MUST equal native/cmake/heif.cmake's
+#                                       CEYX_WINDOWS_DIST_SUFFIX for the same
+#                                       arch (x86_64 keeps the historical
+#                                       unsuffixed "windows")
+#                        None elsewhere (their matrices, if any, live in
+#                        hand-written workflows).
 #   declaration_platform the key `read_shipped_files.py --platform <key>`
 #                        expects (read_shipped_files.py:33,
 #                        _KNOWN_PLATFORMS = ("windows","linux","macos","android"))
@@ -131,10 +163,13 @@ TARGETS: dict = {
         "nm_tools_fallback": (),
         "objdump_tools": ("objdump",),
         "dumpbin_tools": (),
+        "readobj_tools": (),
+        "pe_machine_by_arch": None,
         "c_compiler": "clang",
         "probe_link_style": "posix",
         "requires_arch": False,
         "arch_tags": ("x86_64",),
+        "arch_legs": None,
         "expected_companions": ("libheif.so.1", "libde265.so.0"),
         "declaration_platform": "linux",
         "min_runtime_source": "dump",
@@ -151,10 +186,25 @@ TARGETS: dict = {
         "nm_tools_fallback": ("llvm-nm",),
         "objdump_tools": ("llvm-objdump",),
         "dumpbin_tools": ("dumpbin",),
+        "readobj_tools": ("llvm-readobj",),
+        "pe_machine_by_arch": {
+            "x86_64": "IMAGE_FILE_MACHINE_AMD64",
+            "arm64": "IMAGE_FILE_MACHINE_ARM64",
+        },
         "c_compiler": "clang-cl",
         "probe_link_style": "clang-cl",
-        "requires_arch": False,
-        "arch_tags": ("x86_64",),
+        "requires_arch": True,
+        "arch_tags": ("x86_64", "arm64"),
+        "arch_legs": {
+            "x86_64": {"runner": "windows-latest", "msvc_arch": "x64", "dist_suffix": "windows"},
+            # amd64_arm64, not a bare "arm64": it is the spelling Microsoft's
+            # vcvarsall.bat reference documents for an ARM64 target
+            # (MicrosoftDocs/cpp-docs building-on-the-command-line.md, the
+            # `architecture` table); the x64-hosted tools it selects run under
+            # Windows-on-ARM emulation. The compiler is clang-cl either way --
+            # this input only chooses the ARM64 INCLUDE/LIB/linker environment.
+            "arm64": {"runner": "windows-11-arm", "msvc_arch": "amd64_arm64", "dist_suffix": "windows-arm64"},
+        },
         "expected_companions": ("heif.dll", "libde265.dll"),
         "declaration_platform": "windows",
         "min_runtime_source": "binary",
@@ -171,10 +221,13 @@ TARGETS: dict = {
         "nm_tools_fallback": (),
         "objdump_tools": (),
         "dumpbin_tools": (),
+        "readobj_tools": (),
+        "pe_machine_by_arch": None,
         "c_compiler": "clang",
         "probe_link_style": "posix",
         "requires_arch": True,
         "arch_tags": ("arm64", "x86_64"),
+        "arch_legs": None,
         "expected_companions": ("libheif.1.dylib", "libde265.0.dylib"),
         "declaration_platform": "macos",
         "min_runtime_source": "binary",
@@ -198,10 +251,13 @@ TARGETS: dict = {
         "nm_tools_fallback": (),
         "objdump_tools": (),
         "dumpbin_tools": (),
+        "readobj_tools": (),
+        "pe_machine_by_arch": None,
         "c_compiler": None,
         "probe_link_style": None,
         "requires_arch": False,
         "arch_tags": ("arm64-v8a",),
+        "arch_legs": None,
         "expected_companions": (),
         "declaration_platform": "android",
         "min_runtime_source": "declaration",
@@ -221,10 +277,13 @@ REQUIRED_KEYS = (
     "nm_tools_fallback",
     "objdump_tools",
     "dumpbin_tools",
+    "readobj_tools",
+    "pe_machine_by_arch",
     "c_compiler",
     "probe_link_style",
     "requires_arch",
     "arch_tags",
+    "arch_legs",
     "expected_companions",
     "declaration_platform",
     "min_runtime_source",
@@ -268,6 +327,11 @@ def _validate():
         if not isinstance(tags, tuple) or not tags:
             raise ValueError(
                 f"platform {name!r}: arch_tags must be a non-empty tuple, got {tags!r}"
+            )
+        legs = entry["arch_legs"]
+        if legs is not None and sorted(legs) != sorted(tags):
+            raise ValueError(
+                f"platform {name!r}: arch_legs keys {sorted(legs)} != arch_tags {sorted(tags)}"
             )
         if entry["requires_arch"] != (len(tags) > 1):
             raise ValueError(

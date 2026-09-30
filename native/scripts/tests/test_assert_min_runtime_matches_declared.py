@@ -178,5 +178,7 @@ def test_real_declaration_file_is_resolvable_for_every_shipped_leg():
         data = tomllib.load(fh)
     assert amr.resolve_declared(data, "macos", "arm64") == "15.0"
     assert amr.resolve_declared(data, "macos", "x86_64") == "14.0"
-    for platform in ("windows", "linux", "android"):
+    assert amr.resolve_declared(data, "windows", "x86_64") == "6.0"
+    assert amr.resolve_declared(data, "windows", "arm64") == "6.2"
+    for platform in ("linux", "android"):
         assert amr.resolve_declared(data, platform) is not None

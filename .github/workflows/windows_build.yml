@@ -463,7 +463,7 @@ jobs:
       # below -- see those steps for why they could not fold into this one.
       - name: Verify Windows artifact
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py verify-artifact --platform windows
+        run: python3 native/scripts/ci.py verify-artifact --platform windows --arch x86_64
 
       # AC-W4 (2026-08-30): the DLL actually EXPORTS the FFI surface.
       # Migrated to native/scripts/ci/verify_artifact.py's assert_exports()
@@ -482,7 +482,7 @@ jobs:
       # transcribed verbatim from this step's pre-migration shell.
       - name: Assert required FFI exports present in Windows DLL (AC-W4)
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-exports --platform windows
+        run: python3 native/scripts/ci.py assert-exports --platform windows --arch x86_64
 
       # --- Step-4 load gate: the DLLs this decoder needs at load time ---
       #
@@ -532,7 +532,7 @@ jobs:
       # and the pipeline reports 141).
       - name: Assert Windows DLL dependency closure
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py import-closure --platform windows
+        run: python3 native/scripts/ci.py import-closure --platform windows --arch x86_64
 
       # G1 fix v3 (round 2, task #6): this leg now statically links a real
       # committed libjxl dist (see the "Assert JXL was statically linked"
@@ -596,7 +596,7 @@ jobs:
       - name: Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-orientation --platform windows
+        run: python3 native/scripts/ci.py assert-orientation --platform windows --arch x86_64
 
       - name: Assert full codec capability vector via probe (G1)
         shell: bash
@@ -631,7 +631,7 @@ jobs:
       - name: Compile + run functional capability probe (CI-T3)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE"
+        run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE" --dist-dir native/third_party/heif-dist-windows
 
       # Migrated to native/scripts/ci/stage.py's stage_windows() (WI-21/WI-22,
       # pyci python-ization campaign). The two HEIF dependencies and the
@@ -642,14 +642,27 @@ jobs:
       # original `2>/dev/null || echo ::notice::...` fallback exactly.
       - name: Stage native artifacts
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py stage --platform windows --artifact-dir artifacts --source-dir native/build-windows
+        run: python3 native/scripts/ci.py stage --platform windows --arch x86_64 --artifact-dir artifacts --source-dir native/build-windows
+
+      # AC-C2 (windows-arm64 leg, 2026-09-30): every STAGED DLL's COFF header
+      # names this leg's machine (IMAGE_FILE_MACHINE_AMD64 here,
+      # IMAGE_FILE_MACHINE_ARM64 on the arm64 row). The atomic-group, export
+      # and import-closure gates above are all machine-blind: a DLL built for
+      # the wrong architecture passes every one of them and then fails
+      # LoadLibrary on the user's machine. llvm-readobj --file-headers output
+      # goes to a file per DLL and is matched in Python (never a pipe), see
+      # native/scripts/ci/verify_artifact.py assert_pe_machine(). Same gate on
+      # every Windows arch -- arch is data (targets.py pe_machine_by_arch).
+      - name: Assert every staged DLL is this leg's PE machine type (AC-C2)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-pe-machine --platform windows --arch x86_64 --artifact-dir artifacts
 
       # WI-14 step 14.2 (S-F1): measure the floor of the file that actually
       # ships (the decoder DLL, PE subsystem version).
       - name: Measure and emit the minimum runtime floor (S-F1)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py min-runtime --platform windows
+        run: python3 native/scripts/ci.py min-runtime --platform windows --arch x86_64
 
       # ATOMIC-GROUP GATE. Preserved verbatim in intent from the deleted
       # "Name the release assets" step, but with two round-6 changes:
@@ -690,7 +703,7 @@ jobs:
       # `echo ... | xargs` whitespace-insensitive `!=`.
       - name: Assert the Windows shipped-file group is complete (atomic group)
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-staged-group --platform windows --artifact-dir artifacts
+        run: python3 native/scripts/ci.py assert-staged-group --platform windows --arch x86_64 --artifact-dir artifacts
 
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`

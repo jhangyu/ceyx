@@ -101,12 +101,13 @@ from . import report, run, targets, tools
 _PROBE_SRC_REL = "native/scripts/deps/probe/probe_codecs.c"
 _PROBE_DIR_REL = "native/scripts/deps/probe"
 
-# Fixed dist-directory literals -- linux and windows only. macOS has none:
-# its dist directory is a per-arch matrix value passed in as `dist_dir`
-# (divergence 1 above), never a platform-fact constant like these.
+# Fixed dist-directory literals -- single-arch platforms only. A per-arch
+# platform (targets.spec(p)["requires_arch"]: macOS, and windows since the
+# windows-arm64 leg) has none: its dist directory is a per-arch matrix value
+# passed in as `dist_dir` (divergence 1 above), never a platform-fact
+# constant like these.
 _FIXED_DIST_DIR = {
     "linux": "native/third_party/heif-dist-linux",
-    "windows": "native/third_party/heif-dist-windows",
 }
 
 _SUCCESS_TAIL = (
@@ -115,12 +116,13 @@ _SUCCESS_TAIL = (
 
 
 def _validate_dist_dir(platform: str, dist_dir: str | None) -> int | None:
-    """C-G9 shape applied to `--dist-dir`: required for macOS, rejected
+    """C-G9 shape applied to `--dist-dir`: required for a per-arch platform
+    (macOS, windows -- read from targets.py, not re-decided here), rejected
     everywhere else, checked in BOTH directions. Returns an exit code on
     rejection, or ``None`` when the argument is valid for `platform`."""
-    if platform == "macos":
+    if targets.spec(platform)["requires_arch"]:
         if dist_dir is None:
-            report.error("--dist-dir is required for --platform macos")
+            report.error(f"--dist-dir is required for --platform {platform}")
             return 2
     elif dist_dir is not None:
         report.error(f"--dist-dir is not accepted for --platform {platform!r}")
@@ -129,7 +131,7 @@ def _validate_dist_dir(platform: str, dist_dir: str | None) -> int | None:
 
 
 def _resolve_dist(platform: str, workspace: str, dist_dir: str | None) -> str:
-    if platform == "macos":
+    if dist_dir is not None:
         return f"{workspace}/{dist_dir}"
     return f"{workspace}/{_FIXED_DIST_DIR[platform]}"
 
