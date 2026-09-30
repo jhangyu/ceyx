@@ -57,10 +57,15 @@ else()
         # sse41 is the floor deliberately: every heavy kernel runs on Vulkan
         # here, the CPU codegen is glue, and the evidence above says the CPU
         # feature set makes no practical difference to what gets emitted.
-        # Non-x86_64 Linux hosts keep `host` — no published artifact exists for
+        # Other Linux hosts keep `host` — no published artifact exists for
         # them, so there is no baseline to pin to.
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set(AOT_TARGET "x86-64-linux-sse41-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+            # Same portable-baseline reasoning as the x86_64 branch: pin the
+            # ARMv8.0 floor instead of the builder's detected `host` features
+            # (dotprod/fp16/sve ...), so the artifact runs off the build machine.
+            set(AOT_TARGET "arm-64-linux-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
         else()
             set(AOT_TARGET "host-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query")
         endif()

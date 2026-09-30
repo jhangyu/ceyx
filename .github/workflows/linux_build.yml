@@ -27,7 +27,7 @@ jobs:
     # "Linux x86_64 Vulkan native (dng_decoder_native)" rendered as
     # "Linux / Linux x86_64 Vulkan native (dng_decoder_native)". Only the part
     # the caller does not already say belongs here.
-    name: x86_64 Vulkan
+    name: ${{ matrix.arch }} Vulkan
     # WI-14 step 14.5 (S-F4). RULED (user, 2026-09-12): support as many Linux
     # versions as possible without losing current capabilities. Linux build
     # floor = glibc 2.35 (Ubuntu 22.04 / Debian 12 and newer), achieved via
@@ -41,7 +41,22 @@ jobs:
     # but GitHub schedules brownout failures for that label starting
     # 2026-09-17; staying on the rolling label leaves the floor drifting
     # with GitHub's default.
-    runs-on: ubuntu-24.04
+    #
+    # ARM64 LEG (armci round): the same job runs a second matrix row on GitHub's
+    # native aarch64 runner `ubuntu-24.04-arm` -- native build, no cross-compile,
+    # same `container: ubuntu:22.04` glibc-2.35 floor, same steps. Only the
+    # values in `matrix.include` differ per row (no divergent build path).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            triplet: x64-linux-heif
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            triplet: arm64-linux-heif
+    runs-on: ${{ matrix.runner }}
     container: ubuntu:22.04
     timeout-minutes: 60
     # `contents: write` was dropped in round 6 together with the release-attach
@@ -57,7 +72,7 @@ jobs:
       # runtime by the "Derive vcpkg baseline from vcpkg.json" step below,
       # from native/vcpkg/vcpkg.json's builtin-baseline (the single source),
       # rather than a hardcoded literal that could drift from it silently.
-      VCPKG_TRIPLET: x64-linux-heif
+      VCPKG_TRIPLET: ${{ matrix.triplet }}
       # The vcpkg paths deliberately do NOT live here. The `runner` context is
       # not available in a job-level `env:` block — using it there is a workflow
       # STARTUP failure (the run reports its name as the file path and executes
@@ -169,6 +184,13 @@ jobs:
       # keeps working unchanged, while /usr/bin/python3 stays 3.10 so apt's own
       # python tooling is untouched. It also brings a working pip via ensurepip
       # (measured: pip 24.0), avoiding the get-pip/distutils dance.
+      # vcpkg ships no prebuilt cmake/ninja for aarch64 Linux: it must be told
+      # to use the system ones (ensure-cmake + apt ninja-build below provide
+      # them). Set ONLY on the arm64 row so the x86_64 row is byte-unchanged.
+      - name: Let vcpkg use system binaries (aarch64 has no prebuilt tools)
+        if: matrix.arch == 'arm64'
+        run: echo "VCPKG_FORCE_SYSTEM_BINARIES=1" >> "${GITHUB_ENV}"
+
       - name: Provision Python 3.11 inside the container (no hostedtoolcache)
         run: |
           export DEBIAN_FRONTEND=noninteractive
@@ -361,7 +383,7 @@ jobs:
         run: |
           python3 native/scripts/ci.py vcpkg-bootstrap --baseline "${VCPKG_BASELINE}" --runner-temp "${RUNNER_TEMP}"
 
-      - name: vcpkg install libwebp + libde265 + aom (x64-linux-heif)
+      - name: vcpkg install libwebp + libde265 + aom (${{ matrix.triplet }})
         # WI-23: migrated to ci/provision.py's vcpkg_install() (impl-16).
         # VCPKG_INSTALL_RC preserved as a report.marker() call -- confirmed
         # markerdiff-visible (native/scripts/ci/markerdiff.py:32 anchors on
@@ -428,7 +450,7 @@ jobs:
           export CEYX_VCPKG_PREFIX="$RUNNER_TEMP/vcpkg-installed/$VCPKG_TRIPLET"
           python3 native/scripts/build_deps.py build heif-stack \
               --platform linux \
-              --arch x86_64 \
+              --arch ${{ matrix.arch }} \
               --dist "$GITHUB_WORKSPACE/native/third_party/heif-dist-linux"
 
       - name: Build dng_decoder_native for Linux (Vulkan, single-stage host)
@@ -516,6 +538,7 @@ jobs:
       # `objdump | grep -q`, which under pipefail returns 141 on a successful
       # match (SIGPIPE to objdump) and inverts the verdict (G-9/R-16).
       - name: Assert no AVX-512 in the Linux .so (portable-baseline gate)
+        if: matrix.arch == 'x86_64'
         working-directory: ${{ github.workspace }}
         run: python3 native/scripts/ci.py assert-no-avx512 --platform linux
 
@@ -634,7 +657,7 @@ jobs:
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dng_decoder_native-linux-x86_64
+          name: dng_decoder_native-linux-${{ matrix.arch }}
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 7
@@ -649,7 +672,7 @@ jobs:
       - name: Upload libjxl dist (Linux)
         uses: actions/upload-artifact@v4
         with:
-          name: libjxl-dist-linux-x86_64
+          name: libjxl-dist-linux-${{ matrix.arch }}
           path: ${{ github.workspace }}/native/third_party/libjxl-dist
           if-no-files-found: error
           retention-days: 7
@@ -659,11 +682,11 @@ jobs:
       # probe_results_<platform>_<arch> artifacts (.github/CI-CONVENTIONS.md
       # rule 2, underscore separators). `if: always()` so a failed probe still
       # uploads its own diagnosis rather than leaving CI to guess.
-      - name: Upload probe_results_linux_x86_64
+      - name: Upload probe_results_linux_${{ matrix.arch }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: probe_results_linux_x86_64
+          name: probe_results_linux_${{ matrix.arch }}
           path: native/scripts/deps/probe/probe_codecs.txt
           if-no-files-found: error
           retention-days: 7
