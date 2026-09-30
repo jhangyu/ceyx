@@ -256,7 +256,7 @@ def test_build_installs_dependencies_before_libheif(monkeypatch, tmp_path) -> No
                              lambda *a, _n=name, **k: calls.append(_n))
     monkeypatch.setattr(win_heif_dist, "prune_unconsumed_cli_tools", lambda d: [])
     monkeypatch.setattr(win_heif_dist, "assert_layout", lambda d: "bin/libde265.dll")
-    monkeypatch.setattr(win_heif_dist, "assert_capabilities", lambda d, x: None)
+    monkeypatch.setattr(win_heif_dist, "assert_capabilities", lambda d, x, a: None)
     monkeypatch.setattr(win_heif_dist, "vendor_licences", lambda *a, **k: None)
     monkeypatch.setattr(win_heif_dist, "stamp_is_current", lambda *a, **k: False)
     monkeypatch.setattr(win_heif_dist, "want_pins", lambda *a, **k: "pins")
@@ -311,7 +311,7 @@ class TestPruneUnconsumedCliTools(unittest.TestCase):
                  mock.patch.object(win_heif_dist, "prune_unconsumed_cli_tools",
                                     lambda d: calls.append("prune_unconsumed_cli_tools")), \
                  mock.patch.object(win_heif_dist, "assert_layout", lambda d: "bin/libde265.dll"), \
-                 mock.patch.object(win_heif_dist, "assert_capabilities", lambda d, x: None), \
+                 mock.patch.object(win_heif_dist, "assert_capabilities", lambda d, x, a: None), \
                  mock.patch.object(win_heif_dist, "vendor_licences", lambda *a, **k: None), \
                  mock.patch.object(win_heif_dist, "stamp_is_current", lambda *a, **k: False), \
                  mock.patch.object(win_heif_dist, "want_pins", lambda *a, **k: "pins"):
@@ -339,7 +339,7 @@ def _patch_pe_reads(monkeypatch, *, deps_text: str) -> None:
                          lambda dll, out: "    3    2 0002B230 heif_decode_image")
     monkeypatch.setattr(win_heif_dist.win_pe, "read_dependents",
                          lambda dll, out: deps_text)
-    monkeypatch.setattr(win_heif_dist, "assert_architecture", lambda dist, de265_dll: None)
+    monkeypatch.setattr(win_heif_dist, "assert_architecture", lambda dist, de265_dll, arch: None)
 
 
 def test_assert_capabilities_rejects_missing_kvazaar_archive(monkeypatch, tmp_path) -> None:
@@ -349,7 +349,7 @@ def test_assert_capabilities_rejects_missing_kvazaar_archive(monkeypatch, tmp_pa
     (dist / "lib" / "aom.lib").write_bytes(b"!<arch>\n")
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
     with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
-        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll", "x86_64")
     assert "kvazaar" in str(exc.value)
 
 
@@ -359,7 +359,7 @@ def test_assert_capabilities_rejects_missing_aom_archive(monkeypatch, tmp_path) 
     (dist / "lib" / "kvazaar.lib").write_bytes(b"!<arch>\n")
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
     with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
-        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll", "x86_64")
     assert "aom" in str(exc.value)
 
 
@@ -369,7 +369,7 @@ def test_assert_capabilities_rejects_dynamic_aom(monkeypatch, tmp_path) -> None:
     dist = _make_full_dist(tmp_path)
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\naom.dll\nKERNEL32.dll")
     with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
-        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll", "x86_64")
     assert "aom.dll" in str(exc.value)
 
 
@@ -378,7 +378,7 @@ def test_assert_capabilities_rejects_dynamic_kvazaar(monkeypatch, tmp_path) -> N
     dist = _make_full_dist(tmp_path)
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nkvazaar.dll\nKERNEL32.dll")
     with pytest.raises(win_heif_dist.WindowsHeifError) as exc:
-        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+        win_heif_dist.assert_capabilities(dist, "bin/libde265.dll", "x86_64")
     assert "kvazaar.dll" in str(exc.value)
 
 
@@ -388,7 +388,7 @@ def test_assert_capabilities_accepts_full_static_dist(monkeypatch, tmp_path) -> 
     everything)."""
     dist = _make_full_dist(tmp_path)
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
-    win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+    win_heif_dist.assert_capabilities(dist, "bin/libde265.dll", "x86_64")
 
 
 def test_resolve_kvazaar_library_accepts_the_lib_prefixed_spelling(tmp_path) -> None:
@@ -437,7 +437,7 @@ def test_assert_capabilities_accepts_the_lib_prefixed_kvazaar_spelling(monkeypat
     (dist / "lib" / "libkvazaar.lib").write_bytes(b"!<arch>\n")
     (dist / "lib" / "aom.lib").write_bytes(b"!<arch>\n")
     _patch_pe_reads(monkeypatch, deps_text="libde265.dll\nKERNEL32.dll")
-    win_heif_dist.assert_capabilities(dist, "bin/libde265.dll")
+    win_heif_dist.assert_capabilities(dist, "bin/libde265.dll", "x86_64")
 
 
 def test_build_aom_copies_static_archive_and_headers_from_vcpkg_prefix(monkeypatch, tmp_path) -> None:

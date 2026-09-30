@@ -293,9 +293,9 @@ def _vcpkg_prefix(what: str) -> Path:
             f"not a directory (value: {prefix!r}).\n"
             f"  Install it first, e.g.:\n"
             f"    <vcpkg>/vcpkg install --x-manifest-root=native/vcpkg \\\n"
-            f"        --x-install-root=<root> --triplet=x64-windows-heif \\\n"
+            f"        --x-install-root=<root> --triplet=<x64|arm64>-windows-heif \\\n"
             f"        --x-no-default-features --x-feature=de265 --x-feature=aom\n"
-            f"  then export CEYX_VCPKG_PREFIX=<root>/x64-windows-heif.\n"
+            f"  then export CEYX_VCPKG_PREFIX=<root>/<x64|arm64>-windows-heif.\n"
             f"  There is deliberately no fallback to a source build."
         )
     return Path(prefix)
@@ -320,7 +320,9 @@ def build_aom(loaded: dict[str, Any], arch: str, dist: Path, stage: Path) -> Non
     execute.py's cmake-driven path.
     """
     # arch is accepted for signature symmetry with the other build_* stages
-    # but unused: aom is never cross-built on the Windows runner (x86_64-only).
+    # but unused: the Windows dist is never cross-built -- each arch's dist is
+    # built natively on its own runner, whose vcpkg triplet
+    # (<arch>-windows-heif) already produced a target-arch aom.lib.
     target = dist / "lib" / "aom.lib"
     if target.is_file():
         _log(f"aom already installed at {target}, skipping")
@@ -476,7 +478,7 @@ def assert_layout(dist: Path) -> str:
     return de265_dll
 
 
-def assert_capabilities(dist: Path, de265_dll: str) -> None:
+def assert_capabilities(dist: Path, de265_dll: str, arch: str) -> None:
     """Prove the dist can actually decode, and carries no GPL contamination.
 
     Proof, not assumption: a libheif built without a working libde265
@@ -562,7 +564,7 @@ def assert_capabilities(dist: Path, de265_dll: str) -> None:
             )
     _log(f"ASSERT no dynamic aom/kvazaar OK (import table as read: {deps_text!r})")
 
-    assert_architecture(dist, de265_dll)
+    assert_architecture(dist, de265_dll, arch)
 
 
 def _file_tool_output(targets: list[Path]) -> Optional[str]:
@@ -582,12 +584,12 @@ def _file_tool_output(targets: list[Path]) -> Optional[str]:
     return result.stdout or ""
 
 
-def assert_architecture(dist: Path, de265_dll: str) -> None:
+def assert_architecture(dist: Path, de265_dll: str, arch: str) -> None:
     dist = Path(dist)
     targets = [dist / "bin" / "heif.dll", dist / de265_dll]
     output = _file_tool_output(targets)
-    if win_pe.assert_machine_x86_64(output, dll_names="heif.dll / libde265.dll"):
-        _log("ASSERT PE32+ x86-64 OK")
+    if win_pe.assert_machine(output, arch, dll_names="heif.dll / libde265.dll"):
+        _log(f"ASSERT PE32+ {arch} OK")
     else:
         _log("NOTICE: 'file' unavailable; architecture check SKIPPED (not passed).")
 
@@ -628,7 +630,7 @@ def build(
     build_libheif(loaded, arch, dist, stage)
 
     de265_dll = assert_layout(dist)
-    assert_capabilities(dist, de265_dll)
+    assert_capabilities(dist, de265_dll, arch)
     vendor_licences(loaded, dist, stage)
 
     (dist / ".pins").write_text(want_pins(loaded, arch), encoding="utf-8")
@@ -662,7 +664,7 @@ def main(argv: Optional[list] = None) -> int:
 
     parser = argparse.ArgumentParser(prog="deps.win_heif_dist")
     parser.add_argument("--dist", required=True, help="install prefix the dist lands in")
-    parser.add_argument("--arch", default="x86_64", choices=("x86_64",))
+    parser.add_argument("--arch", default="x86_64", choices=("x86_64", "arm64"))
     parser.add_argument("--force", action="store_true", help="rebuild even when .pins is current")
     args = parser.parse_args(argv)
 

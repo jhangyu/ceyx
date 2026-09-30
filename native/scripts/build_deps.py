@@ -703,7 +703,7 @@ def _run_build(argv: list) -> int:
                 )
                 return 0
             try:
-                win_webp_dist.build(dist, force=args.force)
+                win_webp_dist.build(dist, arch=resolved_arch, force=args.force)
             except (
                 win_webp_dist.WindowsWebpError,
                 win_webp_dist.win_pe.PeInspectionError,
