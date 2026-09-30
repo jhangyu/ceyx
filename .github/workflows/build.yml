@@ -735,12 +735,15 @@ jobs:
           dng_decoder_native-windows-x86_64
           dng_decoder_native-android-arm64-v8a
           heif-dist-windows-x86_64
+          heif-dist-windows-arm64
           libwebp-dist-windows-x86_64
+          libwebp-dist-windows-arm64
           dng_decoder_native-macos-arm64
           dng_decoder_native-macos-x86_64
           libjxl-dist-linux-x86_64
           libjxl-dist-linux-arm64
           libjxl-dist-windows-x86_64
+          libjxl-dist-windows-arm64
           heif-dist-android-arm64-v8a
           libjxl-dist-android-arm64-v8a
           libwebp-dist-android-arm64-v8a

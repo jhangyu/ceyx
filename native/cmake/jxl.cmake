@@ -43,7 +43,13 @@ if(CEYX_ENABLE_JXL)
         # is the ONLY hint -- letting the search fall through to a Mach-O dist
         # left behind by a developer would surface as a link error naming the
         # decoder rather than naming this mismatch.
-        set(JXL_DIST_HINTS "${THIRD_PARTY_DIR}/libjxl-dist-windows")
+        # Per-arch dist dir: CEYX_WINDOWS_DIST_SUFFIX is derived from the
+        # compiler's target arch in cmake/heif.cmake (included before this
+        # file); "windows" for x86_64 (historical path), "windows-arm64".
+        if(NOT DEFINED CEYX_WINDOWS_DIST_SUFFIX)
+            message(FATAL_ERROR "CEYX_WINDOWS_DIST_SUFFIX is undefined at cmake/jxl.cmake -- cmake/heif.cmake must be included first.")
+        endif()
+        set(JXL_DIST_HINTS "${THIRD_PARTY_DIR}/libjxl-dist-${CEYX_WINDOWS_DIST_SUFFIX}")
     endif()
 
     set(JXL_INCLUDE_HINTS "")
