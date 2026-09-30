@@ -184,13 +184,6 @@ jobs:
       # keeps working unchanged, while /usr/bin/python3 stays 3.10 so apt's own
       # python tooling is untouched. It also brings a working pip via ensurepip
       # (measured: pip 24.0), avoiding the get-pip/distutils dance.
-      # vcpkg ships no prebuilt cmake/ninja for aarch64 Linux: it must be told
-      # to use the system ones (ensure-cmake + apt ninja-build below provide
-      # them). Set ONLY on the arm64 row so the x86_64 row is byte-unchanged.
-      - name: Let vcpkg use system binaries (aarch64 has no prebuilt tools)
-        if: matrix.arch == 'arm64'
-        run: echo "VCPKG_FORCE_SYSTEM_BINARIES=1" >> "${GITHUB_ENV}"
-
       - name: Provision Python 3.11 inside the container (no hostedtoolcache)
         run: |
           export DEBIAN_FRONTEND=noninteractive
@@ -654,10 +647,24 @@ jobs:
       # + softprops/action-gh-release pair that used to follow this step is
       # deleted: no workflow may attach release assets directly any more, that
       # is the publish job's exclusive job (rule 3).
+      # Artifact names are spelled as LITERALS, one step per matrix row (not
+      # `linux-${{ matrix.arch }}`): ci_conventions_check.py C6 cross-checks
+      # build.yml's required= set against literal upload names and skips
+      # expression names, so an expression would hide the asset from that check.
       - name: Upload native artifact
+        if: matrix.arch == 'x86_64'
         uses: actions/upload-artifact@v4
         with:
-          name: dng_decoder_native-linux-${{ matrix.arch }}
+          name: dng_decoder_native-linux-x86_64
+          path: ${{ github.workspace }}/artifacts/native
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload native artifact
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dng_decoder_native-linux-arm64
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 7
@@ -670,9 +677,19 @@ jobs:
       # dist workflow. Uploading it here makes the Linux JXL dist a first-class
       # publishable artifact with a canonical name.
       - name: Upload libjxl dist (Linux)
+        if: matrix.arch == 'x86_64'
         uses: actions/upload-artifact@v4
         with:
-          name: libjxl-dist-linux-${{ matrix.arch }}
+          name: libjxl-dist-linux-x86_64
+          path: ${{ github.workspace }}/native/third_party/libjxl-dist
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload libjxl dist (Linux)
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libjxl-dist-linux-arm64
           path: ${{ github.workspace }}/native/third_party/libjxl-dist
           if-no-files-found: error
           retention-days: 7

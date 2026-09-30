@@ -55,6 +55,8 @@ ever needed one -- it doesn't; every command here invokes `vcpkg`/`cmake`/
 from __future__ import annotations
 
 import json
+import os
+import platform
 import re
 import sys
 from pathlib import Path
@@ -70,6 +72,16 @@ def vcpkg_baseline(vcpkg_json_path: str, github_env_path: str) -> int:
     baseline = data["builtin-baseline"]
     report.github_env_append(github_env_path, "VCPKG_BASELINE", baseline)
     return 0
+
+
+def _vcpkg_env():
+    """vcpkg publishes no prebuilt cmake/ninja for aarch64 Linux and refuses to
+    bootstrap/install there unless told to use the system ones (the workflow's
+    apt + ensure-cmake steps provide them). Derived from the HOST arch, so the
+    x86_64 and macOS legs keep env=None (unchanged)."""
+    if sys.platform == "linux" and platform.machine().lower() in ("aarch64", "arm64"):
+        return {**os.environ, "VCPKG_FORCE_SYSTEM_BINARIES": "1"}
+    return None
 
 
 def vcpkg_bootstrap(baseline: str, runner_temp: str) -> int:
@@ -91,7 +103,7 @@ def vcpkg_bootstrap(baseline: str, runner_temp: str) -> int:
         report.error(f"git checkout {baseline} failed in {vcpkg_dir} (rc={result.returncode}).")
         return result.returncode
 
-    result = run.run([str(Path(vcpkg_dir) / "bootstrap-vcpkg.sh"), "-disableMetrics"])
+    result = run.run([str(Path(vcpkg_dir) / "bootstrap-vcpkg.sh"), "-disableMetrics"], env=_vcpkg_env())
     if result.stdout:
         report.plain(result.stdout.rstrip("\n"))
     if result.returncode != 0:
@@ -127,7 +139,7 @@ def vcpkg_install(
         *[f"--x-feature={f}" for f in features],
         "--no-print-usage",
     ]
-    result = run.run(argv)
+    result = run.run(argv, env=_vcpkg_env())
     if result.stdout:
         report.plain(result.stdout.rstrip("\n"))
     if result.stderr:
