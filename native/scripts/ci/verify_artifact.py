@@ -798,6 +798,8 @@ def assert_no_avx512(platform: str) -> int:
     codepath. Replaces `linux_build.yml:671-681`. C-G3: `assert_no_avx512.py`
     keeps its logic inline in its own `main()` -- called through `run.run()`,
     never refactored into this module."""
+    if platform == "windows":
+        return _assert_no_avx512_windows()
     so = _artifact_path(platform)
 
     rc, out = run.capture([
@@ -818,5 +820,52 @@ def assert_no_avx512(platform: str) -> int:
         # shell always `exit 1` here regardless of the child's actual rc
         # (2 for "could not run" collapses to the same 1 as an assertion
         # failure) -- see test_avx512_failure_returns_1_not_rc.
+        return 1
+    return 0
+
+
+# Libs the DLL is linked from that MUST be scanned; their absence means the
+# glob found the wrong tree, not a clean one.
+_AVX512_WINDOWS_REQUIRED = ("rawspeed.lib", "pugixml.lib")
+
+
+def _assert_no_avx512_windows() -> int:
+    """Windows leg: scan every static lib WE compile into the DLL, not the
+    DLL. The DLL cannot be judged whole: the static CRT (/MT) links in
+    libvcruntime's CPUID-dispatched memcpy_avx_ermsb_Intel, 45 legitimate
+    EVEX lines in every build. Every in-tree lib, by contrast, has 0 EVEX
+    on a clean build (runtime-dispatched AVX-512 would show regardless of
+    the builder's CPU), so any hit there is host-derived codegen.
+    Excluded: *_generator.lib (Halide generator host tools, never shipped)
+    and dng_decoder_native.lib (the DLL's import library)."""
+    libs = sorted(
+        p for p in glob.glob("native/build-windows/**/*.lib", recursive=True)
+        if not p.endswith("_generator.lib") and os.path.basename(p) != "dng_decoder_native.lib"
+    )
+    names = {os.path.basename(p) for p in libs}
+    missing = [n for n in _AVX512_WINDOWS_REQUIRED if n not in names]
+    if missing:
+        report.error(f"AVX-512 gate could not find {', '.join(missing)} under native/build-windows "
+                     "-- refusing to pass a scan that did not see the RawSpeed3 objects.")
+        return 1
+    failed = []
+    for lib in libs:
+        stem = os.path.splitext(os.path.basename(lib))[0]
+        rc, out = run.capture([
+            sys.executable, "native/scripts/assert_no_avx512.py",
+            lib,
+            "--dump", f"native/build-windows/avx512-gate-{stem}.txt",
+        ])
+        if out:
+            report.plain(out.rstrip("\n"))
+        report.bare_rc(rc, f"avx512 gate {lib}")
+        if rc != 0:
+            failed.append(lib)
+    if failed:
+        report.error(
+            f"AVX-512 gate failed for {', '.join(failed)} — in-tree code was compiled for the "
+            "build machine's ISA and the DLL will crash (0xC000001D) on CPUs without AVX-512. "
+            "rc=2 means the check could not run at all, which is equally disqualifying."
+        )
         return 1
     return 0

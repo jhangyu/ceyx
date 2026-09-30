@@ -432,6 +432,17 @@ jobs:
           echo "BUILD_RC=$RC"
           exit $RC
 
+      # Portable-baseline gate, Windows leg. RawSpeed3's CpuMarch.cmake gave
+      # every Windows build -march=native (clang-cl sets MSVC=TRUE, which the
+      # old tests.cmake guard skipped), so each release inherited the runner's
+      # ISA: v0.1.13/18/24/28 shipped EVEX and crashed 0xC000001D on
+      # non-AVX-512 CPUs. This judges the in-tree static libs, not the DLL --
+      # the static CRT's CPUID-dispatched memcpy puts legitimate EVEX in every
+      # DLL (see verify_artifact._assert_no_avx512_windows).
+      - name: Assert no AVX-512 in in-tree Windows code (portable-baseline gate)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-no-avx512 --platform windows
+
       # AC-W3 evidence: the DLL exists, is a PE32+ x86_64 DLL, and has a
       # non-zero size recorded in the log. A build step that silently produced
       # nothing must not reach the upload step.
