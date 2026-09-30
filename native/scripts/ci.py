@@ -52,6 +52,8 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py build-zlib        --version 1.3.1 --workspace W
     python3 native/scripts/ci.py locate-clang-cl   [--github-path PATH]
     python3 native/scripts/ci.py verify-vulkan-lib [--vulkan-sdk PATH]
+    python3 native/scripts/ci.py assert-vs-component --component ID
+    python3 native/scripts/ci.py cross-stage1-windows --build-dir D --aot-target T
 
 Extended by WI-29/WI-30 (push 8b, the dist-workflow python-ization -- user
 ruling P-3=(a)): dispatch wiring for both `dist_build.py` and `vcpkg.py`
@@ -151,6 +153,8 @@ _PLATFORMLESS_COMMANDS = (
     "build-zlib",
     "locate-clang-cl",
     "verify-vulkan-lib",
+    "assert-vs-component",
+    "cross-stage1-windows",
     "dist-build",
     "dist-list",
     "provision",
@@ -708,6 +712,16 @@ def build_parser() -> argparse.ArgumentParser:
     vvl = sub.add_parser("verify-vulkan-lib", help="assert vulkan-1.lib is present under VULKAN_SDK")
     vvl.add_argument("--vulkan-sdk", default="")
 
+    # windows-arm64 leg (R-9).
+    avc = sub.add_parser("assert-vs-component", help="assert a Visual Studio component is installed (vswhere)")
+    avc.add_argument("--component", required=True)
+    cs1 = sub.add_parser(
+        "cross-stage1-windows",
+        help="Windows arm64 cross stage 1: x86_64 Halide generators -> AOT for --aot-target",
+    )
+    cs1.add_argument("--build-dir", required=True)
+    cs1.add_argument("--aot-target", required=True)
+
     # WI-29 (push 8b): the carrier invocation and dist listing shared by
     # all six *_dist_*.yml workflows.
     db = sub.add_parser(
@@ -1096,6 +1110,14 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.windows_toolchain as windows_toolchain
 
         return windows_toolchain.verify_vulkan_lib(args.vulkan_sdk)
+    if args.command == "assert-vs-component":
+        import ci.windows_toolchain as windows_toolchain
+
+        return windows_toolchain.assert_vs_component(args.component)
+    if args.command == "cross-stage1-windows":
+        import ci.windows_toolchain as windows_toolchain
+
+        return windows_toolchain.cross_stage1(args.build_dir, args.aot_target)
     if args.command == "vcpkg-baseline":
         import ci.provision as provision
 

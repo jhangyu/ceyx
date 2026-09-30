@@ -75,6 +75,9 @@ FROZEN_CLI_SURFACE = {
     "build-zlib",
     "locate-clang-cl",
     "verify-vulkan-lib",
+    # windows-arm64 leg (R-9).
+    "assert-vs-component",
+    "cross-stage1-windows",
     # WI-29/WI-30 (push 8b, dispatch wiring extension ruled by lead9-pyci-opus):
     # dist_build.py + vcpkg.py's argv surfaces.
     "dist-build",

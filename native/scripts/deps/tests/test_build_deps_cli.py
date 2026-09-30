@@ -213,11 +213,24 @@ def test_legacy_component_form_still_works(capsys) -> None:
 # that doesn't do what the flag implied. Same "rejected rather than silently
 # ignored" doctrine as --stage/--force above for `build heif-stack`.
 # ---------------------------------------------------------------------------
-def test_fetch_halide_rejects_arch(capsys) -> None:
-    rc = build_deps.main(["fetch", "halide", "--arch", "x86_64"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "--arch is not accepted for fetch 'halide'" in err
+def test_fetch_halide_forwards_arch_as_explicit_host_dist(monkeypatch) -> None:
+    """windows-arm64 (R-9): --arch selects the Halide HOST dist explicitly
+    (x86_64 on windows-11-arm); it is forwarded, never ignored."""
+    from deps import fetch_halide
+    seen = {}
+    monkeypatch.setattr(fetch_halide, "fetch", lambda dest, force=False, host_arch=None: seen.update(host_arch=host_arch))
+    assert build_deps.main(["fetch", "halide", "--arch", "x86_64"]) == 0
+    assert seen == {"host_arch": "x86_64"}
+
+
+def test_halide_asset_for_explicit_x86_64_host_on_windows() -> None:
+    from deps import fetch_halide
+    tag, ext, _ = fetch_halide.resolve_asset("Windows", "x86_64")
+    assert (tag, ext) == ("x86-64-windows", "zip")
+    # Windows-on-ARM detected host has no upstream dist: loud, not a guess.
+    import pytest as _pytest
+    with _pytest.raises(fetch_halide.HalideFetchError):
+        fetch_halide.resolve_asset("Windows", "ARM64")
 
 
 def test_fetch_libraw_rejects_arch(capsys) -> None:
