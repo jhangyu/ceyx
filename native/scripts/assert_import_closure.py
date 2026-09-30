@@ -114,6 +114,7 @@ LINUX_OS_ALLOWLIST = frozenset({
     "libstdc++.so.6",
     "libgcc_s.so.1",
     "ld-linux-x86-64.so.2",
+    "ld-linux-aarch64.so.1",  # glibc aarch64 dynamic loader (NEEDED by TLSDESC .so)
     # Measured entries (2026-09-12). Decided by STATUS-QUO evidence, not taste:
     # the RELEASED v0.1.23 linux asset was downloaded by tag, its archive
     # sha256 verified byte-exact against scripts/ceyx_release_pin.json
