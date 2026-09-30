@@ -5,8 +5,23 @@
 #include <cstdio>
 #include <cstring>
 
+#include "ceyx_utf8_path.h"
 #include "dng_timing_utils.h"
 #include "libraw/libraw.h"
+
+namespace {
+
+// LibRaw's narrow open_file reads the path in the ANSI code page on Windows;
+// its wide overload is the one that opens a non-ASCII UTF-8 path there.
+int openFileUtf8(LibRaw &processor, const char *file_path) {
+#ifdef _WIN32
+  return processor.open_file(ceyx_utf8_to_wide(file_path).c_str());
+#else
+  return processor.open_file(file_path);
+#endif
+}
+
+}  // namespace
 
 // Policy note (spec section 6.3.6): LIBRAW_RAWSPEEDV3_IGNOREERRORS is
 // deliberately NEVER set. Enabling it would let warning-flagged RawSpeed
@@ -187,7 +202,7 @@ RawErrorCode LibRawFrontendContext::open_metadata_only(const char* file_path) {
 
     // Step 2. open_file populates imgdata.sizes, which is the whole point:
     // sizes.width/height are readable here, before any pixel is decoded.
-    if (impl_->processor.open_file(file_path) != LIBRAW_SUCCESS) {
+    if (openFileUtf8(impl_->processor, file_path) != LIBRAW_SUCCESS) {
         impl_->processor.recycle();
         return kRawErrParseFailed;
     }
@@ -222,7 +237,7 @@ RawErrorCode LibRawFrontendContext::open_and_unpack(const char* file_path) {
     const auto t0 = std::chrono::high_resolution_clock::now();
 
     // Step 2.
-    if (impl_->processor.open_file(file_path) != LIBRAW_SUCCESS) {
+    if (openFileUtf8(impl_->processor, file_path) != LIBRAW_SUCCESS) {
         impl_->processor.recycle();
         return kRawErrParseFailed;
     }

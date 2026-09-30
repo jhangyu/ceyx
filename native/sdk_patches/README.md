@@ -33,12 +33,26 @@ Stage3 fused demosaic+warp kernel without friend access.
 Discovered during W6 H-3 bridge source move (previously resolved implicitly
 via the `dng_sdk_custom/source/` include path overlay).
 
+## Portability Patches
+
+### 3. dng_file_stream.cpp — UTF-8 path open
+
+**File**: `dng_file_stream_cpp.patch`
+
+Replaces the constructor's `fopen` with `ceyx_fopen_utf8`
+(`native/include/ceyx_utf8_path.h`). Paths reach the SDK as UTF-8 from the
+FFI; on Windows plain `fopen` reads them in the ANSI code page, so a DNG under
+any non-ASCII path (e.g. a Chinese folder name) failed to open. One line here
+covers every `dng_file_stream` in the pipeline. No behaviour change off
+Windows (`ceyx_fopen_utf8` is `fopen` there).
+
 ## Applying
 
 From the `native/` directory:
 
     git apply sdk_patches/dng_lens_correction_h.patch
     git apply sdk_patches/dng_opcode_list_cpp.patch
+    git apply sdk_patches/dng_file_stream_cpp.patch
 
 ## Maintenance
 

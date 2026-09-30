@@ -1,5 +1,7 @@
 #include "raw_file_router.h"
 
+#include "ceyx_utf8_path.h"
+
 #include <cstdio>
 #include <cstring>
 
@@ -99,7 +101,7 @@ RawErrorCode raw_probe_file(const char* file_path, RawRoute* out_route) {
     if (out_route) *out_route = kRawRouteUnknown;
     if (!file_path || file_path[0] == '\0') return kRawErrNullPath;
 
-    std::FILE* fp = std::fopen(file_path, "rb");
+    std::FILE* fp = ceyx_fopen_utf8(file_path, "rb");
     if (!fp) return kRawErrProbeFailed;
 
     uint8_t header[kRawProbeHeaderBytes];

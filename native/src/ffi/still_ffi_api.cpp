@@ -3,6 +3,7 @@
 
 #include "ceyx_still_api.h"
 #include "still_codec_internal.h"
+#include "ceyx_utf8_path.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -40,7 +41,7 @@ namespace {
 // Sniff by MAGIC BYTES, never by extension: Halcyon routes by extension but
 // passes kCeyxFormatUnknown, so a mislabelled file must still work.
 int32_t SniffFormat(const char *path) {
-  FILE *f = std::fopen(path, "rb");
+  FILE *f = ceyx_fopen_utf8(path, "rb");
   if (!f) return kCeyxFormatUnknown;
   uint8_t hdr[32] = {0};
   const size_t n = std::fread(hdr, 1, sizeof(hdr), f);
