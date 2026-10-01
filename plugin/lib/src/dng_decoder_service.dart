@@ -286,10 +286,6 @@ class DngDecoderService {
   /// `ceyx_decode_into_buffer` takes the SAME `max_dim` the deleted entry took
   /// and applies the same sizing rule, so the decode-into pair being present IS
   /// sized-decode being available.
-  ///
-  /// (The BINDINGS-level `DngNativeBindings.sizedDecodeAvailable` keeps its
-  /// original meaning — it describes a loaded image, which is what the
-  /// pinned-old-dylib tests assert about.)
   bool get sizedDecodeAvailable {
     if (!_initialized) initialize();
     return _bindings.decodeIntoBufferAvailable;
@@ -306,10 +302,6 @@ class DngDecoderService {
   /// [RawUnavailableException] when [decodeIntoBufferAvailable] is false, and
   /// nothing anywhere consults the legacy symbol. The probe and the gate now
   /// give the same answer by construction rather than by coincidence.
-  ///
-  /// (The BINDINGS-level `DngNativeBindings.rawDecodeAvailable` keeps its
-  /// original meaning — it describes a loaded image, and pinned-old-dylib tests
-  /// depend on that. This getter answers a different question: can I decode.)
   bool get rawDecodeAvailable {
     if (!_initialized) initialize();
     return _bindings.decodeIntoBufferAvailable;
@@ -360,17 +352,6 @@ class DngDecoderService {
   int nativeRecommendationClassPixels(int index) {
     if (!_initialized) initialize();
     return _bindings.recommendationClassPixels(index) ?? -1;
-  }
-
-  /// RGBA pool buffers currently checked out process-wide; 0 when everything
-  /// has been freed. Null when the dylib lacks the debug symbol.
-  ///
-  /// Note: a zero-copy [decode] keeps its buffer checked out until the
-  /// returned [DngImage] is garbage collected, so a non-zero value right
-  /// after a successful [decode] is correct, not a leak.
-  int? get poolCheckedOut {
-    if (!_initialized) initialize();
-    return _bindings.poolCheckedOut();
   }
 
   /// Warm native resources for the common 24MP decode path off the UI isolate.

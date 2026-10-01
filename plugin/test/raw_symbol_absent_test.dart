@@ -56,16 +56,4 @@ void main() {
       expect(service.rawDecodeAvailable, equals(bindings.decodeIntoBufferAvailable));
     },
   );
-
-  test(
-    'raw_decode_and_process is not exported by the shipped dylib (retired; '
-    'see retired_symbols_absent_test.dart for the shipped-dylib fence)',
-    () {
-      final bindings = DngNativeBindings.fromPath(dylibPath);
-      // rawDecodeAndProcess is the guarded legacy lookup itself — this is a
-      // second, independent read of the same absence retired_symbols_absent_test
-      // checks via nm, exercised through the real binding path.
-      expect(bindings.rawDecodeAndProcess, isNull);
-    },
-  );
 }
