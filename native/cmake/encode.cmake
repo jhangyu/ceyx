@@ -169,26 +169,10 @@ endif()
 target_compile_definitions(dng_decoder_native PRIVATE
     CEYX_ENABLE_WEBP=${CEYX_WEBP_ENABLED})
 
-# src/ffi/still_ffi_api.cpp routes HEIC/AVIF into src/heif_encode.cpp (plan
-# Task 7). Until that TU exists the arms must answer kCeyxStillErrUnsupported
-# instead of leaving MapHeifToStillError / ceyx_heif_still_decode_impl
-# undefined at dylib link time. Keyed on the file's existence — the same
-# advance-registration pattern cmake/tests.cmake:1433 uses for the codec tests —
-# so it flips automatically once Task 7 lands and the build is reconfigured.
-if(EXISTS "${SRC_DIR}/heif_encode.cpp")
-    set(CEYX_HEIF_ENCODE_TU 1)
-else()
-    set(CEYX_HEIF_ENCODE_TU 0)
-    message(STATUS
-        "still-decode: HEIC/AVIF arms stubbed (src/heif_encode.cpp absent)")
-endif()
-target_compile_definitions(dng_decoder_native PRIVATE
-    CEYX_HAS_HEIF_STILL_DECODE=${CEYX_HEIF_ENCODE_TU})
-
 # NOTE (deviation from plan Step 6): the plan adds src/webp_codec.cpp and
-# src/ffi/still_ffi_api.cpp via target_sources() here. cmake/pipeline.cmake:90
-# already collects them with file(GLOB_RECURSE "${SRC_DIR}/*.cpp"), so an
-# explicit target_sources() would compile both TUs twice and fail the dylib
-# link with duplicate symbols. Nothing to add.
+# src/ffi/still_ffi_api.cpp via target_sources() here. cmake/pipeline.cmake's
+# file(GLOB_RECURSE NATIVE_SOURCES "${SRC_DIR}/*.cpp") already collects them,
+# so an explicit target_sources() would compile both TUs twice and fail the
+# dylib link with duplicate symbols. Nothing to add.
 
 endif() # NOT DNG_HOST_GENERATORS_ONLY
