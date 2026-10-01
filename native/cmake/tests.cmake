@@ -235,17 +235,11 @@ if(ANDROID AND DNG_CROSS_BUILD)
         dng_decoder_native
         ${JPEG_LIBRARIES}
         ${LOG_LIBRARY})
-    # host_arm() and Y1's golden-literal SCOPING both key off this macro
-    # (test_stage4_yuv420_output.cpp:107 and :361). Without it the on-device
-    # artifact self-labels "METAL-nonsplit" and ASSERTS the Metal goldens,
-    # which turns the intended cross-backend REPORT into a FAIL and makes the
-    # artifact misdescribe the machine that produced it. ffi.cmake:82 sets the
-    # same macro on dng_decoder_native; this keeps the test binary's view of
-    # the build configuration identical to the library's.
-    if(DNG_STAGE4_SPLIT_KERNEL)
-        target_compile_definitions(test_stage4_yuv420_output_android PRIVATE
-            DNG_STAGE4_SPLIT_KERNEL=1)
-    endif()
+    # host_arm() and Y1's golden-literal SCOPING both key off
+    # DNG_STAGE4_SPLIT_KERNEL (test_stage4_yuv420_output.cpp). The macro is
+    # defined for every target by cmake/halide_aot.cmake from the same variable
+    # that selects the library's Stage4 archives, so this binary's view of the
+    # build configuration is identical to dng_decoder_native's.
     add_dependencies(test_stage4_yuv420_output_android dng_decoder_native)
 
     # ------------------------------------------------------------------------

@@ -39,8 +39,8 @@ else()
         # at runtime, so no Vulkan SDK is needed at build time. Must sit AFTER the
         # ANDROID arm — Android also matches UNIX AND NOT APPLE — so this branch is
         # Linux-desktop only. Selects the same "vulkan" backend as Android/Windows,
-        # so DNG_STAGE4_SPLIT_KERNEL turns ON automatically (matched in the C++ host
-        # bridge, dng_render_halide.cpp).
+        # so DNG_STAGE4_SPLIT_KERNEL turns ON automatically (defined for every TU
+        # below, after the AOT_TARGET selection).
         #
         # PORTABLE-BASELINE (2026-09-08): `host` is the second host-derived
         # codegen site in this build (the first is RawSpeed3's -march=native;
@@ -101,6 +101,20 @@ else()
     set(DNG_STAGE4_SPLIT_KERNEL OFF)
 endif()
 message(STATUS "Halide AOT lib extension: ${DNG_AOT_LIB_EXT}; Stage4 split kernel: ${DNG_STAGE4_SPLIT_KERNEL}")
+
+# Single source of truth for the Stage4 kernel-variant macro (2026-10-02):
+# every native TU (the library and every test target) sees
+# DNG_STAGE4_SPLIT_KERNEL=1 exactly when this variable is ON -- the same
+# variable that selects the linked Stage4 archives in cmake/ffi.cmake and
+# cmake/tests.cmake. C++ must not re-derive it from platform macros.
+if(DNG_FORCE_VULKAN AND NOT DNG_STAGE4_SPLIT_KERNEL)
+    message(FATAL_ERROR
+        "DNG_FORCE_VULKAN requires a Vulkan AOT target: configure with "
+        "-DDNG_AOT_TARGET_OVERRIDE=<...vulkan...> (current AOT_TARGET=${AOT_TARGET})")
+endif()
+if(DNG_STAGE4_SPLIT_KERNEL)
+    add_compile_definitions(DNG_STAGE4_SPLIT_KERNEL=1)
+endif()
 
 # Stage4 render uses same base target with -no_runtime (fixes hardcoded Metal bug)
 # Route A adoption (P16, 2026-06-12): the macOS Metal production Stage4 render is

@@ -93,7 +93,10 @@ if(DNG_STAGE4_SPLIT_KERNEL)
     target_link_libraries(dng_decoder_native
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
+    # Explicit on the library: dng_decoder_native is created in pipeline.cmake,
+    # before halide_aot.cmake's add_compile_definitions() runs.
     target_compile_definitions(dng_decoder_native PRIVATE
+        DNG_STAGE4_SPLIT_KERNEL=1
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()
 if(APPLE)

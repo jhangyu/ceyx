@@ -15,19 +15,14 @@
 #include <vector>
 
 // W7b: which Stage4 AOT kernel variant this host bridge talks to. The 3-channel
-// split kernel (dng_render_stage4_split) exists to dodge the Halide v21
-// SPIR-V Tuple R==G bug, so every Vulkan target needs it — Android and Windows
-// today. Mirrors CMake's DNG_STAGE4_SPLIT_KERNEL option (CMakeLists.txt:460).
+// split kernel (dng_render_stage4_split) exists to dodge the Halide v21 SPIR-V
+// Tuple R==G bug, so every Vulkan AOT target needs it. DNG_STAGE4_SPLIT_KERNEL
+// is defined in exactly one place -- cmake/halide_aot.cmake, from
+// AOT_TARGET MATCHES "vulkan" -- the same CMake variable that selects the
+// linked Stage4 archives (cmake/ffi.cmake). Do not re-derive it here.
 // Guards that are about the *kernel variant* (buffer shapes, RGBA scratch, D2H,
 // call sites) key off this macro; guards that are genuinely platform-specific
 // (arm_neon.h, mmap, Android-only prewarm) stay on __ANDROID__.
-// DNG_FORCE_VULKAN (F-R3-1 MoltenVK arbitration, default OFF): a Vulkan AOT
-// build on Apple ships the split Stage4 kernel (dng_render_stage4_split), so the
-// host bridge must talk to it — same as every other Vulkan target. OFF keeps
-// Apple on the non-split Metal kernel unchanged.
-#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
-#define DNG_STAGE4_SPLIT_KERNEL 1
-#endif
 
 #if defined(__ANDROID__)
 // W7-E S4 prewarm per-size cache + crash-attribution markers (Android-only).
