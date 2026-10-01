@@ -58,46 +58,15 @@ public:
         Expr bw = max(black.dim(0).extent(), 1);
         Expr bh = max(black.dim(1).extent(), 1);
 
-        // R1 fused into R2: one expression, no intermediate frame.
-        // The repeat-6 edge rule lands out-of-range samples on a site of the
-        // same X-Trans phase, so the colour read below stays consistent with
-        // the sample read here.
-        auto norm = [&](Expr sx, Expr sy) {
-            Expr mx = map_repeat_coord_n(sx, width, 6);
-            Expr my = map_repeat_coord_n(sy, height, 6);
-            Expr level = black(mx % bw, my % bh);
-            Expr v = (cast<float>(src(mx, my)) - level) * inv_range;
-            return clamp(v, 0.0f, 65535.0f);
-        };
-
-        // RawColorKey: Red=0, Green=1, Blue=2 (raw_pipeline_contract.h), which
-        // is also the dst channel order, so `key == c` is the own-channel test.
-        auto key_at = [&](Expr sx, Expr sy) {
-            Expr mx = map_repeat_coord_n(sx, width, 6);
-            Expr my = map_repeat_coord_n(sy, height, 6);
-            return cfa(mx % 6, my % 6);
-        };
-
-        Expr own = key_at(x, y);
-        Expr center = norm(x, y);
-
-        // 5x5 weighted mean of same-colour neighbours. Non-matching sites
-        // contribute a literal zero weight (rather than being dropped), so the
-        // summation order matches the scalar reference term for term.
-        Expr weighted_sum = 0.0f;
-        Expr weight_sum = 0.0f;
-        for (int dy = -2; dy <= 2; ++dy) {
-            for (int dx = -2; dx <= 2; ++dx) {
-                Expr k = key_at(x + dx, y + dy);
-                Expr w = select(k == c, 1.0f / (1.0f + float(dx * dx + dy * dy)), 0.0f);
-                weighted_sum += w * norm(x + dx, y + dy);
-                weight_sum += w;
-            }
-        }
-        Expr interpolated = weighted_sum / max(weight_sum, 1e-6f);
-
-        Expr value = select(own == c, center, interpolated);
-        dst(x, y, c) = cast<uint16_t>(clamp(floor(value + 0.5f), 0.0f, 65535.0f));
+        // R1 fused into R2: one expression, no intermediate frame. The body
+        // lives in dng_halide_utils.h (build_xtrans_demosaic_expr) so the fused
+        // X-Trans demosaic+render kernel runs the identical arithmetic.
+        dst(x, y, c) = build_xtrans_demosaic_expr(
+            x, y, c,
+            [&](Expr sx, Expr sy) { return src(sx, sy); },
+            [&](Expr i, Expr j) { return cfa(i, j); },
+            [&](Expr i, Expr j) { return black(i, j); },
+            width, height, bw, bh, inv_range);
     }
 
     void schedule() {

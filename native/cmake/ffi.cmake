@@ -37,6 +37,10 @@ if(NOT DNG_CROSS_BUILD)
     # links the other -- a half-linked format pair is exactly how "the symbol is
     # not in the shipped binary" happens.
     add_dependencies(dng_decoder_native raw_bayer_fused_render_yuv420_aot_target)
+    # X-Trans fusion (2026-10-02): the fused X-Trans pair, declared together so
+    # a build that links one links the other.
+    add_dependencies(dng_decoder_native raw_xtrans_fused_render_aot_target)
+    add_dependencies(dng_decoder_native raw_xtrans_fused_render_yuv420_aot_target)
     # P17 T11: the same reference TU also calls the raw_xtrans_demosaic AOT
     # entry.
     add_dependencies(dng_decoder_native raw_xtrans_demosaic_aot_target)
@@ -69,6 +73,8 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by

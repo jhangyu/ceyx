@@ -98,6 +98,14 @@ if(NOT DNG_CROSS_BUILD)
     target_include_directories(raw_bayer_fused_render_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
     target_link_libraries(raw_bayer_fused_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
+    # X-Trans fusion (2026-10-02): fused X-Trans demosaic + Stage-4 render
+    # generator, sibling of raw_bayer_fused_render_generator above (same
+    # colour body via dng_render_stage4_expr.h, same demosaic body as
+    # raw_xtrans_demosaic via dng_halide_utils.h).
+    add_executable(raw_xtrans_fused_render_generator ${GEN_DIR}/RawXTransFusedRenderGenerator.cpp)
+    target_include_directories(raw_xtrans_fused_render_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
+    target_link_libraries(raw_xtrans_fused_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+
     # P17 T11: fused normalize + X-Trans 6x6 demosaic generator for the
     # generic RAW route. Separate kernel from the Bayer one: the CFA is a
     # runtime 6x6 buffer, not a 2x2 phase pair.

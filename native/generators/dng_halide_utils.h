@@ -168,6 +168,67 @@ inline Halide::Expr build_demosaic_expr(
     return Halide::select(c == 0, r, c == 1, g, b);
 }
 
+// X-Trans 6x6 demosaic, MOVED here verbatim from RawXTransDemosaicGenerator.cpp
+// (X-Trans fusion, 2026-10-02) so the two-stage kernel and the fused
+// demosaic+render kernel run ONE body. The extraction is proven inert by the
+// SHA-256 of raw_xtrans_demosaic.a before == after (same method as T20's
+// dng_render_stage4_expr.h extraction).
+//
+// Returns the u16-ROUNDED value on purpose: the fused render's Stage-4 input is
+// then bit-identical to the two-stage Stage-3 intermediate by construction.
+// Normalize stays an unquantized float feeding the float mean -- do NOT switch
+// to the Bayer kernel's quantized normalized Func; that changes bytes.
+//
+// width/height are the FULL-plane extents: the repeat-6 wrap and the 6x6 phase
+// key are defined on the full plane, never on a crop. The repeat-6 edge rule
+// lands out-of-range samples on a site of the same X-Trans phase, so the colour
+// read stays consistent with the sample read.
+// RawColorKey: Red=0, Green=1, Blue=2, which is also the channel order, so
+// `key == c` is the own-channel test. Non-matching sites contribute a literal
+// zero weight (not dropped) so the summation order matches the scalar
+// reference term for term.
+inline Halide::Expr build_xtrans_demosaic_expr(
+    Halide::Expr x, Halide::Expr y, Halide::Expr c,
+    std::function<Halide::Expr(Halide::Expr, Halide::Expr)> source_at,
+    std::function<Halide::Expr(Halide::Expr, Halide::Expr)> cfa_at,
+    std::function<Halide::Expr(Halide::Expr, Halide::Expr)> black_at,
+    Halide::Expr width, Halide::Expr height,
+    Halide::Expr black_width, Halide::Expr black_height,
+    Halide::Expr inv_range)
+{
+    using Halide::Expr;
+    auto norm = [&](Expr sx, Expr sy) {
+        Expr mx = map_repeat_coord_n(sx, width, 6);
+        Expr my = map_repeat_coord_n(sy, height, 6);
+        Expr level = black_at(mx % black_width, my % black_height);
+        Expr v = (Halide::cast<float>(source_at(mx, my)) - level) * inv_range;
+        return Halide::clamp(v, 0.0f, 65535.0f);
+    };
+    auto key_at = [&](Expr sx, Expr sy) {
+        Expr mx = map_repeat_coord_n(sx, width, 6);
+        Expr my = map_repeat_coord_n(sy, height, 6);
+        return cfa_at(mx % 6, my % 6);
+    };
+
+    Expr own = key_at(x, y);
+    Expr center = norm(x, y);
+
+    Expr weighted_sum = 0.0f;
+    Expr weight_sum = 0.0f;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            Expr k = key_at(x + dx, y + dy);
+            Expr w = Halide::select(k == c, 1.0f / (1.0f + float(dx * dx + dy * dy)), 0.0f);
+            weighted_sum += w * norm(x + dx, y + dy);
+            weight_sum += w;
+        }
+    }
+    Expr interpolated = weighted_sum / Halide::max(weight_sum, 1e-6f);
+
+    Expr value = Halide::select(own == c, center, interpolated);
+    return Halide::cast<uint16_t>(Halide::clamp(Halide::floor(value + 0.5f), 0.0f, 65535.0f));
+}
+
 // Intermediate warp coordinate result.
 struct WarpCoords {
     Halide::Expr base_x, base_y;
