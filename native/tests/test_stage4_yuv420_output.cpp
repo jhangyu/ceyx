@@ -1883,6 +1883,112 @@ void run_y13() {
 }
 
 /* ====================================================================== */
+/* Y14 — LINEAR-RGB (X3F) CROSS-ARM AGREEMENT (Foveon fusion, 2026-10-02)  */
+/*                                                                        */
+/* Y7's design applied to the linear-RGB route: arm A = fused normalize+   */
+/* render yuv420 entry, arm B = raw_linear_rgb_normalize + two-stage      */
+/* Stage-4 yuv420, selected by DNG_RAW_FUSED_LINEAR_RGB_RENDER=0 on the    */
+/* same file in one process. Same pass bounds as Y7 (B0..B5'). The fused  */
+/* seam reproduces the two-stage arithmetic exactly, so Metal is expected  */
+/* to be byte-identical; byte_identical= is reported, not asserted, so the */
+/* Vulkan run reports any residue instead of hiding it behind a red.       */
+/* ====================================================================== */
+void run_y14() {
+    const char *path = "image_samples/raw_corpus/sigma_sd_quattro_h_23.x3f";
+    char detail[1024];
+
+    struct LinearRgbFusionOff {
+        LinearRgbFusionOff() { setenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER", "0", 1); }
+        ~LinearRgbFusionOff() { unsetenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER"); }
+    };
+
+    Yuv fused;
+    Yuv two_stage;
+    int32_t e_a = 0, e_b = 0;
+
+    const uint64_t c0 = raw_fused_linear_rgb_render_count();
+    const bool ok_a = decode_yuv420(path, &fused, &e_a);
+    const uint64_t c1 = raw_fused_linear_rgb_render_count();
+    bool ok_b = false;
+    uint64_t c2 = c1;
+    {
+        LinearRgbFusionOff off;
+        ok_b = decode_yuv420(path, &two_stage, &e_b);
+        c2 = raw_fused_linear_rgb_render_count();
+    }
+    if (!ok_a || !ok_b) {
+        snprintf(detail, sizeof(detail),
+                 "%s: decode failed armA_ok=%d err=%d armB_ok=%d err=%d", path,
+                 ok_a ? 1 : 0, e_a, ok_b ? 1 : 0, e_b);
+        verdict("Y14", "linearrgb-x3f", "A-fused-vs-B-two-stage", false, detail);
+        return;
+    }
+
+    const uint64_t fused_delta_a = c1 - c0;
+    const uint64_t fused_delta_b = c2 - c1;
+    const bool b0 = (fused_delta_a == 1u) && (fused_delta_b == 0u);
+
+    bool b1 = fused.w == two_stage.w && fused.h == two_stage.h &&
+              fused.bytes.size() == two_stage.bytes.size();
+    for (int p = 0; p < 3; ++p) {
+        b1 = b1 &&
+             fused.planes.plane_width[p] == two_stage.planes.plane_width[p] &&
+             fused.planes.plane_height[p] == two_stage.planes.plane_height[p] &&
+             fused.planes.plane_row_stride[p] ==
+                 two_stage.planes.plane_row_stride[p];
+    }
+
+    int32_t max_abs[3] = {0, 0, 0};
+    size_t diff_count[3] = {0, 0, 0};
+    size_t plane_bytes[3] = {0, 0, 0};
+    bool spans_ok = b1;
+    size_t offset = 0;
+    for (int p = 0; p < 3 && spans_ok; ++p) {
+        plane_bytes[p] = static_cast<size_t>(fused.planes.plane_width[p]) *
+                         static_cast<size_t>(fused.planes.plane_height[p]);
+        if (plane_bytes[p] == 0 || offset + plane_bytes[p] > fused.bytes.size()) {
+            spans_ok = false;
+            break;
+        }
+        for (size_t i = 0; i < plane_bytes[p]; ++i) {
+            const int32_t d = static_cast<int32_t>(fused.bytes[offset + i]) -
+                              static_cast<int32_t>(two_stage.bytes[offset + i]);
+            const int32_t a = d < 0 ? -d : d;
+            if (a > max_abs[p]) max_abs[p] = a;
+            if (a != 0) ++diff_count[p];
+        }
+        offset += plane_bytes[p];
+    }
+    double diff_fraction[3] = {0.0, 0.0, 0.0};
+    bool bounds_ok = spans_ok;
+    for (int p = 0; p < 3 && spans_ok; ++p) {
+        diff_fraction[p] = static_cast<double>(diff_count[p]) /
+                           static_cast<double>(plane_bytes[p]);
+        if (max_abs[p] > 1 || diff_fraction[p] > 0.01) bounds_ok = false;
+    }
+    const bool byte_identical =
+        spans_ok && diff_count[0] == 0 && diff_count[1] == 0 && diff_count[2] == 0;
+    const bool ok = b0 && b1 && bounds_ok;
+
+    snprintf(detail, sizeof(detail),
+             "%s %dx%d B0 fused_delta=[A:%llu expect 1, B:%llu expect 0]=%d "
+             "B1 sizes/descriptor=%d spans=%d max_abs=[Y:%d Cb:%d Cr:%d] bound=1 "
+             "diff_fraction=[Y:%.6f Cb:%.6f Cr:%.6f] bound=0.01 "
+             "byte_identical=%d fusedA_fnv1a64=%016" PRIx64
+             " twostageB_fnv1a64=%016" PRIx64
+             " prereg=tmp/verify/foveon-fused/prereg-f5.txt",
+             path, fused.w, fused.h,
+             static_cast<unsigned long long>(fused_delta_a),
+             static_cast<unsigned long long>(fused_delta_b), b0 ? 1 : 0,
+             b1 ? 1 : 0, spans_ok ? 1 : 0, max_abs[0], max_abs[1], max_abs[2],
+             diff_fraction[0], diff_fraction[1], diff_fraction[2],
+             byte_identical ? 1 : 0,
+             fnv1a64(fused.bytes.data(), fused.bytes.size()),
+             fnv1a64(two_stage.bytes.data(), two_stage.bytes.size()));
+    verdict("Y14", "linearrgb-x3f", "A-fused-vs-B-two-stage", ok, detail);
+}
+
+/* ====================================================================== */
 /* Y8 — ROUTE COVERAGE                                                    */
 /*                                                                        */
 /* A partial format thread is indistinguishable from a working one on any  */
@@ -2304,6 +2410,7 @@ int main(int argc, char **argv) {
     if (want("y11")) run_y11();
     if (want("y7")) run_y7();
     if (want("y13")) run_y13();
+    if (want("y14")) run_y14();
     if (want("y8")) run_y8();
     if (want("y9")) run_y9();
     /* Y12 runs LAST among the assertions: it drives the fusion route flag,

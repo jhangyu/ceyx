@@ -112,9 +112,10 @@ ArenaCounters read_counters() {
 // X-Trans fusion (2026-10-02, contract R-3): every fused route counts as
 // fused. The selector is the SUM of the per-format fused counters, so the
 // binding expectation 2*fused + 3*two_stage stays exact as formats fuse. The
-// Foveon squad appends raw_fused_linear_rgb_render_count() here when it lands.
+// Foveon linear-RGB fused counter (2026-10-02) is the third term.
 uint64_t total_fused_count() {
-  return raw_fused_bayer_render_count() + raw_fused_xtrans_render_count();
+  return raw_fused_bayer_render_count() + raw_fused_xtrans_render_count() +
+         raw_fused_linear_rgb_render_count();
 }
 
 // FNV-1a 64. Chosen over a checksum because a transposition of two decodes'
