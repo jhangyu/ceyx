@@ -11,17 +11,16 @@
 #include <vector>
 
 #include "raw_auto_exposure.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RawAutoExposure";
 
 void report(const char* name, bool ok, const char* detail) {
-    std::printf("[RawAutoExposure] %s -> %s (%s)\n", name, ok ? "PASS" : "FAIL", detail);
-    if (!ok) ++failures;
+    test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 // RGGB 2x2 colour-class table: R=0, G=1, G=1, B=2 (folds G/G2 into one class,
 // per Revision 2.1 -- the estimator classifies by colour, not CFA position).
@@ -774,10 +773,5 @@ int main() {
     // acceptance criterion rather than leaving it implicit.
     report("all-returns-finite-by-construction", true, "see per-case checks above");
 
-    if (failures != 0) {
-        std::printf("[RawAutoExposure] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawAutoExposure] ALL PASS\n");
-    return 0;
+    return test_report::finish(kReportPrefix);
 }
