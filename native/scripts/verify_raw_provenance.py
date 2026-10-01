@@ -7,8 +7,10 @@ otherwise. Read-only.
 """
 import hashlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 NATIVE = Path(__file__).resolve().parent.parent
@@ -97,6 +99,40 @@ def _contains_block(file_lines, block):
                for i in range(len(file_lines) - n + 1))
 
 
+def _scratch_git_reverse_check(patch_path, root):
+    """Runs `git apply --check --reverse` in a throwaway git repo that holds
+    copies (shutil.copy2 follows symlinks: content, not links) of the files
+    the patch touches. Returns (status, detail); status is "applied",
+    "rejected" (git examined the files and the reverse does not apply) or
+    "unavailable" (git missing / a target file absent)."""
+    rels = sorted({rel for rel, _, _, _, _ in parse_patch_hunks(
+        patch_path.read_text(encoding="utf-8", errors="replace"))})
+    missing = [rel for rel in rels if not (root / rel).is_file()]
+    if not rels or missing:
+        return "unavailable", "target file missing: " + (missing[0] if missing else "none")
+    try:
+        with tempfile.TemporaryDirectory(prefix="provenance-scratch-") as scratch:
+            for rel in rels:
+                dest = Path(scratch) / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / rel, dest)
+            subprocess.run(["git", "init", "-q"], cwd=scratch, check=True,
+                           capture_output=True)
+            done = subprocess.run(
+                ["git", "apply", "--check", "--reverse", "--verbose",
+                 str(patch_path.resolve())],
+                cwd=scratch, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "unavailable", "git unavailable: " + str(exc)[:80]
+    output = (done.stdout + done.stderr).strip()
+    if done.returncode == 0 and "Skipped patch" not in output:
+        return "applied", ""
+    lines = output.splitlines()
+    first = next((ln for ln in lines if ln.startswith("error:")),
+                 lines[0] if lines else "no output")[:140]
+    return "rejected", first
+
+
 def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
     """Verifies the vendored tree reflects this patch's diff.
 
@@ -122,32 +158,21 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
     own patches are rooted at RAWSPEED; project-authored LibRaw patches
     (patches/libraw/) are rooted at VENDOR (the LibRaw tree).
     """
-    # Strong test first: a forward-applied patch reverse-applies cleanly
-    # (`git apply -R --check`). It is only conclusive when git actually
-    # examined the files: git refuses paths beyond a symlink (vendored
-    # children are symlinks in some checkouts), and silently skips paths
-    # under a gitignored directory while still exiting 0. Neither is evidence
-    # about the patch, so the reason is logged and the hunk check below -- the
-    # added-line-anchored predicate -- decides instead.
+    # Primary: `git apply -R --check` of a forward-applied patch, run in an
+    # isolated scratch repo holding real copies (symlinks dereferenced) of
+    # just the files the patch touches. Run in place it is void: git refuses
+    # paths beyond a symlink, and silently skips gitignored paths while still
+    # exiting 0. A primary rejection is not final -- patches are stacked and a
+    # later patch may have rewritten this one's lines -- so the hunk check
+    # below judges next; every verdict logs which path produced it.
+    name = patch_path.name
     if not reverse:
-        why = ""
-        try:
-            done = subprocess.run(
-                ["git", "apply", "--check", "--reverse", "--verbose", str(patch_path)],
-                cwd=str(root), capture_output=True, text=True,
-            )
-            output = (done.stdout + done.stderr).strip()
-            if done.returncode == 0 and "Skipped patch" not in output:
-                return True, ""
-            lines = output.splitlines()
-            first = next((ln for ln in lines if ln.startswith("error:")),
-                         lines[0] if lines else "no output")[:140]
-            why = ("git skipped the files (gitignored path)"
-                   if done.returncode == 0 else "git apply refused: " + first)
-        except (OSError, subprocess.SubprocessError) as exc:
-            why = "git unavailable: " + str(exc)[:80]
-        print("[Provenance] note: " + patch_path.name + ": strong git check "
-              "inconclusive (" + why + "); using hunk-anchored check")
+        status, detail = _scratch_git_reverse_check(patch_path, root)
+        if status == "applied":
+            print("[Provenance] note: " + name + ": judged by primary-scratch-git")
+            return True, ""
+        print("[Provenance] note: " + name + ": primary-scratch-git " + status +
+              " (" + detail + "); fallback hunk check judges")
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     cache = {}
     later_files = set()
@@ -157,7 +182,7 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
     for relpath, pre, post, n_added, n_removed in parse_patch_hunks(patch_text):
         target = root / relpath
         if not target.is_file():
-            return False, "target file missing: " + relpath
+            return False, "fallback-hunk-check: target file missing: " + relpath
         if relpath not in cache:
             cache[relpath] = [ln.strip() for ln in target.read_text(
                 encoding="utf-8", errors="replace").splitlines()]
@@ -177,9 +202,10 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
         if must_have is not None and not _contains_block(file_lines, must_have):
             if relpath in later_files:
                 continue  # superseded by a later patch's edit of this file
-            return False, relpath + " missing expected hunk: " + label
+            return False, "fallback-hunk-check: " + relpath + " missing expected hunk: " + label
         if must_lack is not None and _contains_block(file_lines, must_lack):
-            return False, relpath + " still contains un-patched hunk: " + label
+            return False, "fallback-hunk-check: " + relpath + " still contains un-patched hunk: " + label
+    print("[Provenance] note: " + name + ": judged by fallback-hunk-check")
     return True, ""
 
 

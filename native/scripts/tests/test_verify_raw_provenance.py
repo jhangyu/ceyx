@@ -93,3 +93,22 @@ def test_removed_line_starting_with_dashes_is_not_read_as_a_file_header():
     )
     hunks = list(vrp.parse_patch_hunks(text))
     assert [(h[0], h[3], h[4]) for h in hunks] == [("f.txt", 0, 1), ("g.txt", 1, 1)]
+
+
+def test_primary_scratch_git_judges_through_a_symlink_and_flags_unapplied(tmp_path, capsys):
+    """Real git, vendor file behind a symlink (git refuses that in place):
+    the scratch-repo primary check must still judge, both ways."""
+    real = tmp_path / "real"
+    real.mkdir()
+    root = tmp_path / "vendor"
+    root.mkdir()
+    (root / "f.cpp").symlink_to(real / "f.cpp")
+    patch = tmp_path / "x.patch"
+    patch.write_text(PATCH_ADD)
+    (real / "f.cpp").write_text("#include <a>\n#include <thread>\n}\n}\n")
+    assert vrp.check_patch_applied(patch, False, root=root) == (True, "")
+    assert "judged by primary-scratch-git" in capsys.readouterr().out
+    (real / "f.cpp").write_text("#include <a>\n}\n}\n")
+    ok, detail = vrp.check_patch_applied(patch, False, root=root)
+    assert not ok and "missing expected hunk" in detail
+    assert "primary-scratch-git rejected" in capsys.readouterr().out
