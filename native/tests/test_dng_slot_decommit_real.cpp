@@ -64,6 +64,7 @@
 #include "dng_pipeline_config.h"
 #include "dng_pipeline.h"  // the guard pair + committed-bytes disclosure
 #include "raw_ffi_api.h"   // the one native idle funnel
+#include "test_report.h"
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -191,14 +192,12 @@ bool residentControlCheck() {
 #endif
 }
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "DngSlotDecommitReal";
 
-void report(const char *name, bool ok, const char *detail) {
-  std::printf("[DngSlotDecommitReal] %s -> %s (%s)\n", name,
-              ok ? "PASS" : "FAIL", detail);
-  if (!ok) ++failures;
+void report(const char* name, bool ok, const char* detail) {
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 // MEASURED AND REPORTED, NOT FATAL. Used for exactly one thing: the two R3
 // readings, which are red on a CORRECTLY FUNCTIONING system (see the banner at
@@ -468,7 +467,5 @@ int main(int argc, char **argv) {
       "==================\n\n",
       (long long)released, arena_res_before);
 
-  std::printf("[DngSlotDecommitReal] TOTAL failures=%d\n", failures);
-  std::fflush(stdout);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }

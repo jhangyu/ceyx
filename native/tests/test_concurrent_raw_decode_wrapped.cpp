@@ -98,18 +98,16 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "ConcurrentRawDecodeWrapped";
 
 void report(const char* name, bool ok, const char* detail) {
-  std::printf("[ConcurrentRawDecodeWrapped] %s -> %s (%s)\n", name,
-              ok ? "PASS" : "FAIL", detail);
-  if (!ok) ++failures;
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 // FNV-1a 64, identical construction to test_concurrent_raw_decode.cpp and
 // test_zero_copy_capability_paths.cpp, so hashes are directly comparable
@@ -546,7 +544,5 @@ int main(int argc, char** argv) {
         "S1: nothing may be written into the caller's pages after the failing "
         "call returns -- the caller is free to release them at that instant");
 
-  std::printf("[ConcurrentRawDecodeWrapped] TOTAL failures=%d\n", failures);
-  std::fflush(stdout);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }
