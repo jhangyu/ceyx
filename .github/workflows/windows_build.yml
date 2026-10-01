@@ -238,6 +238,35 @@ jobs:
                  -name "libomp*" -print 2>/dev/null | head -n 50 || true
             echo "--- end survey ---"
           fi
+          # INVENTORY (2026-10-01, run 36899668620: the arm64 row found no
+          # release-redist libomp140.aarch64.dll, only a debug_nonredist one).
+          # Unconditional, both rows, observation only: EVERY libomp140.* under
+          # the Visual Studio trees and System32 with its size, then the
+          # active toolset's redist dir for this row's arch and the sibling
+          # toolset versions. Decides "absent from the image" (user ruling)
+          # vs "our lookup is wrong" without guessing. Output goes to a file
+          # first, then is printed; nothing here changes what gets staged.
+          echo "--- inventory: every libomp140.* (path + size) ---"
+          find "/c/Program Files/Microsoft Visual Studio" \
+               "/c/Program Files (x86)/Microsoft Visual Studio" \
+               "/c/Windows/System32" -maxdepth 12 \
+               -iname "libomp140.*" -exec ls -l {} + > omp_inventory.txt 2>/dev/null || true
+          cat omp_inventory.txt
+          echo "OMP_INVENTORY_COUNT=$(grep -c . omp_inventory.txt || true)"
+          case "${{ matrix.arch_tag }}" in
+            arm64) REDIST_ARCH=arm64 ;;
+            *) REDIST_ARCH=x64 ;;
+          esac
+          if [ -n "${VCToolsRedistDir:-}" ]; then
+            REDIST_DIR="$(cygpath -u "$VCToolsRedistDir")"
+            echo "--- VCToolsRedistDir=${VCToolsRedistDir} ; ls ${REDIST_DIR}${REDIST_ARCH}/ ---"
+            ls -la "${REDIST_DIR}${REDIST_ARCH}/" || true
+            echo "--- sibling toolset redist versions: ls ${REDIST_DIR}../ ---"
+            ls -la "${REDIST_DIR}../" || true
+          else
+            echo "--- VCToolsRedistDir is unset in this step's environment ---"
+          fi
+          echo "--- end inventory ---"
           echo "OMP_RUNTIME_DLL=${OMP_RUNTIME_DLL}"
           echo "OMP_RUNTIME_RC=${OMP_RUNTIME_RC}"
           echo "$OMP_RUNTIME_DLL" > omp_runtime_path.txt
