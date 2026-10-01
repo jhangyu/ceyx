@@ -40,6 +40,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import assert_exports as _assert_exports_script  # noqa: E402
+from deps.assertions import AssertionFailed, ndk_tool  # noqa: E402
 # Imported for its PE/ELF dump PARSER only (P-23). The gate itself is still
 # invoked as a child process below, exactly as linux/android already do --
 # this import exists so the transitive walk enumerates a module's imports
@@ -309,13 +310,12 @@ def import_closure(
             raise ValueError(
                 "import_closure(platform='android') requires artifact_dir and ndk_home"
             )
-        llvm_readelf = os.path.join(
-            ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-readelf"
-        )
-        if not os.access(llvm_readelf, os.X_OK):
+        try:
+            llvm_readelf = str(ndk_tool(ndk_home, "llvm-readelf"))
+        except AssertionFailed:
             report.error(
-                f"llvm-readelf not found at {llvm_readelf} — NDK layout may have changed "
-                "(r27c expected)."
+                f"llvm-readelf not found at {ndk_home}/toolchains/llvm/prebuilt/*/bin "
+                "— NDK layout may have changed (r27c expected)."
             )
             return 1
         matches = sorted(
@@ -722,12 +722,12 @@ def assert_exports(
             report.error(f"no libdng_decoder_native*.so found under {artifact_dir}/native")
             return 1
         so = matches[0]
-        llvm_nm = os.path.join(
-            ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-nm"
-        )
-        if not os.access(llvm_nm, os.X_OK):
+        try:
+            llvm_nm = str(ndk_tool(ndk_home, "llvm-nm"))
+        except AssertionFailed:
             report.error(
-                f"llvm-nm not found at {llvm_nm} — NDK layout may have changed (r27c expected)."
+                f"llvm-nm not found at {ndk_home}/toolchains/llvm/prebuilt/*/bin "
+                "— NDK layout may have changed (r27c expected)."
             )
             return 1
         result = run.run_to_file([llvm_nm, "-D", so], "android_so_dynsyms.txt")

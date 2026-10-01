@@ -104,6 +104,7 @@ import shutil
 from pathlib import Path
 
 from . import report, run, targets
+from deps.assertions import AssertionFailed, ndk_tool
 
 REQUIRED_SYMBOLS: dict = {
     "linux": ("dng_render_stage4_split",),
@@ -219,7 +220,15 @@ def _android_scan(binary_path: str, out_path: str, ndk_home: str) -> int:
     PORTED AS-IS (pre-existing, d33cc607 android_build.yml, "Assert
     fused-orientation kernel signals present in Android .so"). See
     test_android_symbol_check_is_substring_ported_as_is."""
-    llvm_nm = os.path.join(ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-nm")
+    try:
+        llvm_nm = str(ndk_tool(ndk_home, "llvm-nm"))
+    except AssertionFailed:
+        report.error(
+            f"llvm-nm not found at {ndk_home}/toolchains/llvm/prebuilt/*/bin "
+            "— NDK layout may have changed (r27c expected); capability is UNVERIFIED, "
+            "refusing to publish."
+        )
+        return 1
 
     nm_result = run.run_to_file([llvm_nm, "-D", binary_path], "android_so_dynsyms_orient.txt")
     strings_result = run.run_to_file(["strings", binary_path], out_path)
