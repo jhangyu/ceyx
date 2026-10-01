@@ -107,3 +107,69 @@ def code_lines(step: RunStep) -> list:
             continue
         out.append(t)
     return out
+
+
+_JOB_KEY_RE = re.compile(r"^  [A-Za-z0-9_-]+:\s*(#.*)?$")
+_JOB_CONTAINER_RE = re.compile(r"^    container:")
+_SHELL_KEY_RE = re.compile(r"^shell:\s*(.+)$")
+
+
+@dataclass(frozen=True)
+class StepShell:
+    explicit: "str | None"  # unquoted `shell:` value; None when the step is keyless
+    in_container_job: bool  # the enclosing job declares `container:`
+
+
+def step_shells(text: str) -> dict:
+    """Maps each `run:` key's 1-based line -> StepShell, by line scan (no
+    YAML). A job is a 2-space key under top-level `jobs:`; its `container:`
+    is a 4-space key that precedes `steps:` in every workflow here; a step's
+    `shell:` precedes its `run:`; no workflow uses a `defaults:` block."""
+    out = {}
+    in_jobs = False
+    in_container = False
+    explicit = None
+    for i, raw in enumerate(text.splitlines()):
+        if raw and not raw.startswith((" ", "#")):
+            in_jobs = raw.startswith("jobs:")
+            continue
+        if in_jobs and _JOB_KEY_RE.match(raw):
+            in_container = False
+            explicit = None
+            continue
+        if in_jobs and _JOB_CONTAINER_RE.match(raw):
+            in_container = True
+            continue
+        stripped = raw.lstrip(" ")
+        if _STEP_NAME_RE.match(stripped):
+            explicit = None
+            continue
+        m_shell = _SHELL_KEY_RE.match(stripped)
+        if m_shell:
+            explicit = _unquote(m_shell.group(1))
+            continue
+        if _RUN_KEY_RE.match(stripped):
+            out[i + 1] = StepShell(explicit, in_container)
+    return out
+
+
+def effective_shell(step: StepShell) -> str:
+    """'sh' | 'bash' (errexit, NO pipefail) | 'bash-pipefail' | 'other'.
+
+    GitHub: keyless Linux/macOS step = `bash -e {0}`; keyless step in a Linux
+    `container:` job = `sh -e {0}` (dash -- observed, CI run 34706875811);
+    explicit `shell: bash` = `bash --noprofile --norc -eo pipefail {0}`.
+    ponytail: a keyless Windows step (real default pwsh) resolves 'bash' --
+    `runs-on` is usually a matrix expression a line scan cannot evaluate; the
+    error is a conservative false positive, never a silent pass.
+    """
+    if step.explicit is None:
+        return "sh" if step.in_container_job else "bash"
+    value = step.explicit.strip()
+    if value == "bash":
+        return "bash-pipefail"
+    if value.startswith("bash"):
+        return "bash-pipefail" if "pipefail" in value else "bash"
+    if value == "sh" or value.startswith("sh "):
+        return "sh"
+    return "other"
