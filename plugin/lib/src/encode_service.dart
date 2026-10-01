@@ -12,19 +12,6 @@ import 'encode_bindings.dart';
 import 'encode_bindings_v2.dart';
 import 'encode_options.dart';
 
-/*
----
-file_summary: "RGBA8 -> JPEG/WebP 編碼服務：off-UI-isolate FFI 封裝與記憶體管理"
-modules:
-  - name: "CeyxEncodeException"
-    description: "編碼錯誤定義，附原生錯誤名稱"
-    lines: "below"
-  - name: "CeyxEncodeService"
-    description: "encodeJpegNative / encodeWebpNative 高階入口，皆在 worker isolate 執行"
-    lines: "below"
----
-*/
-
 /// Error thrown when a native encode call fails. [errorCode] is one of
 /// [CeyxEncodeErrorCode]; [errorName] mirrors the native
 /// `ceyx_encode_error_name` spelling.

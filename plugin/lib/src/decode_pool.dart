@@ -14,19 +14,6 @@ import 'encode_bindings.dart';
 import 'encode_service.dart';
 import 'native_buffer_pool.dart';
 
-/*
----
-file_summary: "常駐 worker isolate pool：dylib 每 worker 只載入一次，取代每次操作 Isolate.run"
-modules:
-  - name: "Protocol"
-    description: "pool <-> worker 之間的訊息常數與 job 型別"
-  - name: "CeyxDecodePool"
-    description: "admission、coalescing、generation gating、crash respawn"
-  - name: "ceyxDecodeWorkerMain"
-    description: "正式 worker entry point：一次 initialize()，之後跑 job 迴圈"
----
-*/
-
 /// What a pool job asks a worker to do.
 ///
 /// Exactly two types, per the P2 design: `decode` replaces
