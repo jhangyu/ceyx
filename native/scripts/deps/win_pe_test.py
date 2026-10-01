@@ -35,6 +35,7 @@ from deps.win_pe import (  # noqa: E402
     assert_symbol_exported,
     count_exported_symbols,
     resolve_existing,
+    run_with_fallback,
     symbol_present,
     token_present_ci,
 )
@@ -202,6 +203,48 @@ class TestResolveExisting(unittest.TestCase):
             with self.assertRaises(PeInspectionError) as ctx:
                 resolve_existing(root, ["lib/de265.lib"], what="libde265 import library")
             self.assertIn("something_else.lib", str(ctx.exception))
+
+
+
+
+class RunWithFallbackTests(unittest.TestCase):
+    """Refactor T4: the one dumpbin -> LLVM-tool decision primitive."""
+
+    @staticmethod
+    def _runner(outcomes):
+        calls = []
+
+        def runner(argv):
+            calls.append(argv)
+            return outcomes[argv[0]]
+
+        return runner, calls
+
+    def test_primary_ok_never_runs_fallback(self) -> None:
+        runner, calls = self._runner({"a": (0, "A"), "b": (0, "B")})
+        attempts, text = run_with_fallback(["a", "-x"], ["b"], runner)
+        self.assertEqual(calls, [["a", "-x"]])
+        self.assertEqual(attempts, [(["a", "-x"], 0, "A")])
+        self.assertEqual(text, "A")
+
+    def test_primary_failure_runs_fallback(self) -> None:
+        runner, calls = self._runner({"a": (1, "A-err"), "b": (0, "B")})
+        attempts, text = run_with_fallback(["a"], ["b"], runner)
+        self.assertEqual(calls, [["a"], ["b"]])
+        self.assertEqual([rc for _argv, rc, _text in attempts], [1, 0])
+        self.assertEqual(text, "B")
+
+    def test_primary_not_runnable_runs_fallback(self) -> None:
+        runner, _calls = self._runner({"a": (None, "no such file"), "b": (0, "B")})
+        attempts, text = run_with_fallback(["a"], ["b"], runner)
+        self.assertEqual([rc for _argv, rc, _text in attempts], [None, 0])
+        self.assertEqual(text, "B")
+
+    def test_both_fail_returns_last_attempt_text(self) -> None:
+        runner, _calls = self._runner({"a": (1, "A-err"), "b": (2, "B-err")})
+        attempts, text = run_with_fallback(["a"], ["b"], runner)
+        self.assertEqual([rc for _argv, rc, _text in attempts], [1, 2])
+        self.assertEqual(text, "B-err")
 
 
 if __name__ == "__main__":

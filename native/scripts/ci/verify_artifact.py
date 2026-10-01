@@ -41,6 +41,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import assert_exports as _assert_exports_script  # noqa: E402
 from deps.assertions import AssertionFailed, ndk_tool  # noqa: E402
+from deps.win_pe import run_with_fallback  # noqa: E402
 # Imported for its PE/ELF dump PARSER only (P-23). The gate itself is still
 # invoked as a child process below, exactly as linux/android already do --
 # this import exists so the transitive walk enumerates a module's imports
@@ -383,7 +384,13 @@ def _pe_dump_imports(
     dumpbin = spec["dumpbin_tools"][0] if spec["dumpbin_tools"] else "dumpbin"
     objdump = spec["objdump_tools"][0] if spec["objdump_tools"] else "llvm-objdump"
 
-    rc = run.run_to_file([dumpbin, "-dependents", binary], dump_path).returncode
+    attempts, text = run_with_fallback(
+        [dumpbin, "-dependents", binary], [objdump, "-p", binary], run.capture
+    )
+    out = Path(dump_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    rc = attempts[0][1]
     report.marker(primary_marker, rc)
     if rc != 0:
         message = f"{dumpbin} -dependents{subject} failed (rc={rc}); falling back to {objdump}."
@@ -396,7 +403,7 @@ def _pe_dump_imports(
             report.plain(f"{prefix}notice: {message}")
         else:
             report.notice(message)
-        rc = run.run_to_file([objdump, "-p", binary], dump_path).returncode
+        rc = attempts[1][1]
         report.marker(fallback_marker, rc)
     return rc
 
@@ -688,15 +695,18 @@ def assert_exports(
     elif platform == "windows":
         so = _artifact_path(platform)
         report.plain("== AC-W4: exported FFI symbols ==")
-        result = run.run(["dumpbin", "-exports", so])
-        Path("dll_exports.txt").write_text(result.stdout + result.stderr)
-        rc = result.returncode
+        win = targets.spec("windows")
+        attempts, text = run_with_fallback(
+            [win["dumpbin_tools"][0], "-exports", so],
+            [win["nm_tools_fallback"][0], "--extern-only", "--defined-only", so],
+            run.capture,
+        )
+        Path("dll_exports.txt").write_text(text)
+        rc = attempts[0][1]
         report.marker("DUMPBIN_RC", rc)
         if rc != 0:
             report.notice(f"dumpbin unavailable or failed (rc={rc}); falling back to llvm-nm.")
-            result = run.run(["llvm-nm", "--extern-only", "--defined-only", so])
-            Path("dll_exports.txt").write_text(result.stdout + result.stderr)
-            rc = result.returncode
+            rc = attempts[1][1]
             report.marker("LLVM_NM_RC", rc)
         if rc != 0:
             report.error(
