@@ -73,10 +73,6 @@ if(ANDROID AND DNG_CROSS_BUILD)
         # exactly the reason the fused archive above is (ffi.cmake links it
         # into the shipping library the same way).
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET raw_bayer_fused_render_aot_target)
-        add_dependencies(test_decode_android ${DNG_FUSED_BAYER_AOT_TARGETS})
-        add_dependencies(test_decode_android dng_render_yuv420_aot_target)
-    endif()
     add_dependencies(test_decode_android test_android_vulkan_capability)
 
     # P14-W4-4 measurement: Android cross-build of the production C ABI harness.
@@ -125,10 +121,6 @@ if(ANDROID AND DNG_CROSS_BUILD)
         # exactly the reason the fused archive above is (ffi.cmake links it
         # into the shipping library the same way).
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET raw_bayer_fused_render_aot_target)
-        add_dependencies(dng_ffi_harness_android ${DNG_FUSED_BAYER_AOT_TARGETS})
-        add_dependencies(dng_ffi_harness_android dng_render_yuv420_aot_target)
-    endif()
 
     # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
     # PSNR gate (Stage3->Stage4 device-dirty handoff vs host-copy fallback), mirroring
@@ -174,10 +166,6 @@ if(ANDROID AND DNG_CROSS_BUILD)
         # exactly the reason the fused archive above is (ffi.cmake links it
         # into the shipping library the same way).
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET raw_bayer_fused_render_aot_target)
-        add_dependencies(test_device_handoff_android ${DNG_FUSED_BAYER_AOT_TARGETS})
-        add_dependencies(test_device_handoff_android dng_render_yuv420_aot_target)
-    endif()
 
     # T-V0 (2026-09-19, spec-cpu-levers.md section 3.3b): Android cross-build of
     # the generic-RAW Bayer kernel oracle. The L3 staged producer
