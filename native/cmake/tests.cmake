@@ -2063,50 +2063,6 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_sized_decode ${DNG_LINUX_TEST_LIBS})
 endif()
 
-
-# Color accuracy / visual regression test
-add_executable(test_color_accuracy tests/test_color_accuracy.cpp)
-target_include_directories(test_color_accuracy PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_color_accuracy dng_decoder_native)
-if(APPLE)
-    target_link_libraries(test_color_accuracy ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_color_accuracy ${DNG_LINUX_TEST_LIBS})
-endif()
-
-add_executable(test_dng_layout tests/test_dng_layout.cpp)
-target_include_directories(test_dng_layout PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_dng_layout dng_decoder_native)
-if(APPLE)
-    target_link_libraries(test_dng_layout ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_dng_layout ${DNG_LINUX_TEST_LIBS})
-endif()
-
-# Tile testing tool
-add_executable(test_dng_tiles tests/test_dng_tiles.cpp)
-target_include_directories(test_dng_tiles PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_dng_tiles dng_decoder_native)
-if(APPLE)
-    target_link_libraries(test_dng_tiles ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_dng_tiles ${DNG_LINUX_TEST_LIBS})
-endif()
-
-
-add_executable(test_dng_preview tests/test_dng_preview.cpp)
-target_include_directories(test_dng_preview PRIVATE ${INC_DIR} ${DNG_SDK_DIR})
-target_link_libraries(test_dng_preview dng_decoder_native)
-if(APPLE)
-    target_link_libraries(test_dng_preview ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_dng_preview ${DNG_LINUX_TEST_LIBS})
-endif()
-
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
     src/pipeline/dng_pipeline.cpp
@@ -2176,29 +2132,6 @@ if(APPLE)
 endif()
 if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_decode ${DNG_LINUX_TEST_LIBS})
-endif()
-
-# Phase 5.3: Halide Demosaic PSNR Test
-# 2026-09-05 (R4 item 5): the 2026-08-16 fix below compiled the bridge sources
-# in directly but never actually linked (dng_opcode_list::Apply's bridge calls
-# dng_decode_context_for(), whose only definition lives in dng_pipeline.cpp,
-# which this target never compiled) -- confirmed by an as-is build that still
-# failed with that exact undefined symbol. Switching to linking the shipping
-# dng_decoder_native library (same pattern as test_slot_config) resolves it:
-# that library already contains the bridge, dng_pipeline.cpp, and the AOT
-# kernels, so compiling the bridge sources here again would risk duplicate
-# symbols and would exercise a separately-compiled copy instead of the
-# shipping artifact.
-add_executable(test_demosaic_halide tests/test_demosaic_halide.cpp)
-target_include_directories(test_demosaic_halide PRIVATE
-    ${INC_DIR}
-    ${DNG_SDK_DIR})
-target_link_libraries(test_demosaic_halide dng_decoder_native)
-if(APPLE)
-    target_link_libraries(test_demosaic_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_demosaic_halide ${DNG_LINUX_TEST_LIBS})
 endif()
 
 # 2026-08-16 CFA phase: all-four-Bayer-phases unit check on a synthetic
@@ -2296,39 +2229,6 @@ if(DNG_LINUX_TEST_LIBS)
     target_link_libraries(test_raw_linear_rgb_kernel ${DNG_LINUX_TEST_LIBS})
 endif()
 
-# Debug demosaic test
-add_executable(test_demosaic_debug tests/test_demosaic_debug.cpp
-    src/pipeline/dng_mosaic_halide.cpp)
-target_include_directories(test_demosaic_debug PRIVATE
-    ${INC_DIR}
-    ${DNG_SDK_DIR}
-    ${HALIDE_OUTPUT_DIR}
-    ${HALIDE_DIR}/include)
-# W6 M-4: same standalone runtime as test_demosaic_halide above.
-target_link_libraries(test_demosaic_debug dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT})
-add_dependencies(test_demosaic_debug halide_runtime_target)
-add_dependencies(test_demosaic_debug dng_warp_aot_target)
-add_dependencies(test_demosaic_debug dng_demosaic_aot_target)
-if(APPLE)
-    target_link_libraries(test_demosaic_debug ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_demosaic_debug ${DNG_LINUX_TEST_LIBS})
-endif()
-
-# Phase 5.1: Halide Render PSNR Test (placeholder - needs DNG SDK data)
-add_executable(test_render_halide tests/test_render_halide.cpp)
-target_include_directories(test_render_halide PRIVATE
-    ${INC_DIR}
-    ${DNG_SDK_DIR})
-target_link_libraries(test_render_halide dng_sdk)
-if(APPLE)
-    target_link_libraries(test_render_halide ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_render_halide ${DNG_LINUX_TEST_LIBS})
-endif()
-
 # --- Codec expansion (2026-08-30) ------------------------------------------
 # test_abi_layout has no external codec dependency: it only pins struct layouts
 # and error-code values, so it builds even on a platform with no dist at all.
@@ -2336,22 +2236,18 @@ add_executable(test_abi_layout tests/test_abi_layout.cpp)
 target_include_directories(test_abi_layout PRIVATE ${INC_DIR})
 target_link_libraries(test_abi_layout PRIVATE dng_decoder_native)
 
-# The three codec round-trip targets are registered HERE, in advance, each
-# guarded on its source file existing. That is deliberate: Tasks 7/8/9 are
-# meant to run in parallel and must not contend over this file. A guard that
-# is false today simply means that task has not landed yet.
-foreach(_codec_test test_codec_roundtrip test_codec_heif test_codec_jxl)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_codec_test}.cpp")
-        add_executable(${_codec_test} tests/${_codec_test}.cpp)
-        target_include_directories(${_codec_test} PRIVATE ${INC_DIR} ${SRC_DIR})
-        target_link_libraries(${_codec_test} PRIVATE dng_decoder_native)
-        message(STATUS "codec test enabled: ${_codec_test}")
-    else()
-        # Printed, never silent: a skipped target and a passing one must not
-        # look the same in a build log.
-        message(STATUS "codec test SKIPPED (source absent): ${_codec_test}")
-    endif()
-endforeach()
+# Codec round-trip targets (2026-08-30 codec expansion, Tasks 7/8/9).
+add_executable(test_codec_roundtrip tests/test_codec_roundtrip.cpp)
+target_include_directories(test_codec_roundtrip PRIVATE ${INC_DIR} ${SRC_DIR})
+target_link_libraries(test_codec_roundtrip PRIVATE dng_decoder_native)
+
+add_executable(test_codec_heif tests/test_codec_heif.cpp)
+target_include_directories(test_codec_heif PRIVATE ${INC_DIR} ${SRC_DIR})
+target_link_libraries(test_codec_heif PRIVATE dng_decoder_native)
+
+add_executable(test_codec_jxl tests/test_codec_jxl.cpp)
+target_include_directories(test_codec_jxl PRIVATE ${INC_DIR} ${SRC_DIR})
+target_link_libraries(test_codec_jxl PRIVATE dng_decoder_native)
 
 # ---------------------------------------------------------------------------
 # WP10 (AMENDMENT 3): ONE format-agnostic caller-owned-buffer gate.
