@@ -10,14 +10,15 @@
 
 #include "raw_contract_validate.h"
 #include "raw_pipeline_contract.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RawLayout";
 
 void report(const char* name, bool ok, const char* detail) {
-    std::printf("[RawLayout] %s %s -> %s\n", name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    test_report::report(kReportPrefix, name, ok, detail);
 }
 
 // --- pattern builders -------------------------------------------------------
@@ -497,10 +498,5 @@ int main() {
         report("contract_line_valid_input", rc == kRawSuccess, "printed");
     }
 
-    if (failures != 0) {
-        std::printf("[RawLayout] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawLayout] ALL PASS\n");
-    return 0;
+    return test_report::finish(kReportPrefix);
 }

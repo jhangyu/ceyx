@@ -42,6 +42,7 @@
 #include "HalideBuffer.h"
 #include "dng_demosaic_bilinear.h"
 #include "dng_metal_api_gate.h"
+#include "test_report.h"
 
 // LINK STUB, declared deliberately rather than discovered at signoff.
 // dng_metal_context.cpp calls dng_decode_slot_count_relaxed() (item 1, landed at
@@ -76,8 +77,9 @@ int launch_once() {
 
 int main() {
 #if !defined(__APPLE__) || defined(DNG_FORCE_VULKAN)
-    std::printf("SKIP: Metal-only test\n");
-    return 0;
+    // Whole-harness skip: nothing executed -> exit 2 (incomplete), never 0.
+    test_report::reportSkip("MetalApiGate", "metal-api-gate", "non-apple-or-force-vulkan-build");
+    return test_report::finish("MetalApiGate");
 #else
     // Marker check first: prove this binary contains the code under test.
     std::printf("marker=%s\n", ceyx_metal_api_gate_v1());

@@ -163,6 +163,11 @@ def main():
 
     check_categories(samples, failures)
 
+    if present == 0:
+        # Mirrors test_libraw_frontend's checked==0 rule: a corpus check that
+        # hashed nothing verified nothing, so it may not report ALL PASS.
+        failures.append("no corpus file present (present=0)")
+
     if failures:
         for f in failures:
             print("[Corpus] FAIL " + f)

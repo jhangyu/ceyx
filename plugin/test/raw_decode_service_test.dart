@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ceyx/src/dng_decoder_service.dart';
 import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:ceyx/src/raw_error_codes.dart';
+import 'support/native_fixtures.dart';
 
 /// Service-layer contract for the generic RAW route (Phase 18 spec §3.2, §4).
 ///
@@ -15,16 +16,12 @@ import 'package:ceyx/src/raw_error_codes.dart';
 ///
 /// flutter test runs with cwd == package root (plugin/).
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
   final rafPath = File(
     '../image_samples/raw_corpus/fuji_xt3.raf',
   ).absolute.path;
-  final arwPath = File('../image_samples/raw_sample.arw').absolute.path;
-  final dngPath = File(
-    '../image_samples/lossless_dng_sample.dng',
-  ).absolute.path;
+  final arwPath = File(rawArwSamplePath).absolute.path;
+  final dngPath = File(losslessDngSamplePath).absolute.path;
 
   setUpAll(() {
     for (final p in <String>[dylibPath, rafPath, arwPath, dngPath]) {

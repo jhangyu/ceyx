@@ -26,14 +26,17 @@
 #include "ceyx_yuv420_oracle.h"
 #include "dng_ffi_api.h"
 #include "raw_ffi_api.h"
+#include "test_report.h"
 
 namespace {
 
-int g_failures = 0;
-
+// Line format kept as-is (no parser reads it; verify_yuv420_encode.py reads the
+// dumped files). Counting goes through test_report.h so the run ends with the
+// shared summary line and exit-code rule.
 void Check(bool ok, const char *name, const char *detail = "") {
   std::printf("[encode] %s %s %s\n", ok ? "PASS" : "FAIL", name, detail);
-  if (!ok) ++g_failures;
+  ++test_report::executed;
+  if (!ok) ++test_report::failures;
 }
 
 // Deterministic gradient with a varying alpha, so a channel-order or stride
@@ -417,9 +420,8 @@ int main(int argc, char **argv) {
       dng_free_result(dr);
     }
   } else {
-    std::printf("[encode] SKIP real_frame_yuv420 (no RAW path in argv[1])\n");
+    test_report::reportSkip("encode", "real_frame_yuv420", "no-raw-path");
   }
 
-  std::printf("[encode] failures=%d\n", g_failures);
-  return g_failures == 0 ? 0 : 1;
+  return test_report::finish("encode");
 }

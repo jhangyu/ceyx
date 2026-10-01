@@ -29,21 +29,8 @@
 #   width / height / planes / pixel_size / layout / buffer_size(×2)
 #
 # functions:
-#   - name: "_contract"
-#     description: "輸出 [Contract] PASS/FAIL，FAIL 時設定全域旗標"
-#     lines: "130-142"
-#   - name: "abort_if_contract_failed"
-#     description: "有任何合約 FAIL 時 exit(2)"
-#     lines: "143-148"
-#   - name: "parse_dims_from_path"
-#     description: "從檔名 WxH_Pp 模式解析 (width, height, planes)"
-#     lines: "156-163"
-#   - name: "infer_pixel_size"
-#     description: "由實際檔案大小推算 pixel_size（1 或 2）"
-#     lines: "164-172"
-#   - name: "run_raw_contracts"
-#     description: "執行 7 項合約（width/height/planes/pixel_size/layout/buffer_size×2）"
-#     lines: "209-273"
+#   - name: "raw_contract.*"
+#     description: "合約檢查與檔名解析共用模組（native/tests/raw_contract.py）"
 #   - name: "compute_psnr_per_channel_numpy"
 #     description: "per-channel PSNR + MAE + maxAbs 座標（需 numpy）"
 #     lines: "274-346"
@@ -112,62 +99,16 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+import raw_contract
+from raw_contract import (
+    PIXEL_SIZE_TO_DTYPE,
+    PSNR_MAX_VAL,
+    contract as _contract,
+    infer_pixel_size,
+    parse_dims_from_path,
+)
 
-# ---------------------------------------------------------------------------
-# 常數
-# ---------------------------------------------------------------------------
-
-PIXEL_SIZE_TO_DTYPE = {1: "uint8", 2: "uint16"}
-PSNR_MAX_VAL = {1: 255.0, 2: 65535.0}
-
-# ---------------------------------------------------------------------------
-# 合約檢查輸出（per rule.md Appendix C）
-# ---------------------------------------------------------------------------
-
-_contract_failed = False
-
-
-def _contract(label: str, passed: bool, detail: str = "") -> bool:
-    """輸出 [Contract] PASS/FAIL，並在 FAIL 時設定全域旗標。"""
-    global _contract_failed
-    status = "PASS" if passed else "FAIL"
-    msg = f"[Contract] {label}: {status}"
-    if detail:
-        msg += f"  ({detail})"
-    print(msg)
-    if not passed:
-        _contract_failed = True
-    return passed
-
-
-def abort_if_contract_failed() -> None:
-    if _contract_failed:
-        print("\n[Contract] 合約檢查未通過，中止 PSNR 計算。")
-        sys.exit(2)
-
-
-# ---------------------------------------------------------------------------
-# 檔名自動解析
-# ---------------------------------------------------------------------------
-
-_FILENAME_DIM_RE = re.compile(r"(\d+)x(\d+)_(\d+)p")
-
-
-def parse_dims_from_path(path: Path) -> Optional[Tuple[int, int, int]]:
-    """從檔名解析 (width, height, planes)，例如 6048x4024_3p → (6048, 4024, 3)。"""
-    m = _FILENAME_DIM_RE.search(path.name)
-    if m:
-        return int(m.group(1)), int(m.group(2)), int(m.group(3))
-    return None
-
-
-def infer_pixel_size(path: Path, width: int, height: int, planes: int) -> Optional[int]:
-    """根據實際檔案大小推算 pixel_size（1 或 2）。"""
-    actual = path.stat().st_size
-    for bps in (1, 2):
-        if actual == width * height * planes * bps:
-            return bps
-    return None
+PSNR_ABORT_MESSAGE = "[Contract] 合約檢查未通過，中止 PSNR 計算。"
 
 
 # ---------------------------------------------------------------------------
@@ -200,71 +141,6 @@ def load_jpeg(path: Path) -> Tuple[int, int, bytes]:
     img = Image.open(path).convert("RGB")
     w, h = img.size
     return w, h, img.tobytes()
-
-
-# ---------------------------------------------------------------------------
-# 合約檢查：headless raw 模式
-# ---------------------------------------------------------------------------
-
-def run_raw_contracts(
-    path_a: Path,
-    path_b: Path,
-    width_a: int,
-    height_a: int,
-    planes_a: int,
-    pixel_size_a: int,
-    layout_a: str,
-    width_b: int,
-    height_b: int,
-    planes_b: int,
-    pixel_size_b: int,
-    layout_b: str,
-) -> None:
-    """執行所有合約檢查，任何 FAIL 立即標記；最後統一中止。"""
-    print("\n--- Stage Contract Checks ---")
-
-    # 1. width
-    _contract("width",
-              width_a == width_b,
-              f"file_a={width_a} vs file_b={width_b}")
-
-    # 2. height
-    _contract("height",
-              height_a == height_b,
-              f"file_a={height_a} vs file_b={height_b}")
-
-    # 3. planes
-    _contract("planes",
-              planes_a == planes_b,
-              f"file_a={planes_a} vs file_b={planes_b}")
-
-    # 4. pixel_size
-    _contract("pixel_size",
-              pixel_size_a == pixel_size_b,
-              f"file_a={pixel_size_a} ({PIXEL_SIZE_TO_DTYPE.get(pixel_size_a,'?')}) "
-              f"vs file_b={pixel_size_b} ({PIXEL_SIZE_TO_DTYPE.get(pixel_size_b,'?')})")
-
-    # 5. layout
-    _contract("layout",
-              layout_a == layout_b,
-              f"file_a={layout_a} vs file_b={layout_b}")
-
-    # 6. buffer_size（以 file_a 的 w/h/p/bps 為期望值）
-    expected_bytes = width_a * height_a * planes_a * pixel_size_a
-    actual_a = path_a.stat().st_size
-    actual_b = path_b.stat().st_size
-
-    _contract("buffer_size file_a",
-              actual_a == expected_bytes,
-              f"actual={actual_a} expected={expected_bytes} "
-              f"({width_a}×{height_a}×{planes_a}×{pixel_size_a})")
-
-    _contract("buffer_size file_b",
-              actual_b == expected_bytes,
-              f"actual={actual_b} expected={expected_bytes} "
-              f"({width_a}×{height_a}×{planes_a}×{pixel_size_a})")
-
-    abort_if_contract_failed()
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +280,7 @@ def run_jpeg_mode(path_a: Path, path_b: Path, threshold: float = 36.0) -> None:
     _contract("pixel_size", True, "file_a=uint8 file_b=uint8 (jpeg decoded as uint8)")
     _contract("buffer_size file_a", len(raw_a) == wa * ha * 3, f"actual={len(raw_a)} expected={wa*ha*3}")
     _contract("buffer_size file_b", len(raw_b) == wb * hb * 3, f"actual={len(raw_b)} expected={wb*hb*3}")
-    abort_if_contract_failed()
+    raw_contract.abort_if_contract_failed(PSNR_ABORT_MESSAGE)
 
     try:
         compute_psnr_per_channel_numpy(raw_a, raw_b, wa, ha, 3, 1, "interleaved", threshold=threshold)
@@ -477,10 +353,10 @@ def run_raw_mode(args: argparse.Namespace, threshold: float = 36.0) -> None:
     layout_b = args.layout
 
     # 合約檢查
-    run_raw_contracts(
+    raw_contract.run_pair_contracts(
         path_a, path_b,
-        w_a, h_a, p_a, bps_a, layout_a,
-        w_b, h_b, p_b, bps_b, layout_b,
+        (w_a, h_a, p_a, bps_a, layout_a), (w_b, h_b, p_b, bps_b, layout_b),
+        "file_a", "file_b", "×", PSNR_ABORT_MESSAGE,
     )
 
     # 載入資料（合約已通過）
@@ -565,7 +441,7 @@ def main() -> int:
         run_raw_mode(args, threshold=threshold)
 
     print()
-    return 0 if not _contract_failed else 2
+    return 0 if not raw_contract.contract_failed() else 2
 
 
 if __name__ == "__main__":

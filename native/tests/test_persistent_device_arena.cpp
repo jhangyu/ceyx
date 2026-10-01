@@ -77,18 +77,16 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "PersistentDeviceArena";
 
 void report(const char* name, bool ok, const char* detail) {
-  std::printf("[PersistentDeviceArena] %s -> %s (%s)\n", name,
-              ok ? "PASS" : "FAIL", detail);
-  if (!ok) ++failures;
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 struct ArenaCounters {
   uint64_t allocation_count = 0;
@@ -366,6 +364,5 @@ int main(int argc, char** argv) {
         "plan §9.1 condition 4 — three regions bound per decode, "
         "warmup + measured decodes total");
 
-  std::printf("[PersistentDeviceArena] TOTAL failures=%d\n", failures);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }

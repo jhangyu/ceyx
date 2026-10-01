@@ -18,17 +18,20 @@
 
 #include "raw_demosaic_reference.h"
 #include "raw_pipeline_contract.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RawXTransKernel";
 
 void report(const char* name, bool ok, const char* detail) {
     // The extra separator is emitted only for named cases, so the unnamed
     // per-shift case prints exactly "[RawXTransKernel] shift=... -> PASS".
     std::printf("[RawXTransKernel] %s%s%s -> %s\n", name,
                 (name && name[0]) ? " " : "", detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    ++test_report::executed;
+    if (!ok) ++test_report::failures;
 }
 
 constexpr uint32_t kW = 132;   // multiples of 6 plus a remainder, on purpose
@@ -244,10 +247,5 @@ int main() {
                "row_stride_bytes = width*2 + 64");
     }
 
-    if (failures != 0) {
-        std::printf("[RawXTransKernel] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawXTransKernel] ALL PASS\n");
-    return 0;
+    return test_report::finish(kReportPrefix);
 }

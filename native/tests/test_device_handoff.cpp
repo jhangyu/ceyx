@@ -49,6 +49,7 @@
 #include <unistd.h>
 
 #include "dng_pipeline.h"
+#include "test_report.h"
 
 using namespace std;
 
@@ -352,20 +353,20 @@ static bool testSample(
 static void printUsage(const char* prog) {
     cerr << "Usage: " << prog << " <lossless_dng> <lossy_dng>\n";
     cerr << "  Validates device-handoff path against host-copy fallback.\n";
-    cerr << "  Exit 0 = ALL PASS; Exit 1 = FAIL.\n";
+    cerr << "  Exit 0 = every executed case passed; 1 = a case failed; 2 = incomplete (usage error or nothing executed).\n";
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
+    // Both paths are mandatory: a missing lossy path used to print a synthetic
+    // 999 dB PASS. Every runner passes both (run_decode_matrix.py), so a
+    // missing argument is a usage error -> exit 2 (incomplete).
+    if (argc < 3) {
         printUsage(argv[0]);
-        return 1;
+        return 2;
     }
 
     const char* lossless = argv[1];
-    // Lossy argument is optional: on platforms without libjpeg (Android NDK
-    // builds where qDNGUseLibJPEG=0), lossy DNG decode is not supported so
-    // the lossy test is skipped regardless of whether the path is provided.
-    const char* lossy = (argc >= 3) ? argv[2] : nullptr;
+    const char* lossy = argv[2];
 
     // Force both handoff switches ON as default for the first run.
     // W5-4: C++ equivalent of "os.environ.setdefault(...)" — only set if not
@@ -375,62 +376,51 @@ int main(int argc, char** argv) {
 
     cout << "=== test_device_handoff ===\n";
     cout << "Lossless DNG: " << lossless << "\n";
-    cout << "Lossy DNG:    " << (lossy ? lossy : "(not provided)") << "\n";
+    cout << "Lossy DNG:    " << lossy << "\n";
 
     // Threshold: ≥99dB (Gotcha #44: same Halide AOT kernel, different src
     // residency; result must be bit-identical, but we allow 1dB slack for
     // any minor env-induced path variation).
     constexpr double kPsnrThreshold = 99.0;
 
-    bool allPassed = true;
-
     // Test 1: lossless — Stage3→Stage4 device handoff
     // M3 note: requireEngagement=false here. The defer_handoff marker is
     // emitted by the OpcodeList2 batched dispatch, which is the Stage2->Stage4
     // path; the lossless sample exercises Stage3->Stage4 and never reaches it.
     // Its engagement witness is the lossy sample below.
+    ++test_report::executed;
     if (!testSample("Lossless / Stage3-Stage4 handoff",
                     lossless,
                     "DNG_STAGE3_STAGE4_DEVICE_HANDOFF",
                     kPsnrThreshold,
                     /*requireEngagement=*/false)) {
-        allPassed = false;
+        ++test_report::failures;
     }
 
     // Test 2: lossy — Stage2→Stage4 device handoff
-    // Portability: Android NDK builds without libjpeg (qDNGUseLibJPEG=0) cannot
-    // decode lossy (JPEG-tiled) DNGs. Emit format-compatible synthetic PASS
-    // output so downstream parsers (run_decode_matrix.py) that expect exactly 2
-    // Contract/PSNR result pairs don't break. The device-handoff mechanism is
-    // compression-agnostic — lossless gate validates it; lossy would be identical.
+    // Android NDK builds without libjpeg (qDNGUseLibJPEG=0) cannot decode lossy
+    // (JPEG-tiled) DNGs. That is reported as an explicit SKIP -- no number, no
+    // PASS -- and counted; the parser (run_decode_matrix.py
+    // _parse_device_handoff_output) records it as a skip, never as a pass.
 #if defined(qDNGUseLibJPEG) && qDNGUseLibJPEG == 0
+    (void)lossy;
     cout << "\n[Lossy / Stage2-Stage4 handoff] [SKIP] qDNGUseLibJPEG=0 (JPEG decode unavailable)\n";
-    cout << "  [Contract] PASS\n";
-    cout << "  PSNR(handoff ON vs OFF): 999.00 dB  [PASS]  (threshold="
-         << fixed << setprecision(2) << kPsnrThreshold
-         << " dB) [SYNTHETIC: libjpeg unavailable]\n";
+    cout << "  [Contract] SKIP reason=libjpeg-unavailable\n";
+    cout << "  PSNR(handoff ON vs OFF): SKIP reason=libjpeg-unavailable\n";
+    cout.flush();
+    test_report::reportSkip("DeviceHandoff", "lossy", "libjpeg-unavailable");
 #else
-    if (!lossy) {
-        cout << "\n[Lossy / Stage2-Stage4 handoff] [SKIP] no lossy DNG path provided\n";
-        cout << "  [Contract] PASS\n";
-        cout << "  PSNR(handoff ON vs OFF): 999.00 dB  [PASS]  (threshold="
-             << fixed << setprecision(2) << kPsnrThreshold
-             << " dB) [SYNTHETIC: no path]\n";
-    } else if (!testSample("Lossy / Stage2-Stage4 handoff",
+    ++test_report::executed;
+    if (!testSample("Lossy / Stage2-Stage4 handoff",
                     lossy,
                     "DNG_STAGE2_STAGE4_DEVICE_HANDOFF",
                     kPsnrThreshold,
                     /*requireEngagement=*/true)) {
-        allPassed = false;
+        ++test_report::failures;
     }
 #endif
 
     cout << "\n=== Summary ===\n";
-    if (allPassed) {
-        cout << "[ALL PASS] device-handoff PSNR gate passed for all samples\n";
-        return 0;
-    } else {
-        cerr << "[FAIL] One or more device-handoff tests did not meet the PSNR gate\n";
-        return 1;
-    }
+    cout.flush();
+    return test_report::finish("DeviceHandoff");
 }

@@ -6,6 +6,7 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:ffi/ffi.dart' show malloc;
 import 'package:flutter_test/flutter_test.dart';
+import 'support/native_fixtures.dart';
 
 /// WP10v Task 17 — AC17.3: the route actually EXECUTES, on a real dylib, for
 /// BOTH formats the format-agnostic entry pair covers (A3.3: one symbol pair,
@@ -28,13 +29,10 @@ import 'package:flutter_test/flutter_test.dart';
 /// flutter test runs with cwd == package root (plugin/), so all paths below
 /// are resolved relative to Directory.current.
 void main() {
-  final dylibPath = File(
-    Platform.environment['CEYX_WP10_DYLIB'] ??
-        '../native/build/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(freshBuildDylibPath('CEYX_WP10_DYLIB')).absolute.path;
 
-  final dngPath = File('../image_samples/lossless_dng_sample.dng').absolute.path;
-  final arwPath = File('../image_samples/raw_sample.arw').absolute.path;
+  final dngPath = File(losslessDngSamplePath).absolute.path;
+  final arwPath = File(rawArwSamplePath).absolute.path;
 
   late bool skip;
   String skipReason = '';

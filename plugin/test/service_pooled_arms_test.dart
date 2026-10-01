@@ -2,26 +2,16 @@
 // allocating decode entries. Every public entry still has its exact signature,
 // but the buffer underneath now comes from this isolate's CeyxNativeBufferPool,
 // so every live full-resolution RGBA address is pool-owned.
-import 'dart:io';
 
 import 'package:ceyx/src/dng_decoder_service.dart';
 import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/native_fixtures.dart';
 
 /// The shipped dylib is the only built library in this tree (native/build is
 /// not populated here). Tests that need a real decode are skipped without it —
 /// stated explicitly rather than silently, so a skip is never mistaken for a
 /// pass.
-const String _kLibraryPath = 'macos/Libraries/libdng_decoder_native.dylib';
-const String _kSample = '../image_samples/lossless_dng_sample.dng';
-
-String? get _skipReason {
-  if (!File(_kLibraryPath).existsSync()) {
-    return 'no built dylib at $_kLibraryPath';
-  }
-  if (!File(_kSample).existsSync()) return 'no sample at $_kSample';
-  return null;
-}
 
 void main() {
   tearDown(() {
@@ -36,8 +26,8 @@ void main() {
   });
 
   test('decode() yields an address owned by the shared pool', () {
-    final service = DngDecoderService(libraryPath: _kLibraryPath)..initialize();
-    final image = service.decode(_kSample);
+    final service = DngDecoderService(libraryPath: shippedDylibPath)..initialize();
+    final image = service.decode(losslessDngSamplePath);
     expect(image.width, greaterThan(0));
     expect(
       CeyxNativeBufferPool.shared.ownsAddress(image.nativeAddress),
@@ -63,25 +53,25 @@ void main() {
       reason: 'releaseToPool must return the buffer to the pool',
     );
     expect(CeyxNativeBufferPool.shared.debugFinalizerReleases, 0);
-  }, skip: _skipReason);
+  }, skip: missingFixtureReason(dylib: shippedDylibPath, sample: losslessDngSamplePath));
 
   test('decodeForPointerTransfer() yields an address owned by the shared pool', () {
-    final service = DngDecoderService(libraryPath: _kLibraryPath)..initialize();
-    final wire = service.decodeForPointerTransfer(_kSample);
+    final service = DngDecoderService(libraryPath: shippedDylibPath)..initialize();
+    final wire = service.decodeForPointerTransfer(losslessDngSamplePath);
     final address = wire[0] as int;
     expect(address, isNot(0));
     expect(CeyxNativeBufferPool.shared.ownsAddress(address), isTrue);
     // The pointer route ships ownership onward, so the caller releases.
     expect(CeyxNativeBufferPool.shared.tryReleaseByAddress(address), isTrue);
-  }, skip: _skipReason);
+  }, skip: missingFixtureReason(dylib: shippedDylibPath, sample: losslessDngSamplePath));
 
   test('decodeOnWorker() copies out and leaves nothing checked out', () async {
-    final service = DngDecoderService(libraryPath: _kLibraryPath)..initialize();
-    final image = await service.decodeOnWorker(_kSample);
+    final service = DngDecoderService(libraryPath: shippedDylibPath)..initialize();
+    final image = await service.decodeOnWorker(losslessDngSamplePath);
     expect(image.width, greaterThan(0));
     // The transferable route copies into Dart-owned bytes on the worker
     // isolate and returns its pool buffer there, so this isolate's pool holds
     // nothing.
     expect(CeyxNativeBufferPool.shared.debugCheckedOut, 0);
-  }, skip: _skipReason);
+  }, skip: missingFixtureReason(dylib: shippedDylibPath, sample: losslessDngSamplePath));
 }

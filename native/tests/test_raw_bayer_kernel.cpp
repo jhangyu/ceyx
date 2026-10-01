@@ -23,17 +23,20 @@
 #include "HalideBuffer.h"
 #include "raw_bayer_demosaic.h"
 #include "raw_demosaic_reference.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RawBayerKernel";
 
 void report(const char* name, bool ok, const char* detail) {
     // The extra separator is emitted only for named cases, so the unnamed
     // per-phase case prints exactly "[RawBayerKernel] phase=... -> PASS".
     std::printf("[RawBayerKernel] %s%s%s -> %s\n", name,
                 (name && name[0]) ? " " : "", detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    ++test_report::executed;
+    if (!ok) ++test_report::failures;
 }
 
 struct Geometry { const char* name; uint32_t w; uint32_t h; };
@@ -391,10 +394,5 @@ int main(int argc, char** argv) {
     runComparatorControl();
     runPhaseMutationControl();
 
-    if (failures != 0) {
-        std::printf("[RawBayerKernel] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawBayerKernel] ALL PASS\n");
-    return 0;
+    return test_report::finish(kReportPrefix);
 }

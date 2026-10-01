@@ -6,63 +6,27 @@
 // present file that misbehaves is a FAIL.
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 
 #include "libraw_frontend.h"
+#include "raw_test_support.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
 int checked = 0;
 
 void report(const char* name, const char* id, bool ok, const char* detail) {
-    std::printf("[LibRawFrontend] %s%s%s %s -> %s\n", id ? id : "", id ? " " : "",
-                name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    const std::string full_name = id ? std::string(id) + " " + name : std::string(name);
+    test_report::report("LibRawFrontend", full_name.c_str(), ok, detail);
 }
 
-struct Sample {
-    std::string id;
-    std::string path;
-    std::string expect_backend;
-    std::string expect_error;
-    std::string expect_layout;
-};
-
-// Deliberately a minimal hand-rolled reader: the test must not gain a JSON
-// dependency, and the manifest fields it needs are flat strings.
-std::string field(const std::string& obj, const char* key) {
-    const std::string needle = std::string("\"") + key + "\": \"";
-    const size_t at = obj.find(needle);
-    if (at == std::string::npos) return "";
-    const size_t start = at + needle.size();
-    const size_t end = obj.find('"', start);
-    return end == std::string::npos ? "" : obj.substr(start, end - start);
-}
+using Sample = raw_test_support::RawManifestSample;
+using raw_test_support::fileExists;
 
 std::vector<Sample> loadManifest(const char* path) {
-    std::ifstream in(path);
-    std::string text((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
-    std::vector<Sample> out;
-    size_t pos = 0;
-    while ((pos = text.find('{', pos)) != std::string::npos) {
-        const size_t end = text.find('}', pos);
-        if (end == std::string::npos) break;
-        const std::string obj = text.substr(pos, end - pos);
-        Sample s{field(obj, "id"), field(obj, "path"), field(obj, "expect_backend"),
-                 field(obj, "expect_error"), field(obj, "expect_layout")};
-        if (!s.id.empty() && !s.path.empty()) out.push_back(s);
-        pos = end + 1;
-    }
-    return out;
-}
-
-bool fileExists(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    return f.good();
+    return raw_test_support::loadRawManifest(path);
 }
 
 // Round-3 review finding F2: the frontend used to accept ANY non-null
@@ -171,9 +135,14 @@ int main(int argc, char** argv) {
     }
 
     std::string first_bayer;
+    // The forced-backend check needs a Bayer sample RawSpeed3 really decodes:
+    // the manifest declares that as expect_backend=rawspeed3 and the unpack
+    // above must have confirmed it (ok), so a sample RS3 declines can never be
+    // picked and make the forced-RS3 leg silently land on libraw_native.
+    std::string first_rawspeed3_bayer;
     for (const Sample& s : samples) {
         if (!fileExists(s.path)) {
-            std::printf("[LibRawFrontend] SKIP %s (missing file)\n", s.id.c_str());
+            test_report::reportSkip("LibRawFrontend", s.id.c_str(), "missing-file");
             continue;
         }
         if (s.id.rfind("malformed_", 0) == 0) continue;  // Task 13 owns these
@@ -204,6 +173,10 @@ int main(int argc, char** argv) {
             if (s.expect_layout == "bayer2x2" && first_bayer.empty()) {
                 first_bayer = s.path;
             }
+            if (s.expect_layout == "bayer2x2" && s.expect_backend == "rawspeed3" && ok &&
+                first_rawspeed3_bayer.empty()) {
+                first_rawspeed3_bayer = s.path;
+            }
 
             // Round 2 Task 2.4: census the vendor-curve flag for every
             // successfully-unpacked corpus file (acceptance bullet: census
@@ -231,24 +204,29 @@ int main(int argc, char** argv) {
                    v.row_stride_bytes >= static_cast<int64_t>(v.width) * 2,
                detail);
 
-        // Both backends really execute on the same file.
-        LibRawFrontendContext rs_ctx;
-        rs_ctx.set_forced_backend(RawForcedBackend::kRawSpeed3);
-        const RawErrorCode rs_rc = rs_ctx.open_and_unpack(first_bayer.c_str());
+        // Both backends really execute on the same file (a RawSpeed3-capable one).
+        if (first_rawspeed3_bayer.empty()) {
+            test_report::reportSkip("LibRawFrontend", "forced-backend both-executed",
+                                    "no-rawspeed3-bayer-sample");
+        } else {
+            LibRawFrontendContext rs_ctx;
+            rs_ctx.set_forced_backend(RawForcedBackend::kRawSpeed3);
+            const RawErrorCode rs_rc = rs_ctx.open_and_unpack(first_rawspeed3_bayer.c_str());
 
-        LibRawFrontendContext nat_ctx;
-        nat_ctx.set_forced_backend(RawForcedBackend::kLibRawNative);
-        const RawErrorCode nat_rc = nat_ctx.open_and_unpack(first_bayer.c_str());
+            LibRawFrontendContext nat_ctx;
+            nat_ctx.set_forced_backend(RawForcedBackend::kLibRawNative);
+            const RawErrorCode nat_rc = nat_ctx.open_and_unpack(first_rawspeed3_bayer.c_str());
 
-        const RawDecoderBackend rs_b = rs_ctx.diagnostics().unpack_backend;
-        const RawDecoderBackend nat_b = nat_ctx.diagnostics().unpack_backend;
-        std::snprintf(detail, sizeof(detail), "forced_rawspeed=%s forced_native=%s",
-                      raw_backend_name(rs_b), raw_backend_name(nat_b));
-        report("forced-backend both-executed", nullptr,
-               rs_rc == kRawSuccess && nat_rc == kRawSuccess &&
-                   rs_b == kRawDecoderBackendRawSpeed3 &&
-                   nat_b == kRawDecoderBackendLibRawNative,
-               detail);
+            const RawDecoderBackend rs_b = rs_ctx.diagnostics().unpack_backend;
+            const RawDecoderBackend nat_b = nat_ctx.diagnostics().unpack_backend;
+            std::snprintf(detail, sizeof(detail), "forced_rawspeed=%s forced_native=%s",
+                          raw_backend_name(rs_b), raw_backend_name(nat_b));
+            report("forced-backend both-executed", nullptr,
+                   rs_rc == kRawSuccess && nat_rc == kRawSuccess &&
+                       rs_b == kRawDecoderBackendRawSpeed3 &&
+                       nat_b == kRawDecoderBackendLibRawNative,
+                   detail);
+        }
 
         // recycle() must be idempotent and must close the view.
         LibRawFrontendContext lifecycle;
@@ -257,8 +235,8 @@ int main(int argc, char** argv) {
         lifecycle.recycle();
         report("recycle-idempotent", nullptr, !lifecycle.is_open(), "is_open=false");
     } else {
-        std::printf("[LibRawFrontend] SKIP borrowed-view/forced-backend "
-                    "(no Bayer sample present)\n");
+        test_report::reportSkip("LibRawFrontend", "borrowed-view/forced-backend",
+                                "no-bayer-sample");
     }
 
     {
@@ -300,13 +278,7 @@ int main(int argc, char** argv) {
     }
 
     if (checked == 0) {
-        std::printf("[LibRawFrontend] FAIL no corpus files were present\n");
-        return 1;
+        report("corpus-present", nullptr, false, "no corpus files were present");
     }
-    if (failures != 0) {
-        std::printf("[LibRawFrontend] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[LibRawFrontend] ALL PASS\n");
-    return 0;
+    return test_report::finish("LibRawFrontend");
 }

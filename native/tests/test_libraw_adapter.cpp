@@ -10,13 +10,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 
 #include "libraw_frontend.h"
 #include "libraw_gpu_input_adapter.h"
 #include "raw_contract_validate.h"
+#include "raw_test_support.h"
+#include "test_report.h"
 
 // Declared in src/pipeline/libraw_gpu_input_adapter.cpp (this test compiles that
 // TU directly, cmake/tests.cmake:746-752). They are NOT in
@@ -44,46 +45,18 @@ void raw_white_balance_from_libraw(const float* cam_mul, const float* pre_mul,
 
 namespace {
 
-int failures = 0;
 int checked = 0;
 
 void report(const char* name, const char* id, bool ok, const char* detail) {
-    std::printf("[LibRawAdapter] %s%s%s %s -> %s\n", id ? id : "", id ? " " : "",
-                name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    const std::string full_name = id ? std::string(id) + " " + name : std::string(name);
+    test_report::report("LibRawAdapter", full_name.c_str(), ok, detail);
 }
 
-struct Sample { std::string id, path, expect_backend, expect_error, expect_layout; };
-
-std::string field(const std::string& obj, const char* key) {
-    const std::string needle = std::string("\"") + key + "\": \"";
-    const size_t at = obj.find(needle);
-    if (at == std::string::npos) return "";
-    const size_t start = at + needle.size();
-    const size_t end = obj.find('"', start);
-    return end == std::string::npos ? "" : obj.substr(start, end - start);
-}
+using Sample = raw_test_support::RawManifestSample;
+using raw_test_support::fileExists;
 
 std::vector<Sample> loadManifest(const char* path) {
-    std::ifstream in(path);
-    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    std::vector<Sample> out;
-    size_t pos = 0;
-    while ((pos = text.find('{', pos)) != std::string::npos) {
-        const size_t end = text.find('}', pos);
-        if (end == std::string::npos) break;
-        const std::string obj = text.substr(pos, end - pos);
-        Sample s{field(obj, "id"), field(obj, "path"), field(obj, "expect_backend"),
-                 field(obj, "expect_error"), field(obj, "expect_layout")};
-        if (!s.id.empty() && !s.path.empty()) out.push_back(s);
-        pos = end + 1;
-    }
-    return out;
-}
-
-bool fileExists(const std::string& p) {
-    std::ifstream f(p, std::ios::binary);
-    return f.good();
+    return raw_test_support::loadRawManifest(path);
 }
 
 // Round 2 Task 2.1 (diagnostic only): dump-only case. Iterates the FULL
@@ -98,7 +71,7 @@ bool fileExists(const std::string& p) {
 void dumpRouteCensus(const std::vector<Sample>& samples) {
     for (const Sample& s : samples) {
         if (!fileExists(s.path)) {
-            std::printf("[RouteCensus] %s SKIP-missing-file\n", s.id.c_str());
+            test_report::reportSkip("RouteCensus", s.id.c_str(), "missing-file");
             continue;
         }
         LibRawFrontendContext ctx;
@@ -490,7 +463,7 @@ void checkMatrixInverse() {
 void checkPcsWhiteInvariant(const char* id, const RawColorTransform& xf,
                             const char* route_label) {
     if (!xf.valid) {
-        std::printf("[LibRawAdapter] SKIP pcs-white-invariant %s (no matrix)\n", id);
+        test_report::reportSkip("LibRawAdapter", (std::string("pcs-white-invariant ") + id).c_str(), "no-matrix");
         return;
     }
     float want[3];
@@ -788,7 +761,7 @@ int main(int argc, char** argv) {
     for (const Sample& s : samples) {
         if (s.id.rfind("malformed_", 0) == 0) continue;
         if (!fileExists(s.path)) {
-            std::printf("[LibRawAdapter] SKIP %s (missing file)\n", s.id.c_str());
+            test_report::reportSkip("LibRawAdapter", s.id.c_str(), "missing-file");
             continue;
         }
 
@@ -920,9 +893,8 @@ int main(int argc, char** argv) {
         const RawDecoderBackend rs_b = rs_ctx.diagnostics().unpack_backend;
         const RawDecoderBackend nat_b = nat_ctx.diagnostics().unpack_backend;
         if (rs_b == nat_b) {
-            std::printf("[LibRawAdapter] SKIP backend-invariant %s "
-                        "(both forced contexts decoded with %s)\n",
-                        bayer_ids[i].c_str(), raw_backend_name(rs_b));
+            test_report::reportSkip("LibRawAdapter", ("backend-invariant " + bayer_ids[i]).c_str(),
+                                    "same-backend-both-contexts", raw_backend_name(rs_b));
             continue;
         }
 
@@ -945,8 +917,7 @@ int main(int argc, char** argv) {
         invariance_done = true;
     }
     if (!invariance_done) {
-        std::printf("[LibRawAdapter] SKIP backend-invariant "
-                    "(no Bayer sample decoded by two different backends)\n");
+        test_report::reportSkip("LibRawAdapter", "backend-invariant", "no-two-backend-bayer-sample");
     }
 
     {
@@ -1055,8 +1026,7 @@ int main(int argc, char** argv) {
             any_cfa_checked = true;
         }
         if (!any_cfa_checked) {
-            std::printf("[LibRawAdapter] SKIP component-black-zero-for-cfa "
-                        "(no CFA sample built successfully)\n");
+            test_report::reportSkip("LibRawAdapter", "component-black-zero-for-cfa", "no-cfa-sample-built");
         }
     }
 
@@ -1076,8 +1046,7 @@ int main(int argc, char** argv) {
     };
     for (const FormatCase& fc : format_cases) {
         if (fc.paths->empty()) {
-            std::printf("[LibRawAdapter] SKIP auto-ev-populated-%s (no %s sample built)\n",
-                        fc.label, fc.label);
+            test_report::reportSkip("LibRawAdapter", (std::string("auto-ev-populated-") + fc.label).c_str(), "no-sample-built");
             continue;
         }
         const std::string& path = fc.paths->front();
@@ -1144,13 +1113,7 @@ int main(int argc, char** argv) {
     }
 
     if (checked == 0) {
-        std::printf("[LibRawAdapter] FAIL no corpus files were present\n");
-        return 1;
+        report("corpus-present", nullptr, false, "no corpus files were present");
     }
-    if (failures != 0) {
-        std::printf("[LibRawAdapter] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[LibRawAdapter] ALL PASS\n");
-    return 0;
+    return test_report::finish("LibRawAdapter");
 }

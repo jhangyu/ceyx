@@ -31,10 +31,6 @@ id          = "arena_idle_shrink"
 expected_on = ["macos", "linux", "windows", "android"]
 
 [[group]]
-id          = "debug_pool"
-expected_on = []
-
-[[group]]
 id          = "encode"
 expected_on = ["macos", "linux", "windows", "android"]
 
@@ -51,10 +47,6 @@ id          = "heif"
 expected_on = ["macos", "linux", "windows", "android"]
 
 [[group]]
-id          = "legacy_decode"
-expected_on = []
-
-[[group]]
 id          = "oriented"
 expected_on = ["macos", "linux", "windows", "android"]
 
@@ -65,14 +57,6 @@ expected_on = ["macos", "linux", "windows", "android"]
 [[group]]
 id          = "pool_pressure_relief"
 expected_on = ["macos", "linux", "windows", "android"]
-
-[[group]]
-id          = "raw"
-expected_on = []
-
-[[group]]
-id          = "sized_decode"
-expected_on = []
 
 [[group]]
 id          = "slot_config"
@@ -252,27 +236,6 @@ source     = "native/src/ffi/raw_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 
 [[symbol]]
-name       = "dng_debug_pool_checked_out"
-platforms  = "all"
-group      = "debug_pool"
-source     = ""
-dart_sites = ["plugin/lib/src/dng_bindings.dart"]
-
-[[symbol]]
-name       = "dng_decode_and_process"
-platforms  = "all"
-group      = "legacy_decode"
-source     = ""
-dart_sites = ["plugin/lib/src/dng_bindings.dart"]
-
-[[symbol]]
-name       = "dng_decode_and_process_sized"
-platforms  = "all"
-group      = "sized_decode"
-source     = ""
-dart_sites = ["plugin/lib/src/dng_bindings.dart"]
-
-[[symbol]]
 name       = "dng_decode_configure_slots"
 platforms  = "all"
 group      = "slot_config"
@@ -369,10 +332,3 @@ platforms  = "all"
 group      = "heif"
 source     = "native/src/ffi/heif_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/heif_bindings.dart"]
-
-[[symbol]]
-name       = "raw_decode_and_process"
-platforms  = "all"
-group      = "raw"
-source     = ""
-dart_sites = ["plugin/lib/src/dng_bindings.dart"]

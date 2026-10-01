@@ -20,6 +20,7 @@
 #include "decode_context.h"
 #include "dng_pipeline.h"  // D8: the guard pair and the non-publishing accessor
 #include "raw_ffi_api.h"   // D0/D8: the idle funnel and the T3 residency probe
+#include "test_report.h"
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -54,14 +55,12 @@ size_t processFootprintBytes() {
 #endif
 }
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "DngSlotDecommit";
 
-void report(const char *name, bool ok, const char *detail) {
-  std::printf("[DngSlotDecommit] %s -> %s (%s)\n", name, ok ? "PASS" : "FAIL",
-              detail);
-  if (!ok) ++failures;
+void report(const char* name, bool ok, const char* detail) {
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 // Small enough that four of them cost nothing, large enough to span several
 // pages so the decommit length rounding is actually exercised.
@@ -371,11 +370,9 @@ int main() {
 
     const size_t fp_start = processFootprintBytes();
     if (fp_start == 0) {
-      std::printf(
-          "[DngSlotDecommit] D7 SKIPPED: no resident-size instrument on this "
-          "platform. THIS IS A COVERAGE HOLE, not a pass — on such a platform "
-          "nothing in this binary would catch a decommit that returns no "
-          "pages.\n");
+      // A coverage hole, not a pass: without a resident-size instrument nothing
+      // in this binary would catch a decommit that returns no pages.
+      test_report::reportSkip(kReportPrefix, "D7", "no-resident-size-instrument");
     } else {
       DecodeSlotPool pool(kCtxCount, kBigReserve);
       {
@@ -487,7 +484,5 @@ int main() {
           "contexts; equal counters here mean the DNG half is wired but inert");
   }
 
-  std::printf("[DngSlotDecommit] TOTAL failures=%d\n", failures);
-  std::fflush(stdout);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }
