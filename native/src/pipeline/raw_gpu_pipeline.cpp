@@ -739,14 +739,14 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // the pre-average scaled AOT instead (same entry the DNG path uses).
     // mem8 v3 T20: on the fused route the source handed to Stage-4 is the CFA
     // MOSAIC (uncropped -- the kernel applies crop.x/crop.y itself, see
-    // FusedBayerSource) and no Stage-3 buffer exists. Every other argument is
+    // FusedMosaicSource) and no Stage-3 buffer exists. Every other argument is
     // identical, which is why this is one call site rather than two.
     if (use_fused_bayer_render) {
         // Incremented HERE, immediately before the dispatch that uses it, so
         // the counter cannot report a route that an early return skipped.
         g_fused_bayer_render_count.fetch_add(1, std::memory_order_relaxed);
     }
-    FusedBayerSource fused_source;
+    FusedMosaicSource fused_source;
     fused_source.red_x = red_x;
     fused_source.red_y = red_y;
     fused_source.black_values = input.black.values;
@@ -1060,7 +1060,7 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
                                             // mem8 v3 T12: no fused source on
                                             // this route; the format is the
                                             // parameter after it.
-                                            /*fused_bayer_source=*/nullptr,
+                                            /*fused_mosaic_source=*/nullptr,
                                             develop.output_format)) {
         return kRawErrKernelFailed;
     }
@@ -1342,7 +1342,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             // mem8 v3 T12: no fused source on
                                             // this route; the format is the
                                             // parameter after it.
-                                            /*fused_bayer_source=*/nullptr,
+                                            /*fused_mosaic_source=*/nullptr,
                                             develop.output_format)) {
         return kRawErrKernelFailed;
     }

@@ -170,6 +170,11 @@ functions:
 // Unconditional for the same reason its RGBA8 sibling is -- one archive, every
 // backend.
 #include "raw_bayer_fused_render_yuv420.h"
+// X-Trans fusion (2026-10-02): the fused X-Trans pair, included unconditionally
+// for the same reason as the Bayer pair above -- one archive per entry, built
+// for every backend.
+#include "raw_xtrans_fused_render.h"
+#include "raw_xtrans_fused_render_yuv420.h"
 // mem8 v3 T12: the yuv420 OUTPUT VARIANT of each Stage-4 family. Each sits
 // under the SAME conditional as its RGBA8 sibling below, because it is the same
 // kernel family with a different destination arity -- selecting between them is
@@ -1599,7 +1604,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                          int32_t exif_orientation,
                                          ceyx::RawPersistentDeviceArena* persistent_device_arena,
                                          void* caller_destination_metal_buffer,
-                                         const FusedBayerSource* fused_bayer_source,
+                                         const FusedMosaicSource* fused_mosaic_source,
                                          int32_t output_format) {
     // Plan section 1.6: reset before any validation or early return, so a
     // direct caller of this runner sees kNone rather than a reason inherited
@@ -1623,16 +1628,25 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // destination decision would report it in the optimistic one.
     g_last_rgba_scratch_bytes = 0;
 
+    // Fused-route predicates, computed once. any_fused_source governs every
+    // site whose behaviour is common to all fused kinds (scaled refusal, crop
+    // as scalars, 2-D matrix shapes); fused_xtrans only selects the X-Trans
+    // dispatch arms, which MUST be tested before the plain mosaic (Bayer) arms
+    // or an X-Trans source would silently run the Bayer kernel with
+    // red_x=red_y=0 and return success.
+    const bool any_fused_source = (fused_mosaic_source != nullptr);
+    const bool fused_xtrans =
+        (fused_mosaic_source != nullptr && fused_mosaic_source->xtrans_cfa != nullptr);
     // T20: on the fused route this buffer is a 2D CFA mosaic, not a 3D RGB16
     // frame, so the dimension floor differs. Everything else is validated
     // identically.
-    const int minimum_source_dimensions = fused_bayer_source ? 2 : 3;
+    const int minimum_source_dimensions = fused_mosaic_source ? 2 : 3;
     if (!stage3_device_buf ||
         stage3_device_buf->dimensions < minimum_source_dimensions ||
         !dst || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
         return false;
     }
-    if (fused_bayer_source && !fused_bayer_source->black_values) {
+    if (fused_mosaic_source && !fused_mosaic_source->black_values) {
         return false;
     }
 
@@ -1666,7 +1680,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // a pair, and removing one alone would leave a path that silently
     // disagrees with the other. A fused yuv420 request now dispatches
     // raw_bayer_fused_render_yuv420 in both dispatch blocks below, on every
-    // backend, selected by FORMAT and by the presence of fused_bayer_source
+    // backend, selected by FORMAT and by the presence of fused_mosaic_source
     // and by nothing else.
 
     // Productionization plan section 1.3 — identical derivation to
@@ -1725,7 +1739,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // the two-stage path (which would be an unannounced divergence). Callers
     // only pass a fused source on the unscaled path, so this is a structural
     // guard against a future caller widening the scope by accident.
-    if (fused_bayer_source && scaled) {
+    if (any_fused_source && scaled) {
         return false;
     }
     // T7 (2026-09-20): the scaled x yuv420 cross USED to refuse here, because
@@ -1773,7 +1787,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // on a 2-dimensional buffer would be an out-of-bounds dim read. The mosaic
     // is passed WHOLE and the crop travels as crop_l/crop_t scalars, exactly as
     // on the non-split branch.
-    const bool fused_route = (fused_bayer_source != nullptr);
+    const bool fused_route = any_fused_source;
     if (fused_route) {
         sw = stage3_device_buf->dim[0].extent;
         sh = stage3_device_buf->dim[1].extent;
@@ -1851,11 +1865,11 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // Non-owning wrapper — do NOT call set_host_dirty; data is on the GPU.
     Buffer<uint16_t> src_buf(*stage3_device_buf);
     // T20 fused route: the mosaic is passed WHOLE and the crop travels as
-    // kernel scalars instead (see FusedBayerSource's comment — cropping the
+    // kernel scalars instead (see FusedMosaicSource's comment — cropping the
     // mosaic would change both the CFA phase and the boundary wrap at the crop
     // edge, and the result would no longer be byte-identical to the two-stage
     // path). So none of the crop mutation below runs on that route.
-    if (fused_bayer_source) {
+    if (any_fused_source) {
         // Deliberately empty: no crop(), no dim[].min mutation.
     } else if (scaled) {
         // Sized path: crop to the SOURCE extent (not dst) — the box geometry is
@@ -1891,24 +1905,24 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // raw_bayer_fused_render declares them in the same 2-D shapes the
     // non-split Stage-4 family uses (RawBayerFusedRenderGenerator.cpp:123-125,
     // 133 — one generator, one signature, both backends). Only the declared
-    // shape differs; the element data is identical. With fused_bayer_source ==
+    // shape differs; the element data is identical. With fused_mosaic_source ==
     // nullptr every construction below is exactly the previous one.
     Buffer<float> c2r_buf =
-        fused_bayer_source
+        any_fused_source
             ? Buffer<float>(const_cast<float*>(params.camera_to_rgb), 3, 3)
             : Buffer<float>(const_cast<float*>(params.camera_to_rgb), 9);
     Buffer<float> r2f_buf =
-        fused_bayer_source
+        any_fused_source
             ? Buffer<float>(const_cast<float*>(params.rgb_to_final), 3, 3)
             : Buffer<float>(const_cast<float*>(params.rgb_to_final), 9);
     Buffer<float> hs_table_buf =
-        fused_bayer_source
+        any_fused_source
             ? Buffer<float>(const_cast<float*>(params.huesat_table.data()),
                             static_cast<int>(params.huesat_table.size() / 3), 3)
             : Buffer<float>(const_cast<float*>(params.huesat_table.data()),
                             static_cast<int>(params.huesat_table.size()));
     Buffer<float> look_table_buf =
-        fused_bayer_source
+        any_fused_source
             ? Buffer<float>(const_cast<float*>(params.look_table.data()),
                             static_cast<int>(params.look_table.size() / 3), 3)
             : Buffer<float>(const_cast<float*>(params.look_table.data()),
@@ -2219,7 +2233,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // G2: dst_width scalar retired — the RGBA dst buffer extents carry the
     // output geometry.
     // mem8 v3 T20-fix F2: the FUSED dispatch arm on the SPLIT (Vulkan) branch.
-    // Selected by the presence of fused_bayer_source and by nothing else —
+    // Selected by the presence of fused_mosaic_source and by nothing else —
     // the identical selector the non-split arm uses, which is what makes the
     // route parity rather than platform divergence (repo rule: no multi-platform
     // implementation forking). raw_bayer_fused_render is ONE archive built for
@@ -2232,12 +2246,21 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // fused_route block above), passed WHOLE with the crop travelling as the
     // crop_l/crop_t/src_w/src_h scalars.
     Buffer<float> fused_black_buf;
-    if (fused_bayer_source) {
+    Buffer<int32_t> fused_cfa_buf;
+    if (fused_mosaic_source) {
         fused_black_buf = Buffer<float>(
-            const_cast<float*>(fused_bayer_source->black_values),
-            fused_bayer_source->black_width,
-            fused_bayer_source->black_height);
+            const_cast<float*>(fused_mosaic_source->black_values),
+            fused_mosaic_source->black_width,
+            fused_mosaic_source->black_height);
         fused_black_buf.set_host_dirty();
+        if (fused_mosaic_source->xtrans_cfa) {
+            // 6x6 row-major tile; dim 0 stride 1 matches the kernel's
+            // cfa(x % 6, y % 6) indexing (same wrap as runXTransBranch's
+            // two-stage cfa_buf).
+            fused_cfa_buf = Buffer<int32_t>(
+                const_cast<int32_t*>(fused_mosaic_source->xtrans_cfa), 6, 6);
+            fused_cfa_buf.set_host_dirty();
+        }
     }
     // T12: the yuv420 dispatch arm of the SPLIT family. Selected by FORMAT and
     // by nothing else — the same selector the non-split arm below uses, which
@@ -2254,13 +2277,49 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // both entries come from one generator file sharing one colour body and one
     // plane-write body.
     const int result =
-        (yuv420_output && fused_bayer_source)
+        (yuv420_output && fused_xtrans)
+        ? raw_xtrans_fused_render_yuv420(
+              &src_flat,
+              fused_cfa_buf.raw_buffer(),
+              fused_black_buf.raw_buffer(),
+              fused_mosaic_source->inv_range,
+              crop_l, crop_t, src_w, src_h,
+              src_scale,
+              orient_coeffs[0], orient_coeffs[1],
+              orient_coeffs[2], orient_coeffs[3],
+              orient_coeffs[4], orient_coeffs[5],
+              exp_buf.raw_buffer(),
+              tone_buf.raw_buffer(),
+              gamma_buf.raw_buffer(),
+              cw_buf.raw_buffer(),
+              c2r_buf.raw_buffer(),
+              r2f_buf.raw_buffer(),
+              hs_table_buf.raw_buffer(),
+              hs_encode_buf.raw_buffer(),
+              hs_decode_buf.raw_buffer(),
+              params.huesat_hue_div,
+              params.huesat_sat_div,
+              params.huesat_val_div,
+              params.huesat_has_table,
+              params.huesat_has_encoding,
+              look_table_buf.raw_buffer(),
+              look_encode_buf.raw_buffer(),
+              look_decode_buf.raw_buffer(),
+              params.look_hue_div,
+              params.look_sat_div,
+              params.look_val_div,
+              params.look_has_table,
+              params.look_has_encoding,
+              y_plane_buf.raw_buffer(),
+              cb_plane_buf.raw_buffer(),
+              cr_plane_buf.raw_buffer())
+        : (yuv420_output && fused_mosaic_source)
         ? raw_bayer_fused_render_yuv420(
               &src_flat,
-              fused_bayer_source->red_x,
-              fused_bayer_source->red_y,
+              fused_mosaic_source->red_x,
+              fused_mosaic_source->red_y,
               fused_black_buf.raw_buffer(),
-              fused_bayer_source->inv_range,
+              fused_mosaic_source->inv_range,
               crop_l, crop_t, src_w, src_h,
               src_scale,
               orient_coeffs[0], orient_coeffs[1],
@@ -2329,12 +2388,45 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
               y_plane_buf.raw_buffer(),
               cb_plane_buf.raw_buffer(),
               cr_plane_buf.raw_buffer())
-        : fused_bayer_source
+        : fused_xtrans
+        ? raw_xtrans_fused_render(&src_flat,
+                                  fused_cfa_buf.raw_buffer(),
+                                  fused_black_buf.raw_buffer(),
+                                  fused_mosaic_source->inv_range,
+                                  crop_l, crop_t, src_w, src_h,
+                                  src_scale,
+                                  orient_coeffs[0], orient_coeffs[1],
+                                  orient_coeffs[2], orient_coeffs[3],
+                                  orient_coeffs[4], orient_coeffs[5],
+                                  exp_buf.raw_buffer(),
+                                  tone_buf.raw_buffer(),
+                                  gamma_buf.raw_buffer(),
+                                  cw_buf.raw_buffer(),
+                                  c2r_buf.raw_buffer(),
+                                  r2f_buf.raw_buffer(),
+                                  hs_table_buf.raw_buffer(),
+                                  hs_encode_buf.raw_buffer(),
+                                  hs_decode_buf.raw_buffer(),
+                                  params.huesat_hue_div,
+                                  params.huesat_sat_div,
+                                  params.huesat_val_div,
+                                  params.huesat_has_table,
+                                  params.huesat_has_encoding,
+                                  look_table_buf.raw_buffer(),
+                                  look_encode_buf.raw_buffer(),
+                                  look_decode_buf.raw_buffer(),
+                                  params.look_hue_div,
+                                  params.look_sat_div,
+                                  params.look_val_div,
+                                  params.look_has_table,
+                                  params.look_has_encoding,
+                                  dst_rgba_buf.raw_buffer())
+        : fused_mosaic_source
         ? raw_bayer_fused_render(&src_flat,
-                                 fused_bayer_source->red_x,
-                                 fused_bayer_source->red_y,
+                                 fused_mosaic_source->red_x,
+                                 fused_mosaic_source->red_y,
                                  fused_black_buf.raw_buffer(),
-                                 fused_bayer_source->inv_range,
+                                 fused_mosaic_source->inv_range,
                                  crop_l, crop_t, src_w, src_h,
                                  src_scale,
                                  // T7b: six affine coefficients immediately
@@ -2407,7 +2499,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                    : std::chrono::high_resolution_clock::time_point{};
 #else
     // mem8 v3 T20: the FUSED Bayer demosaic+render kernel. Selected by the
-    // presence of fused_bayer_source and by nothing else -- no platform guard,
+    // presence of fused_mosaic_source and by nothing else -- no platform guard,
     // no OS test. The fused archive's argument tail from src_scale onward is
     // IDENTICAL to dng_render_stage4's, which is what lets this be one extra
     // dispatch arm rather than a parallel copy of this whole function: every
@@ -2419,12 +2511,21 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // extents travel as scalars so the kernel reproduces the two-stage
     // semantics exactly (demosaic over the full plane, clamp against the crop).
     Buffer<float> fused_black_buf;
-    if (fused_bayer_source) {
+    Buffer<int32_t> fused_cfa_buf;
+    if (fused_mosaic_source) {
         fused_black_buf = Buffer<float>(
-            const_cast<float*>(fused_bayer_source->black_values),
-            fused_bayer_source->black_width,
-            fused_bayer_source->black_height);
+            const_cast<float*>(fused_mosaic_source->black_values),
+            fused_mosaic_source->black_width,
+            fused_mosaic_source->black_height);
         fused_black_buf.set_host_dirty();
+        if (fused_mosaic_source->xtrans_cfa) {
+            // 6x6 row-major tile; dim 0 stride 1 matches the kernel's
+            // cfa(x % 6, y % 6) indexing (same wrap as runXTransBranch's
+            // two-stage cfa_buf).
+            fused_cfa_buf = Buffer<int32_t>(
+                const_cast<int32_t*>(fused_mosaic_source->xtrans_cfa), 6, 6);
+            fused_cfa_buf.set_host_dirty();
+        }
     }
     // R2 sized decode: identical argument tail, two kernels. The scaled kernel
     // takes dst_w/dst_h as explicit scalars so its box geometry never depends
@@ -2440,12 +2541,47 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
     // modulo this family's source buffer. Neither is a platform guard: both
     // branches exist on both families and are chosen by format alone.
     const int result =
-        (yuv420_output && fused_bayer_source)
+        (yuv420_output && fused_xtrans)
+        ? raw_xtrans_fused_render_yuv420(src_buf.raw_buffer(),
+                                         fused_cfa_buf.raw_buffer(),
+                                         fused_black_buf.raw_buffer(),
+                                         fused_mosaic_source->inv_range,
+                                         crop_l, crop_t, src_w, src_h,
+                                         src_scale,
+                                         orient_coeffs[0], orient_coeffs[1],
+                                         orient_coeffs[2], orient_coeffs[3],
+                                         orient_coeffs[4], orient_coeffs[5],
+                                         exp_buf.raw_buffer(),
+                                         tone_buf.raw_buffer(),
+                                         gamma_buf.raw_buffer(),
+                                         cw_buf.raw_buffer(),
+                                         c2r_buf.raw_buffer(),
+                                         r2f_buf.raw_buffer(),
+                                         hs_table_buf.raw_buffer(),
+                                         hs_encode_buf.raw_buffer(),
+                                         hs_decode_buf.raw_buffer(),
+                                         params.huesat_hue_div,
+                                         params.huesat_sat_div,
+                                         params.huesat_val_div,
+                                         params.huesat_has_table,
+                                         params.huesat_has_encoding,
+                                         look_table_buf.raw_buffer(),
+                                         look_encode_buf.raw_buffer(),
+                                         look_decode_buf.raw_buffer(),
+                                         params.look_hue_div,
+                                         params.look_sat_div,
+                                         params.look_val_div,
+                                         params.look_has_table,
+                                         params.look_has_encoding,
+                                         y_plane_buf.raw_buffer(),
+                                         cb_plane_buf.raw_buffer(),
+                                         cr_plane_buf.raw_buffer())
+        : (yuv420_output && fused_mosaic_source)
         ? raw_bayer_fused_render_yuv420(src_buf.raw_buffer(),
-                                        fused_bayer_source->red_x,
-                                        fused_bayer_source->red_y,
+                                        fused_mosaic_source->red_x,
+                                        fused_mosaic_source->red_y,
                                         fused_black_buf.raw_buffer(),
-                                        fused_bayer_source->inv_range,
+                                        fused_mosaic_source->inv_range,
                                         crop_l, crop_t, src_w, src_h,
                                         src_scale,
                                         orient_coeffs[0], orient_coeffs[1],
@@ -2550,12 +2686,45 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                    y_plane_buf.raw_buffer(),
                                    cb_plane_buf.raw_buffer(),
                                    cr_plane_buf.raw_buffer())
-        : fused_bayer_source
+        : fused_xtrans
+        ? raw_xtrans_fused_render(src_buf.raw_buffer(),
+                                  fused_cfa_buf.raw_buffer(),
+                                  fused_black_buf.raw_buffer(),
+                                  fused_mosaic_source->inv_range,
+                                  crop_l, crop_t, src_w, src_h,
+                                  src_scale,
+                                  orient_coeffs[0], orient_coeffs[1],
+                                  orient_coeffs[2], orient_coeffs[3],
+                                  orient_coeffs[4], orient_coeffs[5],
+                                  exp_buf.raw_buffer(),
+                                  tone_buf.raw_buffer(),
+                                  gamma_buf.raw_buffer(),
+                                  cw_buf.raw_buffer(),
+                                  c2r_buf.raw_buffer(),
+                                  r2f_buf.raw_buffer(),
+                                  hs_table_buf.raw_buffer(),
+                                  hs_encode_buf.raw_buffer(),
+                                  hs_decode_buf.raw_buffer(),
+                                  params.huesat_hue_div,
+                                  params.huesat_sat_div,
+                                  params.huesat_val_div,
+                                  params.huesat_has_table,
+                                  params.huesat_has_encoding,
+                                  look_table_buf.raw_buffer(),
+                                  look_encode_buf.raw_buffer(),
+                                  look_decode_buf.raw_buffer(),
+                                  params.look_hue_div,
+                                  params.look_sat_div,
+                                  params.look_val_div,
+                                  params.look_has_table,
+                                  params.look_has_encoding,
+                                  dst_buf.raw_buffer())
+        : fused_mosaic_source
         ? raw_bayer_fused_render(src_buf.raw_buffer(),
-                                         fused_bayer_source->red_x,
-                                         fused_bayer_source->red_y,
+                                         fused_mosaic_source->red_x,
+                                         fused_mosaic_source->red_y,
                                          fused_black_buf.raw_buffer(),
-                                         fused_bayer_source->inv_range,
+                                         fused_mosaic_source->inv_range,
                                          crop_l, crop_t, src_w, src_h,
                                          src_scale,
                                          // T7b: six affine coefficients
@@ -3332,7 +3501,7 @@ bool render_stage4_halide_from_device_buffer(dng_host& host,
         // reaches, so the two routes share one dispatch decision.
         /*persistent_device_arena=*/nullptr,
         /*caller_destination_metal_buffer=*/nullptr,
-        /*fused_bayer_source=*/nullptr, output_format);
+        /*fused_mosaic_source=*/nullptr, output_format);
     if (ok && ceyx_orientation_transposes_inline(exif_orientation)) {
         // Plan section 1.3: report the ORIENTED extent back to the caller.
         std::swap(out_w, out_h);
