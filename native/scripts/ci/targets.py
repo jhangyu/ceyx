@@ -150,6 +150,11 @@ from __future__ import annotations
 #   declaration_platform the key `read_shipped_files.py --platform <key>`
 #                        expects (read_shipped_files.py:33,
 #                        _KNOWN_PLATFORMS = ("windows","linux","macos","android"))
+#   ndk_version          android only (None elsewhere): the NDK release every
+#                        android workflow pins via nttld/setup-ndk
+#                        `ndk-version:` (android_build.yml:72, and the rendered
+#                        *_dist_android.yml via workflow_render.py); held
+#                        equal by ci_conventions_check.py C11.
 TARGETS: dict = {
     "linux": {
         "artifact_path": "native/build-linux/libdng_decoder_native.so",
@@ -173,6 +178,7 @@ TARGETS: dict = {
         "expected_companions": ("libheif.so.1", "libde265.so.0"),
         "declaration_platform": "linux",
         "min_runtime_source": "dump",
+        "ndk_version": None,
     },
     "windows": {
         "artifact_path": "native/build-windows/dng_decoder_native.dll",
@@ -208,6 +214,7 @@ TARGETS: dict = {
         "expected_companions": ("heif.dll", "libde265.dll"),
         "declaration_platform": "windows",
         "min_runtime_source": "binary",
+        "ndk_version": None,
     },
     "macos": {
         "artifact_path": None,
@@ -231,6 +238,7 @@ TARGETS: dict = {
         "expected_companions": ("libheif.1.dylib", "libde265.0.dylib"),
         "declaration_platform": "macos",
         "min_runtime_source": "binary",
+        "ndk_version": None,
     },
     "android": {
         "artifact_path": None,
@@ -261,6 +269,7 @@ TARGETS: dict = {
         "expected_companions": (),
         "declaration_platform": "android",
         "min_runtime_source": "declaration",
+        "ndk_version": "r27c",
     },
 }
 
@@ -287,6 +296,7 @@ REQUIRED_KEYS = (
     "expected_companions",
     "declaration_platform",
     "min_runtime_source",
+    "ndk_version",
 )
 
 

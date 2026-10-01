@@ -6,9 +6,12 @@ guard (b) §1): *a step that reports its own exit status actually reports it* --
 no step may emit a self-captured RC marker (`echo "SOMETHING_RC=$?"`) that the
 shell's failure semantics make UNREACHABLE on the failure path.
 
-THE DEFECT, verbatim. GitHub Actions' default shell for a non-Windows runner
-is `bash --noprofile --norc -eo pipefail {0}` -- `-e` (errexit) is ON unless a
-step explicitly opts out via a custom `shell:` invocation template. Under
+THE DEFECT, verbatim. GitHub Actions runs a keyless (no `shell:`) step on a
+Linux/macOS runner as `bash -e {0}` -- errexit ON, pipefail OFF -- and a
+keyless step inside a Linux `container:` job as `sh -e {0}` (dash). Only an
+explicit `shell: bash` gets `bash --noprofile --norc -eo pipefail {0}`. In
+every case `-e` (errexit) is ON unless the step opts out via `set +e` or a
+custom `shell:` template without `-e`. Under
 `-e`, if any command in a `run:` body exits non-zero, the shell exits THAT
 INSTANT -- a trailing `echo "X_RC=$?"` meant to capture the preceding
 command's real exit code is therefore executed ONLY on the success path. On
@@ -48,8 +51,16 @@ WHAT MAKES A STEP SAFE (either one discharges the finding for that marker):
     `{0}` GitHub substitutes the script path into) whose flags do not
     include `-e` / `--errexit` -- e.g. `shell: bash --noprofile --norc -o
     pipefail {0}`. A BARE `shell: bash` (no `{0}` template) is NOT a custom
-    invocation -- GitHub still applies its own default `-eo pipefail` flags
-    to it, so it is exactly as unsafe as declaring no `shell:` key at all.
+    invocation -- GitHub runs it as `bash --noprofile --norc -eo pipefail {0}` --
+    errexit is still ON, so for RC reachability it is exactly as unsafe as a
+    keyless step (it differs from keyless only in adding pipefail, which the
+    pipe rule below relies on).
+
+PIPE RULE (techdebt 2026-10-02): `$?` read after a pipeline is the LAST
+command's status (tee's 0) unless pipefail is on. In a step whose effective
+shell is `sh` or keyless `bash`, a `| tee` line, or a pipe line directly
+followed by a `VAR=$?` assignment, is a violation (exempt: `|| true`
+diagnostics, or a preceding `set -o pipefail` in a bash step).
 
 SCOPE: bash-shelled steps only (the property is specific to POSIX shell
 errexit semantics). A step whose `shell:` names something other than a bash
@@ -84,7 +95,9 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # preceding command's exit status rather than an arbitrary constant string:
 #   (a) `echo "SOMETHING_RC=$?"` / `echo 'SOMETHING_RC=$?'` -- the shape named
 #       in the ruling and the original D6 fixture (captured at 6229efb0).
-#   (b) `SOMETHING_RC=$?` as a bare shell VARIABLE ASSIGNMENT -- the shape the
+#   (b) any `VAR=$?` assignment (`rc=$?`, `RC=$?`, `X_RC=$?` -- the name is
+#       irrelevant; the `$?` is what makes it a capture) as a bare shell
+#       VARIABLE ASSIGNMENT -- the shape the
 #       live D6 step actually uses today (`D6_LAYER1_RC=$?` on its own line,
 #       echoed via `${D6_LAYER1_RC}` on a LATER line). This is the REAL
 #       capture point: if the preceding command's non-zero exit aborts the
@@ -98,56 +111,24 @@ RC_ECHO_RE = re.compile(
     r'echo\s+["\']([A-Za-z_][A-Za-z0-9_]*_RC)=\$\?["\']'
 )
 RC_ASSIGN_RE = re.compile(
-    r'^([A-Za-z_][A-Za-z0-9_]*_RC)=\$\?\s*;?\s*$'
+    r'^([A-Za-z_][A-Za-z0-9_]*)=\$\?\s*;?\s*$'
 )
 
 # Explicitly disables errexit for the rest of the step body from this point on.
 SET_PLUS_E_RE = re.compile(r"(?<![\w-])set\s+\+(e\b|o\s+errexit\b)")
 
-_STEP_NAME_RE = re.compile(r"^-\s+name:\s*(.*)$")
-_SHELL_KEY_RE = re.compile(r"^shell:\s*(.+)$")
-_RUN_KEY_RE = re.compile(r"^run:\s*(\||>[-+]?)?\s*(.*)$")
-
-
-def _unquote(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        return value[1:-1]
-    return value
-
-
-def _step_shell_by_run_start_line(text: str) -> dict:
-    """Maps a `run:` key's 1-based line number -> that step's `shell:` value
-    (`None` if the step has no `shell:` key). A `shell:` key always precedes
-    `run:` within a step in this repo's workflows (grep-verified before
-    writing this), and the map only needs the nearest one per step, so a
-    lightweight independent scan (not `workflow_scan.iter_run_steps`, which
-    does not track `shell:` at all) is enough -- this file owns this small
-    parser rather than extending the shared, multi-owner `workflow_scan.py`.
-    """
-    lines = text.splitlines()
-    shell_for_current_step = None
-    out = {}
-    for i, raw in enumerate(lines):
-        stripped = raw.lstrip(" ")
-        if _STEP_NAME_RE.match(stripped):
-            shell_for_current_step = None
-            continue
-        m_shell = _SHELL_KEY_RE.match(stripped)
-        if m_shell:
-            shell_for_current_step = _unquote(m_shell.group(1))
-            continue
-        if _RUN_KEY_RE.match(stripped):
-            out[i + 1] = shell_for_current_step
-    return out
-
+# Pipe rule (techdebt W1-2): `$?` read after a pipeline is the exit status of
+# the LAST command (tee's 0) unless pipefail is on.
+_SINGLE_PIPE_RE = re.compile(r"(?<!\|)\|(?!\|)")
+_TEE_PIPE_RE = re.compile(r"(?<!\|)\|(?!\|)\s*tee\b")
+_SET_PIPEFAIL_RE = re.compile(r"(?<![\w-])set\s+.*\bpipefail\b")
 
 def _shell_disables_errexit(shell_value):
     """Tri-state: True (errexit OFF, safe), False (errexit ON, unsafe), or
     None (not a bash step -- not applicable, this guard does not evaluate it).
     """
     if shell_value is None:
-        return False  # GitHub default: bash --noprofile --norc -eo pipefail {0}
+        return False  # keyless: bash -e {0} (or sh -e {0} in a container job) -- errexit ON
     s = shell_value.strip()
     if "{0}" not in s:
         # A named-only shell (`shell: bash`, `shell: pwsh`, ...) is not a
@@ -170,11 +151,12 @@ def scan_text(text: str, workflow_rel: str):
     `(workflow_rel, line_no, step_name, marker, shell_repr, reason, line_text)`.
     `reason` is only present for `safe` entries (why the marker is reachable).
     """
-    shell_map = _step_shell_by_run_start_line(text)
+    shell_map = workflow_scan.step_shells(text)
     violations = []
     safe = []
     for step in workflow_scan.iter_run_steps(text, workflow_rel):
-        shell_value = shell_map.get(step.start_line)
+        step_shell = shell_map.get(step.start_line)
+        shell_value = step_shell.explicit if step_shell is not None else None
         errexit_off = _shell_disables_errexit(shell_value)
         if errexit_off is None:
             continue  # non-bash step, not applicable
@@ -203,6 +185,33 @@ def scan_text(text: str, workflow_rel: str):
     return violations, safe
 
 
+def scan_pipes(text: str, workflow_rel: str):
+    """Returns `(workflow_rel, line_no, step_name, effective_shell, line_text)`
+    per pipeline whose `$?` is read without pipefail: a `| tee` line, or a
+    pipe line immediately followed by a `VAR=$?` assignment. `|| true`
+    lines (diagnostics) are exempt."""
+    shell_map = workflow_scan.step_shells(text)
+    out = []
+    for step in workflow_scan.iter_run_steps(text, workflow_rel):
+        effective = workflow_scan.effective_shell(
+            shell_map.get(step.start_line, workflow_scan.StepShell(None, False)))
+        if effective not in ("sh", "bash"):
+            continue
+        code = [(n, t.strip()) for n, t in step.body_lines
+                if t.strip() and not t.strip().startswith("#")]
+        pipefail_on = False
+        for idx, (line_no, line) in enumerate(code):
+            if effective == "bash" and _SET_PIPEFAIL_RE.search(line):
+                pipefail_on = True
+                continue
+            if pipefail_on or "|| true" in line or not _SINGLE_PIPE_RE.search(line):
+                continue
+            next_is_capture = idx + 1 < len(code) and RC_ASSIGN_RE.match(code[idx + 1][1])
+            if _TEE_PIPE_RE.search(line) or next_is_capture:
+                out.append((workflow_rel, line_no, step.step_name, effective, line))
+    return out
+
+
 def _resolve_targets(argv):
     if argv:
         out = []
@@ -224,6 +233,7 @@ def main(argv=None):
 
     all_violations = []
     all_safe = []
+    pipe_violations = []
     scanned = 0
     for path in targets:
         if not path.is_file():
@@ -238,12 +248,14 @@ def main(argv=None):
         v, s = scan_text(text, rel)
         all_violations.extend(v)
         all_safe.extend(s)
+        pipe_violations.extend(scan_pipes(text, rel))
 
     examined = len(all_safe) + len(all_violations)
     print(f"[check_errexit_rc_capture] scanned {scanned} workflow file(s), "
           f"MARKERS_EXAMINED={examined} (a pass over 0 examined markers is "
           "not the same claim as a pass over N safe ones -- printed on every "
           "run, pass or fail, so a green log cannot hide a zero).")
+    print(f"[check_errexit_rc_capture] PIPE_RULE_VIOLATIONS={len(pipe_violations)}")
 
     if all_safe:
         print(f"[check_errexit_rc_capture] {len(all_safe)} RC-capture marker(s) "
@@ -265,11 +277,20 @@ def main(argv=None):
         for wf, line_no, step_name, marker, shell_repr, _reason, line_text in all_violations:
             print(f"  {wf}:{line_no}: [{marker}] step={step_name!r} shell={shell_repr!r} "
                   f"-- {line_text}")
+    if pipe_violations:
+        print(f"[FAIL] {len(pipe_violations)} pipeline(s) whose `$?` is read "
+              "without pipefail -- `$?` is then the LAST command's status "
+              "(tee's 0), not the build's. Declare `shell: bash` (GitHub adds "
+              "`-eo pipefail`), or `set -o pipefail` in a bash step:")
+        for wf, line_no, step_name, effective, line_text in pipe_violations:
+            print(f"  {wf}:{line_no}: step={step_name!r} effective_shell={effective} "
+                  f"-- {line_text}")
+    if all_violations or pipe_violations:
         return 1
 
     print(f"[check_errexit_rc_capture] PASS -- MARKERS_EXAMINED={examined}, "
           f"{examined} of {examined} confirmed reachable on their step's "
-          "failure path (0 violations).")
+          "failure path (0 violations), PIPE_RULE_VIOLATIONS=0.")
     return 0
 
 

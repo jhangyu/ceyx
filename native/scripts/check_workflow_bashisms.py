@@ -35,19 +35,18 @@ across every workflow file. Two things changed:
    `run:` body that is neither a compliant one-line `python3 ...`/`python
    ...`/`pwsh -c python ...` invocation NOR listed in
    `native/scripts/ci/allowlist.py`'s `MUST_STAY`. This is DELIBERATELY the
-   same property `native/scripts/ci/check_shell_prohibition.py`'s Rule 1
-   already checks -- kept as a second, separately-written instrument rather
+   same property the since-deleted `native/scripts/ci/check_shell_prohibition.py`'s Rule 1
+   checked -- kept as a second, separately-written instrument rather
    than importing that module's check function, per the 2026-09-06 lesson
    this campaign's own handover cites: a manual's own checklist (here, a
    single checker) can lead an operator past the only check that detects a
    silent failure, so the property is worth two independent codepaths, not
    one codepath run twice.
 
-This script remains a COMMITTED but NOT-wired-into-CI pre-push check (same
-deliberate-unwired posture as `ci_conventions_check.py` -- see that file's
-docstring for the rationale: keep the workflow YAML itself the single source
-of truth for what CI runs, and run mechanical checks by hand or via a local
-git hook before push).
+This script IS wired into CI: it is listed in `GUARDS` in
+`native/scripts/ci/guards.py` and runs in the `guards-container` job of
+`.github/workflows/build.yml` (as does `ci_conventions_check.py`). It also
+runs by hand before push.
 
 Detected bashisms: `shopt`, `declare`, `mapfile`, `readarray`, `[[ ... ]]`,
 `PIPESTATUS`, `${#name[`, array-assignment `name=(...)`, process substitution
@@ -59,12 +58,17 @@ line-based `run:` body parser -- which does NOT collapse a YAML folded
 scalar (`run: >`) into one line; a step that is semantically one Python
 invocation but is written across several physical lines under `run: >`
 therefore shows up as "non-compliant" here exactly as it does in
-`check_shell_prohibition.py`'s Rule 1 (same instrument-limitation, found
+the since-deleted `check_shell_prohibition.py`'s Rule 1 had (same instrument-limitation, found
 independently by both checks -- see WI-25's own handover note on the three
 `*_dist_android.yml` carrier-build steps and `webp_dist_windows.yml`'s
 carrier step, all pre-existing allowlist entries at WI-25 time).
 
-Exit 0 iff BOTH checks are clean. Prints `CLEAN` on success; otherwise one
+Shell-aware third scan (techdebt 2026-10-02): in steps whose effective shell
+is `sh` (keyless steps of a `container:` job, or explicit `shell: sh`), also
+flags dash-fatal here-strings, `$'...'`, `&>`, `|&`, `${v//...}`,
+`${v^^}`/`${v,,}`, `source`. Hits print as `[dash-fatal]`.
+
+Exit 0 iff ALL THREE checks are clean. Prints `CLEAN` on success; otherwise one
 `<file>:<line>: [bashism] <text>` or `<file>:<line>: [non-python-body]
 <step name>: <n> code lines` line per hit, then exits 1.
 
@@ -94,6 +98,22 @@ _BASHISM_PATTERN = re.compile(
 # prohibition.py`'s Rule 1 already checks -- written separately, not
 # imported, per the module docstring's D2026-09-06 rationale.
 _PYTHON_BODY_RE = re.compile(r"^(python3|python|pwsh -c python)\s")
+
+# Constructs that are fatal (or silently wrong) under dash -- scanned ONLY in
+# steps that really run under `sh`: keyless steps of a Linux `container:` job
+# (`sh -e {0}`), or explicit `shell: sh`. bash-effective steps may use them.
+# Deliberately absent: `local` (dash supports it), `echo -e` / `==` in `[ ]`
+# (behavioral differences needing semantic analysis), and `[[` / `<(`, which
+# _BASHISM_PATTERN already flags everywhere.
+_DASH_FATAL_PATTERN = re.compile(
+    r"<<<"
+    r"|\$'"
+    r"|&>"
+    r"|\|&"
+    r"|\$\{[A-Za-z_][A-Za-z0-9_]*//"
+    r"|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)"
+    r"|(^|[;&|(]\s*)source\s"
+)
 
 
 def _default_target_files(workflows_dir=DEFAULT_WORKFLOWS_DIR):
@@ -129,7 +149,7 @@ def find_non_compliant_bodies(workflows_dir, target_files=None):
 
     Independently re-derives compliance from `workflow_scan.iter_run_steps`/
     `code_lines` and `ci.allowlist.MUST_STAY` -- the same primitives
-    `check_shell_prohibition.py` uses, but this function's own comparison
+    the since-deleted `check_shell_prohibition.py` used, but this function's own comparison
     logic is written fresh here rather than calling into that module,
     per the module docstring's "two instruments, one property" rationale."""
     from ci import allowlist, workflow_scan  # noqa: E402  (sys.path set at import time)
@@ -155,11 +175,40 @@ def find_non_compliant_bodies(workflows_dir, target_files=None):
     return hits
 
 
+def find_dash_fatal(workflows_dir, target_files=None):
+    """Return (path, line_no, line_text) for every _DASH_FATAL_PATTERN hit in
+    a `run:` body whose effective shell is `sh` (resolved by
+    ci.workflow_scan.effective_shell -- regex line scan, no YAML)."""
+    from ci import workflow_scan  # noqa: E402  (sys.path set at import time)
+
+    if target_files is None:
+        target_files = _default_target_files(workflows_dir)
+    hits = []
+    for name in target_files:
+        path = pathlib.Path(workflows_dir) / name
+        if not path.exists():
+            continue
+        text = path.read_text()
+        shells = workflow_scan.step_shells(text)
+        for step in workflow_scan.iter_run_steps(text, path.name):
+            shell = shells.get(step.start_line, workflow_scan.StepShell(None, False))
+            if workflow_scan.effective_shell(shell) != "sh":
+                continue
+            for line_no, line in step.body_lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if _DASH_FATAL_PATTERN.search(stripped):
+                    hits.append((path, line_no, line))
+    return hits
+
+
 def main():
     bashism_hits = find_bashisms(DEFAULT_WORKFLOWS_DIR)
     non_compliant_hits = find_non_compliant_bodies(DEFAULT_WORKFLOWS_DIR)
+    dash_hits = find_dash_fatal(DEFAULT_WORKFLOWS_DIR)
 
-    if not bashism_hits and not non_compliant_hits:
+    if not bashism_hits and not non_compliant_hits and not dash_hits:
         print("CLEAN")
         return 0
 
@@ -170,6 +219,8 @@ def main():
             f"{path.relative_to(REPO_ROOT)}:{lineno}: [non-python-body] "
             f"{step_name}: {n} code lines, not allowlisted"
         )
+    for path, lineno, text in dash_hits:
+        print(f"{path.relative_to(REPO_ROOT)}:{lineno}: [dash-fatal] {text.strip()}")
     return 1
 
 

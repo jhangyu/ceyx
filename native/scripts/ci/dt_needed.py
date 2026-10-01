@@ -31,10 +31,10 @@ rule 2).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from . import report, run
+from deps.assertions import AssertionFailed, ndk_tool
 
 _ANDROID_STL_SHARED_LOG_LINE = (
     "-- Android STL: c++_shared -- staged libc++_shared.so next to dng_decoder_native"
@@ -98,10 +98,18 @@ def _dt_needed_linux(artifact_dir: str, runner_temp: str) -> int:
     )
 
 
-def _resolve_llvm_readelf(ndk_home: str) -> str:
-    """Same NDK-toolchain-root join orientation.py uses for llvm-nm — a
-    fixed, already-verified layout (r27c), not a PATH lookup."""
-    return os.path.join(ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-readelf")
+def _resolve_llvm_readelf(ndk_home: str) -> str | None:
+    """The NDK's llvm-readelf via deps.assertions.ndk_tool (the one NDK
+    resolver: discovers the single prebuilt host dir). Reports the
+    `::error::` line and returns None when the NDK has no such tool."""
+    try:
+        return str(ndk_tool(ndk_home, "llvm-readelf"))
+    except AssertionFailed:
+        report.error(
+            f"llvm-readelf not found at {ndk_home}/toolchains/llvm/prebuilt/*/bin "
+            "— NDK layout may have changed (r27c expected)."
+        )
+        return None
 
 
 def _find_decoder_so(artifact_dir: str) -> Path | None:
@@ -194,8 +202,7 @@ def _dt_needed_android(artifact_dir: str, runner_temp: str, ndk_home: str | None
         report.error("dt_needed: --ndk-home is required for platform android")
         return 2
     llvm_readelf = _resolve_llvm_readelf(ndk_home)
-    if not os.access(llvm_readelf, os.X_OK):
-        report.error(f"llvm-readelf not found at {llvm_readelf} — NDK layout may have changed (r27c expected).")
+    if llvm_readelf is None:
         return 1
 
     report.section("Android level 1: decoder DT_NEEDED matches resolved STL")

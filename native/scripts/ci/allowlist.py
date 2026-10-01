@@ -5,7 +5,7 @@ Owned in push 2 by WI-4 (this push's guard WI). Per D2/the ratchet ruling
 this starts at the FULL set of run-step bodies that are not yet a single
 `python3 native/scripts/ci.py <command>` line, across EVERY workflow file
 under `.github/workflows/*.yml` -- NOT just the four "leg" workflows plus
-build.yml the work-package table names. Rule 1 (check_shell_prohibition.py)
+build.yml the work-package table names. Rule 1 (since-deleted check_shell_prohibition.py)
 scans every workflow file with no exceptions, so the six `*_dist_*.yml`
 workflows (heif/jxl/webp x android/windows) are in MUST_STAY too, even
 though no named WI currently owns migrating them.

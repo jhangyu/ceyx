@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 import shlex
 import sys
 import tempfile
@@ -190,25 +191,13 @@ class GuardListTest(unittest.TestCase):
     def test_guard_list_has_no_duplicates(self):
         self.assertEqual(len(set(guards.GUARDS)), len(guards.GUARDS))
 
-    def test_the_contested_seventeenth_guard_is_included(self):
-        """The Phase 1 scope prose says "16 repo-static guards"; deriving the
-        list from the tree yields 17, and the ruling was to follow the
-        derivation rather than the sentence. This pins that outcome: if a
-        later reader trims the list back to 16 to match the prose, this goes
-        red and makes them read the reasoning instead of quietly shrinking
-        the gate. Shrinking a gate to match a document is the failure this
-        whole campaign keeps paying for.
-
-        Count history: 17 -> 18 when Phase 2 added `ci.py
-        render-workflows --check`, then 18 -> 13 when Phase 2 DELETED its
-        five synchronizer guards, then 13 -> 12 when Phase 3 retired
-        gen_linkage_table.py's --check entry. Both shrinks are fine for a
-        reason this test still guards against: they were removed by named,
-        individual USER RULINGs (2026-09-18 21:40 for Phase 2's five;
-        the narrow-ruling contract clause for Phase 3's one), not to make
-        a number match a document. The membership this test actually pins
-        (check_test_marker_leak.py) is asserted separately above and is
-        unchanged."""
+    def test_the_contested_marker_leak_guard_is_included(self):
+        """The Phase 1 scope prose stated a smaller count than the membership
+        rule derives; the ruling followed the derivation. This pins
+        check_test_marker_leak.py's membership so nobody trims the list to
+        match a sentence. Later shrinks happened only by named user rulings
+        (Phase 2's synchronizer guards, Phase 3's gen_linkage_table --check
+        entry), never to match a document."""
         listed = {g[0] for g in guards.GUARDS}
         self.assertIn("native/scripts/ci/check_test_marker_leak.py", listed)
         self.assertEqual(len(guards.GUARDS), 12)
@@ -233,29 +222,9 @@ class GuardListTest(unittest.TestCase):
 
 
 class StaleRosterTest(unittest.TestCase):
-    """Six of the seventeen entries are scheduled for deletion by three
-    members across two phases. When one of those deletions lands without the
-    matching tuple edit, the failure MUST name the phase and owner -- a
-    generic `can't open file` sends the reader to look at Docker, which is
-    the most expensive wrong turn available here."""
-
-    def test_missing_guard_names_its_phase_and_owner(self):
-        # Synthetic fixture rather than a real guard/phase: every real
-        # RETIREMENT_SCHEDULE row is retired sooner or later (Phase 3's own
-        # row already is), so a fixture pinned to a real entry goes stale
-        # the moment that phase lands. Mocking both GUARDS and
-        # RETIREMENT_SCHEDULE keeps this testing real _preflight() code
-        # without depending on migration state.
-        fake_path = "native/scripts/ci/check_fake_guard_for_test.py"
-        with mock.patch.object(guards, "GUARDS", ((fake_path,),)), mock.patch.object(
-            guards, "RETIREMENT_SCHEDULE", {fake_path: ("Phase X", "test-owner")}
-        ):
-            tmp = Path(tempfile.mkdtemp(prefix="ceyx-guards-stale."))
-            problems = guards._preflight(tmp)
-        self.assertEqual(len(problems), 1)
-        self.assertIn("STALE GUARDS ENTRY", problems[0])
-        self.assertIn("Phase X", problems[0])
-        self.assertIn("test-owner", problems[0])
+    """A stale roster entry MUST fail by name -- a generic `can't open file`
+    sends the reader to look at Docker, the most expensive wrong turn
+    available here."""
 
     def test_unscheduled_missing_guard_says_so_rather_than_inventing_an_owner(self):
         with mock.patch.object(guards, "GUARDS", (("native/scripts/not_a_guard.py",),)):
@@ -266,7 +235,7 @@ class StaleRosterTest(unittest.TestCase):
 
     def test_stale_entry_with_no_schedule_is_flagged_as_unknown(self):
         """The actual current shape for gen_linkage_table.py: its --check
-        mode and GUARDS/RETIREMENT_SCHEDULE entries were retired together by
+        mode and GUARDS entry were retired together by
         impl-p3 (Phase 3), so a stale invocation of it now has NO scheduled
         retirement and must be flagged as unannounced drift, not attributed
         to a phase that already finished."""
@@ -278,22 +247,6 @@ class StaleRosterTest(unittest.TestCase):
         )
         self.assertIn("STALE GUARDS ENTRY", diagnosis)
         self.assertIn("NO scheduled retirement", diagnosis)
-
-    def test_retirement_schedule_only_names_real_guards(self):
-        """The map and the tuple must not drift apart -- a schedule row for a
-        path nobody runs is a lie that outlives the guard."""
-        listed = {g[0] for g in guards.GUARDS}
-        for path in guards.RETIREMENT_SCHEDULE:
-            self.assertIn(path, listed, f"{path} is scheduled but not in GUARDS")
-
-    def test_phase_3_retirement_is_final_not_pending(self):
-        """A literal total count here re-rots at every OTHER phase's
-        landing (Phase 2's five in particular) -- this pins only what
-        Phase 3's own deletion is responsible for: its schedule row is
-        gone for good, not merely pending, and must never reappear."""
-        phases = [p for p, _ in guards.RETIREMENT_SCHEDULE.values()]
-        self.assertNotIn("Phase 3", phases)
-        self.assertNotIn("native/scripts/gen_linkage_table.py", guards.RETIREMENT_SCHEDULE)
 
 
 class ScopePrintingTest(unittest.TestCase):
@@ -404,6 +357,16 @@ class ShlexRoundTripTest(unittest.TestCase):
         image = guards.read_pinned_image(_REPO_ROOT)
         argv = guards.render_docker_argv(image)
         self.assertEqual(shlex.split(guards.render_docker_cmd(image)), argv)
+
+
+class GuardCountProseTest(unittest.TestCase):
+    def test_guards_source_has_no_literal_count(self):
+        """The tuple is the count. A count copied into prose went stale more
+        than once; no literal guard count may live in guards.py."""
+        source = Path(guards.__file__).read_text(encoding="utf-8")
+        hit = re.search(
+            r"(?i)thirteen|seventeen|sixteen|\b1[2-8] guards\b|of the 1[2-8]\b", source)
+        self.assertIsNone(hit, hit.group(0) if hit else "")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -31,7 +31,7 @@ jobs:
     # WI-14 step 14.5 (S-F4). RULED (user, 2026-09-12): support as many Linux
     # versions as possible without losing current capabilities. Linux build
     # floor = glibc 2.35 (Ubuntu 22.04 / Debian 12 and newer), achieved via
-    # `container: ubuntu:22.04` running on an explicitly pinned
+    # `container: ubuntu:22.04` (digest-pinned) running on an explicitly pinned
     # `runs-on: ubuntu-24.04` runner -- the container runs the build; the
     # runner only hosts Docker, which is what decouples the glibc floor from
     # GitHub's runner-deprecation calendar. The previous unpinned rolling
@@ -44,7 +44,7 @@ jobs:
     #
     # ARM64 LEG (armci round): the same job runs a second matrix row on GitHub's
     # native aarch64 runner `ubuntu-24.04-arm` -- native build, no cross-compile,
-    # same `container: ubuntu:22.04` glibc-2.35 floor, same steps. Only the
+    # same `container: ubuntu:22.04` (digest-pinned) glibc-2.35 floor, same steps. Only the
     # values in `matrix.include` differ per row (no divergent build path).
     strategy:
       fail-fast: false
@@ -57,7 +57,12 @@ jobs:
             runner: ubuntu-24.04-arm
             triplet: arm64-linux-heif
     runs-on: ${{ matrix.runner }}
-    container: ubuntu:22.04
+    # Digest-pinned 2026-10-02 (techdebt ruling 4-a; C12 in
+    # native/scripts/ci_conventions_check.py enforces the shape). Multi-arch
+    # INDEX digest -- this job runs on amd64 and arm64. Re-pin: run
+    # `docker buildx imagetools inspect ubuntu:22.04` and copy the top-level
+    # `Digest:` (never a per-platform manifest digest).
+    container: ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
     timeout-minutes: 60
     # `contents: write` was dropped in round 6 together with the release-attach
     # step it existed for. This leg now only reads the repo and uploads
@@ -81,7 +86,7 @@ jobs:
       # the paths are composed there instead.
     steps:
       # MUST RUN BEFORE actions/checkout (CI run 34697591379, this leg's first
-      # real containerised run, died here). `container: ubuntu:22.04` is a bare
+      # real containerised run, died here). `container: ubuntu:22.04` (digest-pinned) is a bare
       # base image with NO git. actions/checkout falls back to downloading a
       # tarball through the REST API when git < 2.18 is absent from PATH, and
       # that fallback mode REJECTS `submodules:` outright:

@@ -50,7 +50,7 @@ theorised). In a linked worktree, `.git` is a FILE containing a pointer to
 `<main repo>/.git/worktrees/<name>` -- a path OUTSIDE the bind mount. Every
 git-backed guard then dies with `fatal: not a git repository`, and
 `check_wiring_is_ledger` additionally cannot resolve `origin/main`. Observed:
-3 of the 17 guards fail from a worktree and all 17 pass from a `git clone` of
+the git-backed guards fail from a worktree and every guard passes from a `git clone` of
 the same commit (tmp/verify/impl-p1-docker/gate-branch.txt vs gate-clone.txt).
 Those failures are an artefact of the MOUNT, not a property of the tree, and
 must not be "fixed" by relaxing a guard. A CI runner is unaffected:
@@ -111,9 +111,7 @@ DOCKERFILE = Path("native/ci.Dockerfile")
 # This list does not discover anything; it is a hand-maintained roster, and a
 # roster that goes stale silently is the exact defect class this campaign
 # exists to remove. You are not relied upon to remember: `_preflight()` below
-# fails LOUDLY and names the retiring phase and owner from
-# `RETIREMENT_SCHEDULE`. One of the thirteen entries is still scheduled for
-# removal (Phase 3) -- keep that map in step with this tuple.
+# fails LOUDLY on a stale entry, by name, before anything runs.
 #
 # ADDING a guard is the same discipline in reverse: apply the membership rule,
 # add the tuple entry, and if it is NOT repo-static do not add it here at all
@@ -139,16 +137,12 @@ DOCKERFILE = Path("native/ci.Dockerfile")
 #     Phase 1's acceptance is a literal grep-zero claim on that filename, and
 #     a comment is a grep hit.
 #
-# ON THE COUNT: the Phase 1 scope prose says "16 repo-static guards".
-# Applying the membership rule mechanically yields SEVENTEEN, and this list is
-# the seventeen. The discrepancy was raised rather than absorbed, and the
-# ruling (lead18, Ruling 1) was to follow the derivation: a count inherited
-# from a document has been wrong more than once in this campaign, and
-# acceptance names no count. The seventeenth is check_test_marker_leak.py,
-# which has NO build.yml consumer at all -- so adopting 17 does not preserve
-# an existing CI behaviour, it ADDS coverage CI never had. Anyone tempted to
-# "correct" this list back down to sixteen to match a sentence: the sentence
-# is the thing that is out of date.
+# ON THE COUNT: the tuple IS the count; no prose here states a number,
+# because a count copied into a comment goes stale. Ruling (lead18, Ruling
+# 1): the mechanical derivation wins over any document's number, so
+# check_test_marker_leak.py is in -- and it ADDS coverage CI never had (it
+# has no other build.yml consumer). Do not trim this list to match a
+# sentence; the sentence is what is out of date.
 # ---------------------------------------------------------------------------
 GUARDS: tuple[tuple[str, ...], ...] = (
     ("native/scripts/check_workflow_bashisms.py",),
@@ -165,7 +159,7 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     # one remains, which is the ruling having been applied rather than
     # merely recorded.
     ("native/scripts/ci/check_expected_additions.py",),
-    # SEVENTEENTH, and the only contested membership. It is a meta-guard: it
+    # The only contested membership. It is a meta-guard: it
     # runs `ci.py selftest` as a subprocess and checks that no test leaked a
     # `NAME=value` line onto real stdout, where AC-2's marker instrument
     # would later parse it as a genuine CI marker. That makes it the only
@@ -204,20 +198,12 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     ("native/scripts/ci.py", "render-workflows", "--check"),
 )
 
-# Machine-readable twin of the `# RETIRES:` comments in GUARDS above. It
-# exists so a STALE ENTRY produces an error naming the phase and the owner
-# instead of a generic file-not-found that reads like a broken environment.
-# The comments are for the person reading the tuple; this map is for the
-# person staring at a red gate at 3am wondering what they broke.
-#
-# Arithmetic for whoever reads next: 18 - 5 (Phase 2, DONE) - 1 (Phase 3,
-# DONE -- gen_linkage_table.py's --check mode and its GUARDS/schedule
-# entries were retired by impl-p3) = 12 at the end of the migration. Both
-# phases' retirements have landed for real, so this map is EMPTY -- an
-# empty map here means every scheduled retirement has actually happened,
-# not that nothing was ever scheduled.
-RETIREMENT_SCHEDULE: dict = {
-}
+# Appended to every STALE GUARDS ENTRY diagnosis.
+_STALE_ENTRY_HINT = (
+    " This guard has NO scheduled retirement, so this is not expected "
+    "roster drift -- it is either an unannounced deletion or a broken "
+    "checkout. Do not 'fix' it by removing the entry until you know which."
+)
 
 #: What this verb does NOT cover. Printed in-band on every run.
 NOT_COVERED = (
@@ -265,40 +251,20 @@ def read_pinned_image(repo_root: Path = REPO_ROOT) -> str:
     raise ValueError(f"{DOCKERFILE.as_posix()} contains no FROM line")
 
 
-def _retirement_note(path: str) -> str:
-    """The 'who do I talk to' half of a stale-entry error, or '' if this
-    guard has no scheduled retirement."""
-    entry = RETIREMENT_SCHEDULE.get(path)
-    if entry is None:
-        return (
-            " This guard has NO scheduled retirement, so this is not expected "
-            "roster drift -- it is either an unannounced deletion or a broken "
-            "checkout. Do not 'fix' it by removing the entry until you know which."
-        )
-    phase, owner = entry
-    return (
-        f" This guard was scheduled for deletion in {phase} (owner: {owner}) and "
-        f"its GUARDS entry in native/scripts/ci/guards.py was not removed with it. "
-        f"The fix is to delete the tuple entry and its RETIREMENT_SCHEDULE row, "
-        f"NOT to weaken or skip the guard block."
-    )
-
-
 def _preflight(repo_root: Path) -> list:
     """Fail loudly and specifically on a stale roster entry, BEFORE running
     anything.
 
-    Six of the seventeen entries are scheduled for deletion by three members
-    across two phases. When one of those deletions lands without the matching
-    tuple edit, the default failure is `python3: can't open file ...` -- which
-    reads like a broken container and sends the reader looking at Docker.
-    This turns it into a sentence naming the phase and the owner.
+    When a guard script is deleted without its tuple entry, the default
+    failure is `python3: can't open file ...` -- which reads like a broken
+    container and sends the reader looking at Docker. This turns it into a
+    named STALE GUARDS ENTRY line.
     """
     problems = []
     for guard in GUARDS:
         path = guard[0]
         if not (repo_root / path).is_file():
-            problems.append(f"STALE GUARDS ENTRY: {path} does not exist.{_retirement_note(path)}")
+            problems.append(f"STALE GUARDS ENTRY: {path} does not exist.{_STALE_ENTRY_HINT}")
     return problems
 
 
@@ -320,7 +286,7 @@ def _classify_failure(guard: tuple, result) -> str:
         path = guard[0]
         return (
             f"STALE GUARDS ENTRY: {path} exists but no longer accepts "
-            f"{' '.join(flags)}.{_retirement_note(path)}"
+            f"{' '.join(flags)}.{_STALE_ENTRY_HINT}"
         )
     return ""
 
@@ -385,10 +351,8 @@ def print_scope() -> None:
         flush=True,
     )
     for i, guard in enumerate(GUARDS, start=1):
-        retirement = RETIREMENT_SCHEDULE.get(guard[0])
-        suffix = f"  [retires: {retirement[0]}, owner {retirement[1]}]" if retirement else ""
         print(
-            f"GUARDS_SCOPE_COVERS[{i}/{len(GUARDS)}]: {' '.join(guard)}{suffix}",
+            f"GUARDS_SCOPE_COVERS[{i}/{len(GUARDS)}]: {' '.join(guard)}",
             flush=True,
         )
     # Cost: QUALITATIVE here, because this block prints BEFORE anything has
@@ -415,12 +379,6 @@ def print_scope() -> None:
         "and printed as GUARDS_COST_SUMMARY below -- read that, not a "
         "remembered number, and note that host and container runs differ "
         "substantially.",
-        flush=True,
-    )
-    print(
-        f"GUARDS_SCOPE_RETIRING: {len(RETIREMENT_SCHEDULE)} of {len(GUARDS)} entries "
-        "are scheduled for deletion by later phases; each stays LIVE until its "
-        "deletion actually lands, and a stale entry fails loudly by name",
         flush=True,
     )
     for item in NOT_COVERED:

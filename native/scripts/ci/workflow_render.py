@@ -53,6 +53,12 @@ from __future__ import annotations
 
 from . import targets
 
+# The one Python toolchain pin for every workflow: interpolated into the
+# rendered dists here; the hand-written legs' literal copies are held equal
+# to it by ci_conventions_check.py C11. Not a per-platform fact, so it does
+# not live in targets.py (targets.py docstring: per-platform facts only).
+PYTHON_VERSION = "3.11"
+
 # The enumerated render set. A name here with no committed file, or a
 # mismatch against one, fails `--check`.
 #
@@ -776,6 +782,7 @@ def render(name: str) -> str:
     dist = f"native/third_party/{d['dist_prefix']}-dist-android-{arch}"
     artifact = f"{d['dist_prefix']}-dist-android-{arch}"
     apt = _APT_STEP if d["apt_step"] else ""
+    ndk = targets.spec("android")["ndk_version"]
 
     return f"""\
 name: {d['title']}
@@ -809,13 +816,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "{PYTHON_VERSION}"
 
       - name: Set up Android NDK
         id: setup_ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
+          ndk-version: {ndk}
           add-to-path: false
 
       - name: Install Ninja
@@ -911,7 +918,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "{PYTHON_VERSION}"
 
       - name: Install Ninja
         run: python native/scripts/ci.py provision ninja

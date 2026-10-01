@@ -13,6 +13,10 @@ ruling calls "preferred but not required".
 """
 from __future__ import annotations
 
+import io
+import re
+import tempfile
+from contextlib import redirect_stdout
 import unittest
 from pathlib import Path
 
@@ -207,6 +211,72 @@ class TestLiveMacosBuildYmlD6StepIsCorrectlyRecognizedSafe(unittest.TestCase):
             "shape again -- that is the R1 regression class, not a "
             "'nothing to check here' state.",
         )
+
+
+
+_PIPE_STEP = (
+    "jobs:\n"
+    "  build:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - name: Build with log\n"
+    "{shell}"
+    "        run: |\n"
+    "          set +e\n"
+    "          python3 build.py 2>&1 | tee build.log\n"
+    "          rc=$?\n"
+    "          set -e\n"
+    "          exit $rc\n"
+)
+
+
+class TestPipeRule(unittest.TestCase):
+    """`$?` after a pipe is the LAST command's status unless pipefail is on.
+    Keyless Linux/macOS steps run `bash -e {0}` (no pipefail); keyless
+    container steps run `sh -e {0}` (dash, no pipefail at all)."""
+
+    def test_tee_without_pipefail_is_a_violation(self):
+        v = guard.scan_pipes(_PIPE_STEP.format(shell=""), "fixture.yml")
+        self.assertEqual(1, len(v))
+        self.assertEqual(("fixture.yml", 8, "Build with log", "bash"), v[0][:4])
+
+    def test_tee_under_shell_bash_is_clean(self):
+        text = _PIPE_STEP.format(shell="        shell: bash\n")
+        self.assertEqual([], guard.scan_pipes(text, "fixture.yml"))
+
+    def test_set_o_pipefail_in_keyless_bash_is_clean(self):
+        text = _PIPE_STEP.format(shell="").replace(
+            "set +e\n", "set +e\n          set -o pipefail\n")
+        self.assertEqual([], guard.scan_pipes(text, "fixture.yml"))
+
+    def test_or_true_diagnostic_is_exempt(self):
+        text = _PIPE_STEP.format(shell="").replace(
+            "| tee build.log\n", "| tee build.log || true\n")
+        self.assertEqual([], guard.scan_pipes(text, "fixture.yml"))
+
+    def test_main_fails_on_pipe_violation(self):
+        path = Path(tempfile.mkdtemp(prefix="ceyx-pipe.")) / "fixture.yml"
+        path.write_text(_PIPE_STEP.format(shell=""))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = guard.main([str(path)])
+        self.assertEqual(1, rc)
+        self.assertIn("PIPE_RULE_VIOLATIONS=1", buf.getvalue())
+
+
+class TestLiveTree(unittest.TestCase):
+    def test_live_markers_examined_at_least_five(self):
+        """Widened marker shape: every `VAR=$?` assignment is a capture point
+        (4 tee sites + D6 at design time; 9 on a48a1975)."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = guard.main([])
+        out = buf.getvalue()
+        self.assertEqual(0, rc, out)
+        m = re.search(r"MARKERS_EXAMINED=(\d+)", out)
+        self.assertIsNotNone(m, out)
+        self.assertGreaterEqual(int(m.group(1)), 5, out)
+        self.assertIn("PIPE_RULE_VIOLATIONS=0", out)
 
 
 if __name__ == "__main__":

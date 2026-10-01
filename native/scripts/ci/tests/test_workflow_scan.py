@@ -164,5 +164,50 @@ jobs:
         self.assertEqual(workflow_scan.code_lines(steps[0]), ['echo "real"'])
 
 
+
+class TestStepShells(unittest.TestCase):
+    def test_effective_shell_table(self):
+        S = workflow_scan.StepShell
+        cases = [
+            (S(None, False), "bash"),
+            (S(None, True), "sh"),
+            (S("bash", False), "bash-pipefail"),
+            (S("bash", True), "bash-pipefail"),
+            (S("bash --noprofile --norc -eo pipefail {0}", False), "bash-pipefail"),
+            (S("bash -e {0}", False), "bash"),
+            (S("sh", False), "sh"),
+            (S("sh -e {0}", False), "sh"),
+            (S("pwsh", False), "other"),
+            (S("python", False), "other"),
+        ]
+        for step, expected in cases:
+            with self.subTest(step=step):
+                self.assertEqual(expected, workflow_scan.effective_shell(step))
+
+    def test_container_job_keyless_is_sh(self):
+        text = (
+            "jobs:\n"
+            "  plain:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: a\n"
+            "        run: echo a\n"
+            "  boxed:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    container: ubuntu:22.04\n"
+            "    steps:\n"
+            "      - name: b\n"
+            "        run: echo b\n"
+            "      - name: c\n"
+            "        shell: bash\n"
+            "        run: echo c\n"
+        )
+        shells = workflow_scan.step_shells(text)
+        self.assertEqual(workflow_scan.StepShell(None, False), shells[6])
+        self.assertEqual(workflow_scan.StepShell(None, True), shells[12])
+        self.assertEqual(workflow_scan.StepShell("bash", True), shells[15])
+        self.assertEqual("sh", workflow_scan.effective_shell(shells[12]))
+
+
 if __name__ == "__main__":
     unittest.main()
