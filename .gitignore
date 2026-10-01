@@ -89,6 +89,11 @@ native/third_party/heif-dist-*/
 # INPUT because Android cannot be rebuilt casually on the dev machine --
 # same policy as heif-dist-windows).
 !native/third_party/heif-dist-android-arm64-v8a/
+# EXCEPTION: heif-dist-windows-arm64 IS committed (windows-arm64 leg,
+# contract armci-contract.md R-7) -- CI-built on windows-11-arm, same reviewed
+# pinned-INPUT policy as heif-dist-windows (which is tracked despite the
+# pattern above; the arm64 twin gets an explicit negation instead).
+!native/third_party/heif-dist-windows-arm64/
 
 # Vendored libwebp encode distribution (static, built by
 # native/scripts/fetch_libwebp_dist.sh). Same policy as the HEIF dist above:
@@ -101,6 +106,9 @@ native/third_party/libwebp-dist-*/
 # locally, so unlike the macOS/Linux dist above, the Windows one is a
 # reviewed, pinned INPUT, same policy as heif-dist-windows.
 !native/third_party/libwebp-dist-windows/
+# EXCEPTION: libwebp-dist-windows-arm64 IS committed (windows-arm64 leg, R-7),
+# same rationale as libwebp-dist-windows.
+!native/third_party/libwebp-dist-windows-arm64/
 # EXCEPTION: the Android dist IS committed (A-T2/D5 ruling 2026-08-31),
 # same rationale as heif-dist-android-arm64-v8a above.
 !native/third_party/libwebp-dist-android-arm64-v8a/
@@ -114,6 +122,9 @@ native/third_party/libjxl-dist-*/
 # EXCEPTION: libjxl-dist-windows IS committed (Task 6, 2026-08-30 codec
 # expansion) -- same rationale as the libwebp-dist-windows exception above.
 !native/third_party/libjxl-dist-windows/
+# EXCEPTION: libjxl-dist-windows-arm64 IS committed (windows-arm64 leg, R-7),
+# same rationale as libjxl-dist-windows.
+!native/third_party/libjxl-dist-windows-arm64/
 # EXCEPTION: the Android dist IS committed (A-T3/D5 ruling 2026-08-31),
 # same rationale as the android exceptions above.
 !native/third_party/libjxl-dist-android-arm64-v8a/
