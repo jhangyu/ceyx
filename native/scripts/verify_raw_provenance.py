@@ -122,18 +122,32 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
     own patches are rooted at RAWSPEED; project-authored LibRaw patches
     (patches/libraw/) are rooted at VENDOR (the LibRaw tree).
     """
-    # Authoritative test first: a forward-applied patch reverse-applies
-    # cleanly (`git apply -R --check`); the hunk check below is the fallback.
+    # Strong test first: a forward-applied patch reverse-applies cleanly
+    # (`git apply -R --check`). It is only conclusive when git actually
+    # examined the files: git refuses paths beyond a symlink (vendored
+    # children are symlinks in some checkouts), and silently skips paths
+    # under a gitignored directory while still exiting 0. Neither is evidence
+    # about the patch, so the reason is logged and the hunk check below -- the
+    # added-line-anchored predicate -- decides instead.
     if not reverse:
+        why = ""
         try:
-            rc = subprocess.run(
-                ["git", "apply", "--check", "--reverse", str(patch_path)],
+            done = subprocess.run(
+                ["git", "apply", "--check", "--reverse", "--verbose", str(patch_path)],
                 cwd=str(root), capture_output=True, text=True,
-            ).returncode
-            if rc == 0:
+            )
+            output = (done.stdout + done.stderr).strip()
+            if done.returncode == 0 and "Skipped patch" not in output:
                 return True, ""
-        except (OSError, subprocess.SubprocessError):
-            pass  # fall through to the hunk check
+            lines = output.splitlines()
+            first = next((ln for ln in lines if ln.startswith("error:")),
+                         lines[0] if lines else "no output")[:140]
+            why = ("git skipped the files (gitignored path)"
+                   if done.returncode == 0 else "git apply refused: " + first)
+        except (OSError, subprocess.SubprocessError) as exc:
+            why = "git unavailable: " + str(exc)[:80]
+        print("[Provenance] note: " + patch_path.name + ": strong git check "
+              "inconclusive (" + why + "); using hunk-anchored check")
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     cache = {}
     later_files = set()
@@ -158,7 +172,8 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
         else:
             must_have, label_src = (post, post) if n_added else (None, pre)
             must_lack = None if n_added else pre
-        label = next((ln for ln in label_src if ln), "")[:80]
+        changed = set(pre) ^ set(post)
+        label = next((ln for ln in label_src if ln in changed and ln), "")[:80]
         if must_have is not None and not _contains_block(file_lines, must_have):
             if relpath in later_files:
                 continue  # superseded by a later patch's edit of this file
