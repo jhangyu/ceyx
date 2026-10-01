@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Mechanical checker for .github/CI-CONVENTIONS.md.
 
-Spec: docs/logs/2026-08-31/plan-ci-codec-integration.md, Task 2 (CI-T2), DP-6
-(closed, option A): this checker is COMMITTED but deliberately NOT wired into
-any CI workflow. It runs by hand, from each task's own acceptance criteria and
-from CI-T10's sign-off (which must record that it stays unwired). Do not add
-a workflow step that invokes this script.
+Spec: docs/logs/2026-08-31/plan-ci-codec-integration.md, Task 2 (CI-T2). The
+original DP-6 posture (unwired, hand-run only) was superseded: this checker
+IS wired into CI -- listed in `GUARDS` in `native/scripts/ci/guards.py` and
+run by the `guards-container` job of `.github/workflows/build.yml`. It also
+runs by hand from task acceptance criteria.
 
 Implements rules C1, C2, C3, C4, C5, C6, C8, C9 from CI-T2 (C7 -- "android_build.yml
 contains an emulator job" -- was REMOVED per the 2026-08-31 compile-only

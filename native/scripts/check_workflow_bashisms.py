@@ -35,19 +35,18 @@ across every workflow file. Two things changed:
    `run:` body that is neither a compliant one-line `python3 ...`/`python
    ...`/`pwsh -c python ...` invocation NOR listed in
    `native/scripts/ci/allowlist.py`'s `MUST_STAY`. This is DELIBERATELY the
-   same property `native/scripts/ci/check_shell_prohibition.py`'s Rule 1
-   already checks -- kept as a second, separately-written instrument rather
+   same property the since-deleted `native/scripts/ci/check_shell_prohibition.py`'s Rule 1
+   checked -- kept as a second, separately-written instrument rather
    than importing that module's check function, per the 2026-09-06 lesson
    this campaign's own handover cites: a manual's own checklist (here, a
    single checker) can lead an operator past the only check that detects a
    silent failure, so the property is worth two independent codepaths, not
    one codepath run twice.
 
-This script remains a COMMITTED but NOT-wired-into-CI pre-push check (same
-deliberate-unwired posture as `ci_conventions_check.py` -- see that file's
-docstring for the rationale: keep the workflow YAML itself the single source
-of truth for what CI runs, and run mechanical checks by hand or via a local
-git hook before push).
+This script IS wired into CI: it is listed in `GUARDS` in
+`native/scripts/ci/guards.py` and runs in the `guards-container` job of
+`.github/workflows/build.yml` (as does `ci_conventions_check.py`). It also
+runs by hand before push.
 
 Detected bashisms: `shopt`, `declare`, `mapfile`, `readarray`, `[[ ... ]]`,
 `PIPESTATUS`, `${#name[`, array-assignment `name=(...)`, process substitution
@@ -59,7 +58,7 @@ line-based `run:` body parser -- which does NOT collapse a YAML folded
 scalar (`run: >`) into one line; a step that is semantically one Python
 invocation but is written across several physical lines under `run: >`
 therefore shows up as "non-compliant" here exactly as it does in
-`check_shell_prohibition.py`'s Rule 1 (same instrument-limitation, found
+the since-deleted `check_shell_prohibition.py`'s Rule 1 had (same instrument-limitation, found
 independently by both checks -- see WI-25's own handover note on the three
 `*_dist_android.yml` carrier-build steps and `webp_dist_windows.yml`'s
 carrier step, all pre-existing allowlist entries at WI-25 time).
@@ -150,7 +149,7 @@ def find_non_compliant_bodies(workflows_dir, target_files=None):
 
     Independently re-derives compliance from `workflow_scan.iter_run_steps`/
     `code_lines` and `ci.allowlist.MUST_STAY` -- the same primitives
-    `check_shell_prohibition.py` uses, but this function's own comparison
+    the since-deleted `check_shell_prohibition.py` used, but this function's own comparison
     logic is written fresh here rather than calling into that module,
     per the module docstring's "two instruments, one property" rationale."""
     from ci import allowlist, workflow_scan  # noqa: E402  (sys.path set at import time)
