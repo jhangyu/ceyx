@@ -42,55 +42,88 @@ def git_head(repo):
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
-def parse_patch_files(patch_text):
-    """Yields (target_relpath, added_lines, removed_lines) per file in a
-    unified diff. added/removed are the literal content lines (leading
-    '+'/'-' stripped), excluding the '+++'/'---' header lines themselves and
-    blank lines (blank-line changes are too common to be a useful marker)."""
-    current_path = None
-    added, removed = [], []
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def parse_patch_hunks(patch_text):
+    """Yields (target_relpath, pre_image, post_image, n_added, n_removed) per
+    hunk in a unified diff. pre_image is the hunk's context + removed lines,
+    post_image its context + added lines, both as stripped content lines in
+    order (blank lines kept: they anchor position even though they are no
+    marker). Hunk bodies are consumed by the @@ line counts, so a removed
+    line that itself starts with "-- " is never mistaken for a file header."""
+    path = None
+    hunk = None  # [pre, post, n_added, n_removed, old_left, new_left]
     for line in patch_text.splitlines():
-        if line.startswith("+++ b/") or line.startswith("+++ "):
-            if current_path is not None:
-                yield current_path, added, removed
-            current_path = line[len("+++ "):].split("\t")[0]
-            if current_path.startswith("b/"):
-                current_path = current_path[2:]
-            added, removed = [], []
-        elif line.startswith("+++") or line.startswith("---"):
+        if hunk is not None and (hunk[4] > 0 or hunk[5] > 0):
+            tag, text = line[:1], line[1:].strip()
+            if tag == "+":
+                hunk[1].append(text)
+                hunk[2] += 1
+                hunk[5] -= 1
+            elif tag == "-":
+                hunk[0].append(text)
+                hunk[3] += 1
+                hunk[4] -= 1
+            elif tag in (" ", ""):
+                hunk[0].append(text)
+                hunk[1].append(text)
+                hunk[4] -= 1
+                hunk[5] -= 1
+            # "\\ No newline at end of file" and anything else: ignored
             continue
-        elif line.startswith("+"):
-            content = line[1:].strip()
-            if content:
-                added.append(content)
-        elif line.startswith("-"):
-            content = line[1:].strip()
-            if content:
-                removed.append(content)
-    if current_path is not None:
-        yield current_path, added, removed
+        if hunk is not None:
+            yield path, hunk[0], hunk[1], hunk[2], hunk[3]
+            hunk = None
+        if line.startswith("+++ "):
+            path = line[len("+++ "):].split("\t")[0]
+            if path.startswith("b/"):
+                path = path[2:]
+        else:
+            m = _HUNK_HEADER.match(line)
+            if m:
+                hunk = [[], [], 0, 0, int(m.group(1) or 1), int(m.group(2) or 1)]
+    if hunk is not None:
+        yield path, hunk[0], hunk[1], hunk[2], hunk[3]
 
 
-def check_patch_applied(patch_path, reverse, root=RAWSPEED):
+def _contains_block(file_lines, block):
+    """True iff `block` occurs as a contiguous run of lines in `file_lines`."""
+    n = len(block)
+    if n == 0:
+        return True
+    first = block[0]
+    return any(file_lines[i] == first and file_lines[i:i + n] == block
+               for i in range(len(file_lines) - n + 1))
+
+
+def check_patch_applied(patch_path, reverse, root=RAWSPEED, later_patches=()):
     """Verifies the vendored tree reflects this patch's diff.
 
-    For a forward-applied patch, the added lines must be present in the
-    current source file (and, as a weaker signal, the removed lines absent).
-    For a patch stored/applied in reverse (see REVERSE_APPLIED_PATCHES),
-    the roles invert: the patch's "added" lines must be ABSENT (never
-    applied forward) and its "removed" lines must be PRESENT (the tree is
-    in the pre-patch state the reverse-apply restores).
+    Anchored per hunk, not per file: a forward-applied hunk's post-image
+    (context + added lines) must occur as one contiguous block in the target
+    file; a reverse-applied (see REVERSE_APPLIED_PATCHES) hunk's pre-image
+    (context + removed lines) must. A hunk with nothing to add (pure
+    deletion) has a post-image that is only context and so also matches the
+    un-patched file; for it the opposite image (the pre-image, which holds
+    the removed lines) must be ABSENT. Removed lines are never asserted
+    absent file-wide: they may legitimately occur elsewhere in the file
+    (a call site removed in one hunk while others are untouched, bare `}` /
+    `#endif`), and only their position inside the hunk context means
+    anything.
+
+    Patches are stacked in order: a LATER patch in `later_patches` may have
+    rewritten the very lines this patch added (e.g. 16/17 refactor what 14
+    imported). A hunk whose image is gone but whose file a later patch also
+    edits is superseded, not unapplied; that later patch is verified in its
+    own right.
 
     `root` is the tree the diff's a/ b/ paths are relative to: RawSpeed3's
     own patches are rooted at RAWSPEED; project-authored LibRaw patches
     (patches/libraw/) are rooted at VENDOR (the LibRaw tree).
     """
     # Authoritative test first: a forward-applied patch reverse-applies
-    # cleanly (`git apply -R --check`). The line-set heuristic below cannot
-    # distinguish "removed line eliminated" from "identical line legitimately
-    # present elsewhere in the file" (e.g. a call site removed in one hunk
-    # while other call sites are deliberately untouched), so it only runs as
-    # a fallback when git is unavailable.
+    # cleanly (`git apply -R --check`); the hunk check below is the fallback.
     if not reverse:
         try:
             rc = subprocess.run(
@@ -100,35 +133,38 @@ def check_patch_applied(patch_path, reverse, root=RAWSPEED):
             if rc == 0:
                 return True, ""
         except (OSError, subprocess.SubprocessError):
-            pass  # fall through to the line heuristic
+            pass  # fall through to the hunk check
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
-    for relpath, added, removed in parse_patch_files(patch_text):
+    cache = {}
+    later_files = set()
+    for later in later_patches:
+        later_text = later.read_text(encoding="utf-8", errors="replace")
+        later_files.update(rel for rel, _, _, _, _ in parse_patch_hunks(later_text))
+    for relpath, pre, post, n_added, n_removed in parse_patch_hunks(patch_text):
         target = root / relpath
         if not target.is_file():
             return False, "target file missing: " + relpath
-        # Exact-line, not substring, membership: a removed line can be a
-        # literal substring of a still-present (differently reformatted)
-        # added line (e.g. "if (x) {" inside "} else if (x) {"), which would
-        # falsely read as "still un-patched" under substring matching.
-        file_lines = {ln.strip() for ln in
-                      target.read_text(encoding="utf-8", errors="replace").splitlines()}
-        added_set, removed_set = set(added), set(removed)
-        # Lines that appear as both an added and a removed line (identical
-        # after stripping, e.g. only their indentation changed, or the same
-        # line recurs unmodified elsewhere in the hunk) are not a reliable
-        # forward/reverse discriminator either way; drop them from both
-        # sides before checking.
-        common = added_set & removed_set
-        added_set -= common
-        removed_set -= common
-        want_present = removed_set if reverse else added_set
-        want_absent = added_set if reverse else removed_set
-        for marker in want_present:
-            if marker not in file_lines:
-                return False, relpath + " missing expected line: " + marker[:80]
-        for marker in want_absent:
-            if marker in file_lines:
-                return False, relpath + " still contains un-patched line: " + marker[:80]
+        if relpath not in cache:
+            cache[relpath] = [ln.strip() for ln in target.read_text(
+                encoding="utf-8", errors="replace").splitlines()]
+        file_lines = cache[relpath]
+        # (image that must be present, image that must be absent or None).
+        # A pure-deletion (forward) / pure-addition (reverse) hunk has a
+        # target image that is only context, which the un-patched file also
+        # matches, so there the *other* image is the discriminator.
+        if reverse:
+            must_have, label_src = (pre, pre) if n_removed else (None, post)
+            must_lack = None if n_removed else post
+        else:
+            must_have, label_src = (post, post) if n_added else (None, pre)
+            must_lack = None if n_added else pre
+        label = next((ln for ln in label_src if ln), "")[:80]
+        if must_have is not None and not _contains_block(file_lines, must_have):
+            if relpath in later_files:
+                continue  # superseded by a later patch's edit of this file
+            return False, relpath + " missing expected hunk: " + label
+        if must_lack is not None and _contains_block(file_lines, must_lack):
+            return False, relpath + " still contains un-patched hunk: " + label
     return True, ""
 
 
@@ -171,14 +207,15 @@ def main():
     # four surviving patches were re-generated as forward diffs against the new
     # pin, so the set is empty.
     REVERSE_APPLIED_PATCHES = set()
-    for patch in patches:
+    for index, patch in enumerate(patches):
         digest = hashlib.sha256(patch.read_bytes()).hexdigest()
         if digest not in text:
             fail("patch " + patch.name + " sha256 " + digest + " not recorded")
             continue
         print("[Provenance] patch " + patch.name + " sha256 -> PASS")
         reverse = patch.name in REVERSE_APPLIED_PATCHES
-        ok, detail = check_patch_applied(patch, reverse)
+        ok, detail = check_patch_applied(patch, reverse,
+                                         later_patches=patches[index + 1:])
         if ok:
             state = "reverse-applied (pre-state)" if reverse else "forward-applied"
             print("[Provenance] patch " + patch.name + " tree state (" + state + ") -> PASS")
@@ -191,13 +228,14 @@ def main():
     # no reverse case, because we author them against the pinned tree.
     project_patches = (sorted(PROJECT_PATCH_DIR.glob("*.patch"))
                        if PROJECT_PATCH_DIR.is_dir() else [])
-    for patch in project_patches:
+    for index, patch in enumerate(project_patches):
         digest = hashlib.sha256(patch.read_bytes()).hexdigest()
         if digest not in text:
             fail("project patch " + patch.name + " sha256 " + digest + " not recorded")
             continue
         print("[Provenance] project patch " + patch.name + " sha256 -> PASS")
-        ok, detail = check_patch_applied(patch, reverse=False, root=VENDOR)
+        ok, detail = check_patch_applied(patch, reverse=False, root=VENDOR,
+                                         later_patches=project_patches[index + 1:])
         if ok:
             print("[Provenance] project patch " + patch.name +
                   " tree state (forward-applied) -> PASS")
