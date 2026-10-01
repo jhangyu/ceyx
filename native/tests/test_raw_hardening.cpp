@@ -33,14 +33,12 @@
 #include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_test_support.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
-
 void report(const char* name, bool ok, const char* detail) {
-    std::printf("[RawHardening] %s %s -> %s\n", name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    test_report::report("RawHardening", name, ok, detail);
 }
 
 using raw_test_support::fileExists;
@@ -183,9 +181,7 @@ int main(int argc, char** argv) {
             const std::string path = base.empty() ? std::string()
                                                   : base + kase[1];
             if (path.empty() || !fileExists(path)) {
-                std::printf("[RawHardening] SKIP %s (missing fixture; run "
-                            "python3 native/scripts/tmp/"
-                            "r7_t13_gen_fixtures.py)\n", kase[0]);
+                test_report::reportSkip("RawHardening", kase[0], "missing-fixture");
                 continue;
             }
             expectCleanFailure(kase[0], path.c_str());
@@ -253,7 +249,7 @@ int main(int argc, char** argv) {
 
     // 5. Cancellation, before and after dispatch.
     if (bayer.empty()) {
-        std::printf("[RawHardening] SKIP cancellation (no Bayer sample)\n");
+        test_report::reportSkip("RawHardening", "cancellation", "no-bayer-sample");
     } else {
         RawDevelopParams develop{};
         develop.tone_curve_strength = 1.0f;
@@ -326,7 +322,7 @@ int main(int argc, char** argv) {
 
     // 6. GPU-mandatory: no CPU render fallback (spec section 2.6).
     if (bayer.empty()) {
-        std::printf("[RawHardening] SKIP gpu-unavailable (no Bayer sample)\n");
+        test_report::reportSkip("RawHardening", "gpu-unavailable", "no-bayer-sample");
     } else {
         setenv("DNG_RAW_FORCE_GPU_UNAVAILABLE", "1", 1);
         RawDevelopParams develop{};
@@ -370,10 +366,5 @@ int main(int argc, char** argv) {
     std::snprintf(detail, sizeof(detail), "elapsed=%llds", static_cast<long long>(elapsed));
     report("no-hang", elapsed < 30, detail);
 
-    if (failures != 0) {
-        std::printf("[RawHardening] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawHardening] ALL PASS\n");
-    return 0;
+    return test_report::finish("RawHardening");
 }
