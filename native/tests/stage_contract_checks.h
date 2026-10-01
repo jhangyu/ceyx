@@ -1,6 +1,8 @@
 #ifndef STAGE_CONTRACT_CHECKS_H_
 #define STAGE_CONTRACT_CHECKS_H_
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -180,5 +182,46 @@ inline bool validateRawBufferContract(const std::string& stageName,
 }
 
 }  // namespace StageContract
+
+// Verbatim PSNR helpers shared by test_decode, test_demosaic_halide and
+// test_render_halide (previously three copies). Global scope on purpose: the
+// call sites are unqualified. The 999.0 "nearly identical" sentinel is
+// load-bearing (run_decode_matrix.py compares against it); do not unify these
+// with the 1000.0 codec / handoff / HEIF variants, which differ on purpose.
+inline double computePSNR_16bit(const uint16_t* img1, const uint16_t* img2, size_t pixelCount) {
+    if (!img1 || !img2 || pixelCount == 0) return 0;
+
+    double mse = 0;
+    const uint32_t maxValue = 65535;
+
+    for (size_t i = 0; i < pixelCount; i++) {
+        double diff = static_cast<double>(img1[i]) - static_cast<double>(img2[i]);
+        mse += diff * diff;
+    }
+    mse /= pixelCount;
+
+    if (mse < 1e-10) return 999.0;  // Nearly identical
+
+    double psnr = 10.0 * std::log10((maxValue * maxValue) / mse);
+    return psnr;
+}
+
+inline double computePSNR_8bit(const uint8_t* img1, const uint8_t* img2, size_t pixelCount) {
+    if (!img1 || !img2 || pixelCount == 0) return 0;
+
+    double mse = 0;
+    const uint32_t maxValue = 255;
+
+    for (size_t i = 0; i < pixelCount; i++) {
+        double diff = static_cast<double>(img1[i]) - static_cast<double>(img2[i]);
+        mse += diff * diff;
+    }
+    mse /= pixelCount;
+
+    if (mse < 1e-10) return 999.0;
+
+    double psnr = 10.0 * std::log10((maxValue * maxValue) / mse);
+    return psnr;
+}
 
 #endif  // STAGE_CONTRACT_CHECKS_H_

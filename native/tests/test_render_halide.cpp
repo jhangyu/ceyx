@@ -23,23 +23,6 @@
 // Simple Halide-like functions for render (no actual Halide dependency for this test)
 // We'll use a basic implementation first and compare PSNR
 
-// Compute PSNR between two 8-bit buffers
-double computePSNR_8bit(const uint8_t* img1, const uint8_t* img2, size_t pixelCount) {
-    if (!img1 || !img2 || pixelCount == 0) return 0;
-
-    double mse = 0;
-    const uint32_t maxValue = 255;
-
-    for (size_t i = 0; i < pixelCount; i++) {
-        double diff = static_cast<double>(img1[i]) - static_cast<double>(img2[i]);
-        mse += diff * diff;
-    }
-    mse /= pixelCount;
-
-    if (mse < 1e-10) return 999.0;
-    return 10.0 * log10((maxValue * maxValue) / mse);
-}
-
 // Load raw file
 bool loadRawFile(const std::string& filename, void* data, size_t byteSize) {
     std::ifstream fin(filename, std::ios::binary);

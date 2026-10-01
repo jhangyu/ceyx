@@ -38,24 +38,6 @@ extern "C" {
 #include "dng_mosaic_halide.h"
 }
 
-// Compute PSNR between two 16-bit buffers
-double computePSNR_16bit(const uint16_t* img1, const uint16_t* img2, size_t pixelCount) {
-    if (!img1 || !img2 || pixelCount == 0) return 0;
-
-    double mse = 0;
-    const uint32_t maxValue = 65535;
-
-    for (size_t i = 0; i < pixelCount; i++) {
-        double diff = static_cast<double>(img1[i]) - static_cast<double>(img2[i]);
-        mse += diff * diff;
-    }
-    mse /= pixelCount;
-
-    if (mse < 1e-10) return 999.0;
-    double psnr = 10.0 * log10((maxValue * maxValue) / mse);
-    return psnr;
-}
-
 struct ChannelDiffStats {
     double mae = 0.0;
     uint16_t maxAbs = 0;
