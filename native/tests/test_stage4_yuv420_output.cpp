@@ -2268,8 +2268,16 @@ void run_fused_hash() {
 }  // namespace
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    /* Optional case filter: argv[1] = lowercase case id (e.g. "y13") runs only
+     * that case; no argument runs the full suite. Lets device runs split per
+     * case to fit a foreground time budget. */
+    const char *only = argc > 1 ? argv[1] : nullptr;
+    int ran = 0;
+    auto want = [&](const char *id) {
+        const bool run = only == nullptr || strcmp(only, id) == 0;
+        if (run) ++ran;
+        return run;
+    };
     printf("=== T12 milestone 4 — yuv420 output correctness (Y1..Y9) ===\n");
     printf("ARM/BACKEND for every case below: %s\n", host_arm());
     printf("Pre-registered bounds and mutation list: "
@@ -2285,24 +2293,29 @@ int main(int argc, char **argv) {
          "linearrgb-x3f"},
     };
 
-    run_y1(corpus);
-    run_y2();
-    run_y3();
-    run_y4a();
-    run_y4b(corpus);
-    run_y5("image_samples/raw_sample.arw", "bayer-arw");
-    run_y6();
-    run_y10();
-    run_y11();
-    run_y7();
-    run_y13();
-    run_y8();
-    run_y9();
+    if (want("y1")) run_y1(corpus);
+    if (want("y2")) run_y2();
+    if (want("y3")) run_y3();
+    if (want("y4a")) run_y4a();
+    if (want("y4b")) run_y4b(corpus);
+    if (want("y5")) run_y5("image_samples/raw_sample.arw", "bayer-arw");
+    if (want("y6")) run_y6();
+    if (want("y10")) run_y10();
+    if (want("y11")) run_y11();
+    if (want("y7")) run_y7();
+    if (want("y13")) run_y13();
+    if (want("y8")) run_y8();
+    if (want("y9")) run_y9();
     /* Y12 runs LAST among the assertions: it drives the fusion route flag,
      * and placing it after every other case means even a leaked flag (which
      * its own RAII forbids) could not re-route an earlier case. */
-    run_y12();
-    run_fused_hash();
+    if (want("y12")) run_y12();
+    if (want("fusedhash")) run_fused_hash();
+
+    if (ran == 0) {
+        printf("[filter] unknown case id '%s' -> no case ran -> FAIL\n", only);
+        ++g_fail;
+    }
 
     printf("\n=== SUMMARY pass=%d fail=%d n/a=%d arm=%s ===\n", g_pass, g_fail,
            g_na, host_arm());
