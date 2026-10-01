@@ -413,6 +413,199 @@ void makeStage3Buffer(ceyx::RawPersistentDeviceArena* arena,
     g_stage3_host_allocation_count.fetch_add(1, std::memory_order_relaxed);
 }
 
+// T3 (2026-10-02 techdebt campaign): the plane-extent and crop-bounds checks
+// all three layout branches ran verbatim. Every failure is
+// kRawErrMetadataInvalid -- the code each branch returned before -- and the
+// checks run in the original order, so error precedence is unchanged.
+//
+// require_even_row_stride is true for LinearRgb only. [R6 parking,
+// r6_review.md] its borrowed wrap divides row_stride_bytes by 2 (U16
+// elements), and an odd stride would silently truncate that division. Bayer
+// and X-Trans pass false: making the guard universal would change what they
+// accept, which is a behavior change (parked, not done here).
+//
+// The Stage4 crop is expressed in plane coordinates, exactly like the DNG
+// route's DefaultCropArea against its Stage3 buffer
+// (src/dng_render_halide.cpp:1988-2008).
+RawErrorCode validatePlaneAndCrop(const RawGpuInput& input,
+                                  bool require_even_row_stride) {
+    const RawPlaneView& plane = input.planes[0];
+    const uint32_t w = plane.width;
+    const uint32_t h = plane.height;
+    if (w == 0 || h == 0 || !plane.data) return kRawErrMetadataInvalid;
+    if (require_even_row_stride && (plane.row_stride_bytes % 2) != 0) {
+        return kRawErrMetadataInvalid;
+    }
+    const RawRect& crop = input.default_crop;
+    if (crop.width == 0 || crop.height == 0 ||
+        crop.x < 0 || crop.y < 0 ||
+        static_cast<uint32_t>(crop.x) + crop.width > w ||
+        static_cast<uint32_t>(crop.y) + crop.height > h) {
+        return kRawErrMetadataInvalid;
+    }
+    return kRawSuccess;
+}
+
+// T3 (2026-10-02 techdebt campaign): everything after the Stage-3 kernel
+// succeeded, shared by runXTransBranch and runLinearRgbBranch -- their two
+// tails were identical apart from one comment line (asserted before this
+// extraction). runBayerBranch keeps its own tail: it carries the fused-render
+// dispatch.
+//
+// The caller owns stage3, the arena region bindings and the source buffers;
+// they stay alive across this call because they are the caller's locals, and
+// this function's own locals (the RGBA checkout, the destination wrap) are
+// destroyed first, in the same relative order as before the extraction.
+RawErrorCode runSharedStage4Tail(const RawGpuInput& input,
+                                 const RawDevelopParams& develop,
+                                 const RawRect& crop,
+                                 Halide::Runtime::Buffer<uint16_t>& stage3,
+                                 ceyx::RawPersistentDeviceArena* arena,
+                                 bool use_zero_copy,
+                                 double gpu_t0,
+                                 double host_to_device_copy_ms,
+                                 double source_memcpy_ms,
+                                 RawPipelineResult& out) {
+    RenderParams params;
+    if (!raw_build_render_params(input, develop, params)) {
+        return kRawErrMetadataInvalid;
+    }
+
+    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
+    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
+    // pre-average scaled AOT when they differ, and is bit-identical to the
+    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
+    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
+    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+
+    // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
+    // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
+    // bridge wrappers (render_stage4_halide_from_device_buffer), the low-level
+    // runRenderStage4HalideAotFromDevice used on this route has NO out_w/out_h
+    // reference params to write the oriented extent back through -- so this
+    // caller must derive and publish the oriented extent itself, or every
+    // transposing orientation (5-8) reports/allocates the wrong (unswapped)
+    // dimensions. Mirrors §1.3's derivation exactly.
+    const bool transposes =
+        ceyx_orientation_transposes_inline(develop.exif_orientation);
+    const uint32_t oriented_w = transposes ? out_h : out_w;
+    const uint32_t oriented_h = transposes ? out_w : out_h;
+    // mem8 v3 T12: the destination byte requirement is FORMAT-dependent, and
+    // the frozen contract's own sizing function is the only place that
+    // arithmetic lives (raw_ffi_api.h: open-coding it is a defect by
+    // contract). The name `rgba_bytes` is kept so the surrounding zero-copy /
+    // checkout / diagnostics code reads unchanged; under yuv420 it holds
+    // w*h + 2*ceil(w/2)*ceil(h/2). A negative answer means an unknown format:
+    // the format-taking FFI entry validates before reaching here, so this is a
+    // backstop, never the caller-facing diagnostic.
+    const int64_t dst_bytes_for_format = ceyx::output_format_byte_count(
+        develop.output_format, static_cast<int32_t>(oriented_w),
+        static_cast<int32_t>(oriented_h));
+    if (dst_bytes_for_format < 0) return kRawErrMetadataInvalid;
+    const size_t rgba_bytes = static_cast<size_t>(dst_bytes_for_format);
+
+    // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
+    // all three branches stay structurally identical to one another.
+    // oriented_w/oriented_h (not out_w/out_h) is what makeRgbaCheckout
+    // publishes into out.width/out.height and checks the caller buffer
+    // against -- the caller's buffer was sized against the (oriented) probe.
+    std::optional<RgbaCheckoutGuard> rgba;
+    if (const RawErrorCode grc =
+            makeRgbaCheckout(out, rgba_bytes, &rgba, oriented_w, oriented_h);
+        grc != kRawSuccess) {
+        return grc;
+    }
+
+    // C2 (plan §4.2.2, §4.3): see runBayerBranch's identical comment -- same
+    // wrap attempt (gated on develop.caller_destination_is_page_aligned),
+    // same degraded-counter bookkeeping, same fallback shape, same RAII
+    // lifetime.
+    // mem8 v3 T12: not attempted at all under yuv420, on every backend. Stage4
+    // refuses the wrap for a three-plane destination anyway
+    // (halide_metal_wrap_buffer takes no offset), so creating the MTLBuffer
+    // here would be a pure cost; and this is NOT an alignment degradation, so
+    // that counter must not move either -- a format with no wrap path is a
+    // different fact from a buffer that failed the alignment contract.
+    const bool destination_wrap_is_applicable = (develop.output_format == 0);
+    std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
+    if (!destination_wrap_is_applicable) {
+        // no wrap, no degradation counter
+    } else if (use_zero_copy && develop.caller_destination_is_page_aligned) {
+        // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
+        // LENGTH argument itself to be a page multiple (§4.3), not just the
+        // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
+        // count) is essentially never a multiple of kRawDeviceArenaAlignmentBytes,
+        // so passing it made this class's own internal length check reject
+        // the wrap on every decode, silently degrading regardless of how well
+        // aligned the caller's real buffer was -- no refusal ever reached
+        // Stage4 because the wrap was never attempted successfully here.
+        // out.caller_dst_capacity is what the alignment probe upstream
+        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
+        // before setting caller_destination_is_page_aligned, and
+        // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
+        // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
+        // MTLBuffer covers the full extent Stage4 will write.
+        dst_metal_wrap.emplace(rgba->get(), out.caller_dst_capacity);
+    } else if (use_zero_copy) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+    void* const caller_destination_metal_buffer =
+        dst_metal_wrap ? dst_metal_wrap->get() : nullptr;
+    if (use_zero_copy && caller_destination_metal_buffer == nullptr &&
+        dst_metal_wrap.has_value()) {
+        ceyx::zero_copy_note_destination_alignment_degraded();
+    }
+
+    // Same shared Stage4 call as the Bayer branch: no second render path.
+    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
+                                            1.0f / 65535.0f,
+                                            crop.x, crop.y,
+                                            static_cast<int>(src_w),
+                                            static_cast<int>(src_h),
+                                            static_cast<int>(out_w),
+                                            static_cast<int>(out_h),
+                                            params, rgba->get(),
+                                            /*ctx=*/nullptr,
+                                            develop.exif_orientation,
+                                            arena,
+                                            caller_destination_metal_buffer,
+                                            // mem8 v3 T12: no fused source on
+                                            // this route; the format is the
+                                            // parameter after it.
+                                            /*fused_bayer_source=*/nullptr,
+                                            develop.output_format)) {
+        return kRawErrKernelFailed;
+    }
+
+    out.diag.gpu_process_ms = nowMs() - gpu_t0;
+    // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
+    out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
+    // R4-T4 S3 (round-4 review B1): named separately, never folded into
+    // host_to_device_copy_ms (see the h2d bracket comment above).
+    out.timing.source_mosaic_copy_milliseconds = source_memcpy_ms;
+    out.timing.device_to_host_copy_ms =
+        runRenderStage4LastDeviceToHostCopyMilliseconds();
+    out.timing.host_copy_ms =
+        out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
+    out.timing.gpu_submit_wait_ms =
+        out.diag.gpu_process_ms - out.timing.host_copy_ms;
+    // C2 (round-close audit): read on the same thread, immediately after the
+    // Stage4 call above. Reports "this decode wrote the caller's pages
+    // directly" -- false covers both "no buffer was passed" and "the wrap was
+    // attempted but refused", not a gate-state signal.
+    out.timing.unified_memory_path_active =
+        runRenderStage4LastCallerDestinationWrapWasUsed() ? 1u : 0u;
+    out.width = oriented_w;
+    out.height = oriented_h;
+    out.rgba_size = rgba_bytes;
+    out.rgba_ptr = rgba->release();   // ownership moves to the caller
+    return kRawSuccess;
+}
+
 RawErrorCode runBayerBranch(const RawGpuInput& input,
                             const RawDevelopParams& develop,
                             RawPipelineResult& out) {
@@ -423,21 +616,15 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         return kRawErrLayoutUnsupported;
     }
 
+    if (const RawErrorCode validation =
+            validatePlaneAndCrop(input, /*require_even_row_stride=*/false);
+        validation != kRawSuccess) {
+        return validation;
+    }
     const RawPlaneView& plane = input.planes[0];
     const uint32_t w = plane.width;
     const uint32_t h = plane.height;
-    if (w == 0 || h == 0 || !plane.data) return kRawErrMetadataInvalid;
-
-    // The Stage4 crop is expressed in plane coordinates, exactly like the DNG
-    // route's DefaultCropArea against its Stage3 buffer
-    // (src/dng_render_halide.cpp:1988-2008).
     const RawRect& crop = input.default_crop;
-    if (crop.width == 0 || crop.height == 0 ||
-        crop.x < 0 || crop.y < 0 ||
-        static_cast<uint32_t>(crop.x) + crop.width > w ||
-        static_cast<uint32_t>(crop.y) + crop.height > h) {
-        return kRawErrMetadataInvalid;
-    }
 
     // C2 (plan §4.1.4): the single capability-gate query. Computed once and
     // reused for both the source and destination decisions below, never
@@ -851,18 +1038,15 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         cfa[i] = channel;
     }
 
+    if (const RawErrorCode validation =
+            validatePlaneAndCrop(input, /*require_even_row_stride=*/false);
+        validation != kRawSuccess) {
+        return validation;
+    }
     const RawPlaneView& plane = input.planes[0];
     const uint32_t w = plane.width;
     const uint32_t h = plane.height;
-    if (w == 0 || h == 0 || !plane.data) return kRawErrMetadataInvalid;
-
     const RawRect& crop = input.default_crop;
-    if (crop.width == 0 || crop.height == 0 ||
-        crop.x < 0 || crop.y < 0 ||
-        static_cast<uint32_t>(crop.x) + crop.width > w ||
-        static_cast<uint32_t>(crop.y) + crop.height > h) {
-        return kRawErrMetadataInvalid;
-    }
 
     // C2 (plan §4.1.4): see runBayerBranch's identical comment.
     const bool use_zero_copy = ceyx::zero_copy_path_is_enabled();
@@ -950,144 +1134,8 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         return kRawErrKernelFailed;
     }
 
-    RenderParams params;
-    if (!raw_build_render_params(input, develop, params)) {
-        return kRawErrMetadataInvalid;
-    }
-
-    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
-    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
-    // pre-average scaled AOT when they differ, and is bit-identical to the
-    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
-    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
-    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
-    const uint32_t src_w = crop.width;
-    const uint32_t src_h = crop.height;
-    uint32_t out_w = 0, out_h = 0;
-    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-
-    // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
-    // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
-    // bridge wrappers (render_stage4_halide_from_device_buffer), the low-level
-    // runRenderStage4HalideAotFromDevice used on this route has NO out_w/out_h
-    // reference params to write the oriented extent back through -- so this
-    // caller must derive and publish the oriented extent itself, or every
-    // transposing orientation (5-8) reports/allocates the wrong (unswapped)
-    // dimensions. Mirrors §1.3's derivation exactly.
-    const bool transposes =
-        ceyx_orientation_transposes_inline(develop.exif_orientation);
-    const uint32_t oriented_w = transposes ? out_h : out_w;
-    const uint32_t oriented_h = transposes ? out_w : out_h;
-    // mem8 v3 T12: the destination byte requirement is FORMAT-dependent, and
-    // the frozen contract's own sizing function is the only place that
-    // arithmetic lives (raw_ffi_api.h: open-coding it is a defect by
-    // contract). The name `rgba_bytes` is kept so the surrounding zero-copy /
-    // checkout / diagnostics code reads unchanged; under yuv420 it holds
-    // w*h + 2*ceil(w/2)*ceil(h/2). A negative answer means an unknown format:
-    // the format-taking FFI entry validates before reaching here, so this is a
-    // backstop, never the caller-facing diagnostic.
-    const int64_t dst_bytes_for_format = ceyx::output_format_byte_count(
-        develop.output_format, static_cast<int32_t>(oriented_w),
-        static_cast<int32_t>(oriented_h));
-    if (dst_bytes_for_format < 0) return kRawErrMetadataInvalid;
-    const size_t rgba_bytes = static_cast<size_t>(dst_bytes_for_format);
-
-    // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
-    // all three branches stay structurally identical to one another.
-    // oriented_w/oriented_h (not out_w/out_h) is what makeRgbaCheckout
-    // publishes into out.width/out.height and checks the caller buffer
-    // against -- the caller's buffer was sized against the (oriented) probe.
-    std::optional<RgbaCheckoutGuard> rgba;
-    if (const RawErrorCode grc =
-            makeRgbaCheckout(out, rgba_bytes, &rgba, oriented_w, oriented_h);
-        grc != kRawSuccess) {
-        return grc;
-    }
-
-    // C2 (plan §4.2.2, §4.3): see runBayerBranch's identical comment -- same
-    // wrap attempt (gated on develop.caller_destination_is_page_aligned),
-    // same degraded-counter bookkeeping, same fallback shape, same RAII
-    // lifetime.
-    // mem8 v3 T12: not attempted at all under yuv420, on every backend. Stage4
-    // refuses the wrap for a three-plane destination anyway
-    // (halide_metal_wrap_buffer takes no offset), so creating the MTLBuffer
-    // here would be a pure cost; and this is NOT an alignment degradation, so
-    // that counter must not move either -- a format with no wrap path is a
-    // different fact from a buffer that failed the alignment contract.
-    const bool destination_wrap_is_applicable = (develop.output_format == 0);
-    std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
-    if (!destination_wrap_is_applicable) {
-        // no wrap, no degradation counter
-    } else if (use_zero_copy && develop.caller_destination_is_page_aligned) {
-        // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
-        // LENGTH argument itself to be a page multiple (§4.3), not just the
-        // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
-        // count) is essentially never a multiple of kRawDeviceArenaAlignmentBytes,
-        // so passing it made this class's own internal length check reject
-        // the wrap on every decode, silently degrading regardless of how well
-        // aligned the caller's real buffer was -- no refusal ever reached
-        // Stage4 because the wrap was never attempted successfully here.
-        // out.caller_dst_capacity is what the alignment probe upstream
-        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
-        // before setting caller_destination_is_page_aligned, and
-        // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
-        // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
-        // MTLBuffer covers the full extent Stage4 will write.
-        dst_metal_wrap.emplace(rgba->get(), out.caller_dst_capacity);
-    } else if (use_zero_copy) {
-        ceyx::zero_copy_note_destination_alignment_degraded();
-    }
-    void* const caller_destination_metal_buffer =
-        dst_metal_wrap ? dst_metal_wrap->get() : nullptr;
-    if (use_zero_copy && caller_destination_metal_buffer == nullptr &&
-        dst_metal_wrap.has_value()) {
-        ceyx::zero_copy_note_destination_alignment_degraded();
-    }
-
-    // Same shared Stage4 call as the Bayer branch: no second render path.
-    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
-                                            1.0f / 65535.0f,
-                                            crop.x, crop.y,
-                                            static_cast<int>(src_w),
-                                            static_cast<int>(src_h),
-                                            static_cast<int>(out_w),
-                                            static_cast<int>(out_h),
-                                            params, rgba->get(),
-                                            /*ctx=*/nullptr,
-                                            develop.exif_orientation,
-                                            arena,
-                                            caller_destination_metal_buffer,
-                                            // mem8 v3 T12: no fused source on
-                                            // this route; the format is the
-                                            // parameter after it.
-                                            /*fused_bayer_source=*/nullptr,
-                                            develop.output_format)) {
-        return kRawErrKernelFailed;
-    }
-
-    out.diag.gpu_process_ms = nowMs() - gpu_t0;
-    // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
-    out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
-    // R4-T4 S3 (round-4 review B1): named separately, never folded into
-    // host_to_device_copy_ms (see the h2d bracket comment above).
-    out.timing.source_mosaic_copy_milliseconds = source_memcpy_ms;
-    out.timing.device_to_host_copy_ms =
-        runRenderStage4LastDeviceToHostCopyMilliseconds();
-    out.timing.host_copy_ms =
-        out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
-    out.timing.gpu_submit_wait_ms =
-        out.diag.gpu_process_ms - out.timing.host_copy_ms;
-    // C2 (round-close audit): read on the same thread, immediately after the
-    // Stage4 call above. Reports "this decode wrote the caller's pages
-    // directly" -- false covers both "no buffer was passed" and "the wrap was
-    // attempted but refused", not a gate-state signal.
-    out.timing.unified_memory_path_active =
-        runRenderStage4LastCallerDestinationWrapWasUsed() ? 1u : 0u;
-    out.width = oriented_w;
-    out.height = oriented_h;
-    out.rgba_size = rgba_bytes;
-    out.rgba_ptr = rgba->release();   // ownership moves to the caller
-    return kRawSuccess;
+    return runSharedStage4Tail(input, develop, crop, stage3, arena, use_zero_copy,
+                               gpu_t0, host_to_device_copy_ms, source_memcpy_ms, out);
 }
 
 // The third sibling of runBayerBranch/runXTransBranch: same borrowed stride-aware
@@ -1122,24 +1170,15 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
 RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                 const RawDevelopParams& develop,
                                 RawPipelineResult& out) {
+    if (const RawErrorCode validation =
+            validatePlaneAndCrop(input, /*require_even_row_stride=*/true);
+        validation != kRawSuccess) {
+        return validation;
+    }
     const RawPlaneView& plane = input.planes[0];
     const uint32_t w = plane.width;
     const uint32_t h = plane.height;
-    if (w == 0 || h == 0 || !plane.data) return kRawErrMetadataInvalid;
-
-    // [R6 parking, r6_review.md] The borrowed wrap below divides
-    // row_stride_bytes by 2 (U16 elements). An odd stride would silently
-    // truncate that division; guard it explicitly rather than inherit the
-    // sibling branches' unguarded pattern silently.
-    if ((plane.row_stride_bytes % 2) != 0) return kRawErrMetadataInvalid;
-
     const RawRect& crop = input.default_crop;
-    if (crop.width == 0 || crop.height == 0 ||
-        crop.x < 0 || crop.y < 0 ||
-        static_cast<uint32_t>(crop.x) + crop.width > w ||
-        static_cast<uint32_t>(crop.y) + crop.height > h) {
-        return kRawErrMetadataInvalid;
-    }
 
     // C2 (plan §4.1.4): see runBayerBranch's identical comment.
     const bool use_zero_copy = ceyx::zero_copy_path_is_enabled();
@@ -1232,144 +1271,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         return kRawErrKernelFailed;
     }
 
-    RenderParams params;
-    if (!raw_build_render_params(input, develop, params)) {
-        return kRawErrMetadataInvalid;
-    }
-
-    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
-    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
-    // pre-average scaled AOT when they differ, and is bit-identical to the
-    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
-    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
-    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
-    const uint32_t src_w = crop.width;
-    const uint32_t src_h = crop.height;
-    uint32_t out_w = 0, out_h = 0;
-    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
-
-    // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
-    // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
-    // bridge wrappers (render_stage4_halide_from_device_buffer), the low-level
-    // runRenderStage4HalideAotFromDevice used on this route has NO out_w/out_h
-    // reference params to write the oriented extent back through -- so this
-    // caller must derive and publish the oriented extent itself, or every
-    // transposing orientation (5-8) reports/allocates the wrong (unswapped)
-    // dimensions. Mirrors §1.3's derivation exactly.
-    const bool transposes =
-        ceyx_orientation_transposes_inline(develop.exif_orientation);
-    const uint32_t oriented_w = transposes ? out_h : out_w;
-    const uint32_t oriented_h = transposes ? out_w : out_h;
-    // mem8 v3 T12: the destination byte requirement is FORMAT-dependent, and
-    // the frozen contract's own sizing function is the only place that
-    // arithmetic lives (raw_ffi_api.h: open-coding it is a defect by
-    // contract). The name `rgba_bytes` is kept so the surrounding zero-copy /
-    // checkout / diagnostics code reads unchanged; under yuv420 it holds
-    // w*h + 2*ceil(w/2)*ceil(h/2). A negative answer means an unknown format:
-    // the format-taking FFI entry validates before reaching here, so this is a
-    // backstop, never the caller-facing diagnostic.
-    const int64_t dst_bytes_for_format = ceyx::output_format_byte_count(
-        develop.output_format, static_cast<int32_t>(oriented_w),
-        static_cast<int32_t>(oriented_h));
-    if (dst_bytes_for_format < 0) return kRawErrMetadataInvalid;
-    const size_t rgba_bytes = static_cast<size_t>(dst_bytes_for_format);
-
-    // WP10: pool-vs-caller is decided in makeRgbaCheckout and nowhere else, so
-    // all three branches stay structurally identical to one another.
-    // oriented_w/oriented_h (not out_w/out_h) is what makeRgbaCheckout
-    // publishes into out.width/out.height and checks the caller buffer
-    // against -- the caller's buffer was sized against the (oriented) probe.
-    std::optional<RgbaCheckoutGuard> rgba;
-    if (const RawErrorCode grc =
-            makeRgbaCheckout(out, rgba_bytes, &rgba, oriented_w, oriented_h);
-        grc != kRawSuccess) {
-        return grc;
-    }
-
-    // C2 (plan §4.2.2, §4.3): see runBayerBranch's identical comment -- same
-    // wrap attempt (gated on develop.caller_destination_is_page_aligned),
-    // same degraded-counter bookkeeping, same fallback shape, same RAII
-    // lifetime.
-    // mem8 v3 T12: not attempted at all under yuv420, on every backend. Stage4
-    // refuses the wrap for a three-plane destination anyway
-    // (halide_metal_wrap_buffer takes no offset), so creating the MTLBuffer
-    // here would be a pure cost; and this is NOT an alignment degradation, so
-    // that counter must not move either -- a format with no wrap path is a
-    // different fact from a buffer that failed the alignment contract.
-    const bool destination_wrap_is_applicable = (develop.output_format == 0);
-    std::optional<CallerDestinationMetalBufferWrap> dst_metal_wrap;
-    if (!destination_wrap_is_applicable) {
-        // no wrap, no degradation counter
-    } else if (use_zero_copy && develop.caller_destination_is_page_aligned) {
-        // R3 gate-13/14 root cause fix: newBufferWithBytesNoCopy requires the
-        // LENGTH argument itself to be a page multiple (§4.3), not just the
-        // pointer. rgba_bytes (oriented_w*oriented_h*4, the exact image byte
-        // count) is essentially never a multiple of kRawDeviceArenaAlignmentBytes,
-        // so passing it made this class's own internal length check reject
-        // the wrap on every decode, silently degrading regardless of how well
-        // aligned the caller's real buffer was -- no refusal ever reached
-        // Stage4 because the wrap was never attempted successfully here.
-        // out.caller_dst_capacity is what the alignment probe upstream
-        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
-        // before setting caller_destination_is_page_aligned, and
-        // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
-        // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
-        // MTLBuffer covers the full extent Stage4 will write.
-        dst_metal_wrap.emplace(rgba->get(), out.caller_dst_capacity);
-    } else if (use_zero_copy) {
-        ceyx::zero_copy_note_destination_alignment_degraded();
-    }
-    void* const caller_destination_metal_buffer =
-        dst_metal_wrap ? dst_metal_wrap->get() : nullptr;
-    if (use_zero_copy && caller_destination_metal_buffer == nullptr &&
-        dst_metal_wrap.has_value()) {
-        ceyx::zero_copy_note_destination_alignment_degraded();
-    }
-
-    // Same shared Stage4 call as the other two branches: no second render path.
-    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
-                                            1.0f / 65535.0f,
-                                            crop.x, crop.y,
-                                            static_cast<int>(src_w),
-                                            static_cast<int>(src_h),
-                                            static_cast<int>(out_w),
-                                            static_cast<int>(out_h),
-                                            params, rgba->get(),
-                                            /*ctx=*/nullptr,
-                                            develop.exif_orientation,
-                                            arena,
-                                            caller_destination_metal_buffer,
-                                            // mem8 v3 T12: no fused source on
-                                            // this route; the format is the
-                                            // parameter after it.
-                                            /*fused_bayer_source=*/nullptr,
-                                            develop.output_format)) {
-        return kRawErrKernelFailed;
-    }
-
-    out.diag.gpu_process_ms = nowMs() - gpu_t0;
-    // C4 (plan §6.2/§6.4/§6.7): see runBayerBranch's identical comment.
-    out.timing.host_to_device_copy_ms = host_to_device_copy_ms;
-    // R4-T4 S3 (round-4 review B1): named separately, never folded into
-    // host_to_device_copy_ms (see the h2d bracket comment above).
-    out.timing.source_mosaic_copy_milliseconds = source_memcpy_ms;
-    out.timing.device_to_host_copy_ms =
-        runRenderStage4LastDeviceToHostCopyMilliseconds();
-    out.timing.host_copy_ms =
-        out.timing.host_to_device_copy_ms + out.timing.device_to_host_copy_ms;
-    out.timing.gpu_submit_wait_ms =
-        out.diag.gpu_process_ms - out.timing.host_copy_ms;
-    // C2 (round-close audit): read on the same thread, immediately after the
-    // Stage4 call above. Reports "this decode wrote the caller's pages
-    // directly" -- false covers both "no buffer was passed" and "the wrap was
-    // attempted but refused", not a gate-state signal.
-    out.timing.unified_memory_path_active =
-        runRenderStage4LastCallerDestinationWrapWasUsed() ? 1u : 0u;
-    out.width = oriented_w;
-    out.height = oriented_h;
-    out.rgba_size = rgba_bytes;
-    out.rgba_ptr = rgba->release();   // ownership moves to the caller
-    return kRawSuccess;
+    return runSharedStage4Tail(input, develop, crop, stage3, arena, use_zero_copy,
+                               gpu_t0, host_to_device_copy_ms, source_memcpy_ms, out);
 }
 
 }  // namespace
