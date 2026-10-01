@@ -1,13 +1,9 @@
-import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:ffi/ffi.dart';
-
-import 'dng_bindings.dart';
-import 'encode_options.dart';
 import 'still_bindings.dart';
 import 'still_error_codes.dart';
+import 'still_worker.dart';
 
 /// A decoded still image (HEIC/AVIF/WebP/JXL/JPEG): RGBA8 interleaved,
 /// Dart-owned.
@@ -34,34 +30,15 @@ class CeyxStillImage {
 /// only.
 typedef CeyxStillProbe = ({int width, int height, int orientation});
 
-class _CeyxStillWorkerResult {
-  _CeyxStillWorkerResult({
-    required this.rgba,
-    required this.width,
-    required this.height,
-    required this.orientation,
-  });
-
-  final TransferableTypedData rgba;
-  final int width;
-  final int height;
-  final int orientation;
-
-  CeyxStillImage toImage() => CeyxStillImage(
-    rgba: rgba.materialize().asUint8List(),
-    width: width,
-    height: height,
-    orientation: orientation,
-  );
-}
-
 /// High-level generic still-image decoding service.
 ///
 /// Shape deliberately mirrors [HeifDecoderService]: the same dylib search
-/// order (it reuses [DngNativeBindings]' loader), the same worker-isolate
+/// order (it reuses `DngNativeBindings`' loader), the same worker-isolate
 /// discipline (native bytes are copied into Dart-owned memory inside the
 /// worker, and only [TransferableTypedData] crosses the isolate boundary --
 /// no native pointer ever does), and the same guarded-symbol degradation.
+/// T8 (2026-10-02): those shared mechanics live in still_worker.dart; this
+/// class keeps its own contract -- null on every failure.
 class CeyxStillDecoderService {
   CeyxStillDecoderService({String? libraryPath}) : _libraryPath = libraryPath;
 
@@ -74,14 +51,10 @@ class CeyxStillDecoderService {
   void _initialize() {
     if (_initialized) return;
     _initialized = true;
-    try {
-      final dng = _libraryPath == null
-          ? DngNativeBindings.load()
-          : DngNativeBindings.fromPath(_libraryPath);
-      _bindings = CeyxStillBindings.fromLibrary(dng.library);
-    } catch (_) {
-      _bindings = null;
-    }
+    _bindings = loadStillRouteBindings(
+      _libraryPath,
+      CeyxStillBindings.fromLibrary,
+    );
   }
 
   /// Whether this build of the native library exports the generic
@@ -127,10 +100,16 @@ class CeyxStillDecoderService {
     final libraryPath = _libraryPath;
     final requested = maxDim > 0 ? maxDim : 0;
     try {
-      final result = await Isolate.run(
+      final pixels = await Isolate.run(
         () => _decodeInIsolate(path, formatHint, libraryPath, requested),
       );
-      return result?.toImage();
+      if (pixels == null) return null;
+      return CeyxStillImage(
+        rgba: pixels.rgba.materialize().asUint8List(),
+        width: pixels.width,
+        height: pixels.height,
+        orientation: pixels.orientation,
+      );
     } catch (_) {
       return null;
     }
@@ -142,72 +121,38 @@ class CeyxStillDecoderService {
     int formatHint,
     String? libraryPath,
   ) {
-    final service = CeyxStillDecoderService(
-      libraryPath: libraryPath,
-    ).._initialize();
-    final bindings = service._bindings;
+    final bindings = loadStillRouteBindings(
+      libraryPath,
+      CeyxStillBindings.fromLibrary,
+    );
     if (bindings == null || !bindings.available) return null;
-
-    final pathPtr = path.toNativeUtf8();
-    final width = calloc<Uint32>();
-    final height = calloc<Uint32>();
-    final orientation = calloc<Int32>();
-    try {
-      final rc = bindings.probe(pathPtr, formatHint, width, height, orientation);
-      if (rc != CeyxStillErrorCode.success) return null;
-      if (width.value == 0 || height.value == 0) return null;
-      return (
-        width: width.value,
-        height: height.value,
-        orientation: orientation.value,
-      );
-    } finally {
-      malloc.free(pathPtr);
-      calloc.free(width);
-      calloc.free(height);
-      calloc.free(orientation);
-    }
+    return probeStillImageExtent(
+      path,
+      (pathPointer, width, height, orientation) =>
+          bindings.probe(pathPointer, formatHint, width, height, orientation),
+      CeyxStillErrorCode.success,
+    );
   }
 
-  static _CeyxStillWorkerResult? _decodeInIsolate(
+  static StillDecodePixels? _decodeInIsolate(
     String path,
     int formatHint,
     String? libraryPath,
     int maxDim,
   ) {
-    final service = CeyxStillDecoderService(
-      libraryPath: libraryPath,
-    ).._initialize();
-    final bindings = service._bindings;
+    final bindings = loadStillRouteBindings(
+      libraryPath,
+      CeyxStillBindings.fromLibrary,
+    );
     if (bindings == null || !bindings.available) return null;
-
-    final pathPtr = path.toNativeUtf8();
-    final out = calloc<CeyxStillResult>();
-    try {
-      final rc = bindings.decode(pathPtr, formatHint, maxDim, out);
-      final result = out.ref;
-      if (rc != CeyxStillErrorCode.success) return null;
-      if (result.rgba == nullptr || result.rgbaLen <= 0) return null;
-      final expected = result.width * result.height * 4;
-      if (result.rgbaLen != expected) return null;
-      // Copy into Dart-owned bytes: TransferableTypedData cannot carry a
-      // native-backed typed list across an isolate boundary safely.
-      final copy = Uint8List.fromList(
-        result.rgba.asTypedList(result.rgbaLen),
-      );
-      return _CeyxStillWorkerResult(
-        rgba: TransferableTypedData.fromList([copy]),
-        width: result.width,
-        height: result.height,
-        orientation: result.orientation,
-      );
-    } finally {
-      // ceyx_still_release frees the buffer and zeroes the struct;
-      // calloc.free then releases the caller-owned struct itself. Order
-      // matters: freeing the struct first would leak the buffer.
-      if (bindings.available) bindings.release(out);
-      calloc.free(out);
-      malloc.free(pathPtr);
-    }
+    final outcome = decodeStillImage(
+      path,
+      maxDim,
+      (pathPointer, maxDimension, out) =>
+          bindings.decode(pathPointer, formatHint, maxDimension, out),
+      bindings.release,
+      CeyxStillErrorCode.success,
+    );
+    return outcome is StillDecodePixels ? outcome : null;
   }
 }
