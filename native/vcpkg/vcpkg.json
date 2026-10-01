@@ -3,9 +3,12 @@
   "version-string": "round2-od2-spike",
   "description": "Consuming manifest for the product build's vcpkg-supplied third-party stack: the HEIF stack (libheif + libde265 + kvazaar + aom) plus libwebp. Round-2 began this as the OD-2 overlay-port spike; D5 makes it load-bearing for the product build.",
   "builtin-baseline": "abb6dda5cc32914d2e64d7d72b974dc301d1fc8a",
-  "$comment-dependencies": "CORE = what every consuming platform needs. libwebp is core because native/cmake/encode.cmake links it on all desktop platforms. The HEIF stack sits behind the `heif` feature below, which is a DEFAULT feature -- so an unqualified `vcpkg install` against this manifest resolves exactly what it resolved before D5. A leg that needs libwebp alone (the Linux product build passes -DDNG_ENABLE_HEIF=OFF) adds --x-no-default-features and skips building aom/libheif/kvazaar entirely, rather than paying for a stack it then disables.",
+  "$comment-dependencies": "CORE = what every consuming platform needs. libwebp is core because native/cmake/encode.cmake links it on macOS and Linux; it is platform-qualified !windows because encode.cmake's WIN32 branch links the COMMITTED native/third_party/libwebp-dist-<suffix> instead and nothing on Windows consumes the vcpkg libwebp (building it there was dead work, and on windows-arm64 it fails: libwebp 1.6.0 cmake/cpu.cmake attaches -mfpu=neon under clang-cl, rejected for aarch64 -- CI run 36892768268). The HEIF stack sits behind the `heif` feature below, which is a DEFAULT feature -- so an unqualified `vcpkg install` against this manifest resolves exactly what it resolved before D5. A leg that needs libwebp alone (the Linux product build passes -DDNG_ENABLE_HEIF=OFF) adds --x-no-default-features and skips building aom/libheif/kvazaar entirely, rather than paying for a stack it then disables.",
   "dependencies": [
-    "libwebp"
+    {
+      "name": "libwebp",
+      "platform": "!windows"
+    }
   ],
   "default-features": [
     "heif"
