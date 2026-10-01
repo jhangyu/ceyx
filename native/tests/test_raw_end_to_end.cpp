@@ -28,6 +28,7 @@
 #include "raw_contract_validate.h"
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
+#include "raw_test_support.h"
 
 // Defined in src/pipeline/libraw_gpu_input_adapter.cpp, reached here through
 // libdng_decoder_native. Not in libraw_gpu_input_adapter.h because that header is
@@ -46,40 +47,11 @@ void report(const char* name, const char* id, bool ok, const char* detail) {
     if (!ok) ++failures;
 }
 
-struct Sample {
-    std::string id, path, route, expect_backend, expect_error, expect_layout;
-};
-
-std::string field(const std::string& obj, const char* key) {
-    const std::string needle = std::string("\"") + key + "\": \"";
-    const size_t at = obj.find(needle);
-    if (at == std::string::npos) return "";
-    const size_t start = at + needle.size();
-    const size_t end = obj.find('"', start);
-    return end == std::string::npos ? "" : obj.substr(start, end - start);
-}
+using Sample = raw_test_support::RawManifestSample;
+using raw_test_support::fileExists;
 
 std::vector<Sample> loadManifest(const char* path) {
-    std::ifstream in(path);
-    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    std::vector<Sample> out;
-    size_t pos = 0;
-    while ((pos = text.find('{', pos)) != std::string::npos) {
-        const size_t end = text.find('}', pos);
-        if (end == std::string::npos) break;
-        const std::string obj = text.substr(pos, end - pos);
-        Sample s{field(obj, "id"),             field(obj, "path"),
-                 field(obj, "expect_route"),   field(obj, "expect_backend"),
-                 field(obj, "expect_error"),   field(obj, "expect_layout")};
-        if (!s.id.empty() && !s.path.empty()) out.push_back(s);
-        pos = end + 1;
-    }
-    return out;
-}
-
-bool fileExists(const std::string& p) {
-    std::ifstream f(p, std::ios::binary);
-    return f.good();
+    return raw_test_support::loadRawManifest(path);
 }
 
 bool alphaAll255(const uint8_t* rgba, size_t pixels) {
@@ -606,7 +578,7 @@ int main(int argc, char** argv) {
         // exist to exercise the frontend's forced-backend switch, and the router
         // still sends them to the DNG SDK route. Driving them through the
         // generic-route expectations below would assert a contradiction.
-        if (s.route == "frontend_only") {
+        if (s.expect_route == "frontend_only") {
             std::printf("[RawE2E] SKIP %s (frontend_only, not a router corpus sample)\n",
                         s.id.c_str());
             continue;

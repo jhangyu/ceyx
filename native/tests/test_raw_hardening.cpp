@@ -32,6 +32,7 @@
 #include "dng_ffi_api.h"     // DngResult, dng_free_result
 #include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
+#include "raw_test_support.h"
 
 namespace {
 
@@ -42,37 +43,14 @@ void report(const char* name, bool ok, const char* detail) {
     if (!ok) ++failures;
 }
 
-bool fileExists(const std::string& p) {
-    std::ifstream f(p, std::ios::binary);
-    return f.good();
-}
-
-// Same minimal object scanner the other RAW tests use: the manifest is a flat
-// list of one-level JSON objects, so a brace scan plus a key lookup is enough
-// and keeps the test dependency-free.
-std::string field(const std::string& obj, const char* key) {
-    const std::string needle = std::string("\"") + key + "\": \"";
-    const size_t at = obj.find(needle);
-    if (at == std::string::npos) return "";
-    const size_t start = at + needle.size();
-    const size_t end = obj.find('"', start);
-    return end == std::string::npos ? "" : obj.substr(start, end - start);
-}
+using raw_test_support::fileExists;
 
 std::string resolveBayerSample(const char* manifest_path) {
-    std::ifstream in(manifest_path);
-    std::string text((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
-    size_t pos = 0;
-    while ((pos = text.find('{', pos)) != std::string::npos) {
-        const size_t end = text.find('}', pos);
-        if (end == std::string::npos) break;
-        const std::string obj = text.substr(pos, end - pos);
-        pos = end + 1;
-        if (field(obj, "expect_route") != "generic") continue;
-        if (field(obj, "expect_layout") != "bayer2x2") continue;
-        const std::string path = field(obj, "path");
-        if (!path.empty() && fileExists(path)) return path;
+    for (const raw_test_support::RawManifestSample& sample :
+         raw_test_support::loadRawManifest(manifest_path)) {
+        if (sample.expect_route != "generic") continue;
+        if (sample.expect_layout != "bayer2x2") continue;
+        if (!sample.path.empty() && fileExists(sample.path)) return sample.path;
     }
     return "";
 }

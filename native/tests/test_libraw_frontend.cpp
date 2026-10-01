@@ -6,11 +6,11 @@
 // present file that misbehaves is a FAIL.
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 
 #include "libraw_frontend.h"
+#include "raw_test_support.h"
 
 namespace {
 
@@ -23,46 +23,11 @@ void report(const char* name, const char* id, bool ok, const char* detail) {
     if (!ok) ++failures;
 }
 
-struct Sample {
-    std::string id;
-    std::string path;
-    std::string expect_backend;
-    std::string expect_error;
-    std::string expect_layout;
-};
-
-// Deliberately a minimal hand-rolled reader: the test must not gain a JSON
-// dependency, and the manifest fields it needs are flat strings.
-std::string field(const std::string& obj, const char* key) {
-    const std::string needle = std::string("\"") + key + "\": \"";
-    const size_t at = obj.find(needle);
-    if (at == std::string::npos) return "";
-    const size_t start = at + needle.size();
-    const size_t end = obj.find('"', start);
-    return end == std::string::npos ? "" : obj.substr(start, end - start);
-}
+using Sample = raw_test_support::RawManifestSample;
+using raw_test_support::fileExists;
 
 std::vector<Sample> loadManifest(const char* path) {
-    std::ifstream in(path);
-    std::string text((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
-    std::vector<Sample> out;
-    size_t pos = 0;
-    while ((pos = text.find('{', pos)) != std::string::npos) {
-        const size_t end = text.find('}', pos);
-        if (end == std::string::npos) break;
-        const std::string obj = text.substr(pos, end - pos);
-        Sample s{field(obj, "id"), field(obj, "path"), field(obj, "expect_backend"),
-                 field(obj, "expect_error"), field(obj, "expect_layout")};
-        if (!s.id.empty() && !s.path.empty()) out.push_back(s);
-        pos = end + 1;
-    }
-    return out;
-}
-
-bool fileExists(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    return f.good();
+    return raw_test_support::loadRawManifest(path);
 }
 
 // Round-3 review finding F2: the frontend used to accept ANY non-null
