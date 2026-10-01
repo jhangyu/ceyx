@@ -64,6 +64,7 @@
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -435,6 +436,14 @@ _DEFAULT_SIZED_DECODE_BIN = "native/build/test_sized_decode"
 _DEFAULT_STAGE4_ORIENTED_BIN = "native/build/test_stage4_oriented"
 _DEFAULT_ABI_LAYOUT_BIN = "native/build/test_abi_layout"
 _DEFAULT_PRODUCTION_DYLIB = "native/build/libdng_decoder_native.dylib"
+# Decision 4-b (2026-10-02): verify_yuv420_encode.py gates ceyx_encode_harness's
+# dumped JPEG pairs; wired into this LOCAL runner only (CI stays compile-only).
+_DEFAULT_ENCODE_HARNESS = "native/build/ceyx_encode_harness"
+_VERIFY_YUV420_SCRIPT = "native/scripts/verify_yuv420_encode.py"
+_ENCODE_SUMMARY_RE = re.compile(
+    r"^\[encode SUMMARY\] executed=(\d+) skipped=(\d+) failed=(\d+)"
+)
+_ENCODE_CASE_NAME = "Encode yuv420 (ceyx_encode_harness + verify_yuv420_encode)"
 _SIZED_OVERALL_RE = re.compile(r"^OVERALL=(PASS|FAIL)\s*$")
 _SIZED_HANDOFF_FAILED_MARKER = "8.2.2 device handoff Stage4 failed"
 
@@ -1467,6 +1476,49 @@ def _run_cfa_phase_case(cwd: Path, binary: Path) -> CfaCheckResult:
         status="PASS",
         detail="all four phases exact on both the Halide AOT kernel and the CPU reference",
     )
+
+
+def _run_encode_yuv420_case(
+    cwd: Path, harness: Path, real_frame: str, dump_dir: Path
+) -> CfaCheckResult:
+    """Decision 4-b: ceyx_encode_harness dumps yuv420/rgba8 JPEG pairs (synthetic
+    plus one real decoded frame), verify_yuv420_encode.py decodes and compares
+    them. Harness exit + summary decide the first half, the script's exit the
+    second. A harness-internal skip makes the case a SKIP (non-declared)."""
+    if dump_dir.exists():
+        shutil.rmtree(dump_dir)
+    dump_dir.mkdir(parents=True)
+    harness_proc = subprocess.run(
+        [str(harness), real_frame, str(dump_dir)],
+        cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, check=False,
+    )
+    harness_output = harness_proc.stdout
+    print(harness_output, end="" if harness_output.endswith("\n") else "\n")
+    summaries = [
+        _ENCODE_SUMMARY_RE.match(line) for line in harness_output.splitlines()
+        if _ENCODE_SUMMARY_RE.match(line)
+    ]
+    if harness_proc.returncode != 0 or not summaries or int(summaries[-1].group(3)) > 0:
+        return CfaCheckResult(name=_ENCODE_CASE_NAME, status="FAIL",
+                              detail=f"harness exit={harness_proc.returncode} "
+                                     f"summary={'present' if summaries else 'missing'}")
+    if int(summaries[-1].group(2)) > 0:
+        _record_skip("encode-yuv420", "harness-case-skipped")
+        return CfaCheckResult(name=_ENCODE_CASE_NAME, status="SKIP",
+                              detail="ceyx_encode_harness skipped a case")
+    verify_proc = subprocess.run(
+        [sys.executable, _VERIFY_YUV420_SCRIPT, str(dump_dir)],
+        cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, check=False,
+    )
+    verify_output = verify_proc.stdout
+    print(verify_output, end="" if verify_output.endswith("\n") else "\n")
+    if verify_proc.returncode != 0:
+        return CfaCheckResult(name=_ENCODE_CASE_NAME, status="FAIL",
+                              detail=f"verify_yuv420_encode exit={verify_proc.returncode}")
+    return CfaCheckResult(name=_ENCODE_CASE_NAME, status="PASS",
+                          detail="every dumped yuv420/rgba8 pair agreed")
 
 
 def _run_abi_layout_case(cwd: Path, binary: Path) -> CfaCheckResult:
@@ -2882,6 +2934,22 @@ def main() -> int:
         help="Disable the orient symbol-absence gate even if the default dylib exists.",
     )
     ap.add_argument(
+        "--encode-harness",
+        default="",
+        help=(
+            "Decision 4-b: ceyx_encode_harness binary (relative to repo-root) for "
+            "the yuv420 encode content gate (verify_yuv420_encode.py). Auto-enabled "
+            f"when the default build output exists ({_DEFAULT_ENCODE_HARNESS}); "
+            "pass --no-encode-yuv420-case to skip explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--no-encode-yuv420-case",
+        action="store_true",
+        default=False,
+        help="Disable the yuv420 encode content gate even if the harness exists.",
+    )
+    ap.add_argument(
         "--bggr-sample",
         default="",
         help=(
@@ -3802,6 +3870,38 @@ def main() -> int:
                 )
         else:
             _record_skip("orient-symbol-absence", "opted-out")
+
+        # Decision 4-b: yuv420 encode content gate. Same auto-enable/SKIP
+        # contract as the harnesses above; every SKIP here is non-declared.
+        requested_encode_harness = bool(args.encode_harness)
+        if not args.no_encode_yuv420_case:
+            encode_harness = (
+                root / (args.encode_harness or _DEFAULT_ENCODE_HARNESS)
+            ).resolve()
+            pillow_and_numpy = (importlib.util.find_spec("PIL") is not None
+                                and importlib.util.find_spec("numpy") is not None)
+            if not encode_harness.exists():
+                if requested_encode_harness:
+                    ap.error(f"Encode harness not found: {encode_harness}")
+                print(f"[SKIP] Encode harness not built; skipping yuv420 encode gate: {encode_harness}")
+                _record_skip("encode-yuv420", "binary-not-built")
+                cfa_results.append(CfaCheckResult(
+                    name=_ENCODE_CASE_NAME, status="SKIP",
+                    detail=f"binary not built: {encode_harness}",
+                ))
+            elif not pillow_and_numpy:
+                print("[SKIP] Pillow/numpy not importable; skipping yuv420 encode gate")
+                _record_skip("encode-yuv420", "pillow-or-numpy-absent")
+                cfa_results.append(CfaCheckResult(
+                    name=_ENCODE_CASE_NAME, status="SKIP",
+                    detail="Pillow or numpy not importable",
+                ))
+            else:
+                cfa_results.append(_run_encode_yuv420_case(
+                    root, encode_harness, lossless, matrix_current / "encode_yuv420"
+                ))
+        else:
+            _record_skip("encode-yuv420", "opted-out")
 
     if any(c.status == "FAIL" for c in cfa_results):
         gate_failed = True
