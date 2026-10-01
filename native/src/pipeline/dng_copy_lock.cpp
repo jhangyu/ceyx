@@ -122,14 +122,9 @@
 
 #include "dng_copy_lock.h"
 
-#include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <mutex>
-#include <thread>
 
 #include "HalideRuntime.h"
 
@@ -258,94 +253,9 @@ namespace ceyx {
 
 int dng_copy_lock_stripes() { return static_cast<int>(kStripes); }
 
-const char *dng_copy_lock_marker() { return "ceyx_copy_lock_v1"; }
-
 }  // namespace ceyx
 
 extern "C" const char *ceyx_copy_lock_v1(void) { return "ceyx_copy_lock_v1"; }
-
-// Self-check for the one deadlock-shaped corner in this TU: two threads taking
-// the SAME pair of buffers in OPPOSITE order, once for a cross-stripe pair and
-// once for a pair that collides on a single stripe (where taking the lock twice
-// would self-deadlock on a non-recursive std::mutex). Not wired into any build
-// target; it is called by tmp/r2t2/selftest_stripe.cpp during the R2-T2 window.
-// Returns 0 on success, non-zero on a checked failure; a real deadlock is caught
-// by the watchdog, which exits(3) rather than hanging the harness.
-extern "C" int ceyx_copy_lock_selftest(void) {
-    // 1. stripe_of must be a pure function of the address.
-    int x = 0, y = 0;
-    if (stripe_of(&x) != stripe_of(&x)) return 1;
-
-    // 2. Find a colliding pair by search, so the same-stripe path is genuinely
-    //    exercised rather than assumed. Addresses inside one array differ.
-    static char pad[1 << 16];
-    const void *same_a = nullptr;
-    const void *same_b = nullptr;
-    for (size_t i = 0; i < sizeof(pad) && same_b == nullptr; i += 16) {
-        for (size_t j = i + 16; j < sizeof(pad); j += 16) {
-            if (stripe_of(&pad[i]) == stripe_of(&pad[j])) {
-                same_a = &pad[i];
-                same_b = &pad[j];
-                break;
-            }
-        }
-    }
-    if (same_a == nullptr) return 2;  // no colliding pair found: search is broken
-
-    const void *diff_a = &x;
-    const void *diff_b = &y;
-    for (size_t i = 0; i < sizeof(pad); i += 16) {
-        if (stripe_of(&pad[i]) != stripe_of(diff_a)) {
-            diff_b = &pad[i];
-            break;
-        }
-    }
-    if (stripe_of(diff_a) == stripe_of(diff_b)) return 3;
-
-    std::atomic<bool> done{false};
-    std::thread watchdog([&done]() {
-        for (int i = 0; i < 100 && !done.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (!done.load()) {
-            std::fputs("ceyx_copy_lock_selftest: DEADLOCK (watchdog fired)\n", stderr);
-            std::fflush(stderr);
-            std::_Exit(3);
-        }
-    });
-
-    std::atomic<int> counter{0};
-    auto hammer = [&counter](const void *p, const void *q) {
-        for (int i = 0; i < 20000; ++i) {
-            StripeLock2 lock(p, q);
-            counter.fetch_add(1, std::memory_order_relaxed);
-        }
-    };
-
-    {
-        std::thread t1(hammer, diff_a, diff_b);
-        std::thread t2(hammer, diff_b, diff_a);  // opposite order: ordering test
-        t1.join();
-        t2.join();
-    }
-    {
-        std::thread t1(hammer, same_a, same_b);
-        std::thread t2(hammer, same_b, same_a);  // same stripe: single-take test
-        t1.join();
-        t2.join();
-    }
-    // 3. Single-buffer path, and the null-src shape halide_buffer_copy can pass.
-    {
-        std::thread t1([&]() { for (int i = 0; i < 20000; ++i) { StripeLock l(diff_a); counter.fetch_add(1); } });
-        std::thread t2([&]() { for (int i = 0; i < 20000; ++i) { StripeLock2 l(nullptr, diff_a); counter.fetch_add(1); } });
-        t1.join();
-        t2.join();
-    }
-
-    done.store(true);
-    watchdog.join();
-    return (counter.load() == 120000) ? 0 : 4;
-}
 
 extern "C" {
 

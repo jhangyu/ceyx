@@ -44,13 +44,6 @@ enum {
     kRawCameraMatrixRouteCamXyz = 2
 };
 
-/* Mirrors RawAutoExposureStatus (raw_auto_exposure.h) by value; kept as a
- * plain uint32_t here rather than including that header, which is owned by
- * a parallel round-2 task. This name is retained as the literal 0 (== kOk)
- * for source compatibility with existing callers written against Task 2.4's
- * build; it is a real, meaningful status now (Task 2.6), not only a sentinel. */
-enum { kRawColorAutoExposureStatusUnavailable = 0 };
-
 typedef struct RawColorDiagnostics {
     uint32_t struct_size;
     float    auto_exposure_ev;      /* what Round 1 actually applied */
