@@ -13,6 +13,7 @@ ruling and is not implemented here). C10 (A-T12 option a) guards the
 plugin/android jniLibs .gitignore exclusion. C11 (refactor T2, 2026-10-02)
 holds every hand-written toolchain pin (python-version, ndk-version, the
 windows matrix runner/msvc_arch) equal to its single source module.
+C12 (techdebt 2026-10-02, ruling 4-a) requires every job `container:` image to be digest-pinned.
 
 Every rule has a paired negative-control fixture proving it actually detects
 a violation (native/scripts/tests/test_ci_conventions_check.py, R8): a rule
@@ -400,6 +401,31 @@ def check_c11_toolchain_pins(workflows_dir):
     return violations
 
 
+_CONTAINER_LINE_RE = re.compile(r"^\s*container:\s*(\S*)")
+
+
+def check_c12_container_digest_pinned(workflows_dir):
+    """C12 (techdebt 2026-10-02, ruling 4-a): every job `container:` image is
+    digest-pinned (`<image>[:<tag>]@sha256:<digest>`). A tag is a mutable
+    pointer -- the same policy guards.py's read_pinned_image() applies to
+    ci.Dockerfile's FROM line. Shape-only: the digest value lives in the
+    workflow file and nowhere else. A mapping-form `container:` (empty value)
+    cannot be verified by a line scan and is rejected."""
+    violations = []
+    for wf in _workflow_files(workflows_dir):
+        for lineno, line in enumerate(wf.read_text().splitlines(), start=1):
+            m = _CONTAINER_LINE_RE.match(line)
+            if not m:
+                continue
+            ref = m.group(1)
+            if "@sha256:" not in ref:
+                violations.append(
+                    f"C12: {wf.name}:{lineno}: container image is not digest-pinned "
+                    f"({(ref or '<mapping form>')!r}); pin <image>:<tag>@sha256:<index digest>"
+                )
+    return violations
+
+
 RULES = [
     check_c1_roles,
     check_c2_naming,
@@ -411,6 +437,7 @@ RULES = [
     check_c9_no_hardcoded_vcpkg_baseline,
     check_c10_android_jnilibs_so_gitignored,
     check_c11_toolchain_pins,
+    check_c12_container_digest_pinned,
 ]
 
 

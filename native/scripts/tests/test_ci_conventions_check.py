@@ -422,3 +422,35 @@ def test_c11_row_without_msvc_arch_is_not_a_windows_leg(tmp_path):
     )
     _write(tmp_path, "macos_build.yml", text)
     assert cc.check_c11_toolchain_pins(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# C12: every job `container:` image is digest-pinned (ruling 4-a).
+# ---------------------------------------------------------------------------
+
+def test_c12_compliant_fixture_passes(tmp_path):
+    _write(
+        tmp_path,
+        "linux_build.yml",
+        "jobs:\n"
+        "  guards-container:\n"
+        "    runs-on: ubuntu-latest\n"
+        "  build-linux:\n"
+        "    # `container: ubuntu:22.04` in prose is not a key\n"
+        "    container: ubuntu:22.04@sha256:" + "a" * 64 + "\n",
+    )
+    assert cc.check_c12_container_digest_pinned(tmp_path) == []
+
+
+def test_c12_violation_fixture_fails(tmp_path):
+    _write(tmp_path, "linux_build.yml", "jobs:\n  b:\n    container: ubuntu:22.04\n")
+    violations = cc.check_c12_container_digest_pinned(tmp_path)
+    assert len(violations) == 1, violations
+    assert violations[0].startswith("C12: linux_build.yml:3:"), violations
+
+
+def test_c12_mapping_form_is_a_violation(tmp_path):
+    _write(tmp_path, "linux_build.yml",
+           "jobs:\n  b:\n    container:\n      image: ubuntu:22.04\n")
+    violations = cc.check_c12_container_digest_pinned(tmp_path)
+    assert len(violations) == 1 and violations[0].startswith("C12: linux_build.yml:3:"), violations
