@@ -223,6 +223,12 @@ uint64_t raw_stage3_host_allocation_count();
 // and no Dart-visible surface, which T20's interface contract requires.
 uint64_t raw_fused_bayer_render_count();
 
+// X-Trans fusion (2026-10-02): how many decodes have taken the FUSED X-Trans
+// demosaic+render route since process start. Same rationale and same
+// constraints as raw_fused_bayer_render_count() above: a C++ accessor for
+// in-tree gates linking dng_decoder_native, NOT an FFI export.
+uint64_t raw_fused_xtrans_render_count();
+
 // Non-zero return requests cancellation. Polled between open_file and unpack,
 // after unpack, and before GPU dispatch. Deliberately a plain function pointer:
 // no lock on the hot path.
