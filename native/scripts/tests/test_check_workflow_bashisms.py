@@ -8,6 +8,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHECK_PATH = REPO_ROOT / "native" / "scripts" / "check_workflow_bashisms.py"
 
@@ -193,3 +195,54 @@ def test_allowlisted_non_compliant_body_not_flagged(tmp_path, monkeypatch):
         "          echo two\n",
     )
     assert cwb.find_non_compliant_bodies(tmp_path) == []
+
+
+_CONTAINER_JOB = (
+    "jobs:\n"
+    "  build:\n"
+    "    runs-on: ubuntu-24.04\n"
+    "    container: ubuntu:22.04\n"
+    "    steps:\n"
+    "      - name: Probe\n"
+    "{shell}"
+    "        run: |\n"
+    "          {line}\n"
+)
+_PLAIN_JOB = _CONTAINER_JOB.replace("    container: ubuntu:22.04\n", "")
+
+# Fatal or silently wrong under dash (Ubuntu 22.04's /bin/sh).
+_DASH_FATAL_LINES = [
+    'grep -q x <<< "$y"',
+    "printf $'\\t'",
+    "make &> build.log",
+    "make |& tee build.log",
+    'echo "${name//-/_}"',
+    'echo "${name^^}"',
+    "source env.sh",
+]
+
+
+@pytest.mark.parametrize("line", _DASH_FATAL_LINES)
+def test_dash_fatal_construct_in_container_keyless_step_flagged(tmp_path, line):
+    _write(tmp_path, "linux_build.yml", _CONTAINER_JOB.format(shell="", line=line))
+    hits = cwb.find_dash_fatal(tmp_path)
+    assert [h[1] for h in hits] == [8], hits
+
+
+@pytest.mark.parametrize("line", _DASH_FATAL_LINES)
+def test_same_construct_under_shell_bash_is_clean(tmp_path, line):
+    _write(tmp_path, "linux_build.yml",
+           _CONTAINER_JOB.format(shell="        shell: bash\n", line=line))
+    assert cwb.find_dash_fatal(tmp_path) == []
+
+
+@pytest.mark.parametrize("line", _DASH_FATAL_LINES)
+def test_same_construct_in_non_container_keyless_step_is_clean(tmp_path, line):
+    _write(tmp_path, "linux_build.yml", _PLAIN_JOB.format(shell="", line=line))
+    assert cwb.find_dash_fatal(tmp_path) == []
+
+
+def test_local_is_not_flagged(tmp_path):
+    """dash supports `local`; flagging it would be a false positive."""
+    _write(tmp_path, "linux_build.yml", _CONTAINER_JOB.format(shell="", line="local x=1"))
+    assert cwb.find_dash_fatal(tmp_path) == []
