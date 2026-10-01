@@ -1,0 +1,15 @@
+--- a/src/x3f/x3f_parse_process.cpp
++++ b/src/x3f/x3f_parse_process.cpp
+@@ -620,7 +620,11 @@
+
+     size_t datasize = S.raw_height * S.raw_width * 3 * sizeof(unsigned short);
+     S.raw_pitch = S.raw_width * 3 * sizeof(unsigned short);
+-    if (!(imgdata.rawdata.raw_alloc = malloc(datasize)))
++    // calloc, not malloc: the TRU/Quattro writers below leave the border-band
++    // odd-parity R/G sites unwritten, and downstream consumers (auto-exposure)
++    // scan the full raw plane. Uninitialized margins make the solved EV depend
++    // on recycled heap contents (decode-order-dependent output, 2026-10-02).
++    if (!(imgdata.rawdata.raw_alloc = calloc(1, datasize)))
+       throw LIBRAW_EXCEPTION_ALLOC;
+
+     imgdata.rawdata.color3_image = (ushort(*)[3])imgdata.rawdata.raw_alloc;
