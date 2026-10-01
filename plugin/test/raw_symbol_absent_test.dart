@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'support/native_fixtures.dart';
 
 /// Spec §4: symbol absent (OFF build or old dylib) must produce a typed
 /// RawUnavailableException — not a crash, and not a silent fallback to the
@@ -44,9 +45,7 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 /// agree with the direct binding query on whatever dylib the default search
 /// path resolves — this part is unconditional and always executes.
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
 
   test(
     'DngDecoderService.rawDecodeAvailable matches the bindings-level '

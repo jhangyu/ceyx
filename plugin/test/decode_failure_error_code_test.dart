@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_decoder_service.dart';
 import 'package:ceyx/src/native_buffer_pool.dart';
+import 'support/native_fixtures.dart';
 
 /// AC-C1 (parking-lot round, 2026-09-20 contract): a decode failure must
 /// surface a distinct, non-zero error code through the FFI contract, never a
@@ -20,9 +21,7 @@ import 'package:ceyx/src/native_buffer_pool.dart';
 ///
 /// `flutter test` runs with cwd == package root (plugin/).
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
 
   setUpAll(() {
     expect(

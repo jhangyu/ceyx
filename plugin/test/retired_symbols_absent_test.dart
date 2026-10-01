@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'support/native_fixtures.dart';
 
 /// Regression fence for the pool-retire campaign (docs/logs/2026-09-07/
 /// pool-retire-v2-round2-review.md finding S1/S2): the eight legacy entries
@@ -18,9 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// flutter test runs with cwd == package root (plugin/), so the path below
 /// is resolved relative to Directory.current, matching the sibling suites.
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
 
   // The eight entries retired by the pool-retire campaign (nm evidence at
   // pool-retire-v2-round2-review.md:60-67). Any one of these reappearing in

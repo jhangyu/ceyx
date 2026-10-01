@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'support/native_fixtures.dart';
 
 /// Covers the sized-decode ACTIVE path — sized symbol present, sized entry
 /// exercised end-to-end. Complements dng_sized_decode_fallback_test.dart,
@@ -30,12 +31,8 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 /// flutter test runs with cwd == package root (plugin/), so all
 /// paths below are resolved relative to Directory.current.
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
-  final samplePath = File(
-    '../image_samples/lossless_dng_sample.dng',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
+  final samplePath = File(losslessDngSamplePath).absolute.path;
 
   late bool sizedAvailable;
 

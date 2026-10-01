@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'support/native_fixtures.dart';
 
 /// Covers the guarded lookup skeleton for `dng_decode_and_process_sized`
 /// (2026-08-23 handover,
@@ -39,16 +40,12 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 /// flutter test runs with cwd == package root (plugin/), so all
 /// paths below are resolved relative to Directory.current.
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
   final oldDylibPath = File(
     Platform.environment['DNG_OLD_DYLIB'] ??
         '../tmp/old-dylib/libdng_decoder_native.dylib',
   ).absolute.path;
-  final samplePath = File(
-    '../image_samples/lossless_dng_sample.dng',
-  ).absolute.path;
+  final samplePath = File(losslessDngSamplePath).absolute.path;
 
   var oldDylibUsable = false;
   var oldDylibSkipReason = '';

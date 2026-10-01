@@ -8,15 +8,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ceyx/src/decode_pool.dart';
 import 'package:ceyx/src/encode_bindings.dart';
 import 'package:ceyx/src/encode_service.dart';
+import 'support/native_fixtures.dart';
 
 /// Covers the RGBA8 -> JPEG/WebP encode surface added in commit 1764a8f
 /// (native/include/ceyx_encode_api.h). Runs against the real shipped dylib —
 /// flutter test's cwd is the package root (plugin/), matching the convention
 /// in dng_sized_decode_active_test.dart.
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
 
   setUpAll(() {
     expect(

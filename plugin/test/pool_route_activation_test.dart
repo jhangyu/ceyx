@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:ceyx/ceyx.dart';
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/native_fixtures.dart';
 
 /// R6 pool activation (Task #9) — proves the POOLED DECODE ROUTE actually
 /// executes end to end through [CeyxDecodePool], with a real dylib, a real
@@ -28,12 +29,9 @@ import 'package:flutter_test/flutter_test.dart';
 /// flutter test runs with cwd == package root (plugin/), so the paths below
 /// resolve relative to Directory.current.
 void main() {
-  final dylibPath = File(
-    Platform.environment['CEYX_WP10_DYLIB'] ??
-        '../native/build/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(freshBuildDylibPath('CEYX_WP10_DYLIB')).absolute.path;
 
-  final dngPath = File('../image_samples/lossless_dng_sample.dng').absolute.path;
+  final dngPath = File(losslessDngSamplePath).absolute.path;
 
   late bool skip;
   String skipReason = '';

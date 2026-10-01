@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'support/native_fixtures.dart';
 
 /// Native-rotation spec Task 3 (native-rotation-spec.md §1.3/§1.4,
 /// native-rotation-contract.md) — Dart bindings + decoder-service unit tests.
@@ -134,9 +135,7 @@ void main() {
     // suite green (the FFI lookup is guarded, so a missing symbol degrades
     // quietly to the unoriented path rather than crashing).
     // flutter test runs with cwd == package root (plugin/).
-    final shippedPath = File(
-      'macos/Libraries/libdng_decoder_native.dylib',
-    ).absolute.path;
+    final shippedPath = File(shippedDylibPath).absolute.path;
 
     test('vendored macos/Libraries dylib exports the oriented entry', () {
       if (!File(shippedPath).existsSync()) {
