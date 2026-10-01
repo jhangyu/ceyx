@@ -78,15 +78,16 @@ def _run(cmd):
 
     Under `set -o pipefail`, `nm ... | grep -q PAT` makes nm take SIGPIPE when
     the pattern IS found, so a found symbol reports as failure. Capture first,
-    match afterwards, always.
+    match afterwards, always. Returns (stdout, returncode, stderr).
     """
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        return p.stdout.decode("utf-8", "replace"), p.returncode
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return (p.stdout.decode("utf-8", "replace"), p.returncode,
+                p.stderr.decode("utf-8", "replace").strip())
     except FileNotFoundError:
-        return "", 127
-    except OSError:
-        return "", 126
+        return "", 127, "not found"
+    except OSError as exc:
+        return "", 126, str(exc)
 
 
 def _defines_symbol(nm_out, sym):
@@ -105,15 +106,19 @@ def classify_body(image, sym):
     Returns (state, detail) where state is INERT | NON_INERT | ABSENT.
     ABSENT is an instrument failure, never a reassuring answer.
     """
-    nm_out, nm_rc = _run(["nm", "-a", image])
-    if nm_rc != 0 and not nm_out:
-        return "ABSENT", "nm_rc=%d" % nm_rc
+    nm_out, nm_rc, nm_err = _run(["nm", "-a", image])
+    if nm_rc != 0:
+        # A failed nm's partial output is not evidence of anything.
+        return "ABSENT", "nm_rc=%d stderr=%s" % (nm_rc, nm_err[:200])
     if not _defines_symbol(nm_out, sym):
         return "ABSENT", "symbol_not_defined"
 
-    dis, drc = _run(["otool", "-tvV", "-p", sym, image])
+    dis, drc, dis_err = _run(["otool", "-tvV", "-p", sym, image])
+    if drc != 0:
+        # A truncated disassembly from a failing otool can look INERT.
+        return "ABSENT", "otool_failed rc=%d stderr=%s" % (drc, dis_err[:200])
     if not dis.strip():
-        return "ABSENT", "empty_disasm otool_rc=%d" % drc
+        return "ABSENT", "empty_disasm"
 
     started = False
     insns = 0
@@ -137,7 +142,7 @@ def classify_body(image, sym):
             break
 
     if insns == 0:
-        return "ABSENT", "no_instructions_parsed otool_rc=%d" % drc
+        return "ABSENT", "no_instructions_parsed"
     if not nontrivial and insns <= INERT_MAX_INSNS:
         return "INERT", "insns=%d nontrivial=0" % insns
     return "NON_INERT", "insns=%d nontrivial=%d:%s" % (
@@ -145,11 +150,11 @@ def classify_body(image, sym):
 
 
 def _uuid(image):
-    out, _ = _run(["dwarfdump", "--uuid", image])
+    out, _, _ = _run(["dwarfdump", "--uuid", image])
     m = re.search(r"UUID:\s*([0-9A-Fa-f-]+)", out)
     if m:
         return m.group(1)
-    out, _ = _run(["shasum", "-a", "256", image])
+    out, _, _ = _run(["shasum", "-a", "256", image])
     parts = out.split()
     return "sha256:" + parts[0] if parts else "UNIDENTIFIED"
 
