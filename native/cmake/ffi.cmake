@@ -41,6 +41,10 @@ if(NOT DNG_CROSS_BUILD)
     # a build that links one links the other.
     add_dependencies(dng_decoder_native raw_xtrans_fused_render_aot_target)
     add_dependencies(dng_decoder_native raw_xtrans_fused_render_yuv420_aot_target)
+    # Foveon fusion: fused X3F entries, declared as a pair (a half-linked
+    # format pair is how "the symbol is not in the shipped binary" happens).
+    add_dependencies(dng_decoder_native raw_linear_rgb_fused_render_aot_target)
+    add_dependencies(dng_decoder_native raw_linear_rgb_fused_render_yuv420_aot_target)
     # P17 T11: the same reference TU also calls the raw_xtrans_demosaic AOT
     # entry.
     add_dependencies(dng_decoder_native raw_xtrans_demosaic_aot_target)
@@ -76,7 +80,9 @@ target_link_libraries(dng_decoder_native
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by
 # dng_render_halide.cpp on the non-split (macOS/Metal) branch only, so it is
 # linked only there. The split branch refuses sized requests instead.

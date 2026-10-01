@@ -106,6 +106,13 @@ if(NOT DNG_CROSS_BUILD)
     target_include_directories(raw_xtrans_fused_render_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
     target_link_libraries(raw_xtrans_fused_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
 
+    # Foveon fusion (2026-10-02): fused X3F linear-RGB normalize + Stage-4
+    # render generator. One executable emits both the rgba8 and the yuv420
+    # entry via -g/-f, exactly like raw_bayer_fused_render_generator.
+    add_executable(raw_linear_rgb_fused_render_generator ${GEN_DIR}/RawLinearRgbFusedRenderGenerator.cpp)
+    target_include_directories(raw_linear_rgb_fused_render_generator PRIVATE ${INC_DIR} ${SRC_DIR} ${GEN_DIR})
+    target_link_libraries(raw_linear_rgb_fused_render_generator PRIVATE Halide::Generator ZLIB::ZLIB)
+
     # P17 T11: fused normalize + X-Trans 6x6 demosaic generator for the
     # generic RAW route. Separate kernel from the Bayer one: the CFA is a
     # runtime 6x6 buffer, not a 2x2 phase pair.
