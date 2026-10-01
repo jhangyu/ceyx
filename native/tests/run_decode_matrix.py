@@ -325,6 +325,32 @@ def _record_skip(name: str, reason: str, *, declared: bool = False) -> None:
     print(f"[MATRIX] {name} -> SKIP reason={reason}{suffix}")
 
 
+def _resolve_optional_harness(
+    ap, root, *, requested_path, default_path, case_name, not_found_error,
+    skip_message_prefix, result_name, missing_kind="binary",
+):
+    """Resolve an auto-enabled optional harness (binary/dylib).
+
+    Returns (resolved_path, skip_result). Exactly one is not None:
+    - path exists               -> (path, None); caller runs the case.
+    - explicit path is missing  -> ap.error (hard failure).
+    - default path is missing   -> prints the [SKIP] line, records the skip and
+      returns (None, SKIP CfaCheckResult) for the caller to append.
+    The caller owns the --no-X opt-out branch (records "opted-out")."""
+    resolved_path = (root / (requested_path or default_path)).resolve()
+    if resolved_path.exists():
+        return resolved_path, None
+    if requested_path:
+        ap.error(f"{not_found_error}: {resolved_path}")
+    print(f"{skip_message_prefix}: {resolved_path}")
+    _record_skip(case_name, "binary-not-built")
+    return None, CfaCheckResult(
+        name=result_name,
+        status="SKIP",
+        detail=f"{missing_kind} not built: {resolved_path}",
+    )
+
+
 def _summary_and_exit_code(executed: int, failed: int) -> int:
     """Print the DECLARED line (if any) and the one [MATRIX SUMMARY] line,
     then return the repo-wide exit code: 1 failed, 2 incomplete, 0 complete."""
@@ -3714,24 +3740,20 @@ def main() -> int:
     # default binary exists, [SKIP] when it does not.
     cfa_results: list[CfaCheckResult] = []
     if macos_enabled:
-        requested_cfa_phase = args.cfa_phase_harness
-        if not args.no_cfa_phase_harness and not args.cfa_phase_harness:
-            args.cfa_phase_harness = _DEFAULT_CFA_PHASE_BIN
         if args.no_cfa_phase_harness:
-            args.cfa_phase_harness = ""
             _record_skip("cfa-phase", "opted-out")
-        if args.cfa_phase_harness:
-            cfa_phase_bin = (root / args.cfa_phase_harness).resolve()
-            if not cfa_phase_bin.exists():
-                if requested_cfa_phase:
-                    ap.error(f"CFA phase harness not found: {cfa_phase_bin}")
-                print(f"[SKIP] CFA phase harness not built; skipping: {cfa_phase_bin}")
-                _record_skip("cfa-phase", "binary-not-built")
-                cfa_results.append(CfaCheckResult(
-                    name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
-                    status="SKIP",
-                    detail=f"binary not built: {cfa_phase_bin}",
-                ))
+        else:
+            cfa_phase_bin, skip_result = _resolve_optional_harness(
+                ap, root,
+                requested_path=args.cfa_phase_harness,
+                default_path=_DEFAULT_CFA_PHASE_BIN,
+                case_name="cfa-phase",
+                not_found_error="CFA phase harness not found",
+                skip_message_prefix="[SKIP] CFA phase harness not built; skipping",
+                result_name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
+            )
+            if skip_result is not None:
+                cfa_results.append(skip_result)
             else:
                 cfa_results.append(_run_cfa_phase_case(root, cfa_phase_bin))
 
@@ -3740,21 +3762,18 @@ def main() -> int:
             bggr_sample = Path(args.bggr_sample or _DEFAULT_BGGR_SAMPLE)
             if not bggr_sample.is_absolute():
                 bggr_sample = (root / bggr_sample).resolve()
-            requested_cfa_color = bool(args.cfa_color_harness)
-            cfa_color_bin = (
-                root / (args.cfa_color_harness or _DEFAULT_CFA_COLOR_BIN)
-            ).resolve()
+            cfa_color_bin, skip_result = _resolve_optional_harness(
+                ap, root,
+                requested_path=args.cfa_color_harness,
+                default_path=_DEFAULT_CFA_COLOR_BIN,
+                case_name="cfa-color-bggr",
+                not_found_error="CFA color harness not found",
+                skip_message_prefix="[SKIP] CFA color harness not built; skipping BGGR case",
+                result_name="CFA color / BGGR",
+            )
 
-            if not cfa_color_bin.exists():
-                if requested_cfa_color:
-                    ap.error(f"CFA color harness not found: {cfa_color_bin}")
-                print(f"[SKIP] CFA color harness not built; skipping BGGR case: {cfa_color_bin}")
-                _record_skip("cfa-color-bggr", "binary-not-built")
-                cfa_results.append(CfaCheckResult(
-                    name="CFA color / BGGR",
-                    status="SKIP",
-                    detail=f"binary not built: {cfa_color_bin}",
-                ))
+            if skip_result is not None:
+                cfa_results.append(skip_result)
             elif not bggr_sample.exists():
                 if requested_bggr:
                     ap.error(f"BGGR sample not found: {bggr_sample}")
@@ -3775,21 +3794,18 @@ def main() -> int:
         # R2 sized decode gate. Same auto-enable/SKIP contract as the harnesses
         # above: a gate nobody knows to invoke is a gate that silently stops
         # being run, so it is registered here rather than left standalone.
-        requested_sized = bool(args.sized_decode_harness)
         if not args.no_sized_decode_harness:
-            sized_bin = (
-                root / (args.sized_decode_harness or _DEFAULT_SIZED_DECODE_BIN)
-            ).resolve()
-            if not sized_bin.exists():
-                if requested_sized:
-                    ap.error(f"Sized decode harness not found: {sized_bin}")
-                print(f"[SKIP] Sized decode harness not built; skipping: {sized_bin}")
-                _record_skip("sized-decode", "binary-not-built")
-                cfa_results.append(CfaCheckResult(
-                    name="Sized decode (AC5 / AC5-D / AC6)",
-                    status="SKIP",
-                    detail=f"binary not built: {sized_bin}",
-                ))
+            sized_bin, skip_result = _resolve_optional_harness(
+                ap, root,
+                requested_path=args.sized_decode_harness,
+                default_path=_DEFAULT_SIZED_DECODE_BIN,
+                case_name="sized-decode",
+                not_found_error="Sized decode harness not found",
+                skip_message_prefix="[SKIP] Sized decode harness not built; skipping",
+                result_name="Sized decode (AC5 / AC5-D / AC6)",
+            )
+            if skip_result is not None:
+                cfa_results.append(skip_result)
             else:
                 cfa_results.append(
                     _run_sized_decode_case(root, sized_bin, lossless)
@@ -3802,21 +3818,18 @@ def main() -> int:
         # silently stops being run, so it is registered here rather than
         # left standalone (plan Task 5 acceptance criterion: "auto-enables
         # the new case (no flag)").
-        requested_stage4_oriented = bool(args.stage4_oriented_harness)
         if not args.no_stage4_oriented_harness:
-            stage4_oriented_bin = (
-                root / (args.stage4_oriented_harness or _DEFAULT_STAGE4_ORIENTED_BIN)
-            ).resolve()
-            if not stage4_oriented_bin.exists():
-                if requested_stage4_oriented:
-                    ap.error(f"Stage4 oriented harness not found: {stage4_oriented_bin}")
-                print(f"[SKIP] Stage4 oriented harness not built; skipping: {stage4_oriented_bin}")
-                _record_skip("stage4-oriented", "binary-not-built")
-                cfa_results.append(CfaCheckResult(
-                    name="Stage4 oriented (G-A)",
-                    status="SKIP",
-                    detail=f"binary not built: {stage4_oriented_bin}",
-                ))
+            stage4_oriented_bin, skip_result = _resolve_optional_harness(
+                ap, root,
+                requested_path=args.stage4_oriented_harness,
+                default_path=_DEFAULT_STAGE4_ORIENTED_BIN,
+                case_name="stage4-oriented",
+                not_found_error="Stage4 oriented harness not found",
+                skip_message_prefix="[SKIP] Stage4 oriented harness not built; skipping",
+                result_name="Stage4 oriented (G-A)",
+            )
+            if skip_result is not None:
+                cfa_results.append(skip_result)
             else:
                 cfa_results.append(
                     _run_stage4_oriented_case(root, stage4_oriented_bin, lossless, args.repeat)
@@ -3827,42 +3840,37 @@ def main() -> int:
         # S-3: ABI layout gate. Same auto-enable/SKIP contract as the harnesses
         # above: a gate nobody knows to invoke is a gate that silently stops
         # being run, so it is registered here rather than left standalone.
-        requested_abi_layout = bool(args.abi_layout_harness)
         if not args.no_abi_layout_harness:
-            abi_layout_bin = (
-                root / (args.abi_layout_harness or _DEFAULT_ABI_LAYOUT_BIN)
-            ).resolve()
-            if not abi_layout_bin.exists():
-                if requested_abi_layout:
-                    ap.error(f"ABI layout harness not found: {abi_layout_bin}")
-                print(f"[SKIP] ABI layout harness not built; skipping: {abi_layout_bin}")
-                _record_skip("abi-layout", "binary-not-built")
-                cfa_results.append(CfaCheckResult(
-                    name="ABI layout (DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult)",
-                    status="SKIP",
-                    detail=f"binary not built: {abi_layout_bin}",
-                ))
+            abi_layout_bin, skip_result = _resolve_optional_harness(
+                ap, root,
+                requested_path=args.abi_layout_harness,
+                default_path=_DEFAULT_ABI_LAYOUT_BIN,
+                case_name="abi-layout",
+                not_found_error="ABI layout harness not found",
+                skip_message_prefix="[SKIP] ABI layout harness not built; skipping",
+                result_name="ABI layout (DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult)",
+            )
+            if skip_result is not None:
+                cfa_results.append(skip_result)
             else:
                 cfa_results.append(_run_abi_layout_case(root, abi_layout_bin))
         else:
             _record_skip("abi-layout", "opted-out")
 
         # S-2: orient symbol-absence gate. Same auto-enable/SKIP contract.
-        requested_orient_symbol_gate = bool(args.orient_symbol_absence_gate)
         if not args.no_orient_symbol_absence_gate:
-            orient_dylib = (
-                root / (args.orient_symbol_absence_gate or _DEFAULT_PRODUCTION_DYLIB)
-            ).resolve()
-            if not orient_dylib.exists():
-                if requested_orient_symbol_gate:
-                    ap.error(f"Production dylib not found: {orient_dylib}")
-                print(f"[SKIP] Production dylib not built; skipping orient symbol-absence gate: {orient_dylib}")
-                _record_skip("orient-symbol-absence", "binary-not-built")
-                cfa_results.append(CfaCheckResult(
-                    name="Orient symbol absence (ceyx_orient_rgba not in production dylib)",
-                    status="SKIP",
-                    detail=f"dylib not built: {orient_dylib}",
-                ))
+            orient_dylib, skip_result = _resolve_optional_harness(
+                ap, root,
+                requested_path=args.orient_symbol_absence_gate,
+                default_path=_DEFAULT_PRODUCTION_DYLIB,
+                case_name="orient-symbol-absence",
+                not_found_error="Production dylib not found",
+                skip_message_prefix="[SKIP] Production dylib not built; skipping orient symbol-absence gate",
+                result_name="Orient symbol absence (ceyx_orient_rgba not in production dylib)",
+                missing_kind="dylib",
+            )
+            if skip_result is not None:
+                cfa_results.append(skip_result)
             else:
                 nm_out_path = artifact_dir / "orient_symbol_nm_output.txt"
                 cfa_results.append(
