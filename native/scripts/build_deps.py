@@ -92,6 +92,12 @@ _JXL_STACK_COMPONENT = "jxl-stack"
 # native/vcpkg/vcpkg.json, not this script.
 _WEBP_STACK_COMPONENT = "webp-stack"
 
+# Windows-only pseudo-component for the LLVM OpenMP runtime dist (user ruling
+# R-11, 2026-10-02): libomp140.<arch>.dll + libomp.lib built from the LLVM
+# release tarball by deps/win_libomp_dist.py. Same shape as webp-stack: no
+# manifest component entry, Windows-only.
+_LIBOMP_STACK_COMPONENT = "libomp-stack"
+
 _FETCH_CHOICES = ("halide", "libjxl", "libraw")
 
 
@@ -717,13 +723,50 @@ def _run_build(argv: list) -> int:
                 return 1
             return 0
 
+        if args.component == _LIBOMP_STACK_COMPONENT:
+            # Windows-only, same rejection shape as webp-stack/jxl-stack.
+            if resolved_platform != "windows":
+                print(
+                    f"[build_deps] error: {_LIBOMP_STACK_COMPONENT!r} currently only "
+                    "supports --platform windows; no other platform consumes this dist.",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.stage != "all":
+                print(
+                    f"[build_deps] error: --stage {args.stage!r} is a macOS/Linux "
+                    f"heif-stack concept; the Windows libomp dist is built in one "
+                    f"pass and has no stage split. Rejected rather than silently "
+                    f"ignored.",
+                    file=sys.stderr,
+                )
+                return 1
+            from deps import win_libomp_dist  # noqa: PLC0415 - lazy, see docstring
+
+            if args.dry_run:
+                print(
+                    f"# {_LIBOMP_STACK_COMPONENT} (windows): self-contained tarball-fetch "
+                    f"recipe, {win_libomp_dist.LLVM_TAG} -- not manifest-rendered, no argv preview"
+                )
+                return 0
+            try:
+                win_libomp_dist.build(dist, arch=resolved_arch, force=args.force)
+            except (
+                win_libomp_dist.WindowsLibompError,
+                win_libomp_dist.win_pe.PeInspectionError,
+                win_libomp_dist.win_pe.PeAssertionFailed,
+            ) as exc:
+                print(f"[libomp-win] {exc}", file=sys.stderr)
+                return 1
+            return 0
+
         known_components = sorted(loaded["manifest"].get("component", {}))
         if args.component not in known_components:
             print(
                 f"[build_deps] error: unknown component {args.component!r} (not present "
                 f"in native/deps/manifest.toml; known components: {known_components}, "
-                f"plus the groups {heif_module.COMPONENT!r}, {_JXL_STACK_COMPONENT!r} and "
-                f"{_WEBP_STACK_COMPONENT!r})",
+                f"plus the groups {heif_module.COMPONENT!r}, {_JXL_STACK_COMPONENT!r}, "
+                f"{_WEBP_STACK_COMPONENT!r} and {_LIBOMP_STACK_COMPONENT!r})",
                 file=sys.stderr,
             )
             return 1

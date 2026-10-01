@@ -1,0 +1,82 @@
+name: libomp dist (Windows)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/**"
+    paths:
+      - "native/scripts/deps/win_libomp_dist.py"
+      - "native/scripts/build_deps.py"
+      - ".github/workflows/libomp_dist_windows.yml"
+
+concurrency:
+  group: libomp-dist-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-libomp-dist:
+    name: libomp dist (windows ${{ matrix.arch_tag }}, clang-cl, LLVM OpenMP runtime DLL)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_tag: x86_64
+            runner: windows-latest
+            msvc_arch: x64
+            dist: native/third_party/libomp-dist-windows
+          - arch_tag: arm64
+            runner: windows-11-arm
+            msvc_arch: amd64_arm64
+            dist: native/third_party/libomp-dist-windows-arm64
+    steps:
+      - name: Force LF line endings for all git operations
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          echo "core.autocrlf=$(git config --global core.autocrlf)"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ninja
+        run: python native/scripts/ci.py provision ninja
+
+      - name: Set up MSVC developer environment (${{ matrix.msvc_arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Locate clang-cl
+        shell: bash
+        run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
+
+      - name: Build the libomp dist (Python carrier)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 native/scripts/ci.py dist-build --component libomp-stack --platform windows --arch ${{ matrix.arch_tag }} --dist ${{ matrix.dist }} --rc-marker LIBOMP_DIST_WINDOWS_RC
+
+      - name: List the produced dist (complete)
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py dist-list --dist ${{ matrix.dist }}
+
+      - name: Upload the dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: libomp-dist-windows-${{ matrix.arch_tag }}
+          path: ${{ github.workspace }}/${{ matrix.dist }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true

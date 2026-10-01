@@ -24,11 +24,11 @@ thing that changed is comment lines. If it fails anywhere that is a
 FINDING, not a formatting artefact -- a semantic change riding along inside
 a diff too large to read is exactly what this check exists to catch.
 
-SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders FIVE
-of the eleven workflows:
+SCOPE TODAY -- READ THIS BEFORE BELIEVING A PASS. This module renders SIX
+of the twelve workflows:
 
     webp_dist_android.yml  jxl_dist_android.yml  heif_dist_android.yml
-    webp_dist_windows.yml  jxl_dist_windows.yml
+    webp_dist_windows.yml  jxl_dist_windows.yml  libomp_dist_windows.yml
 
 It does NOT render the other six. `RENDERED` below is the
 explicit, enumerated set, and `ci.py render-workflows --check` compares
@@ -108,6 +108,7 @@ RENDERED = (
     "heif_dist_android.yml",
     "webp_dist_windows.yml",
     "jxl_dist_windows.yml",
+    "libomp_dist_windows.yml",
 )
 
 
@@ -700,7 +701,8 @@ packaged directory keeps its committed tracked path.""",
 # The step sequences genuinely differ: Windows needs an LF-line-endings step
 # BEFORE checkout, an MSVC developer-environment action and a clang-cl
 # locator, and has no NDK step; its dist directory carries no arch suffix and
-# its upload sets no include-hidden-files. Forcing one template to cover both
+# its upload sets include-hidden-files only where `hidden_files` says so
+# (libomp, R-11: its .pins must survive). Forcing one template to cover both
 # would mean a parameter per difference, which is how a renderer stops being
 # readable. Two templates, one data shape.
 # ---------------------------------------------------------------------------
@@ -724,6 +726,7 @@ _WIN_DIST: dict = {
         # would be a silent normalisation of exactly what WI-32 declined to
         # normalise.
         "dist_absolute": False,
+        "hidden_files": False,
     },
     "jxl_dist_windows.yml": {
         "title": "libjxl dist (Windows)",
@@ -740,6 +743,25 @@ _WIN_DIST: dict = {
         "build_shell": "pwsh",
         "python_exe": "python",
         "dist_absolute": True,
+        "hidden_files": False,
+    },
+    # User ruling R-11 (2026-10-02): the LLVM OpenMP runtime, built from
+    # source per arch (deps/win_libomp_dist.py), replacing the
+    # non-redistributable copy on the runner image.
+    "libomp_dist_windows.yml": {
+        "title": "libomp dist (Windows)",
+        "short": "libomp",
+        "dist_prefix": "libomp",
+        "component": "libomp-stack",
+        "rc_marker": "LIBOMP_DIST_WINDOWS_RC",
+        "job_name": "libomp dist (windows ${{ matrix.arch_tag }}, clang-cl, LLVM OpenMP runtime DLL)",
+        "build_step_name": "Build the libomp dist (Python carrier)",
+        "timeout_minutes": 45,
+        "path_trigger": "native/scripts/deps/win_libomp_dist.py",
+        "build_shell": "bash",
+        "python_exe": "python3",
+        "dist_absolute": False,
+        "hidden_files": True,
     },
 }
 
@@ -877,6 +899,7 @@ def _render_windows_dist(name: str) -> str:
     dist = "${{ matrix.dist }}"
     dist_arg = f'"${{{{ github.workspace }}}}/{dist}"' if d["dist_absolute"] else dist
     rows = _windows_matrix_rows(d["dist_prefix"])
+    hidden = "          include-hidden-files: true\n" if d["hidden_files"] else ""
     return f"""\
 name: {d['title']}
 
@@ -951,7 +974,7 @@ jobs:
           path: ${{{{ github.workspace }}}}/{dist}
           if-no-files-found: error
           retention-days: 7
-"""
+{hidden}"""
 
 
 def render_all() -> dict:
