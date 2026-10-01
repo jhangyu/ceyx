@@ -345,7 +345,11 @@ def fetch_subcommand_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("name", choices=_FETCH_CHOICES)
     parser.add_argument("--dest", default=None, help="override the default native/third_party/<name> destination")
-    parser.add_argument("--arch", default=None, help="libjxl only: overrides CEYX_JXL_ARCH")
+    parser.add_argument(
+        "--arch", default=None,
+        help="libjxl: overrides CEYX_JXL_ARCH; halide: the HOST dist arch to fetch "
+             "(x86_64 on windows-arm64, whose generators run under x64 emulation -- R-9)",
+    )
     parser.add_argument("--force", action="store_true", help="halide/libjxl only: rebuild even if already present")
     return parser
 
@@ -361,11 +365,11 @@ def _run_fetch(argv: list) -> int:
     # it silently gets a build that doesn't do what the flag implied. Reject
     # (same doctrine as `build webp-stack --stage` rejecting an out-of-scope
     # flag) rather than accept-and-ignore.
-    if args.name in ("halide", "libraw") and args.arch is not None:
+    if args.name == "libraw" and args.arch is not None:
         exc = FetchError(
             f"--arch is not accepted for fetch {args.name!r} -- {args.name} has no "
-            "arch-specific acquisition (only 'libjxl' honours --arch, via "
-            "CEYX_JXL_ARCH); drop the flag."
+            "arch-specific acquisition (only 'libjxl' (CEYX_JXL_ARCH) and 'halide' "
+            "(explicit HOST dist) honour --arch); drop the flag."
         )
         print(str(exc), file=sys.stderr)
         return 1
@@ -391,7 +395,7 @@ def _run_fetch(argv: list) -> int:
         from deps import fetch_halide  # noqa: PLC0415
 
         try:
-            fetch_halide.fetch(dest, force=args.force)
+            fetch_halide.fetch(dest, force=args.force, host_arch=args.arch)
         except fetch_halide.HalideFetchError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -703,7 +707,7 @@ def _run_build(argv: list) -> int:
                 )
                 return 0
             try:
-                win_webp_dist.build(dist, force=args.force)
+                win_webp_dist.build(dist, arch=resolved_arch, force=args.force)
             except (
                 win_webp_dist.WindowsWebpError,
                 win_webp_dist.win_pe.PeInspectionError,

@@ -26,7 +26,9 @@ _COMPONENTS = ("kvazaar", "libde265", "aom", "libheif")
 # (libraw is add_subdirectory'd; halide is download-only) and are excluded
 # from render() entirely -- there is nothing for the renderer to produce.
 _RENDERABLE_COMPONENTS = ("kvazaar", "libde265", "aom", "libheif", "libwebp", "libjxl")
-_ALL_PLATFORM_ARCH = (("macos", "arm64"), ("macos", "x86_64"), ("linux", "x86_64"), ("windows", "x86_64"))
+_ALL_PLATFORM_ARCH = (
+    ("macos", "arm64"), ("macos", "x86_64"), ("linux", "x86_64"), ("windows", "x86_64"), ("windows", "arm64"),
+)
 _MACOS_LINUX_ONLY = (("macos", "arm64"), ("macos", "x86_64"), ("linux", "x86_64"))
 _PLATFORM_ARCH_BY_COMPONENT = {
     "libwebp": _MACOS_LINUX_ONLY,

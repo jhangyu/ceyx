@@ -345,7 +345,7 @@ def main(argv: Optional[list] = None) -> int:
 
     parser = argparse.ArgumentParser(prog="deps.win_jxl_dist")
     parser.add_argument("--dist", required=True, help="install prefix the dist lands in")
-    parser.add_argument("--arch", default="x86_64", choices=("x86_64",))
+    parser.add_argument("--arch", default="x86_64", choices=("x86_64", "arm64"))
     parser.add_argument("--force", action="store_true", help="rebuild even when .pins is current")
     args = parser.parse_args(argv)
 

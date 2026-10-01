@@ -37,6 +37,10 @@
 #   decoder      = "<filename>"           -- the built decoder library name.
 #   companions   = ["<filename>", ...]    -- every dynamically-shipped
 #                                             sibling file, in staging order.
+#   companions_by_arch.<arch> = [...]     -- INSTEAD of companions, when the
+#                                             names differ by target arch
+#                                             (windows). Read via
+#                                             read_shipped_files.companions_for.
 #   staged_from  = "<dir>"                -- the directory the CI staging
 #                                             assertion inspects (relative to
 #                                             the native build tree), or a
@@ -60,13 +64,19 @@
 
 [windows]
 decoder    = "dng_decoder_native.dll"
-# Four members: OQ-N2 ruled SHIP (user 2026-09-12) -- the decoder imports the
-# OpenMP runtime, so omitting it produces an artifact that cannot load on a
-# machine without the LLVM redistributable.
-companions = ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"]
 staged_from = "native/build-windows"
 placed      = true
 source      = "native/cmake/heif.cmake:207-236"
+# Four members per arch: OQ-N2 ruled SHIP (user 2026-09-12) -- the decoder
+# imports the OpenMP runtime, so omitting it produces an artifact that cannot
+# load on a machine without the redistributable. Per-arch because the Visual
+# Studio OpenMP.LLVM redist names its DLL after the target machine
+# (libomp140.x86_64.dll / libomp140.aarch64.dll, under
+# VC/Redist/MSVC/*/<x64|arm64>/Microsoft.VC*.OpenMP.LLVM); heif/libde265 keep
+# one name. Keys are native/deps/arch_map.toml canonical arch ids.
+[windows.companions_by_arch]
+x86_64 = ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"]
+arm64  = ["heif.dll", "libde265.dll", "libomp140.aarch64.dll"]
 
 [linux]
 decoder    = "libdng_decoder_native.so"

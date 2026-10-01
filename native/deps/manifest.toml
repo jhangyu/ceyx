@@ -193,8 +193,11 @@ path_keys = ["CMAKE_INSTALL_PREFIX"]
   # configure passes no other flags, so there is nothing to restore here
   # (contrast with libde265 and libheif below, which DO need K13/K14/N16's
   # restored defaults).
-  CMAKE_C_FLAGS   = ["/clang:-msse4.1", "/clang:-mavx2"]
-  CMAKE_CXX_FLAGS = ["/clang:-msse4.1", "/clang:-mavx2"]
+  # x86 ISA flags come from arch_map.toml (empty for an arm64 target, whose
+  # clang rejects -msse4.1/-mavx2; kvazaar's COMPILE_INTEL gate compiles the
+  # x86 strategy sources to nothing there).
+  CMAKE_C_FLAGS   = ["{arch.clang_cl_sse41}", "{arch.clang_cl_avx2}"]
+  CMAKE_CXX_FLAGS = ["{arch.clang_cl_sse41}", "{arch.clang_cl_avx2}"]
 
   [component.kvazaar.outputs]
   static_lib.candidates = ["lib/libkvazaar.a", "lib/kvazaar.lib", "lib/libkvazaar.lib"]
@@ -331,8 +334,10 @@ path_keys     = ["CMAKE_INSTALL_PREFIX"]
   # forbids deletion, not override) transcribed verbatim from
   # build_heif_dist_windows.sh:293 (ENABLE_DECODER=OFF on Windows only).
   ENABLE_DECODER  = "OFF"
-  CMAKE_C_FLAGS   = ["-DWIN32", "-D_WINDOWS", "/clang:-msse4.1"]
-  CMAKE_CXX_FLAGS = ["-DWIN32", "-D_WINDOWS", "-EHsc", "-GR", "/clang:-msse4.1"]
+  # /clang:-msse4.1 via arch_map.toml: x86 only (libde265's own HAVE_X86
+  # probe skips the SSE sources on an arm64 target).
+  CMAKE_C_FLAGS   = ["-DWIN32", "-D_WINDOWS", "{arch.clang_cl_sse41}"]
+  CMAKE_CXX_FLAGS = ["-DWIN32", "-D_WINDOWS", "-EHsc", "-GR", "{arch.clang_cl_sse41}"]
 
   [component.libde265.outputs]
   shared_lib.candidates = ["lib/libde265.dylib", "lib/libde265.so", "bin/libde265.dll", "bin/de265.dll"]

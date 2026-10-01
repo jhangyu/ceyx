@@ -32,9 +32,11 @@ drift check, exactly as today's shell does); then
 against `native/deps/min_runtime_expected.toml`. No `::error::` line exists
 in any of the four original shell steps for this gate -- do not add one.
 
-`--arch` is per-arch DATA, not a special case: only macOS's declaration in
-`min_runtime_expected.toml` is keyed per-arch (arm64/x86_64 measure
-different OpenMP runtimes), so `min_runtime()` requires `arch` for macOS
+`--arch` is per-arch DATA, not a special case: macOS's and windows'
+declarations in `min_runtime_expected.toml` are keyed per-arch (macOS:
+arm64/x86_64 measure different OpenMP runtimes; windows: the linker's
+default subsystem version differs by target machine), so `min_runtime()`
+requires `arch` exactly where `targets.spec(...)["requires_arch"]` says so
 and rejects it everywhere else (C-G9) -- `ci.py`'s argparse layer already
 enforces this from `targets.spec(...)["requires_arch"]`, but a runtime
 assert lives here too so a future direct call (a test, a script) cannot
@@ -128,14 +130,18 @@ def _from_binary(platform: str, arch: str | None) -> int:
     staged_dir = Path(targets.spec(platform)["staged_dir"])
     out_path = str(staged_dir.parent / "min_runtime.txt")
 
-    if platform == "macos":
+    # Arch requirement read from targets.py (the one place that states it),
+    # not re-decided per platform here: macOS and windows are both per-arch.
+    if targets.spec(platform)["requires_arch"]:
         _require_arch(platform, arch)
+    else:
+        _reject_arch(platform, arch)
+    if platform == "macos":
         dylib_paths = sorted(staged_dir.glob("*.dylib"))
         artifact_args = []
         for p in dylib_paths:
             artifact_args += ["--artifact", str(p)]
     else:  # windows
-        _reject_arch(platform, arch)
         decoder_name = Path(targets.spec(platform)["artifact_path"]).name
         artifact_args = ["--artifact", str(staged_dir / decoder_name)]
 

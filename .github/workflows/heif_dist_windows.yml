@@ -63,8 +63,31 @@ concurrency:
 
 jobs:
   build-heif-dist:
-    name: libheif + libde265 + kvazaar + aom dist (windows x86_64, clang-cl, encode+decode)
-    runs-on: windows-latest
+    name: libheif + libde265 + kvazaar + aom dist (windows ${{ matrix.arch_tag }}, clang-cl, encode+decode)
+    # windows-arm64 leg (2026-09-30, contract armci-contract.md R-7): one row
+    # per arch, each built NATIVELY on its own runner by the same carrier and
+    # the same steps. Row values are native/scripts/ci/targets.py's
+    # windows arch_legs (runner / msvc_arch / dist_suffix) -- keep them equal;
+    # the jxl/webp twins are rendered from that table directly. The only
+    # per-arch DIFFERENCE beyond these values is the vcpkg triplet, whose
+    # arm64 file (native/vcpkg/triplets/arm64-windows-heif.cmake) documents
+    # its two ISA-derived deltas from the x64 one. The x86_64 row keeps the
+    # historical unsuffixed dist path and artifact name byte-for-byte.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_tag: x86_64
+            runner: windows-latest
+            msvc_arch: x64
+            vcpkg_triplet: x64-windows-heif
+            dist: native/third_party/heif-dist-windows
+          - arch_tag: arm64
+            runner: windows-11-arm
+            msvc_arch: amd64_arm64
+            vcpkg_triplet: arm64-windows-heif
+            dist: native/third_party/heif-dist-windows-arm64
     timeout-minutes: 60
     env:
       # D1-a: aom reaches the Windows HEIF build via vcpkg, same mechanism as
@@ -73,7 +96,7 @@ jobs:
       # is the ONLY authority, derived at runtime by the "Derive vcpkg
       # baseline from vcpkg.json" step below -- see
       # native/deps/manifest.toml [component.aom].
-      VCPKG_TRIPLET: x64-windows-heif
+      VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
     steps:
       # MUST run BEFORE actions/checkout, same reason as windows_build.yml:
       # Git for Windows ships core.autocrlf=true system-wide, and a checkout
@@ -124,10 +147,10 @@ jobs:
 
       # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
       # LIB; this action is CI's equivalent of vcvars64.bat.
-      - name: Set up MSVC developer environment (x64)
+      - name: Set up MSVC developer environment (${{ matrix.msvc_arch }})
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Locate clang-cl
         shell: bash
@@ -155,7 +178,7 @@ jobs:
       # vendor_licences() re-fetches its tarball independently of vcpkg) and
       # aom for the static archive win_heif_dist.build_aom() copies out of the
       # install prefix below.
-      - name: vcpkg install de265 + aom (x64-windows-heif)
+      - name: vcpkg install de265 + aom (${{ matrix.vcpkg_triplet }})
         shell: bash
         env:
           MSYS_NO_PATHCONV: "1"
@@ -205,7 +228,7 @@ jobs:
       - name: Build the HEIF dist (Python carrier)
         shell: pwsh
         working-directory: ${{ github.workspace }}
-        run: python native/scripts/ci.py dist-build --component heif-stack --platform windows --arch x86_64 --dist "${{ github.workspace }}/native/third_party/heif-dist-windows" --rc-marker HEIF_DIST_WINDOWS_RC
+        run: python native/scripts/ci.py dist-build --component heif-stack --platform windows --arch ${{ matrix.arch_tag }} --dist "${{ github.workspace }}/${{ matrix.dist }}" --rc-marker HEIF_DIST_WINDOWS_RC
 
       # Complete listing, deliberately unfiltered. A '*.dll'-filtered listing
       # looks like a full inventory while silently omitting the import
@@ -215,7 +238,7 @@ jobs:
         if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py dist-list --dist native/third_party/heif-dist-windows
+        run: python3 native/scripts/ci.py dist-list --dist ${{ matrix.dist }}
 
       # Canonical artifact name <component>-<platform>-<arch> (round 6); the
       # arch suffix was previously implicit. The PACKAGED DIRECTORY keeps its
@@ -225,7 +248,7 @@ jobs:
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
-          name: heif-dist-windows-x86_64
-          path: ${{ github.workspace }}/native/third_party/heif-dist-windows
+          name: heif-dist-windows-${{ matrix.arch_tag }}
+          path: ${{ github.workspace }}/${{ matrix.dist }}
           if-no-files-found: error
           retention-days: 7

@@ -60,7 +60,7 @@ class TestStage(unittest.TestCase):
         (native_dir / "build-linux" / "libdng_decoder_native.so").write_bytes(b"\x7fELF")
         # libheif.so.1 declared but never produced by the build.
         with mock.patch.object(
-            stage, "declared_names", lambda p: ["libdng_decoder_native.so", "libheif.so.1"]
+            stage, "declared_names", lambda p, a=None: ["libdng_decoder_native.so", "libheif.so.1"]
         ):
             rc, out, err = _emit(stage.stage, "linux", str(artifact_dir), str(native_dir))
         self.assertEqual(rc, 1)
@@ -78,7 +78,7 @@ class TestStage(unittest.TestCase):
         stopped printing anything, THIS assertion catches it."""
         native_dir, artifact_dir = self._dirs()
         (native_dir / "build-linux" / "libdng_decoder_native.so").write_bytes(b"\x7fELF")
-        with mock.patch.object(stage, "declared_names", lambda p: ["libdng_decoder_native.so"]):
+        with mock.patch.object(stage, "declared_names", lambda p, a=None: ["libdng_decoder_native.so"]):
             rc, out, _ = _emit(stage.stage, "linux", str(artifact_dir), str(native_dir))
         self.assertEqual(rc, 0)
 
@@ -105,7 +105,7 @@ class TestAssertStagedGroup(unittest.TestCase):
 
     def test_shared_lib_count_zero_errors(self) -> None:
         artifact_dir = self._staged([])
-        with mock.patch.object(stage, "declared_names", lambda p: ["libdng_decoder_native.so"]):
+        with mock.patch.object(stage, "declared_names", lambda p, a=None: ["libdng_decoder_native.so"]):
             rc, out, err = _emit(stage.assert_staged_group, "linux", str(artifact_dir))
         self.assertEqual(rc, 1)
         self.assertIn("SHARED_LIB_COUNT=0", out)
@@ -114,7 +114,7 @@ class TestAssertStagedGroup(unittest.TestCase):
     def test_missing_declared_file_is_a_mismatch(self) -> None:
         artifact_dir = self._staged(["libdng_decoder_native.so"])
         with mock.patch.object(
-            stage, "declared_names", lambda p: ["libdng_decoder_native.so", "libheif.so.1"]
+            stage, "declared_names", lambda p, a=None: ["libdng_decoder_native.so", "libheif.so.1"]
         ):
             rc, out, err = _emit(stage.assert_staged_group, "linux", str(artifact_dir))
         self.assertEqual(rc, 1)
@@ -127,7 +127,7 @@ class TestAssertStagedGroup(unittest.TestCase):
         object staged alongside the declared set must fail the group gate,
         not merely a missing declared file."""
         artifact_dir = self._staged(["libdng_decoder_native.so", "libextra.so"])
-        with mock.patch.object(stage, "declared_names", lambda p: ["libdng_decoder_native.so"]):
+        with mock.patch.object(stage, "declared_names", lambda p, a=None: ["libdng_decoder_native.so"]):
             rc, out, err = _emit(stage.assert_staged_group, "linux", str(artifact_dir))
         self.assertEqual(rc, 1)
         self.assertIn(
@@ -243,8 +243,8 @@ class TestStageWindows(unittest.TestCase):
         source_dir, artifact_dir = self._dirs()
         for name in self._REQUIRED:
             (source_dir / name).write_bytes(b"MZ")
-        with mock.patch.object(stage, "declared_names", lambda p: list(self._REQUIRED)):
-            rc, out, _ = _emit(stage.stage_windows, str(source_dir), str(artifact_dir))
+        with mock.patch.object(stage, "declared_names", lambda p, a=None: list(self._REQUIRED)):
+            rc, out, _ = _emit(stage.stage_windows, str(source_dir), str(artifact_dir), "x86_64")
         self.assertEqual(rc, 0)
         dest = artifact_dir / "native"
         for name in self._REQUIRED:
@@ -256,8 +256,8 @@ class TestStageWindows(unittest.TestCase):
         source_dir, artifact_dir = self._dirs()
         for name in (*self._REQUIRED, "dng_decoder_native.lib"):
             (source_dir / name).write_bytes(b"MZ")
-        with mock.patch.object(stage, "declared_names", lambda p: list(self._REQUIRED)):
-            rc, out, _ = _emit(stage.stage_windows, str(source_dir), str(artifact_dir))
+        with mock.patch.object(stage, "declared_names", lambda p, a=None: list(self._REQUIRED)):
+            rc, out, _ = _emit(stage.stage_windows, str(source_dir), str(artifact_dir), "x86_64")
         self.assertEqual(rc, 0)
         self.assertTrue((artifact_dir / "native" / "dng_decoder_native.lib").exists())
         self.assertNotIn("::notice::", out)
@@ -266,8 +266,8 @@ class TestStageWindows(unittest.TestCase):
         source_dir, artifact_dir = self._dirs()
         (source_dir / "dng_decoder_native.dll").write_bytes(b"MZ")
         # heif.dll declared but never produced by the build.
-        with mock.patch.object(stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll"]):
-            rc, _, err = _emit(stage.stage_windows, str(source_dir), str(artifact_dir))
+        with mock.patch.object(stage, "declared_names", lambda p, a=None: ["dng_decoder_native.dll", "heif.dll"]):
+            rc, _, err = _emit(stage.stage_windows, str(source_dir), str(artifact_dir), "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn("::error::declared shipped file 'heif.dll' is missing from", err)
 
@@ -289,9 +289,9 @@ class TestAssertStagedGroupWindows(unittest.TestCase):
             ["dng_decoder_native.dll", "heif.dll", "libde265.dll", "dng_decoder_native.lib"]
         )
         with mock.patch.object(
-            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll", "libde265.dll"]
+            stage, "declared_names", lambda p, a=None: ["dng_decoder_native.dll", "heif.dll", "libde265.dll"]
         ):
-            rc, out, err = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+            rc, out, err = _emit(stage.assert_staged_group_windows, str(artifact_dir), "x86_64")
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
         # The .lib must not appear in either compared set.
@@ -306,9 +306,9 @@ class TestAssertStagedGroupWindows(unittest.TestCase):
         "tidy" it into a bare ``" ".join(...)``."""
         artifact_dir = self._staged(["dng_decoder_native.dll", "heif.dll", "libde265.dll"])
         with mock.patch.object(
-            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll", "libde265.dll"]
+            stage, "declared_names", lambda p, a=None: ["dng_decoder_native.dll", "heif.dll", "libde265.dll"]
         ):
-            rc, out, _ = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+            rc, out, _ = _emit(stage.assert_staged_group_windows, str(artifact_dir), "x86_64")
         self.assertEqual(rc, 0)
         expected_line = "EXPECTED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll "
         staged_line = "STAGED_DLL_SET=dng_decoder_native.dll heif.dll libde265.dll "
@@ -319,9 +319,9 @@ class TestAssertStagedGroupWindows(unittest.TestCase):
     def test_missing_dll_is_a_mismatch(self) -> None:
         artifact_dir = self._staged(["dng_decoder_native.dll"])
         with mock.patch.object(
-            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll"]
+            stage, "declared_names", lambda p, a=None: ["dng_decoder_native.dll", "heif.dll"]
         ):
-            rc, _, err = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+            rc, _, err = _emit(stage.assert_staged_group_windows, str(artifact_dir), "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn(
             "::error::staged Windows DLL set does not match native/deps/shipped_files.toml's "
@@ -339,9 +339,9 @@ class TestAssertStagedGroupWindows(unittest.TestCase):
         future "helpful" normalize-to-ASCII pass fails loudly."""
         artifact_dir = self._staged(["dng_decoder_native.dll"])
         with mock.patch.object(
-            stage, "declared_names", lambda p: ["dng_decoder_native.dll", "heif.dll"]
+            stage, "declared_names", lambda p, a=None: ["dng_decoder_native.dll", "heif.dll"]
         ):
-            rc, _, err = _emit(stage.assert_staged_group_windows, str(artifact_dir))
+            rc, _, err = _emit(stage.assert_staged_group_windows, str(artifact_dir), "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn(
             "declaration — expected [dng_decoder_native.dll heif.dll], found "

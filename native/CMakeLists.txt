@@ -49,6 +49,16 @@ elseif(UNIX)
     add_compile_definitions(qLinux=1 qMacOS=0 qWinOS=0)
 endif()
 
+# dng_flags.h derives byte order from compiler macros (_M_X64, __amd64__,
+# __LITTLE_ENDIAN__, _ARM_) and hits `#error Unable to figure out byte order`
+# on targets that define none of them: GCC on aarch64 Linux (__LITTLE_ENDIAN__
+# is a clang-ism) and MSVC on ARM64 (_M_ARM64, not _ARM_). Every target this
+# project ships is little-endian (x86-64, arm64 macOS/Linux/Windows, Android
+# arm64-v8a), so state it once for all platforms instead of relying on
+# detection; dng_flags.h then resolves qDNGBigEndian to !1 = 0, the value the
+# detection branches already produced on the existing platforms.
+add_compile_definitions(qDNGLittleEndian=1)
+
 # =============================================================================
 # Modular build description (2026-08-25 Ceyx restructure, Round 1 Stream 1B).
 # The fragments below are include()d, never add_subdirectory()'d: they share

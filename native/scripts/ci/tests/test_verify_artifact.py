@@ -419,7 +419,7 @@ class VerifyArtifactTests(unittest.TestCase):
                 run_module, "run",
                 side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
             ):
-                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows", "x86_64")
         self.assertEqual(rc, 0)
         self.assertIn("DEPENDENTS_RC=1", out)
         self.assertIn("LLVM_OBJDUMP_RC=0", out)
@@ -431,6 +431,107 @@ class VerifyArtifactTests(unittest.TestCase):
         # The walk actually reached both companions, not just depth one.
         self.assertIn("transitive(heif.dll):", out)
         self.assertIn("transitive(libde265.dll):", out)
+
+    def test_import_closure_windows_requires_arch(self):
+        with self.assertRaises(ValueError):
+            verify_artifact.import_closure("windows")
+
+    def test_import_closure_windows_forwards_arch_to_the_declaration_gate(self):
+        """The child gate reads shipped_files.toml's companions_by_arch; the
+        arm64 leg must ask for the arm64 list, never fall back to x86_64."""
+        dumps = {"dng_decoder_native.dll": "Dump of file x\n    DLL Name: heif.dll\n",
+                 "heif.dll": "Dump of file y\n    DLL Name: libde265.dll\n"}
+        seen = []
+        inner = self._windows_fake_run(dumps=dumps, gate_results={})
+
+        def spy(argv, cwd=None, env=None):
+            if "--dump" in argv:
+                seen.append(argv[argv.index("--arch") + 1])
+            return inner(argv, cwd=cwd, env=env)
+
+        with _Cwd(self._tmp()):
+            self._windows_dirs()
+            with mock.patch.object(run_module, "run", side_effect=spy):
+                rc, _, _ = _run_captured(verify_artifact.import_closure, "windows", "arm64")
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {"arm64"})
+
+    # ---- AC-C2 PE machine gate (windows-arm64 leg) ----------------------
+
+    def _staged_windows(self, names):
+        staged = Path("artifacts/native")
+        staged.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (staged / name).write_bytes(b"MZ")
+
+    @staticmethod
+    def _readobj_fake(machines):
+        """machines: dll basename -> COFF machine constant, rendered in
+        llvm-readobj's own format (llvm/test/tools/llvm-readobj/COFF/
+        file-headers.test: 'Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)')."""
+        codes = {"IMAGE_FILE_MACHINE_ARM64": "0xAA64", "IMAGE_FILE_MACHINE_AMD64": "0x8664",
+                 "IMAGE_FILE_MACHINE_ARM64EC": "0xA641"}
+
+        def fake_run(argv, cwd=None, env=None):
+            assert argv[0] == "llvm-readobj" and argv[1] == "--file-headers", argv
+            m = machines[Path(argv[-1]).name]
+            return _fake_run_result(
+                returncode=0,
+                stdout=f"File: {argv[-1]}\nFormat: COFF-x\nImageFileHeader {{\n  Machine: {m} ({codes[m]})\n}}\n",
+            )
+        return fake_run
+
+    def test_pe_machine_arm64_green(self):
+        names = ["dng_decoder_native.dll", "heif.dll", "libde265.dll", "libomp140.aarch64.dll"]
+        with _Cwd(self._tmp()):
+            self._staged_windows(names)
+            with mock.patch.object(run_module, "run", side_effect=self._readobj_fake(
+                    {n: "IMAGE_FILE_MACHINE_ARM64" for n in names})):
+                rc, out, err = _run_captured(verify_artifact.assert_pe_machine, "windows", "arm64", "artifacts")
+        self.assertEqual(rc, 0, err)
+        asserts = [l for l in out.splitlines() if l.startswith("ASSERT pe-machine ")]
+        self.assertEqual(len(asserts), len(names))
+        self.assertTrue(all(l.endswith(" RC=0") for l in asserts), asserts)
+        self.assertIn("PE_MACHINE_RC=0", out)
+
+    def test_pe_machine_one_x64_companion_in_arm64_group_is_red(self):
+        names = ["dng_decoder_native.dll", "heif.dll", "libde265.dll", "libomp140.aarch64.dll"]
+        machines = {n: "IMAGE_FILE_MACHINE_ARM64" for n in names}
+        machines["heif.dll"] = "IMAGE_FILE_MACHINE_AMD64"
+        with _Cwd(self._tmp()):
+            self._staged_windows(names)
+            with mock.patch.object(run_module, "run", side_effect=self._readobj_fake(machines)):
+                rc, out, err = _run_captured(verify_artifact.assert_pe_machine, "windows", "arm64", "artifacts")
+        self.assertEqual(rc, 1)
+        self.assertIn("PE_MACHINE_RC=1", out)
+        self.assertIn("heif.dll is not a arm64 PE", err)
+
+    def test_pe_machine_arm64ec_is_not_arm64(self):
+        names = ["dng_decoder_native.dll"]
+        with _Cwd(self._tmp()):
+            self._staged_windows(names)
+            with mock.patch.object(run_module, "run", side_effect=self._readobj_fake(
+                    {"dng_decoder_native.dll": "IMAGE_FILE_MACHINE_ARM64EC"})):
+                rc, _, _ = _run_captured(verify_artifact.assert_pe_machine, "windows", "arm64", "artifacts")
+        self.assertEqual(rc, 1)
+
+    def test_pe_machine_x86_64_green(self):
+        names = ["dng_decoder_native.dll", "heif.dll"]
+        with _Cwd(self._tmp()):
+            self._staged_windows(names)
+            with mock.patch.object(run_module, "run", side_effect=self._readobj_fake(
+                    {n: "IMAGE_FILE_MACHINE_AMD64" for n in names})):
+                rc, _, _ = _run_captured(verify_artifact.assert_pe_machine, "windows", "x86_64", "artifacts")
+        self.assertEqual(rc, 0)
+
+    def test_pe_machine_missing_decoder_is_a_failure_not_a_pass(self):
+        with _Cwd(self._tmp()):
+            self._staged_windows(["heif.dll"])
+            with mock.patch.object(run_module, "run", side_effect=AssertionError("must not run")):
+                rc, out, _ = _run_captured(verify_artifact.assert_pe_machine, "windows", "arm64", "artifacts")
+        self.assertEqual(rc, 1)
+        self.assertIn("PE_MACHINE_RC=1", out)
 
     def test_import_closure_windows_transitive_failure_fails_the_step(self):
         """THE test that keeps the transitive walk from being decorative: the
@@ -453,7 +554,7 @@ class VerifyArtifactTests(unittest.TestCase):
                 run_module, "run",
                 side_effect=self._windows_fake_run(dumps=dumps, gate_results=gate),
             ):
-                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows", "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn("IMPORT_CLOSURE_RC=1", out)
         self.assertIn("import-closure gate failed for staged companion heif.dll", err)
@@ -475,7 +576,7 @@ class VerifyArtifactTests(unittest.TestCase):
                 run_module, "run",
                 side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
             ):
-                _rc, out, _err = _run_captured(verify_artifact.import_closure, "windows")
+                _rc, out, _err = _run_captured(verify_artifact.import_closure, "windows", "x86_64")
         markers = markerdiff.extract(out)
         self.assertEqual(
             len([m for m in markers if m.startswith("IMPORT_CLOSURE_RC=")]), 1
@@ -490,7 +591,7 @@ class VerifyArtifactTests(unittest.TestCase):
                 run_module, "run",
                 side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
             ):
-                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows", "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn("ASSERT dep heif.dll RC=1", out)
         self.assertIn("does not import heif.dll", err)
@@ -505,7 +606,7 @@ class VerifyArtifactTests(unittest.TestCase):
         with _Cwd(self._tmp()):
             self._windows_dirs()
             with mock.patch.object(run_module, "run", side_effect=fake_run):
-                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows", "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn("DEPENDENTS_RC=1", out)
         self.assertIn("LLVM_OBJDUMP_RC=1", out)
@@ -527,7 +628,7 @@ class VerifyArtifactTests(unittest.TestCase):
                 run_module, "run",
                 side_effect=self._windows_fake_run(dumps=dumps, gate_results={}),
             ):
-                rc, out, err = _run_captured(verify_artifact.import_closure, "windows")
+                rc, out, err = _run_captured(verify_artifact.import_closure, "windows", "x86_64")
         self.assertEqual(rc, 1)
         self.assertIn("ASSERT dep heif.dll RC=1", out)
         self.assertIn("does not import heif.dll", err)

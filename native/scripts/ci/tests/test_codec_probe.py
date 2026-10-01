@@ -71,6 +71,9 @@ class CodecProbeTests(unittest.TestCase):
         Path(self.ws, "native", "scripts", "deps", "probe").mkdir(parents=True)
 
     def _run(self, platform, responses, dist_dir=None, patch_environ=None):
+        if platform == "windows" and dist_dir is None:
+            # windows is per-arch (targets.py): the x86_64 row's dist dir.
+            dist_dir = "native/third_party/heif-dist-windows"
         if platform == "windows":
             # shutil.copy2 always does real filesystem I/O regardless of the
             # run() fakes, so every windows test needs real DLL fixtures.
@@ -263,10 +266,26 @@ class CodecProbeTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--dist-dir is not accepted for --platform 'linux'", err)
 
-    def test_windows_rejects_dist_dir(self):
-        rc, _out, err = _emit(cp.codec_probe, "windows", self.ws, "some/dist")
+    def test_windows_requires_dist_dir(self):
+        # per-arch since the windows-arm64 leg: the dist dir is a matrix value.
+        rc, _out, err = _emit(cp.codec_probe, "windows", self.ws)
         self.assertEqual(rc, 2)
-        self.assertIn("--dist-dir is not accepted for --platform 'windows'", err)
+        self.assertIn("--dist-dir is required for --platform windows", err)
+
+    def test_windows_arm64_dist_dir_is_the_one_compiled_against(self):
+        dist = Path(self.ws, "native", "third_party", "heif-dist-windows-arm64", "bin")
+        dist.mkdir(parents=True)
+        (dist / "heif.dll").write_bytes(b"MZ")
+        (dist / "libde265.dll").write_bytes(b"MZ")
+        rc, _out, _err, fake = self._run(
+            "windows",
+            {"clang-cl": (0, ""), "probe_codecs.exe": (0, _HAPPY_PROBE_TEXT)},
+            dist_dir="native/third_party/heif-dist-windows-arm64",
+        )
+        self.assertEqual(rc, 0)
+        argv = [c for c in fake.calls if c[0] == "run" and "clang-cl" in c[1][0]][0][1]
+        self.assertTrue(any("heif-dist-windows-arm64" in a and a.endswith(".lib") for a in argv), argv)
+        self.assertFalse(any(a.endswith("heif-dist-windows/lib/heif.lib") for a in argv), argv)
 
     # ---- golden emission parity --------------------------------------------
 

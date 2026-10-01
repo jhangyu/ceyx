@@ -124,7 +124,7 @@ class TestCmakeConfigureArgs(unittest.TestCase):
 
 class TestWantPins(unittest.TestCase):
     def test_format_matches_the_shell_script_byte_for_byte(self) -> None:
-        pins = win_webp_dist.compute_want_pins()
+        pins = win_webp_dist.compute_want_pins(arch="x86_64")
         expected = (
             f"libwebp={win_webp_dist.WEBP_VERSION}:{win_webp_dist.WEBP_SHA256} "
             "platform=windows-x86_64 archives=webp+mux+demux+sharpyuv"
@@ -134,7 +134,7 @@ class TestWantPins(unittest.TestCase):
 
 class TestStampFastPath(unittest.TestCase):
     def test_current_when_pins_match_and_libs_exist(self) -> None:
-        want = win_webp_dist.compute_want_pins()
+        want = win_webp_dist.compute_want_pins(arch="x86_64")
         with TemporaryDirectory() as tmp:
             dist = _dist_with(
                 {".pins": want, "lib/libwebp.lib": "x", "lib/libwebpmux.lib": "x"}, Path(tmp)
@@ -142,7 +142,7 @@ class TestStampFastPath(unittest.TestCase):
             self.assertTrue(win_webp_dist.stamp_is_current(dist, want))
 
     def test_not_current_when_a_lib_missing(self) -> None:
-        want = win_webp_dist.compute_want_pins()
+        want = win_webp_dist.compute_want_pins(arch="x86_64")
         with TemporaryDirectory() as tmp:
             dist = _dist_with({".pins": want, "lib/libwebp.lib": "x"}, Path(tmp))
             self.assertFalse(win_webp_dist.stamp_is_current(dist, want))
@@ -153,7 +153,7 @@ class TestStampFastPath(unittest.TestCase):
                 {".pins": "libwebp=0.0.0:stale", "lib/libwebp.lib": "x", "lib/libwebpmux.lib": "x"},
                 Path(tmp),
             )
-            self.assertFalse(win_webp_dist.stamp_is_current(dist, win_webp_dist.compute_want_pins()))
+            self.assertFalse(win_webp_dist.stamp_is_current(dist, win_webp_dist.compute_want_pins(arch="x86_64")))
 
 
 class TestAssertLayout(unittest.TestCase):
@@ -227,7 +227,7 @@ class TestBuildOrdering(unittest.TestCase):
                  mock.patch.object(win_webp_dist, "assert_layout") as m_layout, \
                  mock.patch.object(win_webp_dist, "assert_symbols") as m_symbols, \
                  mock.patch.object(win_webp_dist, "vendor_license") as m_license:
-                result = win_webp_dist.build(dist)
+                result = win_webp_dist.build(dist, arch="x86_64")
             self.assertEqual(result, dist)
             m_fetch.assert_not_called()
             m_configure.assert_not_called()
@@ -254,9 +254,9 @@ class TestBuildOrdering(unittest.TestCase):
                  mock.patch.object(
                      win_webp_dist, "vendor_license", side_effect=lambda *a, **k: calls.append("license")
                  ):
-                win_webp_dist.build(dist)
+                win_webp_dist.build(dist, arch="x86_64")
             self.assertEqual(calls, ["configure", "layout", "symbols", "license"])
-            self.assertEqual((dist / ".pins").read_text(encoding="utf-8"), win_webp_dist.compute_want_pins())
+            self.assertEqual((dist / ".pins").read_text(encoding="utf-8"), win_webp_dist.compute_want_pins(arch="x86_64"))
 
 
 if __name__ == "__main__":

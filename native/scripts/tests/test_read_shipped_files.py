@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MODULE_PATH = REPO_ROOT / "native" / "scripts" / "read_shipped_files.py"
 
@@ -26,7 +28,12 @@ def test_load_real_declaration_succeeds():
     for platform in ("windows", "linux", "macos", "android"):
         assert platform in platforms
     assert platforms["windows"]["decoder"] == "dng_decoder_native.dll"
-    assert "libomp140.x86_64.dll" in platforms["windows"]["companions"]
+    assert "libomp140.x86_64.dll" in rsf.companions_for(platforms["windows"], "x86_64")
+    assert "libomp140.aarch64.dll" in rsf.companions_for(platforms["windows"], "arm64")
+    # per-arch entry has no flat list: an arch-blind reader fails loudly.
+    assert "companions" not in platforms["windows"]
+    with pytest.raises(rsf.DeclarationError):
+        rsf.companions_for(platforms["windows"])
     # lcms2 is REMOVED as of WI-5 (OQ-N4 option Z, user ruling 2026-09-12):
     # lcms2 is dead code on every platform, ENABLE_LCMS is forced OFF, and
     # this declaration is authored from the post-removal state.

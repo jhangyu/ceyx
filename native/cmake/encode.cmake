@@ -92,7 +92,13 @@ if(CEYX_ENABLE_WEBP)
         # Still a HARD error if the committed dist is unusable: absent or
         # partial, the outcome would again be a green build with no WebP
         # encoder.
-        set(WEBP_WIN_DIST "${THIRD_PARTY_DIR}/libwebp-dist-windows")
+        # Per-arch dist dir: CEYX_WINDOWS_DIST_SUFFIX is derived from the
+        # compiler's target arch in cmake/heif.cmake (included before this
+        # file); "windows" for x86_64 (historical path), "windows-arm64".
+        if(NOT DEFINED CEYX_WINDOWS_DIST_SUFFIX)
+            message(FATAL_ERROR "CEYX_WINDOWS_DIST_SUFFIX is undefined at cmake/encode.cmake -- cmake/heif.cmake must be included first.")
+        endif()
+        set(WEBP_WIN_DIST "${THIRD_PARTY_DIR}/libwebp-dist-${CEYX_WINDOWS_DIST_SUFFIX}")
         find_path(CEYX_WEBP_INCLUDE_DIR NAMES webp/encode.h
                   HINTS "${WEBP_WIN_DIST}/include" NO_DEFAULT_PATH)
         # NAMES lists both spellings: Platform/Windows-Clang.cmake:33 sets

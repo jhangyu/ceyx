@@ -65,6 +65,7 @@ DEFAULT_PIN_PATH = REPO_ROOT.parent / "Halcyon" / "scripts" / "ceyx_release_pin.
 # to. macos maps to two legs (arm64 + x86_64 build the same companion names).
 _PLATFORM_TO_LEGS = {
     "windows": ["windows-x86_64"],
+    "windows-arm64": ["windows-arm64"],
     "linux": ["linux-x86_64"],
     "macos": ["macos-arm64", "macos-x86_64"],
     "android": ["android-arm64-v8a"],
@@ -74,8 +75,13 @@ _PLATFORM_TO_LEGS = {
 # companions correspond to, for the COLUMN2_EQUALS_PIN check. `None` means no
 # equivalent pin entry names this platform's full companion set today (a
 # drift the declaration surfaces, not something this script papers over).
+# Keyed by table ROW (see `_rows`): a platform declaring companions_by_arch
+# gets one row per arch, "<platform>" for x86_64 (its historical row/pin key)
+# and "<platform>-<arch>" otherwise. windows-arm64 has no pin entry until
+# Halcyon repins onto a release carrying it -- SKIP, printed, never silent.
 _PLATFORM_TO_PIN_TARGET = {
     "windows": "windows",
+    "windows-arm64": None,
     "android": "android",
     "linux": None,
     "macos": None,
@@ -85,6 +91,10 @@ _PLATFORM_TO_PIN_TARGET = {
 # `[component.*]` in manifest.toml, transcribed from third_party.cmake per
 # the plan's step 15.6 text.
 _STATIC_POLICY_FACTS = {
+    "windows-arm64": [
+        "libjpeg-turbo (static, App-Sandbox policy, third_party.cmake:65-230)",
+        "zlib (static, built from source, third_party.cmake:25-59)",
+    ],
     "windows": [
         "libjpeg-turbo (static, App-Sandbox policy, third_party.cmake:65-230)",
         "zlib (static, built from source, third_party.cmake:25-59)",
@@ -128,7 +138,22 @@ def load_pin(pin_path=None):
         return json.load(f)
 
 
-def column2_equals_pin(platform, entry, pin):
+def _rows(platforms):
+    """(row, companions) pairs, sorted by row. A flat-`companions` platform
+    is one row named after the platform; a `companions_by_arch` platform is
+    one row per arch -- "<platform>" for x86_64, "<platform>-<arch>" else."""
+    rows = []
+    for platform, entry in platforms.items():
+        if "companions_by_arch" in entry:
+            for arch in entry["companions_by_arch"]:
+                row = platform if arch == "x86_64" else f"{platform}-{arch}"
+                rows.append((row, entry["decoder"], rsf.companions_for(entry, arch)))
+        else:
+            rows.append((platform, entry["decoder"], rsf.companions_for(entry)))
+    return sorted(rows)
+
+
+def column2_equals_pin(platform, decoder, companions, pin):
     """Returns (status_str, equal_or_none)."""
     if pin is None:
         return "SKIP (no sibling Halcyon checkout)", None
@@ -139,7 +164,7 @@ def column2_equals_pin(platform, entry, pin):
     if asset is None:
         return f"SKIP (pin has no asset {target!r})", None
     pin_artifacts = sorted(lib["artifact"] for lib in asset.get("libraries", []))
-    declared = sorted([entry["decoder"]] + entry["companions"])
+    declared = sorted([decoder] + companions)
     equal = pin_artifacts == declared
     return str(equal), equal
 
@@ -165,10 +190,9 @@ _TABLE_HEADER = """<!-- linkage_table.md -- GENERATED FILE, do not hand-edit. --
 
 def render(platforms, static_components, pin):
     lines = _TABLE_HEADER.splitlines()
-    for platform in sorted(platforms):
-        entry = platforms[platform]
+    for platform, decoder, companions in _rows(platforms):
         static_cell = "<br>".join(static_components + _STATIC_POLICY_FACTS.get(platform, []))
-        dynamic_cell = "<br>".join([entry["decoder"]] + entry["companions"])
+        dynamic_cell = "<br>".join([decoder] + companions)
         legs = _PLATFORM_TO_LEGS.get(platform, [])
         cap_cell = "<br>".join(
             f"see `native/deps/codec_expectations.toml` `[{leg}]`" for leg in legs
@@ -201,8 +225,8 @@ def main(argv=None):
     # Always print the COLUMN2_EQUALS_PIN lines to stdout too, unconditionally
     # -- a silent skip is a FAIL (plan wording), so this must never be
     # omitted.
-    for platform in sorted(platforms):
-        status, _ = column2_equals_pin(platform, platforms[platform], pin)
+    for platform, decoder, companions in _rows(platforms):
+        status, _ = column2_equals_pin(platform, decoder, companions, pin)
         print(f"COLUMN2_EQUALS_PIN({platform})={status}")
 
     output_path.write_text(rendered)

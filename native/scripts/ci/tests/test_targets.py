@@ -59,15 +59,30 @@ class TestSpec(unittest.TestCase):
 
     def test_platform_requiring_arch_without_arch_is_flagged_in_data(self):
         # targets.py states the fact only; enforcement is ci.py's job (C-G9).
-        # This test pins that the DATA distinguishes macos from every other
-        # platform, which is the precondition ci.py's enforcement depends on.
-        non_macos_requires_arch = [
-            name
-            for name, entry in targets.TARGETS.items()
-            if name != "macos" and entry["requires_arch"]
-        ]
-        self.assertEqual(non_macos_requires_arch, [])
+        # This test pins WHICH platforms the data marks per-arch -- the
+        # precondition ci.py's enforcement depends on. windows joined macos
+        # with the windows-arm64 leg (2026-09-30).
+        requires_arch = sorted(
+            name for name, entry in targets.TARGETS.items() if entry["requires_arch"]
+        )
+        self.assertEqual(requires_arch, ["macos", "windows"])
 
+    def test_windows_dist_suffix_matches_heif_cmake(self):
+        """arch_legs[*].dist_suffix (rendered workflows) and heif.cmake's
+        CEYX_WINDOWS_DIST_SUFFIX (the consumer) are two spellings of one fact
+        that CMake cannot import from Python; this pins them together."""
+        from pathlib import Path
+        import re as _re
+        heif = (Path(__file__).resolve().parents[3] / "cmake" / "heif.cmake").read_text()
+        cmake_suffixes = _re.findall(r'set\(CEYX_WINDOWS_DIST_SUFFIX "([^"]+)"\)', heif)
+        legs = targets.spec("windows")["arch_legs"]
+        self.assertEqual(sorted(cmake_suffixes), sorted(l["dist_suffix"] for l in legs.values()))
+
+    def test_windows_pe_machine_table_covers_every_arch_tag(self):
+        spec = targets.spec("windows")
+        self.assertEqual(sorted(spec["pe_machine_by_arch"]), sorted(spec["arch_tags"]))
+        self.assertEqual(spec["pe_machine_by_arch"]["arm64"], "IMAGE_FILE_MACHINE_ARM64")
+        self.assertEqual(spec["pe_machine_by_arch"]["x86_64"], "IMAGE_FILE_MACHINE_AMD64")
 
 if __name__ == "__main__":
     unittest.main()

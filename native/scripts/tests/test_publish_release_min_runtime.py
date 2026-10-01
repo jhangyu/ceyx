@@ -83,9 +83,15 @@ def test_real_declaration_file_loads_and_resolves_all_platforms():
     check that would have caught the macos regression had the arch been wired
     through, so it now exercises both macOS legs by their real arch tags."""
     declared = pr.load_min_runtime_expected()
-    for platform in ("windows", "linux", "android"):
+    for platform in ("linux", "android"):
         value = pr.min_runtime_for_asset(_item("dng_decoder_native", platform), declared)
         assert value is not None
+    # windows is per-arch since the windows-arm64 leg: resolved by the arch the
+    # asset name carries (dng_decoder_native-windows-<arch>).
+    assert pr.min_runtime_for_asset(
+        _item("dng_decoder_native", "windows", arch="x86_64"), declared) == "6.0"
+    assert pr.min_runtime_for_asset(
+        _item("dng_decoder_native", "windows", arch="arm64"), declared) == "6.2"
     assert pr.min_runtime_for_asset(
         _item("dng_decoder_native", "macos", arch="arm64"), declared) == "15.0"
     assert pr.min_runtime_for_asset(

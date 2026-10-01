@@ -82,7 +82,7 @@ from . import report, run, targets
 _SO_NAME_RE = re.compile(r"\.so(\.[0-9]+)*$")
 
 
-def declared_names(platform: str) -> list[str]:
+def declared_names(platform: str, arch: str | None = None) -> list[str]:
     """INCLUDES the decoder: returns decoder + companions, in declaration
     order. Used by linux/windows, whose completeness checks are symmetric
     over the whole group. For a companions-ONLY list (android's asymmetric
@@ -93,10 +93,10 @@ def declared_names(platform: str) -> list[str]:
     import read_shipped_files
 
     entry = read_shipped_files.load_declaration()[platform]
-    return [entry["decoder"], *entry["companions"]]
+    return [entry["decoder"], *read_shipped_files.companions_for(entry, arch)]
 
 
-def declared_companions(platform: str) -> list[str]:
+def declared_companions(platform: str, arch: str | None = None) -> list[str]:
     """EXCLUDES the decoder: companions only. android's completeness check
     (unlike linux/windows, see ``declared_names`` above) is asymmetric and
     only ever checks companions, never the decoder itself, by this list
@@ -104,7 +104,8 @@ def declared_companions(platform: str) -> list[str]:
     --companions``, not ``--all``)."""
     import read_shipped_files
 
-    return list(read_shipped_files.load_declaration()[platform]["companions"])
+    entry = read_shipped_files.load_declaration()[platform]
+    return read_shipped_files.companions_for(entry, arch)
 
 
 def _list_dir(directory: Path) -> None:
@@ -188,13 +189,13 @@ def assert_staged_group(platform: str, artifact_dir: str) -> int:
 _WINDOWS_OPTIONAL_LIB = "dng_decoder_native.lib"
 
 
-def stage_windows(source_dir: str, artifact_dir: str) -> int:
+def stage_windows(source_dir: str, artifact_dir: str, arch: str) -> int:
     """Replaces windows_build.yml:805-833's copy lines (not its own step's
     trailing ``ls -la``, which callers still get via ``_list_dir`` below)."""
     dest = Path(artifact_dir) / "native"
     dest.mkdir(parents=True, exist_ok=True)
     src_root = Path(source_dir)
-    for name in declared_names("windows"):
+    for name in declared_names("windows", arch):
         src = src_root / name
         if not src.exists():
             report.error(
@@ -229,7 +230,7 @@ def _dll_set_marker_value(names: list[str]) -> str:
     return " ".join(names) + " " if names else ""
 
 
-def assert_staged_group_windows(artifact_dir: str) -> int:
+def assert_staged_group_windows(artifact_dir: str, arch: str) -> int:
     """Replaces windows_build.yml:862-872. Symmetric ``*.dll``-only compare
     (the ``.lib`` is never part of either set, matching the shell's
     ``ls *.dll`` glob) -- unlike linux, no ``SHARED_LIB_COUNT``-style marker
@@ -244,7 +245,7 @@ def assert_staged_group_windows(artifact_dir: str) -> int:
     migration-fidelity violation in the other direction (tightening)."""
     dest = Path(artifact_dir) / "native"
     _list_dir(dest)
-    expected = sorted(n for n in declared_names("windows") if n.endswith(".dll"))
+    expected = sorted(n for n in declared_names("windows", arch) if n.endswith(".dll"))
     staged = sorted(p.name for p in dest.iterdir() if p.name.endswith(".dll"))
     report.marker("EXPECTED_DLL_SET", _dll_set_marker_value(expected))
     report.marker("STAGED_DLL_SET", _dll_set_marker_value(staged))

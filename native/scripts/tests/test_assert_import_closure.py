@@ -47,7 +47,7 @@ def test_pe_clean_dump_passes(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 0
     assert "IMPORT_CLOSURE_RESULT=PASS" in out
@@ -59,7 +59,7 @@ def test_pe_unknown_import_fails(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 1
     assert "IMPORT sketchy_third_party.dll -> MISSING" in out
@@ -72,7 +72,7 @@ def test_pe_missing_staged_companion_fails(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, ["libde265.dll", "libomp140.x86_64.dll"])  # heif.dll deleted
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 1
     assert "IMPORT heif.dll -> MISSING" in out
@@ -109,7 +109,7 @@ def test_pe_libomp_transitive_imports_pass(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 0
     assert "IMPORT PSAPI.DLL -> OS_ALLOWLIST" in out
@@ -128,7 +128,7 @@ def test_pe_allowlist_match_is_case_insensitive(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, ["libomp140.x86_64.dll"])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 0
     assert "IMPORT Psapi.dll -> OS_ALLOWLIST" in out
@@ -147,7 +147,7 @@ def test_pe_case_insensitivity_does_not_relax_the_gate(tmp_path, monkeypatch, ca
     staged = _stage(tmp_path, ["libomp140.x86_64.dll"])  # heif.dll genuinely absent
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 1
     assert "IMPORT HEIF.DLL -> MISSING" in out
@@ -307,7 +307,7 @@ def test_empty_dump_is_unverified(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, [])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 1
     assert "IMPORT_CLOSURE_RESULT=UNVERIFIED" in out
@@ -339,7 +339,7 @@ def test_pe_export_table_self_match_not_counted_as_import(tmp_path, monkeypatch,
     staged = _stage(tmp_path, ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(dump), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 0
     assert "dng_decoder_native.dll" not in out
@@ -350,7 +350,7 @@ def test_missing_dump_file_is_unverified(tmp_path, monkeypatch, capsys):
     staged = _stage(tmp_path, [])
     rc, out, err = _invoke(monkeypatch, [
         "--dump", str(tmp_path / "nope.txt"), "--staged-dir", str(staged),
-        "--declaration", str(DECLARATION), "--platform", "windows", "--format", "pe",
+        "--declaration", str(DECLARATION), "--platform", "windows", "--arch", "x86_64", "--format", "pe",
     ], capsys)
     assert rc == 1
     assert "IMPORT_CLOSURE_RESULT=UNVERIFIED" in out

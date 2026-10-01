@@ -193,6 +193,39 @@ workflow = "windows_build.yml"
 "JXL" = 1
 "RAW" = 1
 
+# windows-arm64 leg (2026-09-30, contract armci-contract.md R-6/R-7): the SAME
+# vector as [windows-x86_64] -- same sources, same committed-dist shape
+# (native/third_party/*-dist-windows-arm64), same probe, run natively on
+# windows-11-arm. A cell that differs from x86_64 here would be a capability
+# the arm64 build lost, i.e. a defect, not a per-arch fact.
+[windows-arm64]
+instrument = "capability-probe"
+workflow = "windows_build.yml"
+
+[windows-arm64.expect]
+"jpeg:encode" = 1
+"jpeg:decode" = { value = 0, reason = "JPEG decode capability is deliberately 0 on every platform: the decode route uses libjpeg unconditionally, not the generic ceyx_still_decode_supports gate", owner = "N/A (deliberate, not a gap)" }
+"webp:encode" = 1
+"webp:decode" = 1
+"heic:encode" = 1
+"heic:decode" = 1
+"avif:encode" = 1
+"avif:decode" = 1
+"jxl:encode" = 1
+"jxl:decode" = 1
+
+# WI-5: windows-arm64 build capabilities. ICC=0: nothing sourced lcms2 for
+# Windows in the first place (zero lcms2 branches outside tests.cmake), so
+# this leg moves from "silently non-deterministic" to "explicitly OFF" by
+# the same forced ENABLE_LCMS=OFF value.
+[windows-arm64.capabilities]
+"ICC" = { value = 0, reason = "OQ-N4 option Z (user ruling 2026-09-12): ENABLE_LCMS forced OFF on all platforms. No ICC transform is reachable -- LibRaw's only lcms2 consumer is apply_profile(), called solely from dcraw_process(), which ceyx never calls; camera_profile is never set. Colour uses fixed matrices + DNG-SDK spaces.", owner = "OQ-N4" }
+"OPENMP" = 1
+"HEIF" = 1
+"WEBP" = 1
+"JXL" = 1
+"RAW" = 1
+
 # Android has NO runnable capability instrument in CI at all (compile-only
 # ruling 2026-08-31): the cross-compiled AArch64 .so cannot be dlopen'd from
 # the x86_64 runner, and the emulator gate that would have run an on-device

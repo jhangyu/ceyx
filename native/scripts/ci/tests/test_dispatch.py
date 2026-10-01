@@ -52,6 +52,8 @@ FROZEN_CLI_SURFACE = {
     "render-workflows",
     "marker-diff",
     "verify-artifact",
+    # windows-arm64 leg (2026-09-30, AC-C2): COFF machine-type gate.
+    "assert-pe-machine",
     "import-closure",
     "min-runtime",
     "assert-exports",
@@ -73,6 +75,9 @@ FROZEN_CLI_SURFACE = {
     "build-zlib",
     "locate-clang-cl",
     "verify-vulkan-lib",
+    # windows-arm64 leg (R-9).
+    "assert-vs-component",
+    "cross-stage1-windows",
     # WI-29/WI-30 (push 8b, dispatch wiring extension ruled by lead9-pyci-opus):
     # dist_build.py + vcpkg.py's argv surfaces.
     "dist-build",
@@ -124,10 +129,11 @@ class TestSelftest(unittest.TestCase):
 
 
 class TestArchGate(unittest.TestCase):
-    def test_min_runtime_windows_with_arch_is_argparse_error(self):
+    def test_min_runtime_windows_without_arch_is_argparse_error(self):
+        # windows is per-arch since the windows-arm64 leg (targets.py).
         with self.assertRaises(SystemExit) as ctx:
             with redirect_stderr(io.StringIO()):
-                ci_entrypoint.main(["min-runtime", "--platform", "windows", "--arch", "x86_64"])
+                ci_entrypoint.main(["min-runtime", "--platform", "windows"])
         self.assertEqual(ctx.exception.code, 2)
 
     def test_min_runtime_macos_without_arch_is_argparse_error(self):
@@ -439,21 +445,17 @@ class TestCodecProbeDispatch(unittest.TestCase):
                 )
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_windows_rejects_dist_dir(self):
+    def test_windows_requires_dist_dir(self):
+        # windows is per-arch since the windows-arm64 leg: like macOS, its
+        # HEIF dist dir is a matrix value, required at the CLI layer.
+        buf = io.StringIO()
         with self.assertRaises(SystemExit) as ctx:
-            with redirect_stderr(io.StringIO()):
+            with redirect_stderr(buf):
                 ci_entrypoint.main(
-                    [
-                        "codec-probe",
-                        "--platform",
-                        "windows",
-                        "--workspace",
-                        str(self.tmp),
-                        "--dist-dir",
-                        "x",
-                    ]
+                    ["codec-probe", "--platform", "windows", "--workspace", str(self.tmp)]
                 )
         self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--dist-dir is required", buf.getvalue())
 
     def test_missing_workspace_is_argparse_error_not_traceback(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -546,7 +548,7 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
 
     def test_windows_min_runtime_reaches_minruntime_not_verify_artifact(self):
         self._assert_dispatches_to_minruntime_not_verify_artifact(
-            ["min-runtime", "--platform", "windows"], ("windows", None)
+            ["min-runtime", "--platform", "windows", "--arch", "x86_64"], ("windows", "x86_64")
         )
 
     def test_android_min_runtime_reaches_minruntime_not_verify_artifact(self):
@@ -596,9 +598,9 @@ class TestMinRuntimeDispatchGeneralised(unittest.TestCase):
         import ci.verify_artifact as verify_artifact
 
         with mock.patch.object(verify_artifact, "import_closure", return_value=0) as mocked:
-            rc = ci_entrypoint.main(["import-closure", "--platform", "windows"])
+            rc = ci_entrypoint.main(["import-closure", "--platform", "windows", "--arch", "arm64"])
         self.assertEqual(rc, 0)
-        mocked.assert_called_once_with("windows", artifact_dir=None, ndk_home=None)
+        mocked.assert_called_once_with("windows", "arm64", artifact_dir=None, ndk_home=None)
 
     def test_min_runtime_dispatch_calls_minruntime_module_not_verify_artifact(self):
         # The regression this whole class exists to prevent: a behavioural

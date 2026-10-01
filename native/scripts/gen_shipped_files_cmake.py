@@ -46,8 +46,17 @@ def render(platforms):
         entry = platforms[platform]
         upper = platform.upper()
         lines.append(f'set(CEYX_SHIPPED_{upper}_DECODER "{entry["decoder"]}")')
-        companions = ";".join(entry["companions"])
-        lines.append(f'set(CEYX_SHIPPED_{upper}_COMPANIONS "{companions}")')
+        if "companions_by_arch" in entry:
+            # Per-arch names: one variable per arch, CEYX_SHIPPED_<P>_<ARCH>_COMPANIONS
+            # (arch upper-cased from arch_map.toml's canonical id). No
+            # arch-less variable is emitted, so a CMake consumer that forgot to
+            # select by arch reads an undefined name -- guarded FATAL in heif.cmake.
+            for arch in sorted(entry["companions_by_arch"]):
+                companions = ";".join(rsf.companions_for(entry, arch))
+                lines.append(f'set(CEYX_SHIPPED_{upper}_{arch.upper()}_COMPANIONS "{companions}")')
+        else:
+            companions = ";".join(rsf.companions_for(entry))
+            lines.append(f'set(CEYX_SHIPPED_{upper}_COMPANIONS "{companions}")')
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

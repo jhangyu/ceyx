@@ -17,9 +17,21 @@ concurrency:
 
 jobs:
   build-jxl-dist:
-    name: libjxl dist (windows x86_64, clang-cl, static, encode+decode)
-    runs-on: windows-latest
+    name: libjxl dist (windows ${{ matrix.arch_tag }}, clang-cl, static, encode+decode)
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_tag: x86_64
+            runner: windows-latest
+            msvc_arch: x64
+            dist: native/third_party/libjxl-dist-windows
+          - arch_tag: arm64
+            runner: windows-11-arm
+            msvc_arch: amd64_arm64
+            dist: native/third_party/libjxl-dist-windows-arm64
     steps:
       - name: Force LF line endings for all git operations
         shell: bash
@@ -39,10 +51,10 @@ jobs:
       - name: Install Ninja
         run: python native/scripts/ci.py provision ninja
 
-      - name: Set up MSVC developer environment (x64)
+      - name: Set up MSVC developer environment (${{ matrix.msvc_arch }})
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Locate clang-cl
         shell: bash
@@ -52,18 +64,18 @@ jobs:
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
-          python native/scripts/ci.py dist-build --component jxl-stack --platform windows --arch x86_64 --dist "${{ github.workspace }}/native/third_party/libjxl-dist-windows" --rc-marker JXL_DIST_WINDOWS_RC
+          python native/scripts/ci.py dist-build --component jxl-stack --platform windows --arch ${{ matrix.arch_tag }} --dist "${{ github.workspace }}/${{ matrix.dist }}" --rc-marker JXL_DIST_WINDOWS_RC
 
       - name: List the produced dist (complete)
         if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py dist-list --dist native/third_party/libjxl-dist-windows
+        run: python3 native/scripts/ci.py dist-list --dist ${{ matrix.dist }}
 
       - name: Upload the dist
         uses: actions/upload-artifact@v4
         with:
-          name: libjxl-dist-windows-x86_64
-          path: ${{ github.workspace }}/native/third_party/libjxl-dist-windows
+          name: libjxl-dist-windows-${{ matrix.arch_tag }}
+          path: ${{ github.workspace }}/${{ matrix.dist }}
           if-no-files-found: error
           retention-days: 7

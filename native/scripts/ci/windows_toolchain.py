@@ -93,3 +93,83 @@ def verify_vulkan_lib(vulkan_sdk: str = "") -> int:
     if ls_result.stdout:
         report.plain(ls_result.stdout.rstrip("\n"))
     return ls_result.returncode
+
+
+# --- windows-arm64 leg (2026-09-30, contract armci-contract.md R-9) --------
+
+_VSWHERE = "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+
+
+def assert_vs_component(component: str, out_path: str = "vswhere_component.txt") -> int:
+    """Hard-assert a Visual Studio component is installed (vswhere -requires).
+
+    The windows-11-arm image publishes no VS component list, so the ARM64 VC
+    tools are asserted up front rather than surfacing later as a link error
+    naming something else. Output goes to a FILE and is read back (no pipe);
+    an EMPTY answer is a failure, and the full instance listing is printed
+    for diagnosis."""
+    rc = run.run_to_file(
+        [_VSWHERE, "-products", "*", "-requires", component, "-property", "installationPath"],
+        out_path,
+    ).returncode
+    text = Path(out_path).read_text(errors="replace").strip() if Path(out_path).is_file() else ""
+    report.marker("VSWHERE_RC", rc)
+    report.plain(f"vswhere -requires {component}: {text or '<empty>'}")
+    if rc != 0 or not text:
+        report.error(f"no Visual Studio instance provides {component} on this runner.")
+        listing = run.run([_VSWHERE, "-products", "*", "-all", "-format", "text"])
+        report.plain((listing.stdout + listing.stderr).rstrip("\n"))
+        return 1
+    return 0
+
+
+# The generator host triple on windows-11-arm. Halide v21.0.0 publishes no
+# arm-64-windows HOST dist (release assets: x86-64-windows / x86-32-windows),
+# so stage 1 builds x86_64 generators (against the x86-64-windows Halide dist)
+# that run under Windows-on-ARM x64 emulation. clang-cl on that image is the
+# native arm64 LLVM, hence the explicit --target. Passed through CFLAGS/
+# CXXFLAGS, which CMake folds into CMAKE_<LANG>_FLAGS together with its MSVC
+# defaults (/DWIN32 /D_WINDOWS /EHsc /GR); a -DCMAKE_CXX_FLAGS on the command
+# line would REPLACE those defaults (pitfall N16).
+_STAGE1_HOST_TARGET = "--target=x86_64-pc-windows-msvc"
+
+
+def cross_stage1(build_dir: str, aot_target: str) -> int:
+    """Cross stage 1 on the Windows arm64 row: build the x86_64 Halide
+    generators and run them (target dng_all_aot) with
+    DNG_AOT_TARGET_OVERRIDE=<aot_target>. Same DNG_HOST_GENERATORS_ONLY
+    mechanism as macos_build.yml's cross stage 1; the AOT output lands in
+    <build_dir>/halide_generated, which stage 2 consumes via
+    DNG_PREBUILT_AOT_DIR in the same job. Configure and build logs are
+    written to files (cross_stage1_configure.log / cross_stage1_build.log)
+    and replayed; each RC is emitted as its own marker."""
+    env = dict(os.environ)
+    env["CFLAGS"] = _STAGE1_HOST_TARGET
+    env["CXXFLAGS"] = _STAGE1_HOST_TARGET
+    configure = [
+        "cmake", "-S", "native", "-B", build_dir, "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=clang-cl",
+        "-DCMAKE_CXX_COMPILER=clang-cl",
+        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+        "-DDNG_HOST_GENERATORS_ONLY=ON",
+        f"-DDNG_AOT_TARGET_OVERRIDE={aot_target}",
+    ]
+    rc = run.run_to_file(configure, "cross_stage1_configure.log", env=env).returncode
+    report.plain(Path("cross_stage1_configure.log").read_text(errors="replace").rstrip("\n"))
+    report.marker("CROSS_STAGE1_CONFIGURE_RC", rc)
+    if rc != 0:
+        return rc
+    build = ["cmake", "--build", build_dir, "--target", "dng_all_aot", "--", "-v", "-k", "0"]
+    rc = run.run_to_file(build, "cross_stage1_build.log", env=env).returncode
+    report.plain(Path("cross_stage1_build.log").read_text(errors="replace").rstrip("\n"))
+    report.marker("CROSS_STAGE1_RC", rc)
+    aot_dir = Path(build_dir) / "halide_generated"
+    listing = sorted(p.name for p in aot_dir.iterdir()) if aot_dir.is_dir() else []
+    report.plain(f"--- AOT artifacts in {aot_dir}: {len(listing)}")
+    for name in listing:
+        report.plain(name)
+    if rc == 0 and not listing:
+        report.error(f"stage 1 reported success but {aot_dir} is empty -- nothing for stage 2 to link.")
+        return 1
+    return rc

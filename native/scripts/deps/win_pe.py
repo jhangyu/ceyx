@@ -239,7 +239,17 @@ def resolve_existing(root: Path, candidates: Sequence[str], *, what: str) -> str
     )
 
 
-def assert_machine_x86_64(file_output: Optional[str], *, dll_names: str) -> bool:
+# ``file``'s machine-type wording per target arch (libmagic's PE32+ lines:
+# "x86-64" for IMAGE_FILE_MACHINE_AMD64, "Aarch64" for
+# IMAGE_FILE_MACHINE_ARM64). Keyed by the canonical arch vocabulary of
+# native/deps/arch_map.toml. Matched case-insensitively.
+_FILE_MACHINE_TOKENS = {
+    "x86_64": ("x86-64", "x86_64"),
+    "arm64": ("aarch64", "arm64"),
+}
+
+
+def assert_machine(file_output: Optional[str], arch: str, *, dll_names: str) -> bool:
     """Architecture proof, best-effort, mirroring the source script's use of
     ``file``. Returns True when the check actually ran and passed, False when
     the tool was unavailable.
@@ -249,8 +259,15 @@ def assert_machine_x86_64(file_output: Optional[str], *, dll_names: str) -> bool
     (not passed)"), and a silently-skipped check that looks identical to a
     green one is exactly the failure this project has recorded before.
     """
+    try:
+        tokens = _FILE_MACHINE_TOKENS[arch]
+    except KeyError:
+        raise PeInspectionError(
+            f"no machine-type tokens for arch {arch!r} (known: {sorted(_FILE_MACHINE_TOKENS)})"
+        ) from None
     if file_output is None:
         return False
-    if "x86-64" in file_output or "x86_64" in file_output:
+    lowered = file_output.lower()
+    if any(t in lowered for t in tokens):
         return True
-    raise PeAssertionFailed(f"{dll_names} are not x86-64:\n{file_output}")
+    raise PeAssertionFailed(f"{dll_names} are not {arch}:\n{file_output}")

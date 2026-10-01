@@ -143,9 +143,16 @@ def extract_tar_stripping_top(archive_path: Path, dest: Path) -> None:
                 tf.extract(member, dest)  # noqa: S202 - pre-PEP-706 interpreter
 
 
-def fetch(dest: Optional[Path] = None, *, force: bool = False) -> Path:
+def fetch(dest: Optional[Path] = None, *, force: bool = False, host_arch: Optional[str] = None) -> Path:
     """Fetch (or reuse) the Halide v21 dist into ``dest`` (default
-    ``native/third_party/halide``)."""
+    ``native/third_party/halide``).
+
+    ``host_arch`` (canonical "x86_64"/"arm64"/"x86_32") selects the Halide
+    HOST dist explicitly instead of detecting it from ``platform.machine()``.
+    It exists for the windows-arm64 leg (contract R-9): upstream publishes no
+    arm-64-windows host dist, so that leg fetches the x86-64-windows one and
+    runs its generators under Windows-on-ARM x64 emulation. Never inferred --
+    an unsupported detected host still fails loudly."""
     native_dir = Path(__file__).resolve().parents[2]
     dest = Path(dest) if dest is not None else native_dir / "third_party" / "halide"
     if not force and already_present(dest):
@@ -162,7 +169,7 @@ def fetch(dest: Optional[Path] = None, *, force: bool = False) -> Path:
         return dest
 
     system = platform_module.system()
-    machine = platform_module.machine()
+    machine = host_arch if host_arch is not None else platform_module.machine()
     _, ext, asset = resolve_asset(system, machine)
     url = f"{HALIDE_RELEASE_BASE}/{asset}"
 

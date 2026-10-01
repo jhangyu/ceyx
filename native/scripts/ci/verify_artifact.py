@@ -156,8 +156,72 @@ def verify_artifact(platform: str, arch: str | None = None, *, dylib_path: str |
     raise ValueError(f"verify_artifact: unsupported platform {platform!r}")
 
 
+_PE_MACHINE_RE = re.compile(r"^\s*Machine:\s*(IMAGE_FILE_MACHINE_[A-Z0-9_]+)\b", re.MULTILINE)
+
+
+def assert_pe_machine(platform: str, arch: str, artifact_dir: str) -> int:
+    """AC-C2 (windows-arm64 leg, 2026-09-30): every staged DLL's COFF
+    header names the machine this leg targets.
+
+    WHY: the atomic-group and export gates are machine-blind -- an x64
+    heif.dll left in native/third_party/heif-dist-<suffix>, or an x64
+    OpenMP runtime picked out of the wrong VC redist directory, stages,
+    exports and closes exactly like the right one and then fails
+    LoadLibrary on the user's machine with ERROR_BAD_EXE_FORMAT. Runs on
+    every Windows arch, x86_64 included (same gate, arch is data).
+
+    Dump-then-match, never a pipe (the pipefail/SIGPIPE reverse-gate shape):
+    ``llvm-readobj --file-headers`` is written to ``pe_headers_<dll>.txt``
+    and matched here. The expected constant comes from
+    ``targets.spec(platform)["pe_machine_by_arch"]``; exactly ONE Machine
+    line must be present (IMAGE_FILE_MACHINE_ARM64 does not prefix-match
+    ARM64EC/ARM64X: the regex requires a word boundary after the name)."""
+    spec = targets.spec(platform)
+    machines = spec["pe_machine_by_arch"]
+    if not machines:
+        raise ValueError(f"assert_pe_machine: platform {platform!r} has no PE machine table")
+    if arch not in machines:
+        raise ValueError(
+            f"assert_pe_machine: no PE machine declared for arch {arch!r} (known: {sorted(machines)})"
+        )
+    expected = machines[arch]
+    readobj = spec["readobj_tools"][0]
+    staged_dir = Path(artifact_dir) / "native"
+    dlls = sorted(p for p in staged_dir.glob("*.dll")) if staged_dir.is_dir() else []
+    report.section(f"PE machine gate: every staged DLL must be {expected} ({arch})")
+    decoder = Path(_artifact_path(platform)).name
+    if decoder not in {p.name for p in dlls}:
+        report.error(
+            f"{decoder} is not staged under {staged_dir}; the machine gate has nothing to "
+            "check, which is a failure, not a pass."
+        )
+        report.rc("PE_MACHINE", 1)
+        return 1
+    worst = 0
+    for dll in dlls:
+        dump = f"pe_headers_{dll.name}.txt"
+        tool_rc = run.run_to_file([readobj, "--file-headers", str(dll)], dump).returncode
+        found = _PE_MACHINE_RE.findall(Path(dump).read_text(errors="replace"))
+        ok = tool_rc == 0 and found == [expected]
+        report.plain(
+            f"ASSERT pe-machine {dll.name}: found={','.join(found) or '<none>'} "
+            f"expected={expected} readobj_rc={tool_rc} RC={0 if ok else 1}"
+        )
+        if not ok:
+            report.error(
+                f"{dll.name} is not a {arch} PE ({expected}); found "
+                f"{found or 'no Machine line'} (llvm-readobj rc={tool_rc}, dump: {dump}). "
+                "A wrong-machine DLL in the shipped group fails LoadLibrary on the user's "
+                "machine -- rebuild the offending dist for this arch; do not drop the DLL."
+            )
+            worst = 1
+    report.rc("PE_MACHINE", worst)
+    return worst
+
+
 def import_closure(
-    platform: str, *, artifact_dir: str | None = None, ndk_home: str | None = None
+    platform: str, arch: str | None = None, *, artifact_dir: str | None = None,
+    ndk_home: str | None = None
 ) -> int:
     """S-B3 import-closure gate. Replaces the pre-migration inline shell of
     the step named `Import-closure gate (S-B3)` in `linux_build.yml` and in
@@ -236,7 +300,9 @@ def import_closure(
     raised here instead of reproducing that crash-shaped gap verbatim --
     flagged for the leader's ruling, not silently decided as equivalent."""
     if platform == "windows":
-        return _import_closure_windows()
+        if arch is None:
+            raise ValueError("import_closure(platform='windows') requires arch (per-arch companions)")
+        return _import_closure_windows(arch)
 
     if platform == "android":
         if not artifact_dir or not ndk_home:
@@ -351,18 +417,19 @@ def _strip_pe_dump_header(dump_path: str, body_path: str) -> str:
     return body
 
 
-def _run_pe_closure_gate(body_path: str, staged_dir: str) -> tuple[int, str]:
+def _run_pe_closure_gate(body_path: str, staged_dir: str, arch: str) -> tuple[int, str]:
     return run.capture([
         sys.executable, "native/scripts/assert_import_closure.py",
         "--dump", body_path,
         "--staged-dir", staged_dir,
         "--declaration", "native/deps/shipped_files.toml",
         "--platform", "windows",
+        "--arch", arch,
         "--format", "pe",
     ])
 
 
-def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str) -> int:
+def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str, arch: str) -> int:
     """Walks the import graph BEYOND depth one and gates every staged module
     it reaches, returning the worst RC.
 
@@ -434,7 +501,7 @@ def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str) -
             worst = worst or 1
             continue
         body = _strip_pe_dump_header(dump_path, body_path)
-        sub_rc, sub_out = _run_pe_closure_gate(body_path, staged_dir)
+        sub_rc, sub_out = _run_pe_closure_gate(body_path, staged_dir, arch)
         for line in sub_out.splitlines():
             report.plain(f"transitive({module}): {line}")
         if sub_rc != 0:
@@ -448,7 +515,7 @@ def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str) -
     return worst
 
 
-def _import_closure_windows() -> int:
+def _import_closure_windows(arch: str) -> int:
     """P-23: `windows_build.yml`'s "Assert Windows DLL dependency closure"
     step. Every emitted line below is transcribed verbatim from that step's
     shell, with ONE addition, marked in place: the transitive walk (see
@@ -495,12 +562,12 @@ def _import_closure_windows() -> int:
         return 1
 
     report.section("Step 4: full import-closure gate (S-B1)")
-    closure_rc, closure_out = _run_pe_closure_gate("dll_dependents_body.txt", staged_dir)
+    closure_rc, closure_out = _run_pe_closure_gate("dll_dependents_body.txt", staged_dir, arch)
     if closure_out:
         report.plain(closure_out.rstrip("\n"))
     # ADDED (P-23), and placed BEFORE the marker so the single aggregated
     # `IMPORT_CLOSURE_RC` covers the whole graph, not just depth one.
-    transitive_rc = _pe_transitive_closure(body, staged_dir, Path(dll).name)
+    transitive_rc = _pe_transitive_closure(body, staged_dir, Path(dll).name, arch)
     closure_rc = closure_rc or transitive_rc
     report.rc("IMPORT_CLOSURE", closure_rc)
     if closure_rc != 0:
@@ -746,7 +813,9 @@ def verify_staged_companions(platform: str, dylib_path: str, artifact_dir: str, 
     if str(_SCRIPTS_DIR2) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR2))
 
-    companions = read_shipped_files.load_declaration()[platform]["companions"]
+    companions = read_shipped_files.companions_for(
+        read_shipped_files.load_declaration()[platform], arch
+    )
     staged_dir = Path(artifact_dir) / "native"
     dylib_basename = os.path.basename(dylib_path)
 

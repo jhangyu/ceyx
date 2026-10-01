@@ -23,6 +23,7 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py selftest
     python3 native/scripts/ci.py marker-diff --baseline F --candidate F [--leg L]
     python3 native/scripts/ci.py verify-artifact   --platform linux|windows [--arch A]
+    python3 native/scripts/ci.py assert-pe-machine --platform windows --arch A --artifact-dir D
     python3 native/scripts/ci.py verify-artifact   --platform macos --arch A --dylib-path D
     python3 native/scripts/ci.py import-closure    --platform P
     python3 native/scripts/ci.py min-runtime       --platform P [--arch A]
@@ -31,7 +32,7 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py assert-exports    --platform android --artifact-dir D --ndk-home H
     python3 native/scripts/ci.py assert-no-avx512  --platform P
     python3 native/scripts/ci.py assert-orientation --platform P
-    python3 native/scripts/ci.py codec-probe       --platform P --workspace W [--dist-dir D]
+    python3 native/scripts/ci.py codec-probe       --platform P --workspace W [--dist-dir D]   (--dist-dir: macos|windows)
     python3 native/scripts/ci.py capability-vector --platform P --kind codec|build [--source probe|configure-log]
     python3 native/scripts/ci.py assert-configure-log --log-path F --pattern R --label L --error E [--marker NAME]
     python3 native/scripts/ci.py assert-staged-companions --platform macos --arch A --dylib-path D --artifact-dir T
@@ -51,6 +52,8 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py build-zlib        --version 1.3.1 --workspace W
     python3 native/scripts/ci.py locate-clang-cl   [--github-path PATH]
     python3 native/scripts/ci.py verify-vulkan-lib [--vulkan-sdk PATH]
+    python3 native/scripts/ci.py assert-vs-component --component ID
+    python3 native/scripts/ci.py cross-stage1-windows --build-dir D --aot-target T
 
 Extended by WI-29/WI-30 (push 8b, the dist-workflow python-ization -- user
 ruling P-3=(a)): dispatch wiring for both `dist_build.py` and `vcpkg.py`
@@ -82,8 +85,9 @@ names, deliberately different modules (see `vcpkg.py`'s own docstring).
 
 `--platform` is always explicit and never inferred from the host OS.
 `--arch` is required iff `targets.spec(platform)["requires_arch"]` is True
-(C-G9: macOS yes, everything else is an argparse error if `--arch` is
-passed at all).
+(C-G9: macOS and windows yes -- windows since the windows-arm64 leg,
+2026-09-30 -- everything else is an argparse error if `--arch` is passed at
+all).
 """
 
 from __future__ import annotations
@@ -104,6 +108,7 @@ sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
 # unimplemented and returns via _not_yet().
 _PLATFORM_COMMANDS = (
     "verify-artifact",
+    "assert-pe-machine",
     "import-closure",
     "min-runtime",
     "assert-exports",
@@ -148,6 +153,8 @@ _PLATFORMLESS_COMMANDS = (
     "build-zlib",
     "locate-clang-cl",
     "verify-vulkan-lib",
+    "assert-vs-component",
+    "cross-stage1-windows",
     "dist-build",
     "dist-list",
     "provision",
@@ -239,9 +246,9 @@ def _enforce_codec_probe_flags(parser: argparse.ArgumentParser, args: argparse.N
     platform = args.platform
     dist_dir = args.dist_dir
 
-    if platform == "macos":
+    if _requires_arch(platform):
         if dist_dir is None:
-            parser.error("--dist-dir is required for --platform macos")
+            parser.error(f"--dist-dir is required for --platform {platform}")
     elif dist_dir is not None:
         parser.error(f"--dist-dir is not accepted for --platform {platform!r}")
 
@@ -499,6 +506,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_platform_command(
         sub, "import-closure", "assert the import-closure gate", _import_closure_extra
     )
+
+    def _pe_machine_extra(sp):
+        sp.add_argument("--artifact-dir", required=True)
+
+    _add_platform_command(
+        sub, "assert-pe-machine", "assert every staged DLL's COFF machine type (AC-C2)",
+        _pe_machine_extra,
+    )
     _add_platform_command(sub, "min-runtime", "assert min-runtime drift")
     def _assert_exports_extra(sp):
         # Platform-specific, same reject-not-ignore posture as
@@ -696,6 +711,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     vvl = sub.add_parser("verify-vulkan-lib", help="assert vulkan-1.lib is present under VULKAN_SDK")
     vvl.add_argument("--vulkan-sdk", default="")
+
+    # windows-arm64 leg (R-9).
+    avc = sub.add_parser("assert-vs-component", help="assert a Visual Studio component is installed (vswhere)")
+    avc.add_argument("--component", required=True)
+    cs1 = sub.add_parser(
+        "cross-stage1-windows",
+        help="Windows arm64 cross stage 1: x86_64 Halide generators -> AOT for --aot-target",
+    )
+    cs1.add_argument("--build-dir", required=True)
+    cs1.add_argument("--aot-target", required=True)
 
     # WI-29 (push 8b): the carrier invocation and dist listing shared by
     # all six *_dist_*.yml workflows.
@@ -931,8 +956,19 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.verify_artifact as verify_artifact
 
         return verify_artifact.import_closure(
-            args.platform, artifact_dir=args.artifact_dir, ndk_home=args.ndk_home
+            args.platform, args.arch, artifact_dir=args.artifact_dir, ndk_home=args.ndk_home
         )
+    if args.command == "assert-pe-machine":
+        import ci.verify_artifact as verify_artifact
+
+        if args.platform != "windows":
+            print(
+                f"::error::assert-pe-machine has no --platform {args.platform!r} leg -- "
+                "the COFF machine gate exists only for windows (PE) artifacts",
+                file=sys.stderr,
+            )
+            return 2
+        return verify_artifact.assert_pe_machine(args.platform, args.arch, args.artifact_dir)
     if args.command == "min-runtime":
         import ci.minruntime as minruntime
 
@@ -963,7 +999,7 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.platform == "linux":
             return stage.stage(args.platform, args.artifact_dir, args.native_dir)
         if args.platform == "windows":
-            return stage.stage_windows(args.source_dir, args.artifact_dir)
+            return stage.stage_windows(args.source_dir, args.artifact_dir, args.arch)
         if args.platform == "android":
             return stage.stage_android(args.source_dir, args.artifact_dir)
         if args.platform == "macos":
@@ -976,7 +1012,7 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.platform == "linux":
             return stage.assert_staged_group(args.platform, args.artifact_dir)
         if args.platform == "windows":
-            return stage.assert_staged_group_windows(args.artifact_dir)
+            return stage.assert_staged_group_windows(args.artifact_dir, args.arch)
         if args.platform == "android":
             return stage.assert_staged_group_android(args.artifact_dir)
         # macos has no assert-staged-group step: its staged-group
@@ -1075,6 +1111,14 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.windows_toolchain as windows_toolchain
 
         return windows_toolchain.verify_vulkan_lib(args.vulkan_sdk)
+    if args.command == "assert-vs-component":
+        import ci.windows_toolchain as windows_toolchain
+
+        return windows_toolchain.assert_vs_component(args.component)
+    if args.command == "cross-stage1-windows":
+        import ci.windows_toolchain as windows_toolchain
+
+        return windows_toolchain.cross_stage1(args.build_dir, args.aot_target)
     if args.command == "vcpkg-baseline":
         import ci.provision as provision
 

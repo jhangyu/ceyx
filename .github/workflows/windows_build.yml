@@ -18,11 +18,53 @@ jobs:
     # (the committed plugin/windows/Libraries/dng_decoder_native.dll
     # was hand-built on a developer machine and has had no CI provenance until
     # now — see docs/logs/2026-08-26/Task_windows_build_verification.md §3/§4).
-    # Display name only; renders as "Windows / x86_64 Vulkan". See
+    # Display name only; renders as "Windows / <arch_tag> Vulkan". See
     # linux_build.yml for why the platform word is not repeated here.
-    name: x86_64 Vulkan
-    runs-on: windows-latest
+    #
+    # WINDOWS-ARM64 ROW (2026-09-30, contract armci-contract.md R-9, user
+    # ruling D4=(b)). ONE job on windows-11-arm, two stages, the SAME
+    # DNG_HOST_GENERATORS_ONLY -> DNG_CROSS_BUILD mechanism macos_build.yml
+    # uses for its x86_64 row (macos_build.yml:52-61 and :507-557): stage 1
+    # builds the Halide generators and runs them with DNG_AOT_TARGET_OVERRIDE
+    # set to an arm-64-windows target, stage 2 compiles the shipped library
+    # natively for arm64 against those AOT artifacts, handed over through a
+    # filesystem path INSIDE this job (no cross-job artifact).
+    #
+    # WHY THE GENERATORS RUN UNDER EMULATION HERE, when macOS deliberately
+    # avoided it: macOS keeps its generators host-native (arm64) because an
+    # arm-64-osx Halide host dist exists, and it refused to depend on Rosetta
+    # (macos_build.yml:54-61). Windows-on-ARM has no such choice: upstream
+    # Halide v21.0.0 publishes NO arm-64-windows host dist (release assets:
+    # x86-64-windows / x86-32-windows only), so stage 1 fetches the
+    # x86-64-windows Halide (build_deps.py fetch halide --arch x86_64),
+    # compiles the generators for x86_64 (clang-cl --target via CFLAGS/
+    # CXXFLAGS, x64 MSVC environment) and runs them under Windows 11's x64
+    # emulation. R-9 chose this over building on an x64 runner so that EVERY
+    # assertion step below -- including the LoadLibrary capability probes and
+    # the codec probe, which must execute target-arch code -- runs on this
+    # row unchanged; on an x64 runner they could not run at all.
+    # Row facts (runner / msvc_arch) equal native/scripts/ci/targets.py's
+    # windows arch_legs; the x86_64 row is the pre-existing single-stage leg,
+    # every stage-1 step is `if: matrix.cross == 'true'`.
+    name: ${{ matrix.arch_tag }} Vulkan
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_tag: x86_64
+            runner: windows-latest
+            cross: "false"
+            msvc_arch: x64
+            heif_dist: native/third_party/heif-dist-windows
+            omp_dll: libomp140.x86_64.dll
+          - arch_tag: arm64
+            runner: windows-11-arm
+            cross: "true"
+            msvc_arch: amd64_arm64
+            heif_dist: native/third_party/heif-dist-windows-arm64
+            omp_dll: libomp140.aarch64.dll
     # `contents: write` was dropped in round 6 together with the release-attach
     # step it existed for. This leg now only reads the repo and uploads
     # artifacts; the publish job in build.yml holds the write scope.
@@ -103,13 +145,27 @@ jobs:
           python -m pip install --disable-pip-version-check ninja
           ninja --version
 
+      # arm64 row, FIRST toolchain fact: the windows-11-arm image publishes no
+      # Visual Studio component list (actions/partner-runner-images
+      # arm-windows-11-image.md names only "Visual Studio Enterprise 2022
+      # 17.14"). Without the ARM64 VC tools there are no ARM64 CRT/UCRT libs
+      # to link against, and every later failure would name something else.
+      # vswhere output goes to a file and is read back (no pipe); an empty
+      # answer is a hard failure, printed with the full component-less
+      # instance listing for diagnosis.
+      - name: Assert Visual Studio ARM64 VC tools are installed (vswhere)
+        if: matrix.cross == 'true'
+        run: python3 native/scripts/ci.py assert-vs-component --component Microsoft.VisualStudio.Component.VC.Tools.ARM64
+
       # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
       # LIB. On a developer machine that is vcvars64.bat; in CI this action is
       # the equivalent (it exports the vcvars environment to later steps).
-      - name: Set up MSVC developer environment (x64)
+      # arm64 row: `amd64_arm64` is the spelling Microsoft's vcvarsall.bat
+      # reference documents for an ARM64 target (targets.py arch_legs note).
+      - name: Set up MSVC developer environment (${{ matrix.msvc_arch }})
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       # clang-cl is MANDATORY, not a preference: native/cmake/pipeline.cmake
       # hard-fails on cl.exe because dng_sdk needs -ffp-contract=off for the
@@ -148,7 +204,7 @@ jobs:
       - name: Locate the OpenMP runtime DLL
         shell: bash
         run: |
-          OMP_DLL_NAME="libomp140.x86_64.dll"
+          OMP_DLL_NAME="${{ matrix.omp_dll }}"
           CLANG_CL_BIN="$(command -v clang-cl || echo "/c/Program Files/LLVM/bin/clang-cl.exe")"
           LLVM_BIN_DIR="$(dirname "$CLANG_CL_BIN")"
 
@@ -225,10 +281,12 @@ jobs:
       # publishes under native/scripts/deps/fetch_halide.py's own platform
       # table, runs under the runner's native Python (not Git-Bash), and is
       # exercised on every other desktop/android leg already.
+      # --arch names the Halide HOST dist explicitly (x86_64 on both rows:
+      # there is no arm-64-windows host dist -- see the R-9 note at the top).
       - name: Fetch vendored Halide v21 distribution
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/build_deps.py fetch halide
+        run: python3 native/scripts/build_deps.py fetch halide --arch x86_64
 
       - name: Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)
         uses: actions/cache@v4
@@ -281,6 +339,38 @@ jobs:
             echo "--- $p"
             git -C "$RS" apply --check -v "$p" 2>&1 | head -20 || true
           done
+
+      # ---- arm64 row, cross stage 1 (R-9): x64 host generators -> arm64 AOT ----
+      # Re-point the MSVC environment at x64 for the generator build only; the
+      # step after stage 1 restores ${{ matrix.msvc_arch }} for everything
+      # that ships (ilammy/msvc-dev-cmd documents repeated invocations as the
+      # way to reconfigure). clang-cl on this image is the native arm64 LLVM,
+      # so the x86_64 target is requested explicitly: CFLAGS/CXXFLAGS seed
+      # CMAKE_<LANG>_FLAGS AND keep CMake's MSVC defaults (/EHsc /GR ...),
+      # whereas a -DCMAKE_CXX_FLAGS on the command line would replace them
+      # (N16). The generator .exe files are x86_64 and run under emulation.
+      - name: Set up MSVC developer environment (x64, cross stage 1 generators)
+        if: matrix.cross == 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ARM64_AOT_TARGET is Halide's own target-triple vocabulary (parsed by
+      # Halide, same annotated exemption as macos_build.yml's X86_AOT_TARGET):
+      # the x86_64 row's WIN32 default in cmake/halide_aot.cmake with the arch
+      # swapped, nothing else.
+      - name: Build x64 Halide generators + arm64 AOT (cross stage 1)
+        if: matrix.cross == 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          ARM64_AOT_TARGET: arm-64-windows-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query
+        run: python3 native/scripts/ci.py cross-stage1-windows --build-dir native/build-windows-hostgen --aot-target "${{ env.ARM64_AOT_TARGET }}"
+
+      - name: Restore MSVC developer environment (${{ matrix.msvc_arch }}) for cross stage 2
+        if: matrix.cross == 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
 
       # RawSpeed3's CheckZLIB (cmake/Modules/CheckZLIB.cmake:57-66) LINK-tests
       # uncompress() and zError() and hard-errors when they do not resolve. A
@@ -362,6 +452,13 @@ jobs:
           # active across the `| tee`, so $? still reflects cmake's own exit
           # code (the last non-zero wins when not all stages succeed).
           set +e
+          # Cross stage 2 (arm64 row only): consume stage 1's AOT artifacts
+          # from the path it wrote them to. Empty on the x86_64 row, whose
+          # configure argv is unchanged.
+          CROSS_ARGS=""
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            CROSS_ARGS="-DDNG_CROSS_BUILD=ON -DDNG_PREBUILT_AOT_DIR=${GITHUB_WORKSPACE}/native/build-windows-hostgen/halide_generated"
+          fi
           cmake -S native -B "native/build-windows" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-cl \
@@ -371,7 +468,7 @@ jobs:
             -DDNG_VK_PIPELINE_CACHE=OFF \
             -DDNG_ZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
             -DZLIB_ROOT="${GITHUB_WORKSPACE}/zlib-install" \
-            -DZLIB_USE_STATIC_LIBS=ON 2>&1 | tee configure.log
+            -DZLIB_USE_STATIC_LIBS=ON ${CROSS_ARGS} 2>&1 | tee configure.log
           RC=$?
           set -e
           echo "CONFIGURE_RC=$RC"
@@ -440,6 +537,9 @@ jobs:
       # the static CRT's CPUID-dispatched memcpy puts legitimate EVEX in every
       # DLL (see verify_artifact._assert_no_avx512_windows).
       - name: Assert no AVX-512 in in-tree Windows code (portable-baseline gate)
+        # AVX-512/EVEX is an x86 ISA: the precondition is "the target is x86",
+        # same as linux_build.yml's matrix.arch == 'x86_64' guard on its leg.
+        if: matrix.arch_tag == 'x86_64'
         working-directory: ${{ github.workspace }}
         run: python3 native/scripts/ci.py assert-no-avx512 --platform windows
 
@@ -474,7 +574,7 @@ jobs:
       # below -- see those steps for why they could not fold into this one.
       - name: Verify Windows artifact
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py verify-artifact --platform windows
+        run: python3 native/scripts/ci.py verify-artifact --platform windows --arch ${{ matrix.arch_tag }}
 
       # AC-W4 (2026-08-30): the DLL actually EXPORTS the FFI surface.
       # Migrated to native/scripts/ci/verify_artifact.py's assert_exports()
@@ -493,7 +593,7 @@ jobs:
       # transcribed verbatim from this step's pre-migration shell.
       - name: Assert required FFI exports present in Windows DLL (AC-W4)
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-exports --platform windows
+        run: python3 native/scripts/ci.py assert-exports --platform windows --arch ${{ matrix.arch_tag }}
 
       # --- Step-4 load gate: the DLLs this decoder needs at load time ---
       #
@@ -543,7 +643,7 @@ jobs:
       # and the pipeline reports 141).
       - name: Assert Windows DLL dependency closure
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py import-closure --platform windows
+        run: python3 native/scripts/ci.py import-closure --platform windows --arch ${{ matrix.arch_tag }}
 
       # G1 fix v3 (round 2, task #6): this leg now statically links a real
       # committed libjxl dist (see the "Assert JXL was statically linked"
@@ -607,7 +707,7 @@ jobs:
       - name: Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-orientation --platform windows
+        run: python3 native/scripts/ci.py assert-orientation --platform windows --arch ${{ matrix.arch_tag }}
 
       - name: Assert full codec capability vector via probe (G1)
         shell: bash
@@ -642,7 +742,7 @@ jobs:
       - name: Compile + run functional capability probe (CI-T3)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE"
+        run: python3 native/scripts/ci.py codec-probe --platform windows --workspace "$GITHUB_WORKSPACE" --dist-dir ${{ matrix.heif_dist }}
 
       # Migrated to native/scripts/ci/stage.py's stage_windows() (WI-21/WI-22,
       # pyci python-ization campaign). The two HEIF dependencies and the
@@ -653,14 +753,27 @@ jobs:
       # original `2>/dev/null || echo ::notice::...` fallback exactly.
       - name: Stage native artifacts
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py stage --platform windows --artifact-dir artifacts --source-dir native/build-windows
+        run: python3 native/scripts/ci.py stage --platform windows --arch ${{ matrix.arch_tag }} --artifact-dir artifacts --source-dir native/build-windows
+
+      # AC-C2 (windows-arm64 leg, 2026-09-30): every STAGED DLL's COFF header
+      # names this leg's machine (IMAGE_FILE_MACHINE_AMD64 here,
+      # IMAGE_FILE_MACHINE_ARM64 on the arm64 row). The atomic-group, export
+      # and import-closure gates above are all machine-blind: a DLL built for
+      # the wrong architecture passes every one of them and then fails
+      # LoadLibrary on the user's machine. llvm-readobj --file-headers output
+      # goes to a file per DLL and is matched in Python (never a pipe), see
+      # native/scripts/ci/verify_artifact.py assert_pe_machine(). Same gate on
+      # every Windows arch -- arch is data (targets.py pe_machine_by_arch).
+      - name: Assert every staged DLL is this leg's PE machine type (AC-C2)
+        working-directory: ${{ github.workspace }}
+        run: python3 native/scripts/ci.py assert-pe-machine --platform windows --arch ${{ matrix.arch_tag }} --artifact-dir artifacts
 
       # WI-14 step 14.2 (S-F1): measure the floor of the file that actually
       # ships (the decoder DLL, PE subsystem version).
       - name: Measure and emit the minimum runtime floor (S-F1)
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py min-runtime --platform windows
+        run: python3 native/scripts/ci.py min-runtime --platform windows --arch ${{ matrix.arch_tag }}
 
       # ATOMIC-GROUP GATE. Preserved verbatim in intent from the deleted
       # "Name the release assets" step, but with two round-6 changes:
@@ -701,7 +814,7 @@ jobs:
       # `echo ... | xargs` whitespace-insensitive `!=`.
       - name: Assert the Windows shipped-file group is complete (atomic group)
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-staged-group --platform windows --artifact-dir artifacts
+        run: python3 native/scripts/ci.py assert-staged-group --platform windows --arch ${{ matrix.arch_tag }} --artifact-dir artifacts
 
       # Round 6, Plan B: this artifact name is also the release asset stem —
       # the publish job in build.yml packages `<artifact name>.tar.gz`
@@ -719,7 +832,7 @@ jobs:
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dng_decoder_native-windows-x86_64
+          name: dng_decoder_native-windows-${{ matrix.arch_tag }}
           path: ${{ github.workspace }}/artifacts/native
           if-no-files-found: error
           retention-days: 7
@@ -729,11 +842,11 @@ jobs:
       # uploads its own diagnosis (R3/R7) instead of leaving CI silent on
       # why. Zero-hyphen name keeps it outside the publish job's
       # `<component>-<platform>-<arch>` canonical-asset filter (C4/C6).
-      - name: Upload probe_results_windows_x86_64
+      - name: Upload probe_results_windows_${{ matrix.arch_tag }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: probe_results_windows_x86_64
+          name: probe_results_windows_${{ matrix.arch_tag }}
           path: |
             native/scripts/deps/probe/probe_codecs.txt
             native/scripts/deps/probe/capability.json

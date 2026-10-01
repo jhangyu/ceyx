@@ -35,7 +35,11 @@ def test_regenerated_content_matches_declaration():
     platforms = rsf.load_declaration()
     rendered = gen.render(platforms)
     assert 'set(CEYX_SHIPPED_WINDOWS_DECODER "dng_decoder_native.dll")' in rendered
-    assert 'set(CEYX_SHIPPED_WINDOWS_COMPANIONS "heif.dll;libde265.dll;libomp140.x86_64.dll")' in rendered
+    # windows is companions_by_arch: one variable per arch, and NO arch-less
+    # variable (a consumer that forgets to select by arch must not get x86_64).
+    assert 'set(CEYX_SHIPPED_WINDOWS_X86_64_COMPANIONS "heif.dll;libde265.dll;libomp140.x86_64.dll")' in rendered
+    assert 'set(CEYX_SHIPPED_WINDOWS_ARM64_COMPANIONS "heif.dll;libde265.dll;libomp140.aarch64.dll")' in rendered
+    assert "CEYX_SHIPPED_WINDOWS_COMPANIONS" not in rendered
     # lcms2 is REMOVED as of WI-5 (OQ-N4 option Z, user ruling 2026-09-12):
     # lcms2 is dead code on every platform, ENABLE_LCMS is forced OFF.
     assert 'set(CEYX_SHIPPED_MACOS_COMPANIONS "libjpeg.8.dylib;libheif.1.dylib;libde265.0.dylib;libomp.dylib")' in rendered

@@ -101,10 +101,10 @@ def _log(message: str) -> None:
     print(f"[webp-win] {message}")
 
 
-def compute_want_pins() -> str:
+def compute_want_pins(*, arch: str) -> str:
     """Byte-compatible with a ``.pins`` file written by
-    build_libwebp_dist_windows.sh."""
-    return f"libwebp={WEBP_VERSION}:{WEBP_SHA256} platform=windows-x86_64 archives=webp+mux+demux+sharpyuv"
+    build_libwebp_dist_windows.sh (for ``arch="x86_64"``)."""
+    return f"libwebp={WEBP_VERSION}:{WEBP_SHA256} platform=windows-{arch} archives=webp+mux+demux+sharpyuv"
 
 
 def stamp_is_current(dist: Path, want: str) -> bool:
@@ -226,12 +226,12 @@ def vendor_license(src: Path, dist: Path) -> None:
     shutil.copy2(licence, dest / "COPYING")
 
 
-def build(dist: Path, *, stage: Optional[Path] = None, force: bool = False) -> Path:
+def build(dist: Path, *, arch: str, stage: Optional[Path] = None, force: bool = False) -> Path:
     """Build the whole Windows static libwebp dist into ``dist``."""
     dist = Path(dist)
     stage = Path(stage) if stage is not None else dist / ".stage"
 
-    want = compute_want_pins()
+    want = compute_want_pins(arch=arch)
     if not force and stamp_is_current(dist, want):
         _log(f"dist already at the pinned version {WEBP_VERSION}")
         return dist
@@ -264,11 +264,12 @@ def main(argv: Optional[list] = None) -> int:
 
     parser = argparse.ArgumentParser(prog="deps.win_webp_dist")
     parser.add_argument("--dist", required=True)
+    parser.add_argument("--arch", default="x86_64", choices=("x86_64", "arm64"))
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     try:
-        build(Path(args.dist), force=args.force)
+        build(Path(args.dist), arch=args.arch, force=args.force)
     except (WindowsWebpError, win_pe.PeInspectionError, win_pe.PeAssertionFailed) as exc:
         print(f"[webp-win] {exc}", file=sys.stderr)
         return 1

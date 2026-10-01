@@ -31,7 +31,7 @@ from deps.win_pe import (  # noqa: E402
     PeInspectionError,
     assert_absent,
     assert_depends_on,
-    assert_machine_x86_64,
+    assert_machine,
     assert_symbol_exported,
     count_exported_symbols,
     resolve_existing,
@@ -158,16 +158,29 @@ class TestContaminationScan(unittest.TestCase):
 class TestArchitectureCheck(unittest.TestCase):
     def test_green(self) -> None:
         self.assertTrue(
-            assert_machine_x86_64("heif.dll: PE32+ executable (DLL) x86-64, for MS Windows", dll_names="heif.dll")
+            assert_machine("heif.dll: PE32+ executable (DLL) x86-64, for MS Windows", "x86_64", dll_names="heif.dll")
+        )
+
+    def test_green_arm64(self) -> None:
+        self.assertTrue(
+            assert_machine("heif.dll: PE32+ executable (DLL) (GUI) Aarch64, for MS Windows", "arm64", dll_names="heif.dll")
         )
 
     def test_unavailable_tool_returns_false_not_true(self) -> None:
         """Skipped must be distinguishable from passed."""
-        self.assertFalse(assert_machine_x86_64(None, dll_names="heif.dll"))
+        self.assertFalse(assert_machine(None, "x86_64", dll_names="heif.dll"))
 
     def test_red_on_wrong_architecture(self) -> None:
         with self.assertRaises(PeAssertionFailed):
-            assert_machine_x86_64("heif.dll: PE32 executable (DLL) Intel 80386", dll_names="heif.dll")
+            assert_machine("heif.dll: PE32 executable (DLL) Intel 80386", "x86_64", dll_names="heif.dll")
+
+    def test_red_on_x64_bytes_for_arm64_target(self) -> None:
+        with self.assertRaises(PeAssertionFailed):
+            assert_machine("heif.dll: PE32+ executable (DLL) x86-64, for MS Windows", "arm64", dll_names="heif.dll")
+
+    def test_red_on_arm64_bytes_for_x86_64_target(self) -> None:
+        with self.assertRaises(PeAssertionFailed):
+            assert_machine("heif.dll: PE32+ executable (DLL) (GUI) Aarch64, for MS Windows", "x86_64", dll_names="heif.dll")
 
 
 class TestResolveExisting(unittest.TestCase):
