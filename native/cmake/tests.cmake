@@ -16,6 +16,141 @@ if(NOT DNG_HOST_GENERATORS_ONLY)
 # Windows CMake configure failed. Resolve it once here, at file scope.
 find_package(Threads REQUIRED)
 
+# =============================================================================
+# T1 (2026-10-02 techdebt campaign): ONE declaration of what a statically
+# linked pipeline test compiles and links.
+#
+# Several test executables compile the DNG pipeline sources directly instead
+# of linking dng_decoder_native (the R2-T2 note at test_concurrent_decode says
+# why that shape exists). Each used to carry a hand-copied source list and a
+# hand-copied link block; drift between those copies already invalidated one
+# run of evidence. The lists and the link sequence now live here once.
+#
+# The link helpers are FUNCTIONS, not an INTERFACE library, on purpose: they
+# issue the same target_link_libraries()/add_dependencies() calls in the same
+# order the copies did, so every link line is byte-identical by construction.
+# Static archive order decides which duplicate symbol wins (see the Vulkan
+# fork note in the Android block), so never reorder these lists.
+#
+# Deliberately NOT routed through the helpers:
+#   test_concurrent_decode sources - literal list kept: its object order puts
+#       dng_metal_context.cpp/dng_copy_lock.cpp third/fourth, and object order
+#       can change static-initializer order. (Its link block uses the helper.)
+#   test_stage4_oriented link block - literal: it has no split-kernel archive
+#       block, unlike the helper.
+#   test_sized_decode - #includes dng_render_halide.cpp instead of compiling
+#       it, and links the pre-average pair at a different position.
+# =============================================================================
+set(CEYX_PIPELINE_STATIC_SOURCES
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/dng_render_halide.cpp
+    # C3 param cache (plan 2026-09-11): dng_render_halide.cpp references the
+    # render-parameter upload cache, whose Metal body needs the shared device
+    # handle from dng_metal_context.cpp (production context).
+    src/pipeline/render_parameter_upload_cache.cpp
+    src/pipeline/raw_persistent_device_arena.cpp
+    src/pipeline/dng_metal_context.cpp)
+# The Android cross copies compile the first six only.
+set(CEYX_PIPELINE_STATIC_SOURCES_ANDROID
+    src/pipeline/dng_pipeline.cpp
+    src/pipeline/dng_halide_device.cpp
+    src/pipeline/dng_opcodelist2_halide.cpp
+    src/pipeline/dng_mosaic_halide.cpp
+    src/pipeline/dng_warp_halide.cpp
+    src/pipeline/dng_render_halide.cpp)
+
+# Host helper. Keyword-less target_link_libraries() signature, because
+# test_concurrent_decode receives further keyword-less calls later (generic-RAW
+# block) and CMake forbids mixing the plain and PRIVATE forms on one target.
+function(ceyx_link_pipeline_static target)
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(${target} dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
+    else()
+        target_link_libraries(${target} dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
+    endif()
+    # R2 sized decode: a target compiling dng_render_halide.cpp needs the
+    # scaled kernel the sized dispatch calls (non-split branch only).
+    if(NOT DNG_STAGE4_SPLIT_KERNEL)
+        target_link_libraries(${target}
+            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
+        add_dependencies(${target} dng_render_scaled_preavg_aot_target)
+        add_dependencies(${target} dng_render_scaled_preavg_yuv420_aot_target)
+    endif()
+    add_dependencies(${target} halide_runtime_target)
+    add_dependencies(${target} dng_demosaic_aot_target)
+    add_dependencies(${target} dng_demosaic_warp_aot_target)
+    add_dependencies(${target} dng_warp_aot_target)
+    add_dependencies(${target} dng_render_aot_target)
+    add_dependencies(${target} dng_opcode_polynomial_aot_target)
+    add_dependencies(${target} dng_opcode_polynomial3_aot_target)
+    # T20-fix F1 / mem8 v3 T12: dng_render_halide.cpp dispatches the fused
+    # Bayer pair and the yuv420 Stage-4 variant, so every target compiling it
+    # links them, exactly as ffi.cmake does for the shipping library.
+    target_link_libraries(${target}
+        ${DNG_FUSED_BAYER_AOT_LIBS}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+    if(TARGET raw_bayer_fused_render_aot_target)
+        add_dependencies(${target} ${DNG_FUSED_BAYER_AOT_TARGETS})
+        add_dependencies(${target} dng_render_yuv420_aot_target)
+    endif()
+    # F-T4-1: the split branch of dng_render_halide.cpp calls
+    # dng_render_stage4_split(), so split-kernel builds link that pair here
+    # too, mirroring ffi.cmake.
+    if(DNG_STAGE4_SPLIT_KERNEL)
+        target_link_libraries(${target}
+            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
+        if(TARGET dng_render_android_aot_target)
+            add_dependencies(${target} dng_render_android_aot_target)
+        endif()
+        if(TARGET dng_render_split_yuv420_aot_target)
+            add_dependencies(${target} dng_render_split_yuv420_aot_target)
+        endif()
+    endif()
+    if(APPLE)
+        target_link_libraries(${target} ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
+    endif()
+    if(DNG_LINUX_TEST_LIBS)
+        target_link_libraries(${target} ${DNG_LINUX_TEST_LIBS})
+    endif()
+endfunction()
+
+# Android cross helper. PRIVATE signature, as those blocks always used.
+# Extra archives passed after the target name are linked immediately after
+# the split pair (test_decode_android passes the split probe archive).
+# JPEG_LIBRARIES is read at call time: the Android blocks run BEFORE the
+# generic-RAW FindJPEG shim, so they keep the pre-shim value, as before.
+function(ceyx_link_pipeline_static_android target)
+    target_link_libraries(${target} PRIVATE
+        dng_sdk
+        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
+        ${ARGN}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+        ${VULKAN_LIBRARY}
+        ${LOG_LIBRARY})
+    target_compile_definitions(${target} PRIVATE
+        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
+    if(DNG_USE_LIBJPEG)
+        target_link_libraries(${target} PRIVATE ${JPEG_LIBRARIES})
+    endif()
+    # T20-fix F1 / mem8 v3 T12: see ceyx_link_pipeline_static above.
+    target_link_libraries(${target} PRIVATE
+        ${DNG_FUSED_BAYER_AOT_LIBS}
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+endfunction()
+
 # Phase 14 W0 acceptance smoke: Android cross-build test binary for ADB.
 # Full host test targets stay under the NOT DNG_CROSS_BUILD block below.
 if(ANDROID AND DNG_CROSS_BUILD)
@@ -26,12 +161,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${LOG_LIBRARY})
 
     add_executable(test_decode_android tests/test_decode.cpp
-        src/pipeline/dng_pipeline.cpp
-        src/pipeline/dng_halide_device.cpp
-        src/pipeline/dng_opcodelist2_halide.cpp
-        src/pipeline/dng_mosaic_halide.cpp
-        src/pipeline/dng_warp_halide.cpp
-        src/pipeline/dng_render_halide.cpp)
+        ${CEYX_PIPELINE_STATIC_SOURCES_ANDROID})
     target_include_directories(test_decode_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
@@ -42,37 +172,8 @@ if(ANDROID AND DNG_CROSS_BUILD)
         ${DNG_SDK_DIR}
         ${HALIDE_OUTPUT_DIR}
         ${HALIDE_DIR}/include)
-    target_link_libraries(test_decode_android PRIVATE
-        dng_sdk
-        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
-        ${VULKAN_LIBRARY}
-        ${LOG_LIBRARY})
-    target_compile_definitions(test_decode_android PRIVATE
-        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
-    if(DNG_USE_LIBJPEG)
-        target_link_libraries(test_decode_android PRIVATE ${JPEG_LIBRARIES})
-    endif()
-    # T20-fix F1: this target compiles dng_render_halide.cpp, whose Stage-4
-    # from-device entry dispatches raw_bayer_fused_render on the fused Bayer
-    # route. The split branch carries a fused dispatch arm too (T20-fix F2), so
-    # the archive is required on EVERY target that compiles that TU, exactly as
-    # ffi.cmake:59 links it into the shipping library.
-    target_link_libraries(test_decode_android PRIVATE
-        ${DNG_FUSED_BAYER_AOT_LIBS}
-        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
-        # Required on every target that compiles dng_render_halide.cpp, for
-        # exactly the reason the fused archive above is (ffi.cmake links it
-        # into the shipping library the same way).
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+    ceyx_link_pipeline_static_android(test_decode_android
+        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_probe${DNG_AOT_LIB_EXT})
     add_dependencies(test_decode_android test_android_vulkan_capability)
 
     # P14-W4-4 measurement: Android cross-build of the production C ABI harness.
@@ -83,44 +184,14 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # Measurement-only target; no kernel / device-ownership code is touched.
     add_executable(dng_ffi_harness_android tests/dng_ffi_harness.cpp
         src/ffi/dng_ffi_api.cpp
-        src/pipeline/dng_pipeline.cpp
-        src/pipeline/dng_halide_device.cpp
-        src/pipeline/dng_opcodelist2_halide.cpp
-        src/pipeline/dng_mosaic_halide.cpp
-        src/pipeline/dng_warp_halide.cpp
-        src/pipeline/dng_render_halide.cpp)
+        ${CEYX_PIPELINE_STATIC_SOURCES_ANDROID})
     target_include_directories(dng_ffi_harness_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
         ${DNG_SDK_DIR}
         ${HALIDE_OUTPUT_DIR}
         ${HALIDE_DIR}/include)
-    target_link_libraries(dng_ffi_harness_android PRIVATE
-        dng_sdk
-        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
-        ${VULKAN_LIBRARY}
-        ${LOG_LIBRARY})
-    target_compile_definitions(dng_ffi_harness_android PRIVATE
-        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
-    if(DNG_USE_LIBJPEG)
-        target_link_libraries(dng_ffi_harness_android PRIVATE ${JPEG_LIBRARIES})
-    endif()
-    # T20-fix F1: see the test_decode_android block above.
-    target_link_libraries(dng_ffi_harness_android PRIVATE
-        ${DNG_FUSED_BAYER_AOT_LIBS}
-        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
-        # Required on every target that compiles dng_render_halide.cpp, for
-        # exactly the reason the fused archive above is (ffi.cmake links it
-        # into the shipping library the same way).
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+    ceyx_link_pipeline_static_android(dng_ffi_harness_android)
 
     # matrix-eng ask (2026-07-04, Task #3): Android cross-build of the device-handoff
     # PSNR gate (Stage3->Stage4 device-dirty handoff vs host-copy fallback), mirroring
@@ -128,44 +199,14 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # Android/Vulkan Stage4 AOT variant (dng_render_stage4_split.a), not the Metal
     # one linked by the macOS-only test_device_handoff target below.
     add_executable(test_device_handoff_android tests/test_device_handoff.cpp
-        src/pipeline/dng_pipeline.cpp
-        src/pipeline/dng_halide_device.cpp
-        src/pipeline/dng_opcodelist2_halide.cpp
-        src/pipeline/dng_mosaic_halide.cpp
-        src/pipeline/dng_warp_halide.cpp
-        src/pipeline/dng_render_halide.cpp)
+        ${CEYX_PIPELINE_STATIC_SOURCES_ANDROID})
     target_include_directories(test_device_handoff_android PRIVATE
         ${INC_DIR}
         ${SRC_DIR}
         ${DNG_SDK_DIR}
         ${HALIDE_OUTPUT_DIR}
         ${HALIDE_DIR}/include)
-    target_link_libraries(test_device_handoff_android PRIVATE
-        dng_sdk
-        ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
-        ${VULKAN_LIBRARY}
-        ${LOG_LIBRARY})
-    target_compile_definitions(test_device_handoff_android PRIVATE
-        DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
-    if(DNG_USE_LIBJPEG)
-        target_link_libraries(test_device_handoff_android PRIVATE ${JPEG_LIBRARIES})
-    endif()
-    # T20-fix F1: see the test_decode_android block above.
-    target_link_libraries(test_device_handoff_android PRIVATE
-        ${DNG_FUSED_BAYER_AOT_LIBS}
-        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
-        # Required on every target that compiles dng_render_halide.cpp, for
-        # exactly the reason the fused archive above is (ffi.cmake links it
-        # into the shipping library the same way).
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
+    ceyx_link_pipeline_static_android(test_device_handoff_android)
 
     # T-V0 (2026-09-19, spec-cpu-levers.md section 3.3b): Android cross-build of
     # the generic-RAW Bayer kernel oracle. The L3 staged producer
@@ -1604,87 +1645,14 @@ endif()
 # Validates that Stage3→Stage4 (lossless) and Stage2→Stage4 (lossy) device
 # handoff paths produce bit-identical (PSNR ≥99dB) output vs host-copy fallback.
 add_executable(test_device_handoff tests/test_device_handoff.cpp
-    src/pipeline/dng_pipeline.cpp
-    src/pipeline/dng_halide_device.cpp
-    src/pipeline/dng_opcodelist2_halide.cpp
-    src/pipeline/dng_mosaic_halide.cpp
-    src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp
-    # C3 param cache (plan 2026-09-11): dng_render_halide.cpp now references the
-    # render-parameter upload cache, whose Metal body needs the shared device
-    # handle from dng_metal_context.cpp (production context; its absence here
-    # was already flagged as a coverage gap by the R2-T1 FINDING 3 note below).
-    src/pipeline/render_parameter_upload_cache.cpp
-    src/pipeline/raw_persistent_device_arena.cpp
-    src/pipeline/dng_metal_context.cpp)
+    ${CEYX_PIPELINE_STATIC_SOURCES})
 target_include_directories(test_device_handoff PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
-else()
-    target_link_libraries(test_device_handoff dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
-endif()
-# R2 sized decode: this target compiles dng_render_halide.cpp directly, so it
-# needs the scaled kernel the sized dispatch calls (macOS/Metal branch only).
-if(NOT DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_device_handoff
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
-    add_dependencies(test_device_handoff dng_render_scaled_preavg_aot_target)
-    add_dependencies(test_device_handoff dng_render_scaled_preavg_yuv420_aot_target)
-endif()
-add_dependencies(test_device_handoff halide_runtime_target)
-add_dependencies(test_device_handoff dng_demosaic_aot_target)
-add_dependencies(test_device_handoff dng_demosaic_warp_aot_target)
-add_dependencies(test_device_handoff dng_warp_aot_target)
-add_dependencies(test_device_handoff dng_render_aot_target)
-add_dependencies(test_device_handoff dng_opcode_polynomial_aot_target)
-add_dependencies(test_device_handoff dng_opcode_polynomial3_aot_target)
-# T20-fix F1: compiles dng_render_halide.cpp, whose Stage-4 from-device entry
-# dispatches raw_bayer_fused_render on the fused Bayer route (both branches
-# after T20-fix F2), so the archive must be linked here as ffi.cmake:59 does
-# for the shipping library.
-target_link_libraries(test_device_handoff
-    ${DNG_FUSED_BAYER_AOT_LIBS}
-        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
-        # Required on every target that compiles dng_render_halide.cpp, for
-        # exactly the reason the fused archive above is (ffi.cmake links it
-        # into the shipping library the same way).
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
-if(TARGET raw_bayer_fused_render_aot_target)
-    add_dependencies(test_device_handoff ${DNG_FUSED_BAYER_AOT_TARGETS})
-    add_dependencies(test_device_handoff dng_render_yuv420_aot_target)
-endif()
-# F-T4-1 (found by T3's Linux run): the mirror image of the
-# `if(NOT DNG_STAGE4_SPLIT_KERNEL)` scaled_preavg block above. This target
-# compiles dng_render_halide.cpp, whose split branch calls
-# dng_render_stage4_split() (dng_render_halide.cpp:1045,1348), so wherever the
-# split kernel is the generated one the archive must be linked here too —
-# ffi.cmake:69-75 already does exactly this for dng_decoder_native, which is why
-# the .so linked cleanly on Linux while these executables did not.
-# `dng_render_android_aot_target` (halide_aot.cmake:208) is the custom target
-# that produces the archive; the TARGET guard mirrors ffi.cmake:20.
-if(DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_device_handoff
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET dng_render_android_aot_target)
-        add_dependencies(test_device_handoff dng_render_android_aot_target)
-    endif()
-    if(TARGET dng_render_split_yuv420_aot_target)
-        add_dependencies(test_device_handoff dng_render_split_yuv420_aot_target)
-    endif()
-endif()
-if(APPLE)
-    target_link_libraries(test_device_handoff ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_device_handoff ${DNG_LINUX_TEST_LIBS})
-endif()
+ceyx_link_pipeline_static(test_device_handoff)
 
 # ceyx-gpu-orient productionization plan Task 5 / gate G-A: PRODUCTION Metal
 # fused Stage4 EXIF-orientation gate (docs/logs/2026-09-07/
@@ -1698,15 +1666,7 @@ endif()
 # macOS/Metal only (G-14: not added to CI, not gated on Vulkan/Android).
 add_executable(test_stage4_oriented tests/test_stage4_oriented.cpp
     tests/oracle/ceyx_orient_oracle.cpp
-    src/pipeline/dng_pipeline.cpp
-    src/pipeline/dng_halide_device.cpp
-    src/pipeline/dng_opcodelist2_halide.cpp
-    src/pipeline/dng_mosaic_halide.cpp
-    src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp
-    src/pipeline/render_parameter_upload_cache.cpp
-    src/pipeline/raw_persistent_device_arena.cpp
-    src/pipeline/dng_metal_context.cpp)
+    ${CEYX_PIPELINE_STATIC_SOURCES})
 target_include_directories(test_stage4_oriented PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -1783,54 +1743,7 @@ target_include_directories(test_concurrent_decode PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_concurrent_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
-else()
-    target_link_libraries(test_concurrent_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
-endif()
-if(NOT DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_concurrent_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
-    add_dependencies(test_concurrent_decode dng_render_scaled_preavg_aot_target)
-    add_dependencies(test_concurrent_decode dng_render_scaled_preavg_yuv420_aot_target)
-endif()
-add_dependencies(test_concurrent_decode halide_runtime_target)
-add_dependencies(test_concurrent_decode dng_demosaic_aot_target)
-add_dependencies(test_concurrent_decode dng_demosaic_warp_aot_target)
-add_dependencies(test_concurrent_decode dng_warp_aot_target)
-add_dependencies(test_concurrent_decode dng_render_aot_target)
-add_dependencies(test_concurrent_decode dng_opcode_polynomial_aot_target)
-add_dependencies(test_concurrent_decode dng_opcode_polynomial3_aot_target)
-# T20-fix F1: see the test_device_handoff block above.
-target_link_libraries(test_concurrent_decode
-    ${DNG_FUSED_BAYER_AOT_LIBS}
-        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
-        # Required on every target that compiles dng_render_halide.cpp, for
-        # exactly the reason the fused archive above is (ffi.cmake links it
-        # into the shipping library the same way).
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
-if(TARGET raw_bayer_fused_render_aot_target)
-    add_dependencies(test_concurrent_decode ${DNG_FUSED_BAYER_AOT_TARGETS})
-    add_dependencies(test_concurrent_decode dng_render_yuv420_aot_target)
-endif()
-if(DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_concurrent_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET dng_render_android_aot_target)
-        add_dependencies(test_concurrent_decode dng_render_android_aot_target)
-    endif()
-    if(TARGET dng_render_split_yuv420_aot_target)
-        add_dependencies(test_concurrent_decode dng_render_split_yuv420_aot_target)
-    endif()
-endif()
-if(APPLE)
-    target_link_libraries(test_concurrent_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_concurrent_decode ${DNG_LINUX_TEST_LIBS})
-endif()
+ceyx_link_pipeline_static(test_concurrent_decode)
 
 # R4 item 1: slot-configuration bookkeeping.
 #
@@ -2059,15 +1972,7 @@ endif()
 
 # DNG SDK Decode Pipeline Test Tool (with Halide Stage3 demosaic)
 add_executable(test_decode tests/test_decode.cpp
-    src/pipeline/dng_pipeline.cpp
-    src/pipeline/dng_halide_device.cpp
-    src/pipeline/dng_opcodelist2_halide.cpp
-    src/pipeline/dng_mosaic_halide.cpp
-    src/pipeline/dng_warp_halide.cpp
-    src/pipeline/dng_render_halide.cpp
-    src/pipeline/render_parameter_upload_cache.cpp
-    src/pipeline/raw_persistent_device_arena.cpp
-    src/pipeline/dng_metal_context.cpp)
+    ${CEYX_PIPELINE_STATIC_SOURCES})
 target_include_directories(test_decode PRIVATE
     ${INC_DIR}
     ${SRC_DIR}
@@ -2075,58 +1980,7 @@ target_include_directories(test_decode PRIVATE
     ${DNG_SDK_DIR}
     ${HALIDE_OUTPUT_DIR}
     ${HALIDE_DIR}/include)
-if(DNG_USE_LIBJPEG)
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT} ${JPEG_LIBRARIES})
-else()
-    target_link_libraries(test_decode dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
-endif()
-# R2 sized decode: same as test_device_handoff — compiles the render TU directly.
-if(NOT DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
-    add_dependencies(test_decode dng_render_scaled_preavg_aot_target)
-    add_dependencies(test_decode dng_render_scaled_preavg_yuv420_aot_target)
-endif()
-add_dependencies(test_decode halide_runtime_target)
-add_dependencies(test_decode dng_demosaic_aot_target)
-add_dependencies(test_decode dng_demosaic_warp_aot_target)
-add_dependencies(test_decode dng_warp_aot_target)
-add_dependencies(test_decode dng_render_aot_target)
-add_dependencies(test_decode dng_opcode_polynomial_aot_target)
-add_dependencies(test_decode dng_opcode_polynomial3_aot_target)
-# T20-fix F1: see the test_device_handoff block above.
-target_link_libraries(test_decode
-    ${DNG_FUSED_BAYER_AOT_LIBS}
-        # mem8 v3 T12: the yuv420 output variant of the SAME Stage-4 family.
-        # Required on every target that compiles dng_render_halide.cpp, for
-        # exactly the reason the fused archive above is (ffi.cmake links it
-        # into the shipping library the same way).
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT})
-if(TARGET raw_bayer_fused_render_aot_target)
-    add_dependencies(test_decode ${DNG_FUSED_BAYER_AOT_TARGETS})
-    add_dependencies(test_decode dng_render_yuv420_aot_target)
-endif()
-# F-T4-1: test_decode compiles dng_render_halide.cpp as a source, so it needs
-# the split archive on every split-kernel platform (see the test_device_handoff
-# block above for the full rationale).
-if(DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET dng_render_android_aot_target)
-        add_dependencies(test_decode dng_render_android_aot_target)
-    endif()
-    if(TARGET dng_render_split_yuv420_aot_target)
-        add_dependencies(test_decode dng_render_split_yuv420_aot_target)
-    endif()
-endif()
-if(APPLE)
-    target_link_libraries(test_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
-endif()
-if(DNG_LINUX_TEST_LIBS)
-    target_link_libraries(test_decode ${DNG_LINUX_TEST_LIBS})
-endif()
+ceyx_link_pipeline_static(test_decode)
 
 # 2026-08-16 CFA phase: all-four-Bayer-phases unit check on a synthetic
 # mosaic. Covers both the Halide AOT kernel and the CPU reference demosaic
