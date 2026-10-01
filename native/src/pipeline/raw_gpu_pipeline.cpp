@@ -12,7 +12,7 @@
 #include <optional>
 
 #include "HalideBuffer.h"
-#include "ceyx_decode_into.h"   // WP10 A3: caller-buffer forwarding on the DNG route
+#include "decode_into.h"   // T5b: caller-buffer forwarding on the DNG route (internal, no FFI call)
 // mem8 v3 T12: THE sizing arithmetic for CeyxOutputFormat. The destination byte
 // count is format-dependent from this task on, and open-coding it here would be
 // a defect by contract (raw_ffi_api.h, T12.0 clause 2b).
@@ -544,7 +544,7 @@ RawErrorCode runSharedStage4Tail(const RawGpuInput& input,
         // aligned the caller's real buffer was -- no refusal ever reached
         // Stage4 because the wrap was never attempted successfully here.
         // out.caller_dst_capacity is what the alignment probe upstream
-        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
+        // (ceyx::decodeIntoPrepare) actually checked for page-multiple-ness
         // before setting caller_destination_is_page_aligned, and
         // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
         // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
@@ -863,7 +863,7 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // instead of the arena's destination region. Only attempted when the
     // gate is on AND the probe forwarded via `develop` says the caller's
     // buffer actually meets the page-alignment contract -- that probe is
-    // computed once, upstream, in ceyxDecodeIntoPrepare (plan §4.3 "the one
+    // computed once, upstream, in ceyx::decodeIntoPrepare (plan §4.3 "the one
     // place both entries share"). Constructed unconditionally so no call site
     // needs #ifdef (plan §4.6); its own internal check is a second,
     // structural guard against a wrap ever being attempted on memory that
@@ -899,7 +899,7 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
         // aligned the caller's real buffer was -- no refusal ever reached
         // Stage4 because the wrap was never attempted successfully here.
         // out.caller_dst_capacity is what the alignment probe upstream
-        // (ceyxDecodeIntoPrepare) actually checked for page-multiple-ness
+        // (ceyx::decodeIntoPrepare) actually checked for page-multiple-ness
         // before setting caller_destination_is_page_aligned, and
         // makeRgbaCheckout's kRawErrDstTooSmall guard already proved
         // caller_dst_capacity >= rgba_bytes earlier in this branch, so the
@@ -1467,7 +1467,7 @@ RawErrorCode decodeFileImpl(const char* file_path,
         // surviving route, so the else-arm was already dead; WP5 deletes the
         // entry it called. Collapsed to the arm that was always taken -- the
         // correct code was already here.
-        DngResult* dng = ceyx_decode_into_buffer(
+        DngResult* dng = ceyx::decodeIntoBuffer(
             file_path, static_cast<int32_t>(develop.max_output_long_edge),
             out.caller_dst, out.caller_dst_capacity);
         if (!dng) {

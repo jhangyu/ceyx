@@ -87,7 +87,7 @@ DngResult *ceyx_decode_into_buffer_oriented(const char *file_path,
 /// R4 (gpu-copy-elimination campaign, Round 4): a page-aligned allocator pair
 /// for the Dart-side pooled RGBA buffers. `package:ffi`'s `malloc` has no
 /// aligned form, and the C2 zero-copy wrap
-/// (`ceyxDecodeIntoPrepare`'s `out_destination_is_page_aligned` probe, this
+/// (`ceyx::decodeIntoPrepare`'s `out_destination_is_page_aligned` probe, this
 /// TU's .cpp) only ever answers true for a destination whose pointer AND
 /// capacity are BOTH multiples of the same page-size constant the arena uses
 /// (`kRawDeviceArenaAlignmentBytes` = 16384, `raw_persistent_device_arena.h`).

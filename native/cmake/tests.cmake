@@ -313,6 +313,8 @@ if(DNG_ENABLE_GENERIC_RAW)
         # which WP5 deletes — re-check this block when that lands.
         src/ffi/dng_ffi_api.cpp
         src/ffi/ceyx_decode_into_ffi.cpp
+        # T5b: the decode-into body moved to the pipeline layer.
+        src/pipeline/decode_into.cpp
         src/ffi/raw_ffi_api.cpp)
     target_compile_definitions(test_concurrent_decode PRIVATE
         DNG_CONCURRENT_TEST_GENERIC_RAW=1)
