@@ -229,6 +229,15 @@ uint64_t raw_fused_bayer_render_count();
 // in-tree gates linking dng_decoder_native, NOT an FFI export.
 uint64_t raw_fused_xtrans_render_count();
 
+// Foveon fusion (2026-10-02): how many decodes have taken the FUSED
+// linear-RGB (X3F) normalize+render route since process start, i.e. produced
+// the output in one dispatch with no Stage-3 intermediate. Same reason as
+// raw_fused_bayer_render_count(): byte-identity cannot tell "the fused kernel
+// produced the right pixels" from "fusion silently stopped engaging and the
+// two-stage path produced them" -- both are green. C++ accessor for in-tree
+// gates only; no FFI export, no Dart-visible surface.
+uint64_t raw_fused_linear_rgb_render_count();
+
 // Non-zero return requests cancellation. Polled between open_file and unpack,
 // after unpack, and before GPU dispatch. Deliberately a plain function pointer:
 // no lock on the hot path.

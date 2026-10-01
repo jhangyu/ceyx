@@ -71,6 +71,11 @@ std::atomic<uint64_t> g_fused_bayer_render_count{0};
 // semantics -- incremented immediately before the fused Stage-4 dispatch, so
 // it is the fact "the fused X-Trans route ran", not an inference.
 std::atomic<uint64_t> g_fused_xtrans_render_count{0};
+// Foveon fusion (2026-10-02). Process-wide count of decodes that took the
+// FUSED linear-RGB (X3F) normalize+render route. Same atomic discipline and
+// same rationale as g_fused_bayer_render_count; see
+// raw_fused_linear_rgb_render_count()'s comment in raw_gpu_pipeline.h.
+std::atomic<uint64_t> g_fused_linear_rgb_render_count{0};
 
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 using ObjectiveCSendNewBufferNoCopy = void* (*)(void*, SEL, void*, unsigned long,
@@ -1209,14 +1214,49 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
     }
 
+    // Foveon fusion (2026-10-02): the fusion decision needs the output scale
+    // BEFORE the source is wrapped (the fused kernel takes a flat 1-D source)
+    // and before any Stage-3 allocation, so the extent calculation lives here.
+    // Scope: UNSCALED only -- there is no fused _scaled archive, so a downscale
+    // keeps the two-stage path (R-3). This is a scope boundary, not a platform
+    // guard: every backend takes the fused branch identically.
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+    // DNG_RAW_FUSED_LINEAR_RGB_RENDER=0 forces the two-stage route. Read once
+    // per decode, consulted nowhere else. It exists so the fused and two-stage
+    // arms are comparable ON THE SAME INPUT in one process (gates N2 / Y14),
+    // and as the runtime kill-switch short of a revert.
+    const char* fused_env = std::getenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER");
+    const bool fused_disabled_by_env = (fused_env && fused_env[0] == '0');
+    const bool use_fused_linear_rgb_render =
+        (src_w == out_w && src_h == out_h) && !fused_disabled_by_env;
+    const int32_t src_row_stride_elements =
+        static_cast<int32_t>(plane.row_stride_bytes / 2);
+
     // Borrowed, stride-aware 3-D wrap: no host copy. row_stride_bytes comes
     // from the decoder's pitch and already accounts for the three components.
+    // Fused route: a FLAT 1-D view of the same memory, the shape the fused
+    // kernel declares on every backend. Its extent is the exact pixel
+    // footprint ((h-1) full rows + w*3 components), NOT row_stride*h: the last
+    // row of plane.data may be short (see the R4-T4 S5 memcpy above), and
+    // copy_to_device copies the whole extent. Two-stage route: unchanged 3-D
+    // wrap. Same variable either way, so the arena bind, dirty flags and
+    // upload below are untouched.
     halide_dimension_t src_dims[3] = {
         {0, static_cast<int32_t>(w), 3, 0},
-        {0, static_cast<int32_t>(h),
-         static_cast<int32_t>(plane.row_stride_bytes / 2), 0},
+        {0, static_cast<int32_t>(h), src_row_stride_elements, 0},
         {0, 3, 1, 0}};
-    Halide::Runtime::Buffer<const uint16_t> src_buf(src_host_ptr, 3, src_dims);
+    halide_dimension_t flat_src_dim = {
+        0,
+        static_cast<int32_t>(static_cast<int64_t>(h - 1) * src_row_stride_elements +
+                             static_cast<int64_t>(w) * 3),
+        1, 0};
+    Halide::Runtime::Buffer<const uint16_t> src_buf =
+        use_fused_linear_rgb_render
+            ? Halide::Runtime::Buffer<const uint16_t>(src_host_ptr, 1, &flat_src_dim)
+            : Halide::Runtime::Buffer<const uint16_t>(src_host_ptr, 3, src_dims);
 
     // Per-COMPONENT black, three entries. The kernel indexes black(c) with
     // c in {0,1,2}, matching the dst channel order. component_black[c] >=
@@ -1239,7 +1279,9 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
     std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
-    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    if (!use_fused_linear_rgb_render) {
+        makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    }
 
     // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
     if (zero_copy_src_host != nullptr) {
@@ -1265,7 +1307,7 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     if (h2d_rc != 0) {
         return kRawErrKernelFailed;
     }
-    if (raw_linear_rgb_normalize(src_buf, black_buf,
+    if (!use_fused_linear_rgb_render && raw_linear_rgb_normalize(src_buf, black_buf,
                                  computeInvRangeLinearRgb(input), stage3) != 0) {
         return kRawErrKernelFailed;
     }
@@ -1281,10 +1323,8 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
     // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
     // front (no scaled AOT exists there, matching the DNG path / AC-D1).
-    const uint32_t src_w = crop.width;
-    const uint32_t src_h = crop.height;
-    uint32_t out_w = 0, out_h = 0;
-    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+    // (The src/out extent calculation lives above the source wrap: the Foveon
+    // fusion decision depends on it.)
 
     // Bug fix (post-Task-3 review): dst_w/dst_h passed to the low-level kernel
     // entry below stay the UNORIENTED extent (§1.3), but unlike the high-level
@@ -1364,8 +1404,22 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         ceyx::zero_copy_note_destination_alignment_degraded();
     }
 
+    // Foveon fusion: on the fused route the source handed to Stage-4 is the
+    // flat decoder frame (uncropped; the kernel applies crop.x/crop.y itself)
+    // and no Stage-3 buffer exists. Every other argument is identical.
+    if (use_fused_linear_rgb_render) {
+        // Incremented HERE, immediately before the dispatch that uses it, so
+        // the counter cannot report a route that an early return skipped.
+        g_fused_linear_rgb_render_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    FusedLinearRgbSource fused_linear_rgb_source;
+    fused_linear_rgb_source.black_values = black3;
+    fused_linear_rgb_source.inv_range = computeInvRangeLinearRgb(input);
+    fused_linear_rgb_source.src_row_stride_elements = src_row_stride_elements;
     // Same shared Stage4 call as the other two branches: no second render path.
-    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
+    if (!runRenderStage4HalideAotFromDevice(use_fused_linear_rgb_render
+                                                ? src_buf.raw_buffer()
+                                                : stage3.raw_buffer(),
                                             1.0f / 65535.0f,
                                             crop.x, crop.y,
                                             static_cast<int>(src_w),
@@ -1381,7 +1435,10 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
                                             // this route; the format is the
                                             // parameter after it.
                                             /*fused_mosaic_source=*/nullptr,
-                                            develop.output_format)) {
+                                            develop.output_format,
+                                            use_fused_linear_rgb_render
+                                                ? &fused_linear_rgb_source
+                                                : nullptr)) {
         return kRawErrKernelFailed;
     }
 
@@ -1423,6 +1480,10 @@ uint64_t raw_fused_bayer_render_count() {
 
 uint64_t raw_fused_xtrans_render_count() {
     return g_fused_xtrans_render_count.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_fused_linear_rgb_render_count() {
+    return g_fused_linear_rgb_render_count.load(std::memory_order_relaxed);
 }
 
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
