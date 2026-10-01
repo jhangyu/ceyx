@@ -183,8 +183,7 @@ inline bool validateRawBufferContract(const std::string& stageName,
 
 }  // namespace StageContract
 
-// Verbatim PSNR helpers shared by test_decode, test_demosaic_halide and
-// test_render_halide (previously three copies). Global scope on purpose: the
+// Verbatim PSNR helpers shared by test_decode (previously three copies). Global scope on purpose: the
 // call sites are unqualified. The 999.0 "nearly identical" sentinel is
 // load-bearing (run_decode_matrix.py compares against it); do not unify these
 // with the 1000.0 codec / handoff / HEIF variants, which differ on purpose.

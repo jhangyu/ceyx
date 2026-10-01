@@ -8,8 +8,8 @@ CLI:
 
   * test_concurrent_decode itself emits no wall-clock timing, so wall_ms
     is measured externally in this script with time.perf_counter()
-    bracketing the whole subprocess call (mirrors probe_concurrent_raw.py's
-    external-timing pattern, since here even the single wall_ms line is
+    bracketing the whole subprocess call (mirrors the external-timing
+    pattern of the probe_concurrent_raw harness, since here even the single wall_ms line is
     absent from the target binary's stdout).
   * completions_ms (per-decode completion offsets, for staircase shape) is
     derived from decode_<index>.raw dump mtimes in --out-dir, because the
@@ -55,8 +55,8 @@ def run_one(binary, out_dir, threads, files, driver="test_concurrent_decode"):
         (raw_pipeline_decode_file_into, probe_concurrent_raw.cpp), usage
         `<binary> <threads> <file>...` (no out_dir argument); the binary
         prints its OWN `PROBE threads=N files=M wall_ms=W` line, which is
-        used instead of external timing (matches native/tests/
-        probe_concurrent_raw.py's established parsing precedent). This
+        used instead of external timing (matches the established
+        probe_concurrent_raw harness parsing precedent). This
         driver has no per-decode dump mechanism, so completions_ms is
         always [] — no staircase SHAPE evidence from this driver, only the
         aggregate ratio. Documented limitation, not engineered around.
