@@ -805,6 +805,16 @@ def _run_build(argv: list) -> int:
         # the capability genuinely absent) and their messages already name
         # the concrete artefact. A traceback would bury that under frames.
         print(str(exc), file=sys.stderr)
+        if isinstance(exc, SubprocessError):
+            # The failing tool's own output is the evidence; without it a CI
+            # log shows only "command failed (exit 1): cmake --build ..." and
+            # the real compiler error is unrecoverable (windows-arm64 webp
+            # dist, CI run 36892776133). Tail only: a full Ninja log is huge.
+            for label, text in (("stdout", exc.stdout), ("stderr", exc.stderr)):
+                lines = (text or "").splitlines()
+                if lines:
+                    print(f"--- {label} (last {min(len(lines), 200)} of {len(lines)} lines) ---", file=sys.stderr)
+                    print("\n".join(lines[-200:]), file=sys.stderr)
         return 1
 
 

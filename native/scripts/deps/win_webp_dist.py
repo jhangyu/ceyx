@@ -156,6 +156,34 @@ def fetch_source(stage: Path) -> Path:
     return src_dir
 
 
+# libwebp 1.6.0 cmake/cpu.cmake (unfixed on upstream main as of 2026-10-01):
+# when a SIMD set is detected WITHOUT extra flags, `if(MSVC AND
+# SIMD_ENABLE_FLAGS)` still attaches that set's GNU enable flag to its
+# sources -- under clang-cl (MSVC=1, compiler id Clang) the NEON slot is
+# "-mfpu=neon", an ARM32 FPU selector clang rejects outright for an aarch64
+# target ("unsupported option '-mfpu=' for target aarch64-pc-windows-msvc",
+# CI run 36892768268's vcpkg libwebp log). NEON is baseline on aarch64 and the
+# branch is only reached after the no-flag detection succeeded, so the fix is
+# to skip the flag for NEON. TRUE PRECONDITION: "the NEON set was detected
+# without flags" -- a no-op on x86_64, where NEON is never detected.
+_CPU_CMAKE_NEON_FIX = (
+    "    if(MSVC AND SIMD_ENABLE_FLAGS)\n",
+    '    if(MSVC AND SIMD_ENABLE_FLAGS AND NOT WEBP_SIMD_FLAG STREQUAL "NEON")\n',
+)
+
+
+def patch_cpu_cmake(src: Path) -> None:
+    """Apply _CPU_CMAKE_NEON_FIX to <src>/cmake/cpu.cmake; the anchor must
+    occur exactly once (a moved/changed upstream line fails loudly)."""
+    path = Path(src) / "cmake" / "cpu.cmake"
+    text = path.read_text(encoding="utf-8")
+    old, new = _CPU_CMAKE_NEON_FIX
+    if text.count(old) != 1:
+        raise _fail(f"{path}: expected exactly one {old.strip()!r} to patch, found {text.count(old)}")
+    path.write_text(text.replace(old, new), encoding="utf-8")
+    _log("patched cmake/cpu.cmake: no -mfpu=neon for flag-free NEON (clang-cl aarch64)")
+
+
 def configure_build_install(src: Path, dist: Path, build_dir: Path) -> None:
     if Path(build_dir).exists():
         shutil.rmtree(build_dir)
@@ -237,6 +265,7 @@ def build(dist: Path, *, arch: str, stage: Optional[Path] = None, force: bool = 
         return dist
 
     src = fetch_source(stage)
+    patch_cpu_cmake(src)
     configure_build_install(src, dist, stage / "build")
 
     assert_layout(dist)

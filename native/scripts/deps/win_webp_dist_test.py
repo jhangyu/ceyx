@@ -242,6 +242,9 @@ class TestBuildOrdering(unittest.TestCase):
             with mock.patch.object(win_webp_dist, "stamp_is_current", return_value=False), \
                  mock.patch.object(win_webp_dist, "fetch_source", return_value=Path("/src")), \
                  mock.patch.object(
+                     win_webp_dist, "patch_cpu_cmake", side_effect=lambda *a, **k: calls.append("patch")
+                 ), \
+                 mock.patch.object(
                      win_webp_dist, "configure_build_install",
                      side_effect=lambda *a, **k: calls.append("configure"),
                  ), \
@@ -255,9 +258,36 @@ class TestBuildOrdering(unittest.TestCase):
                      win_webp_dist, "vendor_license", side_effect=lambda *a, **k: calls.append("license")
                  ):
                 win_webp_dist.build(dist, arch="x86_64")
-            self.assertEqual(calls, ["configure", "layout", "symbols", "license"])
+            self.assertEqual(calls, ["patch", "configure", "layout", "symbols", "license"])
             self.assertEqual((dist / ".pins").read_text(encoding="utf-8"), win_webp_dist.compute_want_pins(arch="x86_64"))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCpuCmakeNeonFix(unittest.TestCase):
+    """libwebp 1.6.0 cmake/cpu.cmake attaches -mfpu=neon under clang-cl even
+    for flag-free NEON (aarch64); patch_cpu_cmake skips it, and refuses to
+    apply when the anchor is not present exactly once."""
+
+    _ORIG = (
+        "  else()\n"
+        "    if(MSVC AND SIMD_ENABLE_FLAGS)\n"
+        "      list(GET SIMD_ENABLE_FLAGS ${I_SIMD} SIMD_COMPILE_FLAG)\n"
+    )
+
+    def test_patches_the_single_anchor(self) -> None:
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "cmake").mkdir()
+            (Path(tmp) / "cmake" / "cpu.cmake").write_text(self._ORIG)
+            win_webp_dist.patch_cpu_cmake(Path(tmp))
+            text = (Path(tmp) / "cmake" / "cpu.cmake").read_text()
+        self.assertIn('if(MSVC AND SIMD_ENABLE_FLAGS AND NOT WEBP_SIMD_FLAG STREQUAL "NEON")', text)
+
+    def test_missing_anchor_fails_loudly(self) -> None:
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "cmake").mkdir()
+            (Path(tmp) / "cmake" / "cpu.cmake").write_text("# upstream moved the line\n")
+            with self.assertRaises(win_webp_dist.WindowsWebpError):
+                win_webp_dist.patch_cpu_cmake(Path(tmp))
