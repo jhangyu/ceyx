@@ -44,7 +44,7 @@ else()
         #
         # PORTABLE-BASELINE (2026-09-08): `host` is the second host-derived
         # codegen site in this build (the first is RawSpeed3's -march=native;
-        # see cmake/tests.cmake "PORTABLE-BASELINE"). Halide's `host` target
+        # see cmake/generic_raw.cmake "PORTABLE-BASELINE"). Halide's `host` target
         # string expands to the *generator machine's* detected CPU features,
         # including avx512* on an AVX-512 GitHub runner — the same
         # "compiled for the builder, shipped to everyone" hazard in a second

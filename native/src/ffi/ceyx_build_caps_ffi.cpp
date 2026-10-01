@@ -23,7 +23,7 @@
 #endif
 
 // CEYX_HAVE_LCMS2 is propagated from LibRaw's own ENABLE_LCMS option by
-// native/cmake/tests.cmake (immediately after the libraw-cmake
+// native/cmake/generic_raw.cmake (immediately after the libraw-cmake
 // add_subdirectory, the only point where its effective value is knowable --
 // detail-lcms2-sourcing.md §D.1). Under OQ-N4 option Z it is forced OFF on
 // every platform, so this define lands 0 everywhere by one mechanism rather

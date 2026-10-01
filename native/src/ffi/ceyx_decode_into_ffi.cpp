@@ -2,7 +2,7 @@
 // NATIVE_SOURCES via the GLOB_RECURSE at cmake/pipeline.cmake:90 and is named
 // in none of the EXCLUDE filters. The generic-RAW arm is guarded by
 // DNG_ENABLE_GENERIC_RAW, which reaches this TU through libraw_vendored's
-// INTERFACE definition (cmake/tests.cmake:1372, linked at :1381) — so in an
+// INTERFACE definition (cmake/generic_raw.cmake, libraw_vendored target) — so in an
 // OFF build the SYMBOLS still exist and a RAW input gets a specific error,
 // rather than the Dart lookup finding nothing and the whole feature going
 // silently missing.

@@ -162,7 +162,7 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 # Re-guard (split mechanics): the enclosing `if(NOT DNG_HOST_GENERATORS_ONLY)`
-# opened above is closed here and re-opened at the top of tests.cmake, because
+# opened above is closed here and re-opened at the top of tests_early.cmake, because
 # CMake requires flow-control blocks to balance within one file. The condition
 # is unchanged in between, so execution is identical to the monolith.
-endif() # NOT DNG_HOST_GENERATORS_ONLY (continued in tests.cmake)
+endif() # NOT DNG_HOST_GENERATORS_ONLY (continued in tests_early.cmake)

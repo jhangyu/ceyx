@@ -181,4 +181,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/encode.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/jxl.cmake)
 
+# T6 (2026-10-02): three fragments, in this exact order — generic_raw.cmake
+# must run after tests_early.cmake's Android test targets (pre-shim
+# JPEG_LIBRARIES) and before tests.cmake. See generic_raw.cmake's header.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests_early.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generic_raw.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests.cmake)
