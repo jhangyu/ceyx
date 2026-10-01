@@ -196,6 +196,10 @@ AGENTS.md
 graphify-out/
 native/scripts/tmp/
 native/tests/tmp/
+# Stray output of tools run with the wrong cwd (2026-10-02 junk inventory, design-B-debt §4)
+native/docs/
+native/native/
+plugin/test/tmp/
 
 # Untracked dylib snapshots used as symbol-absent test fixtures (Phase 18 Task 1)
 /tmp/
