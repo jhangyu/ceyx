@@ -43,8 +43,12 @@ MANIFEST_CONSUMERS = {"test_libraw_frontend", "test_libraw_adapter",
                       "test_raw_end_to_end", "test_raw_hardening"}
 
 
+# The callee runner's own "[MATRIX SUMMARY]" is excluded: its skips are
+# already judged by its exit code (2 -> SKIP above); forwarding them would
+# also list them as declared.
 _SUMMARY_LINE_PATTERN = re.compile(
-    r"^\[[^\]]+ SUMMARY\] executed=\d+ skipped=(\d+) failed=\d+", re.MULTILINE)
+    r"^\[(?!MATRIX )[^\]]+ SUMMARY\] executed=\d+ skipped=(\d+) failed=\d+",
+    re.MULTILINE)
 
 executed_cases: list[str] = []
 failed_cases: list[str] = []
