@@ -143,7 +143,7 @@ if(NOT DNG_CROSS_BUILD)
 # cross-compile) is derived from this list instead of a hand-written copy.
 #
 # Why: the previous literal list had drifted. It named
-# dng_render_stage4_scaled (linked by host TESTS only) while OMITTING
+# dng_render_stage4_scaled (an archive nothing linked; deleted 2026-10-02) while OMITTING
 # dng_render_stage4_scaled_preavg, which cmake/ffi.cmake links into the
 # shipped library on the non-split branch. Every cross-compile that existed
 # at the time resolved to a Vulkan target (Android/Linux/Windows), where the
@@ -282,23 +282,12 @@ add_custom_command(
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 
-# Sized decode (targetWidth): box-filter-downscaling Stage4 variant. Emitted
-# from the SAME generator binary via -g/-f, exactly like the Android variant
-# below, so that dng_render_stage4 itself stays byte-identical (its output SHAs
-# are pinned gate artifacts — Gotcha #99).
-add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled.h
-    COMMAND dng_render_generator -g dng_render_stage4_scaled -f dng_render_stage4_scaled -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
-    DEPENDS dng_render_generator
-    COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled)..."
-)
-add_custom_target(dng_render_scaled_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
-list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
-
-# Variant A of the sized kernel: box-averages the Stage3 source BEFORE the
-# colour math (the variant above averages after it). The two co-exist on
-# purpose so the averaging-order trade-off can be measured side by side on a
-# real photograph; see the class comments in DngRenderGenerator.cpp.
+# Sized decode (targetWidth): the box-filter-downscaling Stage4 variant that
+# averages the Stage3 source BEFORE the colour math. Emitted from the SAME
+# generator binary via -g/-f, so dng_render_stage4 itself stays byte-identical
+# (its output SHAs are pinned gate artifacts -- Gotcha #99). The post-average
+# variant (dng_render_stage4_scaled) stays registered in DngRenderGenerator.cpp
+# for side-by-side measurement but is no longer emitted: nothing linked it.
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg.h
     COMMAND dng_render_generator -g dng_render_stage4_scaled_preavg -f dng_render_stage4_scaled_preavg -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
