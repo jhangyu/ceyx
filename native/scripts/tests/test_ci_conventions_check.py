@@ -329,3 +329,96 @@ def test_c10_real_repo_passes(tmp_path):
     fix): the real REPO_ROOT's git check-ignore decision must exclude the
     canonical path."""
     assert cc.check_c10_android_jnilibs_so_gitignored(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# C11: hand-written toolchain pins equal their single source (refactor T2,
+# 2026-10-02). Expected values are read from the source modules via
+# cc._toolchain_sources() -- never retyped here.
+# ---------------------------------------------------------------------------
+
+def _c11_compliant_text():
+    python_version, ndk_version, legs = cc._toolchain_sources()
+    rows = "".join(
+        f"          - arch_tag: {arch}\n"
+        f"            runner: {leg['runner']}\n"
+        f"            two_stage: \"false\"\n"
+        f"            msvc_arch: {leg['msvc_arch']}\n"
+        for arch, leg in legs.items()
+    )
+    return (
+        "jobs:\n"
+        "  build:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        include:\n"
+        f"{rows}"
+        "    steps:\n"
+        "      - uses: actions/setup-python@v5\n"
+        "        with:\n"
+        f"          python-version: \"{python_version}\"\n"
+        "      - uses: nttld/setup-ndk@v1\n"
+        "        with:\n"
+        f"          ndk-version: {ndk_version}\n"
+    )
+
+
+def test_c11_compliant_fixture_passes(tmp_path):
+    _write(tmp_path, "windows_build.yml", _c11_compliant_text())
+    assert cc.check_c11_toolchain_pins(tmp_path) == []
+
+
+def test_c11_python_version_drift_fails(tmp_path):
+    python_version, _, _ = cc._toolchain_sources()
+    text = _c11_compliant_text().replace(f'python-version: "{python_version}"', 'python-version: "0.0"')
+    _write(tmp_path, "windows_build.yml", text)
+    violations = cc.check_c11_toolchain_pins(tmp_path)
+    assert len(violations) == 1 and "python-version" in violations[0] and "'0.0'" in violations[0]
+
+
+def test_c11_ndk_version_drift_fails(tmp_path):
+    _, ndk_version, _ = cc._toolchain_sources()
+    text = _c11_compliant_text().replace(f"ndk-version: {ndk_version}", "ndk-version: r0z")
+    _write(tmp_path, "android_build.yml", text)
+    violations = cc.check_c11_toolchain_pins(tmp_path)
+    assert len(violations) == 1 and "ndk-version" in violations[0] and "android_build.yml" in violations[0]
+
+
+def test_c11_windows_row_runner_drift_fails(tmp_path):
+    _, _, legs = cc._toolchain_sources()
+    arch = sorted(legs)[0]
+    text = _c11_compliant_text().replace(f"runner: {legs[arch]['runner']}\n", "runner: windows-2019\n", 1)
+    _write(tmp_path, "windows_build.yml", text)
+    violations = cc.check_c11_toolchain_pins(tmp_path)
+    assert any("runner" in v and "'windows-2019'" in v for v in violations)
+
+
+def test_c11_windows_row_msvc_arch_drift_fails(tmp_path):
+    _, _, legs = cc._toolchain_sources()
+    arch = sorted(legs)[0]
+    text = _c11_compliant_text().replace(f"msvc_arch: {legs[arch]['msvc_arch']}\n", "msvc_arch: bogus\n", 1)
+    _write(tmp_path, "heif_dist_windows.yml", text)
+    violations = cc.check_c11_toolchain_pins(tmp_path)
+    assert any("msvc_arch" in v and "'bogus'" in v for v in violations)
+
+
+def test_c11_unknown_arch_tag_fails(tmp_path):
+    text = (
+        "        include:\n"
+        "          - arch_tag: sparc64\n"
+        "            runner: windows-latest\n"
+        "            msvc_arch: x64\n"
+    )
+    _write(tmp_path, "windows_build.yml", text)
+    violations = cc.check_c11_toolchain_pins(tmp_path)
+    assert len(violations) == 1 and "sparc64" in violations[0]
+
+
+def test_c11_row_without_msvc_arch_is_not_a_windows_leg(tmp_path):
+    text = (
+        "        include:\n"
+        "          - arch_tag: sparc64\n"
+        "            runner: macos-14\n"
+    )
+    _write(tmp_path, "macos_build.yml", text)
+    assert cc.check_c11_toolchain_pins(tmp_path) == []
