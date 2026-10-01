@@ -658,7 +658,7 @@ def assert_exports(
 
     macOS/windows/android could NOT be collapsed onto linux's shape: the
     shell-prohibition guard's compliance test
-    (`check_shell_prohibition.py:95,168`) requires exactly one code line
+    (since-deleted `check_shell_prohibition.py:95,168`) required exactly one code line
     starting with a python/pwsh-python invocation, so a `tool > file` dump
     step can never itself be a compliant one-liner -- the dump has to move
     INSIDE this module for every platform whose `ci.py verify-artifact`
