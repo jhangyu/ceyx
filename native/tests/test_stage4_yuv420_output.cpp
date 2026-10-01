@@ -1365,21 +1365,21 @@ void run_y6() {
 /* C5 returned LEGITIMATE-TIGHTENING                                       */
 /* (Halcyon docs/logs/2026-09-20/t13-c5-amendment-review.md).              */
 /*                                                                        */
-/* The sample lives outside this repo (the consumer's corpus) and is not   */
-/* vendored, so its absence is an explicit N/A with its reason, never a    */
-/* silent skip. CEYX_T127_DNG overrides the path.                          */
+/* The sample is not in image_samples/ and is not vendored, so with        */
+/* CEYX_T127_DNG unset it is an explicit N/A with its reason, never a      */
+/* silent skip. CEYX_T127_DNG supplies the path.                           */
 /* ====================================================================== */
 void run_y10() {
     const char *env = getenv("CEYX_T127_DNG");
-    const char *path =
-        env && env[0] ? env
-            : "../Halcyon/local_data/photo_samples/DNG/IMG_20251112_092839.dng";
+    /* No default: the pre-registered bounds were measured on a corpus DNG
+     * that is not in image_samples/, so unset -> loud N/A below. */
+    const char *path = env && env[0] ? env : "(unset)";
     char detail[1024];
 
     FILE *probe = fopen(path, "rb");
     if (!probe) {
         snprintf(detail, sizeof(detail),
-                 "sample not present at %s (set CEYX_T127_DNG): fidelity on a "
+                 "sample not present at %s (set CEYX_T127_DNG to a DNG path): fidelity on a "
                  "real corpus DNG NOT MEASURED in this run", path);
         verdict_na("Y10", "dng-corpus", host_arm(), detail);
         return;

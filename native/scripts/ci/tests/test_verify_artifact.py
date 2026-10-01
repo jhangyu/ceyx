@@ -952,6 +952,40 @@ class VerifyArtifactTests(unittest.TestCase):
         expected = (_GOLDEN_DIR / "assert-no-avx512-linux.markers").read_text()
         self.assertEqual(out, expected)
 
+    def test_avx512_windows_scans_in_tree_libs(self):
+        """Windows scans every in-tree .lib except generators and the import
+        lib; any lib's non-zero rc fails; missing rawspeed/pugixml fails."""
+        libs = [
+            "native/build-windows/rawspeed3-build/rawspeed.lib",
+            "native/build-windows/rawspeed3-build/src/external/pugixml/build/pugixml.lib",
+            "native/build-windows/dng_sdk.lib",
+            "native/build-windows/dng_render_generator.lib",
+            "native/build-windows/dng_decoder_native.lib",
+        ]
+        scanned = []
+
+        def fake_run(argv, cwd=None, env=None):
+            scanned.append(argv[2])
+            bad = argv[2].endswith("pugixml.lib")
+            return _fake_run_result(returncode=1 if bad else 0, stdout="")
+
+        with mock.patch.object(run_module, "run", side_effect=fake_run), _Cwd(self._tmp()):
+            for lib in libs:
+                Path(lib).parent.mkdir(parents=True, exist_ok=True)
+                Path(lib).touch()
+            rc, out, err = _run_captured(verify_artifact.assert_no_avx512, "windows")
+            self.assertEqual(rc, 1)
+            self.assertEqual(sorted(os.path.basename(p) for p in scanned),
+                             ["dng_sdk.lib", "pugixml.lib", "rawspeed.lib"])
+            self.assertIn("pugixml.lib", err)
+
+            os.remove(libs[0])
+            scanned.clear()
+            rc, _, err = _run_captured(verify_artifact.assert_no_avx512, "windows")
+            self.assertEqual(rc, 1)
+            self.assertEqual(scanned, [])
+            self.assertIn("could not find rawspeed.lib", err)
+
     # ---- helpers ------------------------------------------------------
 
     def setUp(self):

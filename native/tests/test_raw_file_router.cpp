@@ -8,6 +8,8 @@
 // and prints "route=<name>".
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -166,6 +168,32 @@ int main(int argc, char** argv) {
         raw_probe_bytes(arw_bytes.data(), arw_bytes.size(), &route);
         report("arw_content_with_dng_extension", route == kRawRouteGeneric,
                "content=non-dng");
+    }
+    {
+        // Paths cross the FFI as UTF-8. On Windows a narrow fopen read them in
+        // the ANSI code page, so every file under a non-ASCII folder failed
+        // to open (kRawErrProbeFailed). The file is written here, not taken
+        // from a sample tree, so the case runs on every host.
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() /
+                             fs::u8path(u8"ceyx_utf8_\u6e2c\u8a66_\u00e9");
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const fs::path file = dir / fs::u8path(u8"\u7167\u7247.dng");
+        const std::vector<uint8_t> dng = makeTiff(true, true);
+        {
+            std::ofstream out(file, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(dng.data()),
+                      static_cast<std::streamsize>(dng.size()));
+        }
+        RawRoute route = kRawRouteUnknown;
+        const RawErrorCode rc = raw_probe_file(file.u8string().c_str(), &route);
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "rc=%s route=%s",
+                      raw_error_name(rc), raw_route_name(route));
+        report("non_ascii_utf8_path", rc == kRawSuccess && route == kRawRouteDng,
+               detail);
+        fs::remove_all(dir, ec);
     }
 
     if (failures != 0) {

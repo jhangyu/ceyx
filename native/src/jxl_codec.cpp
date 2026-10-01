@@ -8,6 +8,7 @@
 // asking libjxl whether the write succeeded.
 
 #include "ffi/still_codec_internal.h"
+#include "ceyx_utf8_path.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -30,7 +31,7 @@ namespace {
 
 std::vector<uint8_t> ReadAll(const char *path) {
   std::vector<uint8_t> bytes;
-  FILE *f = std::fopen(path, "rb");
+  FILE *f = ceyx_fopen_utf8(path, "rb");
   if (!f) return bytes;
   std::fseek(f, 0, SEEK_END);
   const long n = std::ftell(f);

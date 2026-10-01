@@ -17,6 +17,9 @@
 
 #include "dng_exceptions.h"
 
+// ceyx patch: paths arrive as UTF-8; see sdk_patches/README.md.
+#include "ceyx_utf8_path.h"
+
 /*****************************************************************************/
 
 dng_file_stream::dng_file_stream (const char *filename,
@@ -31,7 +34,7 @@ dng_file_stream::dng_file_stream (const char *filename,
 	
 	{
 	
-	fFile = fopen (filename, output ? "wb" : "rb");
+	fFile = ceyx_fopen_utf8 (filename, output ? "wb" : "rb");
 	
 	if (!fFile)
 		{

@@ -913,17 +913,18 @@ def dispatch(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # `assert-no-avx512` is PERMANENTLY linux-only (same shape as
-    # `_CODEC_PROBE_PLATFORMS`/`_CAPABILITY_VECTOR_PLATFORMS`), concept-search
-    # confirmed: zero `-march`/`-mtune`/`/arch:`/ISA/baseline-CPU/SIMD-shaped
-    # step on any other platform's workflow, not just an absent "avx"
-    # string.
-    _AVX512_PLATFORMS = frozenset({"linux"})
+    # `assert-no-avx512`: linux and windows (the two legs that build x86-64
+    # natively on a GitHub runner, i.e. can inherit the runner's ISA). The
+    # old "permanently linux-only" ruling searched the workflows for -march
+    # steps; the -march=native on Windows came from RawSpeed3's CpuMarch.cmake
+    # under clang-cl, invisible to a workflow search, and shipped EVEX in
+    # v0.1.13/18/24/28. macOS (arm64/Metal) and android (arm64) stay out.
+    _AVX512_PLATFORMS = frozenset({"linux", "windows"})
     if args.command == "assert-no-avx512" and args.platform not in _AVX512_PLATFORMS:
         print(
             f"::error::assert-no-avx512 has no --platform {args.platform!r} leg -- this "
-            "portable-baseline gate is meaningful on Linux only, permanently (concept-level "
-            "search found no ISA/baseline-CPU-shaped step on any other platform's workflow)",
+            "portable-baseline gate is meaningful only on the x86-64 native legs "
+            "(linux, windows)",
             file=sys.stderr,
         )
         return 2

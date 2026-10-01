@@ -1209,8 +1209,12 @@ set(JPEG_VERSION_STRING \"62\")
     # DEFINED, so pre-defining it drives upstream through its own documented
     # knob and needs no patch to the vendored tree. `-mtune=generic` is exactly
     # what upstream's own binary-distribution branch selects (CpuMarch.cmake:27-35):
-    # tuning only, no ISA raise. MSVC is excluded -- it rejects both spellings
-    # and has no -march=native to begin with, so the hazard does not exist there.
+    # tuning only, no ISA raise. No compiler is excluded: this used to sit
+    # under `if(NOT MSVC)` on the belief that MSVC has no -march=native, but
+    # clang-cl sets MSVC=TRUE AND accepts -march=native, so every Windows
+    # artifact inherited the runner's ISA (v0.1.28's pugixml faulted on a
+    # non-AVX-512 CPU with an EVEX vpcmpneqq; v0.1.13/18/24 were contaminated
+    # the same way). ci.py assert-no-avx512 --platform windows is the gate.
     #
     # Written as CACHE INTERNAL ... FORCE, mirroring how CpuMarch.cmake itself
     # stores the value (CpuMarch.cmake:38). A plain set() would NOT be enough:
@@ -1220,14 +1224,12 @@ set(JPEG_VERSION_STRING \"62\")
     # the poisoned value. An explicit -DRAWSPEED_MARCH=<something> on the command
     # line is still honoured: it lands in the cache as a non-"native" value and
     # is preserved by the first branch below.
-    if(NOT MSVC)
-        if(DEFINED RAWSPEED_MARCH AND NOT RAWSPEED_MARCH MATCHES "native")
-            message(STATUS "RawSpeed3: honouring explicit RAWSPEED_MARCH=${RAWSPEED_MARCH}")
-        else()
-            set(RAWSPEED_MARCH "-mtune=generic" CACHE INTERNAL "" FORCE)
-            message(STATUS "RawSpeed3 portable baseline: RAWSPEED_MARCH=${RAWSPEED_MARCH} "
-                           "(no -march=native; published artifacts must run off the build machine)")
-        endif()
+    if(DEFINED RAWSPEED_MARCH AND NOT RAWSPEED_MARCH MATCHES "native")
+        message(STATUS "RawSpeed3: honouring explicit RAWSPEED_MARCH=${RAWSPEED_MARCH}")
+    else()
+        set(RAWSPEED_MARCH "-mtune=generic" CACHE INTERNAL "" FORCE)
+        message(STATUS "RawSpeed3 portable baseline: RAWSPEED_MARCH=${RAWSPEED_MARCH} "
+                       "(no -march=native; published artifacts must run off the build machine)")
     endif()
 
     # Builds the `rawspeed` static target from RawSpeed3's own (real) CMake
