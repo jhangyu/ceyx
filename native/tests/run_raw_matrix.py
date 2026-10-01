@@ -5,11 +5,17 @@ the DNG regression.
 A MISSING test binary is a FAILURE, not a skip - silent coverage loss is the
 failure mode this runner exists to prevent.
 
-Every exit code comes from CompletedProcess.returncode. Output text is never
-parsed to decide pass/fail: a trailing grep or a wrapper can report the wrong
-sign, and both directions of that mistake have bitten this project before.
+Pass/fail/skip of every case comes from CompletedProcess.returncode
+(0 = pass, 2 = ran but incomplete -> skip, anything else = fail). Output text
+is parsed for exactly one thing: a harness's "[<X> SUMMARY] ... skipped=<m>"
+line, forwarded as a declared per-sample skip count (owner-supplied corpus).
+
+Exit code (repo-wide convention): 0 = everything executed and passed,
+1 = a case failed, 2 = a non-declared case was skipped (incomplete run).
+The last stdout line is "[RawMatrix SUMMARY] executed=<n> skipped=<m> failed=<k>".
 """
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -37,16 +43,63 @@ MANIFEST_CONSUMERS = {"test_libraw_frontend", "test_libraw_adapter",
                       "test_raw_end_to_end", "test_raw_hardening"}
 
 
-def run(name, cmd):
+_SUMMARY_LINE_PATTERN = re.compile(
+    r"^\[[^\]]+ SUMMARY\] executed=\d+ skipped=(\d+) failed=\d+", re.MULTILINE)
+
+executed_cases: list[str] = []
+failed_cases: list[str] = []
+skipped_cases: list[str] = []           # non-declared -> exit 2
+declared_skip_counts: list[str] = []    # "<binary>:<count>" harness-internal
+
+
+def _status_for(return_code: int) -> str:
+    if return_code == 0:
+        return "PASS"
+    if return_code == 2:
+        return "SKIP"
+    return "FAIL"
+
+
+def run(name, command):
+    """Run one case; record it; return "PASS" | "FAIL" | "SKIP"."""
     started = time.monotonic()
-    proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
     elapsed = time.monotonic() - started
-    status = "PASS" if proc.returncode == 0 else "FAIL"
+    status = _status_for(proc.returncode)
     print("[RawMatrix] %-28s rc=%d %5.1fs -> %s" % (name, proc.returncode, elapsed, status))
-    if proc.returncode != 0:
+    if status != "PASS":
         sys.stdout.write(proc.stdout[-4000:])
         sys.stderr.write(proc.stderr[-4000:])
-    return proc.returncode == 0
+    summary = _SUMMARY_LINE_PATTERN.findall(proc.stdout)
+    if summary and int(summary[-1]) > 0:
+        declared_skip_counts.append("%s:%s" % (name, summary[-1]))
+    if status == "PASS":
+        executed_cases.append(name)
+    elif status == "SKIP":
+        skipped_cases.append(name)
+    else:
+        failed_cases.append(name)
+    return status
+
+
+def _finish():
+    if declared_skip_counts:
+        print("[RawMatrix DECLARED] count=%d cases=%s"
+              % (len(declared_skip_counts), ",".join(declared_skip_counts)))
+    if failed_cases:
+        print("[RawMatrix] FAIL (failed: %s)" % ",".join(failed_cases))
+    elif not skipped_cases:
+        print("[RawMatrix] ALL PASS (executed=%d, skipped=0)" % len(executed_cases))
+    line = "[RawMatrix SUMMARY] executed=%d skipped=%d failed=%d" % (
+        len(executed_cases), len(skipped_cases), len(failed_cases))
+    if skipped_cases:
+        line += " skipped_cases=" + ",".join(skipped_cases)
+    print(line, flush=True)
+    if failed_cases:
+        return 1
+    if skipped_cases or not executed_cases:
+        return 2
+    return 0
 
 
 def main():
@@ -60,52 +113,40 @@ def main():
                              "by design and are unaffected by this flag")
     parser.add_argument("--skip-dng", action="store_true",
                         help="iteration only; a gate run must not use this. "
-                             "Forces a non-zero (2) exit code so the omission "
-                             "cannot be mistaken for a passing gate.")
+                             "Records dng-regression as a skipped case, so the "
+                             "run exits 2 and cannot be mistaken for a gate.")
     args = parser.parse_args()
 
     samples = load_corpus(REPO / args.manifest)
     print("[RawMatrix] manifest lists %d samples" % len(samples))
 
-    cases = []
-    ok = True
-
-    ok &= run("provenance",
-              [sys.executable, "native/scripts/verify_raw_provenance.py"])
-    cases.append("provenance")
-
-    ok &= run("corpus",
-              [sys.executable, "native/tests/verify_raw_corpus.py",
-               "--manifest", args.manifest])
-    cases.append("corpus")
-
-    ok &= run("architecture-gates",
-              [sys.executable, "native/scripts/check_raw_architecture_gates.py"])
-    cases.append("architecture-gates")
+    run("provenance", [sys.executable, "native/scripts/verify_raw_provenance.py"])
+    run("corpus", [sys.executable, "native/tests/verify_raw_corpus.py",
+                   "--manifest", args.manifest])
+    run("architecture-gates",
+        [sys.executable, "native/scripts/check_raw_architecture_gates.py"])
 
     build_dir = REPO / args.build_dir
     for name in TEST_BINARIES:
         binary = build_dir / name
         if not binary.is_file():
             print("[RawMatrix] %-28s -> FAIL (binary missing: %s)" % (name, binary))
-            ok = False
-            cases.append(name)
+            failed_cases.append(name)
             continue
-        cmd = [str(binary)]
+        command = [str(binary)]
         if name in MANIFEST_CONSUMERS:
-            cmd += ["--manifest", args.manifest]
-        ok &= run(name, cmd)
-        cases.append(name)
+            command += ["--manifest", args.manifest]
+        run(name, command)
 
     # Scaled decode gate for the LibRaw path (contract AC-2). The binary is
-    # mandatory (a missing binary is silent coverage loss); the SAMPLES are
-    # owner-supplied and untracked, so an absent-sample run is a SKIP, not a
-    # failure — the harness returns 2 for "no usable file", which we tolerate.
-    sized_bin = build_dir / "test_raw_sized_decode"
-    if not sized_bin.is_file():
+    # mandatory (a missing binary is silent coverage loss). Owner-supplied
+    # samples absent, or harness exit 2 ("no usable file"), is a non-declared
+    # SKIP: visible, counted, and it makes this run exit 2.
+    sized_binary = build_dir / "test_raw_sized_decode"
+    if not sized_binary.is_file():
         print("[RawMatrix] %-28s -> FAIL (binary missing: %s)"
-              % ("raw-sized-decode", sized_bin))
-        ok = False
+              % ("raw-sized-decode", sized_binary))
+        failed_cases.append("raw-sized-decode")
     else:
         raw_layouts = {"bayer2x2", "xtrans6x6", "linear_rgb"}
         sized_files = [
@@ -116,39 +157,22 @@ def main():
             and (REPO / s["path"]).is_file()
         ]
         if not sized_files:
-            print("[RawMatrix] %-28s -> SKIP (no raw sample present)"
+            print("[RawMatrix] %-28s -> SKIP reason=no-raw-sample-present"
                   % "raw-sized-decode")
+            skipped_cases.append("raw-sized-decode")
         else:
-            proc = subprocess.run([str(sized_bin), *sized_files],
-                                  cwd=str(REPO), capture_output=True, text=True)
-            status = "PASS" if proc.returncode == 0 else \
-                ("SKIP" if proc.returncode == 2 else "FAIL")
-            print("[RawMatrix] %-28s rc=%d -> %s"
-                  % ("raw-sized-decode", proc.returncode, status))
-            if proc.returncode not in (0, 2):
-                sys.stdout.write(proc.stdout[-4000:])
-                sys.stderr.write(proc.stderr[-4000:])
-                ok = False
-    cases.append("raw-sized-decode")
+            run("raw-sized-decode", [str(sized_binary), *sized_files])
 
     if args.skip_dng:
         print("[RawMatrix] WARNING --skip-dng was used; this is NOT a gate run")
-        if not ok:
-            print("[RawMatrix] FAIL (%d cases attempted)" % len(cases))
-            return 1
-        print("[RawMatrix] ALL PASS (%d cases, DNG-REGRESSION-SKIPPED)" % len(cases))
-        return 2
+        print("[RawMatrix] %-28s -> SKIP reason=skip-dng-flag" % "dng-regression")
+        skipped_cases.append("dng-regression")
+        return _finish()
 
-    ok &= run("dng-regression",
-              [sys.executable, "native/tests/run_decode_matrix.py",
-               "--repeat", str(args.dng_repeat)])
-    cases.append("dng-regression")
-
-    if not ok:
-        print("[RawMatrix] FAIL (%d cases attempted)" % len(cases))
-        return 1
-    print("[RawMatrix] ALL PASS (%d cases)" % len(cases))
-    return 0
+    run("dng-regression",
+        [sys.executable, "native/tests/run_decode_matrix.py",
+         "--repeat", str(args.dng_repeat)])
+    return _finish()
 
 
 if __name__ == "__main__":
