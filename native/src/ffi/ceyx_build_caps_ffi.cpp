@@ -16,11 +16,7 @@
 
 #include <cstring>
 
-#if defined(_WIN32)
-#define CEYX_FFI_EXPORT __declspec(dllexport)
-#else
-#define CEYX_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+#include "ceyx_ffi_export.h"
 
 // CEYX_HAVE_LCMS2 is propagated from LibRaw's own ENABLE_LCMS option by
 // native/cmake/generic_raw.cmake (immediately after the libraw-cmake

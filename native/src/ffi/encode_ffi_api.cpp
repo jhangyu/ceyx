@@ -33,11 +33,7 @@
 #include <webp/encode.h>
 #endif
 
-#if defined(_WIN32)
-#define FFI_EXPORT __declspec(dllexport)
-#else
-#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+#include "ceyx_ffi_export.h"
 
 namespace {
 
@@ -85,7 +81,7 @@ void JpegSilentOutput(j_common_ptr) {}
 
 extern "C" {
 
-FFI_EXPORT const char *ceyx_encode_error_name(int32_t code) {
+CEYX_FFI_EXPORT const char *ceyx_encode_error_name(int32_t code) {
   switch (code) {
     case kCeyxEncodeSuccess: return "kCeyxEncodeSuccess";
     case kCeyxEncodeErrNullArg: return "kCeyxEncodeErrNullArg";
@@ -104,7 +100,7 @@ FFI_EXPORT const char *ceyx_encode_error_name(int32_t code) {
   }
 }
 
-FFI_EXPORT int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
+CEYX_FFI_EXPORT int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len) {
   const int32_t bad =
@@ -207,9 +203,9 @@ FFI_EXPORT int32_t ceyx_encode_jpeg_rgba8(const uint8_t *rgba, int32_t width,
 // `src` and never needs the caller to pre-pad.
 //
 // ONE implementation, no platform branch: this body is identical on every
-// target (the FFI_EXPORT macro above is the Windows export attribute, not a
+// target (the CEYX_FFI_EXPORT macro above is the Windows export attribute, not a
 // second code path), as required by the repo's no-divergence rule.
-FFI_EXPORT int32_t ceyx_encode_jpeg_yuv420(const uint8_t *src,
+CEYX_FFI_EXPORT int32_t ceyx_encode_jpeg_yuv420(const uint8_t *src,
                                            size_t src_capacity, int32_t width,
                                            int32_t height, int32_t quality,
                                            uint8_t **out, size_t *out_len) {
@@ -358,7 +354,7 @@ FFI_EXPORT int32_t ceyx_encode_jpeg_yuv420(const uint8_t *src,
   return kCeyxEncodeSuccess;
 }
 
-FFI_EXPORT int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
+CEYX_FFI_EXPORT int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
                                int32_t height, int32_t quality, uint8_t **out,
                                size_t *out_len) {
   const int32_t bad =
@@ -390,7 +386,7 @@ FFI_EXPORT int32_t ceyx_encode_webp_rgba8(const uint8_t *rgba, int32_t width,
 #endif
 }
 
-FFI_EXPORT void ceyx_encode_free(uint8_t *buffer) {
+CEYX_FFI_EXPORT void ceyx_encode_free(uint8_t *buffer) {
   if (buffer) free(buffer);
 }
 
@@ -520,7 +516,7 @@ int32_t ValidateGeneric(int32_t format, const uint8_t *rgba,
 
 extern "C" {
 
-FFI_EXPORT int32_t ceyx_encode_supports(int32_t format) {
+CEYX_FFI_EXPORT int32_t ceyx_encode_supports(int32_t format) {
   switch (format) {
     case kCeyxFormatJpeg: return 1;                 // libjpeg-turbo always linked
     case kCeyxFormatWebp: return CEYX_ENABLE_WEBP ? 1 : 0;
@@ -533,7 +529,7 @@ FFI_EXPORT int32_t ceyx_encode_supports(int32_t format) {
   }
 }
 
-FFI_EXPORT int32_t ceyx_encode_rgba8(int32_t format,
+CEYX_FFI_EXPORT int32_t ceyx_encode_rgba8(int32_t format,
                                      const uint8_t *rgba,
                                      int32_t width, int32_t height,
                                      const CeyxEncodeOptions *opts,

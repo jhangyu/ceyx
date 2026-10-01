@@ -7,7 +7,7 @@
 //
 // These are INTERNAL impls (still_codec_internal.h); the exported entries live
 // in src/ffi/encode_ffi_api.cpp and src/ffi/still_ffi_api.cpp, so nothing here
-// carries FFI_EXPORT.
+// carries CEYX_FFI_EXPORT.
 
 #include "ffi/still_codec_internal.h"
 #include "ceyx_utf8_path.h"

@@ -14,11 +14,7 @@
 #include "heif_api.h"
 #endif
 
-#if defined(_WIN32)
-#define FFI_EXPORT __declspec(dllexport)
-#else
-#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+#include "ceyx_ffi_export.h"
 
 // JPEG XL (plan Task 9) needs no local stub here: src/jxl_codec.cpp defines
 // ceyx_jxl_probe_impl/ceyx_jxl_decode_impl unconditionally and answers
@@ -90,7 +86,7 @@ int32_t SniffFormat(const char *path) {
 
 extern "C" {
 
-FFI_EXPORT const char *ceyx_still_error_name(int32_t code) {
+CEYX_FFI_EXPORT const char *ceyx_still_error_name(int32_t code) {
   switch (code) {
     case kCeyxStillSuccess: return "kCeyxStillSuccess";
     case kCeyxStillErrNullPath: return "kCeyxStillErrNullPath";
@@ -108,7 +104,7 @@ FFI_EXPORT const char *ceyx_still_error_name(int32_t code) {
   }
 }
 
-FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
+CEYX_FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
   switch (format) {
     case kCeyxFormatWebp: return CEYX_ENABLE_WEBP ? 1 : 0;
     case kCeyxFormatHeic:
@@ -135,7 +131,7 @@ FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
   }
 }
 
-FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
+CEYX_FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
                                     uint32_t *width, uint32_t *height,
                                     int32_t *orientation) {
   if (!path || !*path || !width || !height || !orientation) {
@@ -174,7 +170,7 @@ FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
   }
 }
 
-FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
+CEYX_FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
                                           int32_t max_dim, CeyxStillResult *out) {
   if (!out) return kCeyxStillErrNullPath;
   std::memset(out, 0, sizeof(*out));
@@ -215,7 +211,7 @@ FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
   }
 }
 
-FFI_EXPORT void ceyx_still_release(CeyxStillResult *r) {
+CEYX_FFI_EXPORT void ceyx_still_release(CeyxStillResult *r) {
   if (!r) return;
   if (r->rgba) std::free(r->rgba);
   std::memset(r, 0, sizeof(*r));   // makes a second call a no-op, per contract

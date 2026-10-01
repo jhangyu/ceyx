@@ -32,11 +32,9 @@
 #include "raw_persistent_device_arena.h"  // R3-T4: kRawDeviceArenaAlignmentBytes
 #endif
 
+#include "ceyx_ffi_export.h"
 #if defined(_WIN32)
-#define CEYX_FFI_EXPORT __declspec(dllexport)
 #include <malloc.h>  // _aligned_malloc / _aligned_free
-#else
-#define CEYX_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #endif
 
 #if defined(__APPLE__)
