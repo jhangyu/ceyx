@@ -73,7 +73,6 @@ FROZEN_CLI_SURFACE = {
     "verify-interpreter",
     "ensure-cmake",
     "build-zlib",
-    "locate-clang-cl",
     "verify-vulkan-lib",
     # windows-arm64 leg (R-9).
     "assert-vs-component",

@@ -161,7 +161,7 @@ def test_compliant_one_line_python_body_not_flagged(tmp_path):
         "  build:\n"
         "    steps:\n"
         "      - name: Compliant\n"
-        "        run: python3 native/scripts/ci.py locate-clang-cl\n",
+        "        run: python3 native/scripts/ci.py provision locate-clang-cl\n",
     )
     assert cwb.find_non_compliant_bodies(tmp_path) == []
 

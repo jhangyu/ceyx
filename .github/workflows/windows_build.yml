@@ -180,7 +180,7 @@ jobs:
       # replicates).
       - name: Locate clang-cl
         shell: bash
-        run: python3 native/scripts/ci.py locate-clang-cl --github-path "$GITHUB_PATH"
+        run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
 
       # WI-4 step 4.1 (S-B1/OQ-N2 ruled SHIP): the decoder's own import table
       # names libomp140.x86_64.dll (rootcause-native-capability.md Item B), so
