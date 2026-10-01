@@ -541,7 +541,7 @@ jobs:
         # same as linux_build.yml's matrix.arch == 'x86_64' guard on its leg.
         if: matrix.arch_tag == 'x86_64'
         working-directory: ${{ github.workspace }}
-        run: python3 native/scripts/ci.py assert-no-avx512 --platform windows
+        run: python3 native/scripts/ci.py assert-no-avx512 --platform windows --arch ${{ matrix.arch_tag }}
 
       # AC-W3 evidence: the DLL exists, is a PE32+ x86_64 DLL, and has a
       # non-zero size recorded in the log. A build step that silently produced
