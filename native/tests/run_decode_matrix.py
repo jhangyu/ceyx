@@ -282,9 +282,13 @@ class FailedGateInfo:
 @dataclass
 class DeviceHandoffResult:
     sample_name: str
-    psnr_db: float
+    psnr_db: Optional[float]
     gate_pass: bool
     byte_exact: bool
+    # "PASS" or "SKIP". A SKIP route ran nothing (e.g. lossy on a libjpeg-off
+    # build); it is recorded as a skip, never folded into a pass.
+    status: str = "PASS"
+    skip_reason: str = ""
 
 
 @dataclass
@@ -298,6 +302,26 @@ class CfaCheckResult:
     name: str
     status: str
     detail: str
+
+
+@dataclass
+class SkipRecord:
+    """One case that did not execute. `declared` skips are pre-registered
+    (Android/ADB legs; the RAW-route RGB match, which has no baseline by
+    design): printed and counted on their own line, they never make the run
+    incomplete. Every other skip makes main() return 2."""
+    name: str
+    reason: str
+    declared: bool
+
+
+_SKIP_RECORDS: list[SkipRecord] = []
+
+
+def _record_skip(name: str, reason: str, *, declared: bool = False) -> None:
+    _SKIP_RECORDS.append(SkipRecord(name=name, reason=reason, declared=declared))
+    suffix = " (declared)" if declared else ""
+    print(f"[MATRIX] {name} -> SKIP reason={reason}{suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +374,13 @@ _FFI_RGB_MATCH_SKIP_RE = re.compile(
 _HANDOFF_PSNR_RE = re.compile(
     r"^\s*PSNR\(handoff ON vs OFF\):\s*([0-9]+(?:\.[0-9]+)?)\s+"
     r"dB\s+\[(PASS|FAIL)\]"
+)
+_HANDOFF_PSNR_SKIP_RE = re.compile(
+    r"^\s*PSNR\(handoff ON vs OFF\):\s*SKIP reason=(\S+)"
+)
+_CONTRACT_SKIP_RE = re.compile(r"^\s*\[Contract\] SKIP reason=\S+")
+_HANDOFF_SUMMARY_RE = re.compile(
+    r"^\[DeviceHandoff SUMMARY\] executed=\d+ skipped=\d+ failed=\d+"
 )
 _KV_FLOAT_RE = re.compile(r"\b([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)")
 _DEFAULT_ANDROID_TEST_DECODE = (
@@ -1163,6 +1194,60 @@ def _run_android_ffi_case(
     return results
 
 
+def _parse_device_handoff_output(
+    output: str,
+    return_code: int,
+    labels: tuple[str, str],
+    tag: str,
+) -> list[DeviceHandoffResult]:
+    """Shared by the macOS and Android handoff runs. Accepts exactly two
+    route results (lossless first, lossy second), each a numeric PSNR line or
+    an explicit SKIP line, plus the emitter's summary line. Rejects the
+    pre-2026-10-02 synthetic 999 dB PASS (no summary line, SYNTHETIC tag)."""
+    lines = output.splitlines()
+    contract_passes = sum(1 for line in lines if _CONTRACT_PASS_RE.match(line))
+    contract_skips = sum(1 for line in lines if _CONTRACT_SKIP_RE.match(line))
+    contract_failed = any(_CONTRACT_FAIL_RE.match(line) for line in lines)
+    verdicts: list[tuple[str, str]] = []
+    for line in lines:
+        numeric = _HANDOFF_PSNR_RE.match(line)
+        if numeric:
+            verdicts.append((numeric.group(2), numeric.group(1)))
+            continue
+        skipped = _HANDOFF_PSNR_SKIP_RE.match(line)
+        if skipped:
+            verdicts.append(("SKIP", skipped.group(1)))
+    synthetic = any("SYNTHETIC" in line for line in lines)
+    has_summary = any(_HANDOFF_SUMMARY_RE.match(line) for line in lines)
+    if (
+        return_code != 0
+        or contract_failed
+        or synthetic
+        or not has_summary
+        or contract_passes + contract_skips != 2
+        or len(verdicts) != 2
+    ):
+        raise RuntimeError(f"[{tag}] exit={return_code}\n{output}")
+
+    results: list[DeviceHandoffResult] = []
+    for index, (label, (verdict, value)) in enumerate(zip(labels, verdicts)):
+        if verdict == "SKIP":
+            if index == 0:
+                raise RuntimeError(f"[{tag}] lossless route may not skip\n{output}")
+            results.append(DeviceHandoffResult(
+                sample_name=label, psnr_db=None, gate_pass=False,
+                byte_exact=False, status="SKIP", skip_reason=value,
+            ))
+            continue
+        psnr = float(value)
+        if verdict != "PASS" or psnr < 99.0:
+            raise RuntimeError(f"[{tag}] gate failed\n{output}")
+        results.append(DeviceHandoffResult(
+            sample_name=label, psnr_db=psnr, gate_pass=True, byte_exact=psnr >= 998.0,
+        ))
+    return results
+
+
 def _run_device_handoff(
     cwd: Path,
     harness: str,
@@ -1181,36 +1266,11 @@ def _run_device_handoff(
         env=merged,
         check=False,
     )
-    output = proc.stdout
-    contract_passes = sum(
-        1 for line in output.splitlines() if _CONTRACT_PASS_RE.match(line)
+    return _parse_device_handoff_output(
+        proc.stdout, proc.returncode,
+        ("Lossless / Stage3-Stage4", "Lossy / Stage2-Stage4"),
+        "Device Handoff",
     )
-    contract_failed = any(
-        _CONTRACT_FAIL_RE.match(line) for line in output.splitlines()
-    )
-    matches = [
-        _HANDOFF_PSNR_RE.match(line)
-        for line in output.splitlines()
-        if _HANDOFF_PSNR_RE.match(line)
-    ]
-    if proc.returncode != 0 or contract_failed or contract_passes != 2 or len(matches) != 2:
-        raise RuntimeError(f"[Device Handoff] exit={proc.returncode}\n{output}")
-
-    labels = ("Lossless / Stage3-Stage4", "Lossy / Stage2-Stage4")
-    results: list[DeviceHandoffResult] = []
-    for label, match in zip(labels, matches):
-        assert match is not None
-        psnr = float(match.group(1))
-        gate_pass = match.group(2) == "PASS" and psnr >= 99.0
-        if not gate_pass:
-            raise RuntimeError(f"[Device Handoff] gate failed\n{output}")
-        results.append(DeviceHandoffResult(
-            sample_name=label,
-            psnr_db=psnr,
-            gate_pass=gate_pass,
-            byte_exact=psnr >= 998.0,
-        ))
-    return results
 
 
 def _run_android_device_handoff(
@@ -1242,40 +1302,16 @@ def _run_android_device_handoff(
         adb, serial, cmd_str, local_bin=local_bin, remote_bin=remote_bin,
     )
     output = proc.stdout
-    contract_passes = sum(
-        1 for line in output.splitlines() if _CONTRACT_PASS_RE.match(line)
-    )
-    contract_failed = any(
-        _CONTRACT_FAIL_RE.match(line) for line in output.splitlines()
-    )
-    matches = [
-        _HANDOFF_PSNR_RE.match(line)
-        for line in output.splitlines()
-        if _HANDOFF_PSNR_RE.match(line)
-    ]
     if not _adb_wait_process_exit(adb, serial, process_name):
         print(
             f"[WARN] Android Device Handoff: {process_name} still visible "
             "after teardown timeout; proceeding anyway (best-effort wait)"
         )
-    if proc.returncode != 0 or contract_failed or contract_passes != 2 or len(matches) != 2:
-        raise RuntimeError(f"[Android Device Handoff] exit={proc.returncode}\n{output}")
-
-    labels = ("Lossless / Stage3-Stage4 (Android)", "Lossy / Stage2-Stage4 (Android)")
-    results: list[DeviceHandoffResult] = []
-    for label, match in zip(labels, matches):
-        assert match is not None
-        psnr = float(match.group(1))
-        gate_pass = match.group(2) == "PASS" and psnr >= 99.0
-        if not gate_pass:
-            raise RuntimeError(f"[Android Device Handoff] gate failed\n{output}")
-        results.append(DeviceHandoffResult(
-            sample_name=label,
-            psnr_db=psnr,
-            gate_pass=gate_pass,
-            byte_exact=psnr >= 998.0,
-        ))
-    return results
+    return _parse_device_handoff_output(
+        output, proc.returncode,
+        ("Lossless / Stage3-Stage4 (Android)", "Lossy / Stage2-Stage4 (Android)"),
+        "Android Device Handoff",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1721,6 +1757,9 @@ def _build_markdown(
         L.append("| Sample | PSNR | >=99dB gate | Byte exact |")
         L.append("|---|---:|---|---|")
         for r in handoff_results:
+            if r.status == "SKIP":
+                L.append(f"| {r.sample_name} | — | SKIP ({r.skip_reason}) | no |")
+                continue
             L.append(
                 f"| {r.sample_name} | {r.psnr_db:.2f} dB "
                 f"| {'PASS' if r.gate_pass else 'FAIL'} "
@@ -3380,6 +3419,10 @@ def main() -> int:
                     local_bin=android_handoff_bin,
                 )
                 handoff_results.extend(android_handoff_results)
+                for result in android_handoff_results:
+                    if result.status == "SKIP":
+                        _record_skip("android-device-handoff-lossy",
+                                     result.skip_reason, declared=True)
             except RuntimeError as exc:
                 print(f"  ERROR: {exc}")
                 raise SystemExit(1)
@@ -3432,9 +3475,13 @@ def main() -> int:
         if not handoff_harness.exists():
             ap.error(f"Device handoff harness not found: {handoff_harness}")
         try:
-            handoff_results.extend(_run_device_handoff(
+            macos_handoff_results = _run_device_handoff(
                 root, str(handoff_harness), lossless, lossy, extra_env
-            ))
+            )
+            handoff_results.extend(macos_handoff_results)
+            for result in macos_handoff_results:
+                if result.status == "SKIP":
+                    _record_skip("device-handoff-lossy", result.skip_reason)
         except RuntimeError as exc:
             print(f"  ERROR: {exc}")
             raise SystemExit(1)
