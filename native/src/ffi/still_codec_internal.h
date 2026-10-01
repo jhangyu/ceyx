@@ -87,3 +87,31 @@ int32_t ceyx_map_heif_to_still_error(int32_t heif_code);
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+#include <cstdio>
+#include <vector>
+
+#include "ceyx_utf8_path.h"
+
+namespace ceyx {
+
+// Reads a whole file. Returns empty on any failure; callers map that to
+// kCeyxStillErrOpenFailed. Shared by webp_codec.cpp and jxl_codec.cpp.
+inline std::vector<uint8_t> ReadAll(const char *path) {
+  std::vector<uint8_t> bytes;
+  FILE *f = ceyx_fopen_utf8(path, "rb");
+  if (!f) return bytes;
+  std::fseek(f, 0, SEEK_END);
+  const long n = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (n > 0) {
+    bytes.resize(static_cast<size_t>(n));
+    if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) bytes.clear();
+  }
+  std::fclose(f);
+  return bytes;
+}
+
+}  // namespace ceyx
+#endif

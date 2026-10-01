@@ -8,22 +8,6 @@ import 'package:path_provider/path_provider.dart';
 
 import 'ceyx_example.dart';
 
-/*
----
-file_summary: "App 進入點與首頁 UI，處理檔案選擇、狀態顯示與影像呈現"
-modules:
-  - name: "App Entry"
-    description: "MaterialApp 與主題配置"
-    lines: "28-50"
-  - name: "DngHomePage"
-    description: "首頁狀態管理、檔案選擇邏輯與解碼服務呼叫；_saving/_decoding 分離"
-    lines: "52-185"
-  - name: "UI Widgets"
-    description: "主要的 Scaffold、狀態列顯示與 ImageViewer"
-    lines: "187-415"
----
-*/
-
 void main() {
   runApp(const DngProcessorApp());
 }

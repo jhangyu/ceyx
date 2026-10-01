@@ -7,7 +7,7 @@
 //
 // These are INTERNAL impls (still_codec_internal.h); the exported entries live
 // in src/ffi/encode_ffi_api.cpp and src/ffi/still_ffi_api.cpp, so nothing here
-// carries FFI_EXPORT.
+// carries CEYX_FFI_EXPORT.
 
 #include "ffi/still_codec_internal.h"
 #include "ceyx_utf8_path.h"
@@ -26,23 +26,6 @@
 namespace {
 
 #if CEYX_ENABLE_WEBP
-
-// Reads a whole file. Returns empty on any failure; the caller maps that to
-// kCeyxStillErrOpenFailed.
-std::vector<uint8_t> ReadAll(const char *path) {
-  std::vector<uint8_t> bytes;
-  FILE *f = ceyx_fopen_utf8(path, "rb");
-  if (!f) return bytes;
-  std::fseek(f, 0, SEEK_END);
-  const long n = std::ftell(f);
-  std::fseek(f, 0, SEEK_SET);
-  if (n > 0) {
-    bytes.resize(static_cast<size_t>(n));
-    if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) bytes.clear();
-  }
-  std::fclose(f);
-  return bytes;
-}
 
 // Copies `n` bytes into a malloc'd buffer so ceyx_encode_free stays free().
 int32_t AdoptBuffer(const uint8_t *src, size_t n, uint8_t **out, size_t *out_len) {
@@ -183,7 +166,7 @@ extern "C" int32_t ceyx_webp_probe_impl(const char *path, uint32_t *w, uint32_t 
   return kCeyxStillErrUnsupported;
 #else
   if (!path || !*path || !w || !h) return kCeyxStillErrNullPath;
-  const std::vector<uint8_t> bytes = ReadAll(path);
+  const std::vector<uint8_t> bytes = ceyx::ReadAll(path);
   if (bytes.empty()) return kCeyxStillErrOpenFailed;
   int iw = 0, ih = 0;
   if (!WebPGetInfo(bytes.data(), bytes.size(), &iw, &ih)) {
@@ -203,7 +186,7 @@ extern "C" int32_t ceyx_webp_decode_impl(const char *path, int32_t max_dim,
   return kCeyxStillErrUnsupported;
 #else
   if (!path || !*path || !out) return kCeyxStillErrNullPath;
-  const std::vector<uint8_t> bytes = ReadAll(path);
+  const std::vector<uint8_t> bytes = ceyx::ReadAll(path);
   if (bytes.empty()) return kCeyxStillErrOpenFailed;
 
   WebPDecoderConfig cfg;

@@ -21,12 +21,12 @@
 #      the variable is always DEFINED by the time anything reads it.
 #   2. Consumers do not write `if(CEYX_ENABLE_DESKTOP_OPENMP)` against a
 #      possibly-undefined name. They first assert it is DEFINED and FATAL out
-#      if not (see heif.cmake's WIN32 branch and tests.cmake), because an
+#      if not (see heif.cmake's WIN32 branch and generic_raw.cmake), because an
 #      undefined guard FAILS OPEN -- it skips the check that was supposed to
 #      protect the artifact, and does so completely silently.
 #
 # Scope note: this file computes the BASE policy only (the platform question:
-# does this toolchain have an OpenMP runtime at all?). tests.cmake may still
+# does this toolchain have an OpenMP runtime at all?). generic_raw.cmake may still
 # narrow it to OFF later on Apple when no libomp binary is actually found --
 # that is the deliberate "honest OFF" pattern, a refinement of this value
 # based on a real probe, not a competing definition of the policy.
@@ -46,7 +46,7 @@
 # required to build a library), so RawSpeed3/LibRaw's OpenMP-guarded loops are
 # exactly as buildable for the x86_64 leg as for the native arm64 leg,
 # PROVIDED an x86_64 libomp is available (see the vendored/brew search in
-# tests.cmake -- a missing binary still degrades to OFF via the explicit "no
+# generic_raw.cmake -- a missing binary still degrades to OFF via the explicit "no
 # libomp found" branch, never a silent skip). The true mobile precondition is
 # ANDROID/IOS (no OpenMP runtime in those NDK/iOS-SDK toolchains at all),
 # which is exactly what remains here.
@@ -67,4 +67,4 @@ endif()
 message(STATUS
     "[ceyx] desktop OpenMP policy: CEYX_ENABLE_DESKTOP_OPENMP="
     "${CEYX_ENABLE_DESKTOP_OPENMP} (base platform policy; may be narrowed to "
-    "OFF later by an Apple libomp probe in cmake/tests.cmake)")
+    "OFF later by an Apple libomp probe in cmake/generic_raw.cmake)")

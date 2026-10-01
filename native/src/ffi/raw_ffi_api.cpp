@@ -27,11 +27,7 @@
 
 // Same export decoration as src/dng_ffi_api.cpp, so this entry survives any
 // future visibility tightening on the dylib.
-#if defined(_WIN32)
-#define RAW_FFI_EXPORT __declspec(dllexport)
-#else
-#define RAW_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+#include "ceyx_ffi_export.h"
 
 // Round 2 Task 2.4 acceptance bullet: RawDecodeDiagnostics is explicitly NOT
 // modified by this task (fixed Dart-visible layout, spec section 12). This
@@ -63,21 +59,21 @@ thread_local bool g_have_timing_diagnostics = false;
 
 extern "C" {
 
-RAW_FFI_EXPORT int32_t raw_last_diagnostics(RawDecodeDiagnostics* out) {
+CEYX_FFI_EXPORT int32_t raw_last_diagnostics(RawDecodeDiagnostics* out) {
     if (!out) return -1;
     if (g_last_diagnostics.frontend == kRawFrontendUnknown) return -1;
     *out = g_last_diagnostics;
     return 0;
 }
 
-RAW_FFI_EXPORT int32_t raw_last_color_diagnostics(RawColorDiagnostics* out) {
+CEYX_FFI_EXPORT int32_t raw_last_color_diagnostics(RawColorDiagnostics* out) {
     if (!out) return -1;
     if (!g_have_color_diagnostics) return -1;
     *out = g_last_color_diagnostics;
     return 0;
 }
 
-RAW_FFI_EXPORT int32_t raw_last_timing_diagnostics(RawTimingDiagnostics* out) {
+CEYX_FFI_EXPORT int32_t raw_last_timing_diagnostics(RawTimingDiagnostics* out) {
     if (!out) return -1;
     if (!g_have_timing_diagnostics) return -1;
     // R4-T4 B2 fix (round-4 review): honour out->struct_size instead of a
@@ -112,7 +108,7 @@ RAW_FFI_EXPORT int32_t raw_last_timing_diagnostics(RawTimingDiagnostics* out) {
 // WP5: the SOLE writer of the thread-local diagnostics state below. It used
 // to share that duty with the allocating RAW C ABI entry, which is deleted --
 // so the decode-into path (ceyx_decode_into_ffi.cpp) is now the only producer,
-// which is the intended end state, not an accident. Not RAW_FFI_EXPORT'd --
+// which is the intended end state, not an accident. Not CEYX_FFI_EXPORT'd --
 // internal, same-binary call only (see raw_ffi_api.h).
 void raw_record_decode_into_diagnostics(
     const RawDecodeDiagnostics* diag,
@@ -136,7 +132,7 @@ void raw_record_decode_into_diagnostics(
 
 // C4 (plan §6.4/§6.7): sole writer of the timing thread-local state, called
 // unconditionally (success or failure) from the decode-INTO entry point
-// alongside raw_record_decode_into_diagnostics. Not RAW_FFI_EXPORT'd --
+// alongside raw_record_decode_into_diagnostics. Not CEYX_FFI_EXPORT'd --
 // internal, same-binary call only (see raw_ffi_api.h).
 void raw_record_decode_timing_diagnostics(const RawTimingDiagnostics* timing) {
     if (!timing) return;
@@ -158,7 +154,7 @@ void raw_record_decode_timing_diagnostics(const RawTimingDiagnostics* timing) {
 // are null.
 // ---------------------------------------------------------------------------
 
-RAW_FFI_EXPORT int32_t ceyx_debug_zero_copy_capability_counters(
+CEYX_FFI_EXPORT int32_t ceyx_debug_zero_copy_capability_counters(
     int32_t* out_zero_copy_path_is_enabled,
     int32_t* out_capability_override_state,
     uint64_t* out_destination_wrap_count,
@@ -197,7 +193,7 @@ RAW_FFI_EXPORT int32_t ceyx_debug_zero_copy_capability_counters(
 // mem8 v3 T12 (Y5) — the Stage-4 RGBA8 destination-scratch probe. A forward to
 // the pipeline's accessors; the accounting itself lives at the sole writer.
 // ---------------------------------------------------------------------------
-RAW_FFI_EXPORT int32_t ceyx_debug_stage4_rgba_scratch_counters(
+CEYX_FFI_EXPORT int32_t ceyx_debug_stage4_rgba_scratch_counters(
     uint64_t* out_last_decode_bytes, uint64_t* out_high_water_bytes) {
     if (!out_last_decode_bytes && !out_high_water_bytes) return -1;
     if (out_last_decode_bytes) {
@@ -218,7 +214,7 @@ RAW_FFI_EXPORT int32_t ceyx_debug_stage4_rgba_scratch_counters(
 // chroma_extent (ceil, not truncation) — the odd-dimension case is exactly
 // where a naive w/2 under-allocates, which is a heap overrun, not a miscount.
 // ---------------------------------------------------------------------------
-RAW_FFI_EXPORT int64_t ceyx_output_format_byte_count(int32_t output_format,
+CEYX_FFI_EXPORT int64_t ceyx_output_format_byte_count(int32_t output_format,
                                                       int32_t width,
                                                       int32_t height) {
     return ceyx::output_format_byte_count(output_format, width, height);
@@ -241,7 +237,7 @@ RAW_FFI_EXPORT int64_t ceyx_output_format_byte_count(int32_t output_format,
 // upsampler here would make a decode->upconvert round trip disagree with the
 // oracle by more than rounding, which is exactly the bound Y4/Y7 assert on.
 // ---------------------------------------------------------------------------
-RAW_FFI_EXPORT int32_t ceyx_yuv420_to_rgba8(const uint8_t *src,
+CEYX_FFI_EXPORT int32_t ceyx_yuv420_to_rgba8(const uint8_t *src,
                                              size_t src_capacity, uint8_t *dst,
                                              size_t dst_capacity, int32_t width,
                                              int32_t height) {

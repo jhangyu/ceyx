@@ -21,11 +21,7 @@
 // ceyx_debug_persistent_device_arena_counters below.
 #include "raw_persistent_device_arena.h"
 
-#if defined(_WIN32)
-#define FFI_EXPORT __declspec(dllexport)
-#else
-#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+#include "ceyx_ffi_export.h"
 
 // ---------------------------------------------------------------------------
 // W7 (M-11): rgb_to_rgba_neon RETIRED. WP1 phase 3: pipeline.rgba_ptr is
@@ -66,7 +62,7 @@ inline void dngAutoSaveVkPipelineCache() {
 
 extern "C" {
 
-FFI_EXPORT int32_t dng_decoder_set_pipeline_cache_path(const char *path) {
+CEYX_FFI_EXPORT int32_t dng_decoder_set_pipeline_cache_path(const char *path) {
 #if defined(__ANDROID__)
   if (&dng_vk_pipeline_cache_set_path != nullptr) {
     return static_cast<int32_t>(dng_vk_pipeline_cache_set_path(path));
@@ -77,7 +73,7 @@ FFI_EXPORT int32_t dng_decoder_set_pipeline_cache_path(const char *path) {
   return -1;  // unsupported on this build
 }
 
-FFI_EXPORT int32_t dng_decoder_save_pipeline_cache(void) {
+CEYX_FFI_EXPORT int32_t dng_decoder_save_pipeline_cache(void) {
 #if defined(__ANDROID__)
   if (&dng_vk_pipeline_cache_save != nullptr) {
     return dng_vk_pipeline_cache_save() == 0 ? 0 : -2;
@@ -86,7 +82,7 @@ FFI_EXPORT int32_t dng_decoder_save_pipeline_cache(void) {
   return -1;  // unsupported on this build
 }
 
-FFI_EXPORT int32_t dng_decoder_pipeline_cache_status(void) {
+CEYX_FFI_EXPORT int32_t dng_decoder_pipeline_cache_status(void) {
 #if defined(__ANDROID__)
   if (&dng_vk_pipeline_cache_status != nullptr) {
     return static_cast<int32_t>(dng_vk_pipeline_cache_status());
@@ -100,7 +96,7 @@ FFI_EXPORT int32_t dng_decoder_pipeline_cache_status(void) {
 // Callers use ceyx_decode_into_buffer (ceyx_decode_into.h), which writes into a
 // buffer the caller owns.
 
-FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
+CEYX_FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
   if (width <= 0 || height <= 0) {
     return -1;
   }
@@ -111,7 +107,7 @@ FFI_EXPORT int32_t dng_decoder_warmup_for_size(int32_t width, int32_t height) {
   return rc;
 }
 
-FFI_EXPORT int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffer,
+CEYX_FFI_EXPORT int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffer,
                                       int *outSize) {
   if (!filePath || !outBuffer || !outSize)
     return 5; // INVALID_ARGUMENT
@@ -155,12 +151,12 @@ FFI_EXPORT int dng_extract_preview_jpeg(const char *filePath, uint8_t **outBuffe
   }
 }
 
-FFI_EXPORT void dng_free_buffer(uint8_t *buffer) {
+CEYX_FFI_EXPORT void dng_free_buffer(uint8_t *buffer) {
   if (buffer)
     delete[] buffer;
 }
 
-FFI_EXPORT void dng_free_result(DngResult *result) {
+CEYX_FFI_EXPORT void dng_free_result(DngResult *result) {
   if (!result)
     return;
   // WP5: frees ONLY the struct. It deliberately does NOT touch rgba_data.
@@ -202,7 +198,7 @@ FFI_EXPORT void dng_free_result(DngResult *result) {
 // reintroduces such a clamp, test_slot_config group (e) is what fails.
 // ---------------------------------------------------------------------------
 
-FFI_EXPORT int32_t dng_decode_configure_slots(int32_t requested) {
+CEYX_FFI_EXPORT int32_t dng_decode_configure_slots(int32_t requested) {
   const size_t kMax = PipelineConfig::kAbsoluteMaxDecodeSlots;
   size_t want = requested < 1 ? size_t{1} : static_cast<size_t>(requested);
   if (want > kMax) want = kMax;
@@ -210,12 +206,12 @@ FFI_EXPORT int32_t dng_decode_configure_slots(int32_t requested) {
   return static_cast<int32_t>(want);
 }
 
-FFI_EXPORT int32_t dng_decode_configured_slots(void) {
+CEYX_FFI_EXPORT int32_t dng_decode_configured_slots(void) {
   return static_cast<int32_t>(dng_decode_slot_count());
 }
 
 // ADVISORY ONLY. pixels <= 0 means "use the 61 MP default sizing frame".
-FFI_EXPORT int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels) {
+CEYX_FFI_EXPORT int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels) {
   const size_t px = pixels <= 0
                         ? PipelineConfig::kDecodeDefaultSizingPixels
                         : static_cast<size_t>(pixels);
@@ -223,7 +219,7 @@ FFI_EXPORT int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels) {
       PipelineConfig::decodeRecommendedSlotsForPixels(px));
 }
 
-FFI_EXPORT int64_t dng_decode_recommendation_class_pixels(int32_t index) {
+CEYX_FFI_EXPORT int64_t dng_decode_recommendation_class_pixels(int32_t index) {
   switch (index) {
   case 0:
     return static_cast<int64_t>(PipelineConfig::kDecodePixels24MP);
@@ -245,7 +241,7 @@ FFI_EXPORT int64_t dng_decode_recommendation_class_pixels(int32_t index) {
 // because zero uploads with zero hits means the cache never executed.
 // ---------------------------------------------------------------------------
 
-FFI_EXPORT int32_t ceyx_debug_render_parameter_cache_counters(
+CEYX_FFI_EXPORT int32_t ceyx_debug_render_parameter_cache_counters(
     uint64_t *out_uploads_performed, uint64_t *out_cache_hits) {
   if (!out_uploads_performed && !out_cache_hits) return -1;
   if (out_uploads_performed) {
@@ -270,7 +266,7 @@ FFI_EXPORT int32_t ceyx_debug_render_parameter_cache_counters(
 // then skipped; -1 only when all five are null.
 // ---------------------------------------------------------------------------
 
-FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
+CEYX_FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
     uint64_t *out_allocation_count, uint64_t *out_growth_reallocation_count,
     uint64_t *out_binding_count, uint64_t *out_resident_device_bytes,
     uint64_t *out_live_lane_count) {
@@ -316,7 +312,7 @@ FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
 // one copy of it to keep true.
 // ---------------------------------------------------------------------------
 
-FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
+CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
   // A negative floor is CLAMPED, not rejected: 0 is itself a legal floor
   // meaning "release every quiescent lane", so clamping lands on a defined
   // behaviour rather than inventing an error for an input that has an obvious
@@ -367,7 +363,7 @@ FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
 // null and is then skipped; -1 only when all four are null.
 // ---------------------------------------------------------------------------
 
-FFI_EXPORT int32_t ceyx_debug_dng_slot_residency_counters(
+CEYX_FFI_EXPORT int32_t ceyx_debug_dng_slot_residency_counters(
     uint64_t *out_committed_context_bytes, uint64_t *out_decommit_calls,
     uint64_t *out_contexts_decommitted, uint64_t *out_physical_slots) {
   if (!out_committed_context_bytes && !out_decommit_calls &&
@@ -413,7 +409,7 @@ FFI_EXPORT int32_t ceyx_debug_dng_slot_residency_counters(
 // skipped; -1 only when all six are null.
 // ---------------------------------------------------------------------------
 
-FFI_EXPORT int32_t ceyx_debug_arena_shrink_counters(
+CEYX_FFI_EXPORT int32_t ceyx_debug_arena_shrink_counters(
     uint64_t *out_shrink_calls, uint64_t *out_lanes_released,
     uint64_t *out_lanes_refused, uint64_t *out_bytes_released,
     uint64_t *out_resident_lane_count, uint64_t *out_volatile_device_bytes) {

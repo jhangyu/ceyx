@@ -40,11 +40,7 @@
 #include <cstdint>
 #include <cstddef>
 
-#if defined(_WIN32)
-#define CEYX_FFI_EXPORT __declspec(dllexport)
-#else
-#define CEYX_FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+#include "ceyx_ffi_export.h"
 
 #ifdef __cplusplus
 extern "C" {

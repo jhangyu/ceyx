@@ -43,7 +43,6 @@
         "CMAKE_BUILD_TYPE": "Release",
         "DNG_CROSS_BUILD": "ON",
         "DNG_PREBUILT_AOT_DIR": "${sourceDir}/build-android/host-generators/halide_generated",
-        "DNG_ENABLE_WARP_PRECOMPUTED_DIAG": "OFF",
         "DNG_DIAGNOSTIC_BUILD": "OFF"
       }
     },
