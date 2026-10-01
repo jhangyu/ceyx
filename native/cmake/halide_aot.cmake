@@ -404,3 +404,67 @@ if(DNG_HOST_GENERATORS_ONLY)
 endif()
 
 endif() # NOT DNG_CROSS_BUILD (AOT custom commands)
+
+# =============================================================================
+# T2 (2026-10-02 techdebt campaign): ONE declaration per AOT link family.
+#
+# Consumers: cmake/ffi.cmake (the shipped library's link list and
+# add_dependencies) and the statically linked test helpers in cmake/tests.cmake.
+#
+# Declared AFTER the `if(NOT DNG_CROSS_BUILD)` block on purpose: the *_LIBS
+# paths are exactly what a cross build links from DNG_PREBUILT_AOT_DIR, so they
+# must exist there too. The *_TARGETS names exist only when NOT
+# DNG_CROSS_BUILD; every consumer keeps its add_dependencies() under that
+# guard (or inside the host-only section), as before.
+#
+# Order inside each *_LIBS list IS the link order: static archive order decides
+# which duplicate symbol wins. Append; never sort.
+#
+# DNG_FUSED_BAYER_AOT_LIBS/_TARGETS deliberately stay inside the block above:
+# moving them out would make the Android cross test targets start linking the
+# fused archives, which is a link change, not a refactor.
+# =============================================================================
+set(DNG_PIPELINE_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
+set(DNG_PIPELINE_AOT_TARGETS
+    halide_runtime_target
+    dng_demosaic_aot_target
+    dng_demosaic_warp_aot_target
+    dng_warp_aot_target
+    dng_render_aot_target
+    dng_render_yuv420_aot_target
+    dng_opcode_polynomial_aot_target
+    dng_opcode_polynomial3_aot_target
+    raw_bayer_demosaic_aot_target
+    raw_bayer_fused_render_aot_target
+    raw_bayer_fused_render_yuv420_aot_target
+    raw_xtrans_demosaic_aot_target
+    raw_linear_rgb_normalize_aot_target)
+# Non-split Stage-4 family (macOS/Metal): the pre-average scaled kernel and its
+# yuv420 sibling, always linked together.
+set(DNG_STAGE4_NONSPLIT_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
+set(DNG_STAGE4_NONSPLIT_AOT_TARGETS
+    dng_render_scaled_preavg_aot_target
+    dng_render_scaled_preavg_yuv420_aot_target)
+# Split Stage-4 family (Vulkan): the three-channel-split kernel and its yuv420
+# sibling.
+set(DNG_STAGE4_SPLIT_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
+set(DNG_STAGE4_SPLIT_AOT_TARGETS
+    dng_render_android_aot_target
+    dng_render_split_yuv420_aot_target)

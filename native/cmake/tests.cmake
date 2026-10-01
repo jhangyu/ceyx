@@ -75,11 +75,8 @@ function(ceyx_link_pipeline_static target)
     # R2 sized decode: a target compiling dng_render_halide.cpp needs the
     # scaled kernel the sized dispatch calls (non-split branch only).
     if(NOT DNG_STAGE4_SPLIT_KERNEL)
-        target_link_libraries(${target}
-            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
-        add_dependencies(${target} dng_render_scaled_preavg_aot_target)
-        add_dependencies(${target} dng_render_scaled_preavg_yuv420_aot_target)
+        target_link_libraries(${target} ${DNG_STAGE4_NONSPLIT_AOT_LIBS})
+        add_dependencies(${target} ${DNG_STAGE4_NONSPLIT_AOT_TARGETS})
     endif()
     add_dependencies(${target} halide_runtime_target)
     add_dependencies(${target} dng_demosaic_aot_target)
@@ -102,15 +99,8 @@ function(ceyx_link_pipeline_static target)
     # dng_render_stage4_split(), so split-kernel builds link that pair here
     # too, mirroring ffi.cmake.
     if(DNG_STAGE4_SPLIT_KERNEL)
-        target_link_libraries(${target}
-            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-            ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
-        if(TARGET dng_render_android_aot_target)
-            add_dependencies(${target} dng_render_android_aot_target)
-        endif()
-        if(TARGET dng_render_split_yuv420_aot_target)
-            add_dependencies(${target} dng_render_split_yuv420_aot_target)
-        endif()
+        target_link_libraries(${target} ${DNG_STAGE4_SPLIT_AOT_LIBS})
+        add_dependencies(${target} ${DNG_STAGE4_SPLIT_AOT_TARGETS})
     endif()
     if(APPLE)
         target_link_libraries(${target} ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
@@ -133,8 +123,7 @@ function(ceyx_link_pipeline_static_android target)
         ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT}
+        ${DNG_STAGE4_SPLIT_AOT_LIBS}
         ${ARGN}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
         ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
@@ -1679,11 +1668,8 @@ else()
     target_link_libraries(test_stage4_oriented dng_sdk Halide::Halide ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 endif()
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_stage4_oriented
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
-    add_dependencies(test_stage4_oriented dng_render_scaled_preavg_aot_target)
-    add_dependencies(test_stage4_oriented dng_render_scaled_preavg_yuv420_aot_target)
+    target_link_libraries(test_stage4_oriented ${DNG_STAGE4_NONSPLIT_AOT_LIBS})
+    add_dependencies(test_stage4_oriented ${DNG_STAGE4_NONSPLIT_AOT_TARGETS})
 endif()
 add_dependencies(test_stage4_oriented halide_runtime_target)
 add_dependencies(test_stage4_oriented dng_demosaic_aot_target)
@@ -1922,8 +1908,7 @@ target_link_libraries(test_sized_decode
     ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT}
+    ${DNG_STAGE4_NONSPLIT_AOT_LIBS}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT})
 if(DNG_USE_LIBJPEG)
@@ -1934,8 +1919,7 @@ add_dependencies(test_sized_decode dng_demosaic_aot_target)
 add_dependencies(test_sized_decode dng_demosaic_warp_aot_target)
 add_dependencies(test_sized_decode dng_warp_aot_target)
 add_dependencies(test_sized_decode dng_render_aot_target)
-add_dependencies(test_sized_decode dng_render_scaled_preavg_aot_target)
-add_dependencies(test_sized_decode dng_render_scaled_preavg_yuv420_aot_target)
+add_dependencies(test_sized_decode ${DNG_STAGE4_NONSPLIT_AOT_TARGETS})
 add_dependencies(test_sized_decode dng_opcode_polynomial_aot_target)
 add_dependencies(test_sized_decode dng_opcode_polynomial3_aot_target)
 # T20-fix F1: see the test_device_handoff block above.
@@ -1953,15 +1937,8 @@ endif()
 # F-T4-1: tests/test_sized_decode.cpp #includes dng_render_halide.cpp (see the
 # add_executable note above), so the split archive is required here too.
 if(DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(test_sized_decode
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
-    if(TARGET dng_render_android_aot_target)
-        add_dependencies(test_sized_decode dng_render_android_aot_target)
-    endif()
-    if(TARGET dng_render_split_yuv420_aot_target)
-        add_dependencies(test_sized_decode dng_render_split_yuv420_aot_target)
-    endif()
+    target_link_libraries(test_sized_decode ${DNG_STAGE4_SPLIT_AOT_LIBS})
+    add_dependencies(test_sized_decode ${DNG_STAGE4_SPLIT_AOT_TARGETS})
 endif()
 if(APPLE)
     target_link_libraries(test_sized_decode ${COREFOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY} ${METAL_LIBRARY} ${FOUNDATION_LIBRARY})
