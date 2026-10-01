@@ -176,10 +176,14 @@ bool runRenderStage4HalideAot(const uint16_t* src,
                               // 2026-09-20, which retired T12.5's carve-out).
                               int32_t output_format = 0);
 
-// mem8 v3 T20 (fusion): the extra inputs the FUSED Bayer demosaic+render kernel
-// needs beyond the Stage-4 render parameters. Present => the fused entry is
-// dispatched and `stage3_device_buf` carries the CFA MOSAIC rather than a
-// Stage-3 RGB16 frame.
+// mem8 v3 T20 (fusion), widened 2026-10-02 to every 2-D CFA mosaic: the extra
+// inputs a FUSED demosaic+render kernel needs beyond the Stage-4 render
+// parameters. Present => a fused entry is dispatched and `stage3_device_buf`
+// carries the CFA MOSAIC rather than a Stage-3 RGB16 frame. `xtrans_cfa`
+// non-null selects the X-Trans kernel; null selects the Bayer kernel (which
+// reads red_x/red_y). One struct for both mosaic kinds keeps every mosaic
+// semantic (2-D source, crop-as-scalars, 2-D black tile, 2-D matrix shapes)
+// shared by construction.
 //
 // WHY THE MOSAIC IS PASSED WHOLE AND THE CROP TRAVELS SEPARATELY (load-bearing
 // for byte-identity): the two-stage path demosaics the FULL plane and only then
@@ -188,9 +192,10 @@ bool runRenderStage4HalideAot(const uint16_t* src,
 // boundary wrap there, and would also shift the CFA phase. So the kernel
 // receives the whole plane plus the crop origin, and clamps against the CROPPED
 // extents.
-struct FusedBayerSource {
-    int red_x = 0;              // CFA phase of the FULL plane, not of the crop
+struct FusedMosaicSource {
+    int red_x = 0;              // Bayer CFA phase of the FULL plane (ignored when xtrans_cfa is set)
     int red_y = 0;
+    const int32_t* xtrans_cfa = nullptr;   // 36 entries row-major, values {0,1,2}; non-null => X-Trans
     const float* black_values = nullptr;   // black repeat tile, row-major
     int black_width = 1;
     int black_height = 1;
@@ -256,7 +261,7 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         // and which inputs it takes.
                                         // nullptr keeps every existing caller
                                         // bit-identical.
-                                        const FusedBayerSource* fused_bayer_source =
+                                        const FusedMosaicSource* fused_mosaic_source =
                                             nullptr,
                                         // mem8 v3 T12: a CeyxOutputFormat value
                                         // (raw_ffi_api.h) -- 0 = rgba8 (today's
