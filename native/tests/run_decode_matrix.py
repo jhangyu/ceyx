@@ -324,6 +324,26 @@ def _record_skip(name: str, reason: str, *, declared: bool = False) -> None:
     print(f"[MATRIX] {name} -> SKIP reason={reason}{suffix}")
 
 
+def _summary_and_exit_code(executed: int, failed: int) -> int:
+    """Print the DECLARED line (if any) and the one [MATRIX SUMMARY] line,
+    then return the repo-wide exit code: 1 failed, 2 incomplete, 0 complete."""
+    declared = [record for record in _SKIP_RECORDS if record.declared]
+    undeclared = [record for record in _SKIP_RECORDS if not record.declared]
+    if declared:
+        print(f"[MATRIX DECLARED] count={len(declared)} cases="
+              + ",".join(record.name for record in declared))
+    line = (f"[MATRIX SUMMARY] executed={executed} skipped={len(undeclared)} "
+            f"failed={failed}")
+    if undeclared:
+        line += " skipped_cases=" + ",".join(record.name for record in undeclared)
+    print(line, flush=True)
+    if failed:
+        return 1
+    if undeclared or executed == 0:
+        return 2
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -3042,6 +3062,7 @@ def main() -> int:
             )
         else:
             print(f"[SKIP] Android binary not found; skipping Android: {default_android_bin}")
+            _record_skip("android", "android-binary-absent", declared=True)
 
     # `--platform all` (default) is a best-effort "test whatever is
     # available" mode: if the Android binary exists but no ADB device is
@@ -3051,6 +3072,7 @@ def main() -> int:
     # (via _resolve_serial / ap.error) when no device is available.
     if args.platform == "all" and android_enabled and not _adb_device_attached(args.adb):
         print("[SKIP] no ADB device attached; skipping Android cases")
+        _record_skip("android", "no-adb-device", declared=True)
         android_enabled = False
 
     # Validate macOS binary only when macOS testing is enabled
@@ -3295,6 +3317,7 @@ def main() -> int:
                 raise SystemExit(1)
         else:
             print(f"[SKIP] Vulkan capability probe binary not found; skipping probe: {probe_bin}")
+            _record_skip("android-vulkan-probe", "binary-not-built", declared=True)
 
         # Build and run Android cases
         remote_lossless = f"{args.android_remote_dir}/samples/{Path(lossless).name}"
@@ -3308,6 +3331,7 @@ def main() -> int:
         )
         if not args.android_include_lossy:
             print("[SKIP] Android lossy DNG case skipped (JPEG decode is disabled in current Android SDK build)")
+            _record_skip("android-lossy", "jpeg-decode-disabled", declared=True)
 
         for case_name, baseline_args, test_args, baseline_env, test_env in android_cases:
             android_runs: list[RunResult] = []
@@ -3348,6 +3372,7 @@ def main() -> int:
             and not default_android_ffi_bin.exists()
         ):
             print(f"[SKIP] Android FFI harness binary not found; skipping: {default_android_ffi_bin}")
+            _record_skip("android-ffi", "binary-not-built", declared=True)
             args.android_ffi_harness = ""
 
         if args.android_ffi_harness:
@@ -3402,6 +3427,7 @@ def main() -> int:
                 "[SKIP] Android device handoff harness binary not found "
                 f"(no CMake cross-compile target yet); skipping: {default_android_handoff_bin}"
             )
+            _record_skip("android-device-handoff", "binary-not-built", declared=True)
             args.android_device_handoff_harness = ""
 
         if args.android_device_handoff_harness:
@@ -3434,6 +3460,8 @@ def main() -> int:
         args.device_handoff_harness = _DEFAULT_DEVICE_HANDOFF_HARNESS
     if args.no_device_handoff_harness:
         args.device_handoff_harness = ""
+        if macos_enabled:
+            _record_skip("device-handoff", "opted-out")
     default_handoff_bin = (root / args.device_handoff_harness).resolve() if args.device_handoff_harness else None
     if (
         macos_enabled
@@ -3443,6 +3471,7 @@ def main() -> int:
         and not default_handoff_bin.exists()
     ):
         print(f"[SKIP] Device handoff harness binary not found; skipping: {default_handoff_bin}")
+        _record_skip("device-handoff", "binary-not-built")
         args.device_handoff_harness = ""
 
     requested_ffi_harness = args.ffi_harness
@@ -3450,6 +3479,8 @@ def main() -> int:
         args.ffi_harness = _DEFAULT_FFI_HARNESS
     if args.no_ffi_harness:
         args.ffi_harness = ""
+        if macos_enabled:
+            _record_skip("ffi-dng", "opted-out")
     default_ffi_bin = (root / args.ffi_harness).resolve() if args.ffi_harness else None
     if (
         macos_enabled
@@ -3459,6 +3490,7 @@ def main() -> int:
         and not default_ffi_bin.exists()
     ):
         print(f"[SKIP] FFI harness binary not found; skipping: {default_ffi_bin}")
+        _record_skip("ffi-dng", "binary-not-built")
         args.ffi_harness = ""
     # N-5 (round-2.5 review follow-up): the generic message above covers the
     # DNG FFI cases; the RAW-route case shares the same harness binary but is
@@ -3466,6 +3498,7 @@ def main() -> int:
     # skip line rather than being silently folded into the DNG message.
     if macos_enabled and not args.ffi_harness and not args.no_raw_ffi_case:
         print("[SKIP] Generic RAW / FFI: harness binary not found")
+        _record_skip("ffi-raw", "ffi-harness-unavailable")
 
     # handoff_results is initialized above (before the Android block) so
     # Android device-handoff results collected there survive into this
@@ -3554,6 +3587,7 @@ def main() -> int:
                 if requested_raw_ffi_sample:
                     ap.error(f"RAW FFI sample not found: {raw_ffi_sample}")
                 print(f"[SKIP] RAW FFI sample not present; skipping generic-RAW FFI case: {raw_ffi_sample}")
+                _record_skip("ffi-raw", "sample-absent")
             else:
                 raw_ffi_env = {**ffi_env, "CEYX_RAW_TIMING_LOG": "1"}
                 raw_ffi_artifact_dir = matrix_current / "raw_ffi"
@@ -3597,6 +3631,15 @@ def main() -> int:
                         )
                         raise SystemExit(1)
                 ffi_results.append(FfiAggResult(sample_name=raw_sample_name, runs=raw_runs))
+                if raw_runs and all(run.rgb_match_skipped for run in raw_runs):
+                    # Declared: no staged Halide test-render baseline exists for
+                    # the RAW route by design (_stage_ffi_test_render is
+                    # DNG-only). The case executed and its contract passed;
+                    # only this sub-check has nothing to compare against.
+                    _record_skip("ffi-raw-rgb-match", "no-raw-baseline-by-design",
+                                 declared=True)
+        else:
+            _record_skip("ffi-raw", "opted-out")
 
     # --- CFA phase gates (2026-08-16) ---
     # Same auto-enable pattern as the FFI / handoff harnesses: run when the
@@ -3608,12 +3651,14 @@ def main() -> int:
             args.cfa_phase_harness = _DEFAULT_CFA_PHASE_BIN
         if args.no_cfa_phase_harness:
             args.cfa_phase_harness = ""
+            _record_skip("cfa-phase", "opted-out")
         if args.cfa_phase_harness:
             cfa_phase_bin = (root / args.cfa_phase_harness).resolve()
             if not cfa_phase_bin.exists():
                 if requested_cfa_phase:
                     ap.error(f"CFA phase harness not found: {cfa_phase_bin}")
                 print(f"[SKIP] CFA phase harness not built; skipping: {cfa_phase_bin}")
+                _record_skip("cfa-phase", "binary-not-built")
                 cfa_results.append(CfaCheckResult(
                     name="CFA phase (RGGB/BGGR/GRBG/GBRG)",
                     status="SKIP",
@@ -3636,6 +3681,7 @@ def main() -> int:
                 if requested_cfa_color:
                     ap.error(f"CFA color harness not found: {cfa_color_bin}")
                 print(f"[SKIP] CFA color harness not built; skipping BGGR case: {cfa_color_bin}")
+                _record_skip("cfa-color-bggr", "binary-not-built")
                 cfa_results.append(CfaCheckResult(
                     name="CFA color / BGGR",
                     status="SKIP",
@@ -3645,6 +3691,7 @@ def main() -> int:
                 if requested_bggr:
                     ap.error(f"BGGR sample not found: {bggr_sample}")
                 print(f"[SKIP] BGGR sample not present; skipping color gate: {bggr_sample}")
+                _record_skip("cfa-color-bggr", "sample-absent")
                 cfa_results.append(CfaCheckResult(
                     name="CFA color / BGGR",
                     status="SKIP",
@@ -3654,6 +3701,8 @@ def main() -> int:
                 cfa_results.append(_run_cfa_color_case(
                     root, cfa_color_bin, bggr_sample, args.bggr_min_b_minus_r
                 ))
+        else:
+            _record_skip("cfa-color-bggr", "opted-out")
 
         # R2 sized decode gate. Same auto-enable/SKIP contract as the harnesses
         # above: a gate nobody knows to invoke is a gate that silently stops
@@ -3667,6 +3716,7 @@ def main() -> int:
                 if requested_sized:
                     ap.error(f"Sized decode harness not found: {sized_bin}")
                 print(f"[SKIP] Sized decode harness not built; skipping: {sized_bin}")
+                _record_skip("sized-decode", "binary-not-built")
                 cfa_results.append(CfaCheckResult(
                     name="Sized decode (AC5 / AC5-D / AC6)",
                     status="SKIP",
@@ -3676,6 +3726,8 @@ def main() -> int:
                 cfa_results.append(
                     _run_sized_decode_case(root, sized_bin, lossless)
                 )
+        else:
+            _record_skip("sized-decode", "opted-out")
 
         # Stage4 oriented gate (G-A). Same auto-enable/SKIP contract as the
         # harnesses above: a gate nobody knows to invoke is a gate that
@@ -3691,6 +3743,7 @@ def main() -> int:
                 if requested_stage4_oriented:
                     ap.error(f"Stage4 oriented harness not found: {stage4_oriented_bin}")
                 print(f"[SKIP] Stage4 oriented harness not built; skipping: {stage4_oriented_bin}")
+                _record_skip("stage4-oriented", "binary-not-built")
                 cfa_results.append(CfaCheckResult(
                     name="Stage4 oriented (G-A)",
                     status="SKIP",
@@ -3700,6 +3753,8 @@ def main() -> int:
                 cfa_results.append(
                     _run_stage4_oriented_case(root, stage4_oriented_bin, lossless, args.repeat)
                 )
+        else:
+            _record_skip("stage4-oriented", "opted-out")
 
         # S-3: ABI layout gate. Same auto-enable/SKIP contract as the harnesses
         # above: a gate nobody knows to invoke is a gate that silently stops
@@ -3713,6 +3768,7 @@ def main() -> int:
                 if requested_abi_layout:
                     ap.error(f"ABI layout harness not found: {abi_layout_bin}")
                 print(f"[SKIP] ABI layout harness not built; skipping: {abi_layout_bin}")
+                _record_skip("abi-layout", "binary-not-built")
                 cfa_results.append(CfaCheckResult(
                     name="ABI layout (DngResult/CeyxStillResult/CeyxEncodeOptions/HeifResult)",
                     status="SKIP",
@@ -3720,6 +3776,8 @@ def main() -> int:
                 ))
             else:
                 cfa_results.append(_run_abi_layout_case(root, abi_layout_bin))
+        else:
+            _record_skip("abi-layout", "opted-out")
 
         # S-2: orient symbol-absence gate. Same auto-enable/SKIP contract.
         requested_orient_symbol_gate = bool(args.orient_symbol_absence_gate)
@@ -3731,6 +3789,7 @@ def main() -> int:
                 if requested_orient_symbol_gate:
                     ap.error(f"Production dylib not found: {orient_dylib}")
                 print(f"[SKIP] Production dylib not built; skipping orient symbol-absence gate: {orient_dylib}")
+                _record_skip("orient-symbol-absence", "binary-not-built")
                 cfa_results.append(CfaCheckResult(
                     name="Orient symbol absence (ceyx_orient_rgba not in production dylib)",
                     status="SKIP",
@@ -3741,6 +3800,8 @@ def main() -> int:
                 cfa_results.append(
                     _run_orient_symbol_absence_case(root, orient_dylib, nm_out_path)
                 )
+        else:
+            _record_skip("orient-symbol-absence", "opted-out")
 
     if any(c.status == "FAIL" for c in cfa_results):
         gate_failed = True
@@ -3778,14 +3839,23 @@ def main() -> int:
     for c in cfa_results:
         print(f"[CFA GATE] {c.name}: {c.status} — {c.detail}")
 
-    if gate_failed or not sha_ok:
-        if gate_failed:
-            print("[MATRIX PSNR GATE] FAIL — one or more cases below threshold")
-        if not sha_ok:
-            print("[SHA256 GATE] FAIL — one or more artifacts do not match manifest")
-        return 1
+    if gate_failed:
+        print("[MATRIX PSNR GATE] FAIL — one or more cases below threshold")
+    if not sha_ok:
+        print("[SHA256 GATE] FAIL — one or more artifacts do not match manifest")
 
-    return 0
+    executed = (
+        len(agg_results) + len(android_agg_results)
+        + len(ffi_results) + len(android_ffi_agg_results)
+        + sum(1 for result in handoff_results if result.status != "SKIP")
+        + sum(1 for check in cfa_results if check.status != "SKIP")
+    )
+    failed = sum(1 for check in cfa_results if check.status == "FAIL")
+    if gate_failed and failed == 0:
+        failed = 1  # PSNR gate failure (the PSNR loop tracks a flag, not a count)
+    if not sha_ok:
+        failed += 1
+    return _summary_and_exit_code(executed, failed)
 
 
 if __name__ == "__main__":
