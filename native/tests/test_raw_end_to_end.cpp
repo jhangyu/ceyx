@@ -29,6 +29,7 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_test_support.h"
+#include "test_report.h"
 
 // Defined in src/pipeline/libraw_gpu_input_adapter.cpp, reached here through
 // libdng_decoder_native. Not in libraw_gpu_input_adapter.h because that header is
@@ -38,13 +39,11 @@ extern "C" void raw_pcs_white(float out3[3]);
 
 namespace {
 
-int failures = 0;
 int checked = 0;
 
 void report(const char* name, const char* id, bool ok, const char* detail) {
-    std::printf("[RawE2E] %s%s%s %s -> %s\n", id ? id : "", id ? " " : "",
-                name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    const std::string full_name = id ? std::string(id) + " " + name : std::string(name);
+    test_report::report("RawE2E", full_name.c_str(), ok, detail);
 }
 
 using Sample = raw_test_support::RawManifestSample;
@@ -579,12 +578,11 @@ int main(int argc, char** argv) {
         // still sends them to the DNG SDK route. Driving them through the
         // generic-route expectations below would assert a contradiction.
         if (s.expect_route == "frontend_only") {
-            std::printf("[RawE2E] SKIP %s (frontend_only, not a router corpus sample)\n",
-                        s.id.c_str());
+            test_report::reportSkip("RawE2E", s.id.c_str(), "frontend-only-sample");
             continue;
         }
         if (!fileExists(s.path)) {
-            std::printf("[RawE2E] SKIP %s (missing file)\n", s.id.c_str());
+            test_report::reportSkip("RawE2E", s.id.c_str(), "missing-file");
             continue;
         }
 
@@ -822,8 +820,7 @@ int main(int argc, char** argv) {
                    forced.diag.unpack_backend == kRawDecoderBackendLibRawNative,
                detail);
     } else {
-        std::printf("[RawE2E] SKIP xtrans-forced-fallback (no X-Trans sample "
-                    "file present)\n");
+        test_report::reportSkip("RawE2E", "xtrans-forced-fallback", "no-xtrans-sample");
     }
 
     // Every non-production class must route to kRawErrLayoutUnsupported, and
@@ -1242,8 +1239,7 @@ int main(int argc, char** argv) {
                    rc == kRawErrLayoutUnsupported && out.rgba_ptr == nullptr, detail);
         }
     } else {
-        std::printf("[RawE2E] SKIP bad-cfa-explicit-failure (no X-Trans sample "
-                    "file present)\n");
+        test_report::reportSkip("RawE2E", "bad-cfa-explicit-failure", "no-xtrans-sample");
     }
 
     // The Bayer route must not have moved a single byte. The per-sample `hash`
@@ -1253,8 +1249,7 @@ int main(int argc, char** argv) {
         std::snprintf(detail, sizeof(detail), "compared=%d all_match=%d",
                       bayer_hash_compared, bayer_hash_all_match ? 1 : 0);
         if (bayer_hash_compared == 0) {
-            std::printf("[RawE2E] SKIP bayer-unchanged (%s: no Bayer sample "
-                        "with a recorded baseline was present)\n", detail);
+            test_report::reportSkip("RawE2E", "bayer-unchanged", "no-baselined-bayer-sample", detail);
         } else {
             report("bayer-unchanged", nullptr, bayer_hash_all_match, detail);
         }
@@ -1262,8 +1257,7 @@ int main(int argc, char** argv) {
         std::snprintf(detail, sizeof(detail), "compared=%d all_match=%d",
                       xtrans_hash_compared, xtrans_hash_all_match ? 1 : 0);
         if (xtrans_hash_compared == 0) {
-            std::printf("[RawE2E] SKIP xtrans-unchanged (%s: no X-Trans sample "
-                        "with a recorded baseline was present)\n", detail);
+            test_report::reportSkip("RawE2E", "xtrans-unchanged", "no-baselined-xtrans-sample", detail);
         } else {
             report("xtrans-unchanged", nullptr, xtrans_hash_all_match, detail);
         }
@@ -1271,9 +1265,7 @@ int main(int argc, char** argv) {
         std::snprintf(detail, sizeof(detail), "compared=%d all_match=%d",
                       linear_hash_compared, linear_hash_all_match ? 1 : 0);
         if (linear_hash_compared == 0) {
-            std::printf("[RawE2E] SKIP linear-rgb-unchanged (%s: no Foveon "
-                        "sample with a recorded baseline was present)\n",
-                        detail);
+            test_report::reportSkip("RawE2E", "linear-rgb-unchanged", "no-baselined-foveon-sample", detail);
         } else {
             report("linear-rgb-unchanged", nullptr, linear_hash_all_match,
                    detail);
@@ -1287,8 +1279,7 @@ int main(int argc, char** argv) {
     for (const Sample& s : samples) {
         if (s.expect_layout != "xtrans6x6" || s.expect_error != "kRawSuccess") continue;
         if (!fileExists(s.path.c_str())) {
-            std::printf("[RawE2E] SKIP xtrans-cross-backend %s (missing file)\n",
-                        s.id.c_str());
+            test_report::reportSkip("RawE2E", ("xtrans-cross-backend " + s.id).c_str(), "missing-file");
             continue;
         }
 
@@ -1314,10 +1305,12 @@ int main(int argc, char** argv) {
             // Not a pass. A body RawSpeed3 declines is a legitimate outcome,
             // but it is named, with its error code, so it can never be read
             // as a green cell.
-            std::printf("[RawE2E] SKIP xtrans-cross-backend %s (%s rs=%s nat=%s)\n",
-                        s.id.c_str(),
-                        rs_rc != kRawSuccess ? "rawspeed3 declined" : "native failed",
-                        raw_error_name(rs_rc), raw_error_name(nat_rc));
+            char skip_detail[160];
+            std::snprintf(skip_detail, sizeof(skip_detail), "rs=%s nat=%s",
+                          raw_error_name(rs_rc), raw_error_name(nat_rc));
+            test_report::reportSkip("RawE2E", ("xtrans-cross-backend " + s.id).c_str(),
+                                    rs_rc != kRawSuccess ? "rawspeed3-declined" : "native-failed",
+                                    skip_detail);
             continue;
         }
 
@@ -1333,11 +1326,13 @@ int main(int argc, char** argv) {
         // libraw_frontend.cpp:184-189) are the only way to see which decoder
         // actually produced the pixels; check it before trusting the comparison.
         if (rs.diag.unpack_backend != kRawDecoderBackendRawSpeed3) {
-            std::printf("[RawE2E] SKIP xtrans-cross-backend %s (rawspeed3 declined: "
-                        "forced kRawSpeed3 request silently fell back to %s inside "
-                        "unpack(), warnings=0x%08x)\n",
-                        s.id.c_str(), raw_backend_name(rs.diag.unpack_backend),
-                        rs.diag.rawspeed_warning_bits);
+            char skip_detail[200];
+            std::snprintf(skip_detail, sizeof(skip_detail),
+                          "forced kRawSpeed3 request silently fell back to %s inside unpack(), warnings=0x%08x",
+                          raw_backend_name(rs.diag.unpack_backend),
+                          rs.diag.rawspeed_warning_bits);
+            test_report::reportSkip("RawE2E", ("xtrans-cross-backend " + s.id).c_str(),
+                                    "rawspeed3-declined", skip_detail);
             continue;
         }
 
@@ -1477,7 +1472,7 @@ int main(int argc, char** argv) {
         };
         for (const auto& t : kPins) {
             if (!fileExists(t.path)) {
-                std::printf("[RawE2E] SKIP midgray_pins %s (missing file)\n", t.id);
+                test_report::reportSkip("RawE2E", (std::string("midgray_pins ") + t.id).c_str(), "missing-file");
                 continue;
             }
             RawDevelopParams develop{};
@@ -1568,7 +1563,7 @@ int main(int argc, char** argv) {
     {
         const char* path = "image_samples/raw_corpus/sigma_sd_quattro_h_19.x3f";
         if (!fileExists(path)) {
-            std::printf("[RawE2E] SKIP synthetic_underexposure_recovers (missing file)\n");
+            test_report::reportSkip("RawE2E", "synthetic_underexposure_recovers", "missing-file");
         } else {
             RawDevelopParams baseline_develop{};
             baseline_develop.tone_curve_strength = 1.0f;
@@ -1712,13 +1707,7 @@ int main(int argc, char** argv) {
     }
 
     if (checked == 0) {
-        std::printf("[RawE2E] FAIL no corpus files were present\n");
-        return 1;
+        report("corpus-present", nullptr, false, "no corpus files were present");
     }
-    if (failures != 0) {
-        std::printf("[RawE2E] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawE2E] ALL PASS\n");
-    return 0;
+    return test_report::finish("RawE2E");
 }

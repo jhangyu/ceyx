@@ -17,6 +17,7 @@
 #include "libraw_gpu_input_adapter.h"
 #include "raw_contract_validate.h"
 #include "raw_test_support.h"
+#include "test_report.h"
 
 // Declared in src/pipeline/libraw_gpu_input_adapter.cpp (this test compiles that
 // TU directly, cmake/tests.cmake:746-752). They are NOT in
@@ -44,13 +45,11 @@ void raw_white_balance_from_libraw(const float* cam_mul, const float* pre_mul,
 
 namespace {
 
-int failures = 0;
 int checked = 0;
 
 void report(const char* name, const char* id, bool ok, const char* detail) {
-    std::printf("[LibRawAdapter] %s%s%s %s -> %s\n", id ? id : "", id ? " " : "",
-                name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    const std::string full_name = id ? std::string(id) + " " + name : std::string(name);
+    test_report::report("LibRawAdapter", full_name.c_str(), ok, detail);
 }
 
 using Sample = raw_test_support::RawManifestSample;
@@ -72,7 +71,7 @@ std::vector<Sample> loadManifest(const char* path) {
 void dumpRouteCensus(const std::vector<Sample>& samples) {
     for (const Sample& s : samples) {
         if (!fileExists(s.path)) {
-            std::printf("[RouteCensus] %s SKIP-missing-file\n", s.id.c_str());
+            test_report::reportSkip("RouteCensus", s.id.c_str(), "missing-file");
             continue;
         }
         LibRawFrontendContext ctx;
@@ -464,7 +463,7 @@ void checkMatrixInverse() {
 void checkPcsWhiteInvariant(const char* id, const RawColorTransform& xf,
                             const char* route_label) {
     if (!xf.valid) {
-        std::printf("[LibRawAdapter] SKIP pcs-white-invariant %s (no matrix)\n", id);
+        test_report::reportSkip("LibRawAdapter", (std::string("pcs-white-invariant ") + id).c_str(), "no-matrix");
         return;
     }
     float want[3];
@@ -762,7 +761,7 @@ int main(int argc, char** argv) {
     for (const Sample& s : samples) {
         if (s.id.rfind("malformed_", 0) == 0) continue;
         if (!fileExists(s.path)) {
-            std::printf("[LibRawAdapter] SKIP %s (missing file)\n", s.id.c_str());
+            test_report::reportSkip("LibRawAdapter", s.id.c_str(), "missing-file");
             continue;
         }
 
@@ -894,9 +893,8 @@ int main(int argc, char** argv) {
         const RawDecoderBackend rs_b = rs_ctx.diagnostics().unpack_backend;
         const RawDecoderBackend nat_b = nat_ctx.diagnostics().unpack_backend;
         if (rs_b == nat_b) {
-            std::printf("[LibRawAdapter] SKIP backend-invariant %s "
-                        "(both forced contexts decoded with %s)\n",
-                        bayer_ids[i].c_str(), raw_backend_name(rs_b));
+            test_report::reportSkip("LibRawAdapter", ("backend-invariant " + bayer_ids[i]).c_str(),
+                                    "same-backend-both-contexts", raw_backend_name(rs_b));
             continue;
         }
 
@@ -919,8 +917,7 @@ int main(int argc, char** argv) {
         invariance_done = true;
     }
     if (!invariance_done) {
-        std::printf("[LibRawAdapter] SKIP backend-invariant "
-                    "(no Bayer sample decoded by two different backends)\n");
+        test_report::reportSkip("LibRawAdapter", "backend-invariant", "no-two-backend-bayer-sample");
     }
 
     {
@@ -1029,8 +1026,7 @@ int main(int argc, char** argv) {
             any_cfa_checked = true;
         }
         if (!any_cfa_checked) {
-            std::printf("[LibRawAdapter] SKIP component-black-zero-for-cfa "
-                        "(no CFA sample built successfully)\n");
+            test_report::reportSkip("LibRawAdapter", "component-black-zero-for-cfa", "no-cfa-sample-built");
         }
     }
 
@@ -1050,8 +1046,7 @@ int main(int argc, char** argv) {
     };
     for (const FormatCase& fc : format_cases) {
         if (fc.paths->empty()) {
-            std::printf("[LibRawAdapter] SKIP auto-ev-populated-%s (no %s sample built)\n",
-                        fc.label, fc.label);
+            test_report::reportSkip("LibRawAdapter", (std::string("auto-ev-populated-") + fc.label).c_str(), "no-sample-built");
             continue;
         }
         const std::string& path = fc.paths->front();
@@ -1118,13 +1113,7 @@ int main(int argc, char** argv) {
     }
 
     if (checked == 0) {
-        std::printf("[LibRawAdapter] FAIL no corpus files were present\n");
-        return 1;
+        report("corpus-present", nullptr, false, "no corpus files were present");
     }
-    if (failures != 0) {
-        std::printf("[LibRawAdapter] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[LibRawAdapter] ALL PASS\n");
-    return 0;
+    return test_report::finish("LibRawAdapter");
 }

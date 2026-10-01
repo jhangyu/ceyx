@@ -11,16 +11,15 @@
 
 #include "libraw_frontend.h"
 #include "raw_test_support.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
 int checked = 0;
 
 void report(const char* name, const char* id, bool ok, const char* detail) {
-    std::printf("[LibRawFrontend] %s%s%s %s -> %s\n", id ? id : "", id ? " " : "",
-                name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    const std::string full_name = id ? std::string(id) + " " + name : std::string(name);
+    test_report::report("LibRawFrontend", full_name.c_str(), ok, detail);
 }
 
 using Sample = raw_test_support::RawManifestSample;
@@ -138,7 +137,7 @@ int main(int argc, char** argv) {
     std::string first_bayer;
     for (const Sample& s : samples) {
         if (!fileExists(s.path)) {
-            std::printf("[LibRawFrontend] SKIP %s (missing file)\n", s.id.c_str());
+            test_report::reportSkip("LibRawFrontend", s.id.c_str(), "missing-file");
             continue;
         }
         if (s.id.rfind("malformed_", 0) == 0) continue;  // Task 13 owns these
@@ -222,8 +221,8 @@ int main(int argc, char** argv) {
         lifecycle.recycle();
         report("recycle-idempotent", nullptr, !lifecycle.is_open(), "is_open=false");
     } else {
-        std::printf("[LibRawFrontend] SKIP borrowed-view/forced-backend "
-                    "(no Bayer sample present)\n");
+        test_report::reportSkip("LibRawFrontend", "borrowed-view/forced-backend",
+                                "no-bayer-sample");
     }
 
     {
@@ -265,13 +264,7 @@ int main(int argc, char** argv) {
     }
 
     if (checked == 0) {
-        std::printf("[LibRawFrontend] FAIL no corpus files were present\n");
-        return 1;
+        report("corpus-present", nullptr, false, "no corpus files were present");
     }
-    if (failures != 0) {
-        std::printf("[LibRawFrontend] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[LibRawFrontend] ALL PASS\n");
-    return 0;
+    return test_report::finish("LibRawFrontend");
 }
