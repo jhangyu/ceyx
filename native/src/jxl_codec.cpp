@@ -29,21 +29,6 @@ namespace {
 
 #if CEYX_ENABLE_JXL
 
-std::vector<uint8_t> ReadAll(const char *path) {
-  std::vector<uint8_t> bytes;
-  FILE *f = ceyx_fopen_utf8(path, "rb");
-  if (!f) return bytes;
-  std::fseek(f, 0, SEEK_END);
-  const long n = std::ftell(f);
-  std::fseek(f, 0, SEEK_SET);
-  if (n > 0) {
-    bytes.resize(static_cast<size_t>(n));
-    if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) bytes.clear();
-  }
-  std::fclose(f);
-  return bytes;
-}
-
 // Bounded worker count: the caller may already be on a Dart worker isolate, so
 // grabbing every core here would oversubscribe the machine during an
 // interactive export.
@@ -204,7 +189,7 @@ extern "C" int32_t ceyx_jxl_probe_impl(const char *path, uint32_t *w, uint32_t *
   return kCeyxStillErrUnsupported;
 #else
   try {
-    const std::vector<uint8_t> bytes = ReadAll(path);
+    const std::vector<uint8_t> bytes = ceyx::ReadAll(path);
     if (bytes.empty()) return kCeyxStillErrOpenFailed;
     JxlDecoderPtr dec = JxlDecoderMake(nullptr);
     if (!dec) return kCeyxStillErrAllocationFailed;
@@ -238,7 +223,7 @@ extern "C" int32_t ceyx_jxl_decode_impl(const char *path, int32_t max_dim,
   return kCeyxStillErrUnsupported;
 #else
   try {
-    const std::vector<uint8_t> bytes = ReadAll(path);
+    const std::vector<uint8_t> bytes = ceyx::ReadAll(path);
     if (bytes.empty()) return kCeyxStillErrOpenFailed;
     // Declaration order = reverse destruction order, same reasoning as the
     // encoder above: the runner must outlive `dec`, which holds a pointer to

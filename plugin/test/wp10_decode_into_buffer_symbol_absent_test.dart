@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_bindings.dart';
+import 'support/native_fixtures.dart';
 
 /// WP10v item (3) — absent-symbol matrix (AMENDMENT 3, A3.3: the format-
 /// agnostic entry pair).
@@ -33,9 +34,7 @@ import 'package:ceyx/src/dng_bindings.dart';
 /// flutter test runs with cwd == package root (plugin/), so all paths below
 /// are resolved relative to Directory.current.
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
 
   test(
     'the shipped dylib exports the WP10 ceyx_probe_output_size + '

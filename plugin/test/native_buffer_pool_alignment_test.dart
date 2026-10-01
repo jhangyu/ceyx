@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:ceyx/src/dng_bindings.dart';
 import 'package:ceyx/src/native_buffer_pool.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/native_fixtures.dart';
 
 /// R4 (gpu-copy-elimination campaign), Round 4 acceptance item 1: every
 /// POOLED allocation must satisfy `address % 16384 == 0 && capacity % 16384
@@ -23,10 +24,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const int alignmentBytes = 16384;
 
-  final dylibPath = File(
-    Platform.environment['CEYX_R4_DYLIB'] ??
-        '../native/build/libdng_decoder_native.dylib',
-  ).absolute.path;
+  final dylibPath = File(freshBuildDylibPath('CEYX_R4_DYLIB')).absolute.path;
 
   late bool skip;
   String skipReason = '';

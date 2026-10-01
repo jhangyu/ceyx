@@ -27,19 +27,10 @@ namespace ceyx {
 // Number of address stripes (test/inspection marker). Compile-time constant.
 int dng_copy_lock_stripes();
 
-// Content marker; returns "ceyx_copy_lock_v1".
-const char *dng_copy_lock_marker();
-
 }  // namespace ceyx
 
 // C-ABI content marker, so a built binary can be proven to contain this change
 // by symbol (nm) rather than by mtime.
 extern "C" const char *ceyx_copy_lock_v1(void);
-
-// Self-check for the deadlock-shaped corner: two threads taking the same pair of
-// buffers in opposite order, both for a cross-stripe pair and for a pair that
-// collides on one stripe. Returns 0 on success; a real deadlock is caught by an
-// internal watchdog that exits(3). Driven by tmp/r2t2/selftest_stripe.cpp.
-extern "C" int ceyx_copy_lock_selftest(void);
 
 #endif  // DNG_COPY_LOCK_H

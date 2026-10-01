@@ -55,18 +55,16 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "ArenaShrink";
 
 void report(const char* name, bool ok, const char* detail) {
-  std::printf("[ArenaShrink] %s -> %s (%s)\n", name, ok ? "PASS" : "FAIL",
-              detail);
-  if (!ok) ++failures;
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 struct ShrinkCounters {
   uint64_t shrink_calls = 0;
@@ -297,10 +295,11 @@ int main(int argc, char** argv) {
   // below would be a legitimate zero. Say so rather than printing PASS lines
   // that assert nothing.
   if (resident_warm == 0) {
-    std::printf(
-        "[ArenaShrink] SKIP-REFUSED: warm-up produced 0 resident device bytes "
-        "(no Metal arena on this host). This gate cannot pass vacuously.\n");
+    test_report::reportSkip(kReportPrefix, "warm-up-resident-bytes", "no-metal-arena",
+                            "warm-up produced 0 resident device bytes; this gate cannot pass vacuously");
     for (auto* w : workers) { w->stop(); delete w; }
+    // Refusal exit stays 3; finish() only supplies the summary line.
+    (void)test_report::finish(kReportPrefix);
     return 3;
   }
 
@@ -691,6 +690,5 @@ int main(int argc, char** argv) {
 
   for (auto* w : workers) { w->stop(); delete w; }
 
-  std::printf("[ArenaShrink] failures=%d\n", failures);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }

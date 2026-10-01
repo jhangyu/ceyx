@@ -62,18 +62,16 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "ZeroCopyCapabilityPaths";
 
 void report(const char* name, bool ok, const char* detail) {
-  std::printf("[ZeroCopyCapabilityPaths] %s -> %s (%s)\n", name,
-              ok ? "PASS" : "FAIL", detail);
-  if (!ok) ++failures;
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 // FNV-1a 64, same construction as test_concurrent_raw_decode.cpp so hashes
 // from either driver are directly comparable if ever cross-checked.
@@ -521,7 +519,5 @@ int main(int argc, char** argv) {
         "line start, never the bare token) may appear while every decode "
         "in this phase supplied a genuinely page-aligned buffer");
 
-  std::printf("[ZeroCopyCapabilityPaths] TOTAL failures=%d\n", failures);
-  std::fflush(stdout);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }

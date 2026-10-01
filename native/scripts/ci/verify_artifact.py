@@ -40,6 +40,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import assert_exports as _assert_exports_script  # noqa: E402
+from deps.assertions import AssertionFailed, ndk_tool  # noqa: E402
+from deps.win_pe import run_with_fallback  # noqa: E402
 # Imported for its PE/ELF dump PARSER only (P-23). The gate itself is still
 # invoked as a child process below, exactly as linux/android already do --
 # this import exists so the transitive walk enumerates a module's imports
@@ -309,13 +311,12 @@ def import_closure(
             raise ValueError(
                 "import_closure(platform='android') requires artifact_dir and ndk_home"
             )
-        llvm_readelf = os.path.join(
-            ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-readelf"
-        )
-        if not os.access(llvm_readelf, os.X_OK):
+        try:
+            llvm_readelf = str(ndk_tool(ndk_home, "llvm-readelf"))
+        except AssertionFailed:
             report.error(
-                f"llvm-readelf not found at {llvm_readelf} — NDK layout may have changed "
-                "(r27c expected)."
+                f"llvm-readelf not found at {ndk_home}/toolchains/llvm/prebuilt/*/bin "
+                "— NDK layout may have changed (r27c expected)."
             )
             return 1
         matches = sorted(
@@ -383,7 +384,13 @@ def _pe_dump_imports(
     dumpbin = spec["dumpbin_tools"][0] if spec["dumpbin_tools"] else "dumpbin"
     objdump = spec["objdump_tools"][0] if spec["objdump_tools"] else "llvm-objdump"
 
-    rc = run.run_to_file([dumpbin, "-dependents", binary], dump_path).returncode
+    attempts, text = run_with_fallback(
+        [dumpbin, "-dependents", binary], [objdump, "-p", binary], run.capture
+    )
+    out = Path(dump_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    rc = attempts[0][1]
     report.marker(primary_marker, rc)
     if rc != 0:
         message = f"{dumpbin} -dependents{subject} failed (rc={rc}); falling back to {objdump}."
@@ -396,7 +403,7 @@ def _pe_dump_imports(
             report.plain(f"{prefix}notice: {message}")
         else:
             report.notice(message)
-        rc = run.run_to_file([objdump, "-p", binary], dump_path).returncode
+        rc = attempts[1][1]
         report.marker(fallback_marker, rc)
     return rc
 
@@ -651,7 +658,7 @@ def assert_exports(
 
     macOS/windows/android could NOT be collapsed onto linux's shape: the
     shell-prohibition guard's compliance test
-    (`check_shell_prohibition.py:95,168`) requires exactly one code line
+    (since-deleted `check_shell_prohibition.py:95,168`) required exactly one code line
     starting with a python/pwsh-python invocation, so a `tool > file` dump
     step can never itself be a compliant one-liner -- the dump has to move
     INSIDE this module for every platform whose `ci.py verify-artifact`
@@ -688,15 +695,18 @@ def assert_exports(
     elif platform == "windows":
         so = _artifact_path(platform)
         report.plain("== AC-W4: exported FFI symbols ==")
-        result = run.run(["dumpbin", "-exports", so])
-        Path("dll_exports.txt").write_text(result.stdout + result.stderr)
-        rc = result.returncode
+        win = targets.spec("windows")
+        attempts, text = run_with_fallback(
+            [win["dumpbin_tools"][0], "-exports", so],
+            [win["nm_tools_fallback"][0], "--extern-only", "--defined-only", so],
+            run.capture,
+        )
+        Path("dll_exports.txt").write_text(text)
+        rc = attempts[0][1]
         report.marker("DUMPBIN_RC", rc)
         if rc != 0:
             report.notice(f"dumpbin unavailable or failed (rc={rc}); falling back to llvm-nm.")
-            result = run.run(["llvm-nm", "--extern-only", "--defined-only", so])
-            Path("dll_exports.txt").write_text(result.stdout + result.stderr)
-            rc = result.returncode
+            rc = attempts[1][1]
             report.marker("LLVM_NM_RC", rc)
         if rc != 0:
             report.error(
@@ -722,12 +732,12 @@ def assert_exports(
             report.error(f"no libdng_decoder_native*.so found under {artifact_dir}/native")
             return 1
         so = matches[0]
-        llvm_nm = os.path.join(
-            ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-nm"
-        )
-        if not os.access(llvm_nm, os.X_OK):
+        try:
+            llvm_nm = str(ndk_tool(ndk_home, "llvm-nm"))
+        except AssertionFailed:
             report.error(
-                f"llvm-nm not found at {llvm_nm} — NDK layout may have changed (r27c expected)."
+                f"llvm-nm not found at {ndk_home}/toolchains/llvm/prebuilt/*/bin "
+                "— NDK layout may have changed (r27c expected)."
             )
             return 1
         result = run.run_to_file([llvm_nm, "-D", so], "android_so_dynsyms.txt")

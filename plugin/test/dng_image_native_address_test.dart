@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ceyx/src/dng_decoder_service.dart';
+import 'support/native_fixtures.dart';
 
 /// WP3a (AC3a.6): `DngImage.nativeAddress` is 0 on the legacy
 /// TransferableTypedData arm — the only arm [DngDecoderService.decodeOnWorker]
@@ -12,12 +13,8 @@ import 'package:ceyx/src/dng_decoder_service.dart';
 ///
 /// flutter test runs with cwd == package root (plugin/).
 void main() {
-  final dylibPath = File(
-    'macos/Libraries/libdng_decoder_native.dylib',
-  ).absolute.path;
-  final samplePath = File(
-    '../image_samples/lossless_dng_sample.dng',
-  ).absolute.path;
+  final dylibPath = File(shippedDylibPath).absolute.path;
+  final samplePath = File(losslessDngSamplePath).absolute.path;
 
   setUpAll(() {
     expect(

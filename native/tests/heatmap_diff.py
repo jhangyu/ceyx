@@ -24,14 +24,10 @@
 #   width / height / planes / pixel_size / layout / buffer_size(×2)
 #
 # functions:
-#   - name: "_contract / abort_if_contract_failed"
-#     lines: "75-95"
-#   - name: "parse_dims_from_path / infer_pixel_size"
-#     lines: "98-121"
+#   - name: "raw_contract.*"
+#     description: "合約檢查與檔名解析共用模組（native/tests/raw_contract.py）"
 #   - name: "resolve_raw_params"
 #     lines: "124-165"
-#   - name: "run_contracts"
-#     lines: "168-217"
 #   - name: "load_raw / compute_diff_stats"
 #     lines: "220-273"
 #   - name: "render_heatmap"
@@ -62,58 +58,19 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+import raw_contract
+from raw_contract import (
+    PIXEL_SIZE_TO_DTYPE,
+    PSNR_MAX_VAL,
+    infer_pixel_size,
+    parse_dims_from_path,
+)
 
-PIXEL_SIZE_TO_DTYPE = {1: "uint8", 2: "uint16"}
-PSNR_MAX_VAL = {1: 255.0, 2: 65535.0}
+HEATMAP_ABORT_MESSAGE = "[Contract] 合約檢查未通過，中止 heatmap 產生。"
+
+
 CHANNEL_NAMES = {1: ["Gray"], 3: ["R", "G", "B"], 4: ["R", "G", "B", "A"]}
 VALID_COLORMAPS = ("viridis", "hot", "magma", "inferno", "plasma")
-
-
-# ---------------------------------------------------------------------------
-# Contract helpers
-# ---------------------------------------------------------------------------
-
-_contract_failed = False
-
-
-def _contract(label: str, passed: bool, detail: str = "") -> bool:
-    global _contract_failed
-    status = "PASS" if passed else "FAIL"
-    msg = f"[Contract] {label}: {status}"
-    if detail:
-        msg += f"  ({detail})"
-    print(msg)
-    if not passed:
-        _contract_failed = True
-    return passed
-
-
-def abort_if_contract_failed() -> None:
-    if _contract_failed:
-        print("\n[Contract] 合約檢查未通過，中止 heatmap 產生。")
-        sys.exit(2)
-
-
-# ---------------------------------------------------------------------------
-# Filename parsing
-# ---------------------------------------------------------------------------
-
-_FILENAME_DIM_RE = re.compile(r"(\d+)x(\d+)_(\d+)p")
-
-
-def parse_dims_from_path(path: Path) -> Optional[Tuple[int, int, int]]:
-    m = _FILENAME_DIM_RE.search(path.name)
-    if m:
-        return int(m.group(1)), int(m.group(2)), int(m.group(3))
-    return None
-
-
-def infer_pixel_size(path: Path, width: int, height: int, planes: int) -> Optional[int]:
-    actual = path.stat().st_size
-    for bps in (1, 2):
-        if actual == width * height * planes * bps:
-            return bps
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -155,43 +112,6 @@ def resolve_raw_params(
     print(f"  {label}: {path.name}  {w}x{h} planes={p} pixel_size={bps} "
           f"({PIXEL_SIZE_TO_DTYPE.get(bps, '?')})")
     return w, h, p, bps
-
-
-# ---------------------------------------------------------------------------
-# Contract execution
-# ---------------------------------------------------------------------------
-
-def run_contracts(
-    path_ref: Path,
-    path_test: Path,
-    w_ref: int, h_ref: int, p_ref: int, bps_ref: int, layout_ref: str,
-    w_test: int, h_test: int, p_test: int, bps_test: int, layout_test: str,
-) -> None:
-    print("\n--- Stage Contract Checks ---")
-
-    _contract("width",  w_ref == w_test, f"ref={w_ref} vs test={w_test}")
-    _contract("height", h_ref == h_test, f"ref={h_ref} vs test={h_test}")
-    _contract("planes", p_ref == p_test, f"ref={p_ref} vs test={p_test}")
-    _contract("pixel_size",
-              bps_ref == bps_test,
-              f"ref={bps_ref} ({PIXEL_SIZE_TO_DTYPE.get(bps_ref,'?')}) "
-              f"vs test={bps_test} ({PIXEL_SIZE_TO_DTYPE.get(bps_test,'?')})")
-    _contract("layout", layout_ref == layout_test, f"ref={layout_ref} vs test={layout_test}")
-
-    expected_bytes = w_ref * h_ref * p_ref * bps_ref
-    actual_ref = path_ref.stat().st_size
-    actual_test = path_test.stat().st_size
-
-    _contract("buffer_size ref",
-              actual_ref == expected_bytes,
-              f"actual={actual_ref} expected={expected_bytes} "
-              f"({w_ref}x{h_ref}x{p_ref}x{bps_ref})")
-    _contract("buffer_size test",
-              actual_test == expected_bytes,
-              f"actual={actual_test} expected={expected_bytes} "
-              f"({w_ref}x{h_ref}x{p_ref}x{bps_ref})")
-
-    abort_if_contract_failed()
 
 
 # ---------------------------------------------------------------------------
@@ -378,10 +298,10 @@ def main() -> int:
         test_path, args.width, args.height, args.planes, args.pixel_size, "test"
     )
 
-    run_contracts(
+    raw_contract.run_pair_contracts(
         ref_path, test_path,
-        w_r, h_r, p_r, bps_r, args.layout,
-        w_t, h_t, p_t, bps_t, args.layout,
+        (w_r, h_r, p_r, bps_r, args.layout), (w_t, h_t, p_t, bps_t, args.layout),
+        "ref", "test", "x", HEATMAP_ABORT_MESSAGE,
     )
 
     if args.plane != -1 and (args.plane < 0 or args.plane >= p_r):
@@ -413,7 +333,7 @@ def main() -> int:
     )
     print(f"[HeatmapDiff] Output: {output_path}")
     print()
-    return 0 if not _contract_failed else 2
+    return 0 if not raw_contract.contract_failed() else 2
 
 
 if __name__ == "__main__":

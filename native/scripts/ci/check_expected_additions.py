@@ -81,7 +81,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 sys.path.insert(0, str(REPO_ROOT / "native" / "scripts"))
 
-# Dual-mode import (see check_shell_prohibition.py's header comment for the
+# Dual-mode import (the since-deleted check_shell_prohibition.py's header carried the
 # full rationale this mirrors): a bare-script run has no parent package, so
 # `from . import x` would raise; a package-member run (ci.py selftest /
 # unittest discover) needs the relative form so mocks bind the identity the
@@ -118,7 +118,7 @@ else:
 #
 # WI-53 / guard (f)③: that binding used to cover exactly ONE of this map's
 # two distinct producer invocations (the alias-table one, hardcoded by key
-# name). The `check_shell_prohibition.py` pair had NO argv binding at all,
+# name). The since-deleted `check_shell_prohibition.py` pair had NO argv binding at all,
 # and the blindness was mechanically demonstrated before it was fixed:
 # perturbing either side -- the map's argv or `build.yml`'s real `run:`
 # line -- left the entire 9-test suite green
@@ -226,8 +226,8 @@ def invoked_scripts(command: str) -> set[str]:
     token immediately preceded by an interpreter token. A bare mention is
     not an invocation.
 
-    Public and shared on purpose: `check_wiring_is_ledger.py` (guard (f)②)
-    decides "is this step marker-emitting?" from the same token rule that
+    Public and shared on purpose: the since-deleted `check_wiring_is_ledger.py` (guard (f)②)
+    decided "is this step marker-emitting?" from the same token rule that
     `iter_workflow_invocations` uses, so the two can never disagree about
     what counts as invoking a script.
     """
@@ -266,7 +266,7 @@ def _missing_producer_inputs(argv: tuple[str, ...]) -> list[str]:
     vendored LibRaw tree, absent until build.yml's fetch step runs).
     Returns the argv entries (repo-root-relative) that do not exist on
     disk, in argv order. A producer with no path-shaped argv at all (like
-    `check_shell_prohibition.py`'s `()`) always returns an empty list,
+    the since-deleted `check_shell_prohibition.py`'s `()`) always returns an empty list,
     matching the pre-WI-44 always-run behaviour exactly."""
     return [a for a in argv if not (REPO_ROOT / a).exists()]
 

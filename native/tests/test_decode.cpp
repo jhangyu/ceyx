@@ -333,25 +333,6 @@ bool loadRawFile(const string& filename, void* data, size_t byteSize) {
     return fin.good();
 }
 
-// Compute PSNR between two buffers (16-bit data)
-double computePSNR_16bit(const uint16_t* img1, const uint16_t* img2, size_t pixelCount) {
-    if (!img1 || !img2 || pixelCount == 0) return 0;
-
-    double mse = 0;
-    const uint32_t maxValue = 65535;
-
-    for (size_t i = 0; i < pixelCount; i++) {
-        double diff = static_cast<double>(img1[i]) - static_cast<double>(img2[i]);
-        mse += diff * diff;
-    }
-    mse /= pixelCount;
-
-    if (mse < 1e-10) return 999.0;  // Nearly identical
-
-    double psnr = 10.0 * log10((maxValue * maxValue) / mse);
-    return psnr;
-}
-
 double computePSNR_16bit_strided(const uint16_t* refInterleaved,
                                  const uint16_t* testBase,
                                  uint32_t width,
@@ -417,25 +398,6 @@ static void stripRgbaToRgb(const uint8_t* rgba, uint8_t* rgb, size_t total_px) {
         rgb[i * 3 + 1] = rgba[i * 4 + 1];
         rgb[i * 3 + 2] = rgba[i * 4 + 2];
     }
-}
-
-// Compute PSNR between two buffers (8-bit data)
-double computePSNR_8bit(const uint8_t* img1, const uint8_t* img2, size_t pixelCount) {
-    if (!img1 || !img2 || pixelCount == 0) return 0;
-
-    double mse = 0;
-    const uint32_t maxValue = 255;
-
-    for (size_t i = 0; i < pixelCount; i++) {
-        double diff = static_cast<double>(img1[i]) - static_cast<double>(img2[i]);
-        mse += diff * diff;
-    }
-    mse /= pixelCount;
-
-    if (mse < 1e-10) return 999.0;
-
-    double psnr = 10.0 * log10((maxValue * maxValue) / mse);
-    return psnr;
 }
 
 // Extract image data from dng_image to buffer

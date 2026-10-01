@@ -257,7 +257,7 @@ if(DNG_ENABLE_HEIF)
         # CEYX_SHIPPED_MACOS_COMPANIONS (liblcms2.2.dylib/libjpeg.8.dylib/
         # libomp.dylib are the other staging mechanisms named in
         # shipped_files.toml's macos `source` field: pipeline.cmake's
-        # bundle_macos_dylib_deps.py and tests.cmake's libomp vendoring
+        # bundle_macos_dylib_deps.py and generic_raw.cmake's libomp vendoring
         # respectively) -- looked up BY NAME PREFIX, not by a positional
         # index, so a future change to the declared list's ORDER or LENGTH
         # (e.g. WI-5 removing liblcms2.2.dylib) cannot silently pick the
@@ -340,7 +340,7 @@ if(DNG_ENABLE_HEIF)
         # import table names it -- rootcause-native-capability.md Item B),
         # so "not found" here means the artifact will be unloadable, not
         # that a feature silently degrades -- the honest-OFF pattern this
-        # tree uses for libomp on macOS (tests.cmake:715-726) is the WRONG
+        # tree uses for libomp on macOS (generic_raw.cmake) is the WRONG
         # shape for this case.
         # GUARD THE GUARD (2026-09-12, CI run 34697591379). This block is a
         # FATAL check protecting the shipped artifact, and in CMake a bare

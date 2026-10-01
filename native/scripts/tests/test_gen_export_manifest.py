@@ -119,10 +119,6 @@ def test_every_guarded_symbol_has_a_non_empty_group():
     # The known guarded clusters in today's dng_bindings.dart / siblings --
     # every one of these must have a non-empty group.
     guarded = [
-        "dng_decode_and_process",
-        "dng_decode_and_process_sized",
-        "dng_debug_pool_checked_out",
-        "raw_decode_and_process",
         "dng_decode_configure_slots",
         "ceyx_probe_output_size",
         "ceyx_decode_into_buffer_oriented",

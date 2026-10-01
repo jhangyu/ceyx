@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Mechanical checker for .github/CI-CONVENTIONS.md.
 
-Spec: docs/logs/2026-08-31/plan-ci-codec-integration.md, Task 2 (CI-T2), DP-6
-(closed, option A): this checker is COMMITTED but deliberately NOT wired into
-any CI workflow. It runs by hand, from each task's own acceptance criteria and
-from CI-T10's sign-off (which must record that it stays unwired). Do not add
-a workflow step that invokes this script.
+Spec: docs/logs/2026-08-31/plan-ci-codec-integration.md, Task 2 (CI-T2). The
+original DP-6 posture (unwired, hand-run only) was superseded: this checker
+IS wired into CI -- listed in `GUARDS` in `native/scripts/ci/guards.py` and
+run by the `guards-container` job of `.github/workflows/build.yml`. It also
+runs by hand from task acceptance criteria.
 
 Implements rules C1, C2, C3, C4, C5, C6, C8, C9 from CI-T2 (C7 -- "android_build.yml
 contains an emulator job" -- was REMOVED per the 2026-08-31 compile-only
 ruling and is not implemented here). C10 (A-T12 option a) guards the
-plugin/android jniLibs .gitignore exclusion.
+plugin/android jniLibs .gitignore exclusion. C11 (refactor T2, 2026-10-02)
+holds every hand-written toolchain pin (python-version, ndk-version, the
+windows matrix runner/msvc_arch) equal to its single source module.
+C12 (techdebt 2026-10-02, ruling 4-a) requires every job `container:` image to be digest-pinned.
+C13 (techdebt 2026-10-02) requires `timeout-minutes:` on every job with `runs-on:`.
 
 Every rule has a paired negative-control fixture proving it actually detects
 a violation (native/scripts/tests/test_ci_conventions_check.py, R8): a rule
@@ -302,6 +306,175 @@ def check_c10_android_jnilibs_so_gitignored(workflows_dir, repo_root=None):
     return []
 
 
+# C11 patterns. Regex only: the pinned guards image has no PyYAML.
+_PYTHON_VERSION_RE = re.compile(r"""^\s*python-version:\s*["']?([^"'\s#]+)""")
+_NDK_VERSION_RE = re.compile(r"""^\s*ndk-version:\s*["']?([^"'\s#]+)""")
+_ROW_START_RE = re.compile(r"^(\s*)- arch_tag:\s*(\S+)\s*$")
+_ROW_KEY_RE = re.compile(r"^\s*([A-Za-z_]+):\s*(\S+)\s*$")
+
+
+def _toolchain_sources():
+    """C11's expected values, imported from their single sources -- never
+    retyped here: (PYTHON_VERSION, android ndk_version, windows arch_legs)."""
+    scripts_dir = str(REPO_ROOT / "native" / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from ci import targets
+    from ci.workflow_render import PYTHON_VERSION
+    return (
+        PYTHON_VERSION,
+        targets.spec("android")["ndk_version"],
+        targets.spec("windows")["arch_legs"],
+    )
+
+
+def _matrix_rows(lines):
+    """Yields (lineno, arch_tag, {key: value}) for every `- arch_tag:` matrix
+    row. A row ends at the first non-blank, non-comment line indented no
+    deeper than its own `- ` marker."""
+    i = 0
+    while i < len(lines):
+        start = _ROW_START_RE.match(lines[i])
+        if not start:
+            i += 1
+            continue
+        indent, lineno, row = len(start.group(1)), i + 1, {}
+        i += 1
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                if len(line) - len(line.lstrip()) <= indent:
+                    break
+                key = _ROW_KEY_RE.match(line)
+                if key:
+                    row[key.group(1)] = key.group(2).strip("\"'")
+            i += 1
+        yield lineno, start.group(2), row
+
+
+def check_c11_toolchain_pins(workflows_dir):
+    """Hand-written toolchain pins equal their single source (refactor T2).
+
+    (a) every `python-version:` literal == ci/workflow_render.py PYTHON_VERSION;
+    (b) every `ndk-version:` literal == targets.spec("android")["ndk_version"];
+    (c) every matrix row `- arch_tag: X` that carries `msvc_arch:` (a windows
+    leg) has runner/msvc_arch == targets.spec("windows")["arch_legs"][X].
+    Rendered workflows pass by construction; the rule exists for the
+    hand-written legs (user ruling 2026-09-18 keeps them hand-written), so a
+    second copy can never silently disagree with its source.
+    """
+    python_version, ndk_version, arch_legs = _toolchain_sources()
+    pins = (
+        (_PYTHON_VERSION_RE, "python-version", python_version,
+         "ci/workflow_render.py PYTHON_VERSION"),
+        (_NDK_VERSION_RE, "ndk-version", ndk_version,
+         'ci/targets.py spec("android")["ndk_version"]'),
+    )
+    violations = []
+    for wf in _workflow_files(workflows_dir):
+        lines = wf.read_text().splitlines()
+        for lineno, line in enumerate(lines, start=1):
+            for regex, key, want, source in pins:
+                match = regex.match(line)
+                if match and match.group(1) != want:
+                    violations.append(
+                        f"C11: {wf.name}:{lineno}: {key} {match.group(1)!r} != {want!r} "
+                        f"(single source: {source})"
+                    )
+        for lineno, arch_tag, row in _matrix_rows(lines):
+            if "msvc_arch" not in row:
+                continue
+            leg = arch_legs.get(arch_tag)
+            if leg is None:
+                violations.append(
+                    f"C11: {wf.name}:{lineno}: arch_tag {arch_tag!r} is not a windows "
+                    f"arch_legs key {sorted(arch_legs)} (ci/targets.py)"
+                )
+                continue
+            for key in ("runner", "msvc_arch"):
+                if row.get(key) != leg[key]:
+                    violations.append(
+                        f"C11: {wf.name}:{lineno}: arch_tag {arch_tag!r} {key} "
+                        f"{row.get(key)!r} != {leg[key]!r} "
+                        f'(single source: ci/targets.py spec("windows")["arch_legs"])'
+                    )
+    return violations
+
+
+_CONTAINER_LINE_RE = re.compile(r"^\s*container:\s*(\S*)")
+
+
+def check_c12_container_digest_pinned(workflows_dir):
+    """C12 (techdebt 2026-10-02, ruling 4-a): every job `container:` image is
+    digest-pinned (`<image>[:<tag>]@sha256:<digest>`). A tag is a mutable
+    pointer -- the same policy guards.py's read_pinned_image() applies to
+    ci.Dockerfile's FROM line. Shape-only: the digest value lives in the
+    workflow file and nowhere else. A mapping-form `container:` (empty value)
+    cannot be verified by a line scan and is rejected."""
+    violations = []
+    for wf in _workflow_files(workflows_dir):
+        for lineno, line in enumerate(wf.read_text().splitlines(), start=1):
+            m = _CONTAINER_LINE_RE.match(line)
+            if not m:
+                continue
+            ref = m.group(1)
+            if "@sha256:" not in ref:
+                violations.append(
+                    f"C12: {wf.name}:{lineno}: container image is not digest-pinned "
+                    f"({(ref or '<mapping form>')!r}); pin <image>:<tag>@sha256:<index digest>"
+                )
+    return violations
+
+
+_JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(#.*)?$")
+
+
+def _job_blocks(text):
+    """Yield (job_id, 1-based line, body lines) for each job under the
+    top-level `jobs:` key. Line scan (no YAML); comment/blank lines dropped."""
+    in_jobs = False
+    current = None
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            if current:
+                yield current
+                current = None
+            in_jobs = line.startswith("jobs:")
+            continue
+        if not in_jobs:
+            continue
+        m = _JOB_KEY_RE.match(line)
+        if m:
+            if current:
+                yield current
+            current = (m.group(1), lineno, [])
+        elif current:
+            current[2].append(line)
+    if current:
+        yield current
+
+
+def check_c13_job_timeout(workflows_dir):
+    """C13 (techdebt 2026-10-02): every job that has `runs-on:` declares
+    `timeout-minutes:` -- GitHub's default is 360 minutes. Reusable-workflow
+    jobs (`uses:`, no `runs-on`) cannot carry a timeout and are excluded by
+    construction."""
+    violations = []
+    for wf in _workflow_files(workflows_dir):
+        for job_id, lineno, body in _job_blocks(wf.read_text()):
+            if not any(line.startswith("    runs-on:") for line in body):
+                continue
+            if not any(line.startswith("    timeout-minutes:") for line in body):
+                violations.append(
+                    f"C13: {wf.name}:{lineno}: job {job_id!r} has runs-on but no "
+                    "timeout-minutes (GitHub default: 360 minutes)"
+                )
+    return violations
+
+
 RULES = [
     check_c1_roles,
     check_c2_naming,
@@ -312,6 +485,9 @@ RULES = [
     check_c8_ledger_sync,
     check_c9_no_hardcoded_vcpkg_baseline,
     check_c10_android_jnilibs_so_gitignored,
+    check_c11_toolchain_pins,
+    check_c12_container_digest_pinned,
+    check_c13_job_timeout,
 ]
 
 

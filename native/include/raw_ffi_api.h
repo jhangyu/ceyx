@@ -44,13 +44,6 @@ enum {
     kRawCameraMatrixRouteCamXyz = 2
 };
 
-/* Mirrors RawAutoExposureStatus (raw_auto_exposure.h) by value; kept as a
- * plain uint32_t here rather than including that header, which is owned by
- * a parallel round-2 task. This name is retained as the literal 0 (== kOk)
- * for source compatibility with existing callers written against Task 2.4's
- * build; it is a real, meaningful status now (Task 2.6), not only a sentinel. */
-enum { kRawColorAutoExposureStatusUnavailable = 0 };
-
 typedef struct RawColorDiagnostics {
     uint32_t struct_size;
     float    auto_exposure_ev;      /* what Round 1 actually applied */
@@ -159,7 +152,7 @@ typedef struct RawTimingDiagnostics {
 int32_t raw_last_timing_diagnostics(struct RawTimingDiagnostics *out);
 
 /* Internal call, same binary, never looked up via dlsym/FFI -- deliberately
- * NOT RAW_FFI_EXPORT'd and not part of the Dart-visible surface, mirroring
+ * NOT CEYX_FFI_EXPORT'd and not part of the Dart-visible surface, mirroring
  * raw_record_decode_into_diagnostics below. Called unconditionally (success
  * or failure) from the decode-INTO entry point so a failed decode still
  * reports whatever sub-timings it accumulated before failing (plan §6.4). */
@@ -175,7 +168,7 @@ void raw_record_decode_timing_diagnostics(const struct RawTimingDiagnostics *tim
  * has run" if none had) -- stale-by-construction, not merely by timing.
  *
  * Internal call, same binary, never looked up via dlsym/FFI -- deliberately
- * NOT RAW_FFI_EXPORT'd and not part of the Dart-visible surface. `diag` is
+ * NOT CEYX_FFI_EXPORT'd and not part of the Dart-visible surface. `diag` is
  * required; `color_diag` may be null (a route with no colour pipeline, e.g. a
  * failure before the adapter ran, simply leaves the colour channel
  * unrecorded, exactly as the deleted allocating entry already treated a
@@ -193,7 +186,7 @@ void raw_record_decode_into_diagnostics(
 /* DEBUG/PROBE API, in the same category as the pool live-address gauge:   */
 /* it is NOT part of the Dart-visible surface and adds nothing to          */
 /* DngResult. Defined in native/src/ffi/dng_ffi_api.cpp beside the         */
-/* existing FFI_EXPORT block (precedent: dng_decode_configured_slots).     */
+/* existing CEYX_FFI_EXPORT block (precedent: dng_decode_configured_slots).     */
 /*                                                                        */
 /* Reports the PROCESS-WIDE totals since process start. The gate reads     */
 /* deltas across decodes: same-settings repeat decode => uploads delta 0   */
@@ -213,7 +206,7 @@ int32_t ceyx_debug_render_parameter_cache_counters(
 /*                                                                        */
 /* DEBUG/PROBE API, same category as the cache probe above: NOT part of    */
 /* the Dart-visible surface and nothing is added to DngResult. Defined in  */
-/* native/src/ffi/dng_ffi_api.cpp beside the existing FFI_EXPORT block     */
+/* native/src/ffi/dng_ffi_api.cpp beside the existing CEYX_FFI_EXPORT block     */
 /* (precedent: dng_decode_configured_slots).                              */
 /*                                                                        */
 /* Reports PROCESS-WIDE totals since process start. AC1 is judged on the   */

@@ -91,23 +91,6 @@ endif()
 # added under src/ is invisible to every --skip-configure build until someone
 # happens to reconfigure — the arena TU was silently absent from a full build.
 file(GLOB_RECURSE NATIVE_SOURCES CONFIGURE_DEPENDS "${SRC_DIR}/*.cpp")
-# W7-4 (TD-17): Exclude entire research/ subdirectory from production dylib.
-# Complements the Generator filter below — any new WarpUtils.cpp or helper
-# placed under src/research/ is automatically excluded without updating regex.
-# (Round 2: research/ and the Generator*.cpp files no longer exist under SRC_DIR
-# at all post-move, so these three filters are now no-ops kept for safety/history.)
-list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/research/.*")
-list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Dng[A-Z][A-Za-z0-9]*Generator\\.cpp$")
-# P17 T9: the generic-RAW Halide generators are named Raw*Generator.cpp, which
-# the Dng-prefixed filter above does not match. Without this they get swept
-# into dng_decoder_native by the GLOB_RECURSE and fail to compile (Halide
-# Generator API + Halide.h are generator-only).
-list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Raw[A-Z][A-Za-z0-9]*Generator\\.cpp$")
-# 2026-08-25 naming refactor: RectilinearWarpGenerator.cpp (renamed from its
-# Dng-prefixed name) does not match the Dng-prefixed filter above and gets
-# swept into dng_decoder_native by the GLOB_RECURSE, causing undefined Halide
-# Generator API symbols at dylib link time.
-list(FILTER NATIVE_SOURCES EXCLUDE REGEX ".*/Rectilinear[A-Z][A-Za-z0-9]*Generator\\.cpp$")
 # P17 R5 (F1): the CPU demosaic oracle is test-only. The kernel tests compile
 # it themselves; keeping it in the dylib exported the reference symbols from
 # the production ABI.
@@ -134,11 +117,6 @@ if(NOT DNG_ENABLE_HEIF)
 endif()
 # W6 H-3: bridge .cpp moved from dng_sdk_custom/source/ into src/;
 # now auto-discovered by file(GLOB_RECURSE) above.
-# Only add target if there are sources, dummy for now to avoid target creation error
-if (NOT NATIVE_SOURCES)
-    file(WRITE ${SRC_DIR}/dummy.cpp "void dummy(){}")
-    set(NATIVE_SOURCES ${SRC_DIR}/dummy.cpp)
-endif()
 
 add_library(dng_decoder_native SHARED ${NATIVE_SOURCES})
 target_include_directories(dng_decoder_native PUBLIC

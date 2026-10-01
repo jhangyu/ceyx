@@ -12,45 +12,14 @@ if(NOT DNG_HOST_GENERATORS_ONLY)
 target_include_directories(dng_decoder_native PUBLIC ${HALIDE_OUTPUT_DIR})
 
 if(NOT DNG_CROSS_BUILD)
-    add_dependencies(dng_decoder_native halide_runtime_target)
-    add_dependencies(dng_decoder_native dng_demosaic_aot_target)
-    add_dependencies(dng_decoder_native dng_demosaic_warp_aot_target)
-    add_dependencies(dng_decoder_native dng_warp_aot_target)
-    add_dependencies(dng_decoder_native dng_render_aot_target)
-    # mem8 v3 T12: the yuv420 output variants, one per Stage-4 family. Declared
-    # beside their RGBA8 siblings and under the same conditional, so a build
-    # that links one links the other.
-    add_dependencies(dng_decoder_native dng_render_yuv420_aot_target)
-    if(TARGET dng_render_android_aot_target)
-        add_dependencies(dng_decoder_native dng_render_android_aot_target)
-        add_dependencies(dng_decoder_native dng_render_split_yuv420_aot_target)
+    # T2 (2026-10-02): the always-linked AOT family is declared once in
+    # halide_aot.cmake (DNG_PIPELINE_AOT_TARGETS), beside its link list. The
+    # yuv420 variants and the fused pair are members of it, so a build that
+    # links one half of a format pair links the other (mem8 v3 T12/T12.6).
+    add_dependencies(dng_decoder_native ${DNG_PIPELINE_AOT_TARGETS})
+    if(DNG_STAGE4_SPLIT_KERNEL)
+        add_dependencies(dng_decoder_native ${DNG_STAGE4_SPLIT_AOT_TARGETS})
     endif()
-    add_dependencies(dng_decoder_native dng_opcode_polynomial_aot_target)
-    add_dependencies(dng_decoder_native dng_opcode_polynomial3_aot_target)
-    # P17 T9: src/raw_demosaic_reference.cpp (auto-globbed above) calls the
-    # raw_bayer_demosaic AOT entry, so the dylib depends on and links it.
-    add_dependencies(dng_decoder_native raw_bayer_demosaic_aot_target)
-    # mem8 T20: fused Bayer demosaic+render AOT entry.
-    add_dependencies(dng_decoder_native raw_bayer_fused_render_aot_target)
-    # mem8 v3 T12.6: arm A, the same kernel's yuv420 output variant. Declared
-    # beside its RGBA8 sibling and unconditionally, so a build that links one
-    # links the other -- a half-linked format pair is exactly how "the symbol is
-    # not in the shipped binary" happens.
-    add_dependencies(dng_decoder_native raw_bayer_fused_render_yuv420_aot_target)
-    # X-Trans fusion (2026-10-02): the fused X-Trans pair, declared together so
-    # a build that links one links the other.
-    add_dependencies(dng_decoder_native raw_xtrans_fused_render_aot_target)
-    add_dependencies(dng_decoder_native raw_xtrans_fused_render_yuv420_aot_target)
-    # Foveon fusion: fused X3F entries, declared as a pair (a half-linked
-    # format pair is how "the symbol is not in the shipped binary" happens).
-    add_dependencies(dng_decoder_native raw_linear_rgb_fused_render_aot_target)
-    add_dependencies(dng_decoder_native raw_linear_rgb_fused_render_yuv420_aot_target)
-    # P17 T11: the same reference TU also calls the raw_xtrans_demosaic AOT
-    # entry.
-    add_dependencies(dng_decoder_native raw_xtrans_demosaic_aot_target)
-    # P19 T7: generic-RAW linear-RGB normalize-only AOT kernel (Foveon X3F
-    # pre-pass ahead of the shared Stage4 handoff).
-    add_dependencies(dng_decoder_native raw_linear_rgb_normalize_aot_target)
 endif()
 
 # Halide setup — We only need Halide::Runtime for AOT, but Halide::Halide is fine
@@ -64,48 +33,27 @@ target_include_directories(dng_decoder_native PUBLIC ${HALIDE_DIR}/include)
 # runtime symbols statically. Halide::Halide remains linked by generator executables
 # and test targets that use the Halide host API directly.
 
-# AOT artifacts (always linked — either freshly built or prebuilt)
-target_link_libraries(dng_decoder_native
-    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
+# AOT artifacts (always linked — either freshly built or prebuilt). The list
+# and its ORDER are declared once in halide_aot.cmake (T2).
+target_link_libraries(dng_decoder_native ${DNG_PIPELINE_AOT_LIBS})
 # R2 sized decode: the pre-average scaled Stage4 kernel is dispatched by
 # dng_render_halide.cpp on the non-split (macOS/Metal) branch only, so it is
 # linked only there. The split branch refuses sized requests instead.
 # T7: its yuv420 sibling is linked in the SAME breath and under the same
-# condition, deliberately. A format pair where one half is linked and the other
-# is not is exactly how "the symbol is not in the shipped binary" happens — the
-# same reasoning already recorded for the fused pair above.
+# condition, deliberately — the family variable holds both.
 if(NOT DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(dng_decoder_native
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
+    target_link_libraries(dng_decoder_native ${DNG_STAGE4_NONSPLIT_AOT_LIBS})
     if(NOT DNG_CROSS_BUILD)
-        add_dependencies(dng_decoder_native dng_render_scaled_preavg_aot_target)
-        add_dependencies(dng_decoder_native
-                         dng_render_scaled_preavg_yuv420_aot_target)
+        add_dependencies(dng_decoder_native ${DNG_STAGE4_NONSPLIT_AOT_TARGETS})
     endif()
 endif()
 # W7: link the split Stage4 kernel wherever it is generated (Vulkan targets).
 if(DNG_STAGE4_SPLIT_KERNEL)
-    target_link_libraries(dng_decoder_native
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
-        ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
+    target_link_libraries(dng_decoder_native ${DNG_STAGE4_SPLIT_AOT_LIBS})
+    # Explicit on the library: dng_decoder_native is created in pipeline.cmake,
+    # before halide_aot.cmake's add_compile_definitions() runs.
     target_compile_definitions(dng_decoder_native PRIVATE
+        DNG_STAGE4_SPLIT_KERNEL=1
         DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE=${DNG_RENDER_STAGE4_ANDROID_DIAG_STAGE})
 endif()
 if(APPLE)
@@ -214,7 +162,7 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 # Re-guard (split mechanics): the enclosing `if(NOT DNG_HOST_GENERATORS_ONLY)`
-# opened above is closed here and re-opened at the top of tests.cmake, because
+# opened above is closed here and re-opened at the top of tests_early.cmake, because
 # CMake requires flow-control blocks to balance within one file. The condition
 # is unchanged in between, so execution is identical to the monolith.
-endif() # NOT DNG_HOST_GENERATORS_ONLY (continued in tests.cmake)
+endif() # NOT DNG_HOST_GENERATORS_ONLY (continued in tests_early.cmake)

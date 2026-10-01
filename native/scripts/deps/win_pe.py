@@ -76,6 +76,26 @@ _DUMPBIN_EXPORT_RE = re.compile(r"^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{6,}\s+(\S
 _LLVM_NM_EXPORT_RE = re.compile(r"^[0-9A-Fa-f]+\s+[A-Za-z]\s+(\S+)\s*$")
 
 
+def run_with_fallback(primary_argv, fallback_argv, runner):
+    """The one dumpbin -> LLVM-tool fallback primitive (refactor T4,
+    2026-10-02), shared by this module and ci/verify_artifact.py.
+
+    Runs ``primary_argv``; runs ``fallback_argv`` only if the primary's rc is
+    not 0. ``runner(argv) -> (rc, text)``; ``rc`` None means "could not run
+    at all". Pure: no reporting and no file I/O -- each caller keeps its own
+    markers, notices, exceptions and dump files. Returns ``(attempts,
+    final_text)``: ``attempts`` is ``[(argv, rc, text), ...]`` in run order
+    and ``final_text`` is the last attempt's text.
+    """
+    attempts = []
+    for argv in (list(primary_argv), list(fallback_argv)):
+        rc, text = runner(argv)
+        attempts.append((argv, rc, text))
+        if rc == 0:
+            break
+    return attempts, attempts[-1][2]
+
+
 def _read_pe_text(dll: Path, out_path: Path, primary: Sequence[str], fallback: Sequence[str], what: str) -> str:
     """Run ``primary`` (dumpbin, present on a real MSVC runner); if it cannot
     run at all, fall back to ``fallback`` (the LLVM tool, always present
@@ -86,23 +106,27 @@ def _read_pe_text(dll: Path, out_path: Path, primary: Sequence[str], fallback: S
     ``run.run(check=False)``, never inferred from the output text.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    attempts: list[str] = []
 
-    for argv in (list(primary), list(fallback)):
+    def runner(argv):
         try:
-            result = run(argv + [str(dll)], check=False)
+            result = run(argv, check=False)
         except (OSError, SubprocessError) as exc:
-            attempts.append(f"{argv[0]}: not runnable ({exc})")
-            continue
-        text = (result.stdout or "") + (result.stderr or "")
-        if result.returncode == 0:
-            out_path.write_text(text, encoding="utf-8")
-            return text
-        attempts.append(f"{argv[0]}: exit {result.returncode}")
+            return None, str(exc)
+        return result.returncode, (result.stdout or "") + (result.stderr or "")
 
+    attempts, text = run_with_fallback(
+        list(primary) + [str(dll)], list(fallback) + [str(dll)], runner
+    )
+    if attempts[-1][1] == 0:
+        out_path.write_text(text, encoding="utf-8")
+        return text
+    notes = [
+        f"{argv[0]}: not runnable ({detail})" if rc is None else f"{argv[0]}: exit {rc}"
+        for argv, rc, detail in attempts
+    ]
     raise PeInspectionError(
         f"could not read {what} of {dll} with either tool "
-        f"({'; '.join(attempts)}) -- the measurement did NOT happen; "
+        f"({'; '.join(notes)}) -- the measurement did NOT happen; "
         "this is an instrument failure, not a capability failure"
     )
 

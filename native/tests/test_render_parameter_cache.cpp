@@ -38,18 +38,16 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "render_parameter_upload_cache.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RenderParamCache";
 
 void report(const char* name, bool ok, const char* detail) {
-  std::printf("[RenderParamCache] %s -> %s (%s)\n", name, ok ? "PASS" : "FAIL",
-              detail);
-  if (!ok) ++failures;
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 uint64_t fnv1a(const uint8_t* data, size_t len) {
   uint64_t h = 1469598103934665603ull;
@@ -166,6 +164,5 @@ int main(int argc, char** argv) {
   CHECK("step4_hash_differs_from_step3", step4.hash != step3.hash,
         "changed exposure must change output pixels");
 
-  std::printf("[RenderParamCache] TOTAL failures=%d\n", failures);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }

@@ -39,12 +39,12 @@ else()
         # at runtime, so no Vulkan SDK is needed at build time. Must sit AFTER the
         # ANDROID arm — Android also matches UNIX AND NOT APPLE — so this branch is
         # Linux-desktop only. Selects the same "vulkan" backend as Android/Windows,
-        # so DNG_STAGE4_SPLIT_KERNEL turns ON automatically (matched in the C++ host
-        # bridge, dng_render_halide.cpp).
+        # so DNG_STAGE4_SPLIT_KERNEL turns ON automatically (defined for every TU
+        # below, after the AOT_TARGET selection).
         #
         # PORTABLE-BASELINE (2026-09-08): `host` is the second host-derived
         # codegen site in this build (the first is RawSpeed3's -march=native;
-        # see cmake/tests.cmake "PORTABLE-BASELINE"). Halide's `host` target
+        # see cmake/generic_raw.cmake "PORTABLE-BASELINE"). Halide's `host` target
         # string expands to the *generator machine's* detected CPU features,
         # including avx512* on an AVX-512 GitHub runner — the same
         # "compiled for the builder, shipped to everyone" hazard in a second
@@ -102,6 +102,20 @@ else()
 endif()
 message(STATUS "Halide AOT lib extension: ${DNG_AOT_LIB_EXT}; Stage4 split kernel: ${DNG_STAGE4_SPLIT_KERNEL}")
 
+# Single source of truth for the Stage4 kernel-variant macro (2026-10-02):
+# every native TU (the library and every test target) sees
+# DNG_STAGE4_SPLIT_KERNEL=1 exactly when this variable is ON -- the same
+# variable that selects the linked Stage4 archives in cmake/ffi.cmake and
+# cmake/tests.cmake. C++ must not re-derive it from platform macros.
+if(DNG_FORCE_VULKAN AND NOT DNG_STAGE4_SPLIT_KERNEL)
+    message(FATAL_ERROR
+        "DNG_FORCE_VULKAN requires a Vulkan AOT target: configure with "
+        "-DDNG_AOT_TARGET_OVERRIDE=<...vulkan...> (current AOT_TARGET=${AOT_TARGET})")
+endif()
+if(DNG_STAGE4_SPLIT_KERNEL)
+    add_compile_definitions(DNG_STAGE4_SPLIT_KERNEL=1)
+endif()
+
 # Stage4 render uses same base target with -no_runtime (fixes hardcoded Metal bug)
 # Route A adoption (P16, 2026-06-12): the macOS Metal production Stage4 render is
 # pinned to IEEE stepwise via strict_float so its output is byte-exact against the
@@ -129,7 +143,7 @@ if(NOT DNG_CROSS_BUILD)
 # cross-compile) is derived from this list instead of a hand-written copy.
 #
 # Why: the previous literal list had drifted. It named
-# dng_render_stage4_scaled (linked by host TESTS only) while OMITTING
+# dng_render_stage4_scaled (an archive nothing linked; deleted 2026-10-02) while OMITTING
 # dng_render_stage4_scaled_preavg, which cmake/ffi.cmake links into the
 # shipped library on the non-split branch. Every cross-compile that existed
 # at the time resolved to a Vulkan target (Android/Linux/Windows), where the
@@ -330,23 +344,12 @@ add_custom_command(
 add_custom_target(dng_render_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT})
 
-# Sized decode (targetWidth): box-filter-downscaling Stage4 variant. Emitted
-# from the SAME generator binary via -g/-f, exactly like the Android variant
-# below, so that dng_render_stage4 itself stays byte-identical (its output SHAs
-# are pinned gate artifacts — Gotcha #99).
-add_custom_command(
-    OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled.h
-    COMMAND dng_render_generator -g dng_render_stage4_scaled -f dng_render_stage4_scaled -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
-    DEPENDS dng_render_generator
-    COMMENT "Generating Halide AOT Stage4 Render (box-filter scaled)..."
-)
-add_custom_target(dng_render_scaled_aot_target DEPENDS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
-list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled${DNG_AOT_LIB_EXT})
-
-# Variant A of the sized kernel: box-averages the Stage3 source BEFORE the
-# colour math (the variant above averages after it). The two co-exist on
-# purpose so the averaging-order trade-off can be measured side by side on a
-# real photograph; see the class comments in DngRenderGenerator.cpp.
+# Sized decode (targetWidth): the box-filter-downscaling Stage4 variant that
+# averages the Stage3 source BEFORE the colour math. Emitted from the SAME
+# generator binary via -g/-f, so dng_render_stage4 itself stays byte-identical
+# (its output SHAs are pinned gate artifacts -- Gotcha #99). The post-average
+# variant (dng_render_stage4_scaled) stays registered in DngRenderGenerator.cpp
+# for side-by-side measurement but is no longer emitted: nothing linked it.
 add_custom_command(
     OUTPUT ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg.h
     COMMAND dng_render_generator -g dng_render_stage4_scaled_preavg -f dng_render_stage4_scaled_preavg -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
@@ -463,3 +466,75 @@ if(DNG_HOST_GENERATORS_ONLY)
 endif()
 
 endif() # NOT DNG_CROSS_BUILD (AOT custom commands)
+
+# =============================================================================
+# T2 (2026-10-02 techdebt campaign): ONE declaration per AOT link family.
+#
+# Consumers: cmake/ffi.cmake (the shipped library's link list and
+# add_dependencies) and the statically linked test helpers in cmake/tests.cmake.
+#
+# Declared AFTER the `if(NOT DNG_CROSS_BUILD)` block on purpose: the *_LIBS
+# paths are exactly what a cross build links from DNG_PREBUILT_AOT_DIR, so they
+# must exist there too. The *_TARGETS names exist only when NOT
+# DNG_CROSS_BUILD; every consumer keeps its add_dependencies() under that
+# guard (or inside the host-only section), as before.
+#
+# Order inside each *_LIBS list IS the link order: static archive order decides
+# which duplicate symbol wins. Append; never sort.
+#
+# DNG_FUSED_BAYER_AOT_LIBS/_TARGETS deliberately stay inside the block above:
+# moving them out would make the Android cross test targets start linking the
+# fused archives, which is a link change, not a refactor.
+# =============================================================================
+set(DNG_PIPELINE_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/halide_runtime${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_bilinear${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_demosaic_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/rectilinear_warp${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_opcode_polynomial3${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
+set(DNG_PIPELINE_AOT_TARGETS
+    halide_runtime_target
+    dng_demosaic_aot_target
+    dng_demosaic_warp_aot_target
+    dng_warp_aot_target
+    dng_render_aot_target
+    dng_render_yuv420_aot_target
+    dng_opcode_polynomial_aot_target
+    dng_opcode_polynomial3_aot_target
+    raw_bayer_demosaic_aot_target
+    raw_bayer_fused_render_aot_target
+    raw_bayer_fused_render_yuv420_aot_target
+    raw_xtrans_fused_render_aot_target
+    raw_xtrans_fused_render_yuv420_aot_target
+    raw_xtrans_demosaic_aot_target
+    raw_linear_rgb_normalize_aot_target
+    raw_linear_rgb_fused_render_aot_target
+    raw_linear_rgb_fused_render_yuv420_aot_target)
+# Non-split Stage-4 family (macOS/Metal): the pre-average scaled kernel and its
+# yuv420 sibling, always linked together.
+set(DNG_STAGE4_NONSPLIT_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_scaled_preavg_yuv420${DNG_AOT_LIB_EXT})
+set(DNG_STAGE4_NONSPLIT_AOT_TARGETS
+    dng_render_scaled_preavg_aot_target
+    dng_render_scaled_preavg_yuv420_aot_target)
+# Split Stage-4 family (Vulkan): the three-channel-split kernel and its yuv420
+# sibling.
+set(DNG_STAGE4_SPLIT_AOT_LIBS
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/dng_render_stage4_split_yuv420${DNG_AOT_LIB_EXT})
+set(DNG_STAGE4_SPLIT_AOT_TARGETS
+    dng_render_android_aot_target
+    dng_render_split_yuv420_aot_target)

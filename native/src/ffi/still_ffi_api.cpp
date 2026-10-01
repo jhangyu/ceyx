@@ -14,21 +14,7 @@
 #include "heif_api.h"
 #endif
 
-#if defined(_WIN32)
-#define FFI_EXPORT __declspec(dllexport)
-#else
-#define FFI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
-
-// The HEIC/AVIF arms call into heif_encode.cpp (plan Task 7). Until that TU is
-// in the tree, cmake/encode.cmake leaves CEYX_HAS_HEIF_STILL_DECODE at 0 and
-// the arms return "unsupported" rather than producing an undefined symbol at
-// dylib link time. The definition is computed from the file's existence, so it
-// flips the moment Task 7 lands and the build is reconfigured.
-#ifndef CEYX_HAS_HEIF_STILL_DECODE
-#define CEYX_HAS_HEIF_STILL_DECODE 0
-#endif
-#define CEYX_HEIF_STILL_ROUTE (DNG_ENABLE_HEIF && CEYX_HAS_HEIF_STILL_DECODE)
+#include "ceyx_ffi_export.h"
 
 // JPEG XL (plan Task 9) needs no local stub here: src/jxl_codec.cpp defines
 // ceyx_jxl_probe_impl/ceyx_jxl_decode_impl unconditionally and answers
@@ -100,7 +86,7 @@ int32_t SniffFormat(const char *path) {
 
 extern "C" {
 
-FFI_EXPORT const char *ceyx_still_error_name(int32_t code) {
+CEYX_FFI_EXPORT const char *ceyx_still_error_name(int32_t code) {
   switch (code) {
     case kCeyxStillSuccess: return "kCeyxStillSuccess";
     case kCeyxStillErrNullPath: return "kCeyxStillErrNullPath";
@@ -118,20 +104,19 @@ FFI_EXPORT const char *ceyx_still_error_name(int32_t code) {
   }
 }
 
-FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
+CEYX_FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
   switch (format) {
     case kCeyxFormatWebp: return CEYX_ENABLE_WEBP ? 1 : 0;
     case kCeyxFormatHeic:
     case kCeyxFormatAvif:
-      // NOT the route flag. CEYX_HEIF_STILL_ROUTE only says "the HEIF route
-      // was compiled"; it cannot say whether the libheif we linked carries
-      // the HEVC or AV1 codec this format needs. Asking libheif at runtime is
-      // the only honest answer, and it is what makes a per-codec dist
-      // regression visible as a 0 here instead of as a decode failure later.
-      // CEYX_HEIF_STILL_ROUTE is (DNG_ENABLE_HEIF && CEYX_HAS_HEIF_STILL_DECODE),
-      // defined at still_ffi_api.cpp:30. Keep BOTH halves: dropping the
-      // DNG_ENABLE_HEIF half would call into libheif from a HEIF-less build.
-      return CEYX_HEIF_STILL_ROUTE ? CeyxHeifHasDecoderFor(format) : 0;
+      // NOT the route flag. DNG_ENABLE_HEIF only says "the HEIF route was
+      // compiled"; it cannot say whether the libheif we linked carries the
+      // HEVC or AV1 codec this format needs. Asking libheif at runtime is the
+      // only honest answer, and it is what makes a per-codec dist regression
+      // visible as a 0 here instead of as a decode failure later. Keep the
+      // DNG_ENABLE_HEIF test: without it a HEIF-less build would call into
+      // libheif.
+      return DNG_ENABLE_HEIF ? CeyxHeifHasDecoderFor(format) : 0;
     case kCeyxFormatJxl:  return CEYX_ENABLE_JXL ? 1 : 0;
     // JPEG: 0 ON PURPOSE, deviating from the plan's literal `return 1`. This
     // surface has no libjpeg decode arm -- a JPEG path handed to
@@ -146,7 +131,7 @@ FFI_EXPORT int32_t ceyx_still_decode_supports(int32_t format) {
   }
 }
 
-FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
+CEYX_FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
                                     uint32_t *width, uint32_t *height,
                                     int32_t *orientation) {
   if (!path || !*path || !width || !height || !orientation) {
@@ -165,7 +150,7 @@ FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
       case kCeyxFormatJxl:  rc = ceyx_jxl_probe_impl(path, &w, &h);  break;
       case kCeyxFormatHeic:
       case kCeyxFormatAvif: {
-#if CEYX_HEIF_STILL_ROUTE
+#if DNG_ENABLE_HEIF
         int32_t o = 1;
         rc = ceyx_map_heif_to_still_error(heif_probe(path, &w, &h, &o));
 #else
@@ -185,7 +170,7 @@ FFI_EXPORT int32_t ceyx_still_probe(const char *path, int32_t format_hint,
   }
 }
 
-FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
+CEYX_FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
                                           int32_t max_dim, CeyxStillResult *out) {
   if (!out) return kCeyxStillErrNullPath;
   std::memset(out, 0, sizeof(*out));
@@ -206,7 +191,7 @@ FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
       case kCeyxFormatJxl:  rc = ceyx_jxl_decode_impl(path, max_dim, out);  break;
       case kCeyxFormatHeic:
       case kCeyxFormatAvif:
-#if CEYX_HEIF_STILL_ROUTE
+#if DNG_ENABLE_HEIF
         rc = ceyx_heif_still_decode_impl(path, max_dim, out);
 #else
         rc = kCeyxStillErrUnsupported;
@@ -226,7 +211,7 @@ FFI_EXPORT int32_t ceyx_still_decode_rgba(const char *path, int32_t format_hint,
   }
 }
 
-FFI_EXPORT void ceyx_still_release(CeyxStillResult *r) {
+CEYX_FFI_EXPORT void ceyx_still_release(CeyxStillResult *r) {
   if (!r) return;
   if (r->rgba) std::free(r->rgba);
   std::memset(r, 0, sizeof(*r));   // makes a second call a no-op, per contract

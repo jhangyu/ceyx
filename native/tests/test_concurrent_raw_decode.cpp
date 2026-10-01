@@ -68,18 +68,16 @@
 #include "raw_ffi_api.h"
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "ConcurrentRawDecode";
 
 void report(const char* name, bool ok, const char* detail) {
-  std::printf("[ConcurrentRawDecode] %s -> %s (%s)\n", name,
-              ok ? "PASS" : "FAIL", detail);
-  if (!ok) ++failures;
+  test_report::report(kReportPrefix, name, ok, detail);
 }
-
-#define CHECK(name, cond, detail) report(name, (cond), detail)
 
 struct ArenaCounters {
   uint64_t allocation_count = 0;
@@ -426,11 +424,11 @@ int main(int argc, char** argv) {
           "the fused route; zero means the fused selector stopped engaging and "
           "every route assertion below silently describes the two-stage path");
   } else {
-    std::printf(
-        "[ConcurrentRawDecode] fusion_engaged SKIPPED: custom corpus given on "
-        "the command line, so this driver cannot know it contains an unscaled "
-        "Bayer file (observed fused_delta=%lld)\n",
-        (long long)fused_delta);
+    char skip_detail[96];
+    std::snprintf(skip_detail, sizeof(skip_detail), "observed fused_delta=%lld",
+                  (long long)fused_delta);
+    test_report::reportSkip(kReportPrefix, "fusion_engaged", "custom-corpus",
+                            skip_detail);
   }
 
   const bool every_decode_fused = (fused_delta == expected_decodes);
@@ -578,7 +576,5 @@ int main(int argc, char** argv) {
         "without this the zero measured above would be unfalsifiable — a "
         "counter that can never move is not evidence");
 
-  std::printf("[ConcurrentRawDecode] TOTAL failures=%d\n", failures);
-  std::fflush(stdout);
-  return failures == 0 ? 0 : 1;
+  return test_report::finish(kReportPrefix);
 }

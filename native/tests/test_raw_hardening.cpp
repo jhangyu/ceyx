@@ -32,47 +32,23 @@
 #include "dng_ffi_api.h"     // DngResult, dng_free_result
 #include "dng_pipeline.h"
 #include "raw_gpu_pipeline.h"
+#include "raw_test_support.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
-
 void report(const char* name, bool ok, const char* detail) {
-    std::printf("[RawHardening] %s %s -> %s\n", name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    test_report::report("RawHardening", name, ok, detail);
 }
 
-bool fileExists(const std::string& p) {
-    std::ifstream f(p, std::ios::binary);
-    return f.good();
-}
-
-// Same minimal object scanner the other RAW tests use: the manifest is a flat
-// list of one-level JSON objects, so a brace scan plus a key lookup is enough
-// and keeps the test dependency-free.
-std::string field(const std::string& obj, const char* key) {
-    const std::string needle = std::string("\"") + key + "\": \"";
-    const size_t at = obj.find(needle);
-    if (at == std::string::npos) return "";
-    const size_t start = at + needle.size();
-    const size_t end = obj.find('"', start);
-    return end == std::string::npos ? "" : obj.substr(start, end - start);
-}
+using raw_test_support::fileExists;
 
 std::string resolveBayerSample(const char* manifest_path) {
-    std::ifstream in(manifest_path);
-    std::string text((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
-    size_t pos = 0;
-    while ((pos = text.find('{', pos)) != std::string::npos) {
-        const size_t end = text.find('}', pos);
-        if (end == std::string::npos) break;
-        const std::string obj = text.substr(pos, end - pos);
-        pos = end + 1;
-        if (field(obj, "expect_route") != "generic") continue;
-        if (field(obj, "expect_layout") != "bayer2x2") continue;
-        const std::string path = field(obj, "path");
-        if (!path.empty() && fileExists(path)) return path;
+    for (const raw_test_support::RawManifestSample& sample :
+         raw_test_support::loadRawManifest(manifest_path)) {
+        if (sample.expect_route != "generic") continue;
+        if (sample.expect_layout != "bayer2x2") continue;
+        if (!sample.path.empty() && fileExists(sample.path)) return sample.path;
     }
     return "";
 }
@@ -205,9 +181,7 @@ int main(int argc, char** argv) {
             const std::string path = base.empty() ? std::string()
                                                   : base + kase[1];
             if (path.empty() || !fileExists(path)) {
-                std::printf("[RawHardening] SKIP %s (missing fixture; run "
-                            "python3 native/scripts/tmp/"
-                            "r7_t13_gen_fixtures.py)\n", kase[0]);
+                test_report::reportSkip("RawHardening", kase[0], "missing-fixture");
                 continue;
             }
             expectCleanFailure(kase[0], path.c_str());
@@ -275,7 +249,7 @@ int main(int argc, char** argv) {
 
     // 5. Cancellation, before and after dispatch.
     if (bayer.empty()) {
-        std::printf("[RawHardening] SKIP cancellation (no Bayer sample)\n");
+        test_report::reportSkip("RawHardening", "cancellation", "no-bayer-sample");
     } else {
         RawDevelopParams develop{};
         develop.tone_curve_strength = 1.0f;
@@ -348,7 +322,7 @@ int main(int argc, char** argv) {
 
     // 6. GPU-mandatory: no CPU render fallback (spec section 2.6).
     if (bayer.empty()) {
-        std::printf("[RawHardening] SKIP gpu-unavailable (no Bayer sample)\n");
+        test_report::reportSkip("RawHardening", "gpu-unavailable", "no-bayer-sample");
     } else {
         setenv("DNG_RAW_FORCE_GPU_UNAVAILABLE", "1", 1);
         RawDevelopParams develop{};
@@ -392,10 +366,5 @@ int main(int argc, char** argv) {
     std::snprintf(detail, sizeof(detail), "elapsed=%llds", static_cast<long long>(elapsed));
     report("no-hang", elapsed < 30, detail);
 
-    if (failures != 0) {
-        std::printf("[RawHardening] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawHardening] ALL PASS\n");
-    return 0;
+    return test_report::finish("RawHardening");
 }

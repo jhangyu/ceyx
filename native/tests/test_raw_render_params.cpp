@@ -22,6 +22,7 @@
 #include "libraw_frontend.h"
 #include "libraw_gpu_input_adapter.h"
 #include "raw_render_params_builder.h"
+#include "test_report.h"
 
 // Declared in src/pipeline/libraw_gpu_input_adapter.cpp, which this test reaches
 // through libdng_decoder_native (cmake/tests.cmake:229-231). Not in
@@ -36,14 +37,10 @@ int raw_camera_to_pcs_from_libraw(const float* rgb_cam, const float* cam_xyz,
 
 namespace {
 
-int failures = 0;
-
+// The gate greps for the exact prefix "[RawRenderParams] <name> -> PASS";
+// test_report.h's grammar keeps the detail after the verdict.
 void report(const char* name, bool ok, const char* detail) {
-    // The gate greps for the exact prefix "[RawRenderParams] <name> -> PASS",
-    // so the detail goes after the verdict, never between name and arrow.
-    std::printf("[RawRenderParams] %s -> %s (%s)\n", name, ok ? "PASS" : "FAIL",
-                detail);
-    if (!ok) ++failures;
+    test_report::report("RawRenderParams", name, ok, detail);
 }
 
 // Only the fields raw_build_render_params actually reads are populated; the
@@ -532,9 +529,8 @@ int main() {
         const bool have_dng = dng_render_params_for_test(
             "image_samples/lossless_dng_sample.dng", dng_params);
         if (!have_dng) {
-            std::printf("[RawRenderParams] SKIP dng-equivalence (sample unavailable)\n");
-            std::printf("[RawRenderParams] FAIL: the dng-equivalence gate is mandatory\n");
-            ++failures;
+            report("dng-equivalence", false,
+                   "sample unavailable; the dng-equivalence gate is mandatory");
         } else {
             RawGpuInput in = makeInput(true);
             for (int i = 0; i < 3; ++i) in.as_shot_neutral[i] = dng_params.camera_white[i];
@@ -1105,10 +1101,5 @@ int main() {
         report("shadows-clamped", same && under_cap, detail);
     }
 
-    if (failures != 0) {
-        std::printf("[RawRenderParams] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawRenderParams] ALL PASS\n");
-    return 0;
+    return test_report::finish("RawRenderParams");
 }

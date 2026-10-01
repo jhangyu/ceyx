@@ -50,7 +50,6 @@ docs/logs/2026-09-13/pyci-plan.md WI-1):
     python3 native/scripts/ci.py verify-interpreter --forbid-hostedtoolcache
     python3 native/scripts/ci.py ensure-cmake      --min 3.28
     python3 native/scripts/ci.py build-zlib        --version 1.3.1 --workspace W
-    python3 native/scripts/ci.py locate-clang-cl   [--github-path PATH]
     python3 native/scripts/ci.py verify-vulkan-lib [--vulkan-sdk PATH]
     python3 native/scripts/ci.py assert-vs-component --component ID
     python3 native/scripts/ci.py cross-stage1-windows --build-dir D --aot-target T
@@ -74,9 +73,9 @@ lead9-pyci-opus ruling), both modules' own functions unchanged.
 `provision ninja`/`provision apt`/`dist-list` emit NO markers (ledger
 enumeration confirmed the pre-migration steps they replace emit none --
 tightening a migration's marker surface is as much a regression as
-loosening it). `provision locate-clang-cl` is a second CLI path to the
-SAME `windows_toolchain.locate_clang_cl()` already dispatched by the flat
-`locate-clang-cl` command above -- not a second implementation. `vcpkg`
+loosening it). `provision locate-clang-cl` is the only CLI path to
+`windows_toolchain.locate_clang_cl()` (the flat `locate-clang-cl` alias
+was removed 2026-10-02, refactor T5). `vcpkg`
 is a distinct top-level group from the flat `vcpkg-baseline`/
 `vcpkg-bootstrap`/`vcpkg-install` commands above: those three dispatch to
 `provision.py`'s Linux/macOS (`.sh`) functions; `vcpkg <verb>` dispatches
@@ -151,7 +150,6 @@ _PLATFORMLESS_COMMANDS = (
     "verify-interpreter",
     "ensure-cmake",
     "build-zlib",
-    "locate-clang-cl",
     "verify-vulkan-lib",
     "assert-vs-component",
     "cross-stage1-windows",
@@ -706,9 +704,6 @@ def build_parser() -> argparse.ArgumentParser:
     bz.add_argument("--version", required=True)
     bz.add_argument("--workspace", required=True)
 
-    lcl = sub.add_parser("locate-clang-cl", help="locate clang-cl on PATH or the LLVM install dir")
-    lcl.add_argument("--github-path", default=None)
-
     vvl = sub.add_parser("verify-vulkan-lib", help="assert vulkan-1.lib is present under VULKAN_SDK")
     vvl.add_argument("--vulkan-sdk", default="")
 
@@ -743,10 +738,10 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--dist", required=True)
 
     # `provision <verb>`: WI-29's Ninja/apt bodies (new -- no prior
-    # migration anywhere) plus a second CLI path to WI-24's already-ported
-    # `locate_clang_cl` (the dist Windows twins reuse it rather than
-    # gaining a duplicate implementation). Distinct from the flat
-    # `locate-clang-cl` command above; both dispatch to the same function.
+    # migration anywhere) plus the only CLI path to WI-24's already-ported
+    # `locate_clang_cl` (the dist Windows twins and windows_build.yml reuse
+    # it rather than gaining a duplicate implementation; the flat alias was
+    # removed 2026-10-02, refactor T5).
     prov = sub.add_parser("provision", help="toolchain provisioning shared by dist carriers (WI-29)")
     prov_sub = prov.add_subparsers(dest="provision_command")
     prov_sub.add_parser("ninja", help="pip-install ninja, print its version (emits no marker)")
@@ -1103,10 +1098,6 @@ def dispatch(args: argparse.Namespace) -> int:
         import ci.zlib_build as zlib_build
 
         return zlib_build.build_zlib(args.version, args.workspace)
-    if args.command == "locate-clang-cl":
-        import ci.windows_toolchain as windows_toolchain
-
-        return windows_toolchain.locate_clang_cl(args.github_path)
     if args.command == "verify-vulkan-lib":
         import ci.windows_toolchain as windows_toolchain
 

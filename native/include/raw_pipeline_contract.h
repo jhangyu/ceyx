@@ -37,7 +37,7 @@ extern "C" {
  *       exif_orientation (appended at the end, no existing offset moves).
  *       EXIF tag values 1..8; any other value (including 0 from memset/
  *       malloc+zero) is treated as 1 (identity), matching ceyx_orient_rgba's
- *       contract. No new FFI entry: ceyxDecodeIntoPhase3 already constructs a
+ *       contract. No new FFI entry: ceyx::decodeIntoPhase3 already constructs a
  *       RawDevelopParams develop{} locally and simply sets this field before
  *       calling raw_pipeline_decode_file_into, whose signature is unchanged.
  *   6 - GPU orient productionization plan Task 12: RawGpuInput loses the
@@ -292,7 +292,7 @@ typedef struct RawDevelopParams {
     /* R3-T4, GPU copy-elimination campaign (plan §4.3), contract version 6.
      * Appended at the end on purpose: no existing field's offset changes.
      *
-     * Set by ceyxDecodeIntoPrepare (ceyx_decode_into_ffi.cpp) from the
+     * Set by ceyx::decodeIntoPrepare (ceyx_decode_into_ffi.cpp) from the
      * CALLER'S destination pointer/capacity, before raw_pipeline_decode_
      * file_into is ever called -- true iff `dst` is page-aligned (pointer %
      * kRawDeviceArenaAlignmentBytes == 0) AND `dst_capacity` is a page

@@ -5,7 +5,6 @@ import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
 import 'codec_format.dart';
-import 'raw_bindings.dart';
 
 /// Stands in for [DngNativeBindings.loadedLibraryPath] when NO library could
 /// be opened at all. A sentinel rather than an empty string, because
@@ -50,39 +49,8 @@ final class DngResult extends ffi.Struct {
 }
 
 /// C function signatures
-// WP5: the standalone RGBA free entry's typedef is gone with the symbol -- it had zero
-// remaining callers. The two allocating-decode typedefs are RETAINED, for the
-// same reason RawDecodeAndProcess* is: the current dylib no longer exports
-// these entries, but several tests load PINNED OLD dylibs that do, and these
-// typedefs are how such a dylib is described. A typedef describes a shape, not
-// a dependency.
-typedef DngDecodeAndProcessNative =
-    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath);
-typedef DngDecodeAndProcessDart =
-    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath);
-
-typedef DngDecodeAndProcessSizedNative =
-    ffi.Pointer<DngResult> Function(
-      ffi.Pointer<Utf8> filePath,
-      ffi.Int32 maxDim,
-    );
-typedef DngDecodeAndProcessSizedDart =
-    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath, int maxDim);
-
 typedef DngFreeResultNative = ffi.Void Function(ffi.Pointer<DngResult> result);
 typedef DngFreeResultDart = void Function(ffi.Pointer<DngResult> result);
-
-// Generic RAW entry (Phase 17 native, Phase 18 binding). Reuses the FROZEN
-// DngResult layout, so no struct change is needed. max_dim <= 0 means full
-// resolution (dng_ffi_api.h:114, raw_ffi_api.cpp:24). Additive export: older
-// dylibs lack it, so the lookup MUST be guarded.
-typedef RawDecodeAndProcessNative =
-    ffi.Pointer<DngResult> Function(
-      ffi.Pointer<Utf8> filePath,
-      ffi.Int32 maxDim,
-    );
-typedef RawDecodeAndProcessDart =
-    ffi.Pointer<DngResult> Function(ffi.Pointer<Utf8> filePath, int maxDim);
 
 typedef DngDecoderWarmupForSizeNative =
     ffi.Int32 Function(ffi.Int32 width, ffi.Int32 height);
@@ -336,36 +304,6 @@ typedef CeyxYuv420ToRgba8Dart =
 class DngNativeBindings {
   final ffi.DynamicLibrary _lib;
 
-  // WP5: the current dylib no longer exports the allocating decode entries,
-  // the standalone RGBA free, or the native pool gauge. Production decoding
-  // goes through the decode-into pair, and the process-wide "nothing leaked"
-  // gauge is CeyxNativeBufferPool.debugTotalLiveAddresses on this side.
-  //
-  // The lookups below are RETAINED but are now GUARDED (nullable) rather than
-  // unguarded `late final`. Two reasons, both load-bearing:
-  //   1. Several tests load PINNED OLD dylibs that still export these symbols,
-  //      and these lookups are how an old dylib is described. Deleting an
-  //      export is not the same as deleting the ability to describe one --
-  //      exactly the rule already applied to the guarded RAW entry below.
-  //   2. The unguarded legacy-DNG lookup used to throw inside
-  //      this constructor when the symbol was missing, killing ALL decoding.
-  //      That fragility is what made the native and Dart halves of this work
-  //      package a single indivisible commit; guarding it removes the trap
-  //      rather than merely stepping around it.
-  // No production code path calls either entry; they are capability probes.
-  DngDecodeAndProcessDart? _dngDecodeAndProcess;
-  DngDecodeAndProcessSizedDart? _dngDecodeAndProcessSized;
-  DngDebugPoolCheckedOutDart? _dngDebugPoolCheckedOut;
-
-  // Guarded RAW entries — null when the loaded dylib predates Phase 17 or was
-  // built with -DDNG_ENABLE_GENERIC_RAW=OFF.
-  //
-  // `rawDecodeAndProcess` is deliberately RETAINED even though WP5 deleted the
-  // export: raw_bindings_layout_test.dart loads a PINNED OLD dylib that still
-  // has it, and this guarded lookup is how that dylib is described. Deleting an
-  // export is not the same as deleting the ability to describe an older one.
-  RawDecodeAndProcessDart? _rawDecodeAndProcess;
-
   // R4 item 1: guarded slot-configuration entries. Null together — they ship
   // as one group, so a dylib exposing some but not all is a corrupt build and
   // degrades to "unsupported" rather than half-working.
@@ -420,36 +358,6 @@ class DngNativeBindings {
   /// Pointer to the C `dng_free_result` function for NativeFinalizer (if we were finalizing the whole result)
   late final ffi.Pointer<ffi.NativeFunction<DngFreeResultNative>>
   dngFreeResultPtr;
-
-  /// Guarded access to the generic RAW entry. Null when the loaded dylib does
-  /// not export the legacy allocating RAW entry.
-  RawDecodeAndProcessDart? get rawDecodeAndProcess => _rawDecodeAndProcess;
-
-  /// Whether the loaded dylib exports the legacy allocating RAW entry.
-  bool get rawDecodeAvailable => _rawDecodeAndProcess != null;
-
-  /// Guarded access to the legacy allocating decode entry. Null on any dylib
-  /// built after WP5 retired it; non-null only for a pinned older dylib.
-  DngDecodeAndProcessDart? get dngDecodeAndProcess => _dngDecodeAndProcess;
-
-  /// Guarded access to the legacy allocating sized-decode entry. Null on any
-  /// dylib built after WP5 retired it.
-  DngDecodeAndProcessSizedDart? get dngDecodeAndProcessSized =>
-      _dngDecodeAndProcessSized;
-
-  /// Whether the loaded dylib exports the legacy sized-decode entry.
-  /// WP5: false for every current build; a capability report about the loaded
-  /// image, not a switch any decode path consults.
-  bool get sizedDecodeAvailable => _dngDecodeAndProcessSized != null;
-
-  /// Whether the loaded dylib exports the native pool gauge.
-  /// WP5: false for every current build. The live gauge is
-  /// CeyxNativeBufferPool.debugTotalLiveAddresses.
-  bool get poolStatsAvailable => _dngDebugPoolCheckedOut != null;
-
-  /// Native RGBA pool buffers currently checked out. Null on every current
-  /// build, because the native pool it counted no longer exists.
-  int? poolCheckedOut() => _dngDebugPoolCheckedOut?.call();
 
   /// Guarded access to the R4 item 1 slot-configuration entry. Null when the
   /// loaded dylib predates the configurable native slot cap.
@@ -588,48 +496,6 @@ class DngNativeBindings {
   ffi.DynamicLibrary get library => _lib;
 
   DngNativeBindings._(this._lib) {
-    // WP5: guarded. Absent on every current dylib, present on the pinned old
-    // dylibs the symbol-absence tests load.
-    try {
-      _dngDecodeAndProcess = _lib
-          .lookupFunction<DngDecodeAndProcessNative, DngDecodeAndProcessDart>(
-            'dng_decode_and_process',
-          );
-    } catch (_) {
-      _dngDecodeAndProcess = null;
-    }
-
-    try {
-      _dngDecodeAndProcessSized = _lib
-          .lookupFunction<
-            DngDecodeAndProcessSizedNative,
-            DngDecodeAndProcessSizedDart
-          >('dng_decode_and_process_sized');
-    } catch (_) {
-      _dngDecodeAndProcessSized = null;
-    }
-
-    try {
-      _dngDebugPoolCheckedOut = _lib
-          .lookupFunction<
-            DngDebugPoolCheckedOutNative,
-            DngDebugPoolCheckedOutDart
-          >('dng_debug_pool_checked_out');
-    } catch (_) {
-      _dngDebugPoolCheckedOut = null;
-    }
-
-    try {
-      _rawDecodeAndProcess = _lib
-          .lookupFunction<RawDecodeAndProcessNative, RawDecodeAndProcessDart>(
-            'raw_decode_and_process',
-          );
-    } catch (_) {
-      // Symbol absent -> rawDecodeAvailable stays false and the service
-      // throws RawUnavailableException instead of crashing.
-      _rawDecodeAndProcess = null;
-    }
-
     // R4 item 1. One try block for all four on purpose: they are added by the
     // same commit and ship together, so partial availability means a corrupt
     // build. Degrading the whole group to "unsupported" is safer than letting

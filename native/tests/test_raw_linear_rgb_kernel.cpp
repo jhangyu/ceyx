@@ -1,6 +1,6 @@
 // raw_linear_rgb_normalize AOT kernel vs its same-formula CPU reference.
 //
-// Output contract: one line per case, final "[RawLinearRgb] ALL PASS"; exit 0
+// Output contract: one line per case, final "[RawLinearRgb SUMMARY]" line; exit 0
 // only when every case passed.
 #include <cmath>
 #include <cstdint>
@@ -8,14 +8,17 @@
 #include <vector>
 
 #include "raw_demosaic_reference.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RawLinearRgb";
 
 void report(const char* line, bool ok) {
     std::printf("[RawLinearRgb] %s -> %s\n", line, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    ++test_report::executed;
+    if (!ok) ++test_report::failures;
 }
 
 // Deterministic pseudo-random source: a fixed LCG, so a failure is reproducible
@@ -128,10 +131,5 @@ int main() {
         report(line, ok == 1 && psnr >= 99.0 && max_abs <= 1);
     }
 
-    if (failures != 0) {
-        std::printf("[RawLinearRgb] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawLinearRgb] ALL PASS\n");
-    return 0;
+    return test_report::finish(kReportPrefix);
 }

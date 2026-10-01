@@ -63,6 +63,14 @@ class OrientationTests(unittest.TestCase):
 
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
+        # Refactor T3: _android_scan now resolves llvm-nm via ndk_tool; these
+        # tests fake the NDK at "/opt/ndk", so fake the resolver too.
+        ndk_patch = mock.patch.object(
+            orientation, "ndk_tool",
+            return_value=Path("/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"),
+        )
+        ndk_patch.start()
+        self.addCleanup(ndk_patch.stop)
 
     def _tmp(self):
         return self._tmpdir.name

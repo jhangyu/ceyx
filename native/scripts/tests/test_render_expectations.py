@@ -253,10 +253,10 @@ def test_check_step_anchor_discriminates_two_legs_in_one_file(tmp_path):
         "  build:\n"
         "    steps:\n"
         "      - name: Assert full vector (native leg)\n"
-        "        if: matrix.cross == 'false'\n"
+        "        if: matrix.runs_target_code == 'true'\n"
         "        run: probe.py --expect avif:encode=1\n"
         "      - name: Assert full vector (cross leg)\n"
-        "        if: matrix.cross == 'true'\n"
+        "        if: matrix.two_stage == 'true'\n"
         "        run: echo 'avif:encode=0 (configure-log honest zero)'\n"
     )
     assert re_mod.check(ledger=ledger, workflows_dir=workflows_dir) == []

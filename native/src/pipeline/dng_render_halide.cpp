@@ -1,105 +1,3 @@
-/*
----
-file_summary: >
-  Stage4 render 橋接層。負責把 DNG SDK 的 Stage3 `dng_image` 與 color/tone/profile
-  參數整理成 Halide AOT kernel 可用的 Buffer，並在 full Halide / SDK fallback
-  兩條路徑間 dispatch。
-
-notes:
-  - `render_stage4_halide()` 是唯一正式入口；其餘多為資料萃取、參數建構與 full AOT 包裝。
-  - Phase 8.3 後只保留正式 full Stage4 kernel 與 SDK fallback/quality-lock。
-  - Round 1 P1 (commit 1d1726e) sweep 移除了 `renderHalideTimingEnabled` /
-    `renderHalideTryFullEnabled` / `renderHalideForceFullKernelEnabled` /
-    `renderHalideBitExactModeEnabled` 四個 env getter 與對應的 `DNG_RENDER_*`
-    env，全部退役；本檔不再直接呼叫 `std::getenv`。env 分類請見
-    `include/dng_pipeline_config.h` 頂部的 RouteConfig/DiagnosticConfig/
-    ResearchConfig 目錄。
-  - Phase 10 Sprint E 加入 RGB pool 版本的 `render_stage4_halide` 多載
-    （ptr-based），供 mmap pool zero-copy 路徑直接寫入 caller-owned 記憶體。
-
-structs:
-  - name: "RenderParams"
-    description: "Stage4 所需矩陣、1D/3D table、encoding table 與 SDK reference 物件快取。"
-    lines: "125-163"
-  - name: "CachedRenderHost"
-    description: "quality-lock SDK Render 專用的 reusable host cache。"
-    lines: "175-193"
-
-functions:
-  - name: "copyRenderSettings"
-    description: "把既有 `dng_render` 參數複製到另一個 renderer（供 host 分離時重建）。"
-    lines: "165-173"
-  - name: "qualityLockRenderHostCache"
-    description: "回傳 quality-lock SDK Render 專用的快取 host。"
-    lines: "195-198"
-  - name: "extractStage3Interleaved"
-    description: "把 Stage3 `dng_image` 抽成 float interleaved buffer。"
-    lines: "200-222"
-  - name: "extractStage3Interleaved16"
-    description: "把 Stage3 `dng_image` 抽成 uint16 interleaved buffer。"
-    lines: "224-246"
-  - name: "borrowStage3Interleaved16"
-    description: "嘗試直接借用 Stage3 tile buffer，避免額外拷貝。"
-    lines: "248-287"
-  - name: "packBorrowedStage3Interleaved16"
-    description: "將 borrowed Stage3 tile 重新整理成緊密 interleaved 版面。"
-    lines: "289-322"
-  - name: "borrowImageInterleaved8"
-    description: "嘗試直接借用最終 8-bit image tile buffer。"
-    lines: "324-362"
-  - name: "packBorrowedInterleaved8"
-    description: "將 borrowed 8-bit tile 重新整理成緊密 interleaved 輸出。"
-    lines: "364-397"
-  - name: "matrixToRowMajor3x3"
-    description: "將 `dng_matrix` 轉成 Halide 端使用的 row-major 3x3 array。"
-    lines: "399-405"
-  - name: "toIdentityHueSat"
-    description: "建立 identity HueSat / Look table。"
-    lines: "407-413"
-  - name: "toIdentityCurve"
-    description: "建立 identity 1D curve。"
-    lines: "415-422"
-  - name: "copyHueSatMap"
-    description: "將 SDK HueSatMap 轉成 Halide 期望的 planar layout。"
-    lines: "424-450"
-  - name: "buildRenderParams"
-    description: "從 `dng_negative`/`dng_render` 與 centralized config 萃取 Stage4 所需矩陣、tone/gamma/table 與 profile map。"
-    lines: "452-589"
-  - name: "runRenderStage4HalideAot"
-    description: "呼叫 full Stage4 Halide AOT kernel（host-side src buffer 路徑）。P15 W2：Android 改 zero-copy wrap SDK interleaved RGB 成 flat-1D src 直餵 kernel（src_rgb gather + src_row_stride_px scalar），刪除 host repack_src。G2（Round 2）：Android kernel 直接輸出 interleaved RGBA8（Probe-A 驗證構造），退役 planar D2H + repackPlanarToRGBAMT/repackPlanarToInterleavedMT + RepackThreadPool；legacy RGB8 output format retired entirely (WP1 phase 3)。"
-    lines: "1286-1588"
-  - name: "runRenderStage4HalideAotFromDevice"
-    description: "Phase 8.2.2/8.2.3 — Stage4 AOT kernel，src 來自 GPU device buffer。G1（Round 2）：Android 改為 zero-copy device alias——用 shallow halide_buffer_t 把 producer 的 Vulkan device allocation 以 offset-0 flat-1D view 直餵 kernel（crop 由 crop_l/crop_t scalar 吸收），刪除 W4-4 時代的全幀 copy_to_host + device_deallocate + 重上傳；成功後經原始 struct halide_device_free（owner destructor 因 device==0 不會 double-free），失敗路徑保留 device data 供 fallback。其他平台保留原 Metal device handoff。G2（Round 2）：Android dst 改 kernel 直出 interleaved RGBA8，fused 路徑 D2H 直落 caller RGBA buffer（零 host repack）。"
-    lines: "1590-1888"
-  - name: "runHalideFullOrSdkFallback (host src overload)"
-    description: "執行正式 full Stage4 kernel（host src），失敗時回退 SDK render。"
-    lines: "798-924"
-  - name: "runHalideFullOrSdkFallback (device src overload)"
-    description: "Stage3-on-device 路徑的 full Stage4 kernel + SDK fallback。"
-    lines: "931-1063"
-  - name: "renderHalideModeName"
-    description: "列舉值轉字串。"
-    lines: "1067-1074"
-  - name: "render_stage4_halide (host vector overload)"
-    description: "Stage4 正式入口；處理 Stage3 取得、kernel dispatch、fallback 與 timing。"
-    lines: "1076-1099"
-  - name: "render_stage4_halide_from_device_buffer (host vector overload)"
-    description: "Phase 8.2.2 device handoff 入口；傳入 Stage3 device buffer，計算 DefaultCropArea 並呼叫 runRenderStage4HalideAotFromDevice。"
-    lines: "1101-1158"
-  - name: "render_stage4_halide (pool ptr overload)"
-    description: "Phase 10 Sprint E RGB pool — 以 caller-supplied (mmap pool) 指標直接寫入；包裝 vector overload 並驗證 data() 未搬家。"
-    lines: "1196-1244"
-  - name: "render_stage4_halide_from_device_buffer (pool ptr overload)"
-    description: "Phase 10 Sprint E RGB pool — device handoff + caller pool ptr 版本。"
-    lines: "1246-1303"
-  - name: "LazyZeroBuf"
-    description: "T9 (Gotcha #62)：Android S4 prewarm dummy buffer 的 mmap MAP_ANON lazy-zero RAII 容器（calloc fallback），消除 ~410MB eager memset。"
-    lines: "1632-1655"
-  - name: "dng_render_stage4_prewarm_for_size"
-    description: "W7-E Android-only：以 actual-size LazyZeroBuf identity-params dummy 預建 Stage4 render Vulkan pipeline；per-size cache、[Warmup] s4 markers。macOS no-op。"
-    lines: "1659-1749"
----
-*/
 #include "dng_render_halide.h"
 
 #include <algorithm>
@@ -117,19 +15,14 @@ functions:
 #include <vector>
 
 // W7b: which Stage4 AOT kernel variant this host bridge talks to. The 3-channel
-// split kernel (dng_render_stage4_split) exists to dodge the Halide v21
-// SPIR-V Tuple R==G bug, so every Vulkan target needs it — Android and Windows
-// today. Mirrors CMake's DNG_STAGE4_SPLIT_KERNEL option (CMakeLists.txt:460).
+// split kernel (dng_render_stage4_split) exists to dodge the Halide v21 SPIR-V
+// Tuple R==G bug, so every Vulkan AOT target needs it. DNG_STAGE4_SPLIT_KERNEL
+// is defined in exactly one place -- cmake/halide_aot.cmake, from
+// AOT_TARGET MATCHES "vulkan" -- the same CMake variable that selects the
+// linked Stage4 archives (cmake/ffi.cmake). Do not re-derive it here.
 // Guards that are about the *kernel variant* (buffer shapes, RGBA scratch, D2H,
 // call sites) key off this macro; guards that are genuinely platform-specific
 // (arm_neon.h, mmap, Android-only prewarm) stay on __ANDROID__.
-// DNG_FORCE_VULKAN (F-R3-1 MoltenVK arbitration, default OFF): a Vulkan AOT
-// build on Apple ships the split Stage4 kernel (dng_render_stage4_split), so the
-// host bridge must talk to it — same as every other Vulkan target. OFF keeps
-// Apple on the non-split Metal kernel unchanged.
-#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
-#define DNG_STAGE4_SPLIT_KERNEL 1
-#endif
 
 #if defined(__ANDROID__)
 // W7-E S4 prewarm per-size cache + crash-attribution markers (Android-only).

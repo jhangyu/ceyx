@@ -14,14 +14,15 @@
 #include <vector>
 
 #include "raw_file_router.h"
+#include "test_report.h"
 
 namespace {
 
-int failures = 0;
+using test_report::failures;
+constexpr const char kReportPrefix[] = "RawRouter";
 
 void report(const char* name, bool ok, const char* detail) {
-    std::printf("[RawRouter] %s %s -> %s\n", name, detail, ok ? "PASS" : "FAIL");
-    if (!ok) ++failures;
+    test_report::report(kReportPrefix, name, ok, detail);
 }
 
 void expectBytes(const char* name, const std::vector<uint8_t>& header,
@@ -196,10 +197,5 @@ int main(int argc, char** argv) {
         fs::remove_all(dir, ec);
     }
 
-    if (failures != 0) {
-        std::printf("[RawRouter] FAIL (%d cases)\n", failures);
-        return 1;
-    }
-    std::printf("[RawRouter] ALL PASS\n");
-    return 0;
+    return test_report::finish(kReportPrefix);
 }

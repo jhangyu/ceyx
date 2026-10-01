@@ -47,9 +47,8 @@ KNOWN LIMITS, stated rather than buried
   that is 32 bits wide.
 * `0 + (N*W)` is the form Halide v21 emits for a single staged producer. If a
   future schedule stages two producers the arithmetic may nest differently;
-  --strict makes an unparseable shared-memory expression a FAILURE rather than
-  a skip, and --strict is what the acceptance gate runs with. An unrecognised
-  form must be read by a human, not silently passed.
+  an unparseable shared-memory expression is always a FAILURE (never a skip):
+  an unrecognised form must be read by a human, not silently passed.
 * The device-allocation half (`--max-dispatches`, `--forbid-device-malloc`) is
   reported honestly: on every archive inspected so far the kernel never calls
   device_malloc at all, because the buffers are caller-supplied. So
@@ -107,9 +106,6 @@ def main():
     parser.add_argument("--forbid-device-malloc", action="store_true",
                         help="fail on any device_malloc in the lowered statement "
                              "(weak: see the module docstring)")
-    parser.add_argument("--strict", action="store_true",
-                        help="treat an unparseable shared-memory expression as a "
-                             "FAILURE instead of a skip")
     args = parser.parse_args()
 
     try:
@@ -136,10 +132,7 @@ def main():
         if not shared_match:
             message = ("dispatch %d (%s): could not locate the shared-memory "
                        "argument" % (index, backend))
-            if args.strict:
-                failures.append(message)
-            else:
-                print("[GpuProducerWidth] SKIP %s" % message)
+            failures.append(message)
             continue
         shared = shared_match.group("shared")
         if SHARED_ZERO_RE.match(shared):
@@ -150,10 +143,7 @@ def main():
         if not staged_match:
             message = ("dispatch %d (%s): unrecognised shared-memory expression "
                        "%r -- a human must read this" % (index, backend, shared))
-            if args.strict:
-                failures.append(message)
-            else:
-                print("[GpuProducerWidth] SKIP %s" % message)
+            failures.append(message)
             continue
         elems = int(staged_match.group("elems"))
         width = int(staged_match.group("width"))

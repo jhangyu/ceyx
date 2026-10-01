@@ -1,12 +1,9 @@
-import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:ffi/ffi.dart';
-
-import 'dng_bindings.dart';
 import 'heif_bindings.dart';
 import 'heif_error_codes.dart';
+import 'still_worker.dart';
 
 /// A decoded HEIC image: RGBA8 interleaved, Dart-owned.
 class HeifImage {
@@ -30,34 +27,16 @@ class HeifImage {
 /// Extent + orientation of a HEIC's primary item, read from metadata only.
 typedef HeifProbeResult = ({int width, int height, int orientation});
 
-class _HeifWorkerResult {
-  _HeifWorkerResult({
-    required this.rgba,
-    required this.width,
-    required this.height,
-    required this.orientation,
-  });
-
-  final TransferableTypedData rgba;
-  final int width;
-  final int height;
-  final int orientation;
-
-  HeifImage toImage() => HeifImage(
-    rgba: rgba.materialize().asUint8List(),
-    width: width,
-    height: height,
-    orientation: orientation,
-  );
-}
-
 /// High-level HEIC/HEIF decoding service.
 ///
 /// Shape deliberately mirrors [DngDecoderService]: the same dylib search order
-/// (it reuses [DngNativeBindings]' loader), the same worker-isolate discipline
+/// (it reuses `DngNativeBindings`' loader), the same worker-isolate discipline
 /// (native bytes are copied into Dart-owned memory inside the worker, and only
 /// [TransferableTypedData] crosses the isolate boundary — no native pointer
-/// ever does), and the same guarded-symbol degradation.
+/// ever does), and the same guarded-symbol degradation. T8 (2026-10-02): the
+/// worker mechanics shared with [CeyxStillDecoderService] live in
+/// still_worker.dart; this class keeps the HEIF-specific contract — typed
+/// exceptions on decode failure, null on probe failure.
 class HeifDecoderService {
   HeifDecoderService({String? libraryPath}) : _libraryPath = libraryPath;
 
@@ -70,14 +49,10 @@ class HeifDecoderService {
   void _initialize() {
     if (_initialized) return;
     _initialized = true;
-    try {
-      final dng = _libraryPath == null
-          ? DngNativeBindings.load()
-          : DngNativeBindings.fromPath(_libraryPath);
-      _bindings = HeifNativeBindings.fromLibrary(dng.library);
-    } catch (_) {
-      _bindings = null;
-    }
+    _bindings = loadStillRouteBindings(
+      _libraryPath,
+      HeifNativeBindings.fromLibrary,
+    );
   }
 
   /// Whether this build of the native library exports the HEIF entry points.
@@ -116,97 +91,72 @@ class HeifDecoderService {
     // `this`, and an initialized service holds a DynamicLibrary that
     // Isolate.run cannot send (the same trap DngDecoderService documents).
     final requested = (maxDim != null && maxDim > 0) ? maxDim : 0;
-    final result = await Isolate.run(
+    final pixels = await Isolate.run(
       () => _decodeInIsolate(path, libraryPath, requested),
     );
-    return result.toImage();
+    return HeifImage(
+      rgba: pixels.rgba.materialize().asUint8List(),
+      width: pixels.width,
+      height: pixels.height,
+      orientation: pixels.orientation,
+    );
   }
 
   /// Static so [Isolate.run] cannot capture parent-isolate state.
   static HeifProbeResult? _probeInIsolate(String path, String? libraryPath) {
-    final service = HeifDecoderService(libraryPath: libraryPath).._initialize();
-    final bindings = service._bindings;
+    final bindings = loadStillRouteBindings(
+      libraryPath,
+      HeifNativeBindings.fromLibrary,
+    );
     if (bindings == null || !bindings.available) return null;
-
-    final pathPtr = path.toNativeUtf8();
-    final width = calloc<Uint32>();
-    final height = calloc<Uint32>();
-    final orientation = calloc<Int32>();
-    try {
-      final rc = bindings.probe(pathPtr, width, height, orientation);
-      if (rc != HeifErrorCode.success) return null;
-      if (width.value == 0 || height.value == 0) return null;
-      return (
-        width: width.value,
-        height: height.value,
-        orientation: orientation.value,
-      );
-    } finally {
-      malloc.free(pathPtr);
-      calloc.free(width);
-      calloc.free(height);
-      calloc.free(orientation);
-    }
+    return probeStillImageExtent(path, bindings.probe, HeifErrorCode.success);
   }
 
-  static _HeifWorkerResult _decodeInIsolate(
+  /// Throws inside the worker, exactly as before T8, so [Isolate.run]
+  /// rethrows the same exception types with the same code, name and message.
+  static StillDecodePixels _decodeInIsolate(
     String path,
     String? libraryPath,
     int maxDim,
   ) {
-    final service = HeifDecoderService(libraryPath: libraryPath).._initialize();
-    final bindings = service._bindings;
+    final bindings = loadStillRouteBindings(
+      libraryPath,
+      HeifNativeBindings.fromLibrary,
+    );
     if (bindings == null || !bindings.available) {
       throw HeifUnavailableException(path);
     }
-
-    final pathPtr = path.toNativeUtf8();
-    final out = calloc<HeifResult>();
-    try {
-      final rc = bindings.decode(pathPtr, maxDim, out);
-      final result = out.ref;
-      if (rc != HeifErrorCode.success) {
+    final outcome = decodeStillImage(
+      path,
+      maxDim,
+      (pathPointer, maxDimension, out) =>
+          bindings.decode(pathPointer, maxDimension, out.cast<HeifResult>()),
+      (out) => bindings.release(out.cast<HeifResult>()),
+      HeifErrorCode.success,
+    );
+    switch (outcome) {
+      case StillDecodePixels():
+        return outcome;
+      case StillDecodeNativeError(:final code):
         throw HeifDecodeException(
-          rc,
-          HeifErrorCode.name(rc),
+          code,
+          HeifErrorCode.name(code),
           'native heif_decode_rgba failed for $path',
         );
-      }
-      if (result.rgba == nullptr || result.rgbaLen <= 0) {
+      case StillDecodeNullBuffer():
         throw HeifDecodeException(
           HeifErrorCode.allocationFailed,
           HeifErrorCode.name(HeifErrorCode.allocationFailed),
           'RGBA buffer is null despite kHeifSuccess',
         );
-      }
-      final expected = result.width * result.height * 4;
-      if (result.rgbaLen != expected) {
-        // Native already checks this; re-checking here means a future ABI drift
-        // surfaces as a typed exception rather than as a torn image.
+      case StillDecodeLengthMismatch(:final rgbaLength, :final expectedLength):
+        // Native already checks this; re-checking here means a future ABI
+        // drift surfaces as a typed exception rather than as a torn image.
         throw HeifDecodeException(
           HeifErrorCode.metadataInvalid,
           HeifErrorCode.name(HeifErrorCode.metadataInvalid),
-          'rgba_len=${result.rgbaLen} but width*height*4=$expected',
+          'rgba_len=$rgbaLength but width*height*4=$expectedLength',
         );
-      }
-      // Copy into Dart-owned bytes: TransferableTypedData cannot carry a
-      // native-backed typed list across an isolate boundary safely.
-      final copy = Uint8List.fromList(
-        result.rgba.asTypedList(result.rgbaLen),
-      );
-      return _HeifWorkerResult(
-        rgba: TransferableTypedData.fromList([copy]),
-        width: result.width,
-        height: result.height,
-        orientation: result.orientation,
-      );
-    } finally {
-      // heif_release frees the buffer and zeroes the struct; calloc.free then
-      // releases the caller-owned struct itself. Order matters: freeing the
-      // struct first would leak the buffer.
-      if (bindings.available) bindings.release(out);
-      calloc.free(out);
-      malloc.free(pathPtr);
     }
   }
 }
