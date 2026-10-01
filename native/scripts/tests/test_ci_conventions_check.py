@@ -454,3 +454,42 @@ def test_c12_mapping_form_is_a_violation(tmp_path):
            "jobs:\n  b:\n    container:\n      image: ubuntu:22.04\n")
     violations = cc.check_c12_container_digest_pinned(tmp_path)
     assert len(violations) == 1 and violations[0].startswith("C12: linux_build.yml:3:"), violations
+
+
+# ---------------------------------------------------------------------------
+# C13: every job with runs-on declares timeout-minutes.
+# ---------------------------------------------------------------------------
+
+_C13_OK = (
+    "on:\n"
+    "  push:\n"
+    "jobs:\n"
+    "  build:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    timeout-minutes: 30\n"
+    "    steps:\n"
+    "      - name: x\n"
+    "        run: echo x\n"
+    "  call-leg:\n"
+    "    uses: ./.github/workflows/linux_build.yml\n"
+)
+
+
+def test_c13_compliant_fixture_passes(tmp_path):
+    _write(tmp_path, "build.yml", _C13_OK)
+    assert cc.check_c13_job_timeout(tmp_path) == []
+
+
+def test_c13_violation_fixture_fails(tmp_path):
+    _write(tmp_path, "build.yml", _C13_OK.replace("    timeout-minutes: 30\n", ""))
+    violations = cc.check_c13_job_timeout(tmp_path)
+    assert violations == [
+        "C13: build.yml:4: job 'build' has runs-on but no timeout-minutes "
+        "(GitHub default: 360 minutes)"
+    ], violations
+
+
+def test_c13_commented_timeout_does_not_count(tmp_path):
+    _write(tmp_path, "build.yml",
+           _C13_OK.replace("    timeout-minutes: 30\n", "    # timeout-minutes: 30\n"))
+    assert len(cc.check_c13_job_timeout(tmp_path)) == 1

@@ -14,6 +14,7 @@ plugin/android jniLibs .gitignore exclusion. C11 (refactor T2, 2026-10-02)
 holds every hand-written toolchain pin (python-version, ndk-version, the
 windows matrix runner/msvc_arch) equal to its single source module.
 C12 (techdebt 2026-10-02, ruling 4-a) requires every job `container:` image to be digest-pinned.
+C13 (techdebt 2026-10-02) requires `timeout-minutes:` on every job with `runs-on:`.
 
 Every rule has a paired negative-control fixture proving it actually detects
 a violation (native/scripts/tests/test_ci_conventions_check.py, R8): a rule
@@ -426,6 +427,54 @@ def check_c12_container_digest_pinned(workflows_dir):
     return violations
 
 
+_JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(#.*)?$")
+
+
+def _job_blocks(text):
+    """Yield (job_id, 1-based line, body lines) for each job under the
+    top-level `jobs:` key. Line scan (no YAML); comment/blank lines dropped."""
+    in_jobs = False
+    current = None
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            if current:
+                yield current
+                current = None
+            in_jobs = line.startswith("jobs:")
+            continue
+        if not in_jobs:
+            continue
+        m = _JOB_KEY_RE.match(line)
+        if m:
+            if current:
+                yield current
+            current = (m.group(1), lineno, [])
+        elif current:
+            current[2].append(line)
+    if current:
+        yield current
+
+
+def check_c13_job_timeout(workflows_dir):
+    """C13 (techdebt 2026-10-02): every job that has `runs-on:` declares
+    `timeout-minutes:` -- GitHub's default is 360 minutes. Reusable-workflow
+    jobs (`uses:`, no `runs-on`) cannot carry a timeout and are excluded by
+    construction."""
+    violations = []
+    for wf in _workflow_files(workflows_dir):
+        for job_id, lineno, body in _job_blocks(wf.read_text()):
+            if not any(line.startswith("    runs-on:") for line in body):
+                continue
+            if not any(line.startswith("    timeout-minutes:") for line in body):
+                violations.append(
+                    f"C13: {wf.name}:{lineno}: job {job_id!r} has runs-on but no "
+                    "timeout-minutes (GitHub default: 360 minutes)"
+                )
+    return violations
+
+
 RULES = [
     check_c1_roles,
     check_c2_naming,
@@ -438,6 +487,7 @@ RULES = [
     check_c10_android_jnilibs_so_gitignored,
     check_c11_toolchain_pins,
     check_c12_container_digest_pinned,
+    check_c13_job_timeout,
 ]
 
 

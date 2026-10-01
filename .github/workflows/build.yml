@@ -548,6 +548,7 @@ jobs:
   all-platforms-green:
     name: All platform legs succeeded
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # `guards-container` joins the four platform legs here (Phase 1). It is
     # not a platform leg and produces no bytes, but this job is the single
     # "is this run publishable" gate, and a tree that fails its own static
@@ -604,6 +605,7 @@ jobs:
   publish:
     name: Publish release assets
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # The guard is in `needs:` as well as the legs: depending on the legs alone
     # would let a SKIPPED leg satisfy the dependency (see all-platforms-green).
     # The dist legs are in `needs:` so that a FAILED dist blocks the release.
