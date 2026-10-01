@@ -1,11 +1,13 @@
 // Normalize-only pre-pass for the generic RAW linear-RGB route (Foveon X3F).
 //
-// Why a kernel at all: the SHARED Stage4 entry takes exactly one linear term,
+// Why a kernel at all: the plain Stage4 entry takes exactly one linear term,
 // `float src_scale` (include/dng_render_params.h:85,95). Black subtraction is an
-// OFFSET, and an offset cannot be folded into a multiplier. Feeding raw X3F
-// samples to Stage4 with src_scale = 1/(white-black) would leave the black
-// pedestal in the image -- a silently wrong picture, not a build error. So the
-// normalize happens here, once, before the handoff.
+// OFFSET, and an offset cannot be folded into that multiplier, so on the
+// TWO-STAGE route the normalize happens here, once, before the handoff. The
+// unscaled route no longer takes this kernel: RawLinearRgbFusedRenderGenerator
+// carries its own black/inv_range inputs and folds this exact arithmetic into
+// the render's sample callback. This kernel remains the scaled-decode route,
+// the DNG_RAW_FUSED_LINEAR_RGB_RENDER=0 control arm and the CPU-oracle input.
 //
 // This is a pre-pass and nothing else: no demosaic, no interpolation, no
 // neighbourhood access. Every output element reads exactly the co-located input
