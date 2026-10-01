@@ -23,12 +23,12 @@ supported target of the `capability-vector` subcommand.
 
 TWO SOURCES, not one function branching on data (plan's own framing,
 pyci-plan.md:1682): `source="probe"` covers linux, macOS's NATIVE leg
-(`matrix.cross == 'false'`) and windows -- all three dlopen the built
+(`matrix.runs_target_code == 'true'`) and windows -- all three dlopen the built
 artifact via `codec_capability_probe.py`'s own
 `ceyx_still_decode_supports`/`ceyx_encode_supports`/`ceyx_build_capabilities`
 FFI surface (see that module's docstring for why a symbol-presence check has
 zero discriminating power against a static codec archive). `source=
-"configure-log"` covers ONLY macOS's CROSS leg (`matrix.cross == 'true'`): a
+"configure-log"` covers ONLY macOS's CROSS leg (`matrix.two_stage == 'true'`): a
 foreign-arch dylib cannot be dlopen'd from this host process, so that leg
 instead greps a literal out of `cross_stage2_build.log` at configure time --
 a genuinely different algorithm with its own marker vocabulary (no
@@ -100,7 +100,7 @@ NO `arch` PARAMETER (leader ruling 2026-09-13, applying push 5's `codec-probe`
 precedent here too): neither leg's real `codec_capability_probe.py`
 invocation passes `--arch` today (verified by grepping all three legs) --
 macOS's per-arch identity is already fully carried by which matrix job is
-running (a different `$DYLIB` value, a different `matrix.cross`), not by an
+running (a different `$DYLIB` value, a different `matrix.runs_target_code`), not by an
 extra flag to this probe. An accept-and-ignore parameter is a promise this
 module does not keep, not CLI-shape uniformity; `ci.py`'s `capability-vector`
 subcommand is wired with `_add_platform_command(with_arch=False)`, the same

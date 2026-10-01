@@ -168,7 +168,7 @@ def _tokens_in_file(path, step_anchor=None):
     review): macos_build.yml runs TWO legs (macos-arm64, macos-x86_64) out of
     the SAME workflow file via a matrix, each asserting a different vector
     for the same token (e.g. avif:encode=1 vs avif:encode=0) in different
-    steps gated by `if: matrix.cross`. Without a discriminator, a whole-file
+    steps gated by `matrix.two_stage`/`runs_target_code`. Without a discriminator, a whole-file
     scan sees BOTH legs' tokens as one set, and a leg's correct assertion
     collides with the other leg's honest, differently-valued assertion --
     `check()` would report a false disagreement for both legs. A leg with no

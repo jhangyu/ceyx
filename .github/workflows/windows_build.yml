@@ -45,7 +45,7 @@ jobs:
     # row unchanged; on an x64 runner they could not run at all.
     # Row facts (runner / msvc_arch) equal native/scripts/ci/targets.py's
     # windows arch_legs; the x86_64 row is the pre-existing single-stage leg,
-    # every stage-1 step is `if: matrix.cross == 'true'`.
+    # every stage-1 step is `if: matrix.two_stage == 'true'`.
     name: ${{ matrix.arch_tag }} Vulkan
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -55,13 +55,13 @@ jobs:
         include:
           - arch_tag: x86_64
             runner: windows-latest
-            cross: "false"
+            two_stage: "false"
             msvc_arch: x64
             heif_dist: native/third_party/heif-dist-windows
             omp_dll: libomp140.x86_64.dll
           - arch_tag: arm64
             runner: windows-11-arm
-            cross: "true"
+            two_stage: "true"
             msvc_arch: amd64_arm64
             heif_dist: native/third_party/heif-dist-windows-arm64
             omp_dll: libomp140.aarch64.dll
@@ -154,7 +154,7 @@ jobs:
       # answer is a hard failure, printed with the full component-less
       # instance listing for diagnosis.
       - name: Assert Visual Studio ARM64 VC tools are installed (vswhere)
-        if: matrix.cross == 'true'
+        if: matrix.two_stage == 'true'
         run: python3 native/scripts/ci.py assert-vs-component --component Microsoft.VisualStudio.Component.VC.Tools.ARM64
 
       # Ninja + clang-cl need the MSVC headers/libs/linker on PATH, INCLUDE and
@@ -350,7 +350,7 @@ jobs:
       # whereas a -DCMAKE_CXX_FLAGS on the command line would replace them
       # (N16). The generator .exe files are x86_64 and run under emulation.
       - name: Set up MSVC developer environment (x64, cross stage 1 generators)
-        if: matrix.cross == 'true'
+        if: matrix.two_stage == 'true'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -360,14 +360,14 @@ jobs:
       # the x86_64 row's WIN32 default in cmake/halide_aot.cmake with the arch
       # swapped, nothing else.
       - name: Build x64 Halide generators + arm64 AOT (cross stage 1)
-        if: matrix.cross == 'true'
+        if: matrix.two_stage == 'true'
         working-directory: ${{ github.workspace }}
         env:
           ARM64_AOT_TARGET: arm-64-windows-vulkan-vk_int8-vk_int16-vk_int64-no_asserts-no_bounds_query
         run: python3 native/scripts/ci.py cross-stage1-windows --build-dir native/build-windows-hostgen --aot-target "${{ env.ARM64_AOT_TARGET }}"
 
       - name: Restore MSVC developer environment (${{ matrix.msvc_arch }}) for cross stage 2
-        if: matrix.cross == 'true'
+        if: matrix.two_stage == 'true'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc_arch }}
@@ -456,7 +456,7 @@ jobs:
           # from the path it wrote them to. Empty on the x86_64 row, whose
           # configure argv is unchanged.
           CROSS_ARGS=""
-          if [ "${{ matrix.cross }}" = "true" ]; then
+          if [ "${{ matrix.two_stage }}" = "true" ]; then
             CROSS_ARGS="-DDNG_CROSS_BUILD=ON -DDNG_PREBUILT_AOT_DIR=${GITHUB_WORKSPACE}/native/build-windows-hostgen/halide_generated"
           fi
           cmake -S native -B "native/build-windows" -G Ninja \
