@@ -202,6 +202,18 @@ struct FusedMosaicSource {
     float inv_range = 1.0f;     // 65535 / (white - black_max)
 };
 
+// Foveon fusion (2026-10-02): non-null selects the FUSED linear-RGB (X3F)
+// kernel. The source handed to the runner is then the decoder's interleaved
+// U16 RGB frame wrapped as a FLAT 1-D buffer (same shape on every backend),
+// passed WHOLE; the crop travels as the crop_l/crop_t scalars and the kernel
+// gathers base = (y + crop_t) * src_row_stride_elements + (x + crop_l) * 3.
+// Mutually exclusive with FusedMosaicSource (both non-null => refused).
+struct FusedLinearRgbSource {
+    const float* black_values = nullptr;   // 3 per-component entries
+    float inv_range = 1.0f;                // 65535 / (white - max component black)
+    int32_t src_row_stride_elements = 0;   // decoder pitch in U16 ELEMENTS
+};
+
 // Device-handoff form. Signature transcribed from dng_render_halide.cpp:1182-1192
 // (note the crop_l/crop_t/src_w/src_h parameters the plan placeholder omitted).
 bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
@@ -288,7 +300,13 @@ bool runRenderStage4HalideAotFromDevice(halide_buffer_t* stage3_device_buf,
                                         // MTLBuffer would all alias offset 0 --
                                         // wrong pixels, not a slower path; and
                                         // kDestinationRgba8Region is RGBA8-sized).
-                                        int32_t output_format = 0);
+                                        int32_t output_format = 0,
+                                        // Foveon fusion: non-null selects the
+                                        // fused linear-RGB kernel (see
+                                        // FusedLinearRgbSource). nullptr keeps
+                                        // every existing caller bit-identical.
+                                        const FusedLinearRgbSource*
+                                            fused_linear_rgb_source = nullptr);
 
 // Lead-assigned scope addition (2026-09-11, plan §6.2 item 1 — C4
 // device->host copy bracket). Owned by impl-2-sonnet alongside
