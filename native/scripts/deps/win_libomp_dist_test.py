@@ -25,8 +25,8 @@ def _dist_with(files: dict, root: Path) -> Path:
 
 
 class TestPins(unittest.TestCase):
-    def test_version_tracks_the_runner_clang(self) -> None:
-        # CI log: "The CXX compiler identification is Clang 22.1.8".
+    def test_version_is_the_newest_runner_clang(self) -> None:
+        # windows-11-arm clang 22.1.8 (windows-latest: 20.1.8), run 36943142762.
         self.assertEqual(w.LLVM_VERSION, "22.1.8")
         self.assertEqual(w.LLVM_TAG, "llvmorg-22.1.8")
 

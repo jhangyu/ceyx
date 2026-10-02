@@ -58,13 +58,11 @@ jobs:
             two_stage: "false"
             msvc_arch: x64
             heif_dist: native/third_party/heif-dist-windows
-            omp_dll: libomp140.x86_64.dll
           - arch_tag: arm64
             runner: windows-11-arm
             two_stage: "true"
             msvc_arch: amd64_arm64
             heif_dist: native/third_party/heif-dist-windows-arm64
-            omp_dll: libomp140.aarch64.dll
     # `contents: write` was dropped in round 6 together with the release-attach
     # step it existed for. This leg now only reads the repo and uploads
     # artifacts; the publish job in build.yml holds the write scope.
@@ -181,96 +179,6 @@ jobs:
       - name: Locate clang-cl
         shell: bash
         run: python3 native/scripts/ci.py provision locate-clang-cl --github-path "$GITHUB_PATH"
-
-      # WI-4 step 4.1 (S-B1/OQ-N2 ruled SHIP): the decoder's own import table
-      # names libomp140.x86_64.dll (rootcause-native-capability.md Item B), so
-      # an artifact shipped without it fails to load on a machine lacking the
-      # LLVM redistributable. This step only LOCATES the file next to the
-      # clang-cl install just verified above; it stays an observation (exits
-      # 0 even when absent) so its output is legible on a leg where the
-      # actual staging step (native/cmake/heif.cmake, WI-4 step 4.2) is what
-      # fails. The FATAL gate on absence lives in that CMake step, not here.
-      #
-      # WIDENED 2026-09-12 (CI run 34697591379 reported OMP_RUNTIME_DLL=ABSENT
-      # here). Searching only beside clang-cl was too narrow: the import name
-      # libomp140.x86_64.dll is the VISUAL STUDIO redistributable spelling of
-      # the LLVM OpenMP runtime (the LLVM installer's own copy is plain
-      # libomp.dll), so the file to ship lives under the VC redist tree, not in
-      # LLVM/bin. This step now searches both and, when it still finds nothing,
-      # prints a real directory survey -- the ABSENT line alone told the last
-      # round nothing about WHERE to look next. Kept as an OBSERVATION (always
-      # exits 0); the FATAL gate stays in native/cmake/heif.cmake so the
-      # failure surfaces at the place that actually stages the file.
-      - name: Locate the OpenMP runtime DLL
-        shell: bash
-        run: |
-          OMP_DLL_NAME="${{ matrix.omp_dll }}"
-          CLANG_CL_BIN="$(command -v clang-cl || echo "/c/Program Files/LLVM/bin/clang-cl.exe")"
-          LLVM_BIN_DIR="$(dirname "$CLANG_CL_BIN")"
-
-          OMP_RUNTIME_DLL="ABSENT"
-          # Ordered candidates: beside the compiler first, then the VS redist.
-          for d in "${LLVM_BIN_DIR}" "/c/Program Files/LLVM/bin"; do
-            if [ -f "${d}/${OMP_DLL_NAME}" ]; then
-              OMP_RUNTIME_DLL="${d}/${OMP_DLL_NAME}"
-              break
-            fi
-          done
-          if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
-            # `find` rather than a glob: the VS version/edition components of
-            # the path are not knowable ahead of time on a hosted runner.
-            FOUND="$(find "/c/Program Files/Microsoft Visual Studio" \
-                          "/c/Program Files (x86)/Microsoft Visual Studio" \
-                          -name "${OMP_DLL_NAME}" -print 2>/dev/null | head -n 1)"
-            if [ -n "$FOUND" ]; then
-              OMP_RUNTIME_DLL="$FOUND"
-            fi
-          fi
-
-          OMP_RUNTIME_RC=0
-          if [ "$OMP_RUNTIME_DLL" = "ABSENT" ]; then
-            OMP_RUNTIME_RC=1
-            # Diagnostic survey, printed ONLY on absence. This is what the
-            # previous round lacked: name every copy of any libomp* on the
-            # image so the next fix can be aimed rather than guessed.
-            echo "--- no ${OMP_DLL_NAME} found; surveying all libomp* on the image ---"
-            find "/c/Program Files" "/c/Program Files (x86)" \
-                 -name "libomp*" -print 2>/dev/null | head -n 50 || true
-            echo "--- end survey ---"
-          fi
-          # INVENTORY (2026-10-01, run 36899668620: the arm64 row found no
-          # release-redist libomp140.aarch64.dll, only a debug_nonredist one).
-          # Unconditional, both rows, observation only: EVERY libomp140.* under
-          # the Visual Studio trees and System32 with its size, then the
-          # active toolset's redist dir for this row's arch and the sibling
-          # toolset versions. Decides "absent from the image" (user ruling)
-          # vs "our lookup is wrong" without guessing. Output goes to a file
-          # first, then is printed; nothing here changes what gets staged.
-          echo "--- inventory: every libomp140.* (path + size) ---"
-          find "/c/Program Files/Microsoft Visual Studio" \
-               "/c/Program Files (x86)/Microsoft Visual Studio" \
-               "/c/Windows/System32" -maxdepth 12 \
-               -iname "libomp140.*" -exec ls -l {} + > omp_inventory.txt 2>/dev/null || true
-          cat omp_inventory.txt
-          echo "OMP_INVENTORY_COUNT=$(grep -c . omp_inventory.txt || true)"
-          case "${{ matrix.arch_tag }}" in
-            arm64) REDIST_ARCH=arm64 ;;
-            *) REDIST_ARCH=x64 ;;
-          esac
-          if [ -n "${VCToolsRedistDir:-}" ]; then
-            REDIST_DIR="$(cygpath -u "$VCToolsRedistDir")"
-            echo "--- VCToolsRedistDir=${VCToolsRedistDir} ; ls ${REDIST_DIR}${REDIST_ARCH}/ ---"
-            ls -la "${REDIST_DIR}${REDIST_ARCH}/" || true
-            echo "--- sibling toolset redist versions: ls ${REDIST_DIR}../ ---"
-            ls -la "${REDIST_DIR}../" || true
-          else
-            echo "--- VCToolsRedistDir is unset in this step's environment ---"
-          fi
-          echo "--- end inventory ---"
-          echo "OMP_RUNTIME_DLL=${OMP_RUNTIME_DLL}"
-          echo "OMP_RUNTIME_RC=${OMP_RUNTIME_RC}"
-          echo "$OMP_RUNTIME_DLL" > omp_runtime_path.txt
-          exit 0
 
       # Unlike Linux (where the Halide Vulkan runtime dlopen's libvulkan.so.1),
       # native/cmake/ffi.cmake's WIN32 branch LINKS the loader import library

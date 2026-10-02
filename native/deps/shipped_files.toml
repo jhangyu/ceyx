@@ -69,11 +69,12 @@ placed      = true
 source      = "native/cmake/heif.cmake:207-236"
 # Four members per arch: OQ-N2 ruled SHIP (user 2026-09-12) -- the decoder
 # imports the OpenMP runtime, so omitting it produces an artifact that cannot
-# load on a machine without the redistributable. Per-arch because the Visual
-# Studio OpenMP.LLVM redist names its DLL after the target machine
-# (libomp140.x86_64.dll / libomp140.aarch64.dll, under
-# VC/Redist/MSVC/*/<x64|arm64>/Microsoft.VC*.OpenMP.LLVM); heif/libde265 keep
-# one name. Keys are native/deps/arch_map.toml canonical arch ids.
+# load on a machine without it. Per-arch because the runtime's DLL is named
+# after the target machine (libomp140.x86_64.dll / libomp140.aarch64.dll --
+# LLVM's OPENMP_MSVC_NAME_SCHEME); since R-11 (2026-10-02) both come from the
+# committed native/third_party/libomp-dist-<suffix> LLVM 22.1.8 build
+# (cmake/heif.cmake), never the runner image. heif/libde265 keep one name.
+# Keys are native/deps/arch_map.toml canonical arch ids.
 [windows.companions_by_arch]
 x86_64 = ["heif.dll", "libde265.dll", "libomp140.x86_64.dll"]
 arm64  = ["heif.dll", "libde265.dll", "libomp140.aarch64.dll"]

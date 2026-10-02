@@ -10,10 +10,14 @@ docs/logs/2026-10-01/winarm/vcomp-compat.txt). So this project builds the
 runtime itself, for x86_64 AND arm64, exposed as ``build_deps.py build
 libomp-stack`` -- same shape as the libwebp/libjxl Windows dists.
 
-VERSION: LLVM_VERSION matches the LLVM major/minor of the clang-cl that
-compiles the decoder on the Windows runners ("The CXX compiler identification
-is Clang 22.1.8", CI run diag-110502924813.log), so the runtime and the
-compiler that emits the ``__kmpc_*`` calls into it come from one release.
+VERSION: LLVM_VERSION is the newest clang-cl on the Windows runners. The two
+images differ (dist run 36943142762: windows-11-arm has clang 22.1.8,
+windows-latest has clang 20.1.8), and one runtime version serves both: a
+runtime at or above the compiler that emits the ``__kmpc_*`` calls is the
+supported direction -- the export table is append-only (dllexports keeps
+fixed ordinals "to maintain backwards compatible exports order",
+openmp/runtime/src/CMakeLists.txt:345). Not measured at run time (CI is
+compile-only).
 LLVM_SHA256 is the release asset digest recorded by GitHub for
 ``llvmorg-22.1.8`` and was re-verified by hashing the downloaded file.
 LLVM publishes only the monolithic ``llvm-project`` source tarball (no

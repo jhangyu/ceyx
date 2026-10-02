@@ -24,7 +24,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/shipped_files.cmake)
 # is the architecture of the objects being linked. Three facts hang off it:
 #   CEYX_WINDOWS_ARCH          canonical arch id (native/deps/arch_map.toml)
 #   CEYX_WINDOWS_DIST_SUFFIX   the committed third-party dist directory suffix
-#                              (heif-dist-/libjxl-dist-/libwebp-dist-<suffix>;
+#                              (heif-dist-/libjxl-dist-/libwebp-dist-/
+#                              libomp-dist-<suffix>;
 #                              x86_64 keeps its historical "windows" path, so
 #                              the committed x64 trees are not renamed).
 #                              Consumed by cmake/encode.cmake and cmake/jxl.cmake
@@ -38,11 +39,9 @@ if(WIN32)
     if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
         set(CEYX_WINDOWS_ARCH "x86_64")
         set(CEYX_WINDOWS_DIST_SUFFIX "windows")
-        set(CEYX_WINDOWS_VC_REDIST_ARCH "x64")
     elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
         set(CEYX_WINDOWS_ARCH "arm64")
         set(CEYX_WINDOWS_DIST_SUFFIX "windows-arm64")
-        set(CEYX_WINDOWS_VC_REDIST_ARCH "arm64")
     else()
         message(FATAL_ERROR
             "Unsupported Windows target architecture "
@@ -61,6 +60,64 @@ if(WIN32)
         "${CEYX_SHIPPED_WINDOWS_${_ceyx_windows_arch_upper}_COMPANIONS}")
     message(STATUS "Windows target arch: ${CEYX_WINDOWS_ARCH} "
                    "(dist suffix ${CEYX_WINDOWS_DIST_SUFFIX})")
+
+    # OpenMP runtime (user ruling R-11, 2026-10-02): the committed LLVM
+    # 22.1.8 build in native/third_party/libomp-dist-<suffix> (built by
+    # `build_deps.py build libomp-stack`, see its PROVENANCE.md) is the ONLY
+    # source -- both what the decoder links against and what is staged beside
+    # it. The runner image's copies are not used: System32's libomp140.x86_64
+    # .dll is not ours to ship, and Microsoft provides the arm64 one only as
+    # debug_nonredist.
+    #
+    # LINK: RawSpeed3/LibRaw's find_package(OpenMP) (cmake/generic_raw.cmake,
+    # included after this file) runs CMake FindOpenMP's Clang+WIN32 branch,
+    # which picks the import library with find_library(OpenMP_libomp_LIBRARY
+    # NAMES libomp libgomp libiomp5 HINTS <implicit link dirs>)
+    # (Modules/FindOpenMP.cmake, CMake 4.4.3 lines 500-519) -- i.e. whatever
+    # libomp.lib the toolchain's LIB path happens to hold. Pre-seeding that
+    # cache entry makes find_library keep it, so the decoder imports exactly
+    # the DLL staged below. Defined before the HEIF gate on purpose: OpenMP
+    # is linked whether or not HEIF is on.
+    if(NOT DEFINED CEYX_ENABLE_DESKTOP_OPENMP)
+        message(FATAL_ERROR
+            "CEYX_ENABLE_DESKTOP_OPENMP is not defined at cmake/heif.cmake's "
+            "Windows OpenMP block. It is set by cmake/openmp_policy.cmake, "
+            "which native/CMakeLists.txt must include BEFORE this file. "
+            "Refusing to treat an undefined policy as OFF: that silently "
+            "skips staging the OpenMP runtime the decoder imports, producing "
+            "a DLL that cannot load (CI run 34697591379).")
+    endif()
+    if(CEYX_ENABLE_DESKTOP_OPENMP)
+        set(CEYX_WIN_OMP_DIST "${THIRD_PARTY_DIR}/libomp-dist-${CEYX_WINDOWS_DIST_SUFFIX}")
+        set(_ceyx_omp_dll_name "")
+        foreach(_ceyx_companion IN LISTS CEYX_SHIPPED_WINDOWS_COMPANIONS)
+            if(_ceyx_companion MATCHES "^libomp140\\.")
+                set(_ceyx_omp_dll_name "${_ceyx_companion}")
+            endif()
+        endforeach()
+        if(NOT _ceyx_omp_dll_name)
+            message(FATAL_ERROR
+                "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
+                "is missing a libomp140.* entry -- native/deps/shipped_files.toml "
+                "is malformed.")
+        endif()
+        set(CEYX_WIN_OMP_RUNTIME "${CEYX_WIN_OMP_DIST}/bin/${_ceyx_omp_dll_name}")
+        set(_ceyx_omp_implib "${CEYX_WIN_OMP_DIST}/lib/libomp.lib")
+        foreach(_ceyx_omp_file IN ITEMS "${CEYX_WIN_OMP_RUNTIME}" "${_ceyx_omp_implib}")
+            if(NOT EXISTS "${_ceyx_omp_file}")
+                message(FATAL_ERROR
+                    "${_ceyx_omp_file} is missing. The Windows decoder links and "
+                    "ships the OpenMP runtime from the committed dist only (R-11). "
+                    "Restore native/third_party/libomp-dist-${CEYX_WINDOWS_DIST_SUFFIX} "
+                    "by dispatching libomp_dist_windows.yml and committing its "
+                    "artifact. Do NOT resolve this by turning OpenMP off or by "
+                    "pointing at a runner-image copy.")
+            endif()
+        endforeach()
+        set(OpenMP_libomp_LIBRARY "${_ceyx_omp_implib}" CACHE FILEPATH
+            "OpenMP import library: committed libomp dist (cmake/heif.cmake, R-11)" FORCE)
+        message(STATUS "OpenMP runtime (link + stage): ${CEYX_WIN_OMP_DIST}")
+    endif()
 endif()
 
 if(NOT DNG_HOST_GENERATORS_ONLY)
@@ -316,14 +373,11 @@ if(DNG_ENABLE_HEIF)
         # plan's known round-2 parking-lot trap for this exact branch.
         set(_ceyx_heif_dll_name "")
         set(_ceyx_de265_dll_name "")
-        set(_ceyx_omp_dll_name "")
         foreach(_ceyx_companion IN LISTS CEYX_SHIPPED_WINDOWS_COMPANIONS)
             if(_ceyx_companion MATCHES "^heif\\.")
                 set(_ceyx_heif_dll_name "${_ceyx_companion}")
             elseif(_ceyx_companion MATCHES "^libde265\\.")
                 set(_ceyx_de265_dll_name "${_ceyx_companion}")
-            elseif(_ceyx_companion MATCHES "^libomp140\\.")
-                set(_ceyx_omp_dll_name "${_ceyx_companion}")
             endif()
         endforeach()
         if(NOT _ceyx_heif_dll_name OR NOT _ceyx_de265_dll_name)
@@ -331,91 +385,6 @@ if(DNG_ENABLE_HEIF)
                 "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
                 "is missing a heif.*/libde265.* entry -- native/deps/shipped_files.toml "
                 "is malformed.")
-        endif()
-
-        # The OpenMP runtime ships with the LLVM toolchain, not the HEIF
-        # dist, so it is resolved with find_file at configure time rather
-        # than transcribed from HEIF_DIST_DIR. When desktop OpenMP is
-        # enabled on Windows the decoder ALREADY IMPORTS this DLL (its own
-        # import table names it -- rootcause-native-capability.md Item B),
-        # so "not found" here means the artifact will be unloadable, not
-        # that a feature silently degrades -- the honest-OFF pattern this
-        # tree uses for libomp on macOS (generic_raw.cmake) is the WRONG
-        # shape for this case.
-        # GUARD THE GUARD (2026-09-12, CI run 34697591379). This block is a
-        # FATAL check protecting the shipped artifact, and in CMake a bare
-        # `if(<undefined>)` FAILS OPEN: the name evaluates false and the whole
-        # protection disappears with no diagnostic whatsoever. That is exactly
-        # what happened -- CEYX_ENABLE_DESKTOP_OPENMP was defined in
-        # cmake/tests.cmake, which native/CMakeLists.txt includes AFTER this
-        # file, so this block never ran, OpenMP was still enabled and linked,
-        # and the DLL shipped importing a runtime that was never staged. The
-        # policy now lives in cmake/openmp_policy.cmake (included first); this
-        # assertion makes any future reordering fail loudly instead of
-        # silently reopening the same hole.
-        if(NOT DEFINED CEYX_ENABLE_DESKTOP_OPENMP)
-            message(FATAL_ERROR
-                "CEYX_ENABLE_DESKTOP_OPENMP is not defined at cmake/heif.cmake's "
-                "Windows staging block. It is set by cmake/openmp_policy.cmake, "
-                "which native/CMakeLists.txt must include BEFORE this file. "
-                "Refusing to treat an undefined policy as OFF: that silently "
-                "skips staging the OpenMP runtime the decoder imports, producing "
-                "a DLL that cannot load (CI run 34697591379).")
-        endif()
-        if(CEYX_ENABLE_DESKTOP_OPENMP)
-            if(NOT _ceyx_omp_dll_name)
-                message(FATAL_ERROR
-                    "CEYX_SHIPPED_WINDOWS_COMPANIONS (${CEYX_SHIPPED_WINDOWS_COMPANIONS}) "
-                    "is missing a libomp140.* entry -- native/deps/shipped_files.toml "
-                    "is malformed.")
-            endif()
-            get_filename_component(_ceyx_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-
-            # SEARCH PATHS (widened 2026-09-12). The original search looked only
-            # beside clang-cl. The workflow's independent "Locate the OpenMP
-            # runtime DLL" step ran that same search on the real runner and
-            # reported OMP_RUNTIME_DLL=ABSENT, so the file is NOT in
-            # C:/Program Files/LLVM/bin on a GitHub windows runner.
-            #
-            # The name in the decoder's import table is the decisive clue:
-            # libomp140.x86_64.dll is the VISUAL STUDIO redistributable spelling
-            # of the LLVM OpenMP runtime (shipped as the VC OpenMP.LLVM redist
-            # component), not the LLVM installer's own spelling (plain
-            # libomp.dll). clang-cl linked against the VS-provided import
-            # library, so the runtime to ship is the VS one, and it lives under
-            # the VC redist tree rather than next to the compiler.
-            #
-            # CONFIDENCE, stated honestly: the VS redist layout below is
-            # inferred from the import name + the measured absence beside
-            # clang-cl; it has NOT been observed on the runner, because the job
-            # died before this block could ever execute. If the glob is wrong,
-            # the FATAL below fires with the full search list printed -- a loud,
-            # diagnosable failure that hands the next round the exact directory
-            # listing it needs. That is the intended behaviour; it is NOT
-            # acceptable to make this degrade quietly or to disable OpenMP.
-            file(GLOB _ceyx_vs_omp_dirs
-                "C:/Program Files/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/${CEYX_WINDOWS_VC_REDIST_ARCH}/Microsoft.VC*.OpenMP.LLVM"
-                "C:/Program Files (x86)/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/${CEYX_WINDOWS_VC_REDIST_ARCH}/Microsoft.VC*.OpenMP.LLVM")
-            set(_ceyx_omp_search_paths
-                "${_ceyx_clang_bin_dir}"
-                "C:/Program Files/LLVM/bin"
-                ${_ceyx_vs_omp_dirs})
-            find_file(CEYX_WIN_OMP_RUNTIME
-                NAMES "${_ceyx_omp_dll_name}"
-                HINTS ${_ceyx_omp_search_paths})
-            if(NOT CEYX_WIN_OMP_RUNTIME)
-                message(FATAL_ERROR
-                    "${_ceyx_omp_dll_name} not found. Searched: "
-                    "${_ceyx_omp_search_paths}. The Windows decoder imports "
-                    "this DLL directly (OQ-N2 ruled SHIP); an artifact "
-                    "staged without it will fail to load, so this is a "
-                    "configure-time FATAL, not a degrade. Do NOT resolve this "
-                    "by turning OpenMP off -- that ships a silently slower "
-                    "decoder. Resolve it by locating the real runtime (it is "
-                    "the Visual Studio 'OpenMP.LLVM' redist component) and "
-                    "adding its directory to the search list above.")
-            endif()
-            message(STATUS "OpenMP runtime for staging: ${CEYX_WIN_OMP_RUNTIME}")
         endif()
 
         add_custom_command(TARGET dng_decoder_native POST_BUILD
@@ -426,7 +395,9 @@ if(DNG_ENABLE_HEIF)
                     "${HEIF_DIST_DIR}/bin/${_ceyx_de265_dll_name}"
                     "$<TARGET_FILE_DIR:dng_decoder_native>/${_ceyx_de265_dll_name}"
             COMMENT "Staging heif.dll/libde265.dll next to dng_decoder_native")
-        if(CEYX_ENABLE_DESKTOP_OPENMP AND CEYX_WIN_OMP_RUNTIME)
+        # OpenMP runtime: path resolved (and FATAL-checked) in the WIN32 block
+        # at the top of this file, from the committed dist only.
+        if(CEYX_ENABLE_DESKTOP_OPENMP)
             add_custom_command(TARGET dng_decoder_native POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${CEYX_WIN_OMP_RUNTIME}"

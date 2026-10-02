@@ -167,7 +167,7 @@ def assert_pe_machine(platform: str, arch: str, artifact_dir: str) -> int:
 
     WHY: the atomic-group and export gates are machine-blind -- an x64
     heif.dll left in native/third_party/heif-dist-<suffix>, or an x64
-    OpenMP runtime picked out of the wrong VC redist directory, stages,
+    OpenMP runtime left in the arm64 libomp-dist-<suffix> tree, stages,
     exports and closes exactly like the right one and then fails
     LoadLibrary on the user's machine with ERROR_BAD_EXE_FORMAT. Runs on
     every Windows arch, x86_64 included (same gate, arch is data).
@@ -445,8 +445,10 @@ def _pe_transitive_closure(root_body: str, staged_dir: str, decoder_name: str, a
     references a de265_* symbol, so libde265 appears only in heif.dll's table
     (run 33294722901 proved asserting it at the wrong depth is red on a
     correct artifact). The same shape holds for the OpenMP runtime:
-    libomp140.x86_64.dll is imported by the decoder and itself imports
-    VCRUNTIME140/VCRUNTIME140_1. A depth-one gate therefore cannot see a
+    libomp140.<arch>.dll is imported by the decoder and has an import table
+    of its own (KERNEL32 + PSAPI for the committed static-CRT LLVM build;
+    VCRUNTIME140/VCRUNTIME140_1 for the System32 copy shipped before R-11).
+    A depth-one gate therefore cannot see a
     companion that ships with an unsatisfied dependency of its own, which on a
     user's machine is a total load failure naming only dng_decoder_native.dll.
 
