@@ -65,9 +65,9 @@ measured_on = "2026-09-12"
 reason      = "PE PROVENANCE=linker-default (rootcause-native-capability.md Item F: 'MajorOSystemVersion 6 / MajorSubsystemVersion 6 -- the linker default (Vista-era), which is a default, not a verified floor'). This is NOT a measured requirement -- it is the value read_min_runtime.py's windows reader flags with PROVENANCE=linker-default precisely because no build step has ever set it deliberately. Declared here as the CURRENT state so the drift gate has a baseline to compare against; revisit if a future step deliberately raises /SUBSYSTEM's minimum OS version."
 
 [windows.arm64]
-value       = "6.2"
-measured_on = "NOT YET MEASURED (windows-arm64 leg, 2026-09-30)"
-reason      = "PE PROVENANCE=linker-default, DOCUMENTED not measured: Microsoft's /SUBSYSTEM reference (MicrosoftDocs/cpp-docs docs/build/reference/subsystem-specify-subsystem.md:57-58) lists the CONSOLE/WINDOWS default as 6.00 for x86/x64 and 6.02 for ARM; read_min_runtime.py prints minor 2 as '6.2'. Same status as [windows.x86_64]: the CURRENT state, not a chosen floor. Per-arch because the linker default differs by target machine, not because the decoder differs. The first windows-11-arm CI run's MIN_RUNTIME drift gate is the measurement; correct this value from that log if it disagrees -- do not weaken the gate."
+value       = "6.0"
+measured_on = "ceyx CI Build 36945370657 job 110646485876 (windows-11-arm, ee373e7d, 2026-10-02): MIN_RUNTIME_windows=6.0"
+reason      = "PE PROVENANCE=linker-default, MEASURED 6.0 on the first windows-11-arm run (the 6.2 first declared from the /SUBSYSTEM doc's ARM default did not match the ARM64 linker output). Original note: Microsoft's /SUBSYSTEM reference (MicrosoftDocs/cpp-docs docs/build/reference/subsystem-specify-subsystem.md:57-58) lists the CONSOLE/WINDOWS default as 6.00 for x86/x64 and 6.02 for ARM; read_min_runtime.py prints minor 2 as '6.2'. Same status as [windows.x86_64]: the CURRENT state, not a chosen floor. Per-arch because the linker default differs by target machine, not because the decoder differs. The first windows-11-arm CI run's MIN_RUNTIME drift gate is the measurement; correct this value from that log if it disagrees -- do not weaken the gate."
 
 [linux]
 value       = "2.35"

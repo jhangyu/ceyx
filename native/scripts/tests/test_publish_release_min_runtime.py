@@ -91,7 +91,7 @@ def test_real_declaration_file_loads_and_resolves_all_platforms():
     assert pr.min_runtime_for_asset(
         _item("dng_decoder_native", "windows", arch="x86_64"), declared) == "6.0"
     assert pr.min_runtime_for_asset(
-        _item("dng_decoder_native", "windows", arch="arm64"), declared) == "6.2"
+        _item("dng_decoder_native", "windows", arch="arm64"), declared) == "6.0"
     assert pr.min_runtime_for_asset(
         _item("dng_decoder_native", "macos", arch="arm64"), declared) == "15.0"
     assert pr.min_runtime_for_asset(
