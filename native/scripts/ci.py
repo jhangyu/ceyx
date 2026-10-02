@@ -59,7 +59,7 @@ ruling P-3=(a)): dispatch wiring for both `dist_build.py` and `vcpkg.py`
 lands in one commit (ci.py has exactly one owner at a time per push --
 lead9-pyci-opus ruling), both modules' own functions unchanged.
 
-    python3 native/scripts/ci.py dist-build --component {heif-stack,jxl-stack,webp-stack,libjxl,libwebp} --platform android|windows --arch A --dist D [--android-ndk H] --rc-marker TOKEN
+    python3 native/scripts/ci.py dist-build --component {heif-stack,jxl-stack,webp-stack,libomp-stack,libjxl,libwebp} --platform android|windows --arch A --dist D [--android-ndk H] --rc-marker TOKEN
     python3 native/scripts/ci.py dist-list  --dist D
     python3 native/scripts/ci.py provision ninja
     python3 native/scripts/ci.py provision apt --packages P [P ...]
@@ -724,7 +724,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     db.add_argument(
         "--component", required=True,
-        choices=["heif-stack", "jxl-stack", "webp-stack", "libjxl", "libwebp"],
+        choices=["heif-stack", "jxl-stack", "webp-stack", "libomp-stack", "libjxl", "libwebp"],
     )
     db.add_argument("--platform", required=True, choices=["android", "windows"])
     db.add_argument("--arch", required=True)

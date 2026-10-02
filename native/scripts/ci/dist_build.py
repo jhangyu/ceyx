@@ -6,7 +6,7 @@ Frozen interface (docs/logs/2026-09-13/pyci-plan.md WI-29; argv shapes are
 the interface WI-31/WI-32/the ratchet WI consume -- this module writes
 nothing else):
 
-    dist-build  --component {heif-stack,jxl-stack,webp-stack,libjxl,libwebp}
+    dist-build  --component {heif-stack,jxl-stack,webp-stack,libomp-stack,libjxl,libwebp}
                 --platform {android,windows} --arch <arch> --dist <path>
                 [--android-ndk <path>] --rc-marker <TOKEN>
     dist-list   --dist <path>

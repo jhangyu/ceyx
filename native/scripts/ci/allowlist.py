@@ -77,6 +77,7 @@ MUST_STAY: tuple = (
     Entry('build.yml', 'Publish release assets + artifacts.lock (tag pushes only)', 'C-G14 #8 / Q2 PARKED: publish job, tag-only, contents:write, unexercised by the CI loop; migration parked pending user ruling'),
     Entry('heif_dist_windows.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout (step index 0, checkout at index 1); must stay in YAML permanently'),
     Entry('jxl_dist_windows.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout (step index 0, checkout at index 1); must stay in YAML permanently'),
+    Entry('libomp_dist_windows.yml', 'Force LF line endings for all git operations', 'C-G14 #6: order-dependent relative to actions/checkout (step index 0, checkout at index 1); must stay in YAML permanently'),
     Entry('linux_build.yml', 'Install git + python3 into the container (pre-checkout, WI-14 step 14.5)', 'C-G14 #1: pre-checkout apt bootstrap -- no checkout yet, no interpreter; must stay in YAML permanently'),
     Entry('linux_build.yml', 'Provision Python 3.11 inside the container (no hostedtoolcache)', 'C-G14 #2: Python 3.11 provisioning via $GITHUB_PATH; must stay in YAML permanently'),
     Entry('linux_build.yml', 'Install build prerequisites (apt)', "C-G14 #3: apt build prerequisite package list -- a legible package list is the step's entire value; must stay in YAML permanently"),
