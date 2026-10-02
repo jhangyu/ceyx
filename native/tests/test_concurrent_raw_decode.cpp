@@ -107,6 +107,15 @@ ArenaCounters read_counters() {
   return c;
 }
 
+// X-Trans fusion (2026-10-02, contract R-3): every fused route counts as
+// fused. The selector is the SUM of the per-format fused counters, so the
+// binding expectation 2*fused + 3*two_stage stays exact as formats fuse. The
+// Foveon linear-RGB fused counter (2026-10-02) is the third term.
+uint64_t total_fused_count() {
+  return raw_fused_bayer_render_count() + raw_fused_xtrans_render_count() +
+         raw_fused_linear_rgb_render_count();
+}
+
 // FNV-1a 64. Chosen over a checksum because a transposition of two decodes'
 // outputs (the corruption shape this gate hunts) must change the digest.
 uint64_t hash_bytes(const uint8_t* data, size_t byte_count) {
@@ -226,12 +235,14 @@ int main(int argc, char** argv) {
   // than guessed from the filename or the CFA layout. Used to aim the T4
   // positive control at a file that still has a Stage-3 buffer.
   std::vector<bool> two_stage_files(corpus.size(), false);
+  std::vector<bool> xtrans_fused_files(corpus.size(), false);
   bool reference_ok = true;
   for (size_t i = 0; i < corpus.size(); ++i) {
-    const uint64_t fused_before_file = raw_fused_bayer_render_count();
+    const uint64_t fused_before_file = total_fused_count();
+    const uint64_t xtrans_before_file = raw_fused_xtrans_render_count();
     const DecodeOutcome outcome = decode_and_hash(corpus[i].c_str());
-    two_stage_files[i] =
-        (raw_fused_bayer_render_count() == fused_before_file);
+    two_stage_files[i] = (total_fused_count() == fused_before_file);
+    xtrans_fused_files[i] = (raw_fused_xtrans_render_count() != xtrans_before_file);
     if (!outcome.ok) {
       std::printf("[ConcurrentRawDecode] reference decode FAILED (%s)\n",
                   corpus[i].c_str());
@@ -255,7 +266,7 @@ int main(int argc, char** argv) {
   // Phase 2: clean lane baseline, then the counter baseline for the deltas.
   ceyx::raw_persistent_device_arena_release_all_lanes();
   const ArenaCounters baseline = read_counters();
-  const uint64_t baseline_fused_count = raw_fused_bayer_render_count();
+  const uint64_t baseline_fused_count = total_fused_count();
   std::printf(
       "[ConcurrentRawDecode] baseline: allocation_count=%llu "
       "growth_reallocation_count=%llu binding_count=%llu "
@@ -326,7 +337,7 @@ int main(int argc, char** argv) {
       (unsigned long long)after.resident_device_bytes,
       (unsigned long long)after.live_lane_count);
 
-  const uint64_t after_fused_count = raw_fused_bayer_render_count();
+  const uint64_t after_fused_count = total_fused_count();
   const int64_t allocation_delta =
       static_cast<int64_t>(after.allocation_count) -
       static_cast<int64_t>(baseline.allocation_count);
@@ -393,7 +404,7 @@ int main(int argc, char** argv) {
   // fails both if fusion silently stops engaging (reads 3 on a fused corpus)
   // and if a route loses a region it should have (reads 1). A lower bound
   // would catch neither.
-  // The route selector is raw_fused_bayer_render_count(), read from the
+  // The route selector is total_fused_count(), read from the
   // pipeline; it is NOT inferred from the allocation count being asserted.
   // T20-fix F3: the fused-route counter is now PRINTED, and asserted non-zero
   // on the default corpus. Before this, every arm below was satisfiable with
@@ -401,7 +412,7 @@ int main(int argc, char** argv) {
   // (delta==3N, PASS) and the binding lower bound only rises, so the whole gate
   // stayed green while the route under test never ran.
   std::printf(
-      "[ConcurrentRawDecode] mem8-T20: raw_fused_bayer_render_count %llu -> "
+      "[ConcurrentRawDecode] mem8-T20: total_fused_count (bayer+xtrans) %llu -> "
       "%llu (fused_delta=%lld of %d decodes, two_stage_decodes=%lld)\n",
       (unsigned long long)baseline_fused_count,
       (unsigned long long)after_fused_count, (long long)fused_delta,
@@ -500,24 +511,42 @@ int main(int argc, char** argv) {
   // allocation gate (native/tests/check_gpu_producer_width.py) and T4's vmmap
   // host size-class check. Do NOT re-add a Bayer control here: on the fused
   // route it can only ever pass vacuously.
+  // X-Trans fusion (2026-10-02, contract R-3): with Bayer AND X-Trans fused,
+  // the default corpus has no naturally two-stage file. The control therefore
+  // prefers a natural two-stage file and otherwise re-decodes an X-Trans file
+  // under DNG_RAW_FUSED_XTRANS_RENDER=0, which keeps the Stage-3 host fallback
+  // genuinely exercised (never vacuous). The flag stays set until process
+  // exit: this phase is deliberately LAST.
   const char* control_path = nullptr;
+  bool control_forces_xtrans_two_stage = false;
   for (size_t i = 0; i < corpus.size(); ++i) {
     if (two_stage_files[i]) { control_path = corpus[i].c_str(); break; }
   }
   if (control_path == nullptr) {
-    // Refused rather than skipped: silently not running a positive control is
-    // how the thing it protects becomes unfalsifiable again.
+    for (size_t i = 0; i < corpus.size(); ++i) {
+      if (xtrans_fused_files[i]) {
+        control_path = corpus[i].c_str();
+        control_forces_xtrans_two_stage = true;
+        break;
+      }
+    }
+  }
+  if (control_path == nullptr) {
     std::printf(
         "[ConcurrentRawDecode] mem8_t4_positive_control_has_a_two_stage_file "
-        "-> FAIL (every corpus file takes the fused route, so the Stage-3 "
-        "host fallback cannot be exercised; add a two-stage file -- e.g. "
-        "image_samples/raw_corpus/fuji_xt3.raf, which is what the default "
-        "corpus uses -- or run with no file arguments)\n");
+        "-> FAIL (no corpus file is two-stage and none is X-Trans, so the "
+        "Stage-3 host fallback cannot be exercised; run with no file arguments "
+        "to use the default corpus)\n");
     ++failures;
     std::printf("[ConcurrentRawDecode] TOTAL failures=%d\n", failures);
     std::fflush(stdout);
     return 1;
   }
+  if (control_forces_xtrans_two_stage) {
+    setenv("DNG_RAW_FUSED_XTRANS_RENDER", "0", 1);
+  }
+  std::printf("[ConcurrentRawDecode] positive control file=%s forced_xtrans_two_stage=%d\n",
+              control_path, control_forces_xtrans_two_stage ? 1 : 0);
   const DecodeOutcome arena_on = decode_and_hash(control_path);
   const uint64_t before_control = raw_stage3_host_allocation_count();
   DecodeOutcome arena_off;

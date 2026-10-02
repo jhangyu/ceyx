@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -290,6 +291,41 @@ TestRgbaBuffer probeSizedBuffer(const char* path, uint32_t max_long_edge = 0) {
     return TestRgbaBuffer(4);
 }
 
+// Foveon fusion (2026-10-02). One linear-RGB FILE decode through the same
+// public entry and develop parameters as the manifest loop, returning the
+// output SHA-256 and how far the fused linear-RGB counter moved during it.
+struct LinearRgbDecodeArm {
+    RawErrorCode rc = kRawErrKernelFailed;
+    std::string sha;
+    uint64_t fused_delta = 0;
+};
+
+LinearRgbDecodeArm decodeLinearRgbArm(const std::string& path,
+                                      uint32_t max_long_edge) {
+    LinearRgbDecodeArm arm;
+    RawDevelopParams develop{};
+    develop.tone_curve_strength = 1.0f;
+    develop.output_space = kRawOutputColorSpaceSrgb;
+    develop.max_output_long_edge = max_long_edge;
+    RawPipelineResult result;
+    TestRgbaBuffer buf = probeSizedBuffer(path.c_str(), max_long_edge);
+    const uint64_t before = raw_fused_linear_rgb_render_count();
+    arm.rc = raw_pipeline_decode_file_into(path.c_str(), develop, buf.ptr(),
+                                           buf.size(), result);
+    arm.fused_delta = raw_fused_linear_rgb_render_count() - before;
+    if (arm.rc == kRawSuccess && result.rgba_ptr && result.rgba_size > 0) {
+        arm.sha = sha256Hex(result.rgba_ptr, result.rgba_size);
+    }
+    return arm;
+}
+
+// RAII: the two-stage control flag is cleared on EVERY exit path. A leaked
+// flag would silently de-fuse every later linear-RGB case in this process.
+struct LinearRgbFusionOff {
+    LinearRgbFusionOff() { setenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER", "0", 1); }
+    ~LinearRgbFusionOff() { unsetenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER"); }
+};
+
 // ---------------------------------------------------------------------------
 // Synthetic X-Trans frame, shared by the routing case, the FujiGreen
 // kernel-contract case (round-6 should-fix S-R6-01) and the pixel-exact case
@@ -372,7 +408,8 @@ void setContractCompliantCameraToPcs(float m9[9]) {
 RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
                                 std::vector<uint8_t>& rgba,
                                 uint32_t& out_w, uint32_t& out_h,
-                                RawDecodeDiagnostics& diag) {
+                                RawDecodeDiagnostics& diag,
+                                int32_t output_format = 0) {
     static uint16_t storage[kSynthW * kSynthH];
     fillSyntheticMosaic(storage);
 
@@ -407,12 +444,17 @@ RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
     RawDevelopParams develop{};
     develop.tone_curve_strength = 1.0f;
     develop.output_space = kRawOutputColorSpaceSrgb;
+    develop.output_format = output_format;
 
     RawPipelineResult out;
     // WP3: the caller owns the output. `rgba` IS the decode destination, so the
     // former copy-then-release pair collapses into a resize, and there is no
-    // pool checkout to forget.
-    rgba.assign(static_cast<size_t>(kSynthW) * kSynthH * 4, 0);
+    // pool checkout to forget. Sized by the contract's own sizing function
+    // (raw_ffi_api.h), so rgba8 stays w*h*4 byte-for-byte and yuv420 gets
+    // w*h + 2*ceil(w/2)*ceil(h/2).
+    const int64_t destination_bytes =
+        ceyx_output_format_byte_count(output_format, kSynthW, kSynthH);
+    rgba.assign(destination_bytes > 0 ? static_cast<size_t>(destination_bytes) : 0, 0);
     const RawErrorCode rc =
         raw_pipeline_decode_to_rgba_into(in, develop, rgba.data(), rgba.size(), out);
     out_w = out.width;
@@ -428,6 +470,40 @@ RawErrorCode runSyntheticXTrans(const RawColorKey* tile,
     }
     return rc;
 }
+
+// X-Trans fusion (2026-10-02): A/B byte comparison for xtrans-fused-ab.
+// kXTransFusedAbMaxAbs is 0 (byte identity, the expected outcome because the
+// fused kernel reproduces the two-stage u16 rounding). It may be set to 1 ONLY
+// by the contract's pre-registered R-2 procedure (plan XT-6), never to make a
+// red run green.
+constexpr int kXTransFusedAbMaxAbs = 0;
+
+struct AbByteComparison {
+    bool same_size = false;
+    size_t diff_bytes = 0;
+    int max_abs = 0;
+};
+
+AbByteComparison compareAbBytes(const uint8_t* fused, size_t fused_size,
+                                const uint8_t* two_stage, size_t two_stage_size) {
+    AbByteComparison result;
+    result.same_size = (fused_size == two_stage_size) && fused_size > 0;
+    if (!result.same_size) return result;
+    for (size_t i = 0; i < fused_size; ++i) {
+        const int delta = static_cast<int>(fused[i]) - static_cast<int>(two_stage[i]);
+        const int magnitude = delta < 0 ? -delta : delta;
+        if (magnitude != 0) ++result.diff_bytes;
+        if (magnitude > result.max_abs) result.max_abs = magnitude;
+    }
+    return result;
+}
+
+// RAII: DNG_RAW_FUSED_XTRANS_RENDER=0 for the lifetime of the object, cleared
+// on EVERY exit path (a leaked flag would silently de-fuse every later case).
+struct XTransFusionOff {
+    XTransFusionOff() { setenv("DNG_RAW_FUSED_XTRANS_RENDER", "0", 1); }
+    ~XTransFusionOff() { unsetenv("DNG_RAW_FUSED_XTRANS_RENDER"); }
+};
 
 // P19: synthetic linear-RGB frame. This is the runtime coverage of the Foveon
 // branch: it drives raw_pipeline_decode_to_rgba with an in-memory 3-component
@@ -569,6 +645,7 @@ int main(int argc, char** argv) {
     bool xtrans_hash_all_match = true;
     int linear_hash_compared = 0;
     bool linear_hash_all_match = true;
+    std::string first_linear_path, first_linear_id;
 
     for (const Sample& s : samples) {
         if (s.id.rfind("malformed_", 0) == 0) continue;   // Task 13 owns these
@@ -592,8 +669,11 @@ int main(int argc, char** argv) {
 
         RawPipelineResult result;
         TestRgbaBuffer buf = probeSizedBuffer(s.path.c_str());
+        const uint64_t linear_fused_before = raw_fused_linear_rgb_render_count();
         const RawErrorCode rc = raw_pipeline_decode_file_into(
             s.path.c_str(), develop, buf.ptr(), buf.size(), result);
+        const uint64_t linear_fused_delta =
+            raw_fused_linear_rgb_render_count() - linear_fused_before;
         ++checked;
         char detail[320];
 
@@ -703,6 +783,18 @@ int main(int argc, char** argv) {
                                      record_hashes, baseline, recorded,
                                      linear_hash_compared,
                                      linear_hash_all_match);
+            }
+            // N1 (Foveon fusion): an unscaled linear-RGB decode took the fused
+            // route exactly once. Exact, not >= 1: a second dispatch or a
+            // silent fall-back to two-stage are both defects.
+            std::snprintf(detail, sizeof(detail), "fused_delta=%llu expect=1 rc=%s",
+                          static_cast<unsigned long long>(linear_fused_delta),
+                          raw_error_name(rc));
+            report("linear-rgb-fused-engaged", s.id.c_str(),
+                   rc == kRawSuccess && linear_fused_delta == 1, detail);
+            if (first_linear_path.empty()) {
+                first_linear_path = s.path;
+                first_linear_id = s.id;
             }
         } else if (s.expect_layout == "xtrans6x6") {
             std::snprintf(detail, sizeof(detail), "error=%s want=%s rgba=%s",
@@ -1043,6 +1135,76 @@ int main(int argc, char** argv) {
                detail);
     }
 
+    // Foveon fusion N1/N2 on the SYNTHETIC frame (needs no corpus file, so it
+    // also runs where no .x3f sample can be present): fused ON vs two-stage
+    // OFF on the same input in one process.
+    {
+        std::vector<uint8_t> rgba_on, rgba_off;
+        uint32_t w = 0, h = 0;
+        RawDecodeDiagnostics diag{};
+        const uint64_t c0 = raw_fused_linear_rgb_render_count();
+        const RawErrorCode rc_on = runSyntheticLinearRgb(rgba_on, w, h, diag);
+        const uint64_t c1 = raw_fused_linear_rgb_render_count();
+        RawErrorCode rc_off = kRawErrKernelFailed;
+        uint64_t c2 = c1;
+        {
+            LinearRgbFusionOff off;
+            rc_off = runSyntheticLinearRgb(rgba_off, w, h, diag);
+            c2 = raw_fused_linear_rgb_render_count();
+        }
+        const std::string sha_on = sha256Hex(rgba_on.data(), rgba_on.size());
+        const std::string sha_off = sha256Hex(rgba_off.data(), rgba_off.size());
+        char detail[320];
+        std::snprintf(detail, sizeof(detail), "fused_delta=%llu expect=1 rc=%s",
+                      static_cast<unsigned long long>(c1 - c0),
+                      raw_error_name(rc_on));
+        report("linear-rgb-fused-engaged", "synthetic",
+               rc_on == kRawSuccess && c1 - c0 == 1, detail);
+        std::snprintf(detail, sizeof(detail),
+                      "on_delta=%llu off_delta=%llu sha_on=%s sha_off=%s",
+                      static_cast<unsigned long long>(c1 - c0),
+                      static_cast<unsigned long long>(c2 - c1),
+                      sha_on.c_str(), sha_off.c_str());
+        report("linear-rgb-fused-ab", "synthetic",
+               rc_on == kRawSuccess && rc_off == kRawSuccess &&
+                   !rgba_on.empty() && c1 - c0 == 1 && c2 - c1 == 0 &&
+                   sha_on == sha_off,
+               detail);
+    }
+
+    // Foveon fusion N2 on a REAL .x3f (fused ON vs two-stage OFF, same file,
+    // same binary) and N3 (a sized decode stays two-stage, R-3).
+    if (first_linear_path.empty()) {
+        std::printf("[RawE2E] SKIP linear-rgb-fused-ab (no linear-RGB sample "
+                    "present)\n");
+    } else {
+        const LinearRgbDecodeArm on = decodeLinearRgbArm(first_linear_path, 0);
+        LinearRgbDecodeArm off;
+        {
+            LinearRgbFusionOff guard;
+            off = decodeLinearRgbArm(first_linear_path, 0);
+        }
+        char detail[320];
+        std::snprintf(detail, sizeof(detail),
+                      "on_delta=%llu off_delta=%llu sha_on=%s sha_off=%s",
+                      static_cast<unsigned long long>(on.fused_delta),
+                      static_cast<unsigned long long>(off.fused_delta),
+                      on.sha.c_str(), off.sha.c_str());
+        report("linear-rgb-fused-ab", first_linear_id.c_str(),
+               on.rc == kRawSuccess && off.rc == kRawSuccess &&
+                   !on.sha.empty() && on.fused_delta == 1 &&
+                   off.fused_delta == 0 && on.sha == off.sha,
+               detail);
+
+        const LinearRgbDecodeArm sized = decodeLinearRgbArm(first_linear_path, 1024);
+        std::snprintf(detail, sizeof(detail),
+                      "max_long_edge=1024 fused_delta=%llu expect=0 rc=%s",
+                      static_cast<unsigned long long>(sized.fused_delta),
+                      raw_error_name(sized.rc));
+        report("linear-rgb-sized-two-stage", first_linear_id.c_str(),
+               sized.rc == kRawSuccess && sized.fused_delta == 0, detail);
+    }
+
     // Round-6 should-fix S-R6-01: the validator blesses a canonical tile whose
     // green sites are spelled kRawColorKeyFujiGreen (7) - see
     // tests/test_raw_layout_contract.cpp:258-270 - but the X-Trans kernel only
@@ -1099,6 +1261,124 @@ int main(int argc, char** argv) {
                    !plain_rgba.empty() && plain_rgba.size() == fuji_rgba.size() &&
                    diff_bytes == 0,
                detail);
+    }
+
+    // X-Trans fusion (2026-10-02): xtrans-fused-ab. SYNTHETIC, so it can never
+    // SKIP. For each of the 6 diagonal phase shifts of the canonical tile (the
+    // shifts test_raw_xtrans_kernel uses; the validator accepts all 36) and
+    // each output format: decode A with the default route must move the fused
+    // X-Trans counter by exactly 1; decode B under DNG_RAW_FUSED_XTRANS_RENDER=0
+    // must move it by exactly 0; A and B must agree within
+    // kXTransFusedAbMaxAbs. Exactness of the counter is what distinguishes
+    // "the fused kernel produced these bytes" from "fusion silently stopped
+    // engaging and the two-stage path produced them" -- both are byte-green.
+    {
+        const int32_t formats[2] = {0, kCeyxOutputFormatYuv420};
+        const char* format_names[2] = {"rgba8", "yuv420"};
+        for (int shift = 0; shift < 6; ++shift) {
+            RawColorKey shifted_tile[36];
+            for (int row = 0; row < 6; ++row) {
+                for (int col = 0; col < 6; ++col) {
+                    shifted_tile[row * 6 + col] =
+                        kCanonicalTile[((row + shift) % 6) * 6 + ((col + shift) % 6)];
+                }
+            }
+            for (int f = 0; f < 2; ++f) {
+                std::vector<uint8_t> fused_bytes, two_stage_bytes;
+                uint32_t fused_w = 0, fused_h = 0, two_stage_w = 0, two_stage_h = 0;
+                RawDecodeDiagnostics fused_diag{}, two_stage_diag{};
+                const uint64_t count_before = raw_fused_xtrans_render_count();
+                const RawErrorCode fused_rc = runSyntheticXTrans(
+                    shifted_tile, fused_bytes, fused_w, fused_h, fused_diag, formats[f]);
+                const uint64_t count_after_fused = raw_fused_xtrans_render_count();
+                RawErrorCode two_stage_rc = kRawErrKernelFailed;
+                uint64_t count_after_two_stage = count_after_fused;
+                {
+                    XTransFusionOff fusion_off;
+                    two_stage_rc = runSyntheticXTrans(
+                        shifted_tile, two_stage_bytes, two_stage_w, two_stage_h,
+                        two_stage_diag, formats[f]);
+                    count_after_two_stage = raw_fused_xtrans_render_count();
+                }
+                const uint64_t fused_delta = count_after_fused - count_before;
+                const uint64_t two_stage_delta = count_after_two_stage - count_after_fused;
+                const AbByteComparison cmp = compareAbBytes(
+                    fused_bytes.data(), fused_bytes.size(),
+                    two_stage_bytes.data(), two_stage_bytes.size());
+                char id[64];
+                std::snprintf(id, sizeof(id), "shift=%d/%s", shift, format_names[f]);
+                char detail[320];
+                std::snprintf(detail, sizeof(detail),
+                              "fused_rc=%s two_stage_rc=%s fused_delta=%llu(expect 1) "
+                              "two_stage_delta=%llu(expect 0) bytes=%zu/%zu "
+                              "diff_bytes=%zu max_abs=%d bound=%d",
+                              raw_error_name(fused_rc), raw_error_name(two_stage_rc),
+                              static_cast<unsigned long long>(fused_delta),
+                              static_cast<unsigned long long>(two_stage_delta),
+                              fused_bytes.size(), two_stage_bytes.size(),
+                              cmp.diff_bytes, cmp.max_abs, kXTransFusedAbMaxAbs);
+                ++checked;
+                report("xtrans-fused-ab", id,
+                       fused_rc == kRawSuccess && two_stage_rc == kRawSuccess &&
+                           fused_delta == 1 && two_stage_delta == 0 &&
+                           cmp.same_size && cmp.max_abs <= kXTransFusedAbMaxAbs,
+                       detail);
+            }
+        }
+
+        // Corpus lane (rgba8): every X-Trans sample expected to decode. SKIP
+        // only when the file is absent (corpus is gitignored).
+        for (const Sample& s : samples) {
+            if (s.expect_layout != "xtrans6x6" || s.expect_error != "kRawSuccess") continue;
+            if (!fileExists(s.path)) {
+                std::printf("[RawE2E] SKIP %s xtrans-fused-ab (missing file)\n", s.id.c_str());
+                continue;
+            }
+            RawDevelopParams develop{};
+            develop.tone_curve_strength = 1.0f;
+            develop.output_space = kRawOutputColorSpaceSrgb;
+            TestRgbaBuffer fused_buffer = probeSizedBuffer(s.path.c_str());
+            TestRgbaBuffer two_stage_buffer = probeSizedBuffer(s.path.c_str());
+            RawPipelineResult fused_result, two_stage_result;
+            const uint64_t count_before = raw_fused_xtrans_render_count();
+            const RawErrorCode fused_rc = raw_pipeline_decode_file_into(
+                s.path.c_str(), develop, fused_buffer.ptr(), fused_buffer.size(), fused_result);
+            const uint64_t count_after_fused = raw_fused_xtrans_render_count();
+            RawErrorCode two_stage_rc = kRawErrKernelFailed;
+            uint64_t count_after_two_stage = count_after_fused;
+            {
+                XTransFusionOff fusion_off;
+                two_stage_rc = raw_pipeline_decode_file_into(
+                    s.path.c_str(), develop, two_stage_buffer.ptr(),
+                    two_stage_buffer.size(), two_stage_result);
+                count_after_two_stage = raw_fused_xtrans_render_count();
+            }
+            const uint64_t fused_delta = count_after_fused - count_before;
+            const uint64_t two_stage_delta = count_after_two_stage - count_after_fused;
+            const AbByteComparison cmp = compareAbBytes(
+                fused_result.rgba_ptr, fused_rc == kRawSuccess ? fused_result.rgba_size : 0,
+                two_stage_result.rgba_ptr,
+                two_stage_rc == kRawSuccess ? two_stage_result.rgba_size : 0);
+            char id[96];
+            std::snprintf(id, sizeof(id), "%s/rgba8", s.id.c_str());
+            char detail[320];
+            std::snprintf(detail, sizeof(detail),
+                          "fused_rc=%s two_stage_rc=%s fused_delta=%llu(expect 1) "
+                          "two_stage_delta=%llu(expect 0) bytes=%zu/%zu "
+                          "diff_bytes=%zu max_abs=%d bound=%d",
+                          raw_error_name(fused_rc), raw_error_name(two_stage_rc),
+                          static_cast<unsigned long long>(fused_delta),
+                          static_cast<unsigned long long>(two_stage_delta),
+                          static_cast<size_t>(fused_result.rgba_size),
+                          static_cast<size_t>(two_stage_result.rgba_size),
+                          cmp.diff_bytes, cmp.max_abs, kXTransFusedAbMaxAbs);
+            ++checked;
+            report("xtrans-fused-ab", id,
+                   fused_rc == kRawSuccess && two_stage_rc == kRawSuccess &&
+                       fused_delta == 1 && two_stage_delta == 0 &&
+                       cmp.same_size && cmp.max_abs <= kXTransFusedAbMaxAbs,
+                   detail);
+        }
     }
 
     // The other half of S-R6-01: a colour key the kernel has no channel for

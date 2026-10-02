@@ -1749,6 +1749,246 @@ void run_y7() {
 }
 
 /* ====================================================================== */
+/* Y13 — X-TRANS FUSED A/B (route xtrans-raf). Y7's body and bounds        */
+/* verbatim on the X-Trans RAF sample; counter is the X-Trans fused one.   */
+/* ====================================================================== */
+void run_y13() {
+    const char *path = "image_samples/raw_corpus/fuji_xt3.raf";
+    char detail[1024];
+
+    /* RAII: the route flag is cleared on EVERY exit path below. A leaked
+     * flag would silently de-fuse every later case in this process. */
+    struct XTransFusionOff {
+        XTransFusionOff() { setenv("DNG_RAW_FUSED_XTRANS_RENDER", "0", 1); }
+        ~XTransFusionOff() { unsetenv("DNG_RAW_FUSED_XTRANS_RENDER"); }
+    };
+
+    Yuv fused;
+    Yuv two_stage;
+    int32_t e_a = 0, e_b = 0;
+
+    const uint64_t c0 = raw_fused_xtrans_render_count();
+    const bool ok_a = decode_yuv420(path, &fused, &e_a);
+    const uint64_t c1 = raw_fused_xtrans_render_count();
+    bool ok_b = false;
+    uint64_t c2 = c1;
+    {
+        XTransFusionOff off;
+        ok_b = decode_yuv420(path, &two_stage, &e_b);
+        c2 = raw_fused_xtrans_render_count();
+    }
+
+    if (!ok_a || !ok_b) {
+        snprintf(detail, sizeof(detail),
+                 "%s: decode failed armA_ok=%d err=%d armB_ok=%d err=%d", path,
+                 ok_a ? 1 : 0, e_a, ok_b ? 1 : 0, e_b);
+        verdict("Y13", "xtrans-raf", "A-fused-vs-B-two-stage", false, detail);
+        return;
+    }
+
+    /* B0 — the arm-A decode really fused, and the arm-B decode really did
+     * not. */
+    const uint64_t fused_delta_a = c1 - c0;
+    const uint64_t fused_delta_b = c2 - c1;
+    const bool b0 = (fused_delta_a == 1u) && (fused_delta_b == 0u);
+
+    /* B1 — sizes, extents and the full plane descriptor agree exactly. */
+    const bool b1 =
+        fused.w == two_stage.w && fused.h == two_stage.h &&
+        fused.bytes.size() == two_stage.bytes.size() &&
+        fused.planes.plane_width[0] == two_stage.planes.plane_width[0] &&
+        fused.planes.plane_width[1] == two_stage.planes.plane_width[1] &&
+        fused.planes.plane_width[2] == two_stage.planes.plane_width[2] &&
+        fused.planes.plane_height[0] == two_stage.planes.plane_height[0] &&
+        fused.planes.plane_height[1] == two_stage.planes.plane_height[1] &&
+        fused.planes.plane_height[2] == two_stage.planes.plane_height[2] &&
+        fused.planes.plane_row_stride[0] ==
+            two_stage.planes.plane_row_stride[0] &&
+        fused.planes.plane_row_stride[1] ==
+            two_stage.planes.plane_row_stride[1] &&
+        fused.planes.plane_row_stride[2] ==
+            two_stage.planes.plane_row_stride[2];
+
+    /* B2/B3/B4 — per-plane max |delta| <= 1. Plane spans are computed from
+     * the LITERAL geometry the descriptor reports, so a descriptor defect
+     * cannot fold two planes into one comparison. */
+    int32_t max_abs[3] = {0, 0, 0};
+    size_t diff_count[3] = {0, 0, 0};
+    size_t plane_bytes[3] = {0, 0, 0};
+    bool spans_ok = b1;
+    if (spans_ok) {
+        size_t offset = 0;
+        for (int p = 0; p < 3; ++p) {
+            plane_bytes[p] =
+                static_cast<size_t>(fused.planes.plane_width[p]) *
+                static_cast<size_t>(fused.planes.plane_height[p]);
+            if (offset + plane_bytes[p] > fused.bytes.size()) {
+                spans_ok = false;
+                break;
+            }
+            for (size_t i = 0; i < plane_bytes[p]; ++i) {
+                const int32_t d =
+                    static_cast<int32_t>(fused.bytes[offset + i]) -
+                    static_cast<int32_t>(two_stage.bytes[offset + i]);
+                const int32_t a = d < 0 ? -d : d;
+                if (a > max_abs[p]) max_abs[p] = a;
+                if (a != 0) ++diff_count[p];
+            }
+            offset += plane_bytes[p];
+        }
+    }
+
+    const bool b2 = spans_ok && max_abs[0] <= 1;
+    const bool b3 = spans_ok && max_abs[1] <= 1;
+    const bool b4 = spans_ok && max_abs[2] <= 1;
+    /* B5' (prereg AMENDMENT A1, disclosed there in full): the differing-byte
+     * FRACTION is a pass condition, not a report. It was a report until
+     * mutation M2 was run: a deliberate +1 bias on ONE channel of ONE arm
+     * moved 17.5-49.9% of every plane while keeping max|delta| at 1, so the
+     * max-only bound was green over a planted cross-arm divergence. 1% is a
+     * coarse tripwire sized ~3000x above the only measured honest residue
+     * (32/11198070 on Vulkan luma) and ~17x below that mutant. Exceeding it is
+     * STOP-AND-REPORT; it must not be raised to accommodate a result. */
+    bool b5 = spans_ok;
+    double diff_fraction[3] = {0.0, 0.0, 0.0};
+    for (int p = 0; p < 3 && spans_ok; ++p) {
+        if (plane_bytes[p] == 0) {
+            b5 = false;
+            break;
+        }
+        diff_fraction[p] = static_cast<double>(diff_count[p]) /
+                           static_cast<double>(plane_bytes[p]);
+        if (diff_fraction[p] > 0.01) b5 = false;
+    }
+    const bool ok = b0 && b1 && b2 && b3 && b4 && b5;
+
+    snprintf(detail, sizeof(detail),
+             "%s %dx%d B0 fused_delta=[A:%llu expect 1, B:%llu expect 0]=%d "
+             "B1 sizes/descriptor=%d spans=%d "
+             "max_abs=[Y:%d Cb:%d Cr:%d] bound=1 "
+             "B5' diff_fraction=[Y:%.6f Cb:%.6f Cr:%.6f] bound=0.01 pass=%d "
+             "diff_bytes=[Y:%zu/%zu Cb:%zu/%zu Cr:%zu/%zu] "
+             "fusedA_fnv1a64=%016" PRIx64 " twostageB_fnv1a64=%016" PRIx64
+             " prereg=docs/logs/2026-10-02/plan-xtrans-fusion.md#XT-5",
+             path, fused.w, fused.h,
+             static_cast<unsigned long long>(fused_delta_a),
+             static_cast<unsigned long long>(fused_delta_b), b0 ? 1 : 0,
+             b1 ? 1 : 0, spans_ok ? 1 : 0, max_abs[0], max_abs[1], max_abs[2],
+             diff_fraction[0], diff_fraction[1], diff_fraction[2], b5 ? 1 : 0,
+             diff_count[0], plane_bytes[0], diff_count[1], plane_bytes[1],
+             diff_count[2], plane_bytes[2],
+             fnv1a64(fused.bytes.data(), fused.bytes.size()),
+             fnv1a64(two_stage.bytes.data(), two_stage.bytes.size()));
+    verdict("Y13", "xtrans-raf", "A-fused-vs-B-two-stage", ok, detail);
+}
+
+/* ====================================================================== */
+/* Y14 — LINEAR-RGB (X3F) CROSS-ARM AGREEMENT (Foveon fusion, 2026-10-02)  */
+/*                                                                        */
+/* Y7's design applied to the linear-RGB route: arm A = fused normalize+   */
+/* render yuv420 entry, arm B = raw_linear_rgb_normalize + two-stage      */
+/* Stage-4 yuv420, selected by DNG_RAW_FUSED_LINEAR_RGB_RENDER=0 on the    */
+/* same file in one process. Same pass bounds as Y7 (B0..B5'). The fused  */
+/* seam reproduces the two-stage arithmetic exactly, so Metal is expected  */
+/* to be byte-identical; byte_identical= is reported, not asserted, so the */
+/* Vulkan run reports any residue instead of hiding it behind a red.       */
+/* ====================================================================== */
+void run_y14() {
+    const char *path = "image_samples/raw_corpus/sigma_sd_quattro_h_23.x3f";
+    char detail[1024];
+
+    struct LinearRgbFusionOff {
+        LinearRgbFusionOff() { setenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER", "0", 1); }
+        ~LinearRgbFusionOff() { unsetenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER"); }
+    };
+
+    Yuv fused;
+    Yuv two_stage;
+    int32_t e_a = 0, e_b = 0;
+
+    const uint64_t c0 = raw_fused_linear_rgb_render_count();
+    const bool ok_a = decode_yuv420(path, &fused, &e_a);
+    const uint64_t c1 = raw_fused_linear_rgb_render_count();
+    bool ok_b = false;
+    uint64_t c2 = c1;
+    {
+        LinearRgbFusionOff off;
+        ok_b = decode_yuv420(path, &two_stage, &e_b);
+        c2 = raw_fused_linear_rgb_render_count();
+    }
+    if (!ok_a || !ok_b) {
+        snprintf(detail, sizeof(detail),
+                 "%s: decode failed armA_ok=%d err=%d armB_ok=%d err=%d", path,
+                 ok_a ? 1 : 0, e_a, ok_b ? 1 : 0, e_b);
+        verdict("Y14", "linearrgb-x3f", "A-fused-vs-B-two-stage", false, detail);
+        return;
+    }
+
+    const uint64_t fused_delta_a = c1 - c0;
+    const uint64_t fused_delta_b = c2 - c1;
+    const bool b0 = (fused_delta_a == 1u) && (fused_delta_b == 0u);
+
+    bool b1 = fused.w == two_stage.w && fused.h == two_stage.h &&
+              fused.bytes.size() == two_stage.bytes.size();
+    for (int p = 0; p < 3; ++p) {
+        b1 = b1 &&
+             fused.planes.plane_width[p] == two_stage.planes.plane_width[p] &&
+             fused.planes.plane_height[p] == two_stage.planes.plane_height[p] &&
+             fused.planes.plane_row_stride[p] ==
+                 two_stage.planes.plane_row_stride[p];
+    }
+
+    int32_t max_abs[3] = {0, 0, 0};
+    size_t diff_count[3] = {0, 0, 0};
+    size_t plane_bytes[3] = {0, 0, 0};
+    bool spans_ok = b1;
+    size_t offset = 0;
+    for (int p = 0; p < 3 && spans_ok; ++p) {
+        plane_bytes[p] = static_cast<size_t>(fused.planes.plane_width[p]) *
+                         static_cast<size_t>(fused.planes.plane_height[p]);
+        if (plane_bytes[p] == 0 || offset + plane_bytes[p] > fused.bytes.size()) {
+            spans_ok = false;
+            break;
+        }
+        for (size_t i = 0; i < plane_bytes[p]; ++i) {
+            const int32_t d = static_cast<int32_t>(fused.bytes[offset + i]) -
+                              static_cast<int32_t>(two_stage.bytes[offset + i]);
+            const int32_t a = d < 0 ? -d : d;
+            if (a > max_abs[p]) max_abs[p] = a;
+            if (a != 0) ++diff_count[p];
+        }
+        offset += plane_bytes[p];
+    }
+    double diff_fraction[3] = {0.0, 0.0, 0.0};
+    bool bounds_ok = spans_ok;
+    for (int p = 0; p < 3 && spans_ok; ++p) {
+        diff_fraction[p] = static_cast<double>(diff_count[p]) /
+                           static_cast<double>(plane_bytes[p]);
+        if (max_abs[p] > 1 || diff_fraction[p] > 0.01) bounds_ok = false;
+    }
+    const bool byte_identical =
+        spans_ok && diff_count[0] == 0 && diff_count[1] == 0 && diff_count[2] == 0;
+    const bool ok = b0 && b1 && bounds_ok;
+
+    snprintf(detail, sizeof(detail),
+             "%s %dx%d B0 fused_delta=[A:%llu expect 1, B:%llu expect 0]=%d "
+             "B1 sizes/descriptor=%d spans=%d max_abs=[Y:%d Cb:%d Cr:%d] bound=1 "
+             "diff_fraction=[Y:%.6f Cb:%.6f Cr:%.6f] bound=0.01 "
+             "byte_identical=%d fusedA_fnv1a64=%016" PRIx64
+             " twostageB_fnv1a64=%016" PRIx64
+             " prereg=tmp/verify/foveon-fused/prereg-f5.txt",
+             path, fused.w, fused.h,
+             static_cast<unsigned long long>(fused_delta_a),
+             static_cast<unsigned long long>(fused_delta_b), b0 ? 1 : 0,
+             b1 ? 1 : 0, spans_ok ? 1 : 0, max_abs[0], max_abs[1], max_abs[2],
+             diff_fraction[0], diff_fraction[1], diff_fraction[2],
+             byte_identical ? 1 : 0,
+             fnv1a64(fused.bytes.data(), fused.bytes.size()),
+             fnv1a64(two_stage.bytes.data(), two_stage.bytes.size()));
+    verdict("Y14", "linearrgb-x3f", "A-fused-vs-B-two-stage", ok, detail);
+}
+
+/* ====================================================================== */
 /* Y8 — ROUTE COVERAGE                                                    */
 /*                                                                        */
 /* A partial format thread is indistinguishable from a working one on any  */
@@ -2134,8 +2374,16 @@ void run_fused_hash() {
 }  // namespace
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    /* Optional case filter: argv[1] = lowercase case id (e.g. "y13") runs only
+     * that case; no argument runs the full suite. Lets device runs split per
+     * case to fit a foreground time budget. */
+    const char *only = argc > 1 ? argv[1] : nullptr;
+    int ran = 0;
+    auto want = [&](const char *id) {
+        const bool run = only == nullptr || strcmp(only, id) == 0;
+        if (run) ++ran;
+        return run;
+    };
     printf("=== T12 milestone 4 — yuv420 output correctness (Y1..Y9) ===\n");
     printf("ARM/BACKEND for every case below: %s\n", host_arm());
     printf("Pre-registered bounds and mutation list: "
@@ -2151,23 +2399,30 @@ int main(int argc, char **argv) {
          "linearrgb-x3f"},
     };
 
-    run_y1(corpus);
-    run_y2();
-    run_y3();
-    run_y4a();
-    run_y4b(corpus);
-    run_y5("image_samples/raw_sample.arw", "bayer-arw");
-    run_y6();
-    run_y10();
-    run_y11();
-    run_y7();
-    run_y8();
-    run_y9();
+    if (want("y1")) run_y1(corpus);
+    if (want("y2")) run_y2();
+    if (want("y3")) run_y3();
+    if (want("y4a")) run_y4a();
+    if (want("y4b")) run_y4b(corpus);
+    if (want("y5")) run_y5("image_samples/raw_sample.arw", "bayer-arw");
+    if (want("y6")) run_y6();
+    if (want("y10")) run_y10();
+    if (want("y11")) run_y11();
+    if (want("y7")) run_y7();
+    if (want("y13")) run_y13();
+    if (want("y14")) run_y14();
+    if (want("y8")) run_y8();
+    if (want("y9")) run_y9();
     /* Y12 runs LAST among the assertions: it drives the fusion route flag,
      * and placing it after every other case means even a leaked flag (which
      * its own RAII forbids) could not re-route an earlier case. */
-    run_y12();
-    run_fused_hash();
+    if (want("y12")) run_y12();
+    if (want("fusedhash")) run_fused_hash();
+
+    if (ran == 0) {
+        printf("[filter] unknown case id '%s' -> no case ran -> FAIL\n", only);
+        ++g_fail;
+    }
 
     printf("\n=== SUMMARY pass=%d fail=%d n/a=%d arm=%s ===\n", g_pass, g_fail,
            g_na, host_arm());

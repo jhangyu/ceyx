@@ -224,6 +224,57 @@ add_custom_target(raw_bayer_fused_render_yuv420_aot_target
     DEPENDS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT})
 list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT})
 
+# X-Trans fusion (2026-10-02): fused X-Trans demosaic + Stage-4 render, rgba8
+# and yuv420 entries from ONE generator binary. DNG_RENDER_STAGE4_AOT_TARGET
+# (not AOT_TARGET) for the same reason as the Bayer pair above: it emits the
+# final output and must match Stage-4's strict_float form.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render.h
+    COMMAND raw_xtrans_fused_render_generator -g raw_xtrans_fused_render -f raw_xtrans_fused_render
+            -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS raw_xtrans_fused_render_generator
+    COMMENT "Generating Halide AOT fused X-Trans demosaic+render..."
+)
+add_custom_target(raw_xtrans_fused_render_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT})
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420.h
+    COMMAND raw_xtrans_fused_render_generator -g raw_xtrans_fused_render_yuv420 -f raw_xtrans_fused_render_yuv420
+            -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS raw_xtrans_fused_render_generator
+    COMMENT "Generating Halide AOT fused X-Trans demosaic+render (yuv420 planes)..."
+)
+add_custom_target(raw_xtrans_fused_render_yuv420_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT})
+
+# Foveon fusion (2026-10-02): fused X3F linear-RGB normalize + Stage-4 render.
+# DNG_RENDER_STAGE4_AOT_TARGET for the same reason as the Bayer-fused kernel:
+# it emits the final pixels and must match Stage-4's strict_float form.
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render.h
+    COMMAND raw_linear_rgb_fused_render_generator -g raw_linear_rgb_fused_render -f raw_linear_rgb_fused_render
+            -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS raw_linear_rgb_fused_render_generator
+    COMMENT "Generating Halide AOT fused linear-RGB (X3F) normalize+render..."
+)
+add_custom_target(raw_linear_rgb_fused_render_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT})
+
+add_custom_command(
+    OUTPUT ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT} ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420.h
+    COMMAND raw_linear_rgb_fused_render_generator -g raw_linear_rgb_fused_render_yuv420 -f raw_linear_rgb_fused_render_yuv420
+            -o ${HALIDE_OUTPUT_DIR} target=${DNG_RENDER_STAGE4_AOT_TARGET}
+    DEPENDS raw_linear_rgb_fused_render_generator
+    COMMENT "Generating Halide AOT fused linear-RGB (X3F) normalize+render (yuv420 planes)..."
+)
+add_custom_target(raw_linear_rgb_fused_render_yuv420_aot_target
+    DEPENDS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
+list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
+
 # THE FUSED FAMILY, AS ONE NAME (mem8 v3 T12.6).
 #
 # runRenderStage4HalideAotFromDevice dispatches BOTH fused entries from the
@@ -233,12 +284,23 @@ list(APPEND DNG_AOT_DECLARED_OUTPUTS ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render
 # not updated with it. These two variables exist so the family has ONE
 # declaration site: a future third fused entry is added here and every consumer
 # picks it up, instead of the maintainer having to find eight lists.
+# The family now spans formats (Bayer + X-Trans, 2026-10-02); the name is kept
+# because renaming it would churn 8 consumers + 8 TARGET guards for no
+# behaviour change.
 set(DNG_FUSED_BAYER_AOT_LIBS
     ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
 set(DNG_FUSED_BAYER_AOT_TARGETS
     raw_bayer_fused_render_aot_target
-    raw_bayer_fused_render_yuv420_aot_target)
+    raw_bayer_fused_render_yuv420_aot_target
+    raw_xtrans_fused_render_aot_target
+    raw_xtrans_fused_render_yuv420_aot_target
+    raw_linear_rgb_fused_render_aot_target
+    raw_linear_rgb_fused_render_yuv420_aot_target)
 
 # P17 T11: generic-RAW fused normalize + X-Trans demosaic AOT kernel.
 add_custom_command(
@@ -436,8 +498,12 @@ set(DNG_PIPELINE_AOT_LIBS
     ${HALIDE_OUTPUT_DIR}/raw_bayer_demosaic${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_bayer_fused_render_yuv420${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_xtrans_fused_render_yuv420${DNG_AOT_LIB_EXT}
     ${HALIDE_OUTPUT_DIR}/raw_xtrans_demosaic${DNG_AOT_LIB_EXT}
-    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT})
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_normalize${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render${DNG_AOT_LIB_EXT}
+    ${HALIDE_OUTPUT_DIR}/raw_linear_rgb_fused_render_yuv420${DNG_AOT_LIB_EXT})
 set(DNG_PIPELINE_AOT_TARGETS
     halide_runtime_target
     dng_demosaic_aot_target
@@ -450,8 +516,12 @@ set(DNG_PIPELINE_AOT_TARGETS
     raw_bayer_demosaic_aot_target
     raw_bayer_fused_render_aot_target
     raw_bayer_fused_render_yuv420_aot_target
+    raw_xtrans_fused_render_aot_target
+    raw_xtrans_fused_render_yuv420_aot_target
     raw_xtrans_demosaic_aot_target
-    raw_linear_rgb_normalize_aot_target)
+    raw_linear_rgb_normalize_aot_target
+    raw_linear_rgb_fused_render_aot_target
+    raw_linear_rgb_fused_render_yuv420_aot_target)
 # Non-split Stage-4 family (macOS/Metal): the pre-average scaled kernel and its
 # yuv420 sibling, always linked together.
 set(DNG_STAGE4_NONSPLIT_AOT_LIBS

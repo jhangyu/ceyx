@@ -67,6 +67,15 @@ std::atomic<uint64_t> g_stage3_host_allocation_count{0};
 // counter above; see raw_fused_bayer_render_count()'s comment in
 // raw_gpu_pipeline.h for why byte-identity alone cannot stand in for it.
 std::atomic<uint64_t> g_fused_bayer_render_count{0};
+// X-Trans fusion (2026-10-02): the X-Trans sibling of the counter above, same
+// semantics -- incremented immediately before the fused Stage-4 dispatch, so
+// it is the fact "the fused X-Trans route ran", not an inference.
+std::atomic<uint64_t> g_fused_xtrans_render_count{0};
+// Foveon fusion (2026-10-02). Process-wide count of decodes that took the
+// FUSED linear-RGB (X3F) normalize+render route. Same atomic discipline and
+// same rationale as g_fused_bayer_render_count; see
+// raw_fused_linear_rgb_render_count()'s comment in raw_gpu_pipeline.h.
+std::atomic<uint64_t> g_fused_linear_rgb_render_count{0};
 
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 using ObjectiveCSendNewBufferNoCopy = void* (*)(void*, SEL, void*, unsigned long,
@@ -452,6 +461,13 @@ RawErrorCode validatePlaneAndCrop(const RawGpuInput& input,
 // extraction). runBayerBranch keeps its own tail: it carries the fused-render
 // dispatch.
 //
+// X-Trans / Foveon fusion (2026-10-02, re-applied onto T3 at merge): the
+// caller picks the Stage-4 source (its Stage-3 buffer on the two-stage route,
+// its source wrap on the fused route) and passes the matching fused descriptor
+// (at most one non-null; both null = two-stage). fused_route_counter, when
+// non-null, is incremented immediately before the Stage-4 dispatch so it
+// cannot report a route that an early return in this tail skipped.
+//
 // The caller owns stage3, the arena region bindings and the source buffers;
 // they stay alive across this call because they are the caller's locals, and
 // this function's own locals (the RGBA checkout, the destination wrap) are
@@ -459,7 +475,10 @@ RawErrorCode validatePlaneAndCrop(const RawGpuInput& input,
 RawErrorCode runSharedStage4Tail(const RawGpuInput& input,
                                  const RawDevelopParams& develop,
                                  const RawRect& crop,
-                                 Halide::Runtime::Buffer<uint16_t>& stage3,
+                                 halide_buffer_t* stage4_source,
+                                 const FusedMosaicSource* fused_mosaic_source,
+                                 const FusedLinearRgbSource* fused_linear_rgb_source,
+                                 std::atomic<uint64_t>* fused_route_counter,
                                  ceyx::RawPersistentDeviceArena* arena,
                                  bool use_zero_copy,
                                  double gpu_t0,
@@ -560,8 +579,11 @@ RawErrorCode runSharedStage4Tail(const RawGpuInput& input,
         ceyx::zero_copy_note_destination_alignment_degraded();
     }
 
+    if (fused_route_counter != nullptr) {
+        fused_route_counter->fetch_add(1, std::memory_order_relaxed);
+    }
     // Same shared Stage4 call as the Bayer branch: no second render path.
-    if (!runRenderStage4HalideAotFromDevice(stage3.raw_buffer(),
+    if (!runRenderStage4HalideAotFromDevice(stage4_source,
                                             1.0f / 65535.0f,
                                             crop.x, crop.y,
                                             static_cast<int>(src_w),
@@ -573,11 +595,9 @@ RawErrorCode runSharedStage4Tail(const RawGpuInput& input,
                                             develop.exif_orientation,
                                             arena,
                                             caller_destination_metal_buffer,
-                                            // mem8 v3 T12: no fused source on
-                                            // this route; the format is the
-                                            // parameter after it.
-                                            /*fused_bayer_source=*/nullptr,
-                                            develop.output_format)) {
+                                            fused_mosaic_source,
+                                            develop.output_format,
+                                            fused_linear_rgb_source)) {
         return kRawErrKernelFailed;
     }
 
@@ -926,14 +946,14 @@ RawErrorCode runBayerBranch(const RawGpuInput& input,
     // the pre-average scaled AOT instead (same entry the DNG path uses).
     // mem8 v3 T20: on the fused route the source handed to Stage-4 is the CFA
     // MOSAIC (uncropped -- the kernel applies crop.x/crop.y itself, see
-    // FusedBayerSource) and no Stage-3 buffer exists. Every other argument is
+    // FusedMosaicSource) and no Stage-3 buffer exists. Every other argument is
     // identical, which is why this is one call site rather than two.
     if (use_fused_bayer_render) {
         // Incremented HERE, immediately before the dispatch that uses it, so
         // the counter cannot report a route that an early return skipped.
         g_fused_bayer_render_count.fetch_add(1, std::memory_order_relaxed);
     }
-    FusedBayerSource fused_source;
+    FusedMosaicSource fused_source;
     fused_source.red_x = red_x;
     fused_source.red_y = red_y;
     fused_source.black_values = input.black.values;
@@ -1091,6 +1111,28 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     Halide::Runtime::Buffer<const float> black_buf(
         input.black.values, static_cast<int>(bw), static_cast<int>(bh));
 
+    // Scaled decode: src is the full crop; dst is the (possibly) downscaled
+    // output extent. On the macOS/Metal build the shared Stage4 entry runs the
+    // pre-average scaled AOT when they differ, and is bit-identical to the
+    // previous crop path when equal. Split (Vulkan/Android/Linux) builds never
+    // reach here with a downscale — raw_pipeline_decode_to_rgba rejects it up
+    // front (no scaled AOT exists there, matching the DNG path / AC-D1).
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+    // X-Trans fusion (2026-10-02), the X-Trans copy of runBayerBranch's T20
+    // gate: an UNSCALED decode runs the fused demosaic+render kernel and never
+    // allocates a Stage-3 buffer. Two-stage iff scaled (no fused _scaled
+    // archive exists for any format -- contract ruling R-3) or
+    // DNG_RAW_FUSED_XTRANS_RENDER=0. Nothing else: no backend test, no format
+    // test. Read once per decode, consulted nowhere else.
+    const char* fused_xtrans_env = std::getenv("DNG_RAW_FUSED_XTRANS_RENDER");
+    const bool fused_xtrans_disabled_by_env =
+        (fused_xtrans_env && fused_xtrans_env[0] == '0');
+    const bool use_fused_xtrans_render =
+        (src_w == out_w && src_h == out_h) && !fused_xtrans_disabled_by_env;
+
     // mem8 T4 (SR-7): device-only on the arena path. Declaration order is
     // load-bearing — see makeStage3Buffer.
     Halide::Runtime::Buffer<uint16_t> stage3;
@@ -1102,7 +1144,12 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
     std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
-    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    if (!use_fused_xtrans_render) {
+        // Declaration order stays load-bearing (buffer first, binding second)
+        // -- see makeStage3Buffer. Both are declared above this branch so the
+        // destruction order is unchanged whichever route ran.
+        makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    }
 
     // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
     if (zero_copy_src_host != nullptr) {
@@ -1129,12 +1176,30 @@ RawErrorCode runXTransBranch(const RawGpuInput& input,
     if (h2d_rc != 0) {
         return kRawErrKernelFailed;
     }
-    if (raw_xtrans_demosaic(src_buf, cfa_buf, black_buf,
+    if (!use_fused_xtrans_render &&
+        raw_xtrans_demosaic(src_buf, cfa_buf, black_buf,
                             computeInvRange(input), stage3) != 0) {
         return kRawErrKernelFailed;
     }
 
-    return runSharedStage4Tail(input, develop, crop, stage3, arena, use_zero_copy,
+    // X-Trans fusion: on the fused route the source handed to Stage-4 is the
+    // CFA MOSAIC (uncropped; the kernel applies crop.x/crop.y) and no Stage-3
+    // buffer exists. cfa is the normalised 36-entry stack array above; it
+    // outlives the call.
+    FusedMosaicSource fused_source;
+    fused_source.xtrans_cfa = cfa;
+    fused_source.black_values = input.black.values;
+    fused_source.black_width = static_cast<int>(bw);
+    fused_source.black_height = static_cast<int>(bh);
+    fused_source.inv_range = computeInvRange(input);
+    return runSharedStage4Tail(input, develop, crop,
+                               use_fused_xtrans_render ? src_buf.raw_buffer()
+                                                       : stage3.raw_buffer(),
+                               use_fused_xtrans_render ? &fused_source : nullptr,
+                               /*fused_linear_rgb_source=*/nullptr,
+                               use_fused_xtrans_render ? &g_fused_xtrans_render_count
+                                                       : nullptr,
+                               arena, use_zero_copy,
                                gpu_t0, host_to_device_copy_ms, source_memcpy_ms, out);
 }
 
@@ -1210,14 +1275,49 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         src_host_ptr = static_cast<const uint16_t*>(zero_copy_src_host);
     }
 
+    // Foveon fusion (2026-10-02): the fusion decision needs the output scale
+    // BEFORE the source is wrapped (the fused kernel takes a flat 1-D source)
+    // and before any Stage-3 allocation, so the extent calculation lives here.
+    // Scope: UNSCALED only -- there is no fused _scaled archive, so a downscale
+    // keeps the two-stage path (R-3). This is a scope boundary, not a platform
+    // guard: every backend takes the fused branch identically.
+    const uint32_t src_w = crop.width;
+    const uint32_t src_h = crop.height;
+    uint32_t out_w = 0, out_h = 0;
+    scaledOutputExtent(src_w, src_h, develop.max_output_long_edge, &out_w, &out_h);
+    // DNG_RAW_FUSED_LINEAR_RGB_RENDER=0 forces the two-stage route. Read once
+    // per decode, consulted nowhere else. It exists so the fused and two-stage
+    // arms are comparable ON THE SAME INPUT in one process (gates N2 / Y14),
+    // and as the runtime kill-switch short of a revert.
+    const char* fused_env = std::getenv("DNG_RAW_FUSED_LINEAR_RGB_RENDER");
+    const bool fused_disabled_by_env = (fused_env && fused_env[0] == '0');
+    const bool use_fused_linear_rgb_render =
+        (src_w == out_w && src_h == out_h) && !fused_disabled_by_env;
+    const int32_t src_row_stride_elements =
+        static_cast<int32_t>(plane.row_stride_bytes / 2);
+
     // Borrowed, stride-aware 3-D wrap: no host copy. row_stride_bytes comes
     // from the decoder's pitch and already accounts for the three components.
+    // Fused route: a FLAT 1-D view of the same memory, the shape the fused
+    // kernel declares on every backend. Its extent is the exact pixel
+    // footprint ((h-1) full rows + w*3 components), NOT row_stride*h: the last
+    // row of plane.data may be short (see the R4-T4 S5 memcpy above), and
+    // copy_to_device copies the whole extent. Two-stage route: unchanged 3-D
+    // wrap. Same variable either way, so the arena bind, dirty flags and
+    // upload below are untouched.
     halide_dimension_t src_dims[3] = {
         {0, static_cast<int32_t>(w), 3, 0},
-        {0, static_cast<int32_t>(h),
-         static_cast<int32_t>(plane.row_stride_bytes / 2), 0},
+        {0, static_cast<int32_t>(h), src_row_stride_elements, 0},
         {0, 3, 1, 0}};
-    Halide::Runtime::Buffer<const uint16_t> src_buf(src_host_ptr, 3, src_dims);
+    halide_dimension_t flat_src_dim = {
+        0,
+        static_cast<int32_t>(static_cast<int64_t>(h - 1) * src_row_stride_elements +
+                             static_cast<int64_t>(w) * 3),
+        1, 0};
+    Halide::Runtime::Buffer<const uint16_t> src_buf =
+        use_fused_linear_rgb_render
+            ? Halide::Runtime::Buffer<const uint16_t>(src_host_ptr, 1, &flat_src_dim)
+            : Halide::Runtime::Buffer<const uint16_t>(src_host_ptr, 3, src_dims);
 
     // Per-COMPONENT black, three entries. The kernel indexes black(c) with
     // c in {0,1,2}, matching the dst channel order. component_black[c] >=
@@ -1240,7 +1340,9 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
         arena, src_buf.raw_buffer(), ceyx::RawDeviceArenaRegion::kSourceMosaicRegion,
         src_required_bytes);
     std::optional<ceyx::RawDeviceArenaRegionBinding> stage3_arena_binding;
-    makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    if (!use_fused_linear_rgb_render) {
+        makeStage3Buffer(arena, w, h, stage3, stage3_arena_binding);
+    }
 
     // C2 (plan §4.2.1 item 2): see runBayerBranch's identical comment.
     if (zero_copy_src_host != nullptr) {
@@ -1266,12 +1368,28 @@ RawErrorCode runLinearRgbBranch(const RawGpuInput& input,
     if (h2d_rc != 0) {
         return kRawErrKernelFailed;
     }
-    if (raw_linear_rgb_normalize(src_buf, black_buf,
+    if (!use_fused_linear_rgb_render && raw_linear_rgb_normalize(src_buf, black_buf,
                                  computeInvRangeLinearRgb(input), stage3) != 0) {
         return kRawErrKernelFailed;
     }
 
-    return runSharedStage4Tail(input, develop, crop, stage3, arena, use_zero_copy,
+    // Foveon fusion: on the fused route the source handed to Stage-4 is the
+    // flat decoder frame (uncropped; the kernel applies crop.x/crop.y itself)
+    // and no Stage-3 buffer exists. black3 outlives the call.
+    FusedLinearRgbSource fused_linear_rgb_source;
+    fused_linear_rgb_source.black_values = black3;
+    fused_linear_rgb_source.inv_range = computeInvRangeLinearRgb(input);
+    fused_linear_rgb_source.src_row_stride_elements = src_row_stride_elements;
+    return runSharedStage4Tail(input, develop, crop,
+                               use_fused_linear_rgb_render ? src_buf.raw_buffer()
+                                                           : stage3.raw_buffer(),
+                               /*fused_mosaic_source=*/nullptr,
+                               use_fused_linear_rgb_render ? &fused_linear_rgb_source
+                                                           : nullptr,
+                               use_fused_linear_rgb_render
+                                   ? &g_fused_linear_rgb_render_count
+                                   : nullptr,
+                               arena, use_zero_copy,
                                gpu_t0, host_to_device_copy_ms, source_memcpy_ms, out);
 }
 
@@ -1284,6 +1402,14 @@ uint64_t raw_stage3_host_allocation_count() {
 
 uint64_t raw_fused_bayer_render_count() {
     return g_fused_bayer_render_count.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_fused_xtrans_render_count() {
+    return g_fused_xtrans_render_count.load(std::memory_order_relaxed);
+}
+
+uint64_t raw_fused_linear_rgb_render_count() {
+    return g_fused_linear_rgb_render_count.load(std::memory_order_relaxed);
 }
 
 RawErrorCode raw_pipeline_decode_to_rgba(const RawGpuInput& input,
