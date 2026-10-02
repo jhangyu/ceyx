@@ -559,6 +559,12 @@ path_list_keys = ["CMAKE_IGNORE_PREFIX_PATH"]
 
   [component.libheif.cmake.linux]
   CMAKE_INSTALL_NAME_DIR = "@rpath"
+  # Linux bundles are relocatable directories: libheif.so.1 NEEDS the bundled
+  # libde265.so.0 and must locate it next to itself ($ORIGIN). The install step
+  # strips the build-tree RPATH, so without this the sibling resolves only via a
+  # system copy (v0.1.30 shipped libheif.so.1 with no RUNPATH on both arches).
+  # libde265.so.0 itself comes from the vcpkg port, which already records $ORIGIN.
+  CMAKE_INSTALL_RPATH    = "$ORIGIN"
   LIBDE265_LIBRARY = "{dist}/lib/libde265.so"
   KVAZAAR_LIBRARY  = "{dist}/lib/libkvazaar.a"
   AOM_LIBRARY      = "{dist}/lib/libaom.a"

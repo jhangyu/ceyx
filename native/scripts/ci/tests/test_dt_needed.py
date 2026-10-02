@@ -92,6 +92,48 @@ class TestDtNeeded(unittest.TestCase):
         self.assertIn("RC=1 (DT_NEEDED libde265.so.0 in", out)
         self.assertIn("has no DT_NEEDED entry for libde265.so.0", err)
 
+    _NEEDED_DE265 = " 0x0000000000000001 (NEEDED) Shared library: [libde265.so.0]\n"
+    _NEEDED_HEIF = " 0x0000000000000001 (NEEDED) Shared library: [libheif.so.1]\n"
+    _RUNPATH_ORIGIN = " 0x000000000000001d (RUNPATH) Library runpath: [$ORIGIN]\n"
+
+    def _stage_and_run(self, dumps):
+        artifact_dir, runner_temp = self._dirs()
+        for name in dumps:
+            (artifact_dir / "native" / name).write_bytes(b"")
+        with mock.patch.object(dt_needed.run, "run_to_file", side_effect=_fake_run_to_file(dumps)):
+            return _emit(dt_needed.dt_needed, "linux", str(artifact_dir), str(runner_temp))
+
+    def test_level3_sibling_needed_without_runpath_fails(self) -> None:
+        # The v0.1.30 shape: libheif.so.1 NEEDs the bundled libde265.so.0, no RUNPATH.
+        rc, out, err = self._stage_and_run({
+            "libdng_decoder_native.so": self._NEEDED_HEIF + self._RUNPATH_ORIGIN,
+            "libheif.so.1": self._NEEDED_DE265,
+            "libde265.so.0": self._RUNPATH_ORIGIN,
+        })
+        self.assertEqual(rc, 1)
+        self.assertIn("RC=1 (RUNPATH $ORIGIN covers bundled-sibling NEEDED", out)
+        self.assertIn("libheif.so.1: NEEDs bundled libde265.so.0", err)
+
+    def test_level3_sibling_needed_with_origin_runpath_passes(self) -> None:
+        rc, out, err = self._stage_and_run({
+            "libdng_decoder_native.so": self._NEEDED_HEIF + self._RUNPATH_ORIGIN,
+            "libheif.so.1": self._NEEDED_DE265 + self._RUNPATH_ORIGIN,
+            "libde265.so.0": self._RUNPATH_ORIGIN,
+        })
+        self.assertEqual(rc, 0)
+        self.assertIn("RC=0 (RUNPATH $ORIGIN covers bundled-sibling NEEDED", out)
+        self.assertEqual(err, "")
+
+    def test_level3_non_origin_runpath_fails(self) -> None:
+        # A RUNPATH that exists but is not $ORIGIN (e.g. a baked build-machine path) is no cover.
+        rc, _, err = self._stage_and_run({
+            "libdng_decoder_native.so": self._NEEDED_HEIF + self._RUNPATH_ORIGIN,
+            "libheif.so.1": self._NEEDED_DE265 + " 0x000000000000001d (RUNPATH) Library runpath: [/home/runner/vcpkg/lib]\n",
+            "libde265.so.0": self._RUNPATH_ORIGIN,
+        })
+        self.assertEqual(rc, 1)
+        self.assertIn("no $ORIGIN in RUNPATH/RPATH", err)
+
     def test_emission_matches_golden(self) -> None:
         artifact_dir, runner_temp = self._dirs()
         dumps = {

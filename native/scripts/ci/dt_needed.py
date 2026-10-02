@@ -31,6 +31,7 @@ rule 2).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from . import report, run
@@ -89,13 +90,60 @@ def _dt_needed_linux(artifact_dir: str, runner_temp: str) -> int:
         return rc
 
     report.section("Level 2: libheif.so.1's own NEEDED (expect libde265.so.0, transitive)")
-    return _needed_level(
+    rc = _needed_level(
         heif_so,
         Path(runner_temp) / "dt_needed_heif.txt",
         "libde265.so.0",
         f"{heif_so} has no DT_NEEDED entry for libde265.so.0 — the HEVC "
         "decoder linkage is UNVERIFIED, refusing to publish.",
     )
+    if rc != 0:
+        return rc
+
+    report.section("Level 3: every bundled .so that NEEDs a bundled sibling carries $ORIGIN in RUNPATH")
+    return _runpath_origin_level(native_dir, Path(runner_temp))
+
+
+def _parse_needed_runpath(dump_text: str) -> tuple[list[str], list[str]]:
+    """``readelf -d`` text -> (NEEDED sonames, RUNPATH/RPATH search entries)."""
+    needed, search = [], []
+    for line in dump_text.splitlines():
+        m = re.search(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", line)
+        if m:
+            needed.append(m.group(1))
+            continue
+        m = re.search(r"\((?:RUNPATH|RPATH)\)\s+Library (?:runpath|rpath): \[([^\]]*)\]", line)
+        if m:
+            search.extend(m.group(1).split(":"))
+    return needed, search
+
+
+def _runpath_origin_level(native_dir: Path, runner_temp: Path) -> int:
+    """A bundle is a relocatable directory: a staged .so whose NEEDED names
+    another staged file finds it only if its own RUNPATH/RPATH has ``$ORIGIN``;
+    otherwise it resolves through a system copy of that sibling, or not at
+    all (v0.1.30: libheif.so.1 -> libde265.so.0, no RUNPATH, both arches --
+    invisible on any machine that has system libheif/libde265 installed).
+    Generic over the staged set, not a named pair, so a future bundled .so is
+    covered without editing this check."""
+    staged = sorted(p for p in native_dir.iterdir() if p.is_file() and ".so" in p.name)
+    names = {p.name for p in staged}
+    bad = []
+    for so in staged:
+        dump_path = runner_temp / f"dt_needed_runpath_{so.name}.txt"
+        result = run.run_to_file(["readelf", "-d", str(so)], dump_path)
+        if result.returncode != 0:
+            bad.append(f"{so.name}: readelf -d failed (rc={result.returncode})")
+            continue
+        needed, search = _parse_needed_runpath(dump_path.read_text(encoding="utf-8", errors="replace"))
+        siblings = [n for n in needed if n in names and n != so.name]
+        if siblings and not any(e in ("$ORIGIN", "${ORIGIN}") or e.startswith("$ORIGIN/") for e in search):
+            bad.append(f"{so.name}: NEEDs bundled {', '.join(siblings)} but has no $ORIGIN in RUNPATH/RPATH (found: {search or 'none'})")
+    rc = 1 if bad else 0
+    report.bare_rc(rc, f"RUNPATH $ORIGIN covers bundled-sibling NEEDED in {native_dir}")
+    for line in bad:
+        report.error(line)
+    return rc
 
 
 def _resolve_llvm_readelf(ndk_home: str) -> str | None:

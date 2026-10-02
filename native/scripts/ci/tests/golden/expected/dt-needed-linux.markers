@@ -2,3 +2,5 @@
 RC=0 (DT_NEEDED libheif.so.1 in <TMP>
 == Level 2: libheif.so.1's own NEEDED (expect libde265.so.0, transitive) ==
 RC=0 (DT_NEEDED libde265.so.0 in <TMP>
+== Level 3: every bundled .so that NEEDs a bundled sibling carries $ORIGIN in RUNPATH ==
+RC=0 (RUNPATH $ORIGIN covers bundled-sibling NEEDED in <TMP>

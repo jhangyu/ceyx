@@ -38,6 +38,7 @@
 -DBUILD_TESTING=OFF
 -DWITH_FUZZERS=OFF
 -DCMAKE_INSTALL_NAME_DIR=@rpath
+-DCMAKE_INSTALL_RPATH=$ORIGIN
 -DLIBDE265_LIBRARY=/home/build/ceyx-dist/lib/libde265.so
 -DKVAZAAR_LIBRARY=/home/build/ceyx-dist/lib/libkvazaar.a
 -DAOM_LIBRARY=/home/build/ceyx-dist/lib/libaom.a
