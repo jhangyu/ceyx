@@ -99,9 +99,11 @@ def resolve_asset(system: str, machine: str) -> Tuple[str, str, str]:
 
 def already_present(dest: Path) -> bool:
     """Windows ships an import library (Halide.lib), POSIX hosts a static
-    archive -- mirrors the shell original's dual check."""
+    archive -- mirrors the shell original's dual check. The upstream
+    x86-64-windows zip extracts it to lib/Release/Halide.lib; without that
+    location every Windows run re-downloaded a dist it already had."""
     dest = Path(dest)
-    return (dest / "lib" / "libHalide.a").is_file() or (dest / "lib" / "Halide.lib").is_file()
+    return any((dest / "lib" / rel).is_file() for rel in ("libHalide.a", "Halide.lib", "Release/Halide.lib"))
 
 
 def extract_zip_stripping_top(archive_path: Path, dest: Path) -> None:

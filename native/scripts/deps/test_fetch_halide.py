@@ -114,6 +114,13 @@ class TestAlreadyPresent(unittest.TestCase):
             (dest / "lib" / "Halide.lib").write_bytes(b"x")
             self.assertTrue(fetch_halide.already_present(dest))
 
+    def test_true_with_upstream_windows_zip_layout(self) -> None:
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            (dest / "lib" / "Release").mkdir(parents=True)
+            (dest / "lib" / "Release" / "Halide.lib").write_bytes(b"x")
+            self.assertTrue(fetch_halide.already_present(dest))
+
 
 class TestExtractTarStrippingTop(unittest.TestCase):
     def test_strips_the_single_top_level_directory(self) -> None:
