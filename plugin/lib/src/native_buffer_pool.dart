@@ -6,6 +6,7 @@ import 'package:ffi/ffi.dart' show malloc;
 import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
+import 'gpu_shutdown.dart';
 
 /// A fixed-slot pool of native RGBA buffers.
 ///
@@ -762,6 +763,8 @@ class CeyxNativeBufferPool {
   /// `free()` alone leaves an unpredictable reusable residue instead of
   /// returning the pages (see the campaign's free-probe verdict).
   int shrinkToFloor() {
+    // After the terminal exit-time GPU release no native funnel call may follow.
+    if (CeyxGpuShutdown.isReleased) return 0;
     // Reads the PRODUCTION predicates, not the `@visibleForTesting` counters:
     // `hasOutstandingCheckouts` is derived from `_byAddress`, which is the
     // authoritative ownership record, and the same two getters are what

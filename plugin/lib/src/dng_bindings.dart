@@ -208,6 +208,12 @@ typedef CeyxPoolPressureReliefDart = int Function();
 typedef CeyxNativeIdleShrinkNative = ffi.Int64 Function(ffi.Int32 floor);
 typedef CeyxNativeIdleShrinkDart = int Function(int floor);
 
+/// `void ceyx_native_release_gpu(void)` (IC9): TERMINAL release of the native
+/// GPU context at process exit. Called once, at decode quiescence, as the last
+/// ceyx call; a no-op without a GPU context. See `CeyxGpuShutdown`.
+typedef CeyxNativeReleaseGpuNative = ffi.Void Function();
+typedef CeyxNativeReleaseGpuDart = void Function();
+
 // mem8 T14 (SR-9b): the FORMAT-TAKING siblings of the three format-agnostic
 // decode-into entries, frozen by T12.0 in native/include/raw_ffi_api.h. The
 // originals are UNCHANGED and remain rgba8 (R-B), so this block is additive:
@@ -335,6 +341,7 @@ class DngNativeBindings {
   // above — see the typedef comment for why.
   CeyxPoolPressureReliefDart? _ceyxPoolPressureRelief;
   CeyxNativeIdleShrinkDart? _ceyxNativeIdleShrink;
+  CeyxNativeReleaseGpuDart? _ceyxNativeReleaseGpu;
 
   // mem8 T14: the format-taking entries and the upconvert. Guarded
   // PER-SYMBOL, each in its own try — never as one group. A grouped lookup
@@ -402,6 +409,12 @@ class DngNativeBindings {
   /// `CeyxNativeBufferPool._nativeIdleShrink` for why tolerating an absent
   /// symbol is right HERE and wrong for the yuv420 output entry (T14).
   CeyxNativeIdleShrinkDart? get ceyxNativeIdleShrink => _ceyxNativeIdleShrink;
+
+  /// Guarded access to the terminal exit-time GPU release
+  /// (`ceyx_native_release_gpu`). Null when the loaded library predates it;
+  /// `CeyxGpuShutdown` then logs a loud skip. Tolerated, not thrown: the app is
+  /// still correct, it merely keeps the driver-teardown crash on close.
+  CeyxNativeReleaseGpuDart? get ceyxNativeReleaseGpu => _ceyxNativeReleaseGpu;
 
   /// Whether this library exposes the native idle-shrink funnel.
   bool get nativeIdleShrinkAvailable => _ceyxNativeIdleShrink != null;
@@ -606,6 +619,17 @@ class DngNativeBindings {
           );
     } catch (_) {
       _ceyxNativeIdleShrink = null;
+    }
+
+    // M1 T-G (IC9): the terminal exit-time GPU release. Its OWN try block, so a
+    // library predating it keeps every group resolved above.
+    try {
+      _ceyxNativeReleaseGpu = _lib
+          .lookupFunction<CeyxNativeReleaseGpuNative, CeyxNativeReleaseGpuDart>(
+            'ceyx_native_release_gpu',
+          );
+    } catch (_) {
+      _ceyxNativeReleaseGpu = null;
     }
 
     // mem8 T14 (T12.0's frozen contract): four separate try blocks, one per
