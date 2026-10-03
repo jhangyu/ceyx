@@ -589,13 +589,23 @@ HOST_UNSUPPORTED: dict = {
 }
 
 
+# Not under artifacts/: run_decode_matrix.py wipes that directory on start.
+REPROOF_DIR = Path("prepush-reproof")
+
+
 def host_unsupported(host: str) -> dict:
     return HOST_UNSUPPORTED.get(host, {})
 
 
-def _declare_host_skip(ctx: Ctx, item: str, reproof: str) -> None:
+def _declare_host_skip(ctx: Ctx, item: str, reproof: str, log: Path) -> None:
     cls, evidence = host_unsupported(ctx.host)[item]
     emit(f"PREPUSH_HOST_SKIP({item}): class={cls} reproof={reproof} -- {evidence}")
+    # The scratch clone is deleted after the run; the observed failure is
+    # copied into the gate's own output so the evidence survives in the log.
+    lines = [ln for ln in log.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    hits = [ln for ln in lines if re.search(r"error|FAIL|undefined symbol", ln)]
+    for ln in (hits or lines)[:8]:
+        emit(f"PREPUSH_HOST_SKIP_EVIDENCE({item}): {ln[:300]}")
     ctx.host_skips.append((item, cls, evidence))
 
 
@@ -619,7 +629,7 @@ def t_build_tests(ctx: Ctx):
     stale = []
     for t in sorted(unsupported):
         probe_rc, probe_out = capture(["cmake", "--build", build_dir, "--target", t], cwd=ctx.clone, env=ctx.env or None)
-        log = ctx.clone / "artifacts" / "host-unsupported" / f"{t}.build.log"
+        log = ctx.clone / REPROOF_DIR / f"{t}.build.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(probe_out, encoding="utf-8")
         if probe_rc == 0:
@@ -627,7 +637,7 @@ def t_build_tests(ctx: Ctx):
             emit(f"::error::STALE host-unsupported entry target:{t}: it now BUILDS on {ctx.host}; "
                  f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
         else:
-            _declare_host_skip(ctx, f"target:{t}", f"isolated-build-rc={probe_rc} log={log.relative_to(ctx.clone).as_posix()}")
+            _declare_host_skip(ctx, f"target:{t}", f"isolated-build-rc={probe_rc} log={log.relative_to(ctx.clone).as_posix()}", log)
     return rc or (1 if stale else 0)
 
 
@@ -640,7 +650,7 @@ def _runner_step(script: str):
         item = f"runner:{script}"
         if item not in host_unsupported(ctx.host):
             return ctx.run(ctx.py(script, *args))
-        log = ctx.clone / "artifacts" / "host-unsupported" / f"{Path(script).stem}.log"
+        log = ctx.clone / REPROOF_DIR / f"{Path(script).stem}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         rc, out = capture(ctx.py(script, *args), cwd=ctx.clone, env=ctx.env or None)
         log.write_text(out, encoding="utf-8")
@@ -648,7 +658,7 @@ def _runner_step(script: str):
             emit(f"::error::STALE host-unsupported entry {item}: it now PASSES on {ctx.host}; "
                  f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
             return 1
-        _declare_host_skip(ctx, item, f"runner-rc={rc} log={log.relative_to(ctx.clone).as_posix()}")
+        _declare_host_skip(ctx, item, f"runner-rc={rc} log={log.relative_to(ctx.clone).as_posix()}", log)
         return (HOSTSKIP, item)
     return action
 
