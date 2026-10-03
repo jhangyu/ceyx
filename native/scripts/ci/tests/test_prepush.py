@@ -224,5 +224,67 @@ class TestRoster(unittest.TestCase):
         self.assertFalse(set(runners) & set(manual))
 
 
+class TestBareBinaryRunner(unittest.TestCase):
+    """gates.py kind `runner:native/scripts/prepush.py`: a bare test binary the
+    gate builds and runs itself; every failure names what failed, none skips."""
+
+    def _verdict(self, build, corpus, run, names=("test_x",)):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = prepush.run_bare_binaries(Path(build), Path(build), list(names), corpus, run)
+        return rc, buf.getvalue()
+
+    def _build_dir(self, tmp, exe="test_x"):
+        build = Path(tmp)
+        if exe:
+            (build / prepush._exe(exe)).write_bytes(b"")
+        return build
+
+    def test_registered_in_gates_and_built_by_the_gate(self):
+        runners, _ = prepush.gate_runners(REPO)
+        self.assertIn("test_dng_slot_decommit", runners.get(prepush.BARE_RUNNER, []))
+
+    def test_pass_runs_the_binary(self):
+        ran = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: ran.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(ran), 1)
+        self.assertIn("PREPUSH_BARE_CASE test_x PASS", out)
+
+    def test_missing_binary_fails_naming_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp, exe=None), {}, lambda argv: 0)
+        self.assertEqual(rc, 1)
+        self.assertIn("test_x", out)
+        self.assertIn("binary not found", out)
+
+    def test_missing_corpus_file_fails_naming_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp), {"test_x": ("image_samples/none.raf",)},
+                                    lambda argv: 0)
+        self.assertEqual(rc, 1)
+        self.assertIn("none.raf", out)
+        self.assertIn("corpus file missing", out)
+
+    def test_rc2_could_not_decode_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: 2)
+        self.assertEqual(rc, 1)
+        self.assertIn("could not decode", out)
+
+    def test_nonzero_rc_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, _ = self._verdict(self._build_dir(tmp), {}, lambda argv: 1)
+        self.assertEqual(rc, 1)
+
+    def test_step_is_on_the_roster_for_every_host(self):
+        for host in prepush.ALL_HOSTS:
+            with redirect_stdout(io.StringIO()):
+                steps = {s.name: s for s in prepush.build_steps(REPO, host)}
+            self.assertIn("test-bare-binaries", steps, host)
+            self.assertIn(host, steps["test-bare-binaries"].hosts)
+
+
 if __name__ == "__main__":
     unittest.main()

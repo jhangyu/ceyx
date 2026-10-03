@@ -1106,6 +1106,53 @@ def t_build_tests(ctx: Ctx):
     return rc or (1 if bad else 0)
 
 
+# gates.py kind `runner:native/scripts/prepush.py`: a bare test binary this gate
+# builds (test-build-targets) and runs itself (test-bare-binaries). BARE_CORPUS
+# maps an executable to the repo-relative corpus files passed as its arguments.
+BARE_RUNNER = "native/scripts/prepush.py"
+BARE_CORPUS: dict = {}
+
+
+def run_bare_binaries(build_dir: Path, root: Path, names: list, corpus: dict, run: Callable) -> int:
+    """Run each built binary; a missing binary, a missing corpus file, rc 2
+    (could not decode) or any other nonzero rc is a FAIL naming it. Never a skip."""
+    bad = 0
+    for name in names:
+        exe = build_dir / _exe(name)
+        if not exe.is_file():
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: binary not found: {exe}")
+            bad += 1
+            continue
+        args = [root / rel for rel in corpus.get(name, ())]
+        missing = [a for a in args if not a.is_file()]
+        if missing:
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: corpus file missing: {missing[0]}")
+            bad += 1
+            continue
+        emit(f"PREPUSH_EXEC: {exe} {' '.join(map(str, args))}")
+        rc = run([str(exe), *map(str, args)])
+        if rc == 0:
+            emit(f"PREPUSH_BARE_CASE {name} PASS")
+        else:
+            why = "could not decode (rc=2)" if rc == 2 else f"rc={rc}"
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: {why}")
+            bad += 1
+    return 1 if bad else 0
+
+
+def t_bare_binaries(ctx: Ctx):
+    if ctx.host == LINUX_X64:
+        emit("::error::PREPUSH_UNIMPLEMENTED(test-bare-binaries): no native build leg is implemented for a Linux host")
+        return 3
+    runners, _ = gate_runners(ctx.clone)
+    unsupported = host_unsupported(ctx.host)
+    names = [n for n in runners.get(BARE_RUNNER, []) if f"target:{n}" not in unsupported]
+    if not names:
+        return (SKIP, f"no gates.py entry of kind runner:{BARE_RUNNER} runs on this host")
+    return run_bare_binaries(ctx.clone / build_dir_for(ctx.host), ctx.clone, names, BARE_CORPUS,
+                             lambda argv: ctx.run(argv, ctx.clone / build_dir_for(ctx.host)))
+
+
 # run_decode_matrix.py harness cases, run one at a time through the runner's
 # OWN case functions (so pass/fail semantics stay the runner's) when its main
 # cases cannot complete on this host. (case, binary or None).
@@ -1414,6 +1461,8 @@ def build_steps(clone: Path, host: str) -> list:
              lambda ctx: ctx.run(ctx.py("native/tests/test_decode_matrix_parsers.py")), group="test"),
         Step("test-build-targets", "build every non-manual gates.py runner executable this host configures",
              ALL_HOSTS, t_build_tests, group="test"),
+        Step("test-bare-binaries", f"gates.py runners of kind {BARE_RUNNER}: bare test binaries, built then run",
+             ALL_HOSTS, t_bare_binaries, group="test"),
         Step("test-decode-matrix", f"gates.py runner {DECODE_SCRIPT} (main cases; full runner on macOS)",
              ALL_HOSTS, t_decode_matrix, group="test"),
     ]
