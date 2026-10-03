@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "ceyx_ffi_export.h"
+
 class dng_host;
 class dng_negative;
 
@@ -57,7 +59,7 @@ struct DngPipelineResult {
 // longer "unchanged" — it now carries the C ABI the host uses to CONFIGURE the
 // slot count. These remain the internal, C++-linkage half.)
 size_t dng_decode_slot_count();
-size_t dng_decode_in_flight_count();
+CEYX_FFI_EXPORT size_t dng_decode_in_flight_count();
 size_t dng_decode_max_in_flight_observed();
 size_t dng_decode_arena_high_water_bytes();
 
@@ -107,14 +109,14 @@ size_t dng_decode_slot_count_relaxed();
 // only two of the pool accessor's callers; the decode path constructs the pool
 // without setting it, so it reads 0 on a process that has decoded DNGs. See the
 // definition's comment in dng_pipeline.cpp.
-bool dng_decode_slot_pool_exists();
+CEYX_FFI_EXPORT bool dng_decode_slot_pool_exists();
 
 // Instrumentation only: the RAW published slot count, 0 meaning "never
 // published", with no default fallback and no side effect. This is the frozen
 // spec's REJECTED predicate, exposed so the guard swap can be asserted
 // mechanically instead of argued — D8 constructs the pool through a
 // non-publishing path and pins this to 0 while the accessor above reads true.
-size_t dng_decode_published_slot_count_raw();
+CEYX_FFI_EXPORT size_t dng_decode_published_slot_count_raw();
 
 // mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY: each decode arena's mapped
 // range, so a test can ask the kernel how many of EXACTLY those pages are
