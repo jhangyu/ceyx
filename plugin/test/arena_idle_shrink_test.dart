@@ -8,8 +8,9 @@ import 'package:flutter_test/flutter_test.dart';
 /// WHAT IS BEING PROVED: the native idle funnel `ceyx_native_idle_shrink`
 /// (mem8 T1) is reached from exactly one place — the tail of
 /// [CeyxNativeBufferPool.shrinkToFloor] — with the pool's own `idleFloor`,
-/// after the pressure relief and before the host's `onShrink` listener, and
-/// never on the refusal or already-at-the-floor paths.
+/// after the pressure relief and before the host's `onShrink` listener, on
+/// every quiescent shrink (even one that frees no Dart buffer), and never on
+/// the refusal path.
 ///
 /// The highest-severity failure this wiring can have is A3's: a call placed
 /// above the refusal guard would release arena device regions while a decode
@@ -199,9 +200,33 @@ void main() {
   );
 
   test(
-    'TC-1314 (A5): a shrink that frees nothing does not call the arena — no '
-    'per-tick FFI call on an idle process',
+    'TC-1431 a shrink that frees no Dart buffer still runs the native funnel '
+    'exactly once, and fires no onShrink',
     () async {
+      final floors = <int>[];
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+        floors.add(floor);
+        return 0;
+      };
+      var shrinkNotified = false;
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      addTearDown(pool.debugDisposeIdle);
+      await fillIdle(pool, 2); // already at the floor
+      pool.onShrink = (_) => shrinkNotified = true;
+
+      expect(pool.shrinkToFloor(), 0, reason: 'precondition: freed == 0');
+      expect(floors, <int>[2]);
+      expect(pool.debugArenaIdleShrinkCalls, 1);
+      expect(pool.debugShrinkEvents, 0);
+      expect(shrinkNotified, isFalse);
+    },
+  );
+
+  test(
+    'TC-1432 one quiet window gives one native funnel call even when nothing '
+    'is freed; no re-arm without a new busy edge',
+    () async {
+      final scheduler = _FakeTimerScheduler();
       var calls = 0;
       CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
         calls++;
@@ -209,12 +234,18 @@ void main() {
       };
       final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
       addTearDown(pool.debugDisposeIdle);
-      await fillIdle(pool, 2); // already at the floor
+      await fillIdle(pool, 2);
+      final policy = CeyxPoolShrinkPolicy(pool, timerFactory: scheduler.create);
+      addTearDown(policy.dispose);
 
-      expect(pool.shrinkToFloor(), 0, reason: 'precondition: freed == 0');
-      expect(pool.debugShrinkEvents, 0);
-      expect(calls, 0);
-      expect(pool.debugArenaIdleShrinkSkips, 0);
+      policy.onQuiescenceChanged(true);
+      fakeNow = fakeNow.add(kPoolShrinkQuietWindow);
+      scheduler.fireLast();
+      policy.onQuiescenceChanged(true); // repeated level, ignored
+
+      expect(calls, 1);
+      expect(scheduler.timers.length, 1);
+      expect(policy.debugArmed, isFalse);
     },
   );
 }
