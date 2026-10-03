@@ -502,6 +502,16 @@ target_include_directories(test_dng_slot_decommit PRIVATE
     ${HALIDE_DIR}/include)
 target_link_libraries(test_dng_slot_decommit PRIVATE dng_decoder_native)
 
+# Memory-reclamation campaign M1: the idle funnel's shared telemetry on every
+# leg. F1 needs no GPU/file; F2-F4 take one decodable RAW as argv[1].
+add_executable(test_idle_funnel tests/test_idle_funnel.cpp)
+target_include_directories(test_idle_funnel PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}/pipeline
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_idle_funnel PRIVATE dng_decoder_native)
+add_dependencies(test_idle_funnel dng_decoder_native)
+
 # T3-real gate (mem8 SR-6): the same funnel, driven by a REAL DNG decode
 # through the shipping FFI entry instead of a synthetic arena. Closes the one
 # gap the sibling gate above structurally cannot: that the production decode

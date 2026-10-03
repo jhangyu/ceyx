@@ -12,8 +12,13 @@
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
 #include "HalideRuntimeMetal.h"
 #include "dng_metal_context.h"  // R1-T2: ceyx strong override of the weak Halide Metal context hooks
+#include "render_parameter_upload_cache.h"
 #elif defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
 #include "HalideRuntimeVulkan.h"
+// Not declared in any public Halide v21.0.0 header; both are extern "C" WEAK
+// definitions in the Vulkan runtime linked on every Vulkan leg.
+extern "C" bool halide_vulkan_is_initialized();
+extern "C" int halide_vulkan_release_unused_device_allocations(void *user_context);
 #endif
 
 namespace {
@@ -69,4 +74,35 @@ const char* dng_halide_gpu_backend_name() {
     case GpuBackend::kUnsupported: return "unsupported";
     }
     return "unknown";
+}
+
+DngDeviceReleaseResult dng_halide_release_unused_device_memory() {
+    switch (cached_backend()) {
+#if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
+    case GpuBackend::kMetal:
+        if (ceyx::metal_shared_device_handle() == nullptr) {
+            return DngDeviceReleaseResult::kSkippedUninitialized;
+        }
+        // Halide v21.0.0's Metal runtime keeps no allocation pool:
+        // halide_metal_device_free releases the MTLBuffer at once. Evidence:
+        // Halcyon docs/logs/memory-reclamation-campaign/f3-metal-device-pool.md.
+        // The Metal device memory ceyx itself keeps past a decode is the C3
+        // parameter cache (released here) and the arena lanes (funnel step 1).
+        ceyx::render_parameter_cache_release_all_lanes();
+        return DngDeviceReleaseResult::kReleased;
+#endif
+#if defined(__ANDROID__) || defined(_WIN32) || defined(__linux__) || defined(DNG_FORCE_VULKAN)
+    case GpuBackend::kVulkan:
+        // Unguarded, the release call creates a Vulkan instance and device in a
+        // process that never used the GPU.
+        if (!halide_vulkan_is_initialized()) {
+            return DngDeviceReleaseResult::kSkippedUninitialized;
+        }
+        return halide_vulkan_release_unused_device_allocations(nullptr) == 0
+                   ? DngDeviceReleaseResult::kReleased
+                   : DngDeviceReleaseResult::kError;
+#endif
+    default:
+        return DngDeviceReleaseResult::kSkippedUninitialized;
+    }
 }

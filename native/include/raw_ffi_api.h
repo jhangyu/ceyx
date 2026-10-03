@@ -237,22 +237,31 @@ int32_t ceyx_debug_persistent_device_arena_counters(
 /* through it rather than through a mechanism of its own. Defined in      */
 /* native/src/ffi/dng_ffi_api.cpp beside the arena probe above.           */
 /*                                                                        */
-/* Releases the device regions of every arena lane in excess of `floor`   */
-/* and returns the BYTE COUNT released, so the Dart idle path has         */
-/* something non-trivial to log. A negative floor is clamped to 0 (itself */
-/* a legal floor, meaning "release every quiescent lane"), so -1 is       */
-/* reserved and is not returned by the current implementation. A call     */
-/* with nothing to release returns 0, which is SUCCESS, not an error.     */
+/* Every call runs the same steps, in this order, on every backend:       */
+/*   1. arena lanes in excess of `floor` (the Metal zero-copy             */
+/*      accelerator; off Metal it never binds a region and holds nothing);*/
+/*   2. DNG decode-context decommit down to `floor`;                      */
+/*   3. backend device-memory release (dng_halide_release_unused_device_  */
+/*      memory: the Halide Vulkan pool's unused blocks, or the Metal      */
+/*      parameter cache). MUST follow step 2, which hands context device  */
+/*      buffers back to that pool;                                        */
+/*   4. page return (reserved; lands in a later milestone).               */
 /*                                                                        */
-/* This export forwards verbatim to                                       */
-/* raw_persistent_device_arena_shrink_to_lane_floor                       */
-/* (native/include/raw_persistent_device_arena.h), whose contract it      */
-/* carries in full -- INCLUDING clause (e): THE CALLER MUST GUARANTEE     */
-/* DECODE QUIESCENCE. The per-lane live-binding refusal is a backstop,    */
-/* not a lock; the pool's quiescence window is the only clock.            */
+/* Returns the BYTE COUNT released by steps 1 and 2. Step 3 contributes   */
+/* no byte count (the backend does not report one); its outcome is in    */
+/* ceyx_debug_idle_funnel_counters below and in the one stderr line each  */
+/* call writes: "[IdleFunnel] event=funnel floor=<n> arena_bytes=<n>      */
+/* dng_bytes=<n> device_release=<released|skipped_uninitialized|error>".  */
+/* A negative floor is clamped to 0 (itself a legal floor, meaning        */
+/* "release every quiescent lane"), so -1 is reserved and is not returned */
+/* by the current implementation. A call with nothing to release returns  */
+/* 0, which is SUCCESS, not an error.                                     */
 /*                                                                        */
-/* Present on every platform: the non-Metal build compiles the portable   */
-/* stub, which truthfully answers 0 because it holds no regions.          */
+/* Step 1 carries the contract of raw_persistent_device_arena_shrink_to_  */
+/* lane_floor (native/include/raw_persistent_device_arena.h) in full --   */
+/* INCLUDING clause (e): THE CALLER MUST GUARANTEE DECODE QUIESCENCE, for */
+/* every step. The per-lane live-binding refusal is a backstop, not a     */
+/* lock; the pool's quiescence window is the only clock.                  */
 /* ===================================================================== */
 int64_t ceyx_native_idle_shrink(int32_t floor);
 
@@ -288,6 +297,24 @@ int32_t ceyx_debug_arena_shrink_counters(
     uint64_t *out_bytes_released,
     uint64_t *out_resident_lane_count,
     uint64_t *out_volatile_device_bytes);
+
+/* Idle-funnel probe (memory-reclamation campaign, PARITY.md clause 4).        */
+/* DEBUG/PROBE API: not Dart-visible, nothing added to DngResult.              */
+/* Process-wide totals since start, incremented ONLY in the shared funnel body */
+/* (dng_ffi_api.cpp) -- never inside a backend branch -- so every leg reports  */
+/* the same telemetry. out_page_return_calls / out_page_return_unavailable     */
+/* stay 0 until funnel step 4 lands (M4); they are present from the first     */
+/* release so the signature never widens.                                     */
+/* out_last_funnel_bytes is the most recent funnel return value.               */
+/* Null-pointer convention as the probes above: -1 only when ALL are null.     */
+int32_t ceyx_debug_idle_funnel_counters(
+    uint64_t *out_funnel_calls,
+    uint64_t *out_device_release_runs,
+    uint64_t *out_device_release_skipped_uninitialized,
+    uint64_t *out_device_release_errors,
+    uint64_t *out_page_return_calls,
+    uint64_t *out_page_return_unavailable,
+    uint64_t *out_last_funnel_bytes);
 
 /* ===================================================================== */
 /* mem8 T3 (SR-6) — DNG slot residency probe.                            */
