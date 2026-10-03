@@ -25,7 +25,7 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 4, "role": "adapter",
         "contract": "physicalMemoryBytes: the single physical-RAM query (audit A7)"},
     "native/src/ffi/ceyx_decode_into_ffi.cpp": {
-        "guard_lines": 5, "role": "adapter",
+        "guard_lines": 3, "role": "adapter",
         "contract": "aligned alloc/free adapter (A4)"},
     "native/src/ffi/heap_page_return.cpp": {
         "guard_lines": 8, "role": "adapter",

@@ -38,14 +38,6 @@
 #include <malloc.h>  // _aligned_malloc / _aligned_free
 #endif
 
-#if defined(__APPLE__)
-#include <malloc/malloc.h>  // malloc_zone_pressure_relief
-#endif
-
-#if defined(__linux__) && defined(__GLIBC__)
-#include <malloc.h>  // malloc_trim
-#endif
-
 namespace {
 // R4 (gpu-copy-elimination campaign): the ONE physical alignment constant the
 // pool allocator, the arena (raw_persistent_device_arena.h) and the
