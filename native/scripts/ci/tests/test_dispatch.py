@@ -88,6 +88,9 @@ FROZEN_CLI_SURFACE = {
     # mutually exclusive FLAGS, not sub-parsers, so this set (which covers
     # top-level names only) gains exactly one entry.
     "guards",
+    # Local-only merged pre-push gate (user ruling 2026-10-03). Its module is
+    # native/scripts/prepush.py, outside this package.
+    "prepush",
 }
 
 

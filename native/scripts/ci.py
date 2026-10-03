@@ -70,6 +70,11 @@ lead9-pyci-opus ruling), both modules' own functions unchanged.
     python3 native/scripts/ci.py vcpkg assert-aom-artifact --prefix D
     python3 native/scripts/ci.py vcpkg export-prefix --prefix D --github-env PATH
 
+Local-only pre-push gate (user ruling 2026-10-03; never referenced by a
+workflow -- the gate's own policy step fails if one does):
+
+    python3 native/scripts/ci.py prepush [--log F] [--scratch D] [--keep-scratch] [--step S ...] [--list]
+
 `provision ninja`/`provision apt`/`dist-list` emit NO markers (ledger
 enumeration confirmed the pre-migration steps they replace emit none --
 tightening a migration's marker surface is as much a regression as
@@ -781,6 +786,16 @@ def build_parser() -> argparse.ArgumentParser:
     vcexp.add_argument("--prefix", required=True)
     vcexp.add_argument("--github-env", required=True)
 
+    # LOCAL-ONLY merged pre-push gate (user ruling 2026-10-03): fresh clone
+    # + CI-equivalent steps + test suites. Lives in native/scripts/prepush.py,
+    # outside this package, because it runs tests and native/scripts/ci/ is
+    # check_no_test_execution_in_ci's scan root. Never wired into a workflow.
+    import prepush
+
+    prepush.add_arguments(
+        sub.add_parser("prepush", help="local pre-push gate: fresh clone, CI steps + test suites")
+    )
+
     return p
 
 
@@ -801,6 +816,10 @@ def dispatch(args: argparse.Namespace) -> int:
         # bare-host path must be the SAME code, or the container stops being
         # evidence about what CI will do.
         return guards.run_in_docker() if args.docker else guards.run_checks()
+    if args.command == "prepush":
+        import prepush
+
+        return prepush.main(args)
     if args.command == "render-workflows":
         import ci.workflow_render as wr
 
