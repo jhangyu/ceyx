@@ -311,7 +311,7 @@ def scan_python_sources(roots):
         for path in sorted(root.rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
-            rel = str(path.relative_to(REPO_ROOT))
+            rel = path.relative_to(REPO_ROOT).as_posix()
             source = path.read_text(encoding="utf-8")
             source_lines = source.splitlines()
             try:

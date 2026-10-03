@@ -175,7 +175,7 @@ class MinRuntimeTests(unittest.TestCase):
             rc, out, _ = _run_captured(minruntime.min_runtime, "windows", arch="x86_64")
         self.assertEqual(rc, 0)
         idx = captured["argv"].index("--artifact")
-        self.assertEqual(captured["argv"][idx + 1], "artifacts/native/dng_decoder_native.dll")
+        self.assertEqual(Path(captured["argv"][idx + 1]), Path("artifacts/native/dng_decoder_native.dll"))
 
     def test_macos_reads_every_staged_dylib_sorted(self):
         captured = {}

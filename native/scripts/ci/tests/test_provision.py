@@ -89,8 +89,10 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("VCPKG_INSTALL_RC=0", out)
         joined = " ".join(captured_argv)
-        self.assertIn("--x-manifest-root=/ws/native/vcpkg", joined)
-        self.assertIn("--x-install-root=/tmp/rt/vcpkg-installed", joined)
+        path_flags = {a.split("=", 1)[0]: Path(a.split("=", 1)[1]) for a in captured_argv
+                      if a.startswith(("--x-manifest-root=", "--x-install-root="))}
+        self.assertEqual(path_flags.get("--x-manifest-root"), Path("/ws/native/vcpkg"))
+        self.assertEqual(path_flags.get("--x-install-root"), Path("/tmp/rt/vcpkg-installed"))
         self.assertIn("--triplet=x64-linux-heif", joined)
         self.assertIn("--x-no-default-features", joined)
         self.assertIn("--x-feature=de265", joined)

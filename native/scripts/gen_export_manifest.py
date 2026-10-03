@@ -154,7 +154,7 @@ def _find_source(symbol):
         except OSError:
             continue
         if pattern.search(text):
-            return str(path.relative_to(REPO_ROOT))
+            return path.relative_to(REPO_ROOT).as_posix()
     return ""
 
 
@@ -167,7 +167,7 @@ def scan():
 
     for path in _dart_files():
         text = path.read_text(encoding="utf-8")
-        rel = str(path.relative_to(REPO_ROOT))
+        rel = path.relative_to(REPO_ROOT).as_posix()
 
         # Map each character offset inside a try-block to that block's group
         # id, computed from the FIRST allowed-receiver call inside it (a

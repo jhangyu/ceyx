@@ -125,7 +125,9 @@ class VerifyVulkanLibTests(unittest.TestCase):
         (sdk / "Lib").mkdir()
 
         def fake_run(argv, cwd=None, env=None):
-            self.assertEqual(argv, ["ls", "-la", str(sdk / "Lib")])
+            self.assertEqual(argv[:2], ["ls", "-la"])
+            self.assertEqual(len(argv), 3)
+            self.assertEqual(Path(argv[2]), sdk / "Lib")
             # PORTED AS-IS: the shell's `|| true` swallows this RC entirely.
             return _fake_run_result(returncode=2, stdout="")
 

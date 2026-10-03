@@ -106,6 +106,11 @@ def _finish():
     return 0
 
 
+def _binary(build_dir, name):
+    exe = build_dir / (name + ".exe")
+    return exe if exe.is_file() else build_dir / name
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest",
@@ -132,7 +137,7 @@ def main():
 
     build_dir = REPO / args.build_dir
     for name in TEST_BINARIES:
-        binary = build_dir / name
+        binary = _binary(build_dir, name)
         if not binary.is_file():
             print("[RawMatrix] %-28s -> FAIL (binary missing: %s)" % (name, binary))
             failed_cases.append(name)
@@ -146,7 +151,7 @@ def main():
     # mandatory (a missing binary is silent coverage loss). Owner-supplied
     # samples absent, or harness exit 2 ("no usable file"), is a non-declared
     # SKIP: visible, counted, and it makes this run exit 2.
-    sized_binary = build_dir / "test_raw_sized_decode"
+    sized_binary = _binary(build_dir, "test_raw_sized_decode")
     if not sized_binary.is_file():
         print("[RawMatrix] %-28s -> FAIL (binary missing: %s)"
               % ("raw-sized-decode", sized_binary))
