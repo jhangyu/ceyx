@@ -1113,9 +1113,16 @@ BARE_RUNNER = "native/scripts/prepush.py"
 BARE_CORPUS: dict = {}
 
 
-def run_bare_binaries(build_dir: Path, root: Path, names: list, corpus: dict, run: Callable) -> int:
-    """Run each built binary; a missing binary, a missing corpus file, rc 2
-    (could not decode) or any other nonzero rc is a FAIL naming it. Never a skip."""
+BARE_SUMMARY_RE = re.compile(r"\[[^\]]*SUMMARY\]\s+executed=(\d+)\s+skipped=(\d+)(?:\s+failed=(\d+))?(?:\s+skipped_cases=(\S*))?")
+BARE_SKIP_RE = re.compile(r"\s(\w+) -> SKIP reason=(\S+)")
+
+
+def run_bare_binaries(build_dir: Path, root: Path, names: list, corpus: dict, run: Callable,
+                      inner_skips: Optional[list] = None) -> int:
+    """Run each built binary (run(argv) -> (rc, output)); a missing binary, a missing
+    corpus file, rc 2 (could not decode), any other nonzero rc, a missing SUMMARY
+    line or executed=0 is a FAIL naming it. The binary's own skipped cases are
+    appended to inner_skips and echoed with their reasons - declared, never hidden."""
     bad = 0
     for name in names:
         exe = build_dir / _exe(name)
@@ -1130,13 +1137,32 @@ def run_bare_binaries(build_dir: Path, root: Path, names: list, corpus: dict, ru
             bad += 1
             continue
         emit(f"PREPUSH_EXEC: {exe} {' '.join(map(str, args))}")
-        rc = run([str(exe), *map(str, args)])
-        if rc == 0:
-            emit(f"PREPUSH_BARE_CASE {name} PASS")
-        else:
+        rc, out = run([str(exe), *map(str, args)])
+        sys.stdout.write(out)
+        if rc != 0:
             why = "could not decode (rc=2)" if rc == 2 else f"rc={rc}"
             emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: {why}")
             bad += 1
+            continue
+        m = BARE_SUMMARY_RE.search(out)
+        if not m:
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: no SUMMARY line (executed/skipped counts) in the binary's output")
+            bad += 1
+            continue
+        executed, skipped = int(m.group(1)), int(m.group(2))
+        if executed == 0:
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: SUMMARY reports executed=0 (vacuous)")
+            bad += 1
+            continue
+        reasons = dict(BARE_SKIP_RE.findall(out))
+        cases = [c for c in (m.group(4) or "").split(",") if c]
+        cases += [f"unnamed-{i + 1}" for i in range(skipped - len(cases))]
+        for case in cases:
+            reason = reasons.get(case, "no reason printed")
+            emit(f"PREPUSH_BARE_INNER_SKIP {name}::{case} reason={reason}")
+            if inner_skips is not None:
+                inner_skips.append((f"bare-{name}", f"{case} (reason={reason})"))
+        emit(f"PREPUSH_BARE_CASE {name} PASS executed={executed} skipped={skipped}")
     return 1 if bad else 0
 
 
@@ -1150,7 +1176,8 @@ def t_bare_binaries(ctx: Ctx):
     if not names:
         return (SKIP, f"no gates.py entry of kind runner:{BARE_RUNNER} runs on this host")
     return run_bare_binaries(ctx.clone / build_dir_for(ctx.host), ctx.clone, names, BARE_CORPUS,
-                             lambda argv: ctx.run(argv, ctx.clone / build_dir_for(ctx.host)))
+                             lambda argv: capture(argv, ctx.clone / build_dir_for(ctx.host), env=ctx.base_env()),
+                             ctx.inner_skips)
 
 
 # run_decode_matrix.py harness cases, run one at a time through the runner's

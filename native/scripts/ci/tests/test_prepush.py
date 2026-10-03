@@ -228,10 +228,12 @@ class TestBareBinaryRunner(unittest.TestCase):
     """gates.py kind `runner:native/scripts/prepush.py`: a bare test binary the
     gate builds and runs itself; every failure names what failed, none skips."""
 
-    def _verdict(self, build, corpus, run, names=("test_x",)):
+    OK = "[X SUMMARY] executed=3 skipped=0 failed=0 skipped_cases=\n"
+
+    def _verdict(self, build, corpus, run, names=("test_x",), inner=None):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = prepush.run_bare_binaries(Path(build), Path(build), list(names), corpus, run)
+            rc = prepush.run_bare_binaries(Path(build), Path(build), list(names), corpus, run, inner)
         return rc, buf.getvalue()
 
     def _build_dir(self, tmp, exe="test_x"):
@@ -247,14 +249,14 @@ class TestBareBinaryRunner(unittest.TestCase):
     def test_pass_runs_the_binary(self):
         ran = []
         with tempfile.TemporaryDirectory() as tmp:
-            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: ran.append(argv) or 0)
+            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: ran.append(argv) or (0, self.OK))
         self.assertEqual(rc, 0)
         self.assertEqual(len(ran), 1)
         self.assertIn("PREPUSH_BARE_CASE test_x PASS", out)
 
     def test_missing_binary_fails_naming_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            rc, out = self._verdict(self._build_dir(tmp, exe=None), {}, lambda argv: 0)
+            rc, out = self._verdict(self._build_dir(tmp, exe=None), {}, lambda argv: (0, self.OK))
         self.assertEqual(rc, 1)
         self.assertIn("test_x", out)
         self.assertIn("binary not found", out)
@@ -262,21 +264,56 @@ class TestBareBinaryRunner(unittest.TestCase):
     def test_missing_corpus_file_fails_naming_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             rc, out = self._verdict(self._build_dir(tmp), {"test_x": ("image_samples/none.raf",)},
-                                    lambda argv: 0)
+                                    lambda argv: (0, self.OK))
         self.assertEqual(rc, 1)
         self.assertIn("none.raf", out)
         self.assertIn("corpus file missing", out)
 
     def test_rc2_could_not_decode_is_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: 2)
+            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: (2, ""))
         self.assertEqual(rc, 1)
         self.assertIn("could not decode", out)
 
     def test_nonzero_rc_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
-            rc, _ = self._verdict(self._build_dir(tmp), {}, lambda argv: 1)
+            rc, _ = self._verdict(self._build_dir(tmp), {}, lambda argv: (1, self.OK))
         self.assertEqual(rc, 1)
+
+    def test_internal_skip_is_counted_and_its_reason_echoed(self):
+        out_text = ("[X] D7 -> SKIP reason=no-resident-size-instrument\n"
+                    "[X SUMMARY] executed=16 skipped=1 failed=0 skipped_cases=D7\n")
+        inner = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: (0, out_text), inner=inner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(inner), 1)
+        self.assertIn("D7", inner[0][1])
+        self.assertIn("no-resident-size-instrument", inner[0][1])
+        self.assertIn("PREPUSH_BARE_INNER_SKIP test_x::D7 reason=no-resident-size-instrument", out)
+        self.assertIn("skipped=1", out)
+
+    def test_skip_without_named_case_is_still_counted(self):
+        inner = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, _ = self._verdict(self._build_dir(tmp), {},
+                                  lambda argv: (0, "[X SUMMARY] executed=2 skipped=2\n"), inner=inner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(inner), 2)
+
+    def test_missing_summary_line_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp), {}, lambda argv: (0, "all good, trust me\n"))
+        self.assertEqual(rc, 1)
+        self.assertIn("no SUMMARY line", out)
+        self.assertNotIn("PREPUSH_BARE_CASE test_x PASS", out)
+
+    def test_executed_zero_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self._verdict(self._build_dir(tmp), {},
+                                    lambda argv: (0, "[X SUMMARY] executed=0 skipped=4 failed=0 skipped_cases=a,b,c,d\n"))
+        self.assertEqual(rc, 1)
+        self.assertIn("executed=0", out)
 
     def test_step_is_on_the_roster_for_every_host(self):
         for host in prepush.ALL_HOSTS:
