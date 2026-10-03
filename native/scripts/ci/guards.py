@@ -173,6 +173,10 @@ GUARDS: tuple[tuple[str, ...], ...] = (
     # that only manifests under the runner's interpreter is precisely the
     # shape this container exists to catch.
     ("native/scripts/ci/check_test_marker_leak.py",),
+    # Platform-parity registry guard (PARITY.md): repo-static -- it reads only
+    # git-tracked source plus parity_registry.py. Lint, not a test, so it is
+    # allowed in compile-only CI.
+    ("native/scripts/ci/check_platform_parity.py",),
     # EIGHTEENTH, added by Phase 2 (lead18 ruling): the rendered == committed
     # assertion, which is contract acceptance 3's first clause. It belongs
     # HERE rather than in a hand-written build.yml step, on this module's own

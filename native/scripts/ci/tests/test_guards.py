@@ -200,7 +200,7 @@ class GuardListTest(unittest.TestCase):
         entry), never to match a document."""
         listed = {g[0] for g in guards.GUARDS}
         self.assertIn("native/scripts/ci/check_test_marker_leak.py", listed)
-        self.assertEqual(len(guards.GUARDS), 12)
+        self.assertEqual(len(guards.GUARDS), 13)
 
     def test_artifact_dependent_guards_are_excluded(self):
         """The membership rule is 'repo-static'. These two read
