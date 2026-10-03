@@ -6,6 +6,7 @@ import 'package:meta/meta.dart';
 
 import 'codec_format.dart';
 import 'dng_bindings.dart';
+import 'gpu_shutdown.dart';
 import 'native_buffer_pool.dart';
 import 'raw_error_codes.dart';
 import 'raw_route.dart';
@@ -356,6 +357,7 @@ class DngDecoderService {
 
   /// Warm native resources for the common 24MP decode path off the UI isolate.
   Future<void> warmupForSize({int width = 6000, int height = 4000}) async {
+    CeyxGpuShutdown.guardWork('warmupForSize');
     final result = await Isolate.run(() {
       final bindings = DngNativeBindings.load();
       return bindings.dngDecoderWarmupForSize(width, height);
@@ -426,6 +428,7 @@ class DngDecoderService {
   /// returned [DngImage.width]/[DngImage.height] rather than assuming the
   /// request was honored, exactly as for the DNG route above.
   Future<DngImage> decodeOnWorker(String filePath, {int? maxDim}) async {
+    CeyxGpuShutdown.guardWork('decodeOnWorker');
     // Hoist to a local before the closure: referencing `_libraryPath`
     // directly inside Isolate.run's closure captures `this` (the whole
     // DngDecoderService, including its DynamicLibrary/NativeFinalizer once
@@ -449,6 +452,7 @@ class DngDecoderService {
   ///
   /// Must only be called on a worker isolate.
   List<Object?> decodeForTransfer(String filePath, {int? maxDim}) {
+    CeyxGpuShutdown.guardWork('decodeForTransfer');
     final result = _decodeToTransferable(filePath, maxDim: maxDim);
     return <Object?>[
       result.rgbaData,
@@ -483,6 +487,7 @@ class DngDecoderService {
   ///
   /// Must only be called on a worker isolate.
   List<Object?> decodeForPointerTransfer(String filePath, {int? maxDim}) {
+    CeyxGpuShutdown.guardWork('decodeForPointerTransfer');
     if (!_initialized) {
       initialize();
     }
@@ -576,6 +581,7 @@ class DngDecoderService {
     int dstCapacity, {
     int? maxDim,
   }) {
+    CeyxGpuShutdown.guardWork('decodeIntoPointer');
     if (!_initialized) {
       initialize();
     }
@@ -753,6 +759,7 @@ class DngDecoderService {
     int? probedWidth,
     int? probedHeight,
   }) {
+    CeyxGpuShutdown.guardWork('decodeIntoPointerOriented');
     if (!_initialized) {
       initialize();
     }
@@ -832,6 +839,7 @@ class DngDecoderService {
     int? probedWidth,
     int? probedHeight,
   }) {
+    CeyxGpuShutdown.guardWork('decodeIntoPointerFormat');
     if (!_initialized) {
       initialize();
     }
@@ -947,6 +955,12 @@ class DngDecoderService {
   ///
   /// Returns null if extraction fails.
   Future<Uint8List?> getPreviewJpegOnWorker(String filePath) {
+    if (CeyxGpuShutdown.isClosing) {
+      return Future.error(
+        CeyxShutdownException('getPreviewJpegOnWorker'),
+        StackTrace.current,
+      );
+    }
     return Isolate.run(() => _extractPreviewJpegOnWorker(filePath));
   }
 
@@ -981,6 +995,7 @@ class DngDecoderService {
   ///
   /// Throws [DngDecodeException] on failure.
   DngImage decode(String filePath) {
+    CeyxGpuShutdown.guardWork('decode');
     if (!_initialized) {
       initialize();
     }

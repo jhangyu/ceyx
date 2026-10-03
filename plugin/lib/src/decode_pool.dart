@@ -12,6 +12,7 @@ import 'dng_bindings.dart';
 import 'dng_decoder_service.dart';
 import 'encode_bindings.dart';
 import 'encode_service.dart';
+import 'gpu_shutdown.dart';
 import 'native_buffer_pool.dart';
 
 /// What a pool job asks a worker to do.
@@ -279,7 +280,9 @@ class CeyxDecodePool {
     this.maxRespawns = 8,
   }) : _width = width < 1 ? 1 : width,
        _libraryPath = libraryPath,
-       _entryPoint = entryPoint;
+       _entryPoint = entryPoint {
+    CeyxGpuShutdown.register(_waitQuiescent);
+  }
 
   /// Process-wide instance used by host apps.
   static final CeyxDecodePool shared = CeyxDecodePool();
@@ -563,6 +566,23 @@ class CeyxDecodePool {
     return true;
   }
 
+  /// Completes true once [isQuiescent] holds, false when [bound] elapses first.
+  /// The exit-time GPU release's precondition (`CeyxGpuShutdown`).
+  Future<bool> _waitQuiescent(Duration bound) async {
+    if (isQuiescent) return true;
+    final done = Completer<bool>();
+    final sub = quiescenceChanges.listen((_) {
+      if (isQuiescent && !done.isCompleted) done.complete(true);
+    });
+    final timer = Timer(bound, () {
+      if (!done.isCompleted) done.complete(false);
+    });
+    final reached = await done.future;
+    timer.cancel();
+    await sub.cancel();
+    return reached;
+  }
+
   /// Broadcast notification of [isQuiescent] TRANSITIONS, the seam the idle
   /// shrink timer consumes: `true` = became quiescent (start the 5s timer),
   /// `false` = left quiescence (cancel it).
@@ -762,12 +782,15 @@ class CeyxDecodePool {
     int exifOrientation = 1,
     CeyxOutputFormat format = CeyxOutputFormat.rgba8,
   }) {
-    if (_disposed) {
+    if (_disposed || CeyxGpuShutdown.isClosing) {
       return Future.error(
-        CeyxPoolUnavailableException('pool disposed'),
+        CeyxPoolUnavailableException(
+          _disposed ? 'pool disposed' : 'app closing',
+        ),
         StackTrace.current,
       );
     }
+    CeyxGpuShutdown.ensureInstalled();
     // R-J, checked at SUBMIT and not in the worker: the caller's own stack
     // still holds the path and the requested format, and no job has been
     // admitted or slot acquired yet. A worker-side throw arrives through the
@@ -1196,12 +1219,15 @@ class CeyxDecodePool {
     required int height,
     required int quality,
   }) {
-    if (_disposed) {
+    if (_disposed || CeyxGpuShutdown.isClosing) {
       return Future.error(
-        CeyxPoolUnavailableException('pool disposed'),
+        CeyxPoolUnavailableException(
+          _disposed ? 'pool disposed' : 'app closing',
+        ),
         StackTrace.current,
       );
     }
+    CeyxGpuShutdown.ensureInstalled();
     final job = _PoolJob(
       // T14: written OUT, not defaulted — an encode always operates on an
       // already-materialised RGBA8 buffer, and stating it is what makes that
@@ -1252,12 +1278,15 @@ class CeyxDecodePool {
     required int height,
     required int quality,
   }) {
-    if (_disposed) {
+    if (_disposed || CeyxGpuShutdown.isClosing) {
       return Future.error(
-        CeyxPoolUnavailableException('pool disposed'),
+        CeyxPoolUnavailableException(
+          _disposed ? 'pool disposed' : 'app closing',
+        ),
         StackTrace.current,
       );
     }
+    CeyxGpuShutdown.ensureInstalled();
     final job = _PoolJob(
       key: (
         CeyxPoolJobType.encode,
@@ -1291,6 +1320,7 @@ class CeyxDecodePool {
   /// Stops every worker. In-flight jobs fail rather than hang.
   Future<void> dispose() async {
     _disposed = true;
+    CeyxGpuShutdown.unregister(_waitQuiescent);
     for (final worker in List<_PoolWorker>.from(_workers)) {
       _shutdown(worker);
     }

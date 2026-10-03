@@ -88,6 +88,8 @@ KNOWN_GROUP_IDS = {
     # leg -- is checked by the default-on local test test_idle_funnel, run by
     # the local pre-push gate `ci.py prepush` (native/scripts/prepush.py).
     "ceyx_native_idle_shrink": "arena_idle_shrink",
+    # M1 T-G (IC9): terminal exit-time GPU release; expected on all four legs.
+    "ceyx_native_release_gpu": "gpu_release",
     # mem8 T12.0's frozen yuv420 contract, bound by T14. FOUR entries, ONE
     # group id on purpose: the Dart lookups are guarded PER-SYMBOL (each in
     # its own try, so a partially-updated library cannot null the rest), but

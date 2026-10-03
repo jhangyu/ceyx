@@ -11,6 +11,7 @@ import 'dng_bindings.dart';
 import 'encode_bindings.dart';
 import 'encode_bindings_v2.dart';
 import 'encode_options.dart';
+import 'gpu_shutdown.dart';
 
 /// Error thrown when a native encode call fails. [errorCode] is one of
 /// [CeyxEncodeErrorCode]; [errorName] mirrors the native
@@ -110,6 +111,12 @@ class CeyxEncodeService {
     required int height,
     required int quality,
   }) {
+    if (CeyxGpuShutdown.isClosing) {
+      return Future.error(
+        CeyxShutdownException('encodeJpegNative'),
+        StackTrace.current,
+      );
+    }
     return _encode(
       rgba,
       width: width,
@@ -129,6 +136,12 @@ class CeyxEncodeService {
     required int height,
     required int quality,
   }) {
+    if (CeyxGpuShutdown.isClosing) {
+      return Future.error(
+        CeyxShutdownException('encodeWebpNative'),
+        StackTrace.current,
+      );
+    }
     return _encode(
       rgba,
       width: width,
@@ -166,6 +179,7 @@ class CeyxEncodeService {
     required int quality,
     ffi.Finalizable? keepAlive,
   }) async {
+    CeyxGpuShutdown.guardWork('encodeJpegFromNativeRgba');
     if (rgbaAddress == 0) {
       throw ArgumentError.value(
         rgbaAddress,
@@ -244,6 +258,7 @@ class CeyxEncodeService {
     required int quality,
     ffi.Finalizable? keepAlive,
   }) async {
+    CeyxGpuShutdown.guardWork('encodeJpegFromNativeYuv420');
     if (srcAddress == 0) {
       throw ArgumentError.value(
         srcAddress,
@@ -399,6 +414,7 @@ class CeyxEncodeService {
     Uint8List? xmp,
     Uint8List? icc,
   }) async {
+    CeyxGpuShutdown.guardWork('encodeNative');
     final libraryPath = _libraryPath;
     final memoized = _unavailableCache[libraryPath];
     if (memoized != null) throw memoized;

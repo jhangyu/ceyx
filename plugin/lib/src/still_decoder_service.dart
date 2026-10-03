@@ -2,6 +2,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'still_bindings.dart';
+import 'gpu_shutdown.dart';
 import 'still_error_codes.dart';
 import 'still_worker.dart';
 
@@ -96,6 +97,7 @@ class CeyxStillDecoderService {
     int maxDim = 0,
     int formatHint = 0,
   }) async {
+    CeyxGpuShutdown.guardWork('decodeOnWorker');
     if (!stillDecodeAvailable) return null;
     final libraryPath = _libraryPath;
     final requested = maxDim > 0 ? maxDim : 0;
