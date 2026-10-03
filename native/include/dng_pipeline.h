@@ -61,7 +61,7 @@ struct DngPipelineResult {
 size_t dng_decode_slot_count();
 CEYX_FFI_EXPORT size_t dng_decode_in_flight_count();
 size_t dng_decode_max_in_flight_observed();
-size_t dng_decode_arena_high_water_bytes();
+CEYX_FFI_EXPORT size_t dng_decode_arena_high_water_bytes();
 
 // --- R4 item 1: configurable slot pool -----------------------------------
 
@@ -142,7 +142,7 @@ struct DngDebugArenaRange {
   const void *base;
   size_t bytes;
 };
-size_t dng_debug_arena_ranges(DngDebugArenaRange *out, size_t cap);
+CEYX_FFI_EXPORT size_t dng_debug_arena_ranges(DngDebugArenaRange *out, size_t cap);
 
 // Idle-release arenas and scratch of FREE contexts in excess of `floor`,
 // keeping the first `floor` warm. Returns bytes released.
@@ -165,7 +165,7 @@ size_t dng_decode_decommit_free_slots_to_floor(size_t floor);
 // dng_decode_arena_high_water_bytes(), which is monotonic and is the existing
 // disclosure figure — D-P1-4 pins high-water to stay UNCHANGED across a
 // decommit so that disclosure does not silently change meaning.
-size_t dng_decode_committed_context_bytes();
+CEYX_FFI_EXPORT size_t dng_decode_committed_context_bytes();
 
 // Decommit bookkeeping. A call count that moves with zero contexts touched is
 // the degenerate floor case (success); a call count that never moves means the
