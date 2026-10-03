@@ -39,9 +39,8 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 1, "role": "adapter",
         "contract": "Metal concurrency correctness (A9); no memory retention"},
     "native/src/pipeline/dng_halide_device.cpp": {
-        "guard_lines": 6, "role": "fork-host",
-        "contract": "Halide device interface binding Metal/Vulkan (A8); Vulkan pool never collected is fork B2",
-        "open_forks": ["B2"]},
+        "guard_lines": 8, "role": "adapter",
+        "contract": "Halide device interface binding and idle device-memory release (Vulkan pool release / Metal parameter cache); identical DngDeviceReleaseResult semantics"},
     "native/src/pipeline/dng_metal_api_gate.h": {
         "guard_lines": 1, "role": "adapter",
         "contract": "Metal API serialisation gate (A9)"},
@@ -69,12 +68,11 @@ REGISTRY: dict[str, dict] = {
         "contract": "GPU timing probe backend binding"},
     "native/src/pipeline/raw_persistent_device_arena.cpp": {
         "guard_lines": 3, "role": "fork-host",
-        "contract": "Metal zero-copy lane arena (A11 family); idle release B1, volatile B3, counters B4",
-        "open_forks": ["B1", "B3", "B4"]},
+        "contract": "Metal zero-copy lane arena (A11 family); volatile marking is fork B3",
+        "open_forks": ["B3"]},
     "native/src/pipeline/render_parameter_upload_cache.cpp": {
-        "guard_lines": 1, "role": "fork-host",
-        "contract": "Metal C3 parameter cache; release has zero callers (B7)",
-        "open_forks": ["B7"]},
+        "guard_lines": 1, "role": "accelerator",
+        "contract": "Metal C3 parameter cache; released by funnel step 3"},
     "plugin/lib/src/dng_bindings.dart": {
         "guard_lines": 10, "role": "adapter",
         "contract": "native library file name and loader path per OS"},

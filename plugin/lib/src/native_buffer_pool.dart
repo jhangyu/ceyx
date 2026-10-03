@@ -781,24 +781,20 @@ class CeyxNativeBufferPool {
       _live--;
       freed++;
     }
-    if (freed == 0) return 0;
-    _warmedBytes = null;
-    _lastShrinkAt = debugClock();
-    debugShrinkEvents++;
-    debugBuffersFreedByShrink += freed;
-    _pressureRelief();
-    // mem8 T2 (SR-1): arena (T1) + DNG contexts (T3), same trigger, same
-    // floor. Placed AFTER _pressureRelief and BEFORE onShrink on purpose —
-    // the native release must have happened before onShrink fires, or the
-    // host's working-set trim runs before the pages it is meant to return
-    // have been handed back. Both the refusal path above and the
-    // `freed == 0` early exit correctly skip it: an outstanding checkout
-    // means a decode may still be live, which is exactly the state T1's own
-    // refusal exists for and which we should not even reach.
+    if (freed > 0) {
+      _warmedBytes = null;
+      _lastShrinkAt = debugClock();
+      debugShrinkEvents++;
+      debugBuffersFreedByShrink += freed;
+      _pressureRelief();
+    }
+    // The native funnel runs on EVERY quiescent shrink, including one that
+    // freed no Dart buffer: native device memory (the GPU decode pool) is
+    // independent of this pool's buffer count. Placed after the pressure
+    // relief and before onShrink, so a listener observes pages already
+    // returned. The refusal above still guarantees decode quiescence.
     _nativeIdleShrink();
-    // LAST statement by design: a listener must observe a completed shrink,
-    // pages already returned. Reached only past the `freed == 0` early exit
-    // and never on the refusal path above.
+    if (freed == 0) return 0;
     onShrink?.call(freed);
     return freed;
   }
@@ -832,7 +828,8 @@ class CeyxNativeBufferPool {
   }
 
   /// Asks the native side (mem8 T1's one idle funnel) to release arena device
-  /// regions above [idleFloor]. Called only from [shrinkToFloor]'s tail, so
+  /// regions above [idleFloor]. Called from [shrinkToFloor] on every quiescent
+  /// shrink, whether or not Dart buffers were freed, so
   /// the pool is provably quiescent — which is clause (e) of the native
   /// contract: the per-lane live-binding refusal there is a backstop, not a
   /// lock, and this pool's quiescence window is the only clock.

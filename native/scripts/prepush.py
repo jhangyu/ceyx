@@ -1110,7 +1110,9 @@ def t_build_tests(ctx: Ctx):
 # builds (test-build-targets) and runs itself (test-bare-binaries). BARE_CORPUS
 # maps an executable to the repo-relative corpus files passed as its arguments.
 BARE_RUNNER = "native/scripts/prepush.py"
-BARE_CORPUS: dict = {}
+BARE_CORPUS: dict = {
+    "test_idle_funnel": ("image_samples/raw_corpus/DXT50003.RAF",),
+}
 
 
 BARE_SUMMARY_RE = re.compile(r"\[[^\]]*SUMMARY\]\s+executed=(\d+)\s+skipped=(\d+)(?:\s+failed=(\d+))?(?:\s+skipped_cases=(\S*))?")
