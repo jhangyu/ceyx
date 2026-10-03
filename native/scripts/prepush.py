@@ -939,21 +939,6 @@ HOST_UNSUPPORTED: dict = {
             "passes its Metal-identical self-gate (decode-main entry above)",
             must=(r"\[FFI lossy\] Halide test render missing",),
             allowed=(r"\[FFI lossy\] Halide test render missing", r"^PREPUSH_CASE_RESULT ffi-dng-lossy FAIL")),
-        **{f"decode-case:{case}": Unsupported(
-            "windows-teardown-fastfail",
-            "every check prints PASS, then the harness process exits 0xC0000409 (STATUS_FAST_FAIL family) at "
-            "teardown -- the same family as the shipped double-click crash fixed in v1.0.16 (CRT/stdio or DLL "
-            "unload order); reproduced by running the harness directly. Campaign lead, high value",
-            must=(r"^PREPUSH_CHILD_EXIT=3221226505$", *passes),
-            allowed=(r"^PREPUSH_CHILD_EXIT=3221226505$", r"exit=3221226505", rf"^PREPUSH_CASE_RESULT {case} FAIL"),
-            kind="known-defect")
-           for case, passes in (
-               ("cfa-color-bggr", (r"^\[CFA COLOR\] .*\[PASS\]$",)),
-               ("encode-yuv420", (r"^\[encode SUMMARY\] executed=[1-9]\d* skipped=0 failed=0$",)),
-               ("ffi-dng-lossless", (r"^\[Contract\] PASS ", r"^\[FFI RGB MATCH\] render: byte_exact=1 .*\[PASS\]$",
-                                     r"^\[Pool\] PASS ")),
-               ("ffi-raw", (r"^\[Contract\] PASS ", r"^\[Contract\] RawGpuPipeline .* -> PASS$", r"^\[Pool\] PASS ")),
-           )},
         "decode-case:sized-decode": Unsupported(
             "windows-sized-decode-psnr",
             "REAL Windows image-quality defect: Stage4 device handoff fails and the degraded host-copy fallback "
@@ -1104,6 +1089,82 @@ def t_build_tests(ctx: Ctx):
         verdict = reprove(ctx, f"target:{t}", probe_rc, probe_out, ctx.clone / REPROOF_DIR / f"{t}.build.log")
         bad += verdict == 1
     return rc or (1 if bad else 0)
+
+
+# gates.py kind `runner:native/scripts/prepush.py`: a bare test binary this gate
+# builds (test-build-targets) and runs itself (test-bare-binaries). BARE_CORPUS
+# maps an executable to the repo-relative corpus files passed as its arguments.
+BARE_RUNNER = "native/scripts/prepush.py"
+BARE_CORPUS: dict = {
+    "test_idle_funnel": ("image_samples/raw_corpus/DXT50003.RAF",),
+}
+
+
+BARE_SUMMARY_RE = re.compile(r"\[[^\]]*SUMMARY\]\s+executed=(\d+)\s+skipped=(\d+)(?:\s+failed=(\d+))?(?:\s+skipped_cases=(\S*))?")
+BARE_SKIP_RE = re.compile(r"\s(\w+) -> SKIP reason=(\S+)")
+
+
+def run_bare_binaries(build_dir: Path, root: Path, names: list, corpus: dict, run: Callable,
+                      inner_skips: Optional[list] = None) -> int:
+    """Run each built binary (run(argv) -> (rc, output)); a missing binary, a missing
+    corpus file, rc 2 (could not decode), any other nonzero rc, a missing SUMMARY
+    line or executed=0 is a FAIL naming it. The binary's own skipped cases are
+    appended to inner_skips and echoed with their reasons - declared, never hidden."""
+    bad = 0
+    for name in names:
+        exe = build_dir / _exe(name)
+        if not exe.is_file():
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: binary not found: {exe}")
+            bad += 1
+            continue
+        args = [root / rel for rel in corpus.get(name, ())]
+        missing = [a for a in args if not a.is_file()]
+        if missing:
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: corpus file missing: {missing[0]}")
+            bad += 1
+            continue
+        emit(f"PREPUSH_EXEC: {exe} {' '.join(map(str, args))}")
+        rc, out = run([str(exe), *map(str, args)])
+        sys.stdout.write(out)
+        if rc != 0:
+            why = "could not decode (rc=2)" if rc == 2 else f"rc={rc}"
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: {why}")
+            bad += 1
+            continue
+        m = BARE_SUMMARY_RE.search(out)
+        if not m:
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: no SUMMARY line (executed/skipped counts) in the binary's output")
+            bad += 1
+            continue
+        executed, skipped = int(m.group(1)), int(m.group(2))
+        if executed == 0:
+            emit(f"::error::PREPUSH_BARE_CASE {name} FAIL: SUMMARY reports executed=0 (vacuous)")
+            bad += 1
+            continue
+        reasons = dict(BARE_SKIP_RE.findall(out))
+        cases = [c for c in (m.group(4) or "").split(",") if c]
+        cases += [f"unnamed-{i + 1}" for i in range(skipped - len(cases))]
+        for case in cases:
+            reason = reasons.get(case, "no reason printed")
+            emit(f"PREPUSH_BARE_INNER_SKIP {name}::{case} reason={reason}")
+            if inner_skips is not None:
+                inner_skips.append((f"bare-{name}", f"{case} (reason={reason})"))
+        emit(f"PREPUSH_BARE_CASE {name} PASS executed={executed} skipped={skipped}")
+    return 1 if bad else 0
+
+
+def t_bare_binaries(ctx: Ctx):
+    if ctx.host == LINUX_X64:
+        emit("::error::PREPUSH_UNIMPLEMENTED(test-bare-binaries): no native build leg is implemented for a Linux host")
+        return 3
+    runners, _ = gate_runners(ctx.clone)
+    unsupported = host_unsupported(ctx.host)
+    names = [n for n in runners.get(BARE_RUNNER, []) if f"target:{n}" not in unsupported]
+    if not names:
+        return (SKIP, f"no gates.py entry of kind runner:{BARE_RUNNER} runs on this host")
+    return run_bare_binaries(ctx.clone / build_dir_for(ctx.host), ctx.clone, names, BARE_CORPUS,
+                             lambda argv: capture(argv, ctx.clone / build_dir_for(ctx.host), env=ctx.base_env()),
+                             ctx.inner_skips)
 
 
 # run_decode_matrix.py harness cases, run one at a time through the runner's
@@ -1414,6 +1475,8 @@ def build_steps(clone: Path, host: str) -> list:
              lambda ctx: ctx.run(ctx.py("native/tests/test_decode_matrix_parsers.py")), group="test"),
         Step("test-build-targets", "build every non-manual gates.py runner executable this host configures",
              ALL_HOSTS, t_build_tests, group="test"),
+        Step("test-bare-binaries", f"gates.py runners of kind {BARE_RUNNER}: bare test binaries, built then run",
+             ALL_HOSTS, t_bare_binaries, group="test"),
         Step("test-decode-matrix", f"gates.py runner {DECODE_SCRIPT} (main cases; full runner on macOS)",
              ALL_HOSTS, t_decode_matrix, group="test"),
     ]

@@ -81,14 +81,12 @@ KNOWN_GROUP_IDS = {
     "ceyx_decode_into_buffer_oriented": "oriented",
     "ceyx_pool_aligned_alloc": "pool_aligned",
     "ceyx_pool_pressure_relief": "pool_pressure_relief",
-    # mem8 T1 (SR-1). Deliberately NOT in LEGACY_OPTIONAL_GROUPS, so
-    # expected_on defaults to all four legs -- justified by the portable stub
-    # in raw_persistent_device_arena.cpp, which defines
-    # raw_persistent_device_arena_shrink_to_lane_floor on non-Metal targets as
-    # well, so the symbol exists everywhere even where it has nothing to
-    # release. This id reaches the generated manifest only once a Dart
-    # lookupFunction for ceyx_native_idle_shrink exists (T2); T1 registers the
-    # id here and does not hand-edit the manifest, which forbids it.
+    # mem8 T1 (SR-1), re-justified by the 2026-10 parity campaign. Deliberately
+    # NOT in LEGACY_OPTIONAL_GROUPS, so expected_on is all four legs. Symbol
+    # presence is NOT the parity claim (PARITY.md clause 4): the behavioural
+    # claim -- the funnel runs every step and moves the same counters on every
+    # leg -- is checked by the default-on local test test_idle_funnel, run by
+    # the local pre-push gate `ci.py prepush` (native/scripts/prepush.py).
     "ceyx_native_idle_shrink": "arena_idle_shrink",
     # mem8 T12.0's frozen yuv420 contract, bound by T14. FOUR entries, ONE
     # group id on purpose: the Dart lookups are guarded PER-SYMBOL (each in

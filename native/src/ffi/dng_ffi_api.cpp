@@ -20,6 +20,11 @@
 // R2-T1 (GPU copy-elimination C1): the persistent device arena counters behind
 // ceyx_debug_persistent_device_arena_counters below.
 #include "raw_persistent_device_arena.h"
+// Memory-reclamation campaign M1: funnel step 3 (backend device-memory release).
+#include "dng_halide_device.h"
+
+#include <atomic>
+#include <cstdio>
 
 #include "ceyx_ffi_export.h"
 
@@ -57,6 +62,28 @@ inline void dngAutoSaveVkPipelineCache() {
     (void)dng_vk_pipeline_cache_save();
   }
 #endif
+}
+}  // namespace
+
+namespace {
+// Idle-funnel telemetry (PARITY.md clause 4). Incremented ONLY in
+// ceyx_native_idle_shrink, never in a backend branch, so a run on any leg
+// reports the same counters.
+std::atomic<uint64_t> g_funnel_calls{0};
+std::atomic<uint64_t> g_device_release_runs{0};
+std::atomic<uint64_t> g_device_release_skipped_uninitialized{0};
+std::atomic<uint64_t> g_device_release_errors{0};
+std::atomic<uint64_t> g_page_return_calls{0};        // funnel step 4 (M4)
+std::atomic<uint64_t> g_page_return_unavailable{0};  // funnel step 4 (M4)
+std::atomic<uint64_t> g_last_funnel_bytes{0};
+
+const char *device_release_label(DngDeviceReleaseResult result) {
+  switch (result) {
+    case DngDeviceReleaseResult::kReleased: return "released";
+    case DngDeviceReleaseResult::kSkippedUninitialized: return "skipped_uninitialized";
+    case DngDeviceReleaseResult::kError: return "error";
+  }
+  return "error";
 }
 }  // namespace
 
@@ -310,21 +337,28 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
 // raw_persistent_device_arena_shrink_to_lane_floor in
 // raw_persistent_device_arena.h. It is not restated here, so there is exactly
 // one copy of it to keep true.
+//
+// Steps, in order, on every backend: 1 arena lanes, 2 DNG decode-context
+// decommit, 3 backend device-memory release, 4 page return (M4).
 // ---------------------------------------------------------------------------
 
 CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
+  g_funnel_calls.fetch_add(1, std::memory_order_relaxed);
   // A negative floor is CLAMPED, not rejected: 0 is itself a legal floor
   // meaning "release every quiescent lane", so clamping lands on a defined
   // behaviour rather than inventing an error for an input that has an obvious
   // reading.
   const size_t clamped_floor =
       floor < 0 ? size_t{0} : static_cast<size_t>(floor);
+
+  // Step 1: arena lanes above the floor. The arena is the Metal zero-copy
+  // accelerator; off Metal it never binds a region and holds nothing.
   const ceyx::RawArenaShrinkOutcome outcome =
       ceyx::raw_persistent_device_arena_shrink_to_lane_floor(clamped_floor);
 
-  // mem8 T3 (SR-6): the DNG-route half, INSIDE this funnel rather than beside
-  // it. That placement is the whole one-funnel rule (D-P1-1) — a second export
-  // for DNG idle release would be the defect, not the feature.
+  // Step 2: DNG decode contexts (mem8 T3, SR-6), INSIDE this funnel rather
+  // than beside it — a second export for DNG idle release would be the
+  // defect, not the feature.
   //
   // It is a no-op returning 0 when no DNG slot pool has ever been constructed,
   // and asking that question cannot construct one: a pure-RAW session must not
@@ -333,17 +367,78 @@ CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
   // dng_decode_slot_pool_exists() in dng_pipeline.h for why that one reads 0 on
   // a process that has decoded DNGs, and would silently disable this half
   // forever while every synthetic gate stayed green.
-  //
-  // Order is irrelevant to the result; only the log reads in sequence.
   const size_t dng_bytes =
       dng_decode_decommit_free_slots_to_floor(clamped_floor);
 
-  // Bytes, not lanes: the lane counts are available through the probe below,
-  // while the byte figure is the one the Dart idle path logs. The two
-  // subsystems' byte counts are SUMMED — a caller sees one number for "what
-  // this idle pass handed back", which is what the one-funnel rule implies.
-  return static_cast<int64_t>(outcome.bytes_released) +
-         static_cast<int64_t>(dng_bytes);
+  // Step 3: backend device memory. MUST follow step 2: decommit hands context
+  // device buffers back to the backend pool, and this step can only return
+  // blocks that are already unused.
+  const DngDeviceReleaseResult device = dng_halide_release_unused_device_memory();
+  switch (device) {
+    case DngDeviceReleaseResult::kReleased:
+      g_device_release_runs.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case DngDeviceReleaseResult::kSkippedUninitialized:
+      g_device_release_skipped_uninitialized.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case DngDeviceReleaseResult::kError:
+      g_device_release_errors.fetch_add(1, std::memory_order_relaxed);
+      break;
+  }
+
+  // Bytes, not lanes: steps 1 and 2 SUMMED, so a caller sees one number for
+  // "what this idle pass handed back". Step 3 reports no byte count (Halide
+  // does not give one); its outcome is in the counters and the line below.
+  const int64_t total = static_cast<int64_t>(outcome.bytes_released) +
+                        static_cast<int64_t>(dng_bytes);
+  g_last_funnel_bytes.store(static_cast<uint64_t>(total), std::memory_order_relaxed);
+  std::fprintf(stderr,
+               "[IdleFunnel] event=funnel floor=%zu arena_bytes=%llu dng_bytes=%zu "
+               "device_release=%s\n",
+               clamped_floor,
+               static_cast<unsigned long long>(outcome.bytes_released), dng_bytes,
+               device_release_label(device));
+  std::fflush(stderr);
+  return total;
+}
+
+CEYX_FFI_EXPORT void ceyx_native_release_gpu(void) {
+  dng_halide_release_device();
+}
+
+CEYX_FFI_EXPORT int32_t ceyx_debug_idle_funnel_counters(
+    uint64_t *out_funnel_calls, uint64_t *out_device_release_runs,
+    uint64_t *out_device_release_skipped_uninitialized,
+    uint64_t *out_device_release_errors, uint64_t *out_page_return_calls,
+    uint64_t *out_page_return_unavailable, uint64_t *out_last_funnel_bytes) {
+  if (!out_funnel_calls && !out_device_release_runs &&
+      !out_device_release_skipped_uninitialized && !out_device_release_errors &&
+      !out_page_return_calls && !out_page_return_unavailable &&
+      !out_last_funnel_bytes) {
+    return -1;
+  }
+  if (out_funnel_calls) *out_funnel_calls = g_funnel_calls.load(std::memory_order_relaxed);
+  if (out_device_release_runs) {
+    *out_device_release_runs = g_device_release_runs.load(std::memory_order_relaxed);
+  }
+  if (out_device_release_skipped_uninitialized) {
+    *out_device_release_skipped_uninitialized =
+        g_device_release_skipped_uninitialized.load(std::memory_order_relaxed);
+  }
+  if (out_device_release_errors) {
+    *out_device_release_errors = g_device_release_errors.load(std::memory_order_relaxed);
+  }
+  if (out_page_return_calls) {
+    *out_page_return_calls = g_page_return_calls.load(std::memory_order_relaxed);
+  }
+  if (out_page_return_unavailable) {
+    *out_page_return_unavailable =
+        g_page_return_unavailable.load(std::memory_order_relaxed);
+  }
+  if (out_last_funnel_bytes) {
+    *out_last_funnel_bytes = g_last_funnel_bytes.load(std::memory_order_relaxed);
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -797,8 +797,9 @@ void raw_persistent_device_arena_release_all_lanes() {
   g_live_lane_count.store(0, std::memory_order_relaxed);
 }
 
-RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
-    size_t floor) {
+namespace {
+
+RawArenaShrinkOutcome shrink_to_lane_floor_impl(size_t floor) {
   // IDLE RELEASE (mem8 SR-1). The full contract — floor semantics, the legal
   // zero floor, the all-zeros no-op, "objects are never destroyed", the
   // caller-side quiescence precondition and the release-dominates-volatile
@@ -826,7 +827,6 @@ RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
   // lock" would introduce exactly that window. Do not change this without
   // replacing that guarantee.
   RawArenaShrinkOutcome outcome;
-  g_shrink_call_count.fetch_add(1, std::memory_order_relaxed);
 
   std::lock_guard<std::mutex> guard(lane_map_lock());
   for (auto &entry : lane_map()) {
@@ -890,6 +890,8 @@ RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
   return outcome;
 }
 
+}  // namespace
+
 size_t raw_persistent_device_arena_resident_lane_count() {
   // DERIVED, not cached (see the header). Walks the map under its lock and
   // counts arenas that actually hold device bytes.
@@ -944,9 +946,9 @@ bool RawPersistentDeviceArena::has_live_binding() const { return false; }
 
 uint64_t RawPersistentDeviceArena::resident_device_bytes() const { return 0; }
 
-// T17 (SR-10) off Metal. No region exists to mark, so 0 bytes newly marked
-// and "everything survived" are both the TRUTH here, not a stub's placeholder
-// standing in for an answer we could not compute.
+// T17 (SR-10) off Metal. The arena is a Metal zero-copy accelerator; off Metal
+// it never binds, and the equivalent device memory lives in the Halide pool,
+// released by funnel step 3. So there is no region to mark here.
 uint64_t RawPersistentDeviceArena::mark_regions_volatile() { return 0; }
 
 bool RawPersistentDeviceArena::restore_regions_nonvolatile() { return true; }
@@ -959,17 +961,27 @@ RawPersistentDeviceArena *raw_persistent_device_arena_for_current_lane() {
 
 void raw_persistent_device_arena_release_all_lanes() {}
 
-// A non-Metal target holds no regions at all, so all-zeros is the TRUTH here,
-// not a stub's placeholder — the degenerate case (c) of the contract, which is
-// success. The symbol exists on every leg, which is what lets the FFI export's
-// expected_on cover all four platforms (T2.4) instead of needing a
-// per-platform absence rule.
-RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(size_t) {
-  return {};
-}
+// The arena is a Metal zero-copy accelerator; off Metal it never binds, and the
+// equivalent device memory lives in the Halide pool, released by funnel step 3.
+// This leg's arena half of the shrink therefore has nothing to release.
+namespace {
+RawArenaShrinkOutcome shrink_to_lane_floor_impl(size_t) { return {}; }
+}  // namespace
 
 size_t raw_persistent_device_arena_resident_lane_count() { return 0; }
 
 }  // namespace ceyx
 
 #endif  // __APPLE__ && !DNG_FORCE_VULKAN
+
+namespace ceyx {
+
+// Shared across every leg (PARITY.md clause 1): the call counter moves here,
+// outside both branches, so ceyx_debug_arena_shrink_counters is never blind
+// off Metal.
+RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(size_t floor) {
+  g_shrink_call_count.fetch_add(1, std::memory_order_relaxed);
+  return shrink_to_lane_floor_impl(floor);
+}
+
+}  // namespace ceyx
