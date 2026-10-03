@@ -125,6 +125,24 @@ def host_key() -> str:
     return {"Windows": "windows", "Darwin": "macos"}.get(system, "linux") + f"-{arch}"
 
 
+def py_exe() -> str:
+    """Interpreter for python children. On Windows the `pythonw` sibling
+    (user decree 2026-10-03): no console, so a console-close / Ctrl+C
+    broadcast (0xC000013A) cannot kill the gate's python processes. Output
+    still flows through the pipes the gate reads."""
+    if os.name == "nt":
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if pythonw.is_file():
+            return str(pythonw)
+    return sys.executable
+
+
+# Console children (cmake, ninja, cmd for .bat) of a console-less gate get a
+# console of their own unless told not to; CREATE_NO_WINDOW keeps them off
+# every console, so no console-close signal can reach them either.
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
 def child_env(extra: Optional[dict] = None) -> dict:
     env = dict(os.environ)
     env.update(CHILD_ENV_OVERRIDES)
@@ -142,7 +160,7 @@ def stream(argv, cwd, env=None, tee: Optional[Path] = None) -> int:
         proc = subprocess.Popen(argv, shell=False, cwd=os.fspath(cwd),
                                 env=env if env is not None else child_env(),
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                text=True, encoding="utf-8", errors="replace")
+                                text=True, encoding="utf-8", errors="replace", **_NO_WINDOW)
     except OSError as exc:
         emit(f"PREPUSH_EXEC_ERROR: {exc}")
         return 127
@@ -167,7 +185,7 @@ def capture(argv, cwd, env=None) -> tuple:
     try:
         done = subprocess.run([os.fspath(a) for a in argv], shell=False, cwd=os.fspath(cwd),
                               env=env if env is not None else child_env(), capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+                              text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, **_NO_WINDOW)
     except OSError as exc:
         return 127, f"{exc}\n"
     return done.returncode, (done.stdout or "") + (done.stderr or "")
@@ -194,7 +212,7 @@ class Ctx:
         return dict(self.env) if self.env else child_env()
 
     def py(self, *args) -> list:
-        return [sys.executable, *args]
+        return [py_exe(), *args]
 
     def run(self, argv, cwd: Optional[Path] = None) -> int:
         return stream(argv, cwd or self.clone, env=self.base_env())
@@ -533,7 +551,7 @@ def _absorb_github_files(jr: JobRow) -> None:
 
 def _resolve_exe(argv0: str, env: dict) -> str:
     if argv0 in ("python3", "python"):
-        return sys.executable
+        return py_exe()
     path = next((v for k, v in env.items() if k.upper() == "PATH"), None)
     return shutil.which(argv0, path=path) or argv0
 
@@ -1153,11 +1171,11 @@ def pillow_python(ctx: Ctx) -> Optional[str]:
     interpreter when it has them, else a scratch venv (system site-packages
     + the two packages from PyPI) -- never install into the host."""
     if all(importlib.util.find_spec(m) is not None for m in ("PIL", "numpy")):
-        return sys.executable
+        return py_exe()
     venv = ctx.clone.parent / "prepush-pyenv"
-    py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    py = venv / ("Scripts/pythonw.exe" if os.name == "nt" else "bin/python")
     if not py.is_file():
-        if stream([sys.executable, "-m", "venv", "--system-site-packages", str(venv)], ctx.clone) != 0:
+        if stream([py_exe(), "-m", "venv", "--system-site-packages", str(venv)], ctx.clone) != 0:
             return None
         if stream([str(py), "-m", "pip", "install", "--disable-pip-version-check", "Pillow", "numpy"], ctx.clone) != 0:
             emit("::error::could not provision Pillow + numpy into the scratch venv")
@@ -1628,7 +1646,7 @@ def run_outer(args) -> int:
     head = head.strip() if rc == 0 else "unknown"
     emit(f"PREPUSH_HOST={host}")
     emit(f"PREPUSH_HEAD={head}")
-    emit(f"PREPUSH_PYTHON={sys.executable} {platform_module.python_version()}")
+    emit(f"PREPUSH_PYTHON={sys.executable} {platform_module.python_version()} children={py_exe()}")
     emit("PREPUSH_CHILD_ENV: " + " ".join(f"{k}={v}" for k, v in CHILD_ENV_OVERRIDES.items())
          + " (CI runners use a UTF-8 locale; set for every child)")
     if host == MACOS_ARM64:
@@ -1665,7 +1683,7 @@ def run_outer(args) -> int:
             rc = samples_ok(clone) or rc
         emit(f"PREPUSH_STEP_RC(bootstrap-seed-{name})={rc}")
         results.append((f"bootstrap-seed-{name}", "PASS" if rc == 0 else "FAIL", rc))
-    inner = [sys.executable, str(clone / "native/scripts/ci.py"), "prepush", "--inner", "--head", head]
+    inner = [py_exe(), str(clone / "native/scripts/ci.py"), "prepush", "--inner", "--head", head]
     for name, _, rc in results:
         inner += ["--bootstrap-result", f"{name}={rc}"]
     for s in args.step or []:
@@ -1726,6 +1744,12 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 def main(args) -> int:
     # Child output is UTF-8; a legacy-code-page console or redirect (cp950)
     # cannot encode all of it and would kill the gate mid-run.
+    # Under pythonw with no redirect there is no stdout at all; --log is then
+    # the only output (artifact-first), so write the console copy to devnull.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = sys.stdout
     for s in (sys.stdout, sys.stderr):
         if hasattr(s, "reconfigure"):
             s.reconfigure(encoding="utf-8", errors="replace")
