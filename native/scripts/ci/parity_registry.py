@@ -77,4 +77,7 @@ REGISTRY: dict[str, dict] = {
     "plugin/lib/src/dng_bindings.dart": {
         "guard_lines": 10, "role": "adapter",
         "contract": "native library file name and loader path per OS"},
+    "plugin/lib/src/gpu_shutdown.dart": {
+        "guard_lines": 1, "role": "adapter",
+        "contract": "exit-hook source chosen by dart:ui availability (Flutter vs headless), not by OS; identical behaviour on every OS (6c91791, user T-G exemption; PARITY.md item 10)"},
 }
