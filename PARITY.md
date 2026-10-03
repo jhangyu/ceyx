@@ -50,3 +50,10 @@ generic module or mechanism for every supported platform.
    transitively. They share the Vulkan code path exercised on Windows, and remotely they
    are compile-only. This is a recorded limitation, not a registry entry. Any NEW
    platform difference still needs the decree's explicit user approval.
+10. Inventory note (not a registry entry, not an allowlist exception): the app-close GPU
+    release hook is inert on Android and iOS, because the OS never requests an application
+    exit there; the code is identical on every platform (one AppLifecycleListener
+    onExitRequested, installed from CeyxDecodePool). Desktop delivery: Windows (runner passes
+    WM_CLOSE to the engine first), macOS (terminate-after-last-window, engine termination
+    handler), Linux (FlView `delete-event` -> fl_engine_request_app_exit ->
+    System.requestAppExit).

@@ -43,6 +43,10 @@ id          = "encode_yuv420"
 expected_on = ["macos", "linux", "windows", "android"]
 
 [[group]]
+id          = "gpu_release"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
 id          = "heif"
 expected_on = ["macos", "linux", "windows", "android"]
 
@@ -155,6 +159,13 @@ dart_sites = ["plugin/lib/src/encode_bindings.dart"]
 name       = "ceyx_native_idle_shrink"
 platforms  = "all"
 group      = "arena_idle_shrink"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_native_release_gpu"
+platforms  = "all"
+group      = "gpu_release"
 source     = "native/src/ffi/dng_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 

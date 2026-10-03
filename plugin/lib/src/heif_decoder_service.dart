@@ -2,6 +2,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'heif_bindings.dart';
+import 'gpu_shutdown.dart';
 import 'heif_error_codes.dart';
 import 'still_worker.dart';
 
@@ -85,6 +86,7 @@ class HeifDecoderService {
   /// [HeifDecodeException] when the native side reports an error. Halcyon's
   /// dispatcher turns either into the uniform permanent miss.
   Future<HeifImage> decodeOnWorker(String path, {int? maxDim}) async {
+    CeyxGpuShutdown.guardWork('decodeOnWorker');
     if (!heifAvailable) throw HeifUnavailableException(path);
     final libraryPath = _libraryPath;
     // Hoisted to locals before the closure: referencing a field would capture
