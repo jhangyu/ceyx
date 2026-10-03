@@ -939,21 +939,6 @@ HOST_UNSUPPORTED: dict = {
             "passes its Metal-identical self-gate (decode-main entry above)",
             must=(r"\[FFI lossy\] Halide test render missing",),
             allowed=(r"\[FFI lossy\] Halide test render missing", r"^PREPUSH_CASE_RESULT ffi-dng-lossy FAIL")),
-        **{f"decode-case:{case}": Unsupported(
-            "windows-teardown-fastfail",
-            "every check prints PASS, then the harness process exits 0xC0000409 (STATUS_FAST_FAIL family) at "
-            "teardown -- the same family as the shipped double-click crash fixed in v1.0.16 (CRT/stdio or DLL "
-            "unload order); reproduced by running the harness directly. Campaign lead, high value",
-            must=(r"^PREPUSH_CHILD_EXIT=3221226505$", *passes),
-            allowed=(r"^PREPUSH_CHILD_EXIT=3221226505$", r"exit=3221226505", rf"^PREPUSH_CASE_RESULT {case} FAIL"),
-            kind="known-defect")
-           for case, passes in (
-               ("cfa-color-bggr", (r"^\[CFA COLOR\] .*\[PASS\]$",)),
-               ("encode-yuv420", (r"^\[encode SUMMARY\] executed=[1-9]\d* skipped=0 failed=0$",)),
-               ("ffi-dng-lossless", (r"^\[Contract\] PASS ", r"^\[FFI RGB MATCH\] render: byte_exact=1 .*\[PASS\]$",
-                                     r"^\[Pool\] PASS ")),
-               ("ffi-raw", (r"^\[Contract\] PASS ", r"^\[Contract\] RawGpuPipeline .* -> PASS$", r"^\[Pool\] PASS ")),
-           )},
         "decode-case:sized-decode": Unsupported(
             "windows-sized-decode-psnr",
             "REAL Windows image-quality defect: Stage4 device handoff fails and the degraded host-copy fallback "
