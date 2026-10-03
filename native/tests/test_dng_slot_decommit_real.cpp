@@ -477,5 +477,6 @@ int main(int argc, char **argv) {
       "==================\n\n",
       (long long)released, arena_res_before);
 
+  ceyx_native_release_gpu();
   return test_report::finish(kReportPrefix);
 }
