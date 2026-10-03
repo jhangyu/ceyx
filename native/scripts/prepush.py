@@ -36,14 +36,26 @@ ARTIFACT CONTRACT:
     child process(es) return, `PREPUSH_STEP_RC(<step>)=<rc>` -- the RC is the
     child's own `returncode`, captured in this process, never read off a pipe;
   * exactly one
-    `PREPUSH-SUMMARY host=... head=... total=N passed=N failed=N skipped=N partial=0|1`
+    `PREPUSH-SUMMARY host=... head=... total=N passed=N failed=N skipped=N skipped_host=N partial=0|1`
     line per run; `partial=1` whenever --step/--skip-step narrowed the run,
     so a narrowed green can never be mistaken for the gate;
   * exit code is 0 iff failed == 0.
 
-PRECONDITION, fail-fast: the guards-docker step needs a Docker daemon. When
-it is selected and `docker info` fails, the gate stops before cloning and
-says so.
+TWO KINDS OF SKIP, counted apart:
+  * `skipped`      -- the item belongs to another host's leg (macOS leg on a
+                      Windows host) or is declared manual in gates.py;
+  * `skipped_host` -- the item SHOULD be portable but is not yet runnable on
+                      this host. Each entry in `HOST_UNSUPPORTED` names an
+                      evidence class and evidence, is printed as
+                      `PREPUSH_HOST_UNSUPPORTED ...` (the machine-readable
+                      inventory block at the end of the log), and is
+                      re-proven on every run where that is mechanical: a
+                      declared-unbuildable test target that starts building
+                      turns the gate RED as a stale entry.
+
+GUARDS: with a Docker daemon the guards step runs the digest-pinned
+container form; without one it runs `ci.py guards`'s host form (same roster)
+and prints `guards: host-form (no docker on host)`.
 
 Usage (from a working tree):
     python3 native/scripts/ci.py prepush [--log FILE] [--scratch DIR] [--keep-scratch]
@@ -171,6 +183,7 @@ def capture(argv, cwd, env=None) -> tuple:
 # Step model.
 # ---------------------------------------------------------------------------
 SKIP = "SKIP"
+HOSTSKIP = "HOSTSKIP"
 
 
 @dataclass
@@ -178,6 +191,7 @@ class Ctx:
     clone: Path
     host: str
     env: dict = field(default_factory=dict)  # toolchain env (Windows: vcvars)
+    host_skips: list = field(default_factory=list)  # (item, class, evidence)
 
     def py(self, *args) -> list:
         return [sys.executable, *args]
@@ -216,7 +230,7 @@ JOB_SCOPE: dict = {
     "build.yml:webp-dist-android": ("excluded", "dist leg: tag / run_dists only, committed pinned input"),
     "build.yml:verify-dart": ("included", "flutter pub get + dart analyze (app/) -- steps dart-analyze"),
     "build.yml:verify-native-tests": ("included", "selftest + vendored-LibRaw guards on every host; its test_decode/test_device_handoff build is the test layer's build step"),
-    "build.yml:guards-container": ("included", "the digest-pinned docker guard block, unchanged (step guards-docker; needs a Docker daemon)"),
+    "build.yml:guards-container": ("included", "step guards: the digest-pinned docker form when a Docker daemon is up, else `ci.py guards` host form (same roster, form printed)"),
     "build.yml:all-platforms-green": ("excluded", "aggregator over other jobs' results; no command of its own"),
     "build.yml:publish": ("excluded", "release publication (needs downloaded run artifacts + GitHub token); not a verification step"),
     "android_build.yml:build-android": ("host-specific", "ubuntu runner + apt toolchain + NDK cross-build; not ported to a local host"),
@@ -297,13 +311,18 @@ def docker_available() -> tuple:
     return rc == 0, out.strip()
 
 
-def a_guards_docker(ctx: Ctx):
+def a_guards(ctx: Ctx):
+    """build.yml guards-container. With a Docker daemon: the digest-pinned
+    container form, exactly as CI runs it. Without one: `ci.py guards`'s host
+    form -- the SAME roster through the SAME code path (guards.run_checks,
+    which the container itself invokes via --in-container), minus the pinned
+    interpreter/site-packages. The form that ran is always printed."""
     ok, detail = docker_available()
-    if not ok:
-        emit("::error::Docker daemon unavailable -- `ci.py guards --docker` (build.yml guards-container) cannot run. "
-             f"Start Docker and re-run. docker said: {detail[-300:]}")
-        return 1
-    return ctx.run(ctx.py("native/scripts/ci.py", "guards", "--docker"))
+    if ok:
+        emit(f"guards: docker-form (docker server {detail})")
+        return ctx.run(ctx.py("native/scripts/ci.py", "guards", "--docker"))
+    emit(f"guards: host-form (no docker on host) -- docker said: {detail[-200:]}")
+    return ctx.run(ctx.py("native/scripts/ci.py", "guards"))
 
 
 def a_selftest(ctx: Ctx):
@@ -535,21 +554,81 @@ def _exe(name: str) -> str:
     return name + (".exe" if os.name == "nt" else "")
 
 
+# Items that SHOULD be portable but are not yet runnable on a host -- the
+# platform-fork / blind-instrument inventory (lead ruling 2026-10-03 (b)).
+# Key "target:<cmake target>" or "runner:<script>"; value (class, evidence).
+# Every entry is RE-PROVEN each run: an unsupported target is still built in
+# isolation and must still fail; an unsupported runner is still run and must
+# still exit non-zero. One that passes is a STALE entry and turns the gate
+# red -- remove it from this table so the item is gated again.
+_WIN_DLL_INTERNALS = ("links dng_decoder_native and calls non-FFI internals; a Windows DLL exports only "
+                      "FFI_EXPORT symbols (macOS/Linux shared libs export all), so lld-link reports undefined: ")
+HOST_UNSUPPORTED: dict = {
+    WINDOWS_X64: {
+        "target:test_device_handoff": ("compile-error-posix-header",
+            "native/tests/test_device_handoff.cpp:49 #include <unistd.h> -> clang-cl: 'unistd.h' file not found"),
+        "target:test_raw_end_to_end": ("compile-error-posix-api",
+            "native/tests/test_raw_end_to_end.cpp:325 setenv/unsetenv undeclared (not in the MSVC CRT)"),
+        "target:test_raw_hardening": ("compile-error-posix-api",
+            "native/tests/test_raw_hardening.cpp:327 setenv/unsetenv undeclared (not in the MSVC CRT)"),
+        "target:test_libraw_adapter": ("link-error-dll-internals",
+            _WIN_DLL_INTERNALS + "raw_invert_3x3, raw_bayer_filters_check_2x2, LibRawFrontendContext::* (19 symbols)"),
+        "target:test_raw_sized_decode": ("link-error-dll-internals",
+            _WIN_DLL_INTERNALS + "raw_pipeline_probe_output_size, raw_pipeline_decode_file_into (2 symbols)"),
+        "target:test_raw_render_params": ("link-error-dll-internals",
+            _WIN_DLL_INTERNALS + "raw_build_render_params, dng_render_params_for_test, raw_pcs_white (15 symbols)"),
+        "target:test_stage4_oriented": ("metal-link",
+            "references halide_metal_device_interface and dng_render_stage4_scaled_preavg (Metal-only AOT objects, 4 undefined)"),
+        "runner:native/tests/run_decode_matrix.py": ("metal-pinned-baseline",
+            "native/tests/kernel_regression_baselines.json SHA256 gates lossless_halide_stage3/stage4 pin Metal output bytes; "
+            "Windows Vulkan output differs, so the runner exits at its first gate before any harness case"),
+        "runner:native/tests/run_raw_matrix.py": ("metal-pinned-baseline",
+            "its mandatory dng-regression case runs run_decode_matrix.py (metal-pinned-baseline above), and 5 of its 13 "
+            "binaries are unbuildable here (entries above)"),
+    },
+}
+
+
+def host_unsupported(host: str) -> dict:
+    return HOST_UNSUPPORTED.get(host, {})
+
+
+def _declare_host_skip(ctx: Ctx, item: str, reproof: str) -> None:
+    cls, evidence = host_unsupported(ctx.host)[item]
+    emit(f"PREPUSH_HOST_SKIP({item}): class={cls} reproof={reproof} -- {evidence}")
+    ctx.host_skips.append((item, cls, evidence))
+
+
 def t_build_tests(ctx: Ctx):
     runners, _ = gate_runners(ctx.clone)
     build_dir = WIN_BUILD_DIR if ctx.host == WINDOWS_X64 else "native/build"
     rc, out = capture(["cmake", "--build", build_dir, "--target", "help"], cwd=ctx.clone, env=ctx.env or None)
     available = set(re.findall(r"^([A-Za-z0-9_]+): ", out, re.MULTILINE))
     wanted = sorted({exe for exes in runners.values() for exe in exes})
-    targets = [t for t in wanted if t in available]
+    unsupported = {t for t in wanted if f"target:{t}" in host_unsupported(ctx.host)}
+    targets = [t for t in wanted if t in available and t not in unsupported]
     absent = [t for t in wanted if t not in available]
     for t in absent:
-        emit(f"PREPUSH_TEST_TARGET_NOT_CONFIGURED({t}): this host's configure defines no such target (e.g. android/Metal-only)")
-    emit(f"PREPUSH_TEST_TARGETS wanted={len(wanted)} configured={len(targets)} not_configured={len(absent)}")
+        emit(f"PREPUSH_TEST_TARGET_NOT_CONFIGURED({t}): this host's configure defines no such target (android cross-build target)")
+    emit(f"PREPUSH_TEST_TARGETS wanted={len(wanted)} building={len(targets)} host_unsupported={len(unsupported)} "
+         f"not_configured={len(absent)}")
     if rc != 0 or not targets:
         emit(f"::error::cannot enumerate test targets in {build_dir} (rc={rc})")
         return rc or 1
-    return ctx.run(["cmake", "--build", build_dir, "--target", *targets, "--", "-k", "0"])
+    rc = ctx.run(["cmake", "--build", build_dir, "--target", *targets, "--", "-k", "0"])
+    stale = []
+    for t in sorted(unsupported):
+        probe_rc, probe_out = capture(["cmake", "--build", build_dir, "--target", t], cwd=ctx.clone, env=ctx.env or None)
+        log = ctx.clone / "artifacts" / "host-unsupported" / f"{t}.build.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(probe_out, encoding="utf-8")
+        if probe_rc == 0:
+            stale.append(t)
+            emit(f"::error::STALE host-unsupported entry target:{t}: it now BUILDS on {ctx.host}; "
+                 f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
+        else:
+            _declare_host_skip(ctx, f"target:{t}", f"isolated-build-rc={probe_rc} log={log.relative_to(ctx.clone).as_posix()}")
+    return rc or (1 if stale else 0)
 
 
 def _runner_step(script: str):
@@ -558,7 +637,19 @@ def _runner_step(script: str):
         args = RUNNER_ARGS.get(script, lambda c, b: [])(ctx, build_dir)
         if isinstance(args, tuple) and args and args[0] == SKIP:
             return args
-        return ctx.run(ctx.py(script, *args))
+        item = f"runner:{script}"
+        if item not in host_unsupported(ctx.host):
+            return ctx.run(ctx.py(script, *args))
+        log = ctx.clone / "artifacts" / "host-unsupported" / f"{Path(script).stem}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        rc, out = capture(ctx.py(script, *args), cwd=ctx.clone, env=ctx.env or None)
+        log.write_text(out, encoding="utf-8")
+        if rc == 0:
+            emit(f"::error::STALE host-unsupported entry {item}: it now PASSES on {ctx.host}; "
+                 f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
+            return 1
+        _declare_host_skip(ctx, item, f"runner-rc={rc} log={log.relative_to(ctx.clone).as_posix()}")
+        return (HOSTSKIP, item)
     return action
 
 
@@ -614,7 +705,7 @@ def build_steps(clone: Path) -> list:
     steps = [
         Step("policy-no-prepush-in-workflows", "gate policy (user ruling 2026-10-03): prepush is local-only", ALL_HOSTS, a_policy),
         Step("scope-derivation", "every .github/workflows job classified in JOB_SCOPE", ALL_HOSTS, a_scope),
-        Step("guards-docker", "build.yml:guards-container `ci.py guards --docker`", ALL_HOSTS, a_guards_docker),
+        Step("guards", "build.yml:guards-container `ci.py guards --docker` (host form when no Docker daemon)", ALL_HOSTS, a_guards),
         Step("selftest", "build.yml:verify-native-tests `ci.py selftest`", ALL_HOSTS, a_selftest),
         Step("deps-pytest", "windows_build.yml/linux_build.yml `python -m pytest native/scripts/deps/ -q`", ALL_HOSTS, a_deps_pytest),
         Step("d6-layer1", "macos_build.yml:build `run_dist_equivalence.py --layers l1` (pure argv check, any host)", ALL_HOSTS, a_d6_layer1),
@@ -735,24 +826,44 @@ def run_inner(args) -> int:
             emit(f"PREPUSH_SKIP({step.name}): host={host} -- {outcome[1]}")
             results.append((step.name, "SKIP", None))
             continue
+        if isinstance(outcome, tuple) and outcome and outcome[0] == HOSTSKIP:
+            emit(f"PREPUSH_STEP_HOSTSKIP({step.name}): {outcome[1]} (see PREPUSH_HOST_UNSUPPORTED inventory)")
+            results.append((f"host-unsupported:{outcome[1]}", HOSTSKIP, None))
+            continue
         rc = int(outcome)
         emit(f"PREPUSH_STEP_RC({step.name})={rc}")
         emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
         results.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
+        for item, _, _ in ctx.host_skips:
+            if item.startswith("target:") and (f"host-unsupported:{item}", HOSTSKIP, None) not in results:
+                results.append((f"host-unsupported:{item}", HOSTSKIP, None))
 
+    emit_inventory(ctx)
     return summarize(results, host, args.head or "unknown", partial)
+
+
+def emit_inventory(ctx: Ctx) -> None:
+    """Machine-readable host-unsupported inventory: one tab-separated line
+    per item (host, item, class, evidence) -- plan input for the
+    unification campaign."""
+    emit("")
+    emit(f"==== PREPUSH HOST-UNSUPPORTED INVENTORY host={ctx.host} count={len(ctx.host_skips)} ====")
+    for item, cls, evidence in ctx.host_skips:
+        emit(f"PREPUSH_HOST_UNSUPPORTED\t{ctx.host}\t{item}\t{cls}\t{evidence}")
+    emit("==== END INVENTORY ====")
 
 
 def summarize(results: list, host: str, head: str, partial: bool = False) -> int:
     emit("")
     emit("==== PREPUSH RESULTS ====")
     for name, status, rc in results:
-        emit(f"PREPUSH_RESULT {status:4} {name}" + ("" if rc is None else f" rc={rc}"))
+        emit(f"PREPUSH_RESULT {status:8} {name}" + ("" if rc is None else f" rc={rc}"))
     passed = sum(1 for _, s, _ in results if s == "PASS")
     failed = [n for n, s, _ in results if s == "FAIL"]
     skipped = sum(1 for _, s, _ in results if s == "SKIP")
+    skipped_host = sum(1 for _, s, _ in results if s == HOSTSKIP)
     emit(f"PREPUSH-SUMMARY host={host} head={head} total={len(results)} passed={passed} "
-         f"failed={len(failed)} skipped={skipped} partial={int(partial)}"
+         f"failed={len(failed)} skipped={skipped} skipped_host={skipped_host} partial={int(partial)}"
          + (f" failed_steps={','.join(failed)}" if failed else ""))
     return 1 if failed else 0
 
@@ -790,6 +901,37 @@ def seed(name: str, src: Path, dst: Path) -> int:
     return 1 if mismatched or files == 0 else 0
 
 
+# Samples the test layer reads by default path (run_decode_matrix.py
+# _DEFAULT_RAW_FFI_SAMPLE / _DEFAULT_BGGR_SAMPLE; plugin/test/support/
+# native_fixtures.dart), on top of the sha256-locked fixtures in
+# kernel_regression_baselines.json. A missing one turns the gate red.
+_DEFAULT_SAMPLES = ("image_samples/raw_sample.arw", "image_samples/bayer_conc_a.dng",
+                    "image_samples/lossless_dng_sample.dng")
+
+
+def samples_ok(clone: Path) -> int:
+    import json
+
+    baselines = json.loads((clone / "native/tests/kernel_regression_baselines.json").read_text(encoding="utf-8"))
+    bad = 0
+    for name, info in sorted((baselines.get("fixtures") or {}).items()):
+        path = clone / info.get("path", "")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "MISSING"
+        ok = actual == info.get("sha256")
+        bad += not ok
+        emit(f"PREPUSH_SAMPLE_LOCKED({name}) path={info.get('path')} ok={int(ok)}" + ("" if ok else f" actual={actual}"))
+    for rel in _DEFAULT_SAMPLES:
+        ok = (clone / rel).is_file()
+        bad += not ok
+        emit(f"PREPUSH_SAMPLE_DEFAULT path={rel} present={int(ok)}")
+    if not baselines.get("fixtures"):
+        emit("::error::kernel_regression_baselines.json locks no fixtures")
+        bad += 1
+    if bad:
+        emit(f"::error::{bad} required test sample(s) missing or hash-mismatched in the clone -- provision image_samples/ in the working tree")
+    return 1 if bad else 0
+
+
 def halide_version_ok(dst: Path) -> int:
     sys.path.insert(0, str(REPO_ROOT / "native" / "scripts" / "deps"))
     import fetch_halide  # type: ignore
@@ -814,18 +956,9 @@ def run_outer(args) -> int:
     emit(f"PREPUSH_HOST={host}")
     emit(f"PREPUSH_HEAD={head}")
     emit(f"PREPUSH_PYTHON={sys.executable} {platform_module.python_version()}")
+    emit("PREPUSH_CHILD_ENV: " + " ".join(f"{k}={v}" for k, v in CHILD_ENV_OVERRIDES.items())
+         + " (CI runners use a UTF-8 locale; set for every child)")
     results: list = []
-
-    # Precondition, fail-fast: the docker guard step's daemon.
-    if (not args.step or "guards-docker" in args.step) and "guards-docker" not in (args.skip_step or []):
-        ok, detail = docker_available()
-        emit(f"PREPUSH_PRECONDITION docker={'up' if ok else 'DOWN'}")
-        if not ok:
-            emit("::error::PREPUSH PRECONDITION FAILED: the Docker daemon is not reachable, and the guards-docker step "
-                 "(build.yml guards-container) must run in its digest-pinned container form. Start Docker and re-run; "
-                 f"nothing was cloned or built. docker said: {detail[-300:]}")
-            results.append(("precondition-docker", "FAIL", 1))
-            return summarize(results, host, head)
 
     scratch = Path(args.scratch).resolve() if args.scratch else Path(tempfile.mkdtemp(prefix="ceyx-prepush-"))
     clone = scratch / "ceyx"
@@ -854,6 +987,8 @@ def run_outer(args) -> int:
         rc = seed(name, REPO_ROOT / rel, clone / rel)
         if name == "halide" and rc == 0:
             rc = halide_version_ok(clone / rel)
+        if name == "samples":
+            rc = samples_ok(clone) or rc
         emit(f"PREPUSH_STEP_RC(bootstrap-seed-{name})={rc}")
         results.append((f"bootstrap-seed-{name}", "PASS" if rc == 0 else "FAIL", rc))
 

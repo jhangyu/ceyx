@@ -76,7 +76,12 @@ class TestSummary(unittest.TestCase):
     def test_skip_is_counted_and_not_a_pass(self):
         rc, line = self._summarize([("a", "PASS", 0), ("b", "SKIP", None)])
         self.assertEqual(rc, 0)
-        self.assertIn("total=2 passed=1 failed=0 skipped=1 partial=0", line)
+        self.assertIn("total=2 passed=1 failed=0 skipped=1 skipped_host=0 partial=0", line)
+
+    def test_host_skip_has_its_own_counter(self):
+        rc, line = self._summarize([("a", "PASS", 0), ("host-unsupported:target:x", prepush.HOSTSKIP, None)])
+        self.assertEqual(rc, 0)
+        self.assertIn("passed=1 failed=0 skipped=0 skipped_host=1", line)
 
     def test_any_failure_is_nonzero(self):
         rc, line = self._summarize([("a", "PASS", 0), ("b", "FAIL", 2)], partial=True)
@@ -84,6 +89,25 @@ class TestSummary(unittest.TestCase):
         self.assertIn("failed=1", line)
         self.assertIn("partial=1", line)
         self.assertIn("failed_steps=b", line)
+
+
+class TestHostUnsupportedTable(unittest.TestCase):
+    def test_every_entry_names_kind_class_and_evidence(self):
+        for host, items in prepush.HOST_UNSUPPORTED.items():
+            self.assertIn(host, prepush.ALL_HOSTS)
+            for item, (cls, evidence) in items.items():
+                self.assertTrue(item.startswith(("target:", "runner:")), item)
+                self.assertTrue(cls.strip() and evidence.strip(), item)
+
+    def test_runner_entries_name_real_runners(self):
+        runners, _ = prepush.gate_runners(REPO)
+        for items in prepush.HOST_UNSUPPORTED.values():
+            for item in items:
+                if item.startswith("runner:"):
+                    self.assertIn(item.split(":", 1)[1], runners)
+                else:
+                    exes = {e for v in runners.values() for e in v}
+                    self.assertIn(item.split(":", 1)[1], exes)
 
 
 class TestRoster(unittest.TestCase):
