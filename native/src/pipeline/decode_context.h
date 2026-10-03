@@ -358,6 +358,16 @@ struct DecodeContext {
     stage3_workspace_elements = 0;
   }
 
+  // Device memory is never kept warm at idle (memory-reclamation M1.7): a floor
+  // context keeps its HOST arena committed for the next decode, but its device
+  // scratch goes back to the backend pool, where funnel step 3 can return it.
+  // Same precondition as release_idle_state(): this context is in free_.
+  void release_idle_device_state() {
+    stage2_device_dst = Halide::Runtime::Buffer<uint16_t>();
+    stage2_dst_w = 0;
+    stage2_dst_h = 0;
+  }
+
   // mem8 T3 (SR-6). The IDLE counterpart of reset_for_reuse(): that one makes a
   // context ready for the next decode and deliberately keeps everything warm;
   // this one hands the memory back because no decode is expected soon.
@@ -384,9 +394,7 @@ struct DecodeContext {
     // device free — the same class of teardown as T1's release_metal_buffer,
     // with the same precondition (quiescent, this context is in the free list,
     // no in-flight command buffer), which the caller guarantees.
-    stage2_device_dst = Halide::Runtime::Buffer<uint16_t>();
-    stage2_dst_w = 0;
-    stage2_dst_h = 0;
+    release_idle_device_state();
 
     handoff.buffer.reset();
     stage3_workspace = nullptr;
@@ -557,6 +565,7 @@ class DecodeSlotPool {
   // is not a second lane-width policy; resize() remains the only width funnel.
   size_t decommit_free_to_floor(size_t floor) {
     std::lock_guard<std::mutex> lock(mu_);
+    for (DecodeContext *ctx : free_) ctx->release_idle_device_state();
     if (free_.size() <= floor) return 0;  // degenerate case (D4): success.
     size_t released = 0;
     for (size_t i = floor; i < free_.size(); ++i) {
