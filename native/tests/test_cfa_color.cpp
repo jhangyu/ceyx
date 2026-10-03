@@ -29,6 +29,7 @@
 
 #include "dng_ffi_api.h"
 #include "ceyx_decode_into.h"
+#include "raw_ffi_api.h"
 
 namespace {
 
@@ -71,6 +72,8 @@ ChannelMeans meanTopBand(const uint8_t* rgba, int width, int height,
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Halide #8497: release the GPU while the driver is alive, not in the DLL-unload destructor.
+    std::atexit(ceyx_native_release_gpu);
     if (argc < 2) {
         std::fprintf(stderr,
                      "usage: %s <dng_path> [--min-b-minus-r N] "

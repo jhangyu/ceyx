@@ -156,6 +156,8 @@ bool DumpFile(const char *dir, const char *name, const uint8_t *data,
 }  // namespace
 
 int main(int argc, char **argv) {
+  // Halide #8497: release the GPU while the driver is alive, not in the DLL-unload destructor.
+  std::atexit(ceyx_native_release_gpu);
   // argv[1] = optional RAW file for Case 6; argv[2] = optional directory the
   // encoded JPEGs are dumped into for out-of-process content verification.
   const char *const dump_dir = argc >= 3 ? argv[2] : ".";

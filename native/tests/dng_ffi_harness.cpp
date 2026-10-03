@@ -19,6 +19,7 @@ functions:
 
 #include "dng_ffi_api.h"
 #include "ceyx_decode_into.h"
+#include "raw_ffi_api.h"
 
 #include <chrono>
 #include <cmath>
@@ -255,6 +256,8 @@ bool writeAndCompareRgb(const DngResult &result, const fs::path &artifactDir,
 } // namespace
 
 int main(int argc, char **argv) {
+  // Halide #8497: release the GPU while the driver is alive, not in the DLL-unload destructor.
+  std::atexit(ceyx_native_release_gpu);
   if (argc != 3 && argc != 7) {
     printUsage(argv[0]);
     return 2;
