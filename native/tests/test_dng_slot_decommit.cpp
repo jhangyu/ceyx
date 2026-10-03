@@ -417,6 +417,35 @@ int main() {
   }
 
   // -------------------------------------------------------------------
+  // D8 (memory-reclamation M1.7): device scratch is never kept warm at idle,
+  // even on a floor context; the floor keeps only the HOST arena warm.
+  // -------------------------------------------------------------------
+  {
+    DecodeSlotPool pool(2, kReserveBytes);
+    std::vector<DecodeContext *> ctxs;
+    {
+      std::vector<DecodeSlotPool::Slot> slots;
+      for (int i = 0; i < 2; ++i) slots.push_back(pool.acquire());
+      for (auto &s : slots) {
+        ctxs.push_back(&s.context());
+        driveArena(&s.context(), 0xD8);
+        s.context().stage2_device_dst = Halide::Runtime::Buffer<uint16_t>(64, 64);
+        s.context().stage2_dst_w = 64;
+        s.context().stage2_dst_h = 64;
+      }
+    }
+    const size_t before_a = ctxs[0]->arena.committed_bytes();
+    pool.decommit_free_to_floor(2);
+    CHECK("D8_floor_contexts_release_device_scratch",
+          ctxs[0]->stage2_device_dst.data() == nullptr &&
+              ctxs[1]->stage2_device_dst.data() == nullptr &&
+              ctxs[0]->stage2_dst_w == 0 &&
+              ctxs[0]->arena.committed_bytes() == before_a,
+          "floor 2 with 2 free contexts: device scratch released, host arena "
+          "kept warm");
+  }
+
+  // -------------------------------------------------------------------
   // D8 — GUARD DISCRIMINATION (lead-mandated, 2026-09-20). The case the
   // frozen spec lacks, and the one that proves the substituted predicate does
   // what the spec's could not.
