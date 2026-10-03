@@ -1,5 +1,9 @@
 #include "heap_page_return.h"
 
+// Any C++ standard header pulls in <features.h> on glibc; __GLIBC__ is
+// undefined until then and the platform test below would miss glibc Linux.
+#include <cstdlib>
+
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
 #elif defined(__ANDROID__)
