@@ -752,12 +752,10 @@ void main() {
     setUp(() {
       fakeNow = DateTime.utc(2026, 9, 12, 12);
       CeyxNativeBufferPool.debugClock = () => fakeNow;
-      CeyxNativeBufferPool.debugPressureReliefOverride = null;
     });
 
     tearDown(() {
       CeyxNativeBufferPool.debugClock = DateTime.now;
-      CeyxNativeBufferPool.debugPressureReliefOverride = null;
     });
 
     /// Brings [pool] to `count` idle pooled buffers by checking them all out
@@ -773,12 +771,7 @@ void main() {
       }
     }
 
-    test('TC-1250: shrink frees idle buffers down to the floor, once', () async {
-      var reliefCalls = 0;
-      CeyxNativeBufferPool.debugPressureReliefOverride = () {
-        reliefCalls++;
-        return 0;
-      };
+    test('TC-1250: shrink frees idle buffers down to the floor', () async {
       final pool = CeyxNativeBufferPool(maxBuffers: 6, idleFloor: 2);
       addTearDown(pool.debugDisposeIdle);
       await fillIdle(pool, 6);
@@ -791,14 +784,10 @@ void main() {
       expect(pool.debugLiveBuffers, 2);
       expect(pool.debugShrinkEvents, 1);
       expect(pool.debugBuffersFreedByShrink, 4);
-      // EXACTLY once per batch, not once per freed buffer.
-      expect(reliefCalls, 1);
-      expect(pool.debugPressureReliefCalls, 1);
 
       // Already at the floor: a second call frees nothing and is not an event.
       expect(pool.shrinkToFloor(), 0);
       expect(pool.debugShrinkEvents, 1);
-      expect(reliefCalls, 1);
     });
 
     test('TC-1251: a shrink never frees a checked-out buffer', () async {
@@ -838,19 +827,6 @@ void main() {
       pool.release(adopted); // frees it: unpooled buffers are not idled
       expect(pool.hasOutstandingCheckouts, isFalse);
       expect(pool.shrinkToFloor(), 2);
-    });
-
-    test('TC-1261: every shrink batch either calls the relief or records a skip',
-        () async {
-      // Environment-independent: whether this host resolves the dylib decides
-      // WHICH counter moves, but exactly one of them must move, exactly once.
-      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
-      addTearDown(pool.debugDisposeIdle);
-      await fillIdle(pool, 4);
-
-      expect(pool.shrinkToFloor(), 2);
-
-      expect(pool.debugPressureReliefCalls + pool.debugPressureReliefSkips, 1);
     });
 
     test('TC-1252: a shrink refuses while a waiter is queued', () async {

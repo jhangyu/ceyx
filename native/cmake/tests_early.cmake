@@ -173,6 +173,7 @@ if(ANDROID AND DNG_CROSS_BUILD)
     # Measurement-only target; no kernel / device-ownership code is touched.
     add_executable(dng_ffi_harness_android tests/dng_ffi_harness.cpp
         src/ffi/dng_ffi_api.cpp
+        src/ffi/heap_page_return.cpp
         ${CEYX_PIPELINE_STATIC_SOURCES_ANDROID})
     target_include_directories(dng_ffi_harness_android PRIVATE
         ${INC_DIR}

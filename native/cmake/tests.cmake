@@ -312,6 +312,7 @@ if(DNG_ENABLE_GENERIC_RAW)
         # too. NOTE for WP5: raw_ffi_api.cpp also hosts raw_decode_and_process,
         # which WP5 deletes — re-check this block when that lands.
         src/ffi/dng_ffi_api.cpp
+        src/ffi/heap_page_return.cpp
         src/ffi/ceyx_decode_into_ffi.cpp
         # T5b: the decode-into body moved to the pipeline layer.
         src/pipeline/decode_into.cpp
@@ -699,16 +700,6 @@ if(DNG_STAGE4_SPLIT_KERNEL)
     target_compile_definitions(orient_capability_probe PRIVATE ORIENT_PROBE_SPLIT_KERNEL=1)
 endif()
 # --- end Task 11 ---
-
-# --- win-parity plan P1: pressure-relief capability probe (AC1) ------------
-# Modelled on orient_capability_probe above: dlopen's a library path given on
-# argv at runtime instead of linking dng_decoder_native directly, so the same
-# binary can probe a fresh build or an older fixture (negative control).
-add_executable(pressure_relief_capability_probe tests/pressure_relief_capability_probe.cpp)
-if(UNIX AND NOT APPLE AND NOT ANDROID)
-    target_link_libraries(pressure_relief_capability_probe PRIVATE ${CMAKE_DL_LIBS})
-endif()
-# --- end win-parity plan P1 ---
 
 endif() # NOT DNG_CROSS_BUILD (test targets)
 

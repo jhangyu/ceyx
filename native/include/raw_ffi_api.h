@@ -285,7 +285,7 @@ int64_t ceyx_native_idle_shrink(int32_t floor);
 void ceyx_native_release_gpu(void);
 
 /* ===================================================================== */
-/* Arena idle-release probe (mem8 SR-1, T1; SR-10's volatile counter).    */
+/* Arena idle-release probe (mem8 SR-1, T1).                              */
 /*                                                                        */
 /* DEBUG/PROBE API, same category as the two probes above: NOT part of    */
 /* the Dart-visible surface and nothing is added to DngResult.            */
@@ -296,15 +296,6 @@ void ceyx_native_release_gpu(void);
 /* count, which counts lanes that EXIST. After a shrink the two differ,   */
 /* and that difference is what the shrink accomplished.                   */
 /*                                                                        */
-/* out_volatile_device_bytes is a SEPARATE quantity, never a subtraction: */
-/* a volatile region is still RESIDENT until the OS actually reclaims it, */
-/* so `resident - volatile` would publish a number describing a state     */
-/* that may never occur. It reads 0 until T17's purgeable marking lands,  */
-/* and is present from this export's FIRST release on purpose -- widening */
-/* the signature later would silently mismatch every harness already      */
-/* built against the narrower typedef, which is exactly the trap that     */
-/* keeps ceyx_debug_persistent_device_arena_counters above at five.       */
-/*                                                                        */
 /* Null-pointer convention, same as the probes above: individual          */
 /* out-pointers may be null and are then skipped; returns 0 if at least   */
 /* one was filled, -1 only when ALL are null.                             */
@@ -314,8 +305,7 @@ int32_t ceyx_debug_arena_shrink_counters(
     uint64_t *out_lanes_released,
     uint64_t *out_lanes_refused,
     uint64_t *out_bytes_released,
-    uint64_t *out_resident_lane_count,
-    uint64_t *out_volatile_device_bytes);
+    uint64_t *out_resident_lane_count);
 
 /* Idle-funnel probe (memory-reclamation campaign, PARITY.md clause 4).        */
 /* DEBUG/PROBE API: not Dart-visible, nothing added to DngResult.              */

@@ -189,17 +189,6 @@ typedef CeyxPoolAlignedFreeNative =
     ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
 typedef CeyxPoolAlignedFreeDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
 
-// Pool idle-shrink campaign (2026-09-12): zone-wide "release cached freed
-// blocks back to the OS" sweep, called once after a shrink batch of
-// `ceyx_pool_aligned_free` calls. ADDITIVE and its OWN guarded lookup, same
-// reasoning as the pair above -- a dylib predating this campaign must not
-// null out any group resolved before it. Returns bytes relieved, or
-// kCeyxPressureReliefUnsupported (-1) on a platform/build with no relief
-// mechanism (see native/include/ceyx_decode_into.h).
-const int kCeyxPressureReliefUnsupported = -1;
-typedef CeyxPoolPressureReliefNative = ffi.Int64 Function();
-typedef CeyxPoolPressureReliefDart = int Function();
-
 // mem8 T1/T2 (SR-1): THE ONE NATIVE IDLE FUNNEL. A quiescent host asks the
 // native side to release device regions of every arena lane above `floor`;
 // the return value is the BYTE COUNT released (0 means "nothing to release",
@@ -213,6 +202,10 @@ typedef CeyxNativeIdleShrinkDart = int Function(int floor);
 /// ceyx call; a no-op without a GPU context. See `CeyxGpuShutdown`.
 typedef CeyxNativeReleaseGpuNative = ffi.Void Function();
 typedef CeyxNativeReleaseGpuDart = void Function();
+
+// M4.3 (fork A2): total physical RAM, 0 when unreadable.
+typedef CeyxPhysicalMemoryBytesNative = ffi.Int64 Function();
+typedef CeyxPhysicalMemoryBytesDart = int Function();
 
 // mem8 T14 (SR-9b): the FORMAT-TAKING siblings of the three format-agnostic
 // decode-into entries, frozen by T12.0 in native/include/raw_ffi_api.h. The
@@ -337,11 +330,9 @@ class DngNativeBindings {
   CeyxPoolAlignedAllocDart? _ceyxPoolAlignedAlloc;
   CeyxPoolAlignedFreeDart? _ceyxPoolAlignedFree;
 
-  // Pool idle-shrink campaign: its OWN guarded field, independent of the pair
-  // above — see the typedef comment for why.
-  CeyxPoolPressureReliefDart? _ceyxPoolPressureRelief;
   CeyxNativeIdleShrinkDart? _ceyxNativeIdleShrink;
   CeyxNativeReleaseGpuDart? _ceyxNativeReleaseGpu;
+  CeyxPhysicalMemoryBytesDart? _ceyxPhysicalMemoryBytes;
 
   // mem8 T14: the format-taking entries and the upconvert. Guarded
   // PER-SYMBOL, each in its own try — never as one group. A grouped lookup
@@ -396,13 +387,6 @@ class DngNativeBindings {
   bool get poolAlignedAllocatorAvailable =>
       _ceyxPoolAlignedAlloc != null && _ceyxPoolAlignedFree != null;
 
-  /// Guarded access to the pool idle-shrink pressure-relief sweep. Null when
-  /// the loaded dylib predates it — callers must skip the relief call (plain
-  /// `ceyx_pool_aligned_free` still runs; it just may not fully drop RSS, see
-  /// native/include/ceyx_decode_into.h).
-  CeyxPoolPressureReliefDart? get ceyxPoolPressureRelief =>
-      _ceyxPoolPressureRelief;
-
   /// Guarded access to the mem8 T1 arena idle-release funnel
   /// (`ceyx_native_idle_shrink`). Null when the loaded dylib predates it —
   /// callers SKIP the shrink and count a skip; see
@@ -415,6 +399,11 @@ class DngNativeBindings {
   /// `CeyxGpuShutdown` then logs a loud skip. Tolerated, not thrown: the app is
   /// still correct, it merely keeps the driver-teardown crash on close.
   CeyxNativeReleaseGpuDart? get ceyxNativeReleaseGpu => _ceyxNativeReleaseGpu;
+
+  /// Guarded access to `ceyx_physical_memory_bytes`. Null when the loaded
+  /// library predates it.
+  CeyxPhysicalMemoryBytesDart? get ceyxPhysicalMemoryBytes =>
+      _ceyxPhysicalMemoryBytes;
 
   /// Whether this library exposes the native idle-shrink funnel.
   bool get nativeIdleShrinkAvailable => _ceyxNativeIdleShrink != null;
@@ -595,20 +584,6 @@ class DngNativeBindings {
       _ceyxPoolAlignedFree = null;
     }
 
-    // Pool idle-shrink campaign (2026-09-12): the pressure-relief sweep.
-    // Its OWN try block, same reasoning as the oriented lookup above — a
-    // dylib predating this campaign must not null out the alloc/free pair
-    // already resolved.
-    try {
-      _ceyxPoolPressureRelief = _lib
-          .lookupFunction<
-            CeyxPoolPressureReliefNative,
-            CeyxPoolPressureReliefDart
-          >('ceyx_pool_pressure_relief');
-    } catch (_) {
-      _ceyxPoolPressureRelief = null;
-    }
-
     // mem8 T1/T2 (SR-1): the arena idle-release funnel. Its OWN try block,
     // same reasoning as every guarded lookup above — a dylib predating this
     // campaign must not null out the groups already resolved.
@@ -630,6 +605,18 @@ class DngNativeBindings {
           );
     } catch (_) {
       _ceyxNativeReleaseGpu = null;
+    }
+
+    // M4.3 (fork A2): its OWN try block, so a library predating it keeps every
+    // group resolved above.
+    try {
+      _ceyxPhysicalMemoryBytes = _lib
+          .lookupFunction<
+            CeyxPhysicalMemoryBytesNative,
+            CeyxPhysicalMemoryBytesDart
+          >('ceyx_physical_memory_bytes');
+    } catch (_) {
+      _ceyxPhysicalMemoryBytes = null;
     }
 
     // mem8 T14 (T12.0's frozen contract): four separate try blocks, one per

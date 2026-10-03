@@ -119,57 +119,6 @@ void *ceyx_pool_aligned_alloc(size_t byte_count);
 /// elsewhere).
 void ceyx_pool_aligned_free(void *ptr);
 
-/// Pool idle-shrink campaign (2026-09-12): forces the allocator to release
-/// any freed-but-cached large blocks back to the OS, so a shrink batch of
-/// `ceyx_pool_aligned_free` calls actually drops process RSS instead of
-/// leaving pages parked in the allocator's reusable cache (probe evidence:
-/// ceyx/tmp/free-probe/verdict.md -- plain free() alone left ~32% of freed
-/// bytes resident as MALLOC_LARGE_REUSABLE on macOS). Call ONCE after a
-/// shrink batch completes, not per-free -- it is a zone-wide sweep, not a
-/// per-pointer operation, and `ptr`/`byte_count` play no part in it.
-///
-/// Per-platform mechanism (win-parity plan, 2026-09-12 -- each platform's
-/// return value and what it means):
-///
-/// macOS: wraps `malloc_zone_pressure_relief(NULL, 0)` and returns the
-/// number of bytes the allocator reports as relieved (may be 0 if nothing
-/// was cached -- that is a normal "nothing to relieve" outcome, not a
-/// failure).
-///
-/// glibc Linux (`__linux__ && __GLIBC__`): wraps `malloc_trim(0)`, which
-/// returns 1 when it released memory back to the OS and 0 when it found
-/// nothing to release. Both are mapped straight through (1/0 -> 1/0): both
-/// mean "the mechanism ran", which is the contract's ">= 0" half. `malloc_trim`
-/// does NOT return the pooled ~97MB blocks -- those are mmap'd (well above
-/// glibc's mmap_threshold) and glibc already munmap()s them straight back to
-/// the OS at `free()`/`ceyx_pool_aligned_free()` time, before this function is
-/// ever called. `malloc_trim` here only reclaims what free() itself doesn't:
-/// the heap-top and fastbin memory left behind by everything else. musl and
-/// bionic (Android's NDK libc) define `__linux__` but not `__GLIBC__`, so
-/// they fall through to the unsupported arm below, not this one.
-///
-/// Windows: returns 0, BY DECISION, never -1. Pooled buffers are allocated
-/// via `_aligned_malloc` in ~97MB blocks, far above the NT heap's small
-/// `VirtualMemoryThreshold` (~508KB), so `_aligned_free` (inside
-/// `ceyx_pool_aligned_free`) already `VirtualFree()`s them individually --
-/// there is nothing left in a native heap for a sweep to return. The
-/// equivalent capability Windows actually needs is a process-wide WORKING
-/// SET trim, which is a Win32 API surface the HOST APPLICATION owns, not
-/// this library (Halcyon: `lib/services/platform/working_set_trim_io.dart`,
-/// wired to the pool's `onShrink` callback). 0 here means "the mechanism ran
-/// and had nothing left to return", which is literally true and must stay
-/// distinguishable from -1 ("no mechanism exists on this platform") -- -1
-/// would incorrectly tell the Dart side Windows has no page-return path at
-/// all, when in fact it has one, just not inside this native library.
-///
-/// Every other platform (musl, bionic/Android, anything else): no known
-/// in-process equivalent exists, so this is a documented no-op that returns
-/// kCeyxPressureReliefUnsupported rather than silently claiming 0 bytes were
-/// relieved -- 0 must stay distinguishable from "relieved nothing on a
-/// platform where relief actually ran".
-enum { kCeyxPressureReliefUnsupported = -1 };
-int64_t ceyx_pool_pressure_relief(void);
-
 #ifdef __cplusplus
 }
 #endif

@@ -417,16 +417,20 @@ production), `shrinkToFloor` releases idle slots down to a configurable `idleFlo
 (2 slots in production, versus 8 normally held). Demand regrows the pool for free
 through the normal `acquire` path when decoding resumes.
 
-`ceyx_pool_pressure_relief` — a native FFI entry — then asks the allocator to actually
-return that freed memory to the OS rather than keep it in a process-level free list. The
-mechanism, and what it returns, is platform-specific:
+The native idle funnel (`ceyx_native_idle_shrink`) then returns the memory to the OS.
+It runs four steps in a fixed order: arena release, DNG decode-context decommit,
+device-pool release, and finally page return, which comes last because the earlier steps
+are what free the heap pages. Page return is one function on every platform
+(`return_free_heap_pages`, `native/src/ffi/heap_page_return.h`) that asks the platform
+allocator to hand free pages back, and one counter records each call; the host app
+needs no platform-specific trim of its own. The allocator call differs only as an adapter:
 
-| Platform | Mechanism | Return value |
-|---|---|---|
-| Apple (macOS/iOS) | `malloc_zone_pressure_relief` | Actually returns pages to the OS |
-| Linux (glibc) | `malloc_trim(0)` | Actually returns pages to the OS |
-| Windows | Nothing — pooled buffers are large enough that `_aligned_free` already hands pages back at release time; the process-wide working-set trim is implemented one layer up, in the host app (Halcyon wires it to the pool's `onShrink` callback) | Deliberately returns `0`, not "unsupported" |
-| musl / Android (bionic) | No equivalent mechanism exists | Explicit "unsupported" sentinel, not a silent zero |
+| Platform | Allocator call |
+|---|---|
+| Apple (macOS/iOS) | the malloc zone pressure-relief call |
+| Linux (glibc) | `malloc_trim(0)` |
+| Windows | `HeapCompact` on the process heap |
+| Android (bionic) | `mallopt(M_PURGE)`, resolved at run time; below API 28 it is unavailable and is counted separately from successful calls |
 
 ---
 

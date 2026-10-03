@@ -80,7 +80,6 @@ KNOWN_GROUP_IDS = {
     "ceyx_probe_output_size": "wp10_decode_into_buffer",
     "ceyx_decode_into_buffer_oriented": "oriented",
     "ceyx_pool_aligned_alloc": "pool_aligned",
-    "ceyx_pool_pressure_relief": "pool_pressure_relief",
     # mem8 T1 (SR-1), re-justified by the 2026-10 parity campaign. Deliberately
     # NOT in LEGACY_OPTIONAL_GROUPS, so expected_on is all four legs. Symbol
     # presence is NOT the parity claim (PARITY.md clause 4): the behavioural
@@ -90,6 +89,9 @@ KNOWN_GROUP_IDS = {
     "ceyx_native_idle_shrink": "arena_idle_shrink",
     # M1 T-G (IC9): terminal exit-time GPU release; expected on all four legs.
     "ceyx_native_release_gpu": "gpu_release",
+    # M4.3 (fork A2): the one physical-RAM source for host apps. Not
+    # legacy-optional: expected on all four legs.
+    "ceyx_physical_memory_bytes": "physical_memory",
     # mem8 T12.0's frozen yuv420 contract, bound by T14. FOUR entries, ONE
     # group id on purpose: the Dart lookups are guarded PER-SYMBOL (each in
     # its own try, so a partially-updated library cannot null the rest), but

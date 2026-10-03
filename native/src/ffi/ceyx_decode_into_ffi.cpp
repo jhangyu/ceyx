@@ -38,14 +38,6 @@
 #include <malloc.h>  // _aligned_malloc / _aligned_free
 #endif
 
-#if defined(__APPLE__)
-#include <malloc/malloc.h>  // malloc_zone_pressure_relief
-#endif
-
-#if defined(__linux__) && defined(__GLIBC__)
-#include <malloc.h>  // malloc_trim
-#endif
-
 namespace {
 // R4 (gpu-copy-elimination campaign): the ONE physical alignment constant the
 // pool allocator, the arena (raw_persistent_device_arena.h) and the
@@ -94,37 +86,6 @@ CEYX_FFI_EXPORT void ceyx_pool_aligned_free(void *ptr) {
   _aligned_free(ptr);
 #else
   free(ptr);
-#endif
-}
-
-// Pool idle-shrink + win-parity campaigns: per-platform eager page return.
-// macOS sweeps its malloc zones. glibc Linux's malloc_trim only covers the
-// heap top and fastbins -- the pooled ~97MB blocks are mmap'd (well above
-// mmap_threshold) and are already returned to the OS by munmap() at free()
-// time, not by this call; malloc_trim here reclaims residual small-heap
-// memory. Windows returns 0, not -1, BY DECISION — see ceyx_decode_into.h
-// for the reasoning.
-CEYX_FFI_EXPORT int64_t ceyx_pool_pressure_relief(void) {
-#if defined(__APPLE__)
-  return static_cast<int64_t>(malloc_zone_pressure_relief(nullptr, 0));
-#elif defined(__linux__) && defined(__GLIBC__)
-  // malloc_trim returns 1 when it released memory, 0 when it did not. Both
-  // mean "the mechanism ran", which is what the contract's >= 0 half carries;
-  // -1 stays reserved for "this platform has no mechanism at all".
-  return malloc_trim(0) != 0 ? 1 : 0;
-#elif defined(_WIN32)
-  // No native call here BY DECISION (user parity ruling 2026-09-12), not by
-  // omission. Pooled buffers are ~97MB _aligned_malloc blocks, far above the
-  // NT heap's ~508KB VirtualMemoryThreshold, so RtlFreeHeap already
-  // VirtualFree()s them inside ceyx_pool_aligned_free and a HeapCompact-style
-  // sweep would have nothing left to return. What Windows additionally needs
-  // is a process-wide WORKING-SET trim, which belongs to the host app
-  // (Halcyon: lib/services/platform/working_set_trim_io.dart), not to this
-  // library. 0 = "the mechanism ran and had nothing to return" — the truth
-  // here; -1 would falsely tell Dart that Windows has no page-return path.
-  return 0;
-#else
-  return kCeyxPressureReliefUnsupported;   // musl, bionic, anything else
 #endif
 }
 

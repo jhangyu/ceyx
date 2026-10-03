@@ -95,6 +95,10 @@ int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels);
 /// (12000x9000). Returns 0 for an unknown index.
 int64_t dng_decode_recommendation_class_pixels(int32_t index);
 
+/// Total physical RAM in bytes, or 0 when it cannot be read. The ONE source
+/// for host apps (memory-reclamation campaign M4.3, fork A2).
+int64_t ceyx_physical_memory_bytes(void);
+
 /// R3-3: Set the VkPipelineCache persistence file path (Android/Vulkan only).
 /// Call BEFORE the first warmup/decode with a writable per-app path (e.g.
 /// <cacheDir>/dng_vk_pipeline.cache). Pass NULL or "" to disable.

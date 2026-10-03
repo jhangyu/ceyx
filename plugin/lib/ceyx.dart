@@ -95,6 +95,10 @@ export 'src/codec_format.dart'
 // sentinel the R-J exception reports when no library could be opened at all.
 export 'src/dng_bindings.dart' show ceyxYuv420ToRgba8, kCeyxNoLibraryLoaded;
 
+// M4.3 (fork A2): the one physical-memory source for host apps.
+export 'src/system_memory.dart'
+    show ceyxPhysicalMemoryBytes, debugCeyxPhysicalMemoryBytesOverride;
+
 export 'src/still_error_codes.dart'
     show
         CeyxStillErrorCode,

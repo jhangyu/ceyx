@@ -172,46 +172,12 @@ class RawPersistentDeviceArena {
   // synchronisation to read or write its own bindings.
   bool has_live_binding() const;
 
-  // --- Purgeable marking (SR-10, R-F; mem8 T17) -------------------------
-  // These are MEMBER functions and nothing more: T17 adds no exported C
-  // symbol, no second clock and no policy knob. The only caller of
-  // mark_regions_volatile() is the shrink funnel
-  // (raw_persistent_device_arena_shrink_to_lane_floor), and the only callers
-  // of restore_regions_nonvolatile() are this class's own hand-out paths. If
-  // a future change appears to need an FFI entry point here, that is the
-  // signal to stop and report, not to add one.
-
-  // Marks every resident region of this lane volatile — telling the OS its
-  // contents MAY be discarded under memory pressure. This frees nothing and
-  // guarantees no footprint reduction; it converts "bytes the OS must keep"
-  // into "bytes the OS may take", and that alone is SR-10's deliverable.
-  // Returns bytes NEWLY marked (0 if already volatile, if the lane has a live
-  // binding, or off Metal).
-  uint64_t mark_regions_volatile();
-
-  // Restores every volatile region to non-volatile. MUST be called before any
-  // write reaches a region and before any region is handed to Halide — see
-  // the call sites in bind_region() and ensure_region_host_pointer().
-  // Returns true if EVERY region's contents survived; false if the OS
-  // discarded any, in which case those regions have already been reset to the
-  // released state and will re-allocate on the next bind. A discard is a
-  // CACHE MISS, never an error and never a crash.
-  bool restore_regions_nonvolatile();
-
-  // Bytes of this lane currently marked volatile. Test/diagnostic accessor:
-  // it is what lets a gate assert the per-lane partition (which lanes were
-  // marked) rather than only the process-wide total.
-  uint64_t volatile_region_bytes() const;
-
  private:
   struct ArenaRegionStorage {
     void *metal_buffer = nullptr;  // retained MTLBuffer, or nullptr
     size_t byte_count = 0;         // allocated length of metal_buffer
     halide_buffer_t *bound_halide_buffer = nullptr;  // at most one, see §3.3
     bool unavailable = false;  // a prior allocation failed; stop retrying
-    // Currently marked volatile (SR-10). Never true at the same time as a
-    // released region: clause (f) below makes release dominate volatile.
-    bool is_volatile = false;
   };
 
   ArenaRegionStorage regions_[kRawDeviceArenaRegionCount];
@@ -296,14 +262,8 @@ struct RawArenaShrinkOutcome {
 //     busy lane; it is not a lock and cannot exclude a binding that starts
 //     after it reads. The only real clock is the pool's own quiescence window
 //     (T2).
-// (f) Release dominates volatile. A region that shrink_to_lane_floor releases
-//     is released outright; it is never merely marked volatile. Volatile
-//     marking (SR-10/R-F, T17) applies only to regions this call has decided
-//     NOT to release — below-floor lanes. A region can therefore never be
-//     both, and volatile_device_bytes is never counted against a released
-//     region's bytes. Re-binding a volatile region must restore it to
-//     non-volatile BEFORE any write reaches it, and must treat a "contents
-//     were discarded" answer as a cache miss, not an error.
+// (f) Lanes below the floor keep their regions resident and untouched; there
+//     is no purgeable state.
 RawArenaShrinkOutcome raw_persistent_device_arena_shrink_to_lane_floor(
     size_t floor);
 
@@ -346,23 +306,6 @@ uint64_t raw_persistent_device_arena_shrink_call_count();
 uint64_t raw_persistent_device_arena_shrink_lanes_released();
 uint64_t raw_persistent_device_arena_shrink_lanes_refused();
 uint64_t raw_persistent_device_arena_shrink_bytes_released();
-
-// Of the resident bytes, how many sit in regions currently marked volatile —
-// i.e. reclaimable by the OS at its discretion (SR-10, T17).
-//
-// THIS IS A SEPARATE QUANTITY, NEVER A SUBTRACTION. A volatile region is
-// STILL RESIDENT until the OS actually reclaims it, so reporting
-// `resident - volatile` as "real" residency would publish a number describing
-// a state that may never occur, and would let a purely advisory change look
-// like a footprint win. SR-10's deliverable is reclaimability, not guaranteed
-// footprint.
-//
-// Ships from T1 returning 0, before anything marks a region volatile, so that
-// the probe's out-parameter list is final at its first release: widening
-// ceyx_debug_arena_shrink_counters later would silently mismatch every harness
-// already built against the narrower typedef — the same trap that keeps
-// ceyx_debug_persistent_device_arena_counters at five parameters.
-uint64_t raw_persistent_device_arena_volatile_device_bytes();
 
 // Lanes that currently hold at least one region with device bytes. DERIVED on
 // each call by walking the lane map under its lock — deliberately not cached,

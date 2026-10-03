@@ -65,7 +65,6 @@ GATES: dict[str, str] = {
     "test_heif_color": "manual:test_heif_color  (HEIF H1 known-answer colour gate; see header Usage)",
     "test_render_parameter_cache": "manual:test_render_parameter_cache  (gpu-copy-elim AC5 §9.5; see header)",
     "test_linux_vulkan_capability": "manual:test_linux_vulkan_capability  (Linux+Vulkan only; spec A8 capability gate)",
-    "pressure_relief_capability_probe": "manual:pressure_relief_capability_probe <library-path>",
     "test_raw_bayer_kernel_android": "manual:adb push + run on device (Android cross-build of test_raw_bayer_kernel)",
     "probe_concurrent_raw_android": "manual:adb push + run on device (Android cross-build of probe_concurrent_raw)",
     "test_stage4_yuv420_output_android": "manual:adb push + run on device (Android cross-build of test_stage4_yuv420_output)",

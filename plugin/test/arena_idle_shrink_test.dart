@@ -8,8 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// WHAT IS BEING PROVED: the native idle funnel `ceyx_native_idle_shrink`
 /// (mem8 T1) is reached from exactly one place — the tail of
 /// [CeyxNativeBufferPool.shrinkToFloor] — with the pool's own `idleFloor`,
-/// after the pressure relief and before the host's `onShrink` listener, on
-/// every quiescent shrink (even one that frees no Dart buffer), and never on
+/// on every quiescent shrink (even one that frees no Dart buffer), and never on
 /// the refusal path.
 ///
 /// The highest-severity failure this wiring can have is A3's: a call placed
@@ -19,20 +18,18 @@ import 'package:flutter_test/flutter_test.dart';
 /// guarantee decode quiescence").
 ///
 /// No dylib is needed: `debugArenaIdleShrinkOverride` stands in for the
-/// symbol and `debugPressureReliefOverride` for its neighbour, exactly as the
-/// AC-S1 shrink cases in `native_buffer_pool_test.dart` do.
+/// symbol, exactly as the AC-S1 shrink cases in `native_buffer_pool_test.dart`
+/// do.
 void main() {
   late DateTime fakeNow;
 
   setUp(() {
     fakeNow = DateTime(2026, 9, 20, 12);
     CeyxNativeBufferPool.debugClock = () => fakeNow;
-    CeyxNativeBufferPool.debugPressureReliefOverride = () => 0;
   });
 
   tearDown(() {
     CeyxNativeBufferPool.debugClock = DateTime.now;
-    CeyxNativeBufferPool.debugPressureReliefOverride = null;
     CeyxNativeBufferPool.debugArenaIdleShrinkOverride = null;
     CeyxNativeBufferPool.debugFreeHook = null;
     // The resolution latch is process-wide; without this a null override in
@@ -166,59 +163,41 @@ void main() {
   );
 
   test(
-    'TC-1313 (A4): the arena release happens BEFORE the host onShrink '
-    'listener, and after the pressure relief',
+    'TC-1456 (M4.1): a quiescent shrink reaches native exactly once, through '
+    'the funnel; there is no separate pressure-relief call',
     () async {
-      final order = <String>[];
-      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
+      var funnelCalls = 0;
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (floor) {
+        funnelCalls++;
+        return 0;
+      };
+      addTearDown(() => CeyxNativeBufferPool.debugArenaIdleShrinkOverride = null);
+      final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 1);
       addTearDown(pool.debugDisposeIdle);
-      await fillIdle(pool, 4);
-      CeyxNativeBufferPool.debugFreeHook = (_) => order.add('free');
-      CeyxNativeBufferPool.debugPressureReliefOverride = () {
-        order.add('relief');
-        return 0;
-      };
-      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
-        order.add('arena:$floor');
-        return 0;
-      };
-      pool.onShrink = (int freed) => order.add('onShrink:$freed');
+      await fillIdle(pool, 2);
 
-      expect(pool.shrinkToFloor(), 2);
-
-      // Halcyon couples its Windows working-set trim to onShrink; if the trim
-      // ran before the arena handed its pages back, it would trim the wrong
-      // working set.
-      expect(order, <String>[
-        'free',
-        'free',
-        'relief',
-        'arena:2',
-        'onShrink:2',
-      ]);
+      expect(pool.shrinkToFloor(), 1);
+      expect(funnelCalls, 1);
     },
   );
 
   test(
     'TC-1431 a shrink that frees no Dart buffer still runs the native funnel '
-    'exactly once, and fires no onShrink',
+    'exactly once',
     () async {
       final floors = <int>[];
       CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
         floors.add(floor);
         return 0;
       };
-      var shrinkNotified = false;
       final pool = CeyxNativeBufferPool(maxBuffers: 4, idleFloor: 2);
       addTearDown(pool.debugDisposeIdle);
       await fillIdle(pool, 2); // already at the floor
-      pool.onShrink = (_) => shrinkNotified = true;
 
       expect(pool.shrinkToFloor(), 0, reason: 'precondition: freed == 0');
       expect(floors, <int>[2]);
       expect(pool.debugArenaIdleShrinkCalls, 1);
       expect(pool.debugShrinkEvents, 0);
-      expect(shrinkNotified, isFalse);
     },
   );
 

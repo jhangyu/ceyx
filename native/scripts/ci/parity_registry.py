@@ -25,9 +25,11 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 4, "role": "adapter",
         "contract": "physicalMemoryBytes: the single physical-RAM query (audit A7)"},
     "native/src/ffi/ceyx_decode_into_ffi.cpp": {
-        "guard_lines": 8, "role": "fork-host",
-        "contract": "aligned alloc/free adapter (A4); post-shrink page return is fork B6",
-        "open_forks": ["B6"]},
+        "guard_lines": 3, "role": "adapter",
+        "contract": "aligned alloc/free adapter (A4)"},
+    "native/src/ffi/heap_page_return.cpp": {
+        "guard_lines": 8, "role": "adapter",
+        "contract": "return free heap pages to the OS; ran/unavailable telemetry (TC-1455)"},
     "native/src/ffi/dng_ffi_api.cpp": {
         "guard_lines": 5, "role": "parked",
         "contract": "Android-only Vulkan pipeline-cache persistence (:43-90); not reclamation"},
@@ -67,13 +69,15 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 1, "role": "adapter",
         "contract": "GPU timing probe backend binding"},
     "native/src/pipeline/raw_persistent_device_arena.cpp": {
-        "guard_lines": 3, "role": "fork-host",
-        "contract": "Metal zero-copy lane arena (A11 family); volatile marking is fork B3",
-        "open_forks": ["B3"]},
+        "guard_lines": 3, "role": "accelerator",
+        "contract": "Metal zero-copy lane arena (A11 family); released by funnel step 1"},
     "native/src/pipeline/render_parameter_upload_cache.cpp": {
         "guard_lines": 1, "role": "accelerator",
         "contract": "Metal C3 parameter cache; released by funnel step 3"},
     "plugin/lib/src/dng_bindings.dart": {
         "guard_lines": 10, "role": "adapter",
         "contract": "native library file name and loader path per OS"},
+    "plugin/lib/src/gpu_shutdown.dart": {
+        "guard_lines": 1, "role": "adapter",
+        "contract": "exit-hook source chosen by dart:ui availability (Flutter vs headless), not by OS; identical behaviour on every OS (6c91791, user T-G exemption; PARITY.md item 10)"},
 }
