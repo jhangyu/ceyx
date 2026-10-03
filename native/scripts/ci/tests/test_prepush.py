@@ -96,7 +96,7 @@ class TestHostUnsupportedTable(unittest.TestCase):
         for host, items in prepush.HOST_UNSUPPORTED.items():
             self.assertIn(host, prepush.ALL_HOSTS)
             for item, (cls, evidence) in items.items():
-                self.assertTrue(item.startswith(("target:", "runner:")), item)
+                self.assertTrue(item.startswith(("target:", "runner:", "plugin-test:")), item)
                 self.assertTrue(cls.strip() and evidence.strip(), item)
 
     def test_runner_entries_name_real_runners(self):
@@ -105,6 +105,8 @@ class TestHostUnsupportedTable(unittest.TestCase):
             for item in items:
                 if item.startswith("runner:"):
                     self.assertIn(item.split(":", 1)[1], runners)
+                elif item.startswith("plugin-test:"):
+                    self.assertTrue((REPO / "plugin" / "test" / item.split(":", 1)[1]).is_file(), item)
                 else:
                     exes = {e for v in runners.values() for e in v}
                     self.assertIn(item.split(":", 1)[1], exes)

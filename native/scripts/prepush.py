@@ -97,6 +97,17 @@ SEEDS = {
     "samples": Path("image_samples"),
 }
 
+# Host-specific seeds. The plugin's dylib-fixture suites load the SHIPPED
+# macOS dylib (plugin/test/support/native_fixtures.dart: shippedDylibPath),
+# which `*.dylib` in .gitignore keeps out of every clone. On a macOS host it
+# is copied in, sha256-verified, so those suites run there.
+# IMPLEMENTED-UNVERIFIED-ON-MAC: written and exercised only on a Windows
+# host; the first macOS run is its live proof.
+MACOS_DYLIB = Path("plugin/macos/Libraries/libdng_decoder_native.dylib")
+HOST_SEEDS = {
+    "macos-arm64": {"macos-dylib": MACOS_DYLIB},
+}
+
 WINDOWS_X64 = "windows-x86_64"
 MACOS_ARM64 = "macos-arm64"
 LINUX_X64 = "linux-x86_64"
@@ -381,7 +392,32 @@ def a_flutter_test(subdir: str):
         rc = ctx.run([_flutter(), "pub", "get"], cwd=where)
         if rc != 0:
             return rc
-        return ctx.run([_flutter(), "test"], cwd=where)
+        prefix = f"{subdir}-test:"
+        unsupported = sorted(k[len(prefix):] for k in host_unsupported(ctx.host) if k.startswith(prefix))
+        if not unsupported:
+            return ctx.run([_flutter(), "test"], cwd=where)
+        files = sorted(p.name for p in (where / "test").glob("*_test.dart"))
+        missing = [f for f in unsupported if f not in files]
+        for f in missing:
+            emit(f"::error::STALE host-unsupported entry {prefix}{f}: no such test file; remove it from prepush.HOST_UNSUPPORTED")
+        run_set = [f"test/{f}" for f in files if f not in unsupported]
+        emit(f"PREPUSH_FLUTTER_FILES({subdir}) total={len(files)} running={len(run_set)} host_unsupported={len(unsupported)}")
+        rc = ctx.run([_flutter(), "test", *run_set], cwd=where)
+        stale = len(missing)
+        for f in unsupported:
+            if f in missing:
+                continue
+            probe_rc, out = capture([_flutter(), "test", f"test/{f}"], cwd=where, env=ctx.env or None)
+            log = ctx.clone / REPROOF_DIR / f"{subdir}-{f}.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(out, encoding="utf-8")
+            if probe_rc == 0:
+                stale += 1
+                emit(f"::error::STALE host-unsupported entry {prefix}{f}: it now PASSES on {ctx.host}; "
+                     f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
+            else:
+                _declare_host_skip(ctx, f"{prefix}{f}", f"isolated-run-rc={probe_rc} log={log.relative_to(ctx.clone).as_posix()}", log)
+        return rc or (1 if stale else 0)
     return action
 
 
@@ -563,6 +599,24 @@ def _exe(name: str) -> str:
 # red -- remove it from this table so the item is gated again.
 _WIN_DLL_INTERNALS = ("links dng_decoder_native and calls non-FFI internals; a Windows DLL exports only "
                       "FFI_EXPORT symbols (macOS/Linux shared libs export all), so lld-link reports undefined: ")
+_MACOS_DYLIB_FIXTURE = (
+    "loads the shipped Mach-O plugin/macos/Libraries/libdng_decoder_native.dylib "
+    "(plugin/test/support/native_fixtures.dart:7 shippedDylibPath) and asserts it in setUpAll / via `nm -gU`; "
+    "it is gitignored (.gitignore:36 *.dylib) and a Mach-O dylib cannot be loaded on Windows")
+
+# Defects that are not host skips but are recorded in the same inventory as
+# campaign input (printed on every host, never counted).
+DEFECT_INVENTORY = (
+    ("gitignored-test-fixture",
+     "plugin tests depend on plugin/macos/Libraries/libdng_decoder_native.dylib, which .gitignore:36 (*.dylib) keeps "
+     "out of every fresh clone on every host; the gate seeds it on macOS hosts only. Suites that skip instead of fail "
+     "when it is absent (native_rotation_bindings_test, service_pooled_arms_test, service_resize_retry_test) lose "
+     "coverage silently on any host without it"),
+    ("fetch-halide-windows-layout",
+     "native/scripts/deps/fetch_halide.py already_present() looked only for lib/Halide.lib; the Windows dist ships "
+     "lib/Release/Halide.lib, so every Windows CI run re-downloaded the dist (fixed in its own commit)"),
+)
+
 HOST_UNSUPPORTED: dict = {
     WINDOWS_X64: {
         "target:test_device_handoff": ("compile-error-posix-header",
@@ -579,6 +633,11 @@ HOST_UNSUPPORTED: dict = {
             _WIN_DLL_INTERNALS + "raw_build_render_params, dng_render_params_for_test, raw_pcs_white (15 symbols)"),
         "target:test_stage4_oriented": ("metal-link",
             "references halide_metal_device_interface and dng_render_stage4_scaled_preavg (Metal-only AOT objects, 4 undefined)"),
+        **{f"plugin-test:{name}": ("macos-dylib-fixture", _MACOS_DYLIB_FIXTURE) for name in (
+            "decode_failure_error_code_test.dart", "dng_image_native_address_test.dart",
+            "dng_sized_decode_active_test.dart", "dng_sized_decode_fallback_test.dart",
+            "encode_service_test.dart", "raw_decode_service_test.dart", "raw_symbol_absent_test.dart",
+            "retired_symbols_absent_test.dart", "wp10_decode_into_buffer_symbol_absent_test.dart")},
         "runner:native/tests/run_decode_matrix.py": ("metal-pinned-baseline",
             "native/tests/kernel_regression_baselines.json SHA256 gates lossless_halide_stage3/stage4 pin Metal output bytes; "
             "Windows Vulkan output differs, so the runner exits at its first gate before any harness case"),
@@ -845,7 +904,7 @@ def run_inner(args) -> int:
         emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
         results.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
         for item, _, _ in ctx.host_skips:
-            if item.startswith("target:") and (f"host-unsupported:{item}", HOSTSKIP, None) not in results:
+            if not item.startswith("runner:") and (f"host-unsupported:{item}", HOSTSKIP, None) not in results:
                 results.append((f"host-unsupported:{item}", HOSTSKIP, None))
 
     emit_inventory(ctx)
@@ -860,6 +919,8 @@ def emit_inventory(ctx: Ctx) -> None:
     emit(f"==== PREPUSH HOST-UNSUPPORTED INVENTORY host={ctx.host} count={len(ctx.host_skips)} ====")
     for item, cls, evidence in ctx.host_skips:
         emit(f"PREPUSH_HOST_UNSUPPORTED\t{ctx.host}\t{item}\t{cls}\t{evidence}")
+    for cls, evidence in DEFECT_INVENTORY:
+        emit(f"PREPUSH_DEFECT_INVENTORY\t{ctx.host}\t-\t{cls}\t{evidence}")
     emit("==== END INVENTORY ====")
 
 
@@ -883,25 +944,36 @@ def summarize(results: list, host: str, head: str, partial: bool = False) -> int
 # ---------------------------------------------------------------------------
 def tree_manifest(root: Path) -> dict:
     out = {}
-    for p in sorted(root.rglob("*")):
+    for p in ([root] if root.is_file() else sorted(root.rglob("*"))):
         if p.is_file():
             h = hashlib.sha256()
             with p.open("rb") as fh:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
-            out[p.relative_to(root).as_posix()] = (p.stat().st_size, h.hexdigest())
+            out[p.name if p == root else p.relative_to(root).as_posix()] = (p.stat().st_size, h.hexdigest())
     return out
+
+
+_SEED_HINTS = {
+    "halide": "python3 native/scripts/build_deps.py fetch halide",
+    "samples": "owner-supplied fixtures",
+    "macos-dylib": "build or stage the shipped macOS dylib in the working tree",
+}
 
 
 def seed(name: str, src: Path, dst: Path) -> int:
     emit(f"PREPUSH_SEED({name}): {src} -> {dst}")
-    if not src.is_dir():
-        emit(f"::error::seed source {src} does not exist in the working tree -- fetch it there first "
-             f"({'python3 native/scripts/build_deps.py fetch halide' if name == 'halide' else 'owner-supplied fixtures'})")
+    if not src.exists():
+        emit(f"::error::seed source {src} does not exist in the working tree -- provide it there first "
+             f"({_SEED_HINTS.get(name, '')})")
         return 1
-    if dst.exists():
+    if dst.is_dir():
         shutil.rmtree(dst)
-    shutil.copytree(src, dst, symlinks=False)
+    if src.is_file():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    else:
+        shutil.copytree(src, dst, symlinks=False)
     a, b = tree_manifest(src), tree_manifest(dst)
     files, size = len(b), sum(s for s, _ in b.values())
     mismatched = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
@@ -949,10 +1021,7 @@ def halide_version_ok(dst: Path) -> int:
     machine = "x86_64" if host_key() == WINDOWS_X64 else platform_module.machine()
     _, _, asset = fetch_halide.resolve_asset(platform_module.system(), machine)
     text = (dst / "VERSION").read_text(encoding="utf-8") if (dst / "VERSION").is_file() else ""
-    # The Windows zip lays the import library out as lib/Release/Halide.lib,
-    # which fetch_halide.already_present() (lib/Halide.lib) does not see.
-    libs = ("lib/libHalide.a", "lib/Halide.lib", "lib/Release/Halide.lib")
-    ok = f"asset: {asset}" in text and any((dst / lib).is_file() for lib in libs)
+    ok = f"asset: {asset}" in text and fetch_halide.already_present(dst)
     emit(f"PREPUSH_SEED_HALIDE_ASSET expected={asset} matches={int(ok)}")
     if not ok:
         emit("::error::the working tree's Halide dist is not the pinned asset for this host; re-fetch it there")
@@ -993,7 +1062,9 @@ def run_outer(args) -> int:
     if rc != 0:
         return summarize(results, host, head)
 
-    for name, rel in SEEDS.items():
+    for name, rel in {**SEEDS, **HOST_SEEDS.get(host, {})}.items():
+        if name == "macos-dylib":
+            emit("PREPUSH_SEED_STATUS(macos-dylib): IMPLEMENTED-UNVERIFIED-ON-MAC (first macOS run is its live proof)")
         rc = seed(name, REPO_ROOT / rel, clone / rel)
         if name == "halide" and rc == 0:
             rc = halide_version_ok(clone / rel)
