@@ -6,6 +6,10 @@
 // every push. Remote CI is compile-only (2026-09-07 decree; user ruling
 // 2026-10-03).
 //
+// The process ends with ceyx_native_release_gpu (raw_ffi_api.h): without it
+// Halide releases the GPU from this library's unload at exit, which faults in
+// the Intel Vulkan driver on Windows (0xC0000409).
+//
 // Decodes go through the exported FFI entry (ceyx_decode_into_buffer), not the
 // internal raw_pipeline_* functions: a Windows DLL exports only CEYX_FFI_EXPORT
 // symbols, so the test links the same way on every leg.
@@ -54,10 +58,19 @@ void report(const char* name, bool ok, const char* detail) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  // F1: no GPU use yet -> the release step must SKIP and must not create a device.
+  // F0: the process-end GPU release with no GPU context is a no-op and creates
+  // nothing: a funnel pass right after it still finds no GPU runtime.
+  ceyx_native_release_gpu();
   FunnelCounters a = read_counters();
-  const int64_t r1 = ceyx_native_idle_shrink(0);
+  ceyx_native_idle_shrink(0);
   FunnelCounters b = read_counters();
+  report("F0_release_gpu_creates_nothing_without_gpu",
+         b.skipped - a.skipped == 1 && b.runs == a.runs && b.errors == a.errors, "");
+
+  // F1: no GPU use yet -> the release step must SKIP and must not create a device.
+  a = read_counters();
+  const int64_t r1 = ceyx_native_idle_shrink(0);
+  b = read_counters();
   report("F1_funnel_counts_once", b.funnel_calls - a.funnel_calls == 1, "");
   report("F1_release_skipped_without_gpu",
          b.skipped - a.skipped == 1 && b.runs == a.runs && b.errors == a.errors && r1 >= 0, "");
@@ -69,6 +82,7 @@ int main(int argc, char** argv) {
   // F2: after a real decode the GPU runtime exists -> the release step must RUN.
   if (!decode_one(argv[1])) {
     std::printf("[IdleFunnel] decode of %s failed\n", argv[1]);
+    ceyx_native_release_gpu();
     return 2;  // a skipped real decode never reads as a pass
   }
   a = read_counters();
@@ -81,5 +95,6 @@ int main(int argc, char** argv) {
   report("F3_second_pass_runs_without_error", c.runs - b.runs == 1 && c.errors == b.errors, "");
   // F4: decoding after a release re-grows the pool and succeeds.
   report("F4_decode_after_release_succeeds", decode_one(argv[1]), "");
+  ceyx_native_release_gpu();
   return test_report::finish(kReportPrefix);
 }

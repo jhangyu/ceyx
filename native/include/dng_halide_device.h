@@ -29,3 +29,8 @@ enum class DngDeviceReleaseResult : int32_t {
 // Step 3 of ceyx_native_idle_shrink. The caller guarantees decode quiescence
 // (raw_ffi_api.h clause (e)). Never creates a GPU instance or device.
 DngDeviceReleaseResult dng_halide_release_unused_device_memory();
+
+// Destroys this process's GPU device context (ceyx_native_release_gpu, the
+// contract is in raw_ffi_api.h). Same call on every backend; a no-op that
+// creates nothing when no context exists.
+void dng_halide_release_device();

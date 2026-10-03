@@ -266,6 +266,25 @@ int32_t ceyx_debug_persistent_device_arena_counters(
 int64_t ceyx_native_idle_shrink(int32_t floor);
 
 /* ===================================================================== */
+/* Process-end GPU release (memory-reclamation campaign M1).              */
+/*                                                                        */
+/* Destroys this process's GPU device context and everything allocated   */
+/* in it, through Halide's halide_device_release on the active backend's */
+/* device interface -- the same call on every platform.                   */
+/*                                                                        */
+/* WHY A HOST MUST CALL IT: Halide's AOT contract requires the release to */
+/* be explicit. Left to the runtime's own destructor, it runs while this  */
+/* library is unloaded at process exit, after the GPU driver may already  */
+/* be torn down: on Windows the Intel Vulkan driver then faults with      */
+/* 0xC0000409 (Halide issue 8497).                                        */
+/*                                                                        */
+/* TERMINAL: call it once, from a quiescent host (no decode in flight and */
+/* none after it), as the last ceyx call before the process exits. With   */
+/* no GPU context in the process it is a no-op and creates nothing.       */
+/* ===================================================================== */
+void ceyx_native_release_gpu(void);
+
+/* ===================================================================== */
 /* Arena idle-release probe (mem8 SR-1, T1; SR-10's volatile counter).    */
 /*                                                                        */
 /* DEBUG/PROBE API, same category as the two probes above: NOT part of    */

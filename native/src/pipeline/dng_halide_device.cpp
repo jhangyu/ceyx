@@ -106,3 +106,16 @@ DngDeviceReleaseResult dng_halide_release_unused_device_memory() {
         return DngDeviceReleaseResult::kSkippedUninitialized;
     }
 }
+
+void dng_halide_release_device() {
+    // Halide's AOT contract (HalideRuntime.h, halide_device_release): must be
+    // called explicitly. Left to the runtime's own destructor, the release
+    // runs from this library's unload at process exit, after the GPU driver
+    // may already be torn down (Halide issue 8497; 0xC0000409 in the Intel
+    // Vulkan driver on Windows). Every backend acquires its context here with
+    // create=false, so this never creates one.
+    const halide_device_interface_t* device_interface = dng_halide_gpu_device_interface();
+    if (device_interface != nullptr) {
+        halide_device_release(nullptr, device_interface);
+    }
+}

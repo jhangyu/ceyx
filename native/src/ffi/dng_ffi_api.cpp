@@ -402,6 +402,10 @@ CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
   return total;
 }
 
+CEYX_FFI_EXPORT void ceyx_native_release_gpu(void) {
+  dng_halide_release_device();
+}
+
 CEYX_FFI_EXPORT int32_t ceyx_debug_idle_funnel_counters(
     uint64_t *out_funnel_calls, uint64_t *out_device_release_runs,
     uint64_t *out_device_release_skipped_uninitialized,
