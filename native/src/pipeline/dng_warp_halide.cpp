@@ -29,15 +29,7 @@
 #include <dng_pixel_buffer.h>
 #include <dng_rect.h>
 #include <dng_utils.h>
-// W4 (2026-08-21, Windows port): POSIX mapping headers are unavailable under
-// MSVC/clang-cl; acquireZeroCoordBuffer below uses VirtualAlloc there. (The
-// LazyZeroBuf helper further down is already inside an __ANDROID__ guard.)
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
+#include "virtual_region.h"
 
 namespace {
 
@@ -459,7 +451,7 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
 // Mutex rework (2026-09-03, B2): was a single shared, growable static buffer
 // (three file statics for pointer/size/allocation-origin, plus a mutex) whose
 // mutex covered the grow but NOT the returned pointer's lifetime -- a second
-// decode with a larger frame would munmap pages the first decode's warp kernel
+// decode with a larger frame would unmap pages the first decode's warp kernel
 // was still
 // reading (SIGSEGV, or recycled pages delivering arbitrary warp coordinates).
 // Now allocated per decode and owned by a move-only RAII holder.
@@ -471,85 +463,36 @@ bool copyHalideOutputToHost(Buffer<uint16_t>& dst_buf) {
 // uncommitted. Only the address space is per-decode, not resident memory.
 //
 // The calloc fallback and its origin tracking are preserved deliberately:
-// calloc'd memory must never reach munmap/VirtualFree (see commit e05a9a4,
+// calloc'd memory must never reach the region release (see commit e05a9a4,
 // "fix(native): free getOrGrowZeroBuf by allocation origin"). The origin flag
 // moved from a file static into the holder, which is where it belonged.
 class ZeroCoordBuffer {
 public:
     ZeroCoordBuffer() = default;
-    ZeroCoordBuffer(int32_t* ptr, size_t bytes, bool from_calloc)
-        : ptr_(ptr), bytes_(bytes), from_calloc_(from_calloc) {}
-    ZeroCoordBuffer(ZeroCoordBuffer&& o) noexcept { *this = std::move(o); }
-    ZeroCoordBuffer& operator=(ZeroCoordBuffer&& o) noexcept {
-        if (this != &o) {
-            release();
-            ptr_ = o.ptr_;
-            bytes_ = o.bytes_;
-            from_calloc_ = o.from_calloc_;
-            o.ptr_ = nullptr;
-            o.bytes_ = 0;
-            o.from_calloc_ = false;
-        }
-        return *this;
+    explicit ZeroCoordBuffer(size_t bytes) : region_(bytes) {
+        if (region_.ensure_committed(bytes)) return;
+        region_ = VirtualRegion{};
+        // calloc fallback (e05a9a4): owned by a free() deleter, so it can never
+        // reach the region release.
+        calloc_.reset(static_cast<int32_t*>(std::calloc(bytes / sizeof(int32_t), sizeof(int32_t))));
     }
-    ZeroCoordBuffer(const ZeroCoordBuffer&) = delete;
-    ZeroCoordBuffer& operator=(const ZeroCoordBuffer&) = delete;
-    ~ZeroCoordBuffer() { release(); }
-
-    const int32_t* data() const { return ptr_; }
-    explicit operator bool() const { return ptr_ != nullptr; }
+    const int32_t* data() const {
+        return region_.base() != nullptr ? reinterpret_cast<const int32_t*>(region_.base())
+                                         : calloc_.get();
+    }
+    explicit operator bool() const { return data() != nullptr; }
 
 private:
-    void release() {
-        if (!ptr_) {
-            return;
-        }
-        if (from_calloc_) {
-            std::free(ptr_);
-        } else {
-#if defined(_WIN32)
-            VirtualFree(ptr_, 0, MEM_RELEASE);
-#else
-            munmap(ptr_, bytes_);
-#endif
-        }
-        ptr_ = nullptr;
-        bytes_ = 0;
-        from_calloc_ = false;
-    }
-
-    int32_t* ptr_ = nullptr;
-    size_t bytes_ = 0;
-    bool from_calloc_ = false;
+    struct FreeDeleter {
+        void operator()(int32_t* p) const { std::free(p); }
+    };
+    VirtualRegion region_;
+    std::unique_ptr<int32_t, FreeDeleter> calloc_;
 };
 
 ZeroCoordBuffer acquireZeroCoordBuffer(int width, int height) {
-    const size_t needed_elems = static_cast<size_t>(width) * height * 3u;
-    const size_t needed_bytes = needed_elems * sizeof(int32_t);
-    bool from_calloc = false;
-#if defined(_WIN32)
-    // MEM_RESERVE|MEM_COMMIT gives lazily-backed zero pages, matching the
-    // MAP_ANON property this buffer depends on (the kernel never reads it
-    // when precompute_coords=false, so pages stay uncommitted).
-    void* p = VirtualAlloc(nullptr, needed_bytes, MEM_RESERVE | MEM_COMMIT,
-                           PAGE_READWRITE);
-    if (p == nullptr) {
-        p = std::calloc(needed_elems, sizeof(int32_t));
-        from_calloc = true;
-    }
-#else
-    void* p = mmap(nullptr, needed_bytes,
-                   PROT_READ | PROT_WRITE,
-                   MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (p == MAP_FAILED) {
-        p = std::calloc(needed_elems, sizeof(int32_t));
-        from_calloc = true;
-    }
-#endif
-    if (!p) {
-        return ZeroCoordBuffer{};
-    }
-    return ZeroCoordBuffer(static_cast<int32_t*>(p), needed_bytes, from_calloc);
+    const size_t needed_bytes = static_cast<size_t>(width) * height * 3u * sizeof(int32_t);
+    return ZeroCoordBuffer(needed_bytes);
 }
 
 bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
@@ -592,7 +535,7 @@ bool runWarpHalideAot(const uint16_t* src_interleaved_rgb,
 
     // The rectilinear_warp ABI lists 4 coord buffers as Inputs (base_x/base_y/
     // frac_x/frac_y), but the production kernel never reads them. Feed a
-    // per-decode lazy-zero mmap placeholder for all four — no per-call
+    // per-decode lazy-zero placeholder for all four — no per-call
     // zero-fill (~73 MB saved).
     //
     // LIFETIME (B2): the holder must outlive every buffer view built over it
