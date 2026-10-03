@@ -55,6 +55,7 @@ GATES: dict[str, str] = {
     "test_persistent_device_arena_shrink": "manual:test_persistent_device_arena_shrink  (mem8 T1 SR-1; see header)",
     "test_dng_slot_decommit": "runner:native/scripts/prepush.py",
     "test_idle_funnel": "runner:native/scripts/prepush.py",
+    "test_virtual_region": "runner:native/scripts/prepush.py",
     "test_dng_slot_decommit_real": "manual:test_dng_slot_decommit_real <dng_file>",
     "test_zero_copy_capability_paths": "manual:test_zero_copy_capability_paths [<raw_file>...]",
     "test_concurrent_raw_decode": "manual:test_concurrent_raw_decode  (multi-lane RAW concurrency; see header Usage)",

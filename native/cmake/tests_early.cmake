@@ -513,6 +513,10 @@ target_include_directories(test_idle_funnel PRIVATE
 target_link_libraries(test_idle_funnel PRIVATE dng_decoder_native)
 add_dependencies(test_idle_funnel dng_decoder_native)
 
+# Memory-reclamation campaign M5: VirtualRegion contract V1-V5, every leg.
+add_executable(test_virtual_region tests/test_virtual_region.cpp)
+target_include_directories(test_virtual_region PRIVATE ${SRC_DIR}/pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
 # T3-real gate (mem8 SR-6): the same funnel, driven by a REAL DNG decode
 # through the shipping FFI entry instead of a synthetic arena. Closes the one
 # gap the sibling gate above structurally cannot: that the production decode

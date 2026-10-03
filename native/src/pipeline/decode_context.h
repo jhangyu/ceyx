@@ -23,77 +23,50 @@
 
 #include "HalideBuffer.h"
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <unistd.h>   // mem8 T3: sysconf(_SC_PAGESIZE) for decommit()'s length
-#endif
+#include "virtual_region.h"
 
 class dng_host;
 
-// Bump allocator over lazily-backed zero pages.
+// Bump allocator over a VirtualRegion.
 //
 // No per-allocation free, no free list, no best-fit scan, no eviction policy:
-// the whole region is reclaimed by reset() at decode end. Pages arrive on first
-// touch (MAP_ANON / MEM_RESERVE|MEM_COMMIT), which preserves the property the
+// the whole region is reclaimed by reset() at decode end. The address space is
+// reserved up front; pages are committed on grow through VirtualRegion (64 MiB
+// granules) and arrive on first touch, which preserves the property the
 // buffers this replaces were built around (dng_pipeline.cpp cites a ~262ms
 // eager zero-fill avoided by the mmap-backed Stage3WorkspacePool).
 class DecodeArena {
  public:
-  explicit DecodeArena(size_t reserve_bytes) {
-    if (reserve_bytes == 0) {
-      base_ = nullptr;
-      capacity_ = 0;
-      return;
-    }
-#if defined(_WIN32)
-    void *p = VirtualAlloc(nullptr, reserve_bytes, MEM_RESERVE | MEM_COMMIT,
-                           PAGE_READWRITE);
-    base_ = (p == nullptr) ? nullptr : static_cast<uint8_t *>(p);
-#else
-    void *p = mmap(nullptr, reserve_bytes, PROT_READ | PROT_WRITE,
-                   MAP_ANON | MAP_PRIVATE, -1, 0);
-    base_ = (p == MAP_FAILED) ? nullptr : static_cast<uint8_t *>(p);
-#endif
-    capacity_ = base_ ? reserve_bytes : 0;
-  }
-
-  ~DecodeArena() {
-    if (!base_) return;
-#if defined(_WIN32)
-    // MEM_RELEASE requires size 0 and the exact base returned by VirtualAlloc.
-    VirtualFree(base_, 0, MEM_RELEASE);
-#else
-    munmap(base_, capacity_);
-#endif
-  }
+  explicit DecodeArena(size_t reserve_bytes) : region_(reserve_bytes) {}
 
   DecodeArena(const DecodeArena &) = delete;
   DecodeArena &operator=(const DecodeArena &) = delete;
 
-  // Returns nullptr on exhaustion. The arena deliberately does NOT grow: a
-  // growing arena would move memory a caller is still holding, which is the
-  // exact bug class this design removes.
+  // Returns nullptr on exhaustion (including a refused commit). The arena
+  // deliberately does NOT grow: a growing arena would move memory a caller is
+  // still holding, which is the exact bug class this design removes.
   void *allocate(size_t bytes, size_t align = 64) {
-    if (!base_) return nullptr;
+    uint8_t *const base = region_.base();
+    if (base == nullptr) return nullptr;
     // align must be a power of two; the mask below assumes it.
     if (align == 0 || (align & (align - 1)) != 0) return nullptr;
     const size_t aligned = (offset_ + (align - 1)) & ~(align - 1);
-    if (aligned < offset_) return nullptr;             // overflow on rounding
-    if (bytes > capacity_ - aligned) return nullptr;   // overflow-safe bound
+    if (aligned < offset_) return nullptr;                     // overflow on rounding
+    if (bytes > region_.capacity() - aligned) return nullptr;  // overflow-safe bound
+    // Commit on grow: a refused commit is exhaustion, the existing failure path.
+    if (!region_.ensure_committed(aligned + bytes)) return nullptr;
     offset_ = aligned + bytes;
     if (offset_ > high_water_) high_water_ = offset_;
     // mem8 T3 (SR-6): committed_ tracks pages touched SINCE the last
     // decommit(), so it re-grows naturally after a decommit while high_water_
     // keeps its monotonic, process-lifetime meaning.
     if (offset_ > committed_) committed_ = offset_;
-    return base_ + aligned;
+    return base + aligned;
   }
 
   void reset() { offset_ = 0; }
   size_t high_water() const { return high_water_; }
-  size_t capacity() const { return capacity_; }
+  size_t capacity() const { return region_.capacity(); }
 
   // mem8 T3-real. DEBUG/TEST INSTRUMENTATION ONLY — the mapping's base, so a
   // test can ask the kernel how many of THESE pages are host-resident.
@@ -112,7 +85,7 @@ class DecodeArena {
   // Returns nullptr for a zero-reserve arena. Never dereference this — it is an
   // address to MEASURE, not to read: after decommit() the contents are
   // undefined by construction.
-  const void *base_address() const { return base_; }
+  const void *base_address() const { return region_.base(); }
 
   // mem8 T3 (SR-6). Bytes this arena has actually TOUCHED and not yet handed
   // back to the OS. Distinct from high_water() on purpose:
@@ -125,120 +98,26 @@ class DecodeArena {
   //                 physical pages".
   size_t committed_bytes() const { return committed_; }
 
-  // mem8 T3 (SR-6): hand the touched pages back to the OS, keeping the mapping
-  // and capacity_ intact so the next decode needs no re-commit step.
+  // mem8 T3 (SR-6): hand the touched pages back to the OS, keeping the
+  // reservation and capacity intact.
   //
   // PRECONDITION, asserted rather than documented-only: offset_ == 0, i.e. this
   // arena has been reset() and its owning context is sitting in the pool's free
   // list. Discarding pages under a live bump offset would hand undefined
   // contents to a decode that still holds pointers into them.
   //
-  // WINDOWS MUST NOT USE MEM_DECOMMIT. The constructor commits the whole
-  // reserve and allocate() assumes committed memory with no re-commit step, so
-  // MEM_DECOMMIT would fault the next decode. DiscardVirtualMemory is the true
-  // analogue of MADV_FREE: the commit charge stays, the physical pages go back,
-  // the contents become undefined — which is sound precisely because reset()
-  // already means "nothing here is live". MEM_RESET is the documented fallback
-  // when DiscardVirtualMemory is unavailable at the configured SDK level.
-  // D3 is the test that would catch a violation, and it must be run on a real
-  // Windows host before release — a compile-only CI leg cannot catch it.
+  // Commit charge and pages go back through VirtualRegion::decommit(); allocate() re-commits on grow, so the next decode cannot fault.
   void decommit() {
     assert(offset_ == 0 &&
            "DecodeArena::decommit() requires a reset() arena — a context in "
            "the pool's free list. Discarding pages under a live bump offset "
            "hands undefined contents to a decode still holding pointers.");
-    if (!base_ || high_water_ == 0) return;
-    // Only the touched prefix, never the whole 1.5 GiB reserve: the untouched
-    // tail has no physical pages to return.
-    size_t len = round_up_to_page(high_water_);
-    if (len > capacity_) len = capacity_;
-    if (len == 0) return;
-#if defined(_WIN32)
-    if (!discard_pages_win32(base_, len)) {
-      // Never MEM_DECOMMIT — see the contract above.
-      VirtualAlloc(base_, len, MEM_RESET, PAGE_READWRITE);
-    }
-#elif defined(__APPLE__) && defined(MADV_FREE_REUSABLE)
-    // APPLE: MADV_FREE_REUSABLE, not plain MADV_FREE. The difference is
-    // load-bearing, and it was MEASURED on this host rather than assumed — one
-    // variant per PROCESS, so no reading started from a baseline an earlier
-    // call had already collapsed (native/tests/tmp/t3-12-isolated-variants.txt;
-    // 64 MiB anonymous private mapping, each re-touched afterwards to confirm
-    // the mapping survives):
-    //
-    //   MADV_FREE (5)          rc=0   phys_footprint drop = 0
-    //   MADV_DONTNEED (4)      rc=0   phys_footprint drop = 0
-    //   MADV_FREE_REUSABLE (7) rc=0   phys_footprint drop = 67108864 (exact)
-    //
-    // Note what that says about return codes: ALL THREE REPORT SUCCESS and two
-    // of them reclaim nothing, so a decommit validated by checking madvise's rc
-    // would pass while returning no memory at all. MADV_FREE_REUSABLE is the
-    // primitive libmalloc itself uses for this and decrements the footprint
-    // immediately. Contents become undefined, which is sound because reset()
-    // already means "nothing here is live"; the next touch re-faults (D3).
-    //
-    // resident_size moved for NONE of the three — it is not the observable for
-    // this question on Darwin, which is why D7 reads phys_footprint.
-    if (madvise(base_, len, MADV_FREE_REUSABLE) != 0) {
-      // Reached only if the kernel refuses the range. Plain MADV_FREE returns
-      // the pages on the kernel's own schedule rather than immediately; the
-      // measurement above shows that is weaker, so it is a fallback and never
-      // the primary path.
-      madvise(base_, len, MADV_FREE);
-    }
-#elif defined(MADV_FREE)
-    madvise(base_, len, MADV_FREE);
-#else
-    // Older Linux kernels (< 4.5) have no MADV_FREE. MADV_DONTNEED on a
-    // PRIVATE ANONYMOUS mapping is the correct analogue there: it drops the
-    // pages and the next touch faults in a fresh zero page. It is NOT correct
-    // for shared or file-backed mappings, which is why it is reached only from
-    // this arena's own private anonymous mmap.
-    madvise(base_, len, MADV_DONTNEED);
-#endif
+    region_.decommit();
     committed_ = 0;
   }
 
  private:
-  static size_t round_up_to_page(size_t n) {
-    const size_t page = page_size();
-    if (page == 0) return n;
-    const size_t rounded = (n + page - 1) & ~(page - 1);
-    return rounded < n ? n : rounded;  // overflow guard
-  }
-
-  static size_t page_size() {
-#if defined(_WIN32)
-    static const size_t p = [] {
-      SYSTEM_INFO si;
-      GetSystemInfo(&si);
-      return static_cast<size_t>(si.dwPageSize);
-    }();
-#else
-    static const size_t p = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-#endif
-    return p;
-  }
-
-#if defined(_WIN32)
-  // Resolved at runtime so the build does not hard-require a Win8+ SDK
-  // baseline just for this call. Returns false when unavailable, which sends
-  // decommit() to the MEM_RESET fallback.
-  static bool discard_pages_win32(void *addr, size_t len) {
-    using DiscardFn = DWORD(WINAPI *)(PVOID, SIZE_T);
-    static const DiscardFn fn = [] {
-      HMODULE m = GetModuleHandleW(L"kernel32.dll");
-      return m ? reinterpret_cast<DiscardFn>(
-                     GetProcAddress(m, "DiscardVirtualMemory"))
-               : nullptr;
-    }();
-    if (!fn) return false;
-    return fn(addr, len) == ERROR_SUCCESS;
-  }
-#endif
-
-  uint8_t *base_ = nullptr;
-  size_t capacity_ = 0;
+  VirtualRegion region_;
   size_t offset_ = 0;
   size_t high_water_ = 0;
   // mem8 T3 (SR-6): see committed_bytes(). Maintained in allocate() with one

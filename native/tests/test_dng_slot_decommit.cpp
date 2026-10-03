@@ -20,40 +20,10 @@
 #include "decode_context.h"
 #include "dng_pipeline.h"  // D8: the guard pair and the non-publishing accessor
 #include "raw_ffi_api.h"   // D0/D8: the idle funnel and the T3 residency probe
+#include "test_memory_instrument.h"
 #include "test_report.h"
 
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#endif
-
 namespace {
-
-// Physical footprint of THIS process, or 0 when unavailable on the platform.
-// Test-only: the mach header is included here and never by the production
-// header, so decode_context.h stays portable.
-//
-// phys_footprint, NOT resident_size, and that was MEASURED rather than assumed.
-// The first draft of D7 used resident_size and reported a flat zero drop
-// against a CORRECT implementation. An isolated probe
-// (native/tests/tmp/t3-12-isolated-variants.txt, one variant per process so no
-// reading starts from a baseline an earlier call collapsed) showed
-// resident_size moving for NO madvise variant on this host, while
-// phys_footprint drops by exactly the driven byte count for
-// MADV_FREE_REUSABLE. resident_size is simply not the observable for this
-// question on Darwin.
-size_t processFootprintBytes() {
-#if defined(__APPLE__)
-  task_vm_info_data_t info;
-  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-  if (task_info(mach_task_self(), TASK_VM_INFO,
-                reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) {
-    return 0;
-  }
-  return static_cast<size_t>(info.phys_footprint);
-#else
-  return 0;
-#endif
-}
 
 using test_report::failures;
 constexpr const char kReportPrefix[] = "DngSlotDecommit";
@@ -103,12 +73,12 @@ int main() {
   // a cold process.
   // -------------------------------------------------------------------
   {
-    const size_t fp_before = processFootprintBytes();
+    const size_t fp_before = process_backing_bytes();
     uint64_t committed = 1, calls = 1, ctxs_done = 1, physical = 1;
     const int32_t probe_rc = ceyx_debug_dng_slot_residency_counters(
         &committed, &calls, &ctxs_done, &physical);
     const int64_t shrink_bytes = ceyx_native_idle_shrink(2);
-    const size_t fp_after = processFootprintBytes();
+    const size_t fp_after = process_backing_bytes();
     const size_t fp_grew = fp_after > fp_before ? fp_after - fp_before : 0;
 
     std::printf(
@@ -368,52 +338,46 @@ int main() {
     constexpr size_t kBigDrive = 64u * 1024u * 1024u;
     constexpr int kCtxCount = 4;
 
-    const size_t fp_start = processFootprintBytes();
-    if (fp_start == 0) {
-      // A coverage hole, not a pass: without a resident-size instrument nothing
-      // in this binary would catch a decommit that returns no pages.
-      test_report::reportSkip(kReportPrefix, "D7", "no-resident-size-instrument");
-    } else {
-      DecodeSlotPool pool(kCtxCount, kBigReserve);
-      {
-        std::vector<DecodeSlotPool::Slot> slots;
-        for (int i = 0; i < kCtxCount; ++i) slots.push_back(pool.acquire());
-        for (auto &s : slots) {
-          auto *p = static_cast<uint8_t *>(s.context().arena.allocate(kBigDrive));
-          // Touch every page: allocate() only moves the bump offset, so
-          // without this the pages were never faulted in and there would be
-          // nothing to give back.
-          if (p != nullptr) std::memset(p, 0xD7, kBigDrive);
-          s.context().arena.reset();
-        }
+    const size_t fp_start = process_backing_bytes();
+    DecodeSlotPool pool(kCtxCount, kBigReserve);
+    {
+      std::vector<DecodeSlotPool::Slot> slots;
+      for (int i = 0; i < kCtxCount; ++i) slots.push_back(pool.acquire());
+      for (auto &s : slots) {
+        auto *p = static_cast<uint8_t *>(s.context().arena.allocate(kBigDrive));
+        // Touch every page: allocate() only moves the bump offset, so
+        // without this the pages were never faulted in and there would be
+        // nothing to give back.
+        if (p != nullptr) std::memset(p, 0xD7, kBigDrive);
+        s.context().arena.reset();
       }
-      const size_t fp_driven = processFootprintBytes();
-      pool.decommit_free_to_floor(0);
-      const size_t fp_after = processFootprintBytes();
-
-      const size_t grew = fp_driven > fp_start ? fp_driven - fp_start : 0;
-      const size_t dropped = fp_driven > fp_after ? fp_driven - fp_after : 0;
-      std::printf(
-          "[DngSlotDecommit] D7 phys_footprint: start=%zu driven=%zu after=%zu | "
-          "grew=%zu dropped=%zu (drive total=%zu)\n",
-          fp_start, fp_driven, fp_after, grew, dropped,
-          kBigDrive * kCtxCount);
-
-      // Two-sided on purpose. The growth arm proves the instrument can see
-      // this memory at all, so a zero drop cannot be explained away as "the
-      // pages were never resident"; the drop arm is the actual claim. The
-      // threshold is half the driven bytes — deliberately loose, because the
-      // subject is "did the pages come back", not a precise accounting.
-      CHECK("D7_instrument_observed_the_pages_arriving",
-            grew >= (kBigDrive * kCtxCount) / 2,
-            "phys_footprint must rise when the arenas are touched, otherwise a "
-            "flat drop below would be measuring nothing");
-      CHECK("D7_decommit_actually_returns_physical_pages",
-            dropped >= (kBigDrive * kCtxCount) / 2,
-            "THE case that fails when decommit() stops calling madvise. "
-            "D1-D6 all stay green against that mutation because they assert "
-            "bookkeeping; this one asserts the memory");
     }
+    const size_t fp_driven = process_backing_bytes();
+    pool.decommit_free_to_floor(0);
+    const size_t fp_after = process_backing_bytes();
+
+    const size_t grew = fp_driven > fp_start ? fp_driven - fp_start : 0;
+    const size_t dropped = fp_driven > fp_after ? fp_driven - fp_after : 0;
+    std::printf(
+        "[DngSlotDecommit] D7 phys_footprint: start=%zu driven=%zu after=%zu | "
+        "grew=%zu dropped=%zu (drive total=%zu)\n",
+        fp_start, fp_driven, fp_after, grew, dropped,
+        kBigDrive * kCtxCount);
+
+    // Two-sided on purpose. The growth arm proves the instrument can see
+    // this memory at all, so a zero drop cannot be explained away as "the
+    // pages were never resident"; the drop arm is the actual claim. The
+    // threshold is half the driven bytes — deliberately loose, because the
+    // subject is "did the pages come back", not a precise accounting.
+    CHECK("D7_instrument_observed_the_pages_arriving",
+          grew >= (kBigDrive * kCtxCount) / 2,
+          "phys_footprint must rise when the arenas are touched, otherwise a "
+          "flat drop below would be measuring nothing");
+    CHECK("D7_decommit_actually_returns_physical_pages",
+          dropped >= (kBigDrive * kCtxCount) / 2,
+          "THE case that fails when decommit() stops calling madvise. "
+          "D1-D6 all stay green against that mutation because they assert "
+          "bookkeeping; this one asserts the memory");
   }
 
   // -------------------------------------------------------------------

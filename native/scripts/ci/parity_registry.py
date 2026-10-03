@@ -33,10 +33,6 @@ REGISTRY: dict[str, dict] = {
     "native/src/ffi/dng_ffi_api.cpp": {
         "guard_lines": 5, "role": "parked",
         "contract": "Android-only Vulkan pipeline-cache persistence (:43-90); not reclamation"},
-    "native/src/pipeline/decode_context.h": {
-        "guard_lines": 7, "role": "fork-host",
-        "contract": "DecodeArena page size/release adapter (A5); commit model is fork B5",
-        "open_forks": ["B5"]},
     "native/src/pipeline/dng_copy_lock.cpp": {
         "guard_lines": 1, "role": "adapter",
         "contract": "Metal concurrency correctness (A9); no memory retention"},
@@ -56,15 +52,17 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 11, "role": "accelerator",
         "contract": "Metal zero-copy destination wrap (A11); Android prewarm caches parked (A10)"},
     "native/src/pipeline/dng_warp_halide.cpp": {
-        "guard_lines": 11, "role": "fork-host",
-        "contract": "Android prewarm caches parked (A10); ZeroCoordBuffer commit model is fork A6",
-        "open_forks": ["A6"]},
+        "guard_lines": 8, "role": "parked",
+        "contract": "Android prewarm caches parked (A10)"},
     "native/src/pipeline/libraw_frontend.cpp": {
         "guard_lines": 1, "role": "adapter",
         "contract": "LibRaw open on Windows wide path"},
     "native/src/pipeline/raw_gpu_pipeline.cpp": {
         "guard_lines": 7, "role": "accelerator",
         "contract": "Metal zero-copy wrap (A11): output-identical, holds nothing past the call"},
+    "native/src/pipeline/virtual_region.h": {
+        "guard_lines": 6, "role": "adapter",
+        "contract": "VirtualRegion: one reserve/commit-on-grow/decommit contract (B5, A5, A6)"},
     "native/src/pipeline/raw_gpu_timing_probe.cpp": {
         "guard_lines": 1, "role": "adapter",
         "contract": "GPU timing probe backend binding"},
