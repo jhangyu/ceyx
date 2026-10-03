@@ -4,58 +4,57 @@
 ONE command, run from a working tree, that:
 
   1. clones the LOCAL repo's committed HEAD into a fresh scratch directory
-     (uncommitted edits are invisible to it by construction -- that is the
-     point: the gate judges what a push would publish, not the working tree);
-  2. seeds the clone with the gitignored heavy inputs a fresh clone lacks
-     (the ~540 MB Halide v21 binary dist and the image_samples/ test
-     fixtures), COPIED from this working tree and verified file-by-file
-     (count, bytes, sha256) -- never re-downloaded;
+     (uncommitted edits are invisible to it by construction -- the gate
+     judges what a push would publish, not the working tree);
+  2. seeds the clone with the gitignored inputs a fresh clone lacks (the
+     Halide v21 binary dist, the image_samples/ test fixtures, and on macOS
+     hosts the shipped plugin dylib), COPIED from this working tree and
+     verified file-by-file (count, bytes, sha256) -- never re-downloaded;
   3. hands off to the CLONE's own copy of this module (`--inner`), which runs
-     every step against the clone: the CI-equivalent compile/verify steps
-     derived from .github/workflows (same `ci.py` verbs, same argv) AND the
-     repo's automated test suites.
+     the CI-equivalent steps and the repo's automated test suites.
 
-Local red = no push. Remote CI stays compile-only (CI 純編譯鐵律 2026-10-02);
-this module is a LOCAL gate and must never be referenced by a workflow --
-the `policy-no-prepush-in-workflows` step fails if one does.
+Local red = no push. Remote CI stays compile-only; this module is a LOCAL
+gate and must never be referenced by a workflow (`policy-no-prepush-in-
+workflows` fails if one does).
 
-SCOPE IS DERIVED FROM THE WORKFLOWS, not mirrored from a build leg. Every job
-of every .github/workflows/*.yml is classified in `JOB_SCOPE` below as
-included / skip-on-this-host / excluded, with the reason. The
-`scope-derivation` step re-parses the workflow files on every run and FAILS
-when a job exists that `JOB_SCOPE` does not classify (or vice versa), so a
-new workflow job cannot silently fall outside the gate.
+STEPS COME FROM THE WORKFLOW FILES (prepush_workflow.py parses them):
+  * every job of every workflow is classified in `JOB_SCOPE`;
+  * every STEP of every mirrored job is classified in `STEP_SCOPE`
+    (`derive` / `impl:` / `seed:` / `covered:` / `provision:` / `ci-only`);
+    `scope-derivation` re-parses the workflows each run and FAILS on any
+    unclassified or stale job or step name, on any `if:` it cannot evaluate,
+    and on a `derive` step whose body is no longer derivable;
+  * a `derive` step runs the commands parsed out of its own `run:` body,
+    with `${{ matrix.* }}` / `${{ github.workspace }}` / `$VAR` substituted
+    and GITHUB_ENV / GITHUB_PATH honoured -- the gate holds no copy of them.
 
-SKIPS ARE COUNTED, NEVER SILENT. A step not runnable on this host prints a
-`PREPUSH_SKIP(<step>): <reason>` line and is counted under `skipped=` in the
-summary; a skip never counts as a pass. A step that SHOULD run on this host
-but has no implementation here is a FAILURE (`unimplemented`), not a skip.
+A HOST'S OWN PLATFORM LEG MUST RUN. Each matrix row maps to the local host
+that can run it; on that host its steps run, and a leg with no
+implementation there (the Linux leg on a Linux host) is a FAILURE. Rows
+owned by another host are one counted `skipped` entry per row.
+The macOS leg is IMPLEMENTED-UNVERIFIED-ON-MAC: written and exercised only
+on a Windows host; the first macOS run is its live proof.
 
-ARTIFACT CONTRACT:
-  * every step prints `PREPUSH_STEP_BEGIN(<step>)` and, immediately after its
-    child process(es) return, `PREPUSH_STEP_RC(<step>)=<rc>` -- the RC is the
-    child's own `returncode`, captured in this process, never read off a pipe;
-  * exactly one
-    `PREPUSH-SUMMARY host=... head=... total=N passed=N failed=N skipped=N skipped_host=N partial=0|1`
-    line per run; `partial=1` whenever --step/--skip-step narrowed the run,
-    so a narrowed green can never be mistaken for the gate;
-  * exit code is 0 iff failed == 0.
+COUNTERS, all printed in the one PREPUSH-SUMMARY line:
+  passed / failed  -- executed steps;
+  skipped          -- another host's leg/row, or declared `manual:` in gates.py;
+  skipped_host     -- HOST_UNSUPPORTED items: should be portable, not yet
+                      runnable here. Each carries an evidence class and a
+                      failure SIGNATURE and is re-proven every run: the item
+                      is still built/run and must fail with exactly its
+                      declared signature. Passing = stale entry = RED; any
+                      other failure = RED. Inventory block at the end of the
+                      log (tab-separated PREPUSH_HOST_UNSUPPORTED lines);
+  skipped_inner    -- test-level skips INSIDE suites that ran (Dart `skip:`,
+                      runner-declared per-sample skips), each listed by name;
+  ci_only / covered -- workflow steps with no local meaning (upload,
+                      cache...) or satisfied by the bootstrap (clone, seed).
 
-TWO KINDS OF SKIP, counted apart:
-  * `skipped`      -- the item belongs to another host's leg (macOS leg on a
-                      Windows host) or is declared manual in gates.py;
-  * `skipped_host` -- the item SHOULD be portable but is not yet runnable on
-                      this host. Each entry in `HOST_UNSUPPORTED` names an
-                      evidence class and evidence, is printed as
-                      `PREPUSH_HOST_UNSUPPORTED ...` (the machine-readable
-                      inventory block at the end of the log), and is
-                      re-proven on every run where that is mechanical: a
-                      declared-unbuildable test target that starts building
-                      turns the gate RED as a stale entry.
+GUARDS: with a Docker daemon, the digest-pinned container form; without
+one, `ci.py guards`'s host form (same roster), printed as
+`guards: host-form (no docker on host)`.
 
-GUARDS: with a Docker daemon the guards step runs the digest-pinned
-container form; without one it runs `ci.py guards`'s host form (same roster)
-and prints `guards: host-form (no docker on host)`.
+Every child process gets PYTHONUTF8=1 (CI runners use a UTF-8 locale).
 
 Usage (from a working tree):
     python3 native/scripts/ci.py prepush [--log FILE] [--scratch DIR] [--keep-scratch]
@@ -66,6 +65,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
+import json
 import os
 import platform as platform_module
 import re
@@ -79,44 +80,34 @@ from pathlib import Path
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Every child process inherits UTF-8 mode: CI runners run with a UTF-8
-# locale, a Windows developer host defaults to a legacy code page (cp950 on
-# this project's machine) under which `Path.read_text()` of the repo's UTF-8
-# files raises. Mirroring the runner's locale is not masking a defect.
+import prepush_workflow as wf  # noqa: E402
+
 CHILD_ENV_OVERRIDES = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-
 WORKFLOWS_DIR = Path(".github") / "workflows"
-
-# Gitignored inputs copied into the clone. Each is (relative path, why).
-# The Halide dist seed stands in for every build leg's `build_deps.py fetch
-# halide` step (~540 MB download); image_samples/ is the test-fixture corpus the runners
-# hash-verify themselves (run_decode_matrix.py `_verify_fixture_hashes`).
-SEEDS = {
-    "halide": Path("native/third_party/halide"),
-    "samples": Path("image_samples"),
-}
-
-# Host-specific seeds. The plugin's dylib-fixture suites load the SHIPPED
-# macOS dylib (plugin/test/support/native_fixtures.dart: shippedDylibPath),
-# which `*.dylib` in .gitignore keeps out of every clone. On a macOS host it
-# is copied in, sha256-verified, so those suites run there.
-# IMPLEMENTED-UNVERIFIED-ON-MAC: written and exercised only on a Windows
-# host; the first macOS run is its live proof.
-MACOS_DYLIB = Path("plugin/macos/Libraries/libdng_decoder_native.dylib")
-HOST_SEEDS = {
-    "macos-arm64": {"macos-dylib": MACOS_DYLIB},
-}
 
 WINDOWS_X64 = "windows-x86_64"
 MACOS_ARM64 = "macos-arm64"
 LINUX_X64 = "linux-x86_64"
 ALL_HOSTS = frozenset({WINDOWS_X64, MACOS_ARM64, LINUX_X64})
 
+# Gitignored inputs copied into the clone. The Halide seed stands in for
+# every build leg's `build_deps.py fetch halide` step (classified `seed:`);
+# image_samples/ is the corpus the runners hash-verify themselves.
+SEEDS = {
+    "halide": Path("native/third_party/halide"),
+    "samples": Path("image_samples"),
+}
+# The plugin's dylib-fixture suites load the SHIPPED macOS dylib
+# (plugin/test/support/native_fixtures.dart shippedDylibPath), which `*.dylib`
+# in .gitignore keeps out of every clone. IMPLEMENTED-UNVERIFIED-ON-MAC.
+MACOS_DYLIB = Path("plugin/macos/Libraries/libdng_decoder_native.dylib")
+HOST_SEEDS = {MACOS_ARM64: {"macos-dylib": MACOS_DYLIB}}
+
 
 # ---------------------------------------------------------------------------
-# Output primitives. Everything goes through `emit` so the outer process can
-# tee one stream into the artifact.
+# Output and process primitives.
 # ---------------------------------------------------------------------------
 def emit(line: str = "") -> None:
     print(line, flush=True)
@@ -126,46 +117,35 @@ def host_key() -> str:
     system = platform_module.system()
     machine = platform_module.machine().lower()
     arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64" if machine in ("amd64", "x86_64") else machine
-    if system == "Windows":
-        return f"windows-{arch}"
-    if system == "Darwin":
-        return f"macos-{arch}"
-    return f"linux-{arch}"
+    return {"Windows": "windows", "Darwin": "macos"}.get(system, "linux") + f"-{arch}"
 
 
 def child_env(extra: Optional[dict] = None) -> dict:
     env = dict(os.environ)
     env.update(CHILD_ENV_OVERRIDES)
-    if extra:
-        env.update(extra)
+    env.update(extra or {})
     return env
 
 
 def stream(argv, cwd, env=None, tee: Optional[Path] = None) -> int:
-    """Run argv (list, shell=False), forwarding its combined output line by
-    line to our stdout (and to ``tee`` if given) as it is produced, and
-    return ITS returncode. A missing executable is rc 127 with the OSError
-    text, never an exception."""
+    """Run argv (list, shell=False), forwarding combined output line by line
+    to our stdout (and `tee`), and return ITS returncode. A missing
+    executable is rc 127 with the OSError text, never an exception."""
     argv = [os.fspath(a) for a in argv]
     emit(f"PREPUSH_EXEC: {' '.join(argv)}  (cwd={cwd})")
     try:
-        proc = subprocess.Popen(
-            argv,
-            shell=False,
-            cwd=os.fspath(cwd),
-            env=env if env is not None else child_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        proc = subprocess.Popen(argv, shell=False, cwd=os.fspath(cwd),
+                                env=env if env is not None else child_env(),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                text=True, encoding="utf-8", errors="replace")
     except OSError as exc:
         emit(f"PREPUSH_EXEC_ERROR: {exc}")
         return 127
     assert proc.stdout is not None
-    sink = tee.open("w", encoding="utf-8") if tee is not None else None
+    sink = None
+    if tee is not None:
+        tee.parent.mkdir(parents=True, exist_ok=True)
+        sink = tee.open("w", encoding="utf-8")
     try:
         for line in proc.stdout:
             sys.stdout.write(line)
@@ -180,11 +160,9 @@ def stream(argv, cwd, env=None, tee: Optional[Path] = None) -> int:
 
 def capture(argv, cwd, env=None) -> tuple:
     try:
-        done = subprocess.run(
-            [os.fspath(a) for a in argv], shell=False, cwd=os.fspath(cwd),
-            env=env if env is not None else child_env(), capture_output=True,
-            text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-        )
+        done = subprocess.run([os.fspath(a) for a in argv], shell=False, cwd=os.fspath(cwd),
+                              env=env if env is not None else child_env(), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
     except OSError as exc:
         return 127, f"{exc}\n"
     return done.returncode, (done.stdout or "") + (done.stderr or "")
@@ -193,45 +171,52 @@ def capture(argv, cwd, env=None) -> tuple:
 # ---------------------------------------------------------------------------
 # Step model.
 # ---------------------------------------------------------------------------
-SKIP = "SKIP"
-HOSTSKIP = "HOSTSKIP"
+SKIP, HOSTSKIP, CIONLY, COVERED = "SKIP", "HOSTSKIP", "CI_ONLY", "COVERED"
 
 
 @dataclass
 class Ctx:
     clone: Path
     host: str
-    env: dict = field(default_factory=dict)  # toolchain env (Windows: vcvars)
+    env: dict = field(default_factory=dict)  # host toolchain env (Windows: vcvars)
     host_skips: list = field(default_factory=list)  # (item, class, evidence)
+    inner_skips: list = field(default_factory=list)  # (where, name)
+    jobrows: dict = field(default_factory=dict)  # (job, row) -> JobRow
+
+    def base_env(self) -> dict:
+        return dict(self.env) if self.env else child_env()
 
     def py(self, *args) -> list:
         return [sys.executable, *args]
 
     def run(self, argv, cwd: Optional[Path] = None) -> int:
-        return stream(argv, cwd or self.clone, env=self.env or child_env())
+        return stream(argv, cwd or self.clone, env=self.base_env())
 
 
 @dataclass
 class Step:
     name: str
-    derivation: str  # which workflow job/step (or test entry) this comes from
-    hosts: frozenset  # hosts on which it RUNS
-    action: Optional[Callable[[Ctx], object]]  # returns int rc, or (SKIP, reason)
-    skip_reason: str = ""  # printed on hosts outside `hosts`
-    group: str = "ci"  # "ci" (workflow-derived) or "test" (test layer)
+    derivation: str
+    hosts: frozenset
+    action: Optional[Callable]  # returns int rc, (SKIP|HOSTSKIP, text)
+    skip_reason: str = ""
+    group: str = "ci"
+    status: Optional[str] = None  # CIONLY/COVERED: printed + counted, not executed
 
 
-# Workflow-job classification. Key: "<workflow file>:<job id>". Value:
-# (decision, reason). decision in {"included", "host-specific", "excluded"}.
-# "included"      -- its locally-runnable steps are in STEPS on every host.
-# "host-specific" -- runs only on the host named in its STEPS entries; other
-#                    hosts print a counted SKIP.
-# "excluded"      -- never part of the gate; reason says why.
+# ---------------------------------------------------------------------------
+# Job classification.
+# ---------------------------------------------------------------------------
+# "mirrored"  -- its steps are classified in STEP_SCOPE and run from it;
+# "caller"    -- a `uses:` caller of a classified reusable workflow;
+# "unported"  -- a leg the gate does not implement: FAILS on the host that
+#                owns it (UNPORTED_OWNER), counted skip elsewhere;
+# "excluded"  -- never part of the gate; reason says why.
 JOB_SCOPE: dict = {
-    "build.yml:macos": ("host-specific", "calls macos_build.yml (classified below)"),
-    "build.yml:linux": ("host-specific", "calls linux_build.yml (classified below)"),
-    "build.yml:windows": ("host-specific", "calls windows_build.yml (classified below)"),
-    "build.yml:android": ("host-specific", "calls android_build.yml (classified below)"),
+    "build.yml:macos": ("caller", "calls macos_build.yml"),
+    "build.yml:linux": ("caller", "calls linux_build.yml"),
+    "build.yml:windows": ("caller", "calls windows_build.yml"),
+    "build.yml:android": ("caller", "calls android_build.yml"),
     "build.yml:heif-dist-windows": ("excluded", "dist leg: CI runs it only on v* tags / run_dists dispatch, never on a push; its output is a committed, pinned input"),
     "build.yml:jxl-dist-windows": ("excluded", "dist leg: tag / run_dists only, committed pinned input"),
     "build.yml:webp-dist-windows": ("excluded", "dist leg: tag / run_dists only, committed pinned input"),
@@ -239,16 +224,16 @@ JOB_SCOPE: dict = {
     "build.yml:heif-dist-android": ("excluded", "dist leg: tag / run_dists only, committed pinned input"),
     "build.yml:jxl-dist-android": ("excluded", "dist leg: tag / run_dists only, committed pinned input"),
     "build.yml:webp-dist-android": ("excluded", "dist leg: tag / run_dists only, committed pinned input"),
-    "build.yml:verify-dart": ("included", "flutter pub get + dart analyze (app/) -- steps dart-analyze"),
-    "build.yml:verify-native-tests": ("included", "selftest + vendored-LibRaw guards on every host; its test_decode/test_device_handoff build is the test layer's build step"),
-    "build.yml:guards-container": ("included", "step guards: the digest-pinned docker form when a Docker daemon is up, else `ci.py guards` host form (same roster, form printed)"),
-    "build.yml:all-platforms-green": ("excluded", "aggregator over other jobs' results; no command of its own"),
-    "build.yml:publish": ("excluded", "release publication (needs downloaded run artifacts + GitHub token); not a verification step"),
-    "android_build.yml:build-android": ("host-specific", "ubuntu runner + apt toolchain + NDK cross-build; not ported to a local host"),
-    "linux_build.yml:build-linux": ("host-specific", "runs inside ubuntu:22.04 (glibc floor container); not ported to a local host"),
-    "macos_build.yml:build": ("host-specific", "macOS arm64 native + x86_64 cross legs (Metal); macOS host only"),
-    "windows_build.yml:build-windows": ("host-specific", "x86_64 row runs on a Windows x86_64 host; arm64 row needs an ARM64 host to LoadLibrary its probes"),
-    "heif_dist_android.yml:build-heif-dist": ("excluded", "dist workflow (push trigger only on its own ci/** paths, tag/run_dists via build.yml); committed pinned input"),
+    "build.yml:verify-dart": ("mirrored", "flutter pub get + dart analyze"),
+    "build.yml:verify-native-tests": ("mirrored", "selftest, vendored-LibRaw guards, macOS test-target build"),
+    "build.yml:guards-container": ("mirrored", "repo-static guard block"),
+    "build.yml:all-platforms-green": ("excluded", "aggregator over other jobs' results (needs.*.result); no command of its own"),
+    "build.yml:publish": ("excluded", "release publication (downloaded run artifacts + GitHub token); not a verification step"),
+    "android_build.yml:build-android": ("unported", "ubuntu runner + apt toolchain + NDK cross-build"),
+    "linux_build.yml:build-linux": ("unported", "ubuntu:22.04 glibc-floor container + apt/vcpkg provisioning"),
+    "macos_build.yml:build": ("mirrored", "macOS arm64 native + x86_64 cross rows"),
+    "windows_build.yml:build-windows": ("mirrored", "x86_64 row (Windows x86_64 host); arm64 row needs an ARM64 host"),
+    "heif_dist_android.yml:build-heif-dist": ("excluded", "dist workflow; committed pinned input"),
     "heif_dist_windows.yml:build-heif-dist": ("excluded", "dist workflow; committed pinned input"),
     "jxl_dist_android.yml:build-jxl-dist": ("excluded", "dist workflow; committed pinned input"),
     "jxl_dist_windows.yml:build-jxl-dist": ("excluded", "dist workflow; committed pinned input"),
@@ -257,31 +242,198 @@ JOB_SCOPE: dict = {
     "webp_dist_windows.yml:build-webp-dist": ("excluded", "dist workflow; committed pinned input"),
 }
 
-_JOB_LINE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(#.*)?$")
+# Unported legs: (alias, host that owns it or None). Android has no local
+# host platform: its leg cross-compiles on an ubuntu runner for devices.
+UNPORTED_OWNER = {
+    "linux_build.yml:build-linux": ("linux", LINUX_X64),
+    "android_build.yml:build-android": ("android", None),
+}
+
+# Mirrored jobs in execution order: (job key, alias, row key -> owning host).
+# Row key is the row's `arch_tag` ("" for a job without a matrix).
+MIRRORED = (
+    ("build.yml:guards-container", "guards", {"": LINUX_X64}),
+    ("build.yml:verify-native-tests", "native-tests", {"": MACOS_ARM64}),
+    ("build.yml:verify-dart", "dart", {"": MACOS_ARM64}),
+    ("windows_build.yml:build-windows", "windows", {"x86_64": WINDOWS_X64, "arm64": None}),
+    ("macos_build.yml:build", "macos", {"arm64": MACOS_ARM64, "x86_64": MACOS_ARM64}),
+)
+# Jobs whose own-host steps need a workspace of their own because CI runs
+# them on a separate machine and their default build dir (native/build)
+# collides with another mirrored job's (macos arm64 row).
+OWN_WORKSPACE = {"build.yml:verify-native-tests"}
+
+ANY, OWN = "any", "own"
+CI = ("ci-only", OWN)
+
+# Every step of every mirrored job: workflow step name -> (kind, where, note).
+# where=any: host-agnostic, runs once on every host; where=own: runs on the
+# host owning the row (MIRRORED). The note is printed with the step.
+STEP_SCOPE: dict = {
+    "build.yml:guards-container": {
+        "Checkout": (*CI, "the bootstrap clone is the checkout"),
+        "Set up Python": (*CI, "host interpreter; its version is printed"),
+        "Run repo-static guards in the digest-pinned container": ("impl:guards", ANY, "docker form, or host form without a daemon"),
+    },
+    "build.yml:verify-native-tests": {
+        "Checkout": (*CI, "the bootstrap clone is the checkout"),
+        "Set up Python": (*CI, "host interpreter"),
+        "ci.py selftest (dispatch + report + run primitives)": ("derive", ANY, ""),
+        "Derive vcpkg baseline from vcpkg.json": ("impl:vcpkg-baseline", OWN, "inline python reads vcpkg.json builtin-baseline -- the same field `ci.py vcpkg-baseline` exports"),
+        "Install build prerequisites (Homebrew)": ("provision:brew", OWN, "host provisioning is checked, never performed"),
+        "Cache vendored Halide v21 distribution": (*CI, "actions/cache"),
+        "Fetch vendored Halide v21 distribution": ("seed:halide", OWN, "bootstrap seed"),
+        "Cache vendored LibRaw distribution": (*CI, "actions/cache"),
+        "Fetch vendored LibRaw distribution": ("derive", ANY, ""),
+        "Guard — vendored LibRaw/RawSpeed provenance + licences": ("derive", ANY, ""),
+        "Guard — normalize_model.cpp alias-table '@'-prefix convention (G2-2)": ("derive", ANY, ""),
+        "Bootstrap vcpkg at the pinned baseline (D5)": ("derive", OWN, ""),
+        "vcpkg install libwebp (arm64-osx-heif)": ("derive", OWN, ""),
+        "Cache CMake build directory": (*CI, "actions/cache"),
+        "Build test_decode target": ("derive", OWN, ""),
+        "Build test_device_handoff target": ("derive", OWN, ""),
+    },
+    "build.yml:verify-dart": {
+        "Checkout": (*CI, "the bootstrap clone is the checkout"),
+        "Set up Flutter": ("provision:flutter", ANY, "flutter + dart on PATH"),
+        "Flutter pub get": ("derive", ANY, ""),
+        "dart analyze": ("derive", ANY, ""),
+    },
+    "windows_build.yml:build-windows": {
+        "Force LF line endings for all git operations": ("covered:bootstrap-clone", OWN, "clone runs with -c core.autocrlf=false -c core.eol=lf; the step itself writes --global git config"),
+        "Checkout": (*CI, "the bootstrap clone is the checkout"),
+        "Set up Python": (*CI, "host interpreter"),
+        "Install pytest for deps suite": ("provision:pytest", ANY, "pip-installing into the host interpreter is a host change; presence is checked"),
+        "Run deps unit suite (native Windows Python)": ("impl:deps-pytest", ANY, "pwsh body: `python -m pytest native/scripts/deps/ -q`"),
+        "Install Ninja": ("provision:ninja", OWN, "pip-installing into the host interpreter is a host change; presence is checked"),
+        "Assert Visual Studio ARM64 VC tools are installed (vswhere)": ("derive", OWN, ""),
+        "Set up MSVC developer environment (${{ matrix.msvc_arch }})": ("provision:msvc-env", OWN, "vcvars64 environment captured by the gate"),
+        "Locate clang-cl": ("derive", OWN, ""),
+        "Install Vulkan SDK (provides vulkan-1.lib)": ("provision:vulkan-sdk", OWN, "host Vulkan SDK; the next step verifies vulkan-1.lib"),
+        "Verify vulkan-1.lib is present": ("derive", OWN, ""),
+        "Cache vendored Halide v21 distribution (Windows x86_64)": (*CI, "actions/cache"),
+        "Fetch vendored Halide v21 distribution": ("seed:halide", OWN, "bootstrap seed"),
+        "Cache vendored LibRaw + RawSpeed3 + LibRaw-cmake (pinned revisions)": (*CI, "actions/cache"),
+        "Fetch vendored LibRaw + RawSpeed3 + LibRaw-cmake": ("derive", OWN, ""),
+        "Diagnose LibRaw patch failure (on failure only)": (*CI, "on-failure diagnostics"),
+        "Set up MSVC developer environment (x64, cross stage 1 generators)": ("provision:msvc-env", OWN, "arm64 row only"),
+        "Build x64 Halide generators + arm64 AOT (cross stage 1)": ("derive", OWN, ""),
+        "Restore MSVC developer environment (${{ matrix.msvc_arch }}) for cross stage 2": ("provision:msvc-env", OWN, "arm64 row only"),
+        "Build zlib 1.3.1 (static, /MT) for the Windows toolchain": ("derive", OWN, ""),
+        "Configure (Ninja + clang-cl, Vulkan AOT target)": ("impl:win-configure", OWN, "body has a CROSS_ARGS if-block (arm64 row); x86_64-row argv implemented"),
+        "Assert JXL was statically linked, not silently degraded (G1)": ("impl:win-assert-jxl", OWN, "body is a pattern search inside an if-block; ported"),
+        "Diagnose configure failure (on failure only)": (*CI, "on-failure diagnostics"),
+        "Build dng_decoder_native": ("derive", OWN, ""),
+        "Assert no AVX-512 in in-tree Windows code (portable-baseline gate)": ("derive", OWN, ""),
+        "Diagnose build failure (on failure only)": (*CI, "on-failure diagnostics"),
+        "Verify Windows artifact": ("derive", OWN, ""),
+        "Assert required FFI exports present in Windows DLL (AC-W4)": ("derive", OWN, ""),
+        "Assert Windows DLL dependency closure": ("derive", OWN, ""),
+        "Assert fused-orientation kernel signals present in Windows DLL (Task 11 / G-E)": ("derive", OWN, ""),
+        "Assert full codec capability vector via probe (G1)": ("derive", OWN, ""),
+        "Assert build capability vector via probe (S-E2)": ("derive", OWN, ""),
+        "Compile + run functional capability probe (CI-T3)": ("derive", OWN, ""),
+        "Stage native artifacts": ("derive", OWN, ""),
+        "Assert every staged DLL is this leg's PE machine type (AC-C2)": ("derive", OWN, ""),
+        "Measure and emit the minimum runtime floor (S-F1)": ("derive", OWN, ""),
+        "Assert the Windows shipped-file group is complete (atomic group)": ("derive", OWN, ""),
+        "Upload native artifact": (*CI, "actions/upload-artifact"),
+        "Upload probe_results_windows_${{ matrix.arch_tag }}": (*CI, "actions/upload-artifact"),
+    },
+    "macos_build.yml:build": {
+        "Checkout": (*CI, "the bootstrap clone is the checkout"),
+        "Derive vcpkg baseline from vcpkg.json": ("derive", OWN, ""),
+        "Set up Python": (*CI, "host interpreter"),
+        "D6 layer 1 — argv equivalence (renderer vs golden vs legacy shell)": ("derive", ANY, "pure argv check"),
+        "Install build prerequisites (Homebrew)": ("provision:brew", OWN, "host provisioning is checked, never performed"),
+        "Cache vendored Halide v21 distribution": (*CI, "actions/cache"),
+        "Fetch vendored Halide v21 distribution": ("seed:halide", OWN, "bootstrap seed"),
+        "Cache vendored LibRaw distribution": (*CI, "actions/cache"),
+        "Fetch vendored LibRaw distribution": ("derive", OWN, ""),
+        "Cache vendored libjxl distribution": (*CI, "actions/cache"),
+        "Fetch vendored libjxl distribution": ("derive", OWN, ""),
+        "Bootstrap vcpkg at the pinned baseline (D5)": ("derive", OWN, ""),
+        "vcpkg install libwebp + libde265 + aom (${{ matrix.vcpkg_triplet }})": ("derive", OWN, ""),
+        "Assert the vcpkg artefacts (libwebp static, libde265 shared)": ("derive", OWN, ""),
+        "Cache vendored HEIF (libheif + libde265) distribution": (*CI, "actions/cache"),
+        "Fetch vendored HEIF distribution (Python carrier)": ("derive", OWN, ""),
+        "Assert libde265's linkage in the produced dist (A5.2/A5.3)": ("impl:mac-de265-linkage", OWN, "otool + pattern-search body; ported"),
+        "Compile + run functional capability probe (D4/R-7)": ("derive", OWN, ""),
+        "Cache CMake build directory": (*CI, "actions/cache"),
+        "Build dng_decoder_native via watchdog (native arm64)": ("derive", OWN, ""),
+        "Build host Halide generators + x86_64 AOT (cross stage 1)": ("derive", OWN, ""),
+        "Cross-compile dng_decoder_native for x86_64 (cross stage 2)": ("derive", OWN, ""),
+        "Verify dylib was produced and has the expected architecture": ("derive", OWN, ""),
+        "Build + run orientation capability probe (Task 11 / G-E)": ("derive", OWN, ""),
+        "Assert full codec capability vector via probe (G1, native leg)": ("derive", OWN, ""),
+        "Assert build capability vector via probe (S-E2, native leg)": ("derive", OWN, ""),
+        "Assert codec capability vector via configure log (G1, cross leg)": ("derive", OWN, ""),
+        "Assert build capability vector via probe (S-E2, cross leg)": ("derive", OWN, ""),
+        "Assert required FFI exports present in dylib (G3)": ("derive", OWN, ""),
+        "Stage native artifact": ("derive", OWN, ""),
+        "Verify staged companion dylibs (arch + reachability + rpath)": ("derive", OWN, ""),
+        "Measure and emit the minimum runtime floor (S-F1)": ("derive", OWN, ""),
+        "Upload native artifact": (*CI, "actions/upload-artifact"),
+        "Upload native build log (native arm64)": (*CI, "actions/upload-artifact"),
+        "Upload probe_results_macos_arm64": (*CI, "actions/upload-artifact"),
+    },
+}
 
 
-def workflow_jobs(workflows_dir: Path) -> set:
-    """Top-level job ids of every workflow, parsed as text (no PyYAML: the
-    pinned CI interpreter does not ship it, and neither should this gate
-    depend on it). A job id is a 2-space-indented key directly under the
-    top-level `jobs:` key."""
-    found = set()
+def load_jobs(workflows_dir: Path) -> dict:
+    jobs = {}
     for path in sorted(workflows_dir.glob("*.yml")):
-        in_jobs = False
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            if raw and not raw.startswith((" ", "#")):
-                in_jobs = raw.rstrip() == "jobs:"
-                continue
-            if in_jobs:
-                m = _JOB_LINE.match(raw)
-                if m:
-                    found.add(f"{path.name}:{m.group(1)}")
-    return found
+        for job in wf.parse_workflow(path):
+            jobs[f"{job.file}:{job.job}"] = job
+    return jobs
 
 
-def scope_drift(workflows_dir: Path) -> tuple:
-    jobs = workflow_jobs(workflows_dir)
-    return sorted(jobs - set(JOB_SCOPE)), sorted(set(JOB_SCOPE) - jobs)
+def scope_problems(workflows_dir: Path) -> list:
+    """Every way the classification can disagree with the workflow files."""
+    jobs = load_jobs(workflows_dir)
+    problems = [f"workflow job {j} is not classified in prepush.JOB_SCOPE" for j in sorted(set(jobs) - set(JOB_SCOPE))]
+    problems += [f"prepush.JOB_SCOPE classifies {j}, which no workflow defines" for j in sorted(set(JOB_SCOPE) - set(jobs))]
+    for key, alias, rows in MIRRORED:
+        job = jobs.get(key)
+        if job is None:
+            continue
+        if not job.steps:
+            problems.append(f"{key}: parsed zero steps (parser blind to this job?)")
+        names = [s.name for s in job.steps]
+        scope = STEP_SCOPE.get(key, {})
+        problems += [f"{key}: step {n!r} is not classified in prepush.STEP_SCOPE" for n in names if n not in scope]
+        problems += [f"{key}: prepush.STEP_SCOPE classifies step {n!r}, which the workflow no longer has"
+                     for n in scope if n not in names]
+        row_keys = {r.get("arch_tag", "") for r in (job.rows or [{}])}
+        if row_keys != set(rows):
+            problems.append(f"{key}: matrix rows {sorted(row_keys)} differ from prepush.MIRRORED {sorted(rows)}")
+        for step in job.steps:
+            kind = scope.get(step.name, ("",))[0]
+            for row in job.rows or [{}]:
+                try:
+                    cond = wf.condition(step, row)
+                except ValueError as exc:
+                    problems.append(f"{key}: {exc}")
+                    continue
+                if kind == "derive" and cond == "run":
+                    env = _probe_env(job, row)
+                    env.update({k: wf.expand_expr(v, row, "W", env) for k, v in step.env.items()})
+                    try:
+                        cmds = wf.derive_commands(step, row, "W", env)
+                    except (KeyError, ValueError) as exc:
+                        cmds, why = None, str(exc)
+                    else:
+                        why = "body uses shell constructs beyond the derivable subset"
+                    if not cmds:
+                        problems.append(f"{key}: step {step.name!r} is classified derive but is not derivable ({why})")
+    return problems
+
+
+def _probe_env(job, row) -> dict:
+    env = {k: k for k in ("GITHUB_WORKSPACE", "RUNNER_TEMP", "GITHUB_ENV", "GITHUB_PATH", "VULKAN_SDK",
+                          "VCPKG_BASELINE")}
+    env.update(wf.job_env(job, row, "W"))
+    return env
 
 
 def prepush_mentions(workflows_dir: Path) -> list:
@@ -294,7 +446,7 @@ def prepush_mentions(workflows_dir: Path) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Host-agnostic step actions.
+# Gate-level steps.
 # ---------------------------------------------------------------------------
 def a_policy(ctx: Ctx):
     hits = prepush_mentions(ctx.clone / WORKFLOWS_DIR)
@@ -305,16 +457,114 @@ def a_policy(ctx: Ctx):
 
 
 def a_scope(ctx: Ctx):
-    unclassified, stale = scope_drift(ctx.clone / WORKFLOWS_DIR)
     for job in sorted(JOB_SCOPE):
-        decision, reason = JOB_SCOPE[job]
-        emit(f"PREPUSH_SCOPE {job} -> {decision}: {reason}")
-    for job in unclassified:
-        emit(f"::error::workflow job {job} is not classified in prepush.JOB_SCOPE -- classify it (included / host-specific / excluded) before pushing")
-    for job in stale:
-        emit(f"::error::prepush.JOB_SCOPE classifies {job}, which no workflow defines any more")
-    emit(f"PREPUSH_SCOPE_JOBS={len(JOB_SCOPE)} unclassified={len(unclassified)} stale={len(stale)}")
-    return 1 if (unclassified or stale) else 0
+        emit(f"PREPUSH_SCOPE {job} -> {JOB_SCOPE[job][0]}: {JOB_SCOPE[job][1]}")
+    problems = scope_problems(ctx.clone / WORKFLOWS_DIR)
+    for p in problems:
+        emit(f"::error::{p}")
+    steps = sum(len(v) for v in STEP_SCOPE.values())
+    emit(f"PREPUSH_SCOPE_JOBS={len(JOB_SCOPE)} classified_steps={steps} problems={len(problems)}")
+    return 1 if problems else 0
+
+
+# ---------------------------------------------------------------------------
+# Workflow-derived execution.
+# ---------------------------------------------------------------------------
+@dataclass
+class JobRow:
+    job: wf.WfJob
+    row: dict
+    workspace: Path
+    env: dict
+    github_env: Path
+    github_path: Path
+
+
+def jobrow(ctx: Ctx, key: str, alias: str, row: dict) -> JobRow:
+    rk = (key, row.get("arch_tag", ""))
+    if rk in ctx.jobrows:
+        return ctx.jobrows[rk]
+    job = load_jobs(ctx.clone / WORKFLOWS_DIR)[key]
+    workspace = ctx.clone
+    if key in OWN_WORKSPACE and ctx.host == MACOS_ARM64:
+        workspace = own_workspace(ctx, alias)
+    state = ctx.clone.parent / "prepush-runner" / f"{alias}-{rk[1] or 'job'}"
+    (state / "temp").mkdir(parents=True, exist_ok=True)
+    gh_env, gh_path = state / "github_env", state / "github_path"
+    gh_env.write_text("", encoding="utf-8")
+    gh_path.write_text("", encoding="utf-8")
+    env = ctx.base_env()
+    env.update({"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(state / "temp"),
+                "GITHUB_ENV": str(gh_env), "GITHUB_PATH": str(gh_path)})
+    env.update(wf.job_env(job, row, str(workspace)))
+    ctx.jobrows[rk] = JobRow(job, row, workspace, env, gh_env, gh_path)
+    return ctx.jobrows[rk]
+
+
+def own_workspace(ctx: Ctx, alias: str) -> Path:
+    """A second checkout for a job CI runs on its own machine (OWN_WORKSPACE)."""
+    ws = ctx.clone.parent / f"ws-{alias}"
+    if not ws.exists():
+        stream(["git", "-c", "core.autocrlf=false", "clone", "--no-hardlinks", str(ctx.clone), str(ws)], ctx.clone.parent)
+        seed_tree("halide", ctx.clone / SEEDS["halide"], ws / SEEDS["halide"])
+    return ws
+
+
+def _absorb_github_files(jr: JobRow) -> None:
+    for line in jr.github_env.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition("=")
+        if sep and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            jr.env[key] = value
+    for line in jr.github_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            path_key = next((k for k in jr.env if k.upper() == "PATH"), "PATH")
+            if line.strip() not in jr.env.get(path_key, "").split(os.pathsep):
+                jr.env[path_key] = line.strip() + os.pathsep + jr.env.get(path_key, "")
+    jr.github_env.write_text("", encoding="utf-8")
+    jr.github_path.write_text("", encoding="utf-8")
+
+
+def _resolve_exe(argv0: str, env: dict) -> str:
+    if argv0 in ("python3", "python"):
+        return sys.executable
+    path = next((v for k, v in env.items() if k.upper() == "PATH"), None)
+    return shutil.which(argv0, path=path) or argv0
+
+
+def run_derived(jr: JobRow, step: wf.WfStep) -> int:
+    env = dict(jr.env)
+    for k, v in step.env.items():
+        env[k] = wf.expand_expr(v, jr.row, str(jr.workspace), env)
+    cmds = wf.derive_commands(step, jr.row, str(jr.workspace), env)
+    if not cmds:
+        emit(f"::error::step {step.name!r} is classified derive but its body is not derivable")
+        return 2
+    cwd = jr.workspace
+    if "working-directory" in step.keys:
+        cwd = Path(wf.expand_expr(step.keys["working-directory"], jr.row, str(jr.workspace), env))
+        if not cwd.is_absolute():
+            cwd = jr.workspace / cwd
+    rc = 0
+    for cmd in cmds:
+        argv = [_resolve_exe(cmd.argv[0], env), *cmd.argv[1:]]
+        tee = None
+        if cmd.tee:
+            tee = Path(cmd.tee) if Path(cmd.tee).is_absolute() else cwd / cmd.tee
+        rc = stream(argv, cwd, env={**env, **cmd.env}, tee=tee)
+        if rc != 0:
+            break
+    _absorb_github_files(jr)
+    return rc
+
+
+# --- implementations named by STEP_SCOPE `impl:` entries --------------------
+def i_guards(ctx: Ctx, jr: JobRow, step) -> int:
+    ok, detail = docker_available()
+    if ok:
+        emit(f"guards: docker-form (docker server {detail})")
+        return stream(ctx.py("native/scripts/ci.py", "guards", "--docker"), jr.workspace, env=jr.env)
+    emit(f"guards: host-form (no docker on host) -- docker said: {detail[-200:]}")
+    return stream(ctx.py("native/scripts/ci.py", "guards"), jr.workspace, env=jr.env)
 
 
 def docker_available() -> tuple:
@@ -322,121 +572,196 @@ def docker_available() -> tuple:
     return rc == 0, out.strip()
 
 
-def a_guards(ctx: Ctx):
-    """build.yml guards-container. With a Docker daemon: the digest-pinned
-    container form, exactly as CI runs it. Without one: `ci.py guards`'s host
-    form -- the SAME roster through the SAME code path (guards.run_checks,
-    which the container itself invokes via --in-container), minus the pinned
-    interpreter/site-packages. The form that ran is always printed."""
-    ok, detail = docker_available()
-    if ok:
-        emit(f"guards: docker-form (docker server {detail})")
-        return ctx.run(ctx.py("native/scripts/ci.py", "guards", "--docker"))
-    emit(f"guards: host-form (no docker on host) -- docker said: {detail[-200:]}")
-    return ctx.run(ctx.py("native/scripts/ci.py", "guards"))
+def i_deps_pytest(ctx: Ctx, jr: JobRow, step) -> int:
+    rc = stream(ctx.py("-m", "pytest", "native/scripts/deps/", "-q"), jr.workspace, env=jr.env)
+    emit(f"DEPS_PYTEST_RC={rc}")
+    return rc
 
 
-def a_selftest(ctx: Ctx):
-    return ctx.run(ctx.py("native/scripts/ci.py", "selftest"))
+def i_vcpkg_baseline(ctx: Ctx, jr: JobRow, step) -> int:
+    rc = stream(ctx.py("native/scripts/ci.py", "vcpkg-baseline", "--github-env", str(jr.github_env)),
+                jr.workspace, env=jr.env)
+    _absorb_github_files(jr)
+    return rc
 
 
-def a_deps_pytest(ctx: Ctx):
-    return ctx.run(ctx.py("-m", "pytest", "native/scripts/deps/", "-q"))
+WIN_BUILD_DIR = "native/build-windows"
 
 
-def a_d6_layer1(ctx: Ctx):
-    return ctx.run(ctx.py("native/tests/run_dist_equivalence.py", "--layers", "l1",
-                          "--report", str(ctx.clone / "d6-layer1-report.md")))
+def i_win_configure(ctx: Ctx, jr: JobRow, step) -> int:
+    if jr.row.get("two_stage") == "true":
+        emit("::error::the arm64 two-stage configure is not implemented (no ARM64 host)")
+        return 3
+    zlib = (jr.workspace / "zlib-install").as_posix()
+    argv = ["cmake", "-S", "native", "-B", WIN_BUILD_DIR, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DDNG_DIAGNOSTIC_BUILD=OFF", "-DDNG_VK_PIPELINE_CACHE=OFF",
+            f"-DDNG_ZLIB_ROOT={zlib}", f"-DZLIB_ROOT={zlib}", "-DZLIB_USE_STATIC_LIBS=ON"]
+    rc = stream(argv, jr.workspace, env=jr.env, tee=jr.workspace / "configure.log")
+    emit(f"CONFIGURE_RC={rc}")
+    return rc
 
 
-def _flutter() -> str:
-    return shutil.which("flutter") or shutil.which("flutter.bat") or "flutter"
+def i_win_assert_jxl(ctx: Ctx, jr: JobRow, step) -> int:
+    log = jr.workspace / "configure.log"
+    found = log.is_file() and "JXL: static" in log.read_text(encoding="utf-8", errors="replace")
+    rc = 0 if found else 1
+    emit(f"ASSERT JXL static-link RC={rc}")
+    if rc:
+        emit("::error::configure.log does not show the expected 'JXL: static' line from cmake/jxl.cmake")
+    return rc
 
 
-def _dart() -> str:
-    return shutil.which("dart") or shutil.which("dart.bat") or "dart"
+def i_mac_de265_linkage(ctx: Ctx, jr: JobRow, step) -> int:
+    """Port of macos_build.yml's libde265 linkage assertion. IMPLEMENTED-UNVERIFIED-ON-MAC."""
+    emit("PREPUSH_STATUS: IMPLEMENTED-UNVERIFIED-ON-MAC")
+    dist = jr.workspace / jr.row["heif_dist_dir"]
+    lib = dist / "lib"
+    if not (lib / "libde265.0.dylib").is_file():
+        emit(f"FAIL: {lib}/libde265.0.dylib absent")
+        return 1
+    if not (lib / "libde265.dylib").exists():
+        emit(f"FAIL: {lib}/libde265.dylib absent")
+        return 1
+    rc, out = capture(["otool", "-D", str(lib / "libde265.0.dylib")], jr.workspace, env=jr.env)
+    emit(out)
+    if rc != 0 or "@rpath/libde265.0.dylib" not in out.splitlines():
+        emit("FAIL: libde265's install name is not @rpath/libde265.0.dylib")
+        return 1
+    rc, out = capture(["otool", "-L", str(lib / "libheif.1.dylib")], jr.workspace, env=jr.env)
+    deps = "\n".join(out.splitlines()[1:])
+    emit(deps)
+    if rc != 0 or "@rpath/libde265" not in deps:
+        emit("FAIL: libheif does not reference libde265 via @rpath")
+        return 1
+    if jr.env["RUNNER_TEMP"] in deps:
+        emit("FAIL: libheif carries a load command into the build machine's vcpkg prefix")
+        return 1
+    return 0
 
 
-def a_dart_analyze(ctx: Ctx):
-    app = ctx.clone / "app"
-    rc = ctx.run([_flutter(), "pub", "get"], cwd=app)
-    if rc != 0:
-        return rc
-    return ctx.run([_dart(), "analyze"], cwd=app)
+IMPLS = {
+    "guards": i_guards, "deps-pytest": i_deps_pytest, "vcpkg-baseline": i_vcpkg_baseline,
+    "win-configure": i_win_configure, "win-assert-jxl": i_win_assert_jxl, "mac-de265-linkage": i_mac_de265_linkage,
+}
 
 
-def a_fetch_libraw(ctx: Ctx):
-    return ctx.run(ctx.py("native/scripts/build_deps.py", "fetch", "libraw"))
+# --- host provisioning checks (the gate never installs anything) -----------
+def p_check(ctx: Ctx, jr: JobRow, step, what: str) -> int:
+    path = next((v for k, v in jr.env.items() if k.upper() == "PATH"), None)
+    if what == "pytest":
+        ok = importlib.util.find_spec("pytest") is not None
+        hint = "python -m pip install pytest"
+    elif what == "ninja":
+        ok = shutil.which("ninja", path=path) is not None
+        hint = "python -m pip install ninja"
+    elif what == "msvc-env":
+        ok = bool(ctx.env)
+        hint = "install Visual Studio Build Tools with the x64 VC tools"
+    elif what == "vulkan-sdk":
+        sdk = jr.env.get("VULKAN_SDK", "")
+        ok = bool(sdk) and Path(sdk).is_dir()
+        hint = "install the Vulkan SDK (sets VULKAN_SDK)"
+    elif what == "flutter":
+        ok = shutil.which("flutter", path=path) is not None and shutil.which("dart", path=path) is not None
+        hint = "install Flutter (stable) and put flutter/dart on PATH"
+    elif what == "brew":
+        cmds = wf.derive_commands(step, jr.row, str(jr.workspace), jr.env) or []
+        pkgs = next((c.argv[2:] for c in cmds if c.argv[:2] == ["brew", "install"]), [])
+        rc, out = capture(["brew", "list", "--versions", *pkgs], jr.workspace, env=jr.env)
+        ok = rc == 0 and bool(pkgs)
+        hint = f"brew install {' '.join(pkgs)}"
+        emit(out.strip())
+    else:
+        emit(f"::error::unknown provision check {what!r}")
+        return 2
+    emit(f"PREPUSH_PROVISION({what})={'present' if ok else 'MISSING'}")
+    if not ok:
+        emit(f"::error::host prerequisite {what} missing -- {hint}")
+    return 0 if ok else 1
 
 
-def a_raw_provenance(ctx: Ctx):
-    return ctx.run(ctx.py("native/scripts/verify_raw_provenance.py"))
+def workflow_steps(clone: Path, host: str) -> list:
+    """Gate steps generated from the mirrored jobs' workflow steps."""
+    jobs = load_jobs(clone / WORKFLOWS_DIR)
+    steps: list = []
+    any_seen: set = set()
+    for key, alias, row_hosts in MIRRORED:
+        job = jobs.get(key)
+        if job is None:
+            continue
+        scope = STEP_SCOPE.get(key, {})
+        for row in job.rows or [{}]:
+            rk = row.get("arch_tag", "")
+            owner = row_hosts.get(rk)
+            label = f"{alias}[{rk}]" if rk else alias
+            if owner != host:
+                own = [s for s in job.steps if scope.get(s.name, ("", OWN))[1] == OWN and _cond(s, row) == "run"
+                       and not scope.get(s.name, ("",))[0].startswith(("ci-only", "seed:", "covered:"))]
+                why = (f"row runs on host {owner}" if owner else "no local host can run this row "
+                       "(its LoadLibrary/target-arch probes need an ARM64 Windows host)")
+                if own:
+                    steps.append(Step(label, f"{key} row={rk or '-'} ({len(own)} own-host steps)",
+                                      frozenset(), None, skip_reason=why))
+            for s in job.steps:
+                kind, where, note = scope.get(s.name, ("unclassified", OWN, ""))
+                if where == ANY:
+                    if (key, s.name) in any_seen:
+                        continue
+                    any_seen.add((key, s.name))
+                elif owner != host:
+                    continue
+                cond = _cond(s, row)
+                name = f"{label}:{_slug(s.name)}" if where == OWN else f"{alias}:{_slug(s.name)}"
+                deriv = f"{key} row={rk or '-'} step {s.name!r} [{kind}]" + (f" -- {note}" if note else "")
+                if cond == "skip-row":
+                    continue
+                if cond == "on-failure" or kind == "ci-only":
+                    steps.append(Step(name, deriv, ALL_HOSTS, None, status=CIONLY))
+                    continue
+                if kind.startswith(("seed:", "covered:")):
+                    steps.append(Step(name, deriv, ALL_HOSTS, None, status=COVERED))
+                    continue
+                steps.append(Step(name, deriv, ALL_HOSTS, _wf_action(key, alias, row, s, kind)))
+    for key, (alias, owner) in UNPORTED_OWNER.items():
+        reason = JOB_SCOPE[key][1]
+        if owner == host:
+            steps.append(Step(f"{alias}-leg", f"{key}: {reason}", frozenset({host}), None))
+        else:
+            steps.append(Step(f"{alias}-leg", f"{key}: {reason}", frozenset(), None,
+                              skip_reason=f"owned by host {owner}" if owner else "no local host platform owns this leg"))
+    return steps
 
 
-def a_alias_table(ctx: Ctx):
-    return ctx.run(ctx.py("native/scripts/check_alias_table_convention.py",
-                          "native/third_party/libraw/src/metadata/normalize_model.cpp"))
+def _cond(step, row) -> str:
+    try:
+        return wf.condition(step, row)
+    except ValueError:
+        return "run"  # scope-derivation reports it as a problem
 
 
-def a_check_test_manifest(ctx: Ctx):
-    return ctx.run(ctx.py("native/tests/check_test_manifest.py"))
+def _slug(text: str) -> str:
+    text = re.sub(r"\$\{\{[^}]*\}\}", "", text).lower()
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:60]
 
 
-def a_matrix_parsers(ctx: Ctx):
-    return ctx.run(ctx.py("native/tests/test_decode_matrix_parsers.py"))
-
-
-def a_flutter_test(subdir: str):
+def _wf_action(key: str, alias: str, row: dict, step, kind: str):
     def action(ctx: Ctx):
-        where = ctx.clone / subdir
-        rc = ctx.run([_flutter(), "pub", "get"], cwd=where)
-        if rc != 0:
-            return rc
-        prefix = f"{subdir}-test:"
-        unsupported = sorted(k[len(prefix):] for k in host_unsupported(ctx.host) if k.startswith(prefix))
-        if not unsupported:
-            return ctx.run([_flutter(), "test"], cwd=where)
-        files = sorted(p.name for p in (where / "test").glob("*_test.dart"))
-        missing = [f for f in unsupported if f not in files]
-        for f in missing:
-            emit(f"::error::STALE host-unsupported entry {prefix}{f}: no such test file; remove it from prepush.HOST_UNSUPPORTED")
-        run_set = [f"test/{f}" for f in files if f not in unsupported]
-        emit(f"PREPUSH_FLUTTER_FILES({subdir}) total={len(files)} running={len(run_set)} host_unsupported={len(unsupported)}")
-        rc = ctx.run([_flutter(), "test", *run_set], cwd=where)
-        stale = len(missing)
-        for f in unsupported:
-            if f in missing:
-                continue
-            probe_rc, out = capture([_flutter(), "test", f"test/{f}"], cwd=where, env=ctx.env or None)
-            log = ctx.clone / REPROOF_DIR / f"{subdir}-{f}.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text(out, encoding="utf-8")
-            if probe_rc == 0:
-                stale += 1
-                emit(f"::error::STALE host-unsupported entry {prefix}{f}: it now PASSES on {ctx.host}; "
-                     f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
-            else:
-                _declare_host_skip(ctx, f"{prefix}{f}", f"isolated-run-rc={probe_rc} log={log.relative_to(ctx.clone).as_posix()}", log)
-        return rc or (1 if stale else 0)
+        jr = jobrow(ctx, key, alias, row)
+        if kind == "derive":
+            return run_derived(jr, step)
+        if kind.startswith("impl:"):
+            return IMPLS[kind[5:]](ctx, jr, step)
+        if kind.startswith("provision:"):
+            return p_check(ctx, jr, step, kind[10:])
+        emit(f"::error::step {step.name!r} has unknown classification {kind!r}")
+        return 2
     return action
 
 
 # ---------------------------------------------------------------------------
-# Windows x86_64: toolchain environment + the windows_build.yml x86_64 row.
+# Windows toolchain environment.
 # ---------------------------------------------------------------------------
-WIN_BUILD_DIR = "native/build-windows"
-WIN_CODEC_EXPECT = [
-    "--expect", "jpeg:encode=1", "--expect", "jpeg:decode=0", "--expect", "webp:encode=1",
-    "--expect", "webp:decode=1", "--expect", "heic:encode=1", "--expect", "heic:decode=1",
-    "--expect", "avif:encode=1", "--expect", "avif:decode=1", "--expect", "jxl:encode=1",
-    "--expect", "jxl:decode=1",
-]
-WIN_BUILD_EXPECT = [
-    "--expect-cap", "ICC=0", "--expect-cap", "OPENMP=1", "--expect-cap", "HEIF=1",
-    "--expect-cap", "WEBP=1", "--expect-cap", "JXL=1", "--expect-cap", "RAW=1",
-]
-
-
 def _vswhere() -> Optional[Path]:
     base = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     p = Path(base) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
@@ -446,14 +771,13 @@ def _vswhere() -> Optional[Path]:
 def windows_msvc_env() -> tuple:
     """The vcvars64 environment (what ilammy/msvc-dev-cmd exports in CI),
     plus the VS-bundled LLVM bin dir appended when clang-cl is not already on
-    PATH (CI's runner image has a standalone LLVM; a developer box usually
-    has the VS-bundled one). Returns (env or None, diagnostic)."""
+    PATH. Returns (env or None, diagnostic)."""
     vswhere = _vswhere()
     if vswhere is None:
         return None, "vswhere.exe not found (Visual Studio Installer absent)"
     rc, out = capture([vswhere, "-latest", "-products", "*", "-requires",
-                       "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                       "-property", "installationPath"], cwd=REPO_ROOT)
+                       "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+                      cwd=REPO_ROOT)
     install = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ""
     if not install:
         return None, f"vswhere found no VS install with the x64 VC tools (rc={rc}): {out.strip()}"
@@ -471,8 +795,8 @@ def windows_msvc_env() -> tuple:
     path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
     parts = env.get(path_key, "").split(os.pathsep)
     # Git-for-Windows' MSYS dirs AFTER System32: their GNU `tar` parses
-    # `C:\...` as a remote host spec and their `curl` differs from the
-    # runner's. CI's pwsh steps resolve System32's bsdtar/curl first.
+    # `C:\...` as a remote host spec. CI's pwsh steps resolve System32's
+    # bsdtar/curl first.
     msys = [p for p in parts if re.search(r"\\Git\\(usr|mingw64)\\bin", p, re.IGNORECASE)]
     parts = [p for p in parts if p not in msys] + msys
     if shutil.which("clang-cl", path=os.pathsep.join(parts)) is None:
@@ -484,96 +808,186 @@ def windows_msvc_env() -> tuple:
     return env, f"vcvars64={vcvars}"
 
 
-def _ci(ctx: Ctx, *args) -> int:
-    return ctx.run(ctx.py("native/scripts/ci.py", *args))
+# ---------------------------------------------------------------------------
+# Test layer: host-unsupported inventory with failure signatures.
+# ---------------------------------------------------------------------------
+# A failure line, in a build log or runner/test output.
+_FAILURE_LINE = re.compile(r"error|FAILED|\bFAIL\b|undefined symbol")
 
 
-def w_locate_clang_cl(ctx: Ctx):
-    return _ci(ctx, "provision", "locate-clang-cl")
+@dataclass
+class Unsupported:
+    cls: str
+    evidence: str
+    must: tuple  # every regex must match some line of the observed output
+    allowed: tuple  # every failure line must match one of these
 
 
-def w_verify_vulkan(ctx: Ctx):
-    sdk = ctx.env.get("VULKAN_SDK") or os.environ.get("VULKAN_SDK", "")
-    return _ci(ctx, "verify-vulkan-lib", "--vulkan-sdk", sdk)
+def _obj_failed(target: str) -> str:
+    return rf"FAILED: \[code=\d+\] CMakeFiles/{target}\.dir/tests/{target}\.cpp\.obj"
 
 
-def w_build_zlib(ctx: Ctx):
-    return _ci(ctx, "build-zlib", "--version", "1.3.1", "--workspace", str(ctx.clone))
+def _undefined(symbols: str) -> str:
+    return rf"lld-link: error: undefined symbol: .*\b({symbols})\b"
 
 
-def w_configure(ctx: Ctx):
-    zlib = (ctx.clone / "zlib-install").as_posix()
-    argv = ["cmake", "-S", "native", "-B", WIN_BUILD_DIR, "-G", "Ninja",
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
-            "-DDNG_DIAGNOSTIC_BUILD=OFF", "-DDNG_VK_PIPELINE_CACHE=OFF",
-            f"-DDNG_ZLIB_ROOT={zlib}", f"-DZLIB_ROOT={zlib}", "-DZLIB_USE_STATIC_LIBS=ON"]
-    rc = stream(argv, ctx.clone, env=ctx.env, tee=ctx.clone / "configure.log")
-    emit(f"CONFIGURE_RC={rc}")
-    return rc
+_GENERATED = r"^\d+ errors? generated\.$"
+_DLL_INTERNALS = ("links dng_decoder_native and calls non-FFI internals; a Windows DLL exports only "
+                  "FFI_EXPORT symbols (macOS/Linux shared libs export all), so lld-link reports them undefined")
+_MACOS_DYLIB_FIXTURE = (
+    "loads the shipped Mach-O plugin/macos/Libraries/libdng_decoder_native.dylib "
+    "(plugin/test/support/native_fixtures.dart:7 shippedDylibPath); it is gitignored (.gitignore:36 *.dylib) "
+    "and a Mach-O dylib cannot be loaded on Windows")
+_DYLIB_FAILURE = r"libdng_decoder_native\.dylib"
 
 
-def w_assert_jxl_static(ctx: Ctx):
-    log = ctx.clone / "configure.log"
-    found = log.is_file() and "JXL: static" in log.read_text(encoding="utf-8", errors="replace")
-    rc = 0 if found else 1
-    emit(f"ASSERT JXL static-link RC={rc}")
-    if rc:
-        emit("::error::configure.log does not show the expected 'JXL: static' line from cmake/jxl.cmake")
-    return rc
+def _link_entry(target: str, symbols: str, detail: str) -> Unsupported:
+    return Unsupported("link-error-dll-internals", f"{_DLL_INTERNALS}: {detail}",
+                       must=(_undefined(symbols),),
+                       allowed=(_undefined(symbols), rf"FAILED: \[code=\d+\] {target}\.exe"))
 
 
-def w_build(ctx: Ctx):
-    rc = ctx.run(["cmake", "--build", WIN_BUILD_DIR, "--target", "dng_decoder_native", "--", "-k", "0"])
-    emit(f"BUILD_RC={rc}")
-    return rc
+HOST_UNSUPPORTED: dict = {
+    WINDOWS_X64: {
+        "target:test_device_handoff": Unsupported(
+            "compile-error-posix-header",
+            "native/tests/test_device_handoff.cpp:49 #include <unistd.h> -> clang-cl: 'unistd.h' file not found",
+            must=(r"test_device_handoff\.cpp\(49,10\): fatal error: 'unistd\.h' file not found",),
+            allowed=(r"test_device_handoff\.cpp\(49,10\): fatal error: 'unistd\.h' file not found", _GENERATED,
+                     _obj_failed("test_device_handoff"))),
+        "target:test_raw_end_to_end": Unsupported(
+            "compile-error-posix-api",
+            "native/tests/test_raw_end_to_end.cpp:325 setenv/unsetenv undeclared (not in the MSVC CRT)",
+            must=(r"test_raw_end_to_end\.cpp\(\d+,\d+\): error: use of undeclared identifier '(un)?setenv'",),
+            allowed=(r"test_raw_end_to_end\.cpp\(\d+,\d+\): error: use of undeclared identifier '(un)?setenv'",
+                     _GENERATED, _obj_failed("test_raw_end_to_end"))),
+        "target:test_raw_hardening": Unsupported(
+            "compile-error-posix-api",
+            "native/tests/test_raw_hardening.cpp:327 setenv/unsetenv undeclared (not in the MSVC CRT)",
+            must=(r"test_raw_hardening\.cpp\(\d+,\d+\): error: use of undeclared identifier '(un)?setenv'",),
+            allowed=(r"test_raw_hardening\.cpp\(\d+,\d+\): error: use of undeclared identifier '(un)?setenv'",
+                     _GENERATED, _obj_failed("test_raw_hardening"))),
+        "target:test_libraw_adapter": _link_entry(
+            "test_libraw_adapter",
+            "raw_invert_3x3|raw_bayer_filters_check_2x2|raw_black_pattern_from_libraw|raw_camera_to_pcs_from_libraw"
+            "|LibRawFrontendContext|LibRawGpuInputAdapter|raw_bayer_phase_from_pattern|raw_classify_layout"
+            "|raw_contract_print|raw_layout_class_name|raw_pcs_white|raw_bayer_channel_index_at_plane"
+            "|raw_component_black_from_libraw|raw_white_balance_from_libraw",
+            "raw_invert_3x3, raw_bayer_filters_check_2x2, LibRawFrontendContext::* ... (19 symbols)"),
+        "target:test_raw_sized_decode": _link_entry(
+            "test_raw_sized_decode", "raw_pipeline_probe_output_size|raw_pipeline_decode_file_into",
+            "raw_pipeline_probe_output_size, raw_pipeline_decode_file_into"),
+        "target:test_raw_render_params": _link_entry(
+            "test_raw_render_params",
+            "dng_render_params_for_test|halide_stage2_ol2_dispatch_failed|halide_try_dispatch_opcode2"
+            "|halide_try_dispatch_opcode2_batch|raw_build_render_params|runRenderStage4HalideAot"
+            "|raw_camera_to_pcs_from_libraw|LibRawFrontendContext|LibRawGpuInputAdapter|raw_pcs_white"
+            "|raw_srgb_to_pcs_matrix|toIdentityHueSatMap",
+            "raw_build_render_params, dng_render_params_for_test, raw_pcs_white ... (15 symbols)"),
+        "target:test_stage4_oriented": Unsupported(
+            "metal-link",
+            "references halide_metal_device_interface and the Metal-only AOT stage4 objects",
+            must=(_undefined("halide_metal_device_interface"),),
+            allowed=(_undefined("halide_metal_device_interface|dng_render_stage4_scaled_preavg|dng_render_stage4_split"
+                                "|dng_render_stage4_split_yuv420"),
+                     r"FAILED: \[code=\d+\] test_stage4_oriented\.exe")),
+        "decode-main:native/tests/run_decode_matrix.py": Unsupported(
+            "metal-pinned-baseline",
+            "native/tests/kernel_regression_baselines.json SHA256 gates lossless_halide_stage3/stage4 pin Metal output "
+            "bytes, and test_decode's own lossy Stage4 self-gate requires 999 dB (Metal-identical); Windows Vulkan "
+            "differs on exactly those, every other main-case gate (fixture hashes, lossless PSNR) still gates",
+            must=(r"^\[SHA256 GATE\] lossless_halide_stage3: FAIL$", r"^\[SHA256 GATE\] lossless_halide_stage4: FAIL$",
+                  r"^\[PSNR GATE\] Stage4: [\d.]+ dB < 999\.00 dB  \[FAIL\]$"),
+            allowed=(r"^\[SHA256 GATE\] lossless_halide_stage[34]: FAIL$",
+                     r"^\[PSNR GATE\] Stage4: [\d.]+ dB < 999\.00 dB  \[FAIL\]$",
+                     r"^\[PSNR GATE\] FAIL — one or more stages below threshold; exiting 1$",
+                     r"^\s*ERROR: \[Lossy / Halide Metal\] exit=1$")),
+        "decode-case:ffi-dng-lossy": Unsupported(
+            "metal-pinned-baseline",
+            "needs the lossy Halide test render that run_decode_matrix.py stages only after test_decode's lossy case "
+            "passes its Metal-identical self-gate (decode-main entry above)",
+            must=(r"\[FFI lossy\] Halide test render missing",),
+            allowed=(r"\[FFI lossy\] Halide test render missing", r"^PREPUSH_CASE_RESULT ffi-dng-lossy FAIL")),
+        "decode-case:orient-symbol-absence": Unsupported(
+            "macho-nm-instrument",
+            "run_decode_matrix.py _run_orient_symbol_absence_case lists exports with `nm -gU` (macOS nm; -U is Mach-O "
+            "'defined only') against the production dylib; Windows has no nm and a PE DLL keeps exports in its export "
+            "table, not a symbol table. Windows' FFI export surface is gated by windows[x86_64]:assert-required-ffi-"
+            "exports (positive set only; the oracle-only ABSENCE check has no Windows instrument)",
+            must=(r"PREPUSH_CASE_RESULT orient-symbol-absence FAIL -- instrument `nm -gU`",),
+            allowed=(r"PREPUSH_CASE_RESULT orient-symbol-absence FAIL -- instrument `nm -gU`",)),
+        **{f"plugin-test:{name}": Unsupported(
+            "macos-dylib-fixture", _MACOS_DYLIB_FIXTURE, must=(_DYLIB_FAILURE,), allowed=(_DYLIB_FAILURE,))
+           for name in ("decode_failure_error_code_test.dart", "dng_image_native_address_test.dart",
+                        "dng_sized_decode_active_test.dart", "dng_sized_decode_fallback_test.dart",
+                        "encode_service_test.dart", "raw_decode_service_test.dart", "raw_symbol_absent_test.dart",
+                        "retired_symbols_absent_test.dart", "wp10_decode_into_buffer_symbol_absent_test.dart")},
+    },
+}
+
+# Recorded as campaign input; printed on every host, never counted.
+DEFECT_INVENTORY = (
+    ("gitignored-test-fixture",
+     "plugin tests depend on plugin/macos/Libraries/libdng_decoder_native.dylib, which .gitignore:36 (*.dylib) keeps "
+     "out of every fresh clone; the gate seeds it on macOS hosts only. Suites that SKIP (rather than fail) without a "
+     "loadable dylib -- native_buffer_pool_alignment_test, native_rotation_bindings_test, service_pooled_arms_test, "
+     "service_resize_retry_test, wp10_activation_proof_test -- lose coverage silently; each skipped test is listed per "
+     "run as a PREPUSH_INNER_SKIP line"),
+    ("fetch-halide-windows-layout",
+     "native/scripts/deps/fetch_halide.py already_present() looked only for lib/Halide.lib; the Windows dist ships "
+     "lib/Release/Halide.lib, so every Windows CI run re-downloaded the dist (fixed in its own commit)"),
+)
+
+REPROOF_DIR = Path("prepush-reproof")  # not under artifacts/: run_decode_matrix.py wipes that
 
 
-ARCH = ["--arch", "x86_64"]
+def host_unsupported(host: str) -> dict:
+    return HOST_UNSUPPORTED.get(host, {})
 
 
-def w_ci(*args):
-    return lambda ctx: _ci(ctx, *args)
+def match_signature(entry: Unsupported, text: str) -> list:
+    """Problems with `text` as a re-proof of `entry` ([] = signature holds)."""
+    lines = text.splitlines()
+    problems = [f"declared signature not observed: /{rx}/" for rx in entry.must
+                if not any(re.search(rx, ln) for ln in lines)]
+    allowed = [re.compile(rx) for rx in entry.allowed]
+    for ln in lines:
+        if _FAILURE_LINE.search(ln) and not any(rx.search(ln) for rx in allowed):
+            problems.append(f"undeclared failure: {ln.strip()[:240]}")
+    return problems
 
 
-WINDOWS_LEG = [
-    ("win-locate-clang-cl", "Locate clang-cl", w_locate_clang_cl),
-    ("win-verify-vulkan-lib", "Verify vulkan-1.lib is present", w_verify_vulkan),
-    ("win-build-zlib", "Build zlib 1.3.1 (static, /MT)", w_build_zlib),
-    ("win-configure", "Configure (Ninja + clang-cl, Vulkan AOT target)", w_configure),
-    ("win-assert-jxl-static", "Assert JXL was statically linked (G1)", w_assert_jxl_static),
-    ("win-build", "Build dng_decoder_native", w_build),
-    ("win-assert-no-avx512", "Assert no AVX-512 in in-tree Windows code", w_ci("assert-no-avx512", "--platform", "windows", *ARCH)),
-    ("win-verify-artifact", "Verify Windows artifact", w_ci("verify-artifact", "--platform", "windows", *ARCH)),
-    ("win-assert-exports", "Assert required FFI exports (AC-W4)", w_ci("assert-exports", "--platform", "windows", *ARCH)),
-    ("win-import-closure", "Assert Windows DLL dependency closure", w_ci("import-closure", "--platform", "windows", *ARCH)),
-    ("win-assert-orientation", "Assert fused-orientation kernel signals (G-E)", w_ci("assert-orientation", "--platform", "windows", *ARCH)),
-    ("win-capability-codec", "Assert full codec capability vector via probe (G1)",
-     w_ci("capability-vector", "--platform", "windows", "--kind", "codec", *WIN_CODEC_EXPECT,
-          "--json-out", "native/scripts/deps/probe/capability.json")),
-    ("win-capability-build", "Assert build capability vector via probe (S-E2)",
-     w_ci("capability-vector", "--platform", "windows", "--kind", "build", *WIN_BUILD_EXPECT,
-          "--json-out", "native/scripts/deps/probe/capability_build.json")),
-    ("win-codec-probe", "Compile + run functional capability probe (CI-T3)",
-     lambda ctx: _ci(ctx, "codec-probe", "--platform", "windows", "--workspace", str(ctx.clone),
-                     "--dist-dir", "native/third_party/heif-dist-windows")),
-    ("win-stage", "Stage native artifacts", w_ci("stage", "--platform", "windows", *ARCH, "--artifact-dir", "artifacts", "--source-dir", WIN_BUILD_DIR)),
-    ("win-assert-pe-machine", "Assert every staged DLL is this leg's PE machine type (AC-C2)",
-     w_ci("assert-pe-machine", "--platform", "windows", *ARCH, "--artifact-dir", "artifacts")),
-    ("win-min-runtime", "Measure and emit the minimum runtime floor (S-F1)", w_ci("min-runtime", "--platform", "windows", *ARCH)),
-    ("win-assert-staged-group", "Assert the Windows shipped-file group is complete",
-     w_ci("assert-staged-group", "--platform", "windows", *ARCH, "--artifact-dir", "artifacts")),
-]
+def reprove(ctx: Ctx, item: str, rc: int, text: str, log: Path) -> object:
+    """Judge one host-unsupported item's re-proof run: HOSTSKIP if it failed
+    with exactly its declared signature, else a hard failure."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(text, encoding="utf-8")
+    entry = host_unsupported(ctx.host)[item]
+    if rc == 0:
+        emit(f"::error::STALE host-unsupported entry {item}: it now PASSES on {ctx.host}; remove it from "
+             "prepush.HOST_UNSUPPORTED so it is gated")
+        return 1
+    problems = match_signature(entry, text)
+    for p in problems:
+        emit(f"::error::{item}: {p}")
+    if problems:
+        emit(f"::error::{item} failed, but NOT with its declared {entry.cls} signature -- a real failure, gate RED "
+             f"(log {log.relative_to(ctx.clone).as_posix()})")
+        return 1
+    emit(f"PREPUSH_HOST_SKIP({item}): class={entry.cls} rc={rc} signature=matched -- {entry.evidence}")
+    hits = [ln for ln in text.splitlines() if _FAILURE_LINE.search(ln)]
+    for ln in hits[:6]:
+        emit(f"PREPUSH_HOST_SKIP_EVIDENCE({item}): {ln.strip()[:300]}")
+    ctx.host_skips.append((item, entry.cls, entry.evidence))
+    return (HOSTSKIP, item)
 
 
 # ---------------------------------------------------------------------------
-# Test layer.
+# Test layer: steps.
 # ---------------------------------------------------------------------------
 def gate_runners(clone: Path) -> tuple:
-    """(non-manual runner scripts, their executables) derived from
-    native/tests/gates.py: GATES kind `runner:<file>` minus every script
-    SCRIPTS declares `manual:`."""
+    """(non-manual runner scripts -> executables, manual scripts) derived
+    from native/tests/gates.py."""
     ns: dict = {}
     exec(compile((clone / "native/tests/gates.py").read_text(encoding="utf-8"), "gates.py", "exec"), ns)
     manual = {k for k, v in ns.get("SCRIPTS", {}).items() if v.startswith("manual:")}
@@ -586,92 +1000,21 @@ def gate_runners(clone: Path) -> tuple:
     return runners, sorted(manual)
 
 
+def build_dir_for(host: str) -> str:
+    return WIN_BUILD_DIR if host == WINDOWS_X64 else "native/build"
+
+
 def _exe(name: str) -> str:
     return name + (".exe" if os.name == "nt" else "")
 
 
-# Items that SHOULD be portable but are not yet runnable on a host -- the
-# platform-fork / blind-instrument inventory (lead ruling 2026-10-03 (b)).
-# Key "target:<cmake target>" or "runner:<script>"; value (class, evidence).
-# Every entry is RE-PROVEN each run: an unsupported target is still built in
-# isolation and must still fail; an unsupported runner is still run and must
-# still exit non-zero. One that passes is a STALE entry and turns the gate
-# red -- remove it from this table so the item is gated again.
-_WIN_DLL_INTERNALS = ("links dng_decoder_native and calls non-FFI internals; a Windows DLL exports only "
-                      "FFI_EXPORT symbols (macOS/Linux shared libs export all), so lld-link reports undefined: ")
-_MACOS_DYLIB_FIXTURE = (
-    "loads the shipped Mach-O plugin/macos/Libraries/libdng_decoder_native.dylib "
-    "(plugin/test/support/native_fixtures.dart:7 shippedDylibPath) and asserts it in setUpAll / via `nm -gU`; "
-    "it is gitignored (.gitignore:36 *.dylib) and a Mach-O dylib cannot be loaded on Windows")
-
-# Defects that are not host skips but are recorded in the same inventory as
-# campaign input (printed on every host, never counted).
-DEFECT_INVENTORY = (
-    ("gitignored-test-fixture",
-     "plugin tests depend on plugin/macos/Libraries/libdng_decoder_native.dylib, which .gitignore:36 (*.dylib) keeps "
-     "out of every fresh clone on every host; the gate seeds it on macOS hosts only. Suites that skip instead of fail "
-     "when it is absent (native_rotation_bindings_test, service_pooled_arms_test, service_resize_retry_test) lose "
-     "coverage silently on any host without it"),
-    ("fetch-halide-windows-layout",
-     "native/scripts/deps/fetch_halide.py already_present() looked only for lib/Halide.lib; the Windows dist ships "
-     "lib/Release/Halide.lib, so every Windows CI run re-downloaded the dist (fixed in its own commit)"),
-)
-
-HOST_UNSUPPORTED: dict = {
-    WINDOWS_X64: {
-        "target:test_device_handoff": ("compile-error-posix-header",
-            "native/tests/test_device_handoff.cpp:49 #include <unistd.h> -> clang-cl: 'unistd.h' file not found"),
-        "target:test_raw_end_to_end": ("compile-error-posix-api",
-            "native/tests/test_raw_end_to_end.cpp:325 setenv/unsetenv undeclared (not in the MSVC CRT)"),
-        "target:test_raw_hardening": ("compile-error-posix-api",
-            "native/tests/test_raw_hardening.cpp:327 setenv/unsetenv undeclared (not in the MSVC CRT)"),
-        "target:test_libraw_adapter": ("link-error-dll-internals",
-            _WIN_DLL_INTERNALS + "raw_invert_3x3, raw_bayer_filters_check_2x2, LibRawFrontendContext::* (19 symbols)"),
-        "target:test_raw_sized_decode": ("link-error-dll-internals",
-            _WIN_DLL_INTERNALS + "raw_pipeline_probe_output_size, raw_pipeline_decode_file_into (2 symbols)"),
-        "target:test_raw_render_params": ("link-error-dll-internals",
-            _WIN_DLL_INTERNALS + "raw_build_render_params, dng_render_params_for_test, raw_pcs_white (15 symbols)"),
-        "target:test_stage4_oriented": ("metal-link",
-            "references halide_metal_device_interface and dng_render_stage4_scaled_preavg (Metal-only AOT objects, 4 undefined)"),
-        **{f"plugin-test:{name}": ("macos-dylib-fixture", _MACOS_DYLIB_FIXTURE) for name in (
-            "decode_failure_error_code_test.dart", "dng_image_native_address_test.dart",
-            "dng_sized_decode_active_test.dart", "dng_sized_decode_fallback_test.dart",
-            "encode_service_test.dart", "raw_decode_service_test.dart", "raw_symbol_absent_test.dart",
-            "retired_symbols_absent_test.dart", "wp10_decode_into_buffer_symbol_absent_test.dart")},
-        "runner:native/tests/run_decode_matrix.py": ("metal-pinned-baseline",
-            "native/tests/kernel_regression_baselines.json SHA256 gates lossless_halide_stage3/stage4 pin Metal output bytes; "
-            "Windows Vulkan output differs, so the runner exits at its first gate before any harness case"),
-        "runner:native/tests/run_raw_matrix.py": ("metal-pinned-baseline",
-            "its mandatory dng-regression case runs run_decode_matrix.py (metal-pinned-baseline above), and 5 of its 13 "
-            "binaries are unbuildable here (entries above)"),
-    },
-}
-
-
-# Not under artifacts/: run_decode_matrix.py wipes that directory on start.
-REPROOF_DIR = Path("prepush-reproof")
-
-
-def host_unsupported(host: str) -> dict:
-    return HOST_UNSUPPORTED.get(host, {})
-
-
-def _declare_host_skip(ctx: Ctx, item: str, reproof: str, log: Path) -> None:
-    cls, evidence = host_unsupported(ctx.host)[item]
-    emit(f"PREPUSH_HOST_SKIP({item}): class={cls} reproof={reproof} -- {evidence}")
-    # The scratch clone is deleted after the run; the observed failure is
-    # copied into the gate's own output so the evidence survives in the log.
-    lines = [ln for ln in log.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
-    hits = [ln for ln in lines if re.search(r"error|FAIL|undefined symbol", ln)]
-    for ln in (hits or lines)[:8]:
-        emit(f"PREPUSH_HOST_SKIP_EVIDENCE({item}): {ln[:300]}")
-    ctx.host_skips.append((item, cls, evidence))
-
-
 def t_build_tests(ctx: Ctx):
+    if ctx.host == LINUX_X64:
+        emit("::error::PREPUSH_UNIMPLEMENTED(test-build-targets): no native build leg is implemented for a Linux host")
+        return 3
     runners, _ = gate_runners(ctx.clone)
-    build_dir = WIN_BUILD_DIR if ctx.host == WINDOWS_X64 else "native/build"
-    rc, out = capture(["cmake", "--build", build_dir, "--target", "help"], cwd=ctx.clone, env=ctx.env or None)
+    build_dir = build_dir_for(ctx.host)
+    rc, out = capture(["cmake", "--build", build_dir, "--target", "help"], ctx.clone, env=ctx.base_env())
     available = set(re.findall(r"^([A-Za-z0-9_]+): ", out, re.MULTILINE))
     wanted = sorted({exe for exes in runners.values() for exe in exes})
     unsupported = {t for t in wanted if f"target:{t}" in host_unsupported(ctx.host)}
@@ -685,184 +1028,362 @@ def t_build_tests(ctx: Ctx):
         emit(f"::error::cannot enumerate test targets in {build_dir} (rc={rc})")
         return rc or 1
     rc = ctx.run(["cmake", "--build", build_dir, "--target", *targets, "--", "-k", "0"])
-    stale = []
+    bad = 0
     for t in sorted(unsupported):
-        probe_rc, probe_out = capture(["cmake", "--build", build_dir, "--target", t], cwd=ctx.clone, env=ctx.env or None)
-        log = ctx.clone / REPROOF_DIR / f"{t}.build.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(probe_out, encoding="utf-8")
-        if probe_rc == 0:
-            stale.append(t)
-            emit(f"::error::STALE host-unsupported entry target:{t}: it now BUILDS on {ctx.host}; "
-                 f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
-        else:
-            _declare_host_skip(ctx, f"target:{t}", f"isolated-build-rc={probe_rc} log={log.relative_to(ctx.clone).as_posix()}", log)
-    return rc or (1 if stale else 0)
+        probe_rc, probe_out = capture(["cmake", "--build", build_dir, "--target", t], ctx.clone, env=ctx.base_env())
+        verdict = reprove(ctx, f"target:{t}", probe_rc, probe_out, ctx.clone / REPROOF_DIR / f"{t}.build.log")
+        bad += verdict == 1
+    return rc or (1 if bad else 0)
 
 
-def _runner_step(script: str):
+# run_decode_matrix.py harness cases, run one at a time through the runner's
+# OWN case functions (so pass/fail semantics stay the runner's) when its main
+# cases cannot complete on this host. (case, binary or None).
+DECODE_CASES = (
+    ("cfa-phase", "test_cfa_phase"),
+    ("cfa-color-bggr", "test_cfa_color"),
+    ("sized-decode", "test_sized_decode"),
+    ("stage4-oriented", "test_stage4_oriented"),
+    ("abi-layout", "test_abi_layout"),
+    ("encode-yuv420", "ceyx_encode_harness"),
+    ("device-handoff", "test_device_handoff"),
+    ("ffi-dng-lossless", "dng_ffi_harness"),
+    ("ffi-dng-lossy", "dng_ffi_harness"),
+    ("ffi-raw", "dng_ffi_harness"),
+    ("orient-symbol-absence", None),
+)
+_MAIN_OPT_OUTS = ("--no-ffi-harness", "--no-device-handoff-harness", "--no-cfa-phase-harness", "--no-bggr-case",
+                  "--no-sized-decode-harness", "--no-stage4-oriented-harness", "--no-abi-layout-harness",
+                  "--no-orient-symbol-absence-gate", "--no-encode-yuv420-case", "--no-raw-ffi-case")
+DECODE_SCRIPT = "native/tests/run_decode_matrix.py"
+
+
+def t_decode_matrix(ctx: Ctx):
+    if ctx.host == MACOS_ARM64:
+        return ctx.run(ctx.py(DECODE_SCRIPT))
+    if ctx.host == LINUX_X64:
+        emit("::error::PREPUSH_UNIMPLEMENTED(test-decode-matrix): no native build leg is implemented for a Linux host")
+        return 3
+    b = build_dir_for(ctx.host)
+    item = f"decode-main:{DECODE_SCRIPT}"
+    argv = ctx.py(DECODE_SCRIPT, "--test-decode", f"{b}/{_exe('test_decode')}", *_MAIN_OPT_OUTS)
+    emit(f"PREPUSH_EXEC: {' '.join(argv)}")
+    rc, out = capture(argv, ctx.clone, env=ctx.base_env())
+    sys.stdout.write(out)
+    return reprove(ctx, item, rc, out, ctx.clone / REPROOF_DIR / "decode-main.log")
+
+
+def t_decode_case(case: str, binary: Optional[str]):
     def action(ctx: Ctx):
-        build_dir = WIN_BUILD_DIR if ctx.host == WINDOWS_X64 else "native/build"
-        args = RUNNER_ARGS.get(script, lambda c, b: [])(ctx, build_dir)
-        if isinstance(args, tuple) and args and args[0] == SKIP:
-            return args
-        item = f"runner:{script}"
-        if item not in host_unsupported(ctx.host):
-            return ctx.run(ctx.py(script, *args))
-        log = ctx.clone / REPROOF_DIR / f"{Path(script).stem}.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        rc, out = capture(ctx.py(script, *args), cwd=ctx.clone, env=ctx.env or None)
-        log.write_text(out, encoding="utf-8")
-        if rc == 0:
-            emit(f"::error::STALE host-unsupported entry {item}: it now PASSES on {ctx.host}; "
-                 f"remove it from prepush.HOST_UNSUPPORTED so it is gated")
-            return 1
-        _declare_host_skip(ctx, item, f"runner-rc={rc} log={log.relative_to(ctx.clone).as_posix()}", log)
-        return (HOSTSKIP, item)
+        b = build_dir_for(ctx.host)
+        item = f"decode-case:{case}"
+        if binary and f"target:{binary}" in host_unsupported(ctx.host):
+            emit(f"PREPUSH_CASE_DEPENDS({case}): binary target:{binary} is host-unsupported (counted there)")
+            return (SKIP, f"depends on host-unsupported target:{binary}")
+        argv = ctx.py("native/scripts/ci.py", "prepush", "--decode-case", case, "--build-dir", b)
+        if case == "encode-yuv420":
+            py = pillow_python(ctx)
+            if py is None:
+                return 1
+            argv[0] = py
+        emit(f"PREPUSH_EXEC: {' '.join(argv)}")
+        rc, out = capture(argv, ctx.clone, env=ctx.base_env())
+        sys.stdout.write(out)
+        if item in host_unsupported(ctx.host):
+            return reprove(ctx, item, rc, out, ctx.clone / REPROOF_DIR / f"decode-case-{case}.log")
+        return rc
     return action
 
 
-# run_decode_matrix.py's auto-enabled harnesses default to extensionless
-# native/build/<name> paths. On hosts whose build dir or executable suffix
-# differs, each BUILT harness is passed explicitly; an unbuilt one is left to
-# the runner's own skip accounting (it records and counts it).
-_MATRIX_HARNESS_FLAGS = {
-    "--ffi-harness": "dng_ffi_harness",
-    "--device-handoff-harness": "test_device_handoff",
-    "--cfa-phase-harness": "test_cfa_phase",
-    "--cfa-color-harness": "test_cfa_color",
-    "--sized-decode-harness": "test_sized_decode",
-    "--stage4-oriented-harness": "test_stage4_oriented",
-    "--abi-layout-harness": "test_abi_layout",
-    "--encode-harness": "ceyx_encode_harness",
-}
+def pillow_python(ctx: Ctx) -> Optional[str]:
+    """run_decode_matrix.py's yuv420 encode gate needs Pillow + numpy
+    (verify_yuv420_encode.py); no repo manifest declares them. Use the host
+    interpreter when it has them, else a scratch venv (system site-packages
+    + the two packages from PyPI) -- never install into the host."""
+    if all(importlib.util.find_spec(m) is not None for m in ("PIL", "numpy")):
+        return sys.executable
+    venv = ctx.clone.parent / "prepush-pyenv"
+    py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not py.is_file():
+        if stream([sys.executable, "-m", "venv", "--system-site-packages", str(venv)], ctx.clone) != 0:
+            return None
+        if stream([str(py), "-m", "pip", "install", "--disable-pip-version-check", "Pillow", "numpy"], ctx.clone) != 0:
+            emit("::error::could not provision Pillow + numpy into the scratch venv")
+            return None
+    rc, out = capture([str(py), "-m", "pip", "list", "--format=freeze"], ctx.clone)
+    emit("PREPUSH_PYENV: " + " ".join(ln for ln in out.splitlines() if ln.lower().startswith(("pillow", "numpy"))))
+    return str(py)
 
 
-def _decode_matrix_args(ctx: Ctx, build_dir: str):
+def decode_case_main(case: str, build_dir: str) -> int:
+    """`prepush --decode-case CASE`: run ONE run_decode_matrix.py case through
+    the runner's own case function, in the current checkout."""
+    root = REPO_ROOT
+    spec = importlib.util.spec_from_file_location("run_decode_matrix", root / DECODE_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(root / "native/tests"))
+    spec.loader.exec_module(mod)
+    lossless = str(root / "image_samples/lossless_dng_sample.dng")
+    lossy = str(root / "image_samples/lossy_dng_sample.dng")
+    artifact_dir = root / "artifacts"
+    matrix_current = artifact_dir / "matrix-current"
+
+    def binary(name: str) -> Path:
+        return root / build_dir / _exe(name)
+
+    source = (root / DECODE_SCRIPT).read_text(encoding="utf-8")
+    m = re.search(r'"--bggr-min-b-minus-r",\s*type=float,\s*default=([\d.]+)', source)
+    min_b_minus_r = float(m.group(1)) if m else None
+    ffi_env = {"DNG_STAGE1_TIMING": "1", "DNG_MAP_POLY_TIMING": "1", "DNG_STAGE2_SDK_TIMING": "1"}
+    try:
+        if case == "cfa-phase":
+            result = mod._run_cfa_phase_case(root, binary("test_cfa_phase"))
+        elif case == "cfa-color-bggr":
+            if min_b_minus_r is None:
+                raise RuntimeError("cannot read --bggr-min-b-minus-r default from run_decode_matrix.py")
+            result = mod._run_cfa_color_case(root, binary("test_cfa_color"), root / mod._DEFAULT_BGGR_SAMPLE,
+                                             min_b_minus_r)
+        elif case == "sized-decode":
+            result = mod._run_sized_decode_case(root, binary("test_sized_decode"), lossless)
+        elif case == "stage4-oriented":
+            result = mod._run_stage4_oriented_case(root, binary("test_stage4_oriented"), lossless, 1)
+        elif case == "abi-layout":
+            result = mod._run_abi_layout_case(root, binary("test_abi_layout"))
+        elif case == "encode-yuv420":
+            result = mod._run_encode_yuv420_case(root, binary("ceyx_encode_harness"), lossless,
+                                                 matrix_current / "encode_yuv420")
+        elif case == "orient-symbol-absence":
+            lib = root / build_dir / ("dng_decoder_native.dll" if os.name == "nt" else "libdng_decoder_native.dylib")
+            if shutil.which("nm") is None:
+                print(f"PREPUSH_CASE_RESULT {case} FAIL -- instrument `nm -gU` (Mach-O export listing) not on PATH")
+                return 1
+            result = mod._run_orient_symbol_absence_case(root, lib, artifact_dir / "orient_symbol_nm.txt")
+        elif case in ("ffi-dng-lossless", "ffi-dng-lossy"):
+            fixture = case.rsplit("-", 1)[1]
+            dng = lossless if fixture == "lossless" else lossy
+            staged = mod._stage_ffi_test_render(artifact_dir, matrix_current, fixture, dng)
+            run = mod._run_ffi_case(root, str(binary("dng_ffi_harness")), f"{fixture.title()} / FFI", dng,
+                                    ffi_env, staged)
+            result = mod.CfaCheckResult(name=case, status="PASS", detail=f"ok={run.ok} contract={run.contract_pass}")
+        elif case == "ffi-raw":
+            raw_dir = matrix_current / "raw_ffi"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            run = mod._run_ffi_case(root, str(binary("dng_ffi_harness")), "Generic RAW / FFI",
+                                    str(root / mod._DEFAULT_RAW_FFI_SAMPLE),
+                                    {**ffi_env, "CEYX_RAW_TIMING_LOG": "1"}, raw_dir, require_rgb_match=False)
+            result = mod.CfaCheckResult(name=case, status="PASS", detail=f"ok={run.ok} contract={run.contract_pass}")
+        else:
+            print(f"::error::unknown decode case {case!r}")
+            return 2
+    except RuntimeError as exc:
+        print(str(exc))
+        print(f"PREPUSH_CASE_RESULT {case} FAIL")
+        return 1
+    print(f"PREPUSH_CASE_RESULT {case} {result.status} -- {result.detail}")
+    return 0 if result.status == "PASS" else 1
+
+
+RAW_SCRIPT = "native/tests/run_raw_matrix.py"
+_RAW_CASE = re.compile(r"^\[RawMatrix\] (\S+)\s+(?:rc=-?\d+\s+[\d.]+s -> (PASS|FAIL|SKIP)|-> (FAIL) \(binary missing: "
+                       r"[^)]*\)|-> (SKIP) reason=(\S+))")
+
+
+def t_raw_matrix(ctx: Ctx):
     if ctx.host == MACOS_ARM64:
-        return []
-    args = ["--test-decode", f"{build_dir}/{_exe('test_decode')}"]
-    for flag, name in _MATRIX_HARNESS_FLAGS.items():
-        rel = f"{build_dir}/{_exe(name)}"
-        if (ctx.clone / rel).is_file():
-            args += [flag, rel]
-    return args
+        return ctx.run(ctx.py(RAW_SCRIPT))
+    if ctx.host == LINUX_X64:
+        emit("::error::PREPUSH_UNIMPLEMENTED(test-raw-matrix): no native build leg is implemented for a Linux host")
+        return 3
+    # Every binary case is judged here; the runner's mandatory dng-regression
+    # case IS run_decode_matrix.py, which steps test-decode-* cover case by
+    # case, so it is skipped with the runner's own flag.
+    argv = ctx.py(RAW_SCRIPT, "--build-dir", build_dir_for(ctx.host), "--skip-dng")
+    emit(f"PREPUSH_EXEC: {' '.join(argv)}")
+    rc, out = capture(argv, ctx.clone, env=ctx.base_env())
+    sys.stdout.write(out)
+    spec = importlib.util.spec_from_file_location("run_raw_matrix", ctx.clone / RAW_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(ctx.clone / "native/tests"))
+    spec.loader.exec_module(mod)
+    expected = {"provenance", "corpus", "architecture-gates", *mod.TEST_BINARIES, "raw-sized-decode", "dng-regression"}
+    seen, bad = {}, 0
+    for line in out.splitlines():
+        m = _RAW_CASE.match(line)
+        if m:
+            seen[m.group(1)] = (m.group(2) or m.group(3) or m.group(4), m.group(5), "binary missing" in line)
+    for name in sorted(expected - set(seen)):
+        emit(f"::error::raw matrix case {name} produced no result line -- the instrument did not run it")
+        bad += 1
+    for name, (status, reason, missing) in sorted(seen.items()):
+        target = "test_raw_sized_decode" if name == "raw-sized-decode" else name
+        if status == "PASS":
+            emit(f"PREPUSH_RAW_CASE {name} PASS")
+        elif missing and f"target:{target}" in host_unsupported(ctx.host):
+            emit(f"PREPUSH_RAW_CASE {name} not-built -- target:{target} is host-unsupported (counted there)")
+        elif name == "dng-regression" and status == "SKIP" and reason == "skip-dng-flag":
+            emit("PREPUSH_RAW_CASE dng-regression delegated -- covered case by case by test-decode-* steps")
+        else:
+            emit(f"::error::raw matrix case {name}: {status}" + (f" reason={reason}" if reason else ""))
+            bad += 1
+    m = re.search(r"^\[RawMatrix DECLARED\] count=\d+ cases=(\S+)", out, re.MULTILINE)
+    for entry in (m.group(1).split(",") if m else []):
+        ctx.inner_skips.append(("raw-matrix", f"{entry} (runner-declared per-sample skip)"))
+    emit(f"PREPUSH_RAW_MATRIX runner_rc={rc} judged_cases={len(seen)} bad={bad}")
+    return 1 if bad else 0
 
 
-def _raw_matrix_args(ctx: Ctx, build_dir: str):
-    return ["--build-dir", build_dir]
-
-
-def _dist_equivalence_args(ctx: Ctx, build_dir: str):
+def t_dist_equivalence(ctx: Ctx):
     if ctx.host != MACOS_ARM64:
         return (SKIP, "layers 2-3 compare the macOS carrier-built HEIF dist against the committed macOS dist "
-                      "(`--platform` accepts macos or linux only); layer 1 runs on every host as step d6-layer1")
-    return []
+                      "(`--platform` accepts macos or linux only); layer 1 runs as macos:d6-layer-1 on every host")
+    return ctx.run(ctx.py("native/tests/run_dist_equivalence.py"))
 
 
-RUNNER_ARGS = {
-    "native/tests/run_decode_matrix.py": _decode_matrix_args,
-    "native/tests/run_raw_matrix.py": _raw_matrix_args,
-    "native/tests/run_dist_equivalence.py": _dist_equivalence_args,
-}
+def t_flutter(subdir: str):
+    def action(ctx: Ctx):
+        where = ctx.clone / subdir
+        flutter = _resolve_exe("flutter", ctx.base_env())
+        rc = stream([flutter, "pub", "get"], where, env=ctx.base_env())
+        if rc != 0:
+            return rc
+        report = ctx.clone / REPROOF_DIR / f"flutter-{subdir}.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        rc = stream([flutter, "test", "--file-reporter", f"json:{report}"], where, env=ctx.base_env())
+        tests = parse_dart_json(report)
+        for t in tests.values():
+            if t["skipped"]:
+                ctx.inner_skips.append((f"flutter-{subdir}", f"{t['suite']} :: {t['name']}"))
+        failing = [t for t in tests.values() if t["result"] not in ("success", None) and not t["hidden"]]
+        prefix = f"{subdir}-test:"
+        declared = {k[len(prefix):] for k in host_unsupported(ctx.host) if k.startswith(prefix)}
+        emit(f"PREPUSH_DART({subdir}) tests={sum(not t['hidden'] for t in tests.values())} "
+             f"failed={len(failing)} skipped={sum(t['skipped'] for t in tests.values())}")
+        bad = 0
+        for t in failing:
+            if Path(t["suite"]).name not in declared:
+                emit(f"::error::{subdir} test failed: {t['suite']} :: {t['name']}")
+                bad += 1
+        by_file: dict = {f: [] for f in sorted(declared)}
+        for t in tests.values():
+            fname = Path(t["suite"] or "").name
+            if fname in by_file and (t["result"] not in ("success", None) or t["errors"]):
+                by_file[fname].append(t)
+        verdicts = []
+        for fname, fails in by_file.items():
+            # One line per failing test (name + its whole error text): the
+            # signature is judged per failing TEST, not per wrapped line.
+            text = "\n".join(f"{t['name']} [{t['result']}] :: " + " | ".join(
+                " ".join(e.split()) for e in t["errors"]) for t in fails)
+            frc = 1 if fails else 0
+            verdicts.append(reprove(ctx, f"{prefix}{fname}", frc, text, ctx.clone / REPROOF_DIR / f"{subdir}-{fname}.log"))
+        bad += sum(v == 1 for v in verdicts)
+        if rc != 0 and not failing:
+            emit(f"::error::flutter test exited {rc} with no failing test in its report (load error?)")
+            bad += 1
+        return 1 if bad else 0
+    return action
+
+
+def parse_dart_json(path: Path) -> dict:
+    """testID -> {name, suite, result, skipped, hidden, errors} from the
+    `--file-reporter json:` event stream (dart test JSON reporter protocol)."""
+    suites, tests = {}, {}
+    if not path.is_file():
+        return tests
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        kind = ev.get("type")
+        if kind == "suite":
+            suites[ev["suite"]["id"]] = ev["suite"].get("path") or ""
+        elif kind == "testStart":
+            t = ev["test"]
+            tests[t["id"]] = {"name": t.get("name", ""), "suite": suites.get(t.get("suiteID"), ""), "result": None,
+                              "skipped": False, "hidden": False, "errors": []}
+        elif kind == "error" and ev.get("testID") in tests:
+            tests[ev["testID"]]["errors"].append(str(ev.get("error", "")))
+        elif kind == "testDone" and ev.get("testID") in tests:
+            tests[ev["testID"]].update(result=ev.get("result"), skipped=bool(ev.get("skipped")),
+                                       hidden=bool(ev.get("hidden")))
+    return tests
 
 
 # ---------------------------------------------------------------------------
-# The step roster.
+# Roster.
 # ---------------------------------------------------------------------------
-def build_steps(clone: Path) -> list:
+def build_steps(clone: Path, host: str) -> list:
     steps = [
-        Step("policy-no-prepush-in-workflows", "gate policy (user ruling 2026-10-03): prepush is local-only", ALL_HOSTS, a_policy),
-        Step("scope-derivation", "every .github/workflows job classified in JOB_SCOPE", ALL_HOSTS, a_scope),
-        Step("guards", "build.yml:guards-container `ci.py guards --docker` (host form when no Docker daemon)", ALL_HOSTS, a_guards),
-        Step("selftest", "build.yml:verify-native-tests `ci.py selftest`", ALL_HOSTS, a_selftest),
-        Step("deps-pytest", "windows_build.yml/linux_build.yml `python -m pytest native/scripts/deps/ -q`", ALL_HOSTS, a_deps_pytest),
-        Step("d6-layer1", "macos_build.yml:build `run_dist_equivalence.py --layers l1` (pure argv check, any host)", ALL_HOSTS, a_d6_layer1),
-        Step("dart-analyze", "build.yml:verify-dart `flutter pub get` + `dart analyze` (app/)", ALL_HOSTS, a_dart_analyze),
-        Step("fetch-libraw", "all build legs `build_deps.py fetch libraw`", ALL_HOSTS, a_fetch_libraw),
-        Step("guard-raw-provenance", "build.yml:verify-native-tests `verify_raw_provenance.py`", ALL_HOSTS, a_raw_provenance),
-        Step("guard-alias-table", "build.yml:verify-native-tests `check_alias_table_convention.py`", ALL_HOSTS, a_alias_table),
+        Step("policy-no-prepush-in-workflows", "gate policy: prepush is local-only", ALL_HOSTS, a_policy),
+        Step("scope-derivation", "every workflow job and mirrored step classified; derive steps derivable", ALL_HOSTS, a_scope),
     ]
-    for name, wf_step, action in WINDOWS_LEG:
-        steps.append(Step(name, f"windows_build.yml:build-windows (x86_64 row) '{wf_step}'",
-                          frozenset({WINDOWS_X64}), action,
-                          skip_reason="windows_build.yml x86_64 row: needs a Windows x86_64 host"))
+    steps += workflow_steps(clone, host)
     steps += [
-        Step("win-arm64-row", "windows_build.yml:build-windows (arm64 row)", frozenset(), None,
-             skip_reason="needs a Windows ARM64 host: its LoadLibrary capability probes execute arm64 code"),
-        Step("macos-leg", "macos_build.yml:build (arm64 native + x86_64 cross)", frozenset({MACOS_ARM64}), None,
-             skip_reason="needs a macOS arm64 host (Metal AOT, Mach-O assertions)"),
-        Step("linux-leg", "linux_build.yml:build-linux", frozenset(), None,
-             skip_reason="runs inside the ubuntu:22.04 glibc-floor container with apt/vcpkg provisioning; not ported to a local host"),
-        Step("android-leg", "android_build.yml:build-android", frozenset(), None,
-             skip_reason="ubuntu runner + apt + NDK cross-build; not ported to a local host"),
-    ]
-    # Test layer.
-    steps += [
-        Step("test-manifest", "native/tests/check_test_manifest.py (every test executable classified)", ALL_HOSTS, a_check_test_manifest, group="test"),
-        Step("test-matrix-parsers", "native/tests/test_decode_matrix_parsers.py (canned-stdout self-check)", ALL_HOSTS, a_matrix_parsers, group="test"),
+        Step("test-manifest", "native/tests/check_test_manifest.py", ALL_HOSTS,
+             lambda ctx: ctx.run(ctx.py("native/tests/check_test_manifest.py")), group="test"),
+        Step("test-matrix-parsers", "native/tests/test_decode_matrix_parsers.py", ALL_HOSTS,
+             lambda ctx: ctx.run(ctx.py("native/tests/test_decode_matrix_parsers.py")), group="test"),
         Step("test-build-targets", "build every non-manual gates.py runner executable this host configures",
-             frozenset({WINDOWS_X64, MACOS_ARM64}), t_build_tests,
-             skip_reason="no native build leg implemented for this host", group="test"),
+             ALL_HOSTS, t_build_tests, group="test"),
+        Step("test-decode-matrix", f"gates.py runner {DECODE_SCRIPT} (main cases; full runner on macOS)",
+             ALL_HOSTS, t_decode_matrix, group="test"),
+    ]
+    if host not in (MACOS_ARM64, LINUX_X64):
+        for case, binary in DECODE_CASES:
+            steps.append(Step(f"test-decode-{case}", f"{DECODE_SCRIPT} case {case} via the runner's own case function",
+                              ALL_HOSTS, t_decode_case(case, binary), group="test"))
+    steps += [
+        Step("test-raw-matrix", f"gates.py runner {RAW_SCRIPT} (every case judged)", ALL_HOSTS, t_raw_matrix, group="test"),
+        Step("test-dist-equivalence", "gates.py runner native/tests/run_dist_equivalence.py", ALL_HOSTS,
+             t_dist_equivalence, group="test"),
     ]
     try:
-        runners, manual = gate_runners(clone)
+        _, manual = gate_runners(clone)
     except (OSError, KeyError, SyntaxError) as exc:
-        runners, manual = {}, []
+        manual = []
         emit(f"::error::cannot read native/tests/gates.py: {exc}")
-    for script in sorted(runners):
-        steps.append(Step(f"test-{Path(script).stem.replace('_', '-')}",
-                          f"gates.py runner {script} (executables: {', '.join(runners[script])})",
-                          frozenset({WINDOWS_X64, MACOS_ARM64}), _runner_step(script),
-                          skip_reason="no native build leg implemented for this host", group="test"))
     for script in manual:
-        steps.append(Step(f"test-{Path(script).stem.replace('_', '-')}", f"gates.py SCRIPTS {script}",
-                          frozenset(), None, skip_reason="declared manual: in native/tests/gates.py SCRIPTS (not an automated gate)",
-                          group="test"))
+        steps.append(Step(f"test-{Path(script).stem.replace('_', '-')}", f"gates.py SCRIPTS {script}", frozenset(),
+                          None, skip_reason="declared manual: in native/tests/gates.py SCRIPTS", group="test"))
     steps += [
-        Step("test-flutter-plugin", "plugin/ `flutter test`", ALL_HOSTS, a_flutter_test("plugin"), group="test"),
-        Step("test-flutter-app", "app/ `flutter test`", ALL_HOSTS, a_flutter_test("app"), group="test"),
+        Step("test-flutter-plugin", "plugin/ `flutter test`", ALL_HOSTS, t_flutter("plugin"), group="test"),
+        Step("test-flutter-app", "app/ `flutter test`", ALL_HOSTS, t_flutter("app"), group="test"),
     ]
     return steps
 
 
 # ---------------------------------------------------------------------------
-# Inner run (inside the clone).
+# Inner run.
 # ---------------------------------------------------------------------------
-def _needs_msvc(step: Step) -> bool:
-    """Steps that compile, link, or run toolchain binaries (dumpbin,
-    llvm-readobj, clang-cl) -- CI runs all of them after msvc-dev-cmd."""
-    return WINDOWS_X64 in step.hosts and (step.name.startswith("win-") or step.name.startswith("test-build"))
-
-
 def run_inner(args) -> int:
-    clone = REPO_ROOT
-    host = host_key()
-    steps = build_steps(clone)
+    clone, host = REPO_ROOT, host_key()
+    steps = build_steps(clone, host)
     names = [s.name for s in steps]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        emit(f"::error::duplicate gate step names {dupes}")
+        return 2
     unknown = [n for n in (args.step or []) + (args.skip_step or []) if n not in names]
     if unknown:
-        emit(f"::error::unknown step name(s) {unknown}; known: {names}")
+        emit(f"::error::unknown step name(s) {unknown}; see --list")
         return 2
-    selected = [s for s in steps if not args.step or s.name in args.step]
-
     ctx = Ctx(clone=clone, host=host)
-    results: list = []  # (name, status, rc)
+    results: list = []
     for item in args.bootstrap_result or []:
         name, _, rc = item.partition("=")
         results.append((name, "PASS" if rc == "0" else "FAIL", int(rc)))
     for name in args.skip_step or []:
         emit(f"PREPUSH_SKIP({name}): skipped on request (--skip-step); this run is NOT a full gate")
-        results.append((name, "SKIP", None))
-    selected = [s for s in selected if s.name not in (args.skip_step or [])]
+        results.append((name, SKIP, None))
+    selected = [s for s in steps if (not args.step or s.name in args.step) and s.name not in (args.skip_step or [])]
     partial = bool(args.step or args.skip_step)
 
-    if host == WINDOWS_X64 and any(_needs_msvc(s) for s in selected):
+    if host == WINDOWS_X64:
         env, diag = windows_msvc_env()
         emit(f"PREPUSH_MSVC_ENV: {diag}")
         if env is None:
             emit(f"::error::MSVC developer environment unavailable: {diag}")
-            results.append(("precondition-msvc-env", "FAIL", 1))
         else:
             ctx.env = env
 
@@ -870,18 +1391,19 @@ def run_inner(args) -> int:
         emit("")
         emit(f"==== PREPUSH STEP {step.name} [{step.group}] ====")
         emit(f"PREPUSH_STEP_DERIVATION({step.name}): {step.derivation}")
+        if step.status in (CIONLY, COVERED):
+            emit(f"PREPUSH_{step.status}({step.name})")
+            results.append((step.name, step.status, None))
+            continue
         if host not in step.hosts:
             emit(f"PREPUSH_SKIP({step.name}): host={host} -- {step.skip_reason}")
-            results.append((step.name, "SKIP", None))
+            results.append((step.name, SKIP, None))
             continue
         if step.action is None:
-            emit(f"::error::PREPUSH_UNIMPLEMENTED({step.name}): this step must run on host={host} but the gate has no implementation for it yet")
-            results.append((step.name, "FAIL", 3))
+            emit(f"::error::PREPUSH_UNIMPLEMENTED({step.name}): this is host {host}'s own leg and the gate has no "
+                 "implementation for it")
             emit(f"PREPUSH_STEP_RC({step.name})=3")
-            continue
-        if host == WINDOWS_X64 and not ctx.env and _needs_msvc(step):
-            emit(f"PREPUSH_STEP_RC({step.name})=1  (no MSVC developer environment)")
-            results.append((step.name, "FAIL", 1))
+            results.append((step.name, "FAIL", 3))
             continue
         emit(f"PREPUSH_STEP_BEGIN({step.name})")
         started = time.monotonic()
@@ -891,12 +1413,12 @@ def run_inner(args) -> int:
             emit(f"::error::step {step.name} raised {type(exc).__name__}: {exc}")
             outcome = 4
         elapsed = time.monotonic() - started
-        if isinstance(outcome, tuple) and outcome and outcome[0] == SKIP:
+        if isinstance(outcome, tuple) and outcome[0] == SKIP:
             emit(f"PREPUSH_SKIP({step.name}): host={host} -- {outcome[1]}")
-            results.append((step.name, "SKIP", None))
+            results.append((step.name, SKIP, None))
             continue
-        if isinstance(outcome, tuple) and outcome and outcome[0] == HOSTSKIP:
-            emit(f"PREPUSH_STEP_HOSTSKIP({step.name}): {outcome[1]} (see PREPUSH_HOST_UNSUPPORTED inventory)")
+        if isinstance(outcome, tuple) and outcome[0] == HOSTSKIP:
+            emit(f"PREPUSH_STEP_HOSTSKIP({step.name}): {outcome[1]}")
             results.append((f"host-unsupported:{outcome[1]}", HOSTSKIP, None))
             continue
         rc = int(outcome)
@@ -904,18 +1426,18 @@ def run_inner(args) -> int:
         emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
         results.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
         for item, _, _ in ctx.host_skips:
-            if not item.startswith("runner:") and (f"host-unsupported:{item}", HOSTSKIP, None) not in results:
-                results.append((f"host-unsupported:{item}", HOSTSKIP, None))
+            row = (f"host-unsupported:{item}", HOSTSKIP, None)
+            if row not in results:
+                results.append(row)
 
     emit_inventory(ctx)
-    return summarize(results, host, args.head or "unknown", partial)
+    return summarize(results, host, args.head or "unknown", partial, len(ctx.inner_skips))
 
 
 def emit_inventory(ctx: Ctx) -> None:
-    """Machine-readable host-unsupported inventory: one tab-separated line
-    per item (host, item, class, evidence) -- plan input for the
-    unification campaign."""
     emit("")
+    for where, name in ctx.inner_skips:
+        emit(f"PREPUSH_INNER_SKIP\t{where}\t{name}")
     emit(f"==== PREPUSH HOST-UNSUPPORTED INVENTORY host={ctx.host} count={len(ctx.host_skips)} ====")
     for item, cls, evidence in ctx.host_skips:
         emit(f"PREPUSH_HOST_UNSUPPORTED\t{ctx.host}\t{item}\t{cls}\t{evidence}")
@@ -924,17 +1446,19 @@ def emit_inventory(ctx: Ctx) -> None:
     emit("==== END INVENTORY ====")
 
 
-def summarize(results: list, host: str, head: str, partial: bool = False) -> int:
+def summarize(results: list, host: str, head: str, partial: bool = False, inner_skips: int = 0) -> int:
     emit("")
     emit("==== PREPUSH RESULTS ====")
     for name, status, rc in results:
         emit(f"PREPUSH_RESULT {status:8} {name}" + ("" if rc is None else f" rc={rc}"))
-    passed = sum(1 for _, s, _ in results if s == "PASS")
+
+    def count(status):
+        return sum(1 for _, s, _ in results if s == status)
+
     failed = [n for n, s, _ in results if s == "FAIL"]
-    skipped = sum(1 for _, s, _ in results if s == "SKIP")
-    skipped_host = sum(1 for _, s, _ in results if s == HOSTSKIP)
-    emit(f"PREPUSH-SUMMARY host={host} head={head} total={len(results)} passed={passed} "
-         f"failed={len(failed)} skipped={skipped} skipped_host={skipped_host} partial={int(partial)}"
+    emit(f"PREPUSH-SUMMARY host={host} head={head} total={len(results)} passed={count('PASS')} "
+         f"failed={len(failed)} skipped={count(SKIP)} skipped_host={count(HOSTSKIP)} skipped_inner={inner_skips} "
+         f"ci_only={count(CIONLY)} covered={count(COVERED)} partial={int(partial)}"
          + (f" failed_steps={','.join(failed)}" if failed else ""))
     return 1 if failed else 0
 
@@ -961,7 +1485,7 @@ _SEED_HINTS = {
 }
 
 
-def seed(name: str, src: Path, dst: Path) -> int:
+def seed_tree(name: str, src: Path, dst: Path) -> int:
     emit(f"PREPUSH_SEED({name}): {src} -> {dst}")
     if not src.exists():
         emit(f"::error::seed source {src} does not exist in the working tree -- provide it there first "
@@ -983,17 +1507,13 @@ def seed(name: str, src: Path, dst: Path) -> int:
     return 1 if mismatched or files == 0 else 0
 
 
-# Samples the test layer reads by default path (run_decode_matrix.py
-# _DEFAULT_RAW_FFI_SAMPLE / _DEFAULT_BGGR_SAMPLE; plugin/test/support/
-# native_fixtures.dart), on top of the sha256-locked fixtures in
-# kernel_regression_baselines.json. A missing one turns the gate red.
+# Samples the test layer reads by default path, on top of the sha256-locked
+# fixtures in kernel_regression_baselines.json. A missing one turns the gate red.
 _DEFAULT_SAMPLES = ("image_samples/raw_sample.arw", "image_samples/bayer_conc_a.dng",
                     "image_samples/lossless_dng_sample.dng")
 
 
 def samples_ok(clone: Path) -> int:
-    import json
-
     baselines = json.loads((clone / "native/tests/kernel_regression_baselines.json").read_text(encoding="utf-8"))
     bad = 0
     for name, info in sorted((baselines.get("fixtures") or {}).items()):
@@ -1010,7 +1530,7 @@ def samples_ok(clone: Path) -> int:
         emit("::error::kernel_regression_baselines.json locks no fixtures")
         bad += 1
     if bad:
-        emit(f"::error::{bad} required test sample(s) missing or hash-mismatched in the clone -- provision image_samples/ in the working tree")
+        emit(f"::error::{bad} required test sample(s) missing or hash-mismatched in the clone")
     return 1 if bad else 0
 
 
@@ -1037,8 +1557,9 @@ def run_outer(args) -> int:
     emit(f"PREPUSH_PYTHON={sys.executable} {platform_module.python_version()}")
     emit("PREPUSH_CHILD_ENV: " + " ".join(f"{k}={v}" for k, v in CHILD_ENV_OVERRIDES.items())
          + " (CI runners use a UTF-8 locale; set for every child)")
+    if host == MACOS_ARM64:
+        emit("PREPUSH_STATUS: the macOS leg, macOS dylib seed and macOS test layer are IMPLEMENTED-UNVERIFIED-ON-MAC")
     results: list = []
-
     scratch = Path(args.scratch).resolve() if args.scratch else Path(tempfile.mkdtemp(prefix="ceyx-prepush-"))
     clone = scratch / "ceyx"
     if clone.exists():
@@ -1046,38 +1567,32 @@ def run_outer(args) -> int:
         return summarize([("bootstrap-clone", "FAIL", 1)], host, head)
     scratch.mkdir(parents=True, exist_ok=True)
     emit(f"PREPUSH_SCRATCH={scratch}")
-
     # LF on checkout, as windows_build.yml's first step forces before checkout.
     rc = stream(["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "clone", "--no-hardlinks",
                  str(REPO_ROOT), str(clone)], cwd=scratch)
     if rc == 0:
-        crc, chead = capture(["git", "rev-parse", "HEAD"], cwd=clone)
+        _, chead = capture(["git", "rev-parse", "HEAD"], cwd=clone)
         if chead.strip() != head:
-            emit(f"::error::clone HEAD {chead.strip()} != working tree HEAD {head} (detached/odd branch state?)")
+            emit(f"::error::clone HEAD {chead.strip()} != working tree HEAD {head}")
             rc = 1
-        cfg = stream(["git", "config", "core.autocrlf", "false"], cwd=clone)
-        rc = rc or cfg
+        rc = rc or stream(["git", "config", "core.autocrlf", "false"], cwd=clone)
     emit(f"PREPUSH_STEP_RC(bootstrap-clone)={rc}")
     results.append(("bootstrap-clone", "PASS" if rc == 0 else "FAIL", rc))
     if rc != 0:
         return summarize(results, host, head)
-
     if "macos-dylib" not in HOST_SEEDS.get(host, {}):
         emit(f"PREPUSH_SEED_STATUS(macos-dylib): not seeded on host={host} (macOS hosts only); "
              "that path is IMPLEMENTED-UNVERIFIED-ON-MAC")
     for name, rel in {**SEEDS, **HOST_SEEDS.get(host, {})}.items():
-        if name == "macos-dylib":
-            emit("PREPUSH_SEED_STATUS(macos-dylib): IMPLEMENTED-UNVERIFIED-ON-MAC (first macOS run is its live proof)")
-        rc = seed(name, REPO_ROOT / rel, clone / rel)
+        rc = seed_tree(name, REPO_ROOT / rel, clone / rel)
         if name == "halide" and rc == 0:
             rc = halide_version_ok(clone / rel)
         if name == "samples":
             rc = samples_ok(clone) or rc
         emit(f"PREPUSH_STEP_RC(bootstrap-seed-{name})={rc}")
         results.append((f"bootstrap-seed-{name}", "PASS" if rc == 0 else "FAIL", rc))
-
     inner = [sys.executable, str(clone / "native/scripts/ci.py"), "prepush", "--inner", "--head", head]
-    for name, status, rc in results:
+    for name, _, rc in results:
         inner += ["--bootstrap-result", f"{name}={rc}"]
     for s in args.step or []:
         inner += ["--step", s]
@@ -1085,7 +1600,6 @@ def run_outer(args) -> int:
         inner += ["--skip-step", s]
     rc = stream(inner, cwd=clone)
     emit(f"PREPUSH_INNER_RC={rc}")
-
     if args.keep_scratch:
         emit(f"PREPUSH_SCRATCH_KEPT={scratch}")
     else:
@@ -1100,9 +1614,9 @@ def _force_remove(func, path, _exc):
 
 
 def list_steps() -> int:
-    for step in build_steps(REPO_ROOT):
+    for step in build_steps(REPO_ROOT, host_key()):
         hosts = ",".join(sorted(step.hosts)) or "none"
-        emit(f"{step.name:34} [{step.group}] hosts={hosts} :: {step.derivation}")
+        emit(f"{step.name:58} [{step.group}] {step.status or ''} hosts={hosts} :: {step.derivation}")
     return 0
 
 
@@ -1131,15 +1645,18 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--head", default=None, help=argparse.SUPPRESS)
     p.add_argument("--bootstrap-result", action="append", help=argparse.SUPPRESS)
+    p.add_argument("--decode-case", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--build-dir", default=None, help=argparse.SUPPRESS)
 
 
 def main(args) -> int:
-    # Child output is UTF-8 (CHILD_ENV_OVERRIDES); a legacy-code-page console
-    # or redirect (cp950) cannot encode all of it and would kill the gate
-    # mid-run, orphaning the step it was streaming.
+    # Child output is UTF-8; a legacy-code-page console or redirect (cp950)
+    # cannot encode all of it and would kill the gate mid-run.
     for s in (sys.stdout, sys.stderr):
         if hasattr(s, "reconfigure"):
             s.reconfigure(encoding="utf-8", errors="replace")
+    if args.decode_case:
+        return decode_case_main(args.decode_case, args.build_dir or build_dir_for(host_key()))
     if args.list:
         return list_steps()
     if args.inner:
