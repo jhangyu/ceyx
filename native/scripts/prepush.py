@@ -1062,6 +1062,9 @@ def run_outer(args) -> int:
     if rc != 0:
         return summarize(results, host, head)
 
+    if "macos-dylib" not in HOST_SEEDS.get(host, {}):
+        emit(f"PREPUSH_SEED_STATUS(macos-dylib): not seeded on host={host} (macOS hosts only); "
+             "that path is IMPLEMENTED-UNVERIFIED-ON-MAC")
     for name, rel in {**SEEDS, **HOST_SEEDS.get(host, {})}.items():
         if name == "macos-dylib":
             emit("PREPUSH_SEED_STATUS(macos-dylib): IMPLEMENTED-UNVERIFIED-ON-MAC (first macOS run is its live proof)")
