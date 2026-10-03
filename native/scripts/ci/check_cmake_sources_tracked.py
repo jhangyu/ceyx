@@ -159,7 +159,7 @@ def main():
                      str(resolved_rel)],
                     cwd=REPO_ROOT,
                     capture_output=True,
-                    text=True,
+                    text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 if proc.returncode != 0:
                     git_error = (proc.stderr or proc.stdout).strip().splitlines()

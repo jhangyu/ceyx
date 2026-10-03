@@ -31,7 +31,7 @@ KNOWN_SAFE_PREFIXES = ("@rpath/", "@loader_path/", "@executable_path/", "/usr/li
 
 
 def otool_deps(path: Path) -> list[str]:
-    out = subprocess.run(["otool", "-L", str(path)], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(["otool", "-L", str(path)], capture_output=True, text=True, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     deps = []
     for line in out.splitlines()[1:]:  # first line is the file path itself
         m = re.match(r"^\s*(\S+)\s+\(compatibility", line)
@@ -43,11 +43,11 @@ def otool_deps(path: Path) -> list[str]:
 def resign(path: Path) -> None:
     # install_name_tool invalidates any existing signature; ad-hoc re-sign so
     # the file loads under Gatekeeper/hardened runtime after this rewrite.
-    subprocess.run(["codesign", "--force", "--sign", "-", str(path)], check=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(path)], check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def existing_rpaths(path: Path) -> set[str]:
-    out = subprocess.run(["otool", "-l", str(path)], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(["otool", "-l", str(path)], capture_output=True, text=True, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     return set(re.findall(r"path (\S+) \(offset", out))
 
 
@@ -59,7 +59,7 @@ def ensure_loader_path_rpath(path: Path) -> None:
     # built .app) does not -- so the dylib must carry its own, pointing at
     # the directory it and its vendored siblings live in.
     if "@loader_path" not in existing_rpaths(path):
-        subprocess.run(["install_name_tool", "-add_rpath", "@loader_path", str(path)], check=True)
+        subprocess.run(["install_name_tool", "-add_rpath", "@loader_path", str(path)], check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def strip_build_tree_rpaths(path: Path) -> None:
@@ -76,7 +76,7 @@ def strip_build_tree_rpaths(path: Path) -> None:
             ("@loader_path/", "@executable_path/")
         ):
             continue
-        subprocess.run(["install_name_tool", "-delete_rpath", rpath, str(path)], check=True)
+        subprocess.run(["install_name_tool", "-delete_rpath", rpath, str(path)], check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         print(f"[bundle] stripped build-tree rpath {rpath!r} from {path}")
 
 
@@ -142,12 +142,12 @@ def bundle(dylib: Path, dest_dir: Path) -> None:
                 if not dest.exists():
                     shutil.copy2(dep, dest)
                     dest.chmod(0o755)
-                    subprocess.run(["install_name_tool", "-id", f"@rpath/{name}", str(dest)], check=True)
+                    subprocess.run(["install_name_tool", "-id", f"@rpath/{name}", str(dest)], check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                     resign(dest)
                     print(f"[bundle] vendored {dep} -> {dest}")
                 queue.append(dest)
             subprocess.run(
-                ["install_name_tool", "-change", dep, f"@rpath/{name}", str(current)], check=True
+                ["install_name_tool", "-change", dep, f"@rpath/{name}", str(current)], check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             rewrote = True
         if rewrote:

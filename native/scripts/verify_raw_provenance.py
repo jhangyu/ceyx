@@ -40,7 +40,7 @@ def git_head(repo):
     if vendor_rev.is_file():
         return vendor_rev.read_text(encoding="utf-8").strip()
     out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
@@ -117,11 +117,11 @@ def _scratch_git_reverse_check(patch_path, root):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(root / rel, dest)
             subprocess.run(["git", "init", "-q"], cwd=scratch, check=True,
-                           capture_output=True)
+                           capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             done = subprocess.run(
                 ["git", "apply", "--check", "--reverse", "--verbose",
                  str(patch_path.resolve())],
-                cwd=scratch, capture_output=True, text=True)
+                cwd=scratch, capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError) as exc:
         return "unavailable", "git unavailable: " + str(exc)[:80]
     output = (done.stdout + done.stderr).strip()

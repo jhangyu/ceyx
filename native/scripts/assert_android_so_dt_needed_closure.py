@@ -84,7 +84,7 @@ DEFAULT_SYSTEM_WHITELIST = frozenset({
 
 def dt_needed(readelf: str, so_path: Path) -> list[str]:
     proc = subprocess.run(
-        [readelf, "-d", str(so_path)], capture_output=True, text=True
+        [readelf, "-d", str(so_path)], capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
     if proc.returncode != 0:
         raise RuntimeError(

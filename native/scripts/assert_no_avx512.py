@@ -95,7 +95,7 @@ def main() -> int:
     # Architecture guard: this gate only means anything for x86-64. A non-x86
     # binary is NOT silently passed -- it is refused, so a platform change can
     # never turn this gate into a no-op that still prints green.
-    hdr = subprocess.run([tool, "-f", binary], capture_output=True, text=True)
+    hdr = subprocess.run([tool, "-f", binary], capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if hdr.returncode != 0:
         fail(f"{tool} -f failed (rc={hdr.returncode}): {hdr.stderr.strip()[:400]}")
     arch_line = hdr.stdout
@@ -103,7 +103,7 @@ def main() -> int:
         fail(f"{binary} is not an x86-64 object per `{tool} -f`; this gate is x86-64 only.\n{arch_line}")
 
     with open(dump_path, "w") as fh:
-        proc = subprocess.run([tool, "-d", binary], stdout=fh, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.run([tool, "-d", binary], stdout=fh, stderr=subprocess.PIPE, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     rc = proc.returncode
     print(f"AVX512-GATE: tool={tool} disassemble_rc={rc} dump={dump_path}")
     if rc != 0:

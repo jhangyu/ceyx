@@ -292,7 +292,7 @@ import subprocess
 
 
 def _init_repo(root):
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def test_c10_compliant_fixture_passes(tmp_path):

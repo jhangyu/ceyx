@@ -129,7 +129,7 @@ def run(
         env=dict(env) if env is not None else None,
         shell=False,
         capture_output=capture_output,
-        text=True,
+        text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if check and result.returncode != 0:
         raise SubprocessError(argv_list, result.returncode, result.stdout or "", result.stderr or "")

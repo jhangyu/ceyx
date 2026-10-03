@@ -401,7 +401,7 @@ def _legacy_text_from_tag(tag: str) -> tuple[Optional[str], str]:
         ["git", "show", f"{tag}:{_LEGACY_REPO_PATH}"],
         cwd=_REPO_ROOT,
         capture_output=True,
-        text=True,
+        text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         return None, f"git show {tag}:{_LEGACY_REPO_PATH} failed (rc={proc.returncode})"
@@ -692,7 +692,7 @@ def layer3(report: Report, command: Optional[list[str]], profile: str = "decode-
             "linked against the carrier dist. SKIP, never PASS (exit code 2).",
         )
         return
-    proc = subprocess.run(command, cwd=_REPO_ROOT, capture_output=True, text=True)
+    proc = subprocess.run(command, cwd=_REPO_ROOT, capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     rc = proc.returncode
     output = proc.stdout + proc.stderr
     log_path = _REPO_ROOT / "native" / "scripts" / "tmp" / "r5-d6-consumer.log"

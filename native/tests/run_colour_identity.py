@@ -66,7 +66,7 @@ def run_decode(binary, out_dir, threads, files, repeat=1):
         cmd += ["--repeat", str(repeat)]
     cmd += list(files)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except OSError as exc:
         sys.exit(f"FATAL: could not execute binary {binary!r}: {exc}")
     return proc
@@ -292,7 +292,7 @@ def main():
                     cmp_proc = subprocess.run(
                         [sys.executable, args.stage4_compare, baseline_dump,
                          offending, "--width", str(s_w), "--height", str(s_h)],
-                        capture_output=True, text=True)
+                        capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                     lines.append(f"[stage4-compare {name}] {cmp_proc.stdout.strip()}")
                     lines.append(f"[stage4-compare {name}] rc={cmp_proc.returncode}")
 

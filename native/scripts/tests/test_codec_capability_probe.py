@@ -20,7 +20,7 @@ spec.loader.exec_module(ccp)
 def run_cli(args):
     return subprocess.run(
         [sys.executable, str(PROBE_PATH)] + args,
-        capture_output=True, text=True,
+        capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 

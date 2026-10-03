@@ -492,7 +492,7 @@ def _parse_attached_devices(adb: str) -> tuple[list[str], str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"adb devices failed with exit {proc.returncode}\n{proc.stdout}")
@@ -531,7 +531,7 @@ def _resolve_serial(adb: str, requested: Optional[str]) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            check=False,
+            check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0 or proc.stdout.strip() != "device":
             raise RuntimeError(f"ADB device is not ready: {requested}")
@@ -557,7 +557,7 @@ def _adb_cmd(adb: str, serial: str, *args: str, check: bool = True) -> subproces
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.stdout:
         print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
@@ -709,7 +709,7 @@ def _adb_pidof(adb: str, serial: str, process_name: str) -> list[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         return []
@@ -1023,7 +1023,7 @@ def _run_case(cwd: Path, cmd: list[str], case_name: str, env: dict[str, str]) ->
         stderr=subprocess.STDOUT,
         text=True,
         env=merged,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return _parse_test_decode_output(proc.stdout, proc.returncode, case_name)
 
@@ -1041,7 +1041,7 @@ def _run_ffi_case(cwd: Path, harness: str, sample_name: str, dng_path: str,
         stderr=subprocess.STDOUT,
         text=True,
         env=merged,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = proc.stdout
     stage2_probe: dict[str, float] = {}
@@ -1319,7 +1319,7 @@ def _run_device_handoff(
         stderr=subprocess.STDOUT,
         text=True,
         env=merged,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return _parse_device_handoff_output(
         proc.stdout, proc.returncode,
@@ -1389,7 +1389,7 @@ def _run_sized_decode_case(cwd: Path, binary: Path, dng_path: str) -> CfaCheckRe
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = proc.stdout
     lines = output.splitlines()
@@ -1436,7 +1436,7 @@ def _run_stage4_oriented_case(cwd: Path, binary: Path, dng_path: str, repeat: in
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = proc.stdout
     lines = output.splitlines()
@@ -1481,7 +1481,7 @@ def _run_cfa_phase_case(cwd: Path, binary: Path) -> CfaCheckResult:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = proc.stdout
     all_pass = any(_CFA_PHASE_PASS_RE.match(line) for line in output.splitlines())
@@ -1517,7 +1517,7 @@ def _run_encode_yuv420_case(
     harness_proc = subprocess.run(
         [str(harness), real_frame, str(dump_dir)],
         cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, check=False,
+        text=True, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     harness_output = harness_proc.stdout
     print(harness_output, end="" if harness_output.endswith("\n") else "\n")
@@ -1536,7 +1536,7 @@ def _run_encode_yuv420_case(
     verify_proc = subprocess.run(
         [sys.executable, _VERIFY_YUV420_SCRIPT, str(dump_dir)],
         cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, check=False,
+        text=True, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     verify_output = verify_proc.stdout
     print(verify_output, end="" if verify_output.endswith("\n") else "\n")
@@ -1561,7 +1561,7 @@ def _run_abi_layout_case(cwd: Path, binary: Path) -> CfaCheckResult:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = proc.stdout
     ok = any(line.strip() == "ABI_LAYOUT_OK" for line in output.splitlines())
@@ -1604,7 +1604,7 @@ def _run_orient_symbol_absence_case(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     nm_out_path.parent.mkdir(parents=True, exist_ok=True)
     nm_out_path.write_text(proc.stdout, encoding="utf-8")
@@ -1656,7 +1656,7 @@ def _run_cfa_color_case(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = proc.stdout
     match = next(
@@ -2662,7 +2662,7 @@ def _auto_diff_on_failure(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                check=False,
+                check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             lines.extend([
                 "",
@@ -2690,7 +2690,7 @@ def _auto_diff_on_failure(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    check=False,
+                    check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 lines.extend([
                     "",

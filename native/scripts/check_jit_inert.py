@@ -81,7 +81,7 @@ def _run(cmd):
     match afterwards, always. Returns (stdout, returncode, stderr).
     """
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return (p.stdout.decode("utf-8", "replace"), p.returncode,
                 p.stderr.decode("utf-8", "replace").strip())
     except FileNotFoundError:

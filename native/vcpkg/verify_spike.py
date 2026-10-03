@@ -172,7 +172,7 @@ def macho_install_name(path: Path) -> str:
     """
     proc = subprocess.run(
         ["otool", "-D", str(path)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
     # Output is "<path>:" then the install name. A fat binary repeats per arch.

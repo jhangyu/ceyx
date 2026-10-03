@@ -79,7 +79,7 @@ def run_one(binary, out_dir, threads, files, driver="test_concurrent_decode"):
     t0_perf = time.perf_counter()
     t0_wall = time.time()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except OSError as exc:
         # e.g. binary does not exist / is not executable — exercised by
         # --self-test-missing-binary. Python raises here rather than

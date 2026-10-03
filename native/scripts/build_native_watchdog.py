@@ -72,7 +72,7 @@ def run_with_watchdog(cmd: list[str], cwd: Path, idle_timeout_sec: int, native_d
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,
+        bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
     assert proc.stdout is not None
@@ -257,7 +257,7 @@ def embed_macos_dylib(native_dir: Path, app_bundle: Optional[Path] = None) -> in
     frameworks_dir.mkdir(parents=True, exist_ok=True)
     dest = frameworks_dir / "libdng_decoder_native.dylib"
     shutil.copy2(native_dylib, dest)
-    code = subprocess.run(["codesign", "--force", "--sign", "-", str(dest)]).returncode
+    code = subprocess.run(["codesign", "--force", "--sign", "-", str(dest)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode
     if code != 0:
         return code
     print(f"[OK] Embedded native dylib: {dest}")
@@ -307,7 +307,7 @@ def strip_android_so(ndk_path: Path, so_path: Path) -> int:
         return 0
     llvm_strip = strip_candidates[0]
     print(f"[INFO] Stripping {so_path} with {llvm_strip}")
-    result = subprocess.run([str(llvm_strip), "--strip-unneeded", str(so_path)])
+    result = subprocess.run([str(llvm_strip), "--strip-unneeded", str(so_path)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode != 0:
         print(f"[ERROR] llvm-strip failed on {so_path}", file=sys.stderr)
     return result.returncode
@@ -756,7 +756,7 @@ def main() -> int:
         code = embed_macos_dylib(native_dir, app_bundle)
         if code != 0:
             return code
-        code = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app_bundle)]).returncode
+        code = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app_bundle)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode
         if code != 0:
             return code
         code = publish_macos_dist(app_dir, native_dir, args.macos_mode)

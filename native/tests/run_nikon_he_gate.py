@@ -37,7 +37,7 @@ def fail(message):
 
 def run_binary(binary_path, sample_path):
     completed = subprocess.run([str(binary_path), str(sample_path)],
-                               cwd=str(REPOSITORY_ROOT), capture_output=True, text=True)
+                               cwd=str(REPOSITORY_ROOT), capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return completed.returncode, completed.stdout
 
 

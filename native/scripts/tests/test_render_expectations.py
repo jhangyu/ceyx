@@ -325,6 +325,6 @@ def test_cli_leg_help_exits_zero():
     import subprocess
     result = subprocess.run(
         [sys.executable, str(MODULE_PATH), "--help"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     assert result.returncode == 0

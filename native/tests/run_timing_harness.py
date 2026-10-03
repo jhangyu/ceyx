@@ -172,7 +172,7 @@ def read_gpu_perf_state():
     try:
         proc = subprocess.run(["ioreg", "-r", "-c", "IOAccelerator", "-d", "1"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=5)
+                              timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         text = proc.stdout.decode(errors="replace")
     except Exception as exc:  # pragma: no cover - environment-dependent
         return "unavailable_no_admin_rights(ioreg_error:%s)" % exc
@@ -487,7 +487,7 @@ def dylib_uuid(path=LIVE_DYLIB):
     if not os.path.exists(path):
         return "MISSING %s" % path
     proc = subprocess.run(["dwarfdump", "--uuid", path],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return proc.stdout.decode(errors="replace").strip() or "UUID-UNAVAILABLE"
 
 
@@ -520,7 +520,7 @@ def run_one(arm, width, round_index, sample, decodes, extra_args, handle,
     # there to call it VOID. This harness shipped with that bug for one run;
     # the control caught it. Do not "simplify" this argument away.
     proc = subprocess.run(command, cwd=REPO, env=environment,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     # RC straight off the process object. Never from a shell pipeline: `cmd |
     # tail; RC=$?` reads tail's status, which is how this campaign has twice
     # recorded a green RC for a failing run.

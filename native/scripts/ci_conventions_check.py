@@ -293,7 +293,7 @@ def check_c10_android_jnilibs_so_gitignored(workflows_dir, repo_root=None):
     root = pathlib.Path(repo_root) if repo_root is not None else REPO_ROOT
     result = subprocess.run(
         ["git", "check-ignore", "-q", _CANONICAL_ANDROID_SO_PATH],
-        cwd=root, capture_output=True,
+        cwd=root, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         return [

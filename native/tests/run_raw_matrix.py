@@ -67,7 +67,7 @@ def _status_for(return_code: int) -> str:
 def run(name, command):
     """Run one case; record it; return "PASS" | "FAIL" | "SKIP"."""
     started = time.monotonic()
-    proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
+    proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     elapsed = time.monotonic() - started
     status = _status_for(proc.returncode)
     print("[RawMatrix] %-28s rc=%d %5.1fs -> %s" % (name, proc.returncode, elapsed, status))
