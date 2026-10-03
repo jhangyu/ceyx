@@ -123,7 +123,6 @@ def test_every_guarded_symbol_has_a_non_empty_group():
         "ceyx_probe_output_size",
         "ceyx_decode_into_buffer_oriented",
         "ceyx_pool_aligned_alloc",
-        "ceyx_pool_pressure_relief",
         "ceyx_still_decode_supports",
         "ceyx_encode_jpeg_rgba8",
         "ceyx_encode_rgba8",

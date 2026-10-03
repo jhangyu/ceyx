@@ -25,9 +25,11 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 4, "role": "adapter",
         "contract": "physicalMemoryBytes: the single physical-RAM query (audit A7)"},
     "native/src/ffi/ceyx_decode_into_ffi.cpp": {
-        "guard_lines": 8, "role": "fork-host",
-        "contract": "aligned alloc/free adapter (A4); post-shrink page return is fork B6",
-        "open_forks": ["B6"]},
+        "guard_lines": 5, "role": "adapter",
+        "contract": "aligned alloc/free adapter (A4)"},
+    "native/src/ffi/heap_page_return.cpp": {
+        "guard_lines": 8, "role": "adapter",
+        "contract": "return free heap pages to the OS; ran/unavailable telemetry (TC-1455)"},
     "native/src/ffi/dng_ffi_api.cpp": {
         "guard_lines": 5, "role": "parked",
         "contract": "Android-only Vulkan pipeline-cache persistence (:43-90); not reclamation"},

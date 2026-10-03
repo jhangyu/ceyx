@@ -27,6 +27,7 @@
 #include <cstdio>
 
 #include "ceyx_ffi_export.h"
+#include "heap_page_return.h"
 
 // ---------------------------------------------------------------------------
 // W7 (M-11): rgb_to_rgba_neon RETIRED. WP1 phase 3: pipeline.rgba_ptr is
@@ -384,6 +385,14 @@ CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
     case DngDeviceReleaseResult::kError:
       g_device_release_errors.fetch_add(1, std::memory_order_relaxed);
       break;
+  }
+
+  // Step 4 (M4.1): return free heap pages. LAST, because steps 1-3 are what
+  // free them. Same call on every leg; see heap_page_return.h.
+  if (ceyx::return_free_heap_pages() == ceyx::HeapPageReturn::ran) {
+    g_page_return_calls.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    g_page_return_unavailable.fetch_add(1, std::memory_order_relaxed);
   }
 
   // Bytes, not lanes: steps 1 and 2 SUMMED, so a caller sees one number for

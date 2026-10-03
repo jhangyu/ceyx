@@ -75,6 +75,20 @@ int main(int argc, char** argv) {
   report("F1_release_skipped_without_gpu",
          b.skipped - a.skipped == 1 && b.runs == a.runs && b.errors == a.errors && r1 >= 0, "");
 
+  // F5 / TC-1455 (memory-reclamation M4.1): the post-shrink page return is ONE
+  // step inside the funnel and reports on every leg.
+  {
+    const FunnelCounters before = read_counters();
+    (void)ceyx_native_idle_shrink(0);
+    const FunnelCounters after = read_counters();
+    const uint64_t moved = (after.page - before.page) +
+                           (after.page_unavailable - before.page_unavailable);
+    report("F5_page_return_once_per_funnel_call", moved == 1, "");
+#if defined(__APPLE__) || defined(_WIN32) || (defined(__linux__) && defined(__GLIBC__))
+    report("F5_page_return_ran_on_desktop", after.page - before.page == 1, "");
+#endif
+  }
+
   if (argc < 2) {
     test_report::reportSkip(kReportPrefix, "F2_F4", "no-raw-argument");
     return test_report::finish(kReportPrefix);

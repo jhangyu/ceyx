@@ -25,7 +25,6 @@ void main() {
   tearDown(() {
     CeyxGpuShutdown.debugReset();
     CeyxNativeBufferPool.debugArenaIdleShrinkOverride = null;
-    CeyxNativeBufferPool.debugPressureReliefOverride = null;
   });
 
   /// Delivers the framework's exit request exactly as an embedder does.
@@ -134,7 +133,6 @@ void main() {
 
   test('TC-1438 no native funnel call follows the release', () async {
     var funnelCalls = 0;
-    CeyxNativeBufferPool.debugPressureReliefOverride = () => 0;
     CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
       funnelCalls++;
       return 0;

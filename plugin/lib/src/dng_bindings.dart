@@ -189,17 +189,6 @@ typedef CeyxPoolAlignedFreeNative =
     ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
 typedef CeyxPoolAlignedFreeDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
 
-// Pool idle-shrink campaign (2026-09-12): zone-wide "release cached freed
-// blocks back to the OS" sweep, called once after a shrink batch of
-// `ceyx_pool_aligned_free` calls. ADDITIVE and its OWN guarded lookup, same
-// reasoning as the pair above -- a dylib predating this campaign must not
-// null out any group resolved before it. Returns bytes relieved, or
-// kCeyxPressureReliefUnsupported (-1) on a platform/build with no relief
-// mechanism (see native/include/ceyx_decode_into.h).
-const int kCeyxPressureReliefUnsupported = -1;
-typedef CeyxPoolPressureReliefNative = ffi.Int64 Function();
-typedef CeyxPoolPressureReliefDart = int Function();
-
 // mem8 T1/T2 (SR-1): THE ONE NATIVE IDLE FUNNEL. A quiescent host asks the
 // native side to release device regions of every arena lane above `floor`;
 // the return value is the BYTE COUNT released (0 means "nothing to release",
@@ -337,9 +326,6 @@ class DngNativeBindings {
   CeyxPoolAlignedAllocDart? _ceyxPoolAlignedAlloc;
   CeyxPoolAlignedFreeDart? _ceyxPoolAlignedFree;
 
-  // Pool idle-shrink campaign: its OWN guarded field, independent of the pair
-  // above — see the typedef comment for why.
-  CeyxPoolPressureReliefDart? _ceyxPoolPressureRelief;
   CeyxNativeIdleShrinkDart? _ceyxNativeIdleShrink;
   CeyxNativeReleaseGpuDart? _ceyxNativeReleaseGpu;
 
@@ -395,13 +381,6 @@ class DngNativeBindings {
   /// Whether this dylib exports the aligned allocator pair.
   bool get poolAlignedAllocatorAvailable =>
       _ceyxPoolAlignedAlloc != null && _ceyxPoolAlignedFree != null;
-
-  /// Guarded access to the pool idle-shrink pressure-relief sweep. Null when
-  /// the loaded dylib predates it — callers must skip the relief call (plain
-  /// `ceyx_pool_aligned_free` still runs; it just may not fully drop RSS, see
-  /// native/include/ceyx_decode_into.h).
-  CeyxPoolPressureReliefDart? get ceyxPoolPressureRelief =>
-      _ceyxPoolPressureRelief;
 
   /// Guarded access to the mem8 T1 arena idle-release funnel
   /// (`ceyx_native_idle_shrink`). Null when the loaded dylib predates it —
@@ -593,20 +572,6 @@ class DngNativeBindings {
     } catch (_) {
       _ceyxPoolAlignedAlloc = null;
       _ceyxPoolAlignedFree = null;
-    }
-
-    // Pool idle-shrink campaign (2026-09-12): the pressure-relief sweep.
-    // Its OWN try block, same reasoning as the oriented lookup above — a
-    // dylib predating this campaign must not null out the alloc/free pair
-    // already resolved.
-    try {
-      _ceyxPoolPressureRelief = _lib
-          .lookupFunction<
-            CeyxPoolPressureReliefNative,
-            CeyxPoolPressureReliefDart
-          >('ceyx_pool_pressure_relief');
-    } catch (_) {
-      _ceyxPoolPressureRelief = null;
     }
 
     // mem8 T1/T2 (SR-1): the arena idle-release funnel. Its OWN try block,

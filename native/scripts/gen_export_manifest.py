@@ -80,7 +80,6 @@ KNOWN_GROUP_IDS = {
     "ceyx_probe_output_size": "wp10_decode_into_buffer",
     "ceyx_decode_into_buffer_oriented": "oriented",
     "ceyx_pool_aligned_alloc": "pool_aligned",
-    "ceyx_pool_pressure_relief": "pool_pressure_relief",
     # mem8 T1 (SR-1), re-justified by the 2026-10 parity campaign. Deliberately
     # NOT in LEGACY_OPTIONAL_GROUPS, so expected_on is all four legs. Symbol
     # presence is NOT the parity claim (PARITY.md clause 4): the behavioural

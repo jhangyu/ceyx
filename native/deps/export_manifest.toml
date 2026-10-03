@@ -59,10 +59,6 @@ id          = "pool_aligned"
 expected_on = ["macos", "linux", "windows", "android"]
 
 [[group]]
-id          = "pool_pressure_relief"
-expected_on = ["macos", "linux", "windows", "android"]
-
-[[group]]
 id          = "slot_config"
 expected_on = ["macos", "linux", "windows", "android"]
 
@@ -180,13 +176,6 @@ dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 name       = "ceyx_pool_aligned_free"
 platforms  = "all"
 group      = "pool_aligned"
-source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
-dart_sites = ["plugin/lib/src/dng_bindings.dart"]
-
-[[symbol]]
-name       = "ceyx_pool_pressure_relief"
-platforms  = "all"
-group      = "pool_pressure_relief"
 source     = "native/src/ffi/ceyx_decode_into_ffi.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 

@@ -96,14 +96,6 @@ class CeyxNativeBufferPool {
   @visibleForTesting
   static DateTime Function() debugClock = DateTime.now;
 
-  /// Test seam standing in for the native `ceyx_pool_pressure_relief` symbol
-  /// (macOS `malloc_zone_pressure_relief`) until the FFI binding lands. When
-  /// null, the binding is consulted; when the binding is also absent (a plain
-  /// Dart test process with no dylib) the relief is simply skipped — the
-  /// frees still happened, only the eager page return did not.
-  @visibleForTesting
-  static int Function()? debugPressureReliefOverride;
-
   /// Test seam standing in for the native `ceyx_native_idle_shrink` symbol
   /// (mem8 T1, SR-1). Takes the lane floor, returns bytes released. When
   /// null, the binding is consulted; when the binding is also absent the
@@ -358,23 +350,6 @@ class CeyxNativeBufferPool {
   @visibleForTesting
   int debugBuffersFreedByShrink = 0;
 
-  /// Times the pressure-relief call actually reached a function (override or
-  /// binding). MUST be at most one per shrink batch.
-  @visibleForTesting
-  int debugPressureReliefCalls = 0;
-
-  /// Bytes the native relief reported reclaiming on its last call, or
-  /// [kCeyxPressureReliefUnsupported] (-1) on a platform/build without it.
-  /// Null before the first call that reached a function. A real 0 ("nothing
-  /// cached") stays distinguishable from -1 on purpose.
-  @visibleForTesting
-  int? debugLastPressureReliefResult;
-
-  /// Shrink batches that freed memory but found no relief symbol to call.
-  /// Non-zero on a release build means the dylib predates the symbol.
-  @visibleForTesting
-  int debugPressureReliefSkips = 0;
-
   /// Times the native idle shrink actually reached a function (override or
   /// binding). MUST be at most one per shrink batch.
   @visibleForTesting
@@ -423,20 +398,6 @@ class CeyxNativeBufferPool {
   /// never goes through the decode pool). Set by
   /// `CeyxDecodePool`'s quiescence watch; null when nobody is watching.
   void Function()? onCheckoutChange;
-
-  /// Notified when [shrinkToFloor] COMPLETES a batch that actually freed
-  /// buffers, with the number of buffers freed.
-  ///
-  /// Fires exactly once per such batch, as the last thing the shrink does:
-  /// after every buffer has been freed and after the native pressure relief
-  /// ran. It never fires on the refusal path (waiters or outstanding
-  /// checkouts), nor on an already-at-the-floor call that freed nothing — so
-  /// a listener may treat every call as "pages just came back".
-  ///
-  /// Unlike [onCheckoutChange], no ceyx code ever assigns this: the host
-  /// application is its single writer (Halcyon couples its Windows
-  /// working-set trim to it). Called plainly, so the callback MUST NOT throw.
-  void Function(int freedBuffers)? onShrink;
 
   DateTime? _lastGrowAt;
   DateTime? _lastShrinkAt;
@@ -759,9 +720,7 @@ class CeyxNativeBufferPool {
   ///
   /// On a batch that freed something: invalidates the [warmUpFor] memo (the
   /// warmed pages are gone with the buffer, so the next warm must really
-  /// re-commit) and calls the native pressure relief EXACTLY ONCE — plain
-  /// `free()` alone leaves an unpredictable reusable residue instead of
-  /// returning the pages (see the campaign's free-probe verdict).
+  /// re-commit). The native funnel then returns the freed pages to the OS.
   int shrinkToFloor() {
     // After the terminal exit-time GPU release no native funnel call may follow.
     if (CeyxGpuShutdown.isReleased) return 0;
@@ -789,45 +748,14 @@ class CeyxNativeBufferPool {
       _lastShrinkAt = debugClock();
       debugShrinkEvents++;
       debugBuffersFreedByShrink += freed;
-      _pressureRelief();
     }
     // The native funnel runs on EVERY quiescent shrink, including one that
     // freed no Dart buffer: native device memory (the GPU decode pool) is
-    // independent of this pool's buffer count. Placed after the pressure
-    // relief and before onShrink, so a listener observes pages already
-    // returned. The refusal above still guarantees decode quiescence.
+    // independent of this pool's buffer count. The funnel owns arena release,
+    // DNG decommit, device-pool release and page return, in that order. The
+    // refusal above still guarantees decode quiescence.
     _nativeIdleShrink();
-    if (freed == 0) return 0;
-    onShrink?.call(freed);
     return freed;
-  }
-
-  /// Deliberately does NOT fire [onCheckoutChange]: a shrink runs only when
-  /// nothing is checked out and frees only idle buffers, so the checked-out
-  /// set it reports is provably unchanged across the call. Firing anyway would
-  /// publish a quiescence "transition" that did not happen.
-  void _pressureRelief() {
-    final fn =
-        debugPressureReliefOverride ??
-        _resolveNativeBindings()?.ceyxPoolPressureRelief;
-    if (fn == null) {
-      // Silent in release BY DESIGN (an older dylib simply lacks the symbol;
-      // the frees still happened, only the eager page return did not), but a
-      // debug build says so — otherwise a shrink that returns far less RSS
-      // than expected looks identical to one that worked.
-      debugPressureReliefSkips++;
-      assert(() {
-        // ignore: avoid_print
-        print(
-          'CeyxNativeBufferPool: ceyx_pool_pressure_relief unavailable; '
-          'shrink freed memory but did not request an eager page return.',
-        );
-        return true;
-      }());
-      return;
-    }
-    debugLastPressureReliefResult = fn();
-    debugPressureReliefCalls++;
   }
 
   /// Asks the native side (mem8 T1's one idle funnel) to release arena device
@@ -840,8 +768,7 @@ class CeyxNativeBufferPool {
   /// ABSENT-SYMBOL RULE — TOLERATE, and that is specific to THIS symbol.
   /// `ceyx_native_idle_shrink` is an OPTIMISATION: a dylib without it means
   /// "no idle shrink", and the app is still fully correct, merely using more
-  /// memory. So a missing symbol counts a skip and returns, exactly like
-  /// [_pressureRelief]. Do NOT generalise this to the next guarded lookup
+  /// memory. So a missing symbol counts a skip and returns. Do NOT generalise this to the next guarded lookup
   /// added in this file: mem8 T14's yuv420 output-format entry is
   /// LOAD-BEARING FOR CORRECTNESS (a dylib without it cannot produce the
   /// pixels the host is about to interpret as planar yuv, so degrading
@@ -851,8 +778,7 @@ class CeyxNativeBufferPool {
   /// No → throw (T14).
   ///
   /// Never throws: an unexpected native error must not escape into the shrink
-  /// path and strand the pool mid-batch (the [onShrink] listener still has to
-  /// run).
+  /// path and strand the pool mid-batch.
   void _nativeIdleShrink() {
     final fn =
         debugArenaIdleShrinkOverride ??
