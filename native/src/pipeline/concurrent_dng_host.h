@@ -18,6 +18,7 @@
 #include <sstream>
 
 #include "dng_pipeline_config.h"
+#include "ceyx_ffi_export.h"
 
 // Mutex rework (plan Task 4): forward declaration only, so the include graph
 // stays acyclic — decode_context.h forward-declares dng_host in turn.
@@ -27,7 +28,7 @@ struct DecodeContext;
 // area-task fan-out. Declared rather than included: dng_pipeline.h would drag
 // the pipeline result types into every consumer of this header. Defined in
 // dng_pipeline.cpp, which every target compiling this header also compiles.
-size_t dng_decode_in_flight_count();
+CEYX_FFI_EXPORT size_t dng_decode_in_flight_count();
 
 class ConcurrentDngHost : public dng_host {
 public:
