@@ -1,8 +1,5 @@
-import 'package:flutter/foundation.dart' show visibleForTesting;
-
 import 'dng_bindings.dart';
 
-@visibleForTesting
 int? Function()? debugCeyxPhysicalMemoryBytesOverride;
 
 DngNativeBindings? _bindings;
