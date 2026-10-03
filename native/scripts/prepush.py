@@ -45,6 +45,11 @@ COUNTERS, all printed in the one PREPUSH-SUMMARY line:
                       declared signature. Passing = stale entry = RED; any
                       other failure = RED. Inventory block at the end of the
                       log (tab-separated PREPUSH_HOST_UNSUPPORTED lines);
+  known_defect     -- real defects quarantined to the campaign by lead ruling,
+                      signature-bound exactly like skipped_host entries
+                      (`kind="known-defect"`);
+  flaky_known      -- single tests quarantined as flaky (FLAKY_TESTS), never
+                      retried; any other failing test stays red;
   skipped_inner    -- test-level skips INSIDE suites that ran (Dart `skip:`,
                       runner-declared per-sample skips), each listed by name;
   ci_only / covered -- workflow steps with no local meaning (upload,
@@ -172,6 +177,8 @@ def capture(argv, cwd, env=None) -> tuple:
 # Step model.
 # ---------------------------------------------------------------------------
 SKIP, HOSTSKIP, CIONLY, COVERED = "SKIP", "HOSTSKIP", "CI_ONLY", "COVERED"
+KNOWNDEFECT, FLAKY = "KNOWN_DEFECT", "FLAKY_KNOWN"
+ROW_PREFIX = {HOSTSKIP: "host-unsupported", KNOWNDEFECT: "known-defect", FLAKY: "flaky-known"}
 
 
 @dataclass
@@ -812,7 +819,10 @@ def windows_msvc_env() -> tuple:
 # Test layer: host-unsupported inventory with failure signatures.
 # ---------------------------------------------------------------------------
 # A failure line, in a build log or runner/test output.
-_FAILURE_LINE = re.compile(r"error|FAILED|\bFAIL\b|undefined symbol")
+# `PREPUSH_CHILD_EXIT=<nonzero>` is printed by the --decode-case shim for
+# every child the runner's case function starts, so an exit code is a
+# failure line a signature must account for.
+_FAILURE_LINE = re.compile(r"error|FAILED|\bFAIL\b|undefined symbol|PREPUSH_CHILD_EXIT=[1-9]")
 
 
 @dataclass
@@ -821,6 +831,9 @@ class Unsupported:
     evidence: str
     must: tuple  # every regex must match some line of the observed output
     allowed: tuple  # every failure line must match one of these
+    # host: should be portable, not yet runnable here (skipped_host).
+    # known-defect: a real defect quarantined to the campaign (known_defect).
+    kind: str = "host"
 
 
 def _obj_failed(target: str) -> str:
@@ -908,6 +921,33 @@ HOST_UNSUPPORTED: dict = {
             "passes its Metal-identical self-gate (decode-main entry above)",
             must=(r"\[FFI lossy\] Halide test render missing",),
             allowed=(r"\[FFI lossy\] Halide test render missing", r"^PREPUSH_CASE_RESULT ffi-dng-lossy FAIL")),
+        **{f"decode-case:{case}": Unsupported(
+            "windows-teardown-fastfail",
+            "every check prints PASS, then the harness process exits 0xC0000409 (STATUS_FAST_FAIL family) at "
+            "teardown -- the same family as the shipped double-click crash fixed in v1.0.16 (CRT/stdio or DLL "
+            "unload order); reproduced by running the harness directly. Campaign lead, high value",
+            must=(r"^PREPUSH_CHILD_EXIT=3221226505$", *passes),
+            allowed=(r"^PREPUSH_CHILD_EXIT=3221226505$", r"exit=3221226505", rf"^PREPUSH_CASE_RESULT {case} FAIL"),
+            kind="known-defect")
+           for case, passes in (
+               ("cfa-color-bggr", (r"^\[CFA COLOR\] .*\[PASS\]$",)),
+               ("encode-yuv420", (r"^\[encode SUMMARY\] executed=[1-9]\d* skipped=0 failed=0$",)),
+               ("ffi-dng-lossless", (r"^\[Contract\] PASS ", r"^\[FFI RGB MATCH\] render: byte_exact=1 .*\[PASS\]$",
+                                     r"^\[Pool\] PASS ")),
+               ("ffi-raw", (r"^\[Contract\] PASS ", r"^\[Contract\] RawGpuPipeline .* -> PASS$", r"^\[Pool\] PASS ")),
+           )},
+        "decode-case:sized-decode": Unsupported(
+            "windows-sized-decode-psnr",
+            "REAL Windows image-quality defect: Stage4 device handoff fails and the degraded host-copy fallback "
+            "drops the sized device route to 36-42 dB vs the CPU reference (AC5-D threshold 55 dB). High-priority "
+            "campaign item for the user's attention",
+            must=(r"device handoff Stage4 failed; using finish\(\)\+Stage4 host-copy path",
+                  r"^\s*FAIL AC5-D: [34]\d\.\d+ dB < 55\.00 dB threshold$"),
+            allowed=(r"^\s*FAIL AC5-D: [34]\d\.\d+ dB < 55\.00 dB threshold$", r"^\s*\[FAIL\]$", r"^OVERALL=FAIL$",
+                     r"^PREPUSH_CHILD_EXIT=1$",
+                     r"^PREPUSH_CASE_RESULT sized-decode FAIL -- exit=1 overall_pass=False "
+                     r"device_handoff_fell_back_to_host=True$"),
+            kind="known-defect"),
         "decode-case:orient-symbol-absence": Unsupported(
             "macho-nm-instrument",
             "run_decode_matrix.py _run_orient_symbol_absence_case lists exports with `nm -gU` (macOS nm; -U is Mach-O "
@@ -922,6 +962,17 @@ HOST_UNSUPPORTED: dict = {
                         "dng_sized_decode_active_test.dart", "dng_sized_decode_fallback_test.dart",
                         "encode_service_test.dart", "raw_decode_service_test.dart", "raw_symbol_absent_test.dart",
                         "retired_symbols_absent_test.dart", "wp10_decode_into_buffer_symbol_absent_test.dart")},
+    },
+}
+
+# Single tests quarantined as flaky (lead ruling 2026-10-03, halcyon rules:
+# never retried; a failure is counted under flaky_known with this evidence,
+# any OTHER failing test in the suite stays red). (file, test-name prefix).
+FLAKY_TESTS = {
+    "plugin": {
+        ("decode_pool_test.dart", "TC-942: past the respawn cap"): (
+            "same-day pass+fail at the same commit content: passed in run2.log (head b09202f) and dev4.out, failed in "
+            "run3.log (head 081efe7, no plugin/ change between them) -- timing-dependent respawn-cap test"),
     },
 }
 
@@ -974,12 +1025,13 @@ def reprove(ctx: Ctx, item: str, rc: int, text: str, log: Path) -> object:
         emit(f"::error::{item} failed, but NOT with its declared {entry.cls} signature -- a real failure, gate RED "
              f"(log {log.relative_to(ctx.clone).as_posix()})")
         return 1
-    emit(f"PREPUSH_HOST_SKIP({item}): class={entry.cls} rc={rc} signature=matched -- {entry.evidence}")
+    status = KNOWNDEFECT if entry.kind == "known-defect" else HOSTSKIP
+    emit(f"PREPUSH_{status}({item}): class={entry.cls} rc={rc} signature=matched -- {entry.evidence}")
     hits = [ln for ln in text.splitlines() if _FAILURE_LINE.search(ln)]
     for ln in hits[:6]:
-        emit(f"PREPUSH_HOST_SKIP_EVIDENCE({item}): {ln.strip()[:300]}")
-    ctx.host_skips.append((item, entry.cls, entry.evidence))
-    return (HOSTSKIP, item)
+        emit(f"PREPUSH_{status}_EVIDENCE({item}): {ln.strip()[:300]}")
+    ctx.host_skips.append((item, entry.cls, entry.evidence, status))
+    return (status, item)
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1183,16 @@ def decode_case_main(case: str, build_dir: str) -> int:
     def binary(name: str) -> Path:
         return root / build_dir / _exe(name)
 
+    # Record every child's exit code: the runner's case functions fold it
+    # into PASS/FAIL, and a quarantine signature must see the code itself.
+    original_run = subprocess.run
+
+    def recording_run(*a, **k):
+        proc = original_run(*a, **k)
+        print(f"PREPUSH_CHILD_EXIT={proc.returncode}", flush=True)
+        return proc
+
+    mod.subprocess.run = recording_run
     source = (root / DECODE_SCRIPT).read_text(encoding="utf-8")
     m = re.search(r'"--bggr-min-b-minus-r",\s*type=float,\s*default=([\d.]+)', source)
     min_b_minus_r = float(m.group(1)) if m else None
@@ -1260,9 +1322,17 @@ def t_flutter(subdir: str):
              f"failed={len(failing)} skipped={sum(t['skipped'] for t in tests.values())}")
         bad = 0
         for t in failing:
-            if Path(t["suite"]).name not in declared:
-                emit(f"::error::{subdir} test failed: {t['suite']} :: {t['name']}")
-                bad += 1
+            if Path(t["suite"]).name in declared:
+                continue
+            flaky = next((ev for (f, prefix), ev in FLAKY_TESTS.get(subdir, {}).items()
+                          if Path(t["suite"]).name == f and t["name"].startswith(prefix)), None)
+            if flaky:
+                item = f"{subdir}-test:{Path(t['suite']).name}::{t['name'][:60]}"
+                emit(f"PREPUSH_{FLAKY}({item}): quarantined, NOT retried -- {flaky}")
+                ctx.host_skips.append((item, "flaky-quarantine", flaky, FLAKY))
+                continue
+            emit(f"::error::{subdir} test failed: {t['suite']} :: {t['name']}")
+            bad += 1
         by_file: dict = {f: [] for f in sorted(declared)}
         for t in tests.values():
             fname = Path(t["suite"] or "").name
@@ -1417,16 +1487,18 @@ def run_inner(args) -> int:
             emit(f"PREPUSH_SKIP({step.name}): host={host} -- {outcome[1]}")
             results.append((step.name, SKIP, None))
             continue
-        if isinstance(outcome, tuple) and outcome[0] == HOSTSKIP:
-            emit(f"PREPUSH_STEP_HOSTSKIP({step.name}): {outcome[1]}")
-            results.append((f"host-unsupported:{outcome[1]}", HOSTSKIP, None))
-            continue
-        rc = int(outcome)
-        emit(f"PREPUSH_STEP_RC({step.name})={rc}")
-        emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
-        results.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
-        for item, _, _ in ctx.host_skips:
-            row = (f"host-unsupported:{item}", HOSTSKIP, None)
+        if isinstance(outcome, tuple) and outcome[0] in ROW_PREFIX:
+            emit(f"PREPUSH_STEP_{outcome[0]}({step.name}): {outcome[1]}")
+            results.append((f"{ROW_PREFIX[outcome[0]]}:{outcome[1]}", outcome[0], None))
+        else:
+            rc = int(outcome)
+            emit(f"PREPUSH_STEP_RC({step.name})={rc}")
+            emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
+            results.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
+        # Items a step quarantined internally (targets, plugin files, flaky
+        # tests) each get their own counted row.
+        for item, _, _, status in ctx.host_skips:
+            row = (f"{ROW_PREFIX[status]}:{item}", status, None)
             if row not in results:
                 results.append(row)
 
@@ -1438,9 +1510,10 @@ def emit_inventory(ctx: Ctx) -> None:
     emit("")
     for where, name in ctx.inner_skips:
         emit(f"PREPUSH_INNER_SKIP\t{where}\t{name}")
-    emit(f"==== PREPUSH HOST-UNSUPPORTED INVENTORY host={ctx.host} count={len(ctx.host_skips)} ====")
-    for item, cls, evidence in ctx.host_skips:
-        emit(f"PREPUSH_HOST_UNSUPPORTED\t{ctx.host}\t{item}\t{cls}\t{evidence}")
+    emit(f"==== PREPUSH QUARANTINE INVENTORY host={ctx.host} count={len(ctx.host_skips)} ====")
+    for item, cls, evidence, status in ctx.host_skips:
+        tag = {HOSTSKIP: "PREPUSH_HOST_UNSUPPORTED", KNOWNDEFECT: "PREPUSH_KNOWN_DEFECT", FLAKY: "PREPUSH_FLAKY_KNOWN"}
+        emit(f"{tag[status]}\t{ctx.host}\t{item}\t{cls}\t{evidence}")
     for cls, evidence in DEFECT_INVENTORY:
         emit(f"PREPUSH_DEFECT_INVENTORY\t{ctx.host}\t-\t{cls}\t{evidence}")
     emit("==== END INVENTORY ====")
@@ -1457,7 +1530,8 @@ def summarize(results: list, host: str, head: str, partial: bool = False, inner_
 
     failed = [n for n, s, _ in results if s == "FAIL"]
     emit(f"PREPUSH-SUMMARY host={host} head={head} total={len(results)} passed={count('PASS')} "
-         f"failed={len(failed)} skipped={count(SKIP)} skipped_host={count(HOSTSKIP)} skipped_inner={inner_skips} "
+         f"failed={len(failed)} skipped={count(SKIP)} skipped_host={count(HOSTSKIP)} "
+         f"known_defect={count(KNOWNDEFECT)} flaky_known={count(FLAKY)} skipped_inner={inner_skips} "
          f"ci_only={count(CIONLY)} covered={count(COVERED)} partial={int(partial)}"
          + (f" failed_steps={','.join(failed)}" if failed else ""))
     return 1 if failed else 0

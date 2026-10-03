@@ -181,9 +181,21 @@ class TestSummary(unittest.TestCase):
 
     def test_counters_are_distinct(self):
         rc, line = self._summarize([("a", "PASS", 0), ("b", prepush.SKIP, None), ("c", prepush.HOSTSKIP, None),
-                                    ("d", prepush.CIONLY, None), ("e", prepush.COVERED, None)], inner=3)
+                                    ("d", prepush.CIONLY, None), ("e", prepush.COVERED, None),
+                                    ("f", prepush.KNOWNDEFECT, None), ("g", prepush.FLAKY, None)], inner=3)
         self.assertEqual(rc, 0)
-        self.assertIn("passed=1 failed=0 skipped=1 skipped_host=1 skipped_inner=3 ci_only=1 covered=1 partial=0", line)
+        self.assertIn("passed=1 failed=0 skipped=1 skipped_host=1 known_defect=1 flaky_known=1 skipped_inner=3 "
+                      "ci_only=1 covered=1 partial=0", line)
+
+    def test_teardown_fastfail_signature_rejects_a_failing_check(self):
+        entry = prepush.HOST_UNSUPPORTED[prepush.WINDOWS_X64]["decode-case:cfa-color-bggr"]
+        good = "[CFA COLOR] file=x B-R=86.90 min=50.00 [PASS]\nPREPUSH_CHILD_EXIT=3221226505\n" \
+               "PREPUSH_CASE_RESULT cfa-color-bggr FAIL -- file=x\n"
+        self.assertEqual(prepush.match_signature(entry, good), [])
+        wrong_exit = good.replace("3221226505", "1")
+        self.assertTrue(prepush.match_signature(entry, wrong_exit))
+        check_failed = good.replace("[PASS]", "[FAIL]")
+        self.assertTrue(prepush.match_signature(entry, check_failed))
 
     def test_any_failure_is_nonzero(self):
         rc, line = self._summarize([("a", "PASS", 0), ("b", "FAIL", 2)], partial=True)
