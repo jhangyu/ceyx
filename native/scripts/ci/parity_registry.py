@@ -69,9 +69,8 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 1, "role": "adapter",
         "contract": "GPU timing probe backend binding"},
     "native/src/pipeline/raw_persistent_device_arena.cpp": {
-        "guard_lines": 3, "role": "fork-host",
-        "contract": "Metal zero-copy lane arena (A11 family); volatile marking is fork B3",
-        "open_forks": ["B3"]},
+        "guard_lines": 3, "role": "accelerator",
+        "contract": "Metal zero-copy lane arena (A11 family); released by funnel step 1"},
     "native/src/pipeline/render_parameter_upload_cache.cpp": {
         "guard_lines": 1, "role": "accelerator",
         "contract": "Metal C3 parameter cache; released by funnel step 3"},

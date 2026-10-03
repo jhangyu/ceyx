@@ -333,7 +333,7 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
 // other subsystem would be the defect, not the feature.
 //
 // The full contract (floor semantics, zero floor legal, all-zeros no-op is
-// success, the caller-side quiescence precondition, release-dominates-volatile)
+// success, the caller-side quiescence precondition)
 // lives on the declaration in raw_ffi_api.h and, in full, on
 // raw_persistent_device_arena_shrink_to_lane_floor in
 // raw_persistent_device_arena.h. It is not restated here, so there is exactly
@@ -459,7 +459,7 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_idle_funnel_counters(
 // so nothing read here may be quoted as a measured DNG saving.
 //
 // Four out-parameters, fixed at this first release for the same ABI reason
-// ceyx_debug_arena_shrink_counters shipped with six: widening a released
+// ceyx_debug_persistent_device_arena_counters stays at five: widening a released
 // signature silently mismatches every harness already built against the
 // narrower typedef.
 //
@@ -503,23 +503,16 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_dng_slot_residency_counters(
 // T1 — arena idle-release probe. Debug/probe surface only (see the contract
 // comment in raw_ffi_api.h): not Dart-visible, nothing added to DngResult.
 //
-// Six out-parameters from the FIRST release on purpose: out_volatile_device_
-// bytes reads 0 until T17's purgeable marking lands, and widening this
-// signature afterwards would silently mismatch every harness already built
-// against a five-argument typedef — the same trap that keeps
-// ceyx_debug_persistent_device_arena_counters above at five.
-//
 // Null-pointer convention, as above: any out-pointer may be null and is then
-// skipped; -1 only when all six are null.
+// skipped; -1 only when all five are null.
 // ---------------------------------------------------------------------------
 
 CEYX_FFI_EXPORT int32_t ceyx_debug_arena_shrink_counters(
     uint64_t *out_shrink_calls, uint64_t *out_lanes_released,
     uint64_t *out_lanes_refused, uint64_t *out_bytes_released,
-    uint64_t *out_resident_lane_count, uint64_t *out_volatile_device_bytes) {
+    uint64_t *out_resident_lane_count) {
   if (!out_shrink_calls && !out_lanes_released && !out_lanes_refused &&
-      !out_bytes_released && !out_resident_lane_count &&
-      !out_volatile_device_bytes) {
+      !out_bytes_released && !out_resident_lane_count) {
     return -1;
   }
   if (out_shrink_calls) {
@@ -542,10 +535,6 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_arena_shrink_counters(
     // the four process-wide totals above.
     *out_resident_lane_count = static_cast<uint64_t>(
         ceyx::raw_persistent_device_arena_resident_lane_count());
-  }
-  if (out_volatile_device_bytes) {
-    *out_volatile_device_bytes =
-        ceyx::raw_persistent_device_arena_volatile_device_bytes();
   }
   return 0;
 }
