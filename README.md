@@ -432,12 +432,6 @@ needs no platform-specific trim of its own. The allocator call differs only as a
 | Windows | `HeapCompact` on the process heap |
 | Android (bionic) | `mallopt(M_PURGE)`, resolved at run time; below API 28 it is unavailable and is counted separately from successful calls |
 
----|---|---|
-| Apple (macOS/iOS) | `malloc_zone_pressure_relief` | Actually returns pages to the OS |
-| Linux (glibc) | `malloc_trim(0)` | Actually returns pages to the OS |
-| Windows | Nothing — pooled buffers are large enough that `_aligned_free` already hands pages back at release time; the process-wide working-set trim is implemented one layer up, in the host app (Halcyon wires it to the pool's `onShrink` callback) | Deliberately returns `0`, not "unsupported" |
-| musl / Android (bionic) | No equivalent mechanism exists | Explicit "unsupported" sentinel, not a silent zero |
-
 ---
 
 ## GPU backends and platform support
