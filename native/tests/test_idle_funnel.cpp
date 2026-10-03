@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "ceyx_decode_into.h"
+#include "dng_ffi_api.h"
 #include "raw_ffi_api.h"
 #include "test_report.h"
 
@@ -88,6 +89,10 @@ int main(int argc, char** argv) {
     report("F5_page_return_ran_on_desktop", after.page - before.page == 1, "");
 #endif
   }
+
+  // F6 / TC-1458 (memory-reclamation M4.3): the one physical-memory source
+  // answers a positive byte count on every leg that runs native tests locally.
+  report("F6_physical_memory_bytes_positive", ceyx_physical_memory_bytes() > 0, "");
 
   if (argc < 2) {
     test_report::reportSkip(kReportPrefix, "F2_F4", "no-raw-argument");

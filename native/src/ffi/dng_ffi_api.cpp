@@ -247,6 +247,10 @@ CEYX_FFI_EXPORT int32_t dng_decode_recommended_slots_for_pixels(int64_t pixels) 
       PipelineConfig::decodeRecommendedSlotsForPixels(px));
 }
 
+CEYX_FFI_EXPORT int64_t ceyx_physical_memory_bytes(void) {
+  return static_cast<int64_t>(PipelineConfig::physicalMemoryBytes());
+}
+
 CEYX_FFI_EXPORT int64_t dng_decode_recommendation_class_pixels(int32_t index) {
   switch (index) {
   case 0:

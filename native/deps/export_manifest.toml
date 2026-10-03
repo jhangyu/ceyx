@@ -55,6 +55,10 @@ id          = "oriented"
 expected_on = ["macos", "linux", "windows", "android"]
 
 [[group]]
+id          = "physical_memory"
+expected_on = ["macos", "linux", "windows", "android"]
+
+[[group]]
 id          = "pool_aligned"
 expected_on = ["macos", "linux", "windows", "android"]
 
@@ -162,6 +166,13 @@ dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 name       = "ceyx_native_release_gpu"
 platforms  = "all"
 group      = "gpu_release"
+source     = "native/src/ffi/dng_ffi_api.cpp"
+dart_sites = ["plugin/lib/src/dng_bindings.dart"]
+
+[[symbol]]
+name       = "ceyx_physical_memory_bytes"
+platforms  = "all"
+group      = "physical_memory"
 source     = "native/src/ffi/dng_ffi_api.cpp"
 dart_sites = ["plugin/lib/src/dng_bindings.dart"]
 

@@ -89,6 +89,9 @@ KNOWN_GROUP_IDS = {
     "ceyx_native_idle_shrink": "arena_idle_shrink",
     # M1 T-G (IC9): terminal exit-time GPU release; expected on all four legs.
     "ceyx_native_release_gpu": "gpu_release",
+    # M4.3 (fork A2): the one physical-RAM source for host apps. Not
+    # legacy-optional: expected on all four legs.
+    "ceyx_physical_memory_bytes": "physical_memory",
     # mem8 T12.0's frozen yuv420 contract, bound by T14. FOUR entries, ONE
     # group id on purpose: the Dart lookups are guarded PER-SYMBOL (each in
     # its own try, so a partially-updated library cannot null the rest), but

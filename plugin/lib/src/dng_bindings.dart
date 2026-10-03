@@ -203,6 +203,10 @@ typedef CeyxNativeIdleShrinkDart = int Function(int floor);
 typedef CeyxNativeReleaseGpuNative = ffi.Void Function();
 typedef CeyxNativeReleaseGpuDart = void Function();
 
+// M4.3 (fork A2): total physical RAM, 0 when unreadable.
+typedef CeyxPhysicalMemoryBytesNative = ffi.Int64 Function();
+typedef CeyxPhysicalMemoryBytesDart = int Function();
+
 // mem8 T14 (SR-9b): the FORMAT-TAKING siblings of the three format-agnostic
 // decode-into entries, frozen by T12.0 in native/include/raw_ffi_api.h. The
 // originals are UNCHANGED and remain rgba8 (R-B), so this block is additive:
@@ -328,6 +332,7 @@ class DngNativeBindings {
 
   CeyxNativeIdleShrinkDart? _ceyxNativeIdleShrink;
   CeyxNativeReleaseGpuDart? _ceyxNativeReleaseGpu;
+  CeyxPhysicalMemoryBytesDart? _ceyxPhysicalMemoryBytes;
 
   // mem8 T14: the format-taking entries and the upconvert. Guarded
   // PER-SYMBOL, each in its own try — never as one group. A grouped lookup
@@ -394,6 +399,11 @@ class DngNativeBindings {
   /// `CeyxGpuShutdown` then logs a loud skip. Tolerated, not thrown: the app is
   /// still correct, it merely keeps the driver-teardown crash on close.
   CeyxNativeReleaseGpuDart? get ceyxNativeReleaseGpu => _ceyxNativeReleaseGpu;
+
+  /// Guarded access to `ceyx_physical_memory_bytes`. Null when the loaded
+  /// library predates it.
+  CeyxPhysicalMemoryBytesDart? get ceyxPhysicalMemoryBytes =>
+      _ceyxPhysicalMemoryBytes;
 
   /// Whether this library exposes the native idle-shrink funnel.
   bool get nativeIdleShrinkAvailable => _ceyxNativeIdleShrink != null;
@@ -595,6 +605,18 @@ class DngNativeBindings {
           );
     } catch (_) {
       _ceyxNativeReleaseGpu = null;
+    }
+
+    // M4.3 (fork A2): its OWN try block, so a library predating it keeps every
+    // group resolved above.
+    try {
+      _ceyxPhysicalMemoryBytes = _lib
+          .lookupFunction<
+            CeyxPhysicalMemoryBytesNative,
+            CeyxPhysicalMemoryBytesDart
+          >('ceyx_physical_memory_bytes');
+    } catch (_) {
+      _ceyxPhysicalMemoryBytes = null;
     }
 
     // mem8 T14 (T12.0's frozen contract): four separate try blocks, one per
