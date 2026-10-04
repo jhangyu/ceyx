@@ -77,7 +77,7 @@ int main() {
     uint64_t committed = 1, calls = 1, ctxs_done = 1, physical = 1;
     const int32_t probe_rc = ceyx_debug_dng_slot_residency_counters(
         &committed, &calls, &ctxs_done, &physical);
-    const int64_t shrink_bytes = ceyx_native_idle_shrink(2);
+    const int64_t shrink_bytes = ceyx_native_idle_shrink(2, nullptr, nullptr, 0);
     const size_t fp_after = process_backing_bytes();
     const size_t fp_grew = fp_after > fp_before ? fp_after - fp_before : 0;
 
@@ -444,7 +444,7 @@ int main() {
     ceyx_debug_dng_slot_residency_counters(nullptr, &calls_before, &ctxs_before,
                                            &physical_after);
     // Fire the one native idle funnel. floor 0 = release every free context.
-    ceyx_native_idle_shrink(0);
+    ceyx_native_idle_shrink(0, nullptr, nullptr, 0);
     uint64_t calls_after = 0, ctxs_after = 0;
     ceyx_debug_dng_slot_residency_counters(nullptr, &calls_after, &ctxs_after,
                                            nullptr);

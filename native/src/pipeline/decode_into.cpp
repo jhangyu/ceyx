@@ -29,6 +29,7 @@
 #include "dng_render_params.h"
 #include "raw_ffi_api.h"
 #include "raw_file_router.h"
+#include "../ffi/heap_page_return.h"
 #if defined(DNG_ENABLE_GENERIC_RAW)
 #include "raw_gpu_pipeline.h"
 #include "raw_persistent_device_arena.h"  // R3-T4: kRawDeviceArenaAlignmentBytes
@@ -144,6 +145,10 @@ bool decodeIntoPrepare(const char *file_path, int32_t max_dim,
     result->error_code = kCeyxErrDstTooSmall;
     return false;
   }
+
+  // memreclaim spec §9.1: the slot may have been discarded by idle funnel
+  // step 4a; re-arm it before phase 3's first write (no-op off macOS).
+  ceyx::prepare_slot_reuse(const_cast<uint8_t *>(dst), dst_capacity);
 
   // R3-T4 (plan §4.3): the alignment probe, immediately after the capacity
   // check, in the one function both entries share. `newBufferWithBytesNoCopy:

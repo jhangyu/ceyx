@@ -77,6 +77,9 @@ std::atomic<uint64_t> g_device_release_errors{0};
 std::atomic<uint64_t> g_page_return_calls{0};        // funnel step 4 (M4)
 std::atomic<uint64_t> g_page_return_unavailable{0};  // funnel step 4 (M4)
 std::atomic<uint64_t> g_last_funnel_bytes{0};
+std::atomic<uint64_t> g_cold_handoff_ran{0};          // funnel step 5
+std::atomic<uint64_t> g_cold_handoff_unavailable{0};  // funnel step 5
+std::atomic<uint64_t> g_cold_handoff_refused{0};      // funnel step 5
 
 const char *device_release_label(DngDeviceReleaseResult result) {
   switch (result) {
@@ -85,6 +88,29 @@ const char *device_release_label(DngDeviceReleaseResult result) {
     case DngDeviceReleaseResult::kError: return "error";
   }
   return "error";
+}
+
+void count_cold_handoff(ceyx::ColdHandoff outcome) {
+  switch (outcome) {
+    case ceyx::ColdHandoff::ran:
+      g_cold_handoff_ran.fetch_add(1, std::memory_order_relaxed);
+      return;
+    case ceyx::ColdHandoff::unavailable:
+      g_cold_handoff_unavailable.fetch_add(1, std::memory_order_relaxed);
+      return;
+    case ceyx::ColdHandoff::refused:
+      g_cold_handoff_refused.fetch_add(1, std::memory_order_relaxed);
+      return;
+  }
+}
+
+const char *cold_handoff_label(ceyx::ColdHandoff outcome) {
+  switch (outcome) {
+    case ceyx::ColdHandoff::ran: return "ran";
+    case ceyx::ColdHandoff::unavailable: return "unavailable";
+    case ceyx::ColdHandoff::refused: return "refused";
+  }
+  return "refused";
 }
 }  // namespace
 
@@ -344,10 +370,14 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_persistent_device_arena_counters(
 // one copy of it to keep true.
 //
 // Steps, in order, on every backend: 1 arena lanes, 2 DNG decode-context
-// decommit, 3 backend device-memory release, 4 page return (M4).
+// decommit, 3 backend device-memory release, 4a idle-slot page discard, 4b
+// allocator page return, 5 cold-page handoff.
 // ---------------------------------------------------------------------------
 
-CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
+CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor,
+                                                void *const *idle_slots,
+                                                const uint64_t *idle_slot_bytes,
+                                                int32_t idle_slot_count) {
   g_funnel_calls.fetch_add(1, std::memory_order_relaxed);
   // A negative floor is CLAMPED, not rejected: 0 is itself a legal floor
   // meaning "release every quiescent lane", so clamping lands on a defined
@@ -391,26 +421,42 @@ CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor) {
       break;
   }
 
-  // Step 4 (M4.1): return free heap pages. LAST, because steps 1-3 are what
-  // free them. Same call on every leg; see heap_page_return.h.
+  // Step 4a: idle pooled slots named by the host pool (which proved
+  // quiescence) give their resident pages back. Same call on every leg.
+  size_t discarded = 0;
+  if (idle_slots != nullptr && idle_slot_bytes != nullptr) {
+    for (int32_t i = 0; i < idle_slot_count; ++i) {
+      discarded += ceyx::discard_idle_pages(idle_slots[i],
+                                            static_cast<size_t>(idle_slot_bytes[i]));
+    }
+  }
+
+  // Step 4b (M4.1): allocator free pages. LAST, because steps 1-4a free them.
+  // Same call on every leg; see heap_page_return.h.
   if (ceyx::return_free_heap_pages() == ceyx::HeapPageReturn::ran) {
     g_page_return_calls.fetch_add(1, std::memory_order_relaxed);
   } else {
     g_page_return_unavailable.fetch_add(1, std::memory_order_relaxed);
   }
 
-  // Bytes, not lanes: steps 1 and 2 SUMMED, so a caller sees one number for
-  // "what this idle pass handed back". Step 3 reports no byte count (Halide
-  // does not give one); its outcome is in the counters and the line below.
+  // Step 5 (Layer B): cold live pages to the OS, content preserved. LAST: it
+  // moves what the steps above did not free. Outcome counted, never a constant.
+  const ceyx::ColdHandoff cold = ceyx::handoff_cold_pages();
+  count_cold_handoff(cold);
+
+  // Bytes, not lanes: steps 1, 2 and 4a SUMMED, so a caller sees one number for
+  // "what this idle pass handed back". Steps 3, 4b and 5 report no byte count;
+  // their outcomes are in the counters and the line below.
   const int64_t total = static_cast<int64_t>(outcome.bytes_released) +
-                        static_cast<int64_t>(dng_bytes);
+                        static_cast<int64_t>(dng_bytes) +
+                        static_cast<int64_t>(discarded);
   g_last_funnel_bytes.store(static_cast<uint64_t>(total), std::memory_order_relaxed);
   std::fprintf(stderr,
                "[IdleFunnel] event=funnel floor=%zu arena_bytes=%llu dng_bytes=%zu "
-               "device_release=%s\n",
+               "discarded_bytes=%zu cold_handoff=%s device_release=%s\n",
                clamped_floor,
                static_cast<unsigned long long>(outcome.bytes_released), dng_bytes,
-               device_release_label(device));
+               discarded, cold_handoff_label(cold), device_release_label(device));
   std::fflush(stderr);
   return total;
 }
@@ -423,12 +469,25 @@ CEYX_FFI_EXPORT int32_t ceyx_debug_idle_funnel_counters(
     uint64_t *out_funnel_calls, uint64_t *out_device_release_runs,
     uint64_t *out_device_release_skipped_uninitialized,
     uint64_t *out_device_release_errors, uint64_t *out_page_return_calls,
-    uint64_t *out_page_return_unavailable, uint64_t *out_last_funnel_bytes) {
+    uint64_t *out_page_return_unavailable, uint64_t *out_last_funnel_bytes,
+    uint64_t *out_cold_handoff_ran, uint64_t *out_cold_handoff_unavailable,
+    uint64_t *out_cold_handoff_refused) {
   if (!out_funnel_calls && !out_device_release_runs &&
       !out_device_release_skipped_uninitialized && !out_device_release_errors &&
       !out_page_return_calls && !out_page_return_unavailable &&
-      !out_last_funnel_bytes) {
+      !out_last_funnel_bytes && !out_cold_handoff_ran &&
+      !out_cold_handoff_unavailable && !out_cold_handoff_refused) {
     return -1;
+  }
+  if (out_cold_handoff_ran) {
+    *out_cold_handoff_ran = g_cold_handoff_ran.load(std::memory_order_relaxed);
+  }
+  if (out_cold_handoff_unavailable) {
+    *out_cold_handoff_unavailable =
+        g_cold_handoff_unavailable.load(std::memory_order_relaxed);
+  }
+  if (out_cold_handoff_refused) {
+    *out_cold_handoff_refused = g_cold_handoff_refused.load(std::memory_order_relaxed);
   }
   if (out_funnel_calls) *out_funnel_calls = g_funnel_calls.load(std::memory_order_relaxed);
   if (out_device_release_runs) {

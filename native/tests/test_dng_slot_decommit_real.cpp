@@ -356,7 +356,7 @@ int main(int argc, char **argv) {
   size_t span_before = 0, span_after = 0;
   const size_t arena_res_before = arenaResidentBytes(&rg_before, &span_before);
   const size_t fp_driven = processFootprintBytes();
-  const int64_t released = ceyx_native_idle_shrink(0);
+  const int64_t released = ceyx_native_idle_shrink(0, nullptr, nullptr, 0);
   const size_t fp_after = processFootprintBytes();
   const size_t arena_res_after = arenaResidentBytes(&rg_after, &span_after);
 

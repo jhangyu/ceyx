@@ -48,3 +48,17 @@ inline size_t process_backing_bytes() {
   return kb * 1024;
 #endif
 }
+
+// Resident pages: what funnel step 4a must drop. Windows reads WorkingSetSize
+// (VirtualUnlock removes pages from the working set while the range stays
+// committed, so PrivateUsage would not move); elsewhere the backing reading
+// already counts resident anonymous pages.
+inline size_t process_resident_bytes() {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS pmc{};
+  if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0;
+  return static_cast<size_t>(pmc.WorkingSetSize);
+#else
+  return process_backing_bytes();
+#endif
+}

@@ -245,13 +245,19 @@ int32_t ceyx_debug_persistent_device_arena_counters(
 /*      memory: the Halide Vulkan pool's unused blocks, or the Metal      */
 /*      parameter cache). MUST follow step 2, which hands context device  */
 /*      buffers back to that pool;                                        */
-/*   4. page return (reserved; lands in a later milestone).               */
+/*   4. page return: 4a discard the pages of the idle pooled slots passed */
+/*      in idle_slots/idle_slot_bytes (idle_slot_count entries; null or   */
+/*      <= 0 means none), then 4b allocator free-page return.             */
+/*   5. cold-page handoff (Layer B): live pages to the OS, content kept;  */
+/*      macOS reports unavailable (approved exception).                   */
 /*                                                                        */
-/* Returns the BYTE COUNT released by steps 1 and 2. Step 3 contributes   */
-/* no byte count (the backend does not report one); its outcome is in    */
+/* Returns the BYTE COUNT released by steps 1, 2 and 4a. Steps 3, 4b and */
+/* 5 contribute no byte count (the OS/backend does not report one); their */
+/* outcomes are in                                                        */
 /* ceyx_debug_idle_funnel_counters below and in the one stderr line each  */
 /* call writes: "[IdleFunnel] event=funnel floor=<n> arena_bytes=<n>      */
-/* dng_bytes=<n> device_release=<released|skipped_uninitialized|error>".  */
+/* dng_bytes=<n> discarded_bytes=<n> cold_handoff=<ran|unavailable|      */
+/* refused> device_release=<released|skipped_uninitialized|error>".       */
 /* A negative floor is clamped to 0 (itself a legal floor, meaning        */
 /* "release every quiescent lane"), so -1 is reserved and is not returned */
 /* by the current implementation. A call with nothing to release returns  */
@@ -263,7 +269,10 @@ int32_t ceyx_debug_persistent_device_arena_counters(
 /* every step. The per-lane live-binding refusal is a backstop, not a     */
 /* lock; the pool's quiescence window is the only clock.                  */
 /* ===================================================================== */
-int64_t ceyx_native_idle_shrink(int32_t floor);
+int64_t ceyx_native_idle_shrink(int32_t floor,
+                                void *const *idle_slots,
+                                const uint64_t *idle_slot_bytes,
+                                int32_t idle_slot_count);
 
 /* ===================================================================== */
 /* Process-end GPU release (memory-reclamation campaign M1).              */
@@ -312,8 +321,8 @@ int32_t ceyx_debug_arena_shrink_counters(
 /* Process-wide totals since start, incremented ONLY in the shared funnel body */
 /* (dng_ffi_api.cpp) -- never inside a backend branch -- so every leg reports  */
 /* the same telemetry. out_page_return_calls / out_page_return_unavailable     */
-/* stay 0 until funnel step 4 lands (M4); they are present from the first     */
-/* release so the signature never widens.                                     */
+/* count step 4b outcomes; out_cold_handoff_ran / _unavailable / _refused      */
+/* count step 5 outcomes (macOS: always unavailable, approved exception).      */
 /* out_last_funnel_bytes is the most recent funnel return value.               */
 /* Null-pointer convention as the probes above: -1 only when ALL are null.     */
 int32_t ceyx_debug_idle_funnel_counters(
@@ -323,7 +332,10 @@ int32_t ceyx_debug_idle_funnel_counters(
     uint64_t *out_device_release_errors,
     uint64_t *out_page_return_calls,
     uint64_t *out_page_return_unavailable,
-    uint64_t *out_last_funnel_bytes);
+    uint64_t *out_last_funnel_bytes,
+    uint64_t *out_cold_handoff_ran,
+    uint64_t *out_cold_handoff_unavailable,
+    uint64_t *out_cold_handoff_refused);
 
 /* ===================================================================== */
 /* mem8 T3 (SR-6) — DNG slot residency probe.                            */

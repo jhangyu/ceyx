@@ -505,9 +505,12 @@ target_link_libraries(test_dng_slot_decommit PRIVATE dng_decoder_native)
 
 # Memory-reclamation campaign M1: the idle funnel's shared telemetry on every
 # leg. F1 needs no GPU/file; F2-F4 take one decodable RAW as argv[1].
-add_executable(test_idle_funnel tests/test_idle_funnel.cpp)
+# memreclaim F8 calls the adapter's prepare_slot_reuse directly (an internal
+# symbol, not exported from the DLL), so the adapter TU is compiled in too.
+add_executable(test_idle_funnel tests/test_idle_funnel.cpp src/ffi/heap_page_return.cpp)
 target_include_directories(test_idle_funnel PRIVATE
     ${INC_DIR}
+    ${SRC_DIR}/ffi
     ${SRC_DIR}/pipeline
     ${HALIDE_DIR}/include)
 target_link_libraries(test_idle_funnel PRIVATE dng_decoder_native)
