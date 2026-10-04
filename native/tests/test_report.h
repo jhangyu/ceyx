@@ -26,6 +26,7 @@ inline void report(const char* prefix, const char* name, bool ok, const char* de
         std::printf("[%s] %s -> %s\n", prefix, name, ok ? "PASS" : "FAIL");
     }
     if (!ok) ++failures;
+    std::fflush(stdout);  // abort() later must not discard buffered results
 }
 
 inline void reportSkip(const char* prefix, const char* name, const char* reason,

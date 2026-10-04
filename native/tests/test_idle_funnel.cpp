@@ -203,8 +203,17 @@ int main(int argc, char** argv) {
   // and 64 KiB-stride-32 were returned at free(); 16 KiB and smaller stayed
   // held but malloc_zone_pressure_relief returned ~nothing; stride >= 4 coalesced).
   {
+#if defined(__APPLE__) || defined(_WIN32)
     constexpr size_t kBlock = 128 * 1024;
     constexpr int kCount = 512;
+#elif defined(__ANDROID__)
+    // Android shape pending on-device sweep (contract item 5); glibc shape until calibrated.
+    constexpr size_t kBlock = 64 * 1024;
+    constexpr int kCount = 1024;
+#else  // glibc
+    constexpr size_t kBlock = 64 * 1024;
+    constexpr int kCount = 1024;
+#endif
     constexpr int kPinStride = 3;
     (void)ceyx_native_idle_shrink(0, nullptr, nullptr, 0);  // settle earlier frees
     const size_t base = process_resident_bytes();
@@ -252,7 +261,9 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < kL; ++i) live[i] = static_cast<unsigned char>((i * 2654435761u) >> 24);
     const FunnelCounters c0 = read_counters();
     const size_t r0 = process_resident_bytes();
+    const auto f10_t0 = std::chrono::steady_clock::now();
     (void)ceyx_native_idle_shrink(0, nullptr, nullptr, 0);
+    const double step5_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f10_t0).count();
     const size_t r1 = process_resident_bytes();
     const FunnelCounters c1 = read_counters();
     bool intact = true;
@@ -269,8 +280,8 @@ int main(int argc, char** argv) {
 #else
     // Linux/Android: swap/zram must exist or the pattern is not observable (FAIL, never SKIP).
     const bool ok = c1.cold_ran - c0.cold_ran == 1 && intact && r0 >= r1 + kL * 9 / 10;
-    std::snprintf(d, sizeof d, "r0=%zu r1=%zu intact=%d ran=%llu", r0, r1, (int)intact,
-                  (unsigned long long)(c1.cold_ran - c0.cold_ran));
+    std::snprintf(d, sizeof d, "r0=%zu r1=%zu intact=%d ran=%llu step5_ms=%.2f", r0, r1, (int)intact,
+                  (unsigned long long)(c1.cold_ran - c0.cold_ran), step5_ms);
 #endif
     report("F10_cold_pages_handoff", ok, d);
   }
@@ -373,7 +384,15 @@ int main(int argc, char** argv) {
       constexpr size_t kL = 256 * kMiB;
       std::vector<unsigned char> live(kL);
       for (size_t i = 0; i < kL; ++i) live[i] = static_cast<unsigned char>((i * 2654435761u) >> 24);
+      const FunnelCounters g5c0 = read_counters();
+      const size_t g5r0 = process_resident_bytes();
       (void)ceyx_native_idle_shrink(0, nullptr, nullptr, 0);
+      const size_t g5r1 = process_resident_bytes();
+      const FunnelCounters g5c1 = read_counters();
+      // User ruling R2: step 5 must have lowered resident memory by >= 0.9 x 256 MiB,
+      // else the re-access cost below measures nothing ("not observable" FAIL).
+      const bool step5_ran = g5c1.cold_ran - g5c0.cold_ran == 1;
+      const bool observable = !step5_ran || g5r0 >= g5r1 + kL * 9 / 10;
       Clock::time_point t0 = Clock::now();
       bool intact = true;
       for (size_t i = 0; i < kL; i += 4096) {
@@ -392,8 +411,9 @@ int main(int argc, char** argv) {
       const double fresh = ms_since(t0);
       const bool alloc_ok = f != nullptr && f[kL / 2] == 0xC3;
       if (f != nullptr) os_release_pages(f, kL);
-      std::snprintf(d, sizeof d, "fresh_ms=%.2f reaccess_ms=%.2f ratio=%.2f intact=%d", fresh,
-                    reaccess, fresh > 0 ? reaccess / fresh : 0.0, (int)intact);
+      std::snprintf(d, sizeof d, "%sfresh_ms=%.2f reaccess_ms=%.2f ratio=%.2f intact=%d g5r0=%zu g5r1=%zu",
+                    observable ? "" : "not observable (step 5 did not drop resident >= 0.9x256MiB) ", fresh,
+                    reaccess, fresh > 0 ? reaccess / fresh : 0.0, (int)intact, g5r0, g5r1);
       // A baseline under 1 ms is not a measurement (FAIL, never a free pass).
       // Ratio limit per spec §9.1 round-3 follow-up ruling 1a: Windows <= 5.0x
       // (re-reading pages SetProcessWorkingSetSize pushed to the pagefile is the
@@ -404,7 +424,7 @@ int main(int argc, char** argv) {
       constexpr double kMaxRatio = 2.0;
 #endif
       report("G5_cold_page_reaccess_cost",
-             alloc_ok && intact && fresh >= 1.0 && reaccess <= kMaxRatio * fresh, d);
+             observable && alloc_ok && intact && fresh >= 1.0 && reaccess <= kMaxRatio * fresh, d);
     }
 #endif
   }

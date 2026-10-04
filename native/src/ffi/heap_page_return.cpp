@@ -123,8 +123,10 @@ ColdHandoff handoff_cold_pages() {
              ? ColdHandoff::ran
              : ColdHandoff::refused;
 #elif defined(__linux__)
-  // MADV_PAGEOUT (kernel >= 5.4) over private, writable, non-exec anonymous
-  // ranges; needs swap/zram or the pages stay resident (F10 precondition).
+  // MADV_PAGEOUT (kernel >= 5.4); needs swap/zram or the pages stay resident
+  // (F10 precondition). Selection = AOSP CachedAppOptimizer rule: private,
+  // writable, non-exec, anonymous (inode 0). No name filter: Android names heap
+  // VMAs [anon:...].
   constexpr int kMadvPageout = 21;
   std::FILE *maps = std::fopen("/proc/self/maps", "r");
   if (maps == nullptr) return ColdHandoff::refused;
@@ -137,8 +139,6 @@ ColdHandoff handoff_cold_pages() {
     if (std::sscanf(line, "%lx-%lx %7s %*s %*s %lu %n", &lo, &hi, perms, &inode, &path_at) < 4) continue;
     if (perms[0] != 'r' || perms[1] != 'w' || perms[2] == 'x' || perms[3] != 'p') continue;
     if (inode != 0) continue;  // file-backed
-    const char *path = line + path_at;
-    if (path[0] == '[' && std::strncmp(path, "[heap]", 6) != 0 && std::strncmp(path, "[stack", 6) != 0) continue;
     if (madvise(reinterpret_cast<void *>(lo), hi - lo, kMadvPageout) == 0) ++ok;
     else if (errno == EINVAL) ++einval;
     else ++other;  // e.g. ENOMEM: range vanished between read and call
