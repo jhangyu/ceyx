@@ -32,8 +32,7 @@ A HOST'S OWN PLATFORM LEG MUST RUN. Each matrix row maps to the local host
 that can run it; on that host its steps run, and a leg with no
 implementation there (the Linux leg on a Linux host) is a FAILURE. Rows
 owned by another host are one counted `skipped` entry per row.
-The macOS leg is IMPLEMENTED-UNVERIFIED-ON-MAC: written and exercised only
-on a Windows host; the first macOS run is its live proof.
+The macOS leg is verified on macOS host at 6b35c47f (2026-10-04, docs/logs/2026-10-04/ceyx-prepush-6b35c47f-090909.log).
 
 COUNTERS, all printed in the one PREPUSH-SUMMARY line:
   passed / failed  -- executed steps;
@@ -106,7 +105,7 @@ SEEDS = {
 }
 # The plugin's dylib-fixture suites load the SHIPPED macOS dylib
 # (plugin/test/support/native_fixtures.dart shippedDylibPath), which `*.dylib`
-# in .gitignore keeps out of every clone. IMPLEMENTED-UNVERIFIED-ON-MAC.
+# in .gitignore keeps out of every clone. Seed verified on macOS host at 6b35c47f (2026-10-04, docs/logs/2026-10-04/ceyx-prepush-6b35c47f-090909.log).
 # It also loads the @rpath companions (@loader_path), i.e. the whole vendored directory the podspec ships
 # (`vendored_libraries = 'Libraries/*'`), so the whole directory is seeded.
 MACOS_LIBRARIES = Path("plugin/macos/Libraries")
@@ -640,8 +639,7 @@ def i_win_assert_jxl(ctx: Ctx, jr: JobRow, step) -> int:
 
 
 def i_mac_de265_linkage(ctx: Ctx, jr: JobRow, step) -> int:
-    """Port of macos_build.yml's libde265 linkage assertion. IMPLEMENTED-UNVERIFIED-ON-MAC."""
-    emit("PREPUSH_STATUS: IMPLEMENTED-UNVERIFIED-ON-MAC")
+    """Port of macos_build.yml's libde265 linkage assertion. Gate verified on macOS host at 6b35c47f (2026-10-04, docs/logs/2026-10-04/ceyx-prepush-6b35c47f-090909.log)."""
     dist = jr.workspace / jr.row["heif_dist_dir"]
     lib = dist / "lib"
     if not (lib / "libde265.0.dylib").is_file():
@@ -1765,7 +1763,7 @@ def run_outer(args) -> int:
     emit("PREPUSH_CHILD_ENV: " + " ".join(f"{k}={v}" for k, v in CHILD_ENV_OVERRIDES.items())
          + " (CI runners use a UTF-8 locale; set for every child)")
     if host == MACOS_ARM64:
-        emit("PREPUSH_STATUS: the macOS leg, macOS dylib seed and macOS test layer are IMPLEMENTED-UNVERIFIED-ON-MAC")
+        emit("PREPUSH_STATUS: the macOS leg, macOS dylib seed and macOS test layer are verified on macOS host at 6b35c47f (2026-10-04, docs/logs/2026-10-04/ceyx-prepush-6b35c47f-090909.log)")
     results: list = []
     scratch = Path(args.scratch).resolve() if args.scratch else Path(tempfile.mkdtemp(prefix="ceyx-prepush-"))
     clone = scratch / "ceyx"
@@ -1789,7 +1787,7 @@ def run_outer(args) -> int:
         return summarize(results, host, head)
     if "macos-dylib" not in HOST_SEEDS.get(host, {}):
         emit(f"PREPUSH_SEED_STATUS(macos-dylib): not seeded on host={host} (macOS hosts only); "
-             "that path is IMPLEMENTED-UNVERIFIED-ON-MAC")
+             "that path is not exercised on this host")
     for name, rel in {**SEEDS, **HOST_SEEDS.get(host, {})}.items():
         rc = seed_tree(name, REPO_ROOT / rel, clone / rel)
         if name == "halide" and rc == 0:
