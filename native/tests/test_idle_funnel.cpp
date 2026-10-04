@@ -362,11 +362,11 @@ int main(int argc, char** argv) {
       const bool step5_skipped = g1.cold_ran == g0.cold_ran &&
                                  g1.cold_unavailable == g0.cold_unavailable &&
                                  g1.cold_refused == g0.cold_refused;
-      // Limit per spec §9.1 "Round-3 final G4 ruling": 60 ms on Windows (real
+      // Limit per spec §9.1 "Round-3 final G4 ruling", Windows raised to 150 ms by user ruling 2026-10-04 (real
       // DiscardVirtualMemory + HeapOptimizeResources cost, p95 48.68 measured),
       // 8 ms elsewhere.
 #if defined(_WIN32)
-      constexpr double kLimitMs = 60.0;
+      constexpr double kLimitMs = 150.0;  // user ruling 2026-10-04, supersedes 60
 #else
       constexpr double kLimitMs = 8.0;
 #endif
