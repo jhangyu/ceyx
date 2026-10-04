@@ -28,8 +28,8 @@ REGISTRY: dict[str, dict] = {
         "guard_lines": 3, "role": "adapter",
         "contract": "aligned alloc/free adapter (A4)"},
     "native/src/ffi/heap_page_return.cpp": {
-        "guard_lines": 16, "role": "adapter",
-        "contract": "funnel step 4: idle-slot page discard (4a) + slot reuse re-arm + allocator page return (4b); step 5 cold-page handoff; ran/unavailable/refused telemetry (TC-1455)"},
+        "guard_lines": 17, "role": "adapter",
+        "contract": "funnel step 4: idle-slot page discard (4a) + slot reuse re-arm + allocator page return (4b); step 5 cold-page handoff + debug skip toggle (OS env read); ran/unavailable/refused telemetry (TC-1455)"},
     "native/src/ffi/dng_ffi_api.cpp": {
         "guard_lines": 5, "role": "parked",
         "contract": "Android-only Vulkan pipeline-cache persistence (:43-90); not reclamation"},

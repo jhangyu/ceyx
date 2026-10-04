@@ -155,4 +155,14 @@ ColdHandoff handoff_cold_pages() {
 #endif
 }
 
+bool cold_handoff_skipped_for_debug() {
+#if defined(_WIN32)
+  char v[2] = {};
+  return GetEnvironmentVariableA("CEYX_DEBUG_SKIP_COLD_HANDOFF", v, sizeof v) == 1 && v[0] == '1';
+#else
+  const char *v = std::getenv("CEYX_DEBUG_SKIP_COLD_HANDOFF");
+  return v != nullptr && v[0] == '1' && v[1] == '\0';
+#endif
+}
+
 }  // namespace ceyx

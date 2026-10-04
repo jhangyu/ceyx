@@ -441,8 +441,13 @@ CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor,
 
   // Step 5 (Layer B): cold live pages to the OS, content preserved. LAST: it
   // moves what the steps above did not free. Outcome counted, never a constant.
-  const ceyx::ColdHandoff cold = ceyx::handoff_cold_pages();
-  count_cold_handoff(cold);
+  // A debug-only env toggle skips it (spec §9.1 Windows gate collision): the
+  // Layer-A residency cases need a funnel that does not empty the working set.
+  // Skipped = no OS call, no outcome counter, "skipped_debug" in the line below.
+  const bool cold_skipped = ceyx::cold_handoff_skipped_for_debug();
+  const ceyx::ColdHandoff cold =
+      cold_skipped ? ceyx::ColdHandoff::unavailable : ceyx::handoff_cold_pages();
+  if (!cold_skipped) count_cold_handoff(cold);
 
   // Bytes, not lanes: steps 1, 2 and 4a SUMMED, so a caller sees one number for
   // "what this idle pass handed back". Steps 3, 4b and 5 report no byte count;
@@ -456,7 +461,8 @@ CEYX_FFI_EXPORT int64_t ceyx_native_idle_shrink(int32_t floor,
                "discarded_bytes=%zu cold_handoff=%s device_release=%s\n",
                clamped_floor,
                static_cast<unsigned long long>(outcome.bytes_released), dng_bytes,
-               discarded, cold_handoff_label(cold), device_release_label(device));
+               discarded, cold_skipped ? "skipped_debug" : cold_handoff_label(cold),
+               device_release_label(device));
   std::fflush(stderr);
   return total;
 }

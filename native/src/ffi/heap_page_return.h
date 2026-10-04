@@ -36,4 +36,11 @@ void prepare_slot_reuse(void *base, size_t bytes);
 enum class ColdHandoff { ran, unavailable, refused };
 ColdHandoff handoff_cold_pages();
 
+// DEBUG/TEST-ONLY toggle (spec §9.1 Windows gate collision, option 1): true
+// while the process environment holds CEYX_DEBUG_SKIP_COLD_HANDOFF=1, so the
+// Layer-A residency cases can run the funnel without step 5 emptying the
+// working set. Read from the OS environment block (not a CRT copy) so a test
+// executable and this library agree even with separate CRTs. Unset = false.
+bool cold_handoff_skipped_for_debug();
+
 }  // namespace ceyx
