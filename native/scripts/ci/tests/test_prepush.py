@@ -330,5 +330,27 @@ class BuildTestsGeneratorTests(unittest.TestCase):
             self.assertEqual(prepush._generator(Path(tmp)), "Ninja")
 
 
+class GateInvocationTests(unittest.TestCase):
+    def test_default_log_path_is_dated_docs_logs_artifact(self):
+        import time
+        p = prepush.default_log_path("abc1234", time.strptime("2026-10-04 12:34:56", "%Y-%m-%d %H:%M:%S"))
+        self.assertEqual(p, prepush.REPO_ROOT / "docs/logs/2026-10-04/ceyx-prepush-abc1234-123456.log")
+
+    def test_dist_equivalence_argv_derived_from_workflow_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            scratch = Path(td)
+            clone = scratch / "ceyx"
+            (clone / prepush.WORKFLOWS_DIR).parent.mkdir(parents=True)
+            import shutil
+            shutil.copytree(WORKFLOWS, clone / prepush.WORKFLOWS_DIR)
+            ctx = prepush.Ctx(clone=clone, host=prepush.MACOS_ARM64)
+            argv = prepush.dist_equivalence_argv(ctx)
+            kv = dict(zip(argv[::2], argv[1::2]))
+            self.assertEqual(kv["--carrier-dist"], str(clone / "native/third_party/heif-dist"))
+            self.assertEqual(kv["--baseline-dist"], str(scratch / prepush.HEIF_BASELINE_DIR))
+            self.assertEqual(kv["--consumer-profile"], "heif-codec")
+            self.assertTrue(kv["--consumer-command"].startswith(str(clone / "native/build/test_codec_heif")))
+
+
 if __name__ == "__main__":
     unittest.main()

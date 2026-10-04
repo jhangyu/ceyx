@@ -1396,11 +1396,34 @@ def t_raw_matrix(ctx: Ctx):
     return 1 if bad else 0
 
 
+# The shell-built macOS HEIF dist (untracked, so absent from every clone) is the L2 baseline the
+# carrier-built dist is compared against; the outer run seeds it next to the clone.
+HEIF_BASELINE_SRC = Path("native/third_party/heif-dist")
+HEIF_BASELINE_DIR = "heif-baseline-dist"
+HEIF_CONSUMER_OUT = "heif-consumer-out"
+
+
+def dist_equivalence_argv(ctx: Ctx) -> list:
+    """Layer-2/3 inputs derived from what the gate itself builds: the carrier dist is the macOS arm64
+    row's `heif_dist_dir` in macos_build.yml; the consumer is the HEIF codec test binary the
+    build-tests step produced (its link resolves to that dist)."""
+    job = load_jobs(ctx.clone / WORKFLOWS_DIR)["macos_build.yml:build"]
+    row = next(r for r in job.rows if r.get("arch_tag") == "arm64")
+    out = ctx.clone.parent / HEIF_CONSUMER_OUT
+    out.mkdir(parents=True, exist_ok=True)
+    binary = ctx.clone / build_dir_for(ctx.host) / "test_codec_heif"
+    return ["--platform", "macos", "--arch", "arm64",
+            "--baseline-dist", str(ctx.clone.parent / HEIF_BASELINE_DIR),
+            "--carrier-dist", str(ctx.clone / row["heif_dist_dir"]),
+            "--consumer-profile", "heif-codec",
+            "--consumer-command", f"{binary} {out}"]
+
+
 def t_dist_equivalence(ctx: Ctx):
     if ctx.host != MACOS_ARM64:
         return (SKIP, "layers 2-3 compare the macOS carrier-built HEIF dist against the committed macOS dist "
                       "(`--platform` accepts macos or linux only); layer 1 runs as macos:d6-layer-1 on every host")
-    return ctx.run(ctx.py("native/tests/run_dist_equivalence.py"))
+    return ctx.run(ctx.py("native/tests/run_dist_equivalence.py", *dist_equivalence_argv(ctx)))
 
 
 def t_flutter(subdir: str):
@@ -1412,7 +1435,12 @@ def t_flutter(subdir: str):
             return rc
         report = ctx.clone / REPROOF_DIR / f"flutter-{subdir}.json"
         report.parent.mkdir(parents=True, exist_ok=True)
-        rc = stream([flutter, "test", "--file-reporter", f"json:{report}"], where, env=ctx.base_env())
+        env = ctx.base_env()
+        if subdir == "app":
+            # The app resolves the dylib via DngDecoderService's generic search, whose script-relative
+            # candidates all miss under `flutter test`; the gate's own build is the one under test.
+            env["DNG_NATIVE_BUILD_DIR"] = str(ctx.clone / build_dir_for(ctx.host))
+        rc = stream([flutter, "test", "--file-reporter", f"json:{report}"], where, env=env)
         tests = parse_dart_json(report)
         for t in tests.values():
             if t["skipped"]:
@@ -1659,6 +1687,7 @@ def tree_manifest(root: Path) -> dict:
 _SEED_HINTS = {
     "halide": "python3 native/scripts/build_deps.py fetch halide",
     "samples": "owner-supplied fixtures",
+    "heif-baseline": "the shell-built macOS HEIF dist (see native/third_party/heif-dist/PROVENANCE.md)",
     "macos-dylib": "build or stage the shipped macOS dylib and its companions in plugin/macos/Libraries",
 }
 
@@ -1769,6 +1798,10 @@ def run_outer(args) -> int:
             rc = samples_ok(clone) or rc
         emit(f"PREPUSH_STEP_RC(bootstrap-seed-{name})={rc}")
         results.append((f"bootstrap-seed-{name}", "PASS" if rc == 0 else "FAIL", rc))
+    if host == MACOS_ARM64:
+        rc = seed_tree("heif-baseline", REPO_ROOT / HEIF_BASELINE_SRC, scratch / HEIF_BASELINE_DIR)
+        emit(f"PREPUSH_STEP_RC(bootstrap-seed-heif-baseline)={rc}")
+        results.append(("bootstrap-seed-heif-baseline", "PASS" if rc == 0 else "FAIL", rc))
     inner = [py_exe(), str(clone / "native/scripts/ci.py"), "prepush", "--inner", "--head", head]
     for name, _, rc in results:
         inner += ["--bootstrap-result", f"{name}={rc}"]
@@ -1827,6 +1860,12 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--build-dir", default=None, help=argparse.SUPPRESS)
 
 
+def default_log_path(head: str, now: Optional[time.struct_time] = None) -> Path:
+    now = now or time.localtime()
+    return (REPO_ROOT / "docs" / "logs" / time.strftime("%Y-%m-%d", now)
+            / f"ceyx-prepush-{head}-{time.strftime('%H%M%S', now)}.log")
+
+
 def main(args) -> int:
     # Child output is UTF-8; a legacy-code-page console or redirect (cp950)
     # cannot encode all of it and would kill the gate mid-run.
@@ -1845,18 +1884,19 @@ def main(args) -> int:
         return list_steps()
     if args.inner:
         return run_inner(args)
-    if args.log:
-        log_path = Path(args.log)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as fh:
-            real = sys.stdout
-            sys.stdout = _Tee(real, fh)
-            try:
-                rc = run_outer(args)
-                emit(f"PREPUSH_EXIT_RC={rc}")
-            finally:
-                sys.stdout = real
-        return rc
-    rc = run_outer(args)
-    emit(f"PREPUSH_EXIT_RC={rc}")
+    # Byte-stable invocation (user decree): the artifact path is chosen here, never on the command line.
+    if not args.log:
+        rc, head = capture(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT)
+        args.log = str(default_log_path(head.strip() if rc == 0 else "unknown"))
+    log_path = Path(args.log)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as fh:
+        real = sys.stdout
+        sys.stdout = _Tee(real, fh)
+        try:
+            emit(f"PREPUSH_LOG={log_path}")
+            rc = run_outer(args)
+            emit(f"PREPUSH_EXIT_RC={rc}")
+        finally:
+            sys.stdout = real
     return rc
