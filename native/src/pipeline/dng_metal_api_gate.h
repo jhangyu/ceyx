@@ -107,9 +107,14 @@ extern void *metal_api_checked_device;
 
 namespace ceyx {
 
+// INTENTIONALLY LEAKED, same reason as pool_lock() in dng_metal_context.cpp:
+// Halide's Metal teardown runs from exit() (halide_metal_device_release ->
+// halide_metal_acquire_context -> metal_api_gate_enter) AFTER function-local
+// statics are destroyed; locking a destroyed std::mutex throws
+// "mutex lock failed: Invalid argument" and aborts every app quit.
 inline std::mutex &metal_api_gate_mutex() {
-    static std::mutex m;
-    return m;
+    static std::mutex *m = new std::mutex();
+    return *m;
 }
 
 // Set once the memo has been observed populated; after that the gate is a single

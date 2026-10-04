@@ -888,8 +888,9 @@ void halide_prewarm_polynomial3_for_size(dng_host &host, int width, int height) 
     }
 
     // Fast path: check cache without the kernel dispatch lock.
-    static std::mutex cache_mu;
-    static std::unordered_set<uint64_t> warmed;
+    // Leaked on purpose: see pool_lock() in dng_metal_context.cpp (teardown-reachable).
+    static std::mutex &cache_mu = *new std::mutex();
+    static auto &warmed = *new std::unordered_set<uint64_t>();
 
     const uint64_t key = (static_cast<uint64_t>(width) << 32) |
                          static_cast<uint64_t>(static_cast<uint32_t>(height));

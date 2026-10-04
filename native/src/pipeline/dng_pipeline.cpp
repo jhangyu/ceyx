@@ -1534,8 +1534,9 @@ DecodeContext *dng_decode_context_for(dng_host &host) {
 // docs/logs/2026-09-03/mutex-rework-spec.md §2 for the audit and
 // docs/logs/2026-09-03/gate-results.md for the evidence.
 static std::shared_mutex &pipelineSingleFlightMutex() {
-  static std::shared_mutex m;
-  return m;
+  // Leaked on purpose: see pool_lock() in dng_metal_context.cpp (teardown-reachable).
+  static std::shared_mutex *m = new std::shared_mutex();
+  return *m;
 }
 
 void dngRaceDelay() {
