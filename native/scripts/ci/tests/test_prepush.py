@@ -364,7 +364,7 @@ class TestLanes(unittest.TestCase):
 
     def test_macos_own_workspace_rows_get_own_lanes_and_tests_follow_arm64(self):
         steps, lanes = self._lanes(prepush.MACOS_ARM64)
-        self.assertEqual(set(lanes), {prepush.MAIN_LANE, "native-tests", "macos-x86_64"})
+        self.assertEqual(set(lanes), {prepush.MAIN_LANE, "guards", "native-tests", "dart", "macos-x86_64"})
         names = {ln: [s.name for _, s in items] for ln, items in lanes.items()}
         self.assertTrue(names["macos-x86_64"])
         self.assertTrue(all(n.startswith("macos[x86_64]:") for n in names["macos-x86_64"]))
@@ -376,10 +376,21 @@ class TestLanes(unittest.TestCase):
         self.assertLess(last_arm64, first_test)
         self.assertEqual(sum(len(v) for v in lanes.values()), len(steps))
 
-    def test_other_hosts_stay_one_serial_lane(self):
+    def test_windows_and_linux_hosts_get_the_same_side_lanes(self):
         for host in (prepush.WINDOWS_X64, prepush.LINUX_X64):
-            _, lanes = self._lanes(host)
-            self.assertEqual(list(lanes), [prepush.MAIN_LANE], host)
+            steps, lanes = self._lanes(host)
+            self.assertEqual(set(lanes), {prepush.MAIN_LANE, "guards", "native-tests", "dart"}, host)
+            names = {ln: [s.name for _, s in items] for ln, items in lanes.items()}
+            for lane in ("guards", "native-tests", "dart"):
+                self.assertTrue(names[lane], (host, lane))
+                self.assertTrue(all(n.startswith(f"{lane}:") for n in names[lane]), (host, lane))
+            main = names[prepush.MAIN_LANE]
+            self.assertFalse([n for n in main if n.startswith(("guards:", "native-tests:", "dart:"))], host)
+            self.assertEqual(sum(len(v) for v in lanes.values()), len(steps), host)
+        steps, lanes = self._lanes(prepush.WINDOWS_X64)
+        main = [s.name for _, s in lanes[prepush.MAIN_LANE]]
+        last_row = max(i for i, n in enumerate(main) if n.startswith("windows[x86_64]:"))
+        self.assertLess(last_row, min(i for i, n in enumerate(main) if n.startswith("test-")))
 
     def test_lanes_overlap_rows_keep_roster_order_and_a_lost_lane_is_red(self):
         side_started = __import__("threading").Event()

@@ -295,14 +295,20 @@ MIRRORED = (
     ("macos_build.yml:build", "macos", {"arm64": MACOS_ARM64, "x86_64": MACOS_ARM64}),
 )
 # Job rows that CI runs on a machine of their own and the gate runs in a
-# checkout of their own (macOS hosts), each CONCURRENTLY with the main lane:
-# (job key, row arch_tag) -> optional seeds carried over from the clone.
+# checkout of their own (every host), each CONCURRENTLY with the main lane:
+# (job key, row arch_tag) -> seeds carried over from the clone (SEEDS: always;
+# OPTIONAL_SEEDS: when the clone holds one). Only the rows whose CI job fetches
+# Halide get it, as on CI.
 # native-tests' default build dir (native/build) collides with the macos arm64
 # row's; the x86_64 row's outputs are disjoint from arm64's, and nothing in the
-# test-* steps reads them, so test-* only waits for the arm64 row (main lane).
+# test-* steps reads them, so test-* only waits for the host's own build row
+# (main lane). guards/dart read the tree only; their own checkout keeps them
+# off the main lane's build tree (Windows/Linux hosts: their whole gain).
 OWN_WORKSPACE = {
-    ("build.yml:verify-native-tests", ""): (),
-    ("macos_build.yml:build", "x86_64"): ("libjxl-x86_64",),
+    ("build.yml:guards-container", ""): (),
+    ("build.yml:verify-native-tests", ""): ("halide",),
+    ("build.yml:verify-dart", ""): (),
+    ("macos_build.yml:build", "x86_64"): ("halide", "libjxl-x86_64"),
 }
 
 ANY, OWN = "any", "own"
@@ -528,7 +534,7 @@ def jobrow(ctx: Ctx, key: str, alias: str, row: dict) -> JobRow:
         return ctx.jobrows[rk]
     job = load_jobs(ctx.clone / WORKFLOWS_DIR)[key]
     workspace = ctx.clone
-    if rk in OWN_WORKSPACE and ctx.host == MACOS_ARM64:
+    if rk in OWN_WORKSPACE:
         workspace = own_workspace(ctx, f"{alias}-{rk[1]}" if rk[1] else alias, OWN_WORKSPACE[rk])
     state = ctx.clone.parent / "prepush-runner" / f"{alias}-{rk[1] or 'job'}"
     (state / "temp").mkdir(parents=True, exist_ok=True)
@@ -548,9 +554,10 @@ def own_workspace(ctx: Ctx, alias: str, seeds: tuple = ()) -> Path:
     ws = ctx.clone.parent / f"ws-{alias}"
     if not ws.exists():
         stream(["git", "-c", "core.autocrlf=false", "clone", "--no-hardlinks", str(ctx.clone), str(ws)], ctx.clone.parent)
-        seed_tree("halide", ctx.clone / SEEDS["halide"], ws / SEEDS["halide"])
         for name in seeds:
-            if (ctx.clone / OPTIONAL_SEEDS[name] / ".pins").is_file():
+            if name in SEEDS:
+                seed_tree(name, ctx.clone / SEEDS[name], ws / SEEDS[name])
+            elif (ctx.clone / OPTIONAL_SEEDS[name] / ".pins").is_file():
                 seed_optional(name, ctx.clone, ws)
     return ws
 
@@ -1641,8 +1648,7 @@ def run_inner(args) -> int:
 
 
 def run_selected(ctx: Ctx, selected: list, host: str) -> list:
-    """Run the selected steps (concurrent lanes on macOS hosts, see
-    step_lanes) and return their result rows in roster order."""
+    """Run the selected steps (concurrent lanes, see step_lanes) and return their result rows in roster order."""
     lanes = step_lanes(selected, host)
     rows: dict = {}  # index in `selected` -> result rows
 
@@ -1671,11 +1677,9 @@ def step_lanes(selected: list, host: str) -> dict:
     """lane -> [(index, step)]. Steps of an OWN_WORKSPACE row run in a lane of
     their own (own checkout = own CI machine); everything else keeps its
     order in the main lane, so test-* follow the arm64 row there."""
-    labels = {}
-    if host == MACOS_ARM64:
-        aliases = {key: alias for key, alias, _ in MIRRORED}
-        for key, rk in OWN_WORKSPACE:
-            labels[f"{aliases[key]}[{rk}]:" if rk else f"{aliases[key]}:"] = f"{aliases[key]}-{rk}" if rk else aliases[key]
+    aliases = {key: alias for key, alias, _ in MIRRORED}
+    labels = {f"{aliases[key]}[{rk}]:" if rk else f"{aliases[key]}:": f"{aliases[key]}-{rk}" if rk else aliases[key]
+              for key, rk in OWN_WORKSPACE}
     lanes: dict = {MAIN_LANE: []}
     for idx, step in enumerate(selected):
         lane = next((ln for prefix, ln in labels.items() if step.name.startswith(prefix)), MAIN_LANE)
