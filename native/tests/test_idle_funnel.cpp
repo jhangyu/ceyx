@@ -225,9 +225,20 @@ int main(int argc, char** argv) {
     const size_t r1 = process_resident_bytes();
     char d[200];
     const bool observable = held >= 32 * kMiB;
+#if defined(_WIN32)
+    // RECORDED EXCEPTION (spec §9.1 round-3 follow-up ruling 2a): the NT heap
+    // returns freed blocks at free() or keeps them in partly used LFH blocks
+    // HeapOptimizeResources cannot release (memreclaim-t1c-win-f9-probe.txt).
+    // The basis is re-proven every run: setup must NOT reach 32 MiB held. If it
+    // ever does, the exception no longer holds -> FAIL and revisit the ruling.
+    std::snprintf(d, sizeof d, "windows exception: allocator self-returns at free() base=%zu r0=%zu r1=%zu",
+                  base, r0, r1);
+    report("F9_allocator_trim_returns_free_pages", !observable, d);
+#else
     std::snprintf(d, sizeof d, "%sbase=%zu r0=%zu r1=%zu",
                   observable ? "" : "pattern not observable ", base, r0, r1);
     report("F9_allocator_trim_returns_free_pages", observable && r0 >= r1 + held / 2, d);
+#endif
     for (void *b : blocks) std::free(b);
   }
   set_skip_cold_handoff(false);  // Layer B (F10/G5) and G4 measure the real step 5
@@ -372,8 +383,16 @@ int main(int argc, char** argv) {
       std::snprintf(d, sizeof d, "fresh_ms=%.2f reaccess_ms=%.2f ratio=%.2f intact=%d", fresh,
                     reaccess, fresh > 0 ? reaccess / fresh : 0.0, (int)intact);
       // A baseline under 1 ms is not a measurement (FAIL, never a free pass).
+      // Ratio limit per spec §9.1 round-3 follow-up ruling 1a: Windows <= 5.0x
+      // (re-reading pages SetProcessWorkingSetSize pushed to the pagefile is the
+      // inherent cost; measured 3.77x); every other platform 2.0x.
+#if defined(_WIN32)
+      constexpr double kMaxRatio = 5.0;
+#else
+      constexpr double kMaxRatio = 2.0;
+#endif
       report("G5_cold_page_reaccess_cost",
-             alloc_ok && intact && fresh >= 1.0 && reaccess <= 2.0 * fresh, d);
+             alloc_ok && intact && fresh >= 1.0 && reaccess <= kMaxRatio * fresh, d);
     }
 #endif
   }
