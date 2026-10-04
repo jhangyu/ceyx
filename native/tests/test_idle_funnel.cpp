@@ -409,12 +409,12 @@ int main(int argc, char** argv) {
       const double fresh = ms_since(t0);
       const bool alloc_ok = f != nullptr && f[kL / 2] == 0xC3;
       if (f != nullptr) os_release_pages(f, kL);
-      std::snprintf(d, sizeof d, "%sfresh_ms=%.2f reaccess_ms=%.2f limit_ms=180 intact=%d g5r0=%zu g5r1=%zu",
+      std::snprintf(d, sizeof d, "%sfresh_ms=%.2f reaccess_ms=%.2f limit_ms=600 intact=%d g5r0=%zu g5r1=%zu",
                     observable ? "" : "not observable (step 5 did not drop resident >= 0.9x256MiB) ", fresh,
                     reaccess, (int)intact, g5r0, g5r1);
-      // User ruling 2026-10-04: absolute criterion, re-access of the 256 MiB buffer
-      // <= 180 ms on every platform where step 5 runs; no ratio. fresh_ms is informational.
-      constexpr double kMaxReaccessMs = 180.0;
+      // User ruling 2026-10-04 (supersedes 180 ms): absolute criterion, re-access of the 256 MiB buffer
+      // <= 600 ms on every platform where step 5 runs; no ratio. fresh_ms is informational.
+      constexpr double kMaxReaccessMs = 600.0;
       report("G5_cold_page_reaccess_cost",
              observable && alloc_ok && intact && reaccess <= kMaxReaccessMs, d);
     }
