@@ -354,3 +354,92 @@ class GateInvocationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLanes(unittest.TestCase):
+    def _lanes(self, host):
+        with redirect_stdout(io.StringIO()):
+            steps = prepush.build_steps(REPO, host)
+        return steps, prepush.step_lanes(steps, host)
+
+    def test_macos_own_workspace_rows_get_own_lanes_and_tests_follow_arm64(self):
+        steps, lanes = self._lanes(prepush.MACOS_ARM64)
+        self.assertEqual(set(lanes), {prepush.MAIN_LANE, "native-tests", "macos-x86_64"})
+        names = {ln: [s.name for _, s in items] for ln, items in lanes.items()}
+        self.assertTrue(names["macos-x86_64"])
+        self.assertTrue(all(n.startswith("macos[x86_64]:") for n in names["macos-x86_64"]))
+        self.assertTrue(all(n.startswith("native-tests:") for n in names["native-tests"]))
+        main = names[prepush.MAIN_LANE]
+        self.assertFalse([n for n in main if n.startswith(("macos[x86_64]:", "native-tests:"))])
+        last_arm64 = max(i for i, n in enumerate(main) if n.startswith("macos[arm64]:"))
+        first_test = min(i for i, n in enumerate(main) if n.startswith("test-"))
+        self.assertLess(last_arm64, first_test)
+        self.assertEqual(sum(len(v) for v in lanes.values()), len(steps))
+
+    def test_other_hosts_stay_one_serial_lane(self):
+        for host in (prepush.WINDOWS_X64, prepush.LINUX_X64):
+            _, lanes = self._lanes(host)
+            self.assertEqual(list(lanes), [prepush.MAIN_LANE], host)
+
+    def test_lanes_overlap_rows_keep_roster_order_and_a_lost_lane_is_red(self):
+        side_started = __import__("threading").Event()
+
+        def main_step(ctx):  # returns only once the side lane is running: proves concurrency
+            return 0 if side_started.wait(timeout=30) else 9
+
+        def side_step(ctx):
+            side_started.set()
+            return 1
+
+        class Broken(prepush.Step):  # raising outside the action's own try kills the lane
+            @property
+            def derivation(self):
+                raise RuntimeError("boom")
+
+            @derivation.setter
+            def derivation(self, _):
+                pass
+
+        steps = [prepush.Step("policy", "d", prepush.ALL_HOSTS, lambda c: 0),
+                 prepush.Step("native-tests:a", "d", prepush.ALL_HOSTS, side_step),
+                 prepush.Step("macos[arm64]:b", "d", prepush.ALL_HOSTS, main_step),
+                 Broken("native-tests:c", "d", prepush.ALL_HOSTS, lambda c: 0),
+                 prepush.Step("test-x", "d", prepush.ALL_HOSTS, lambda c: 0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = prepush.Ctx(clone=Path(tmp) / "ceyx", host=prepush.MACOS_ARM64)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rows = prepush.run_selected(ctx, steps, prepush.MACOS_ARM64)
+        self.assertEqual(rows, [("policy", "PASS", 0), ("native-tests:a", "FAIL", 1), ("macos[arm64]:b", "PASS", 0),
+                                ("native-tests:c", "FAIL", 4), ("test-x", "PASS", 0)])
+        out = buf.getvalue()
+        self.assertIn("PREPUSH_STEP_RC(native-tests:a)=1", out)  # side lane replayed whole
+        self.assertIn("PREPUSH_LANE_LOST(native-tests:c)", out)
+
+
+class TestVcpkgMirror(unittest.TestCase):
+    def test_bootstrap_clone_url_is_rewritten_to_the_run_mirror(self):
+        import subprocess
+        from ci.provision import VCPKG_REPO_URL
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp)
+            calls = []
+
+            def fake_stream(argv, cwd, env=None, tee=None):  # stands in for the one network clone
+                calls.append(argv)
+                return subprocess.run(["git", "init", "-q", "--bare", argv[-1]]).returncode
+
+            orig, prepush.stream = prepush.stream, fake_stream
+            prepush._VCPKG_MIRROR.clear()
+            try:
+                with redirect_stdout(io.StringIO()):
+                    rc1, env = prepush.vcpkg_mirror_env(scratch)
+                    rc2, _ = prepush.vcpkg_mirror_env(scratch)
+            finally:
+                prepush.stream = orig
+                prepush._VCPKG_MIRROR.clear()
+            self.assertEqual((rc1, rc2, len(calls)), (0, 0, 1))
+            self.assertEqual(calls[0][:3], ["git", "clone", "--mirror"])
+            done = subprocess.run(["git", "ls-remote", "--get-url", VCPKG_REPO_URL], capture_output=True, text=True,
+                                  env={**__import__("os").environ, **env})
+            self.assertEqual(done.stdout.strip(), str(scratch / "prepush-vcpkg-mirror.git"))

@@ -133,9 +133,14 @@ class TestResolveDist(unittest.TestCase):
 
 class TestWantPins(unittest.TestCase):
     def test_format(self) -> None:
-        pins = fetch_libjxl.compute_want_pins("deadbeef", "-1234 third_party/highway", arch="arm64")
-        expected = f"tag={win_jxl_dist.JXL_TAG} commit=deadbeef arch=arm64\n-1234 third_party/highway"
+        pins = fetch_libjxl.compute_want_pins("deadbeef", "-1234 third_party/highway", arch="arm64", script="cafe")
+        expected = f"tag={win_jxl_dist.JXL_TAG} commit=deadbeef arch=arm64 script=cafe\n-1234 third_party/highway"
         self.assertEqual(pins, expected)
+
+    def test_script_hash_is_this_files_sha256(self) -> None:
+        import hashlib
+        expected = hashlib.sha256(Path(fetch_libjxl.__file__).read_bytes()).hexdigest()
+        self.assertEqual(fetch_libjxl.script_sha256(), expected)
 
 
 class TestStampFastPath(unittest.TestCase):

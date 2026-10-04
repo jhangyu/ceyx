@@ -78,6 +78,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +111,15 @@ SEEDS = {
 # (`vendored_libraries = 'Libraries/*'`), so the whole directory is seeded.
 MACOS_LIBRARIES = Path("plugin/macos/Libraries")
 HOST_SEEDS = {MACOS_ARM64: {"macos-dylib": MACOS_LIBRARIES}}
+# Built libjxl dists, seeded only when the working tree holds one (its `.pins`
+# stamp exists). The `Fetch vendored libjxl distribution` step still runs and
+# fetch_libjxl.py's stamp (tag, commit, arch, submodules, sha256 of the script
+# = CI's actions/cache key) decides skip vs. source build, exactly like a CI
+# cache hit/miss. Absent = cold source build, as before.
+OPTIONAL_SEEDS = {
+    "libjxl": Path("native/third_party/libjxl-dist"),
+    "libjxl-x86_64": Path("native/third_party/libjxl-dist-x86_64"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -284,10 +294,16 @@ MIRRORED = (
     ("windows_build.yml:build-windows", "windows", {"x86_64": WINDOWS_X64, "arm64": None}),
     ("macos_build.yml:build", "macos", {"arm64": MACOS_ARM64, "x86_64": MACOS_ARM64}),
 )
-# Jobs whose own-host steps need a workspace of their own because CI runs
-# them on a separate machine and their default build dir (native/build)
-# collides with another mirrored job's (macos arm64 row).
-OWN_WORKSPACE = {"build.yml:verify-native-tests"}
+# Job rows that CI runs on a machine of their own and the gate runs in a
+# checkout of their own (macOS hosts), each CONCURRENTLY with the main lane:
+# (job key, row arch_tag) -> optional seeds carried over from the clone.
+# native-tests' default build dir (native/build) collides with the macos arm64
+# row's; the x86_64 row's outputs are disjoint from arm64's, and nothing in the
+# test-* steps reads them, so test-* only waits for the arm64 row (main lane).
+OWN_WORKSPACE = {
+    ("build.yml:verify-native-tests", ""): (),
+    ("macos_build.yml:build", "x86_64"): ("libjxl-x86_64",),
+}
 
 ANY, OWN = "any", "own"
 CI = ("ci-only", OWN)
@@ -512,8 +528,8 @@ def jobrow(ctx: Ctx, key: str, alias: str, row: dict) -> JobRow:
         return ctx.jobrows[rk]
     job = load_jobs(ctx.clone / WORKFLOWS_DIR)[key]
     workspace = ctx.clone
-    if key in OWN_WORKSPACE and ctx.host == MACOS_ARM64:
-        workspace = own_workspace(ctx, alias)
+    if rk in OWN_WORKSPACE and ctx.host == MACOS_ARM64:
+        workspace = own_workspace(ctx, f"{alias}-{rk[1]}" if rk[1] else alias, OWN_WORKSPACE[rk])
     state = ctx.clone.parent / "prepush-runner" / f"{alias}-{rk[1] or 'job'}"
     (state / "temp").mkdir(parents=True, exist_ok=True)
     gh_env, gh_path = state / "github_env", state / "github_path"
@@ -527,13 +543,38 @@ def jobrow(ctx: Ctx, key: str, alias: str, row: dict) -> JobRow:
     return ctx.jobrows[rk]
 
 
-def own_workspace(ctx: Ctx, alias: str) -> Path:
-    """A second checkout for a job CI runs on its own machine (OWN_WORKSPACE)."""
+def own_workspace(ctx: Ctx, alias: str, seeds: tuple = ()) -> Path:
+    """A second checkout for a job row CI runs on its own machine (OWN_WORKSPACE)."""
     ws = ctx.clone.parent / f"ws-{alias}"
     if not ws.exists():
         stream(["git", "-c", "core.autocrlf=false", "clone", "--no-hardlinks", str(ctx.clone), str(ws)], ctx.clone.parent)
         seed_tree("halide", ctx.clone / SEEDS["halide"], ws / SEEDS["halide"])
+        for name in seeds:
+            if (ctx.clone / OPTIONAL_SEEDS[name] / ".pins").is_file():
+                seed_optional(name, ctx.clone, ws)
     return ws
+
+
+# One vcpkg fetch per run (scratch-local, gone with the scratch): every
+# `ci.py vcpkg-bootstrap` still runs `git clone <VCPKG_REPO_URL>`, which git's
+# url.insteadOf rewrites to a mirror cloned from that URL once in this run.
+_VCPKG_MIRROR_LOCK = threading.Lock()
+_VCPKG_MIRROR: dict = {}
+
+
+def vcpkg_mirror_env(scratch: Path) -> tuple:
+    """(rc, env overlay). The first caller clones the mirror; the rest wait and reuse its rc."""
+    from ci.provision import VCPKG_REPO_URL  # noqa: PLC0415
+
+    mirror = scratch / "prepush-vcpkg-mirror.git"
+    with _VCPKG_MIRROR_LOCK:
+        if "rc" not in _VCPKG_MIRROR:
+            _VCPKG_MIRROR["rc"] = stream(["git", "clone", "--mirror", VCPKG_REPO_URL, str(mirror)], scratch)
+            emit(f"PREPUSH_VCPKG_MIRROR rc={_VCPKG_MIRROR['rc']} path={mirror}")
+        else:
+            emit(f"PREPUSH_VCPKG_MIRROR reused rc={_VCPKG_MIRROR['rc']} path={mirror}")
+    return _VCPKG_MIRROR["rc"], {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.{mirror}.insteadOf",
+                                 "GIT_CONFIG_VALUE_0": VCPKG_REPO_URL}
 
 
 def _absorb_github_files(jr: JobRow) -> None:
@@ -571,6 +612,12 @@ def run_derived(jr: JobRow, step: wf.WfStep) -> int:
         if not cwd.is_absolute():
             cwd = jr.workspace / cwd
     rc = 0
+    if any("vcpkg-bootstrap" in cmd.argv for cmd in cmds):
+        rc, overlay = vcpkg_mirror_env(jr.workspace.parent)
+        if rc != 0:
+            emit("::error::cloning the vcpkg repository failed")
+            return rc
+        env.update(overlay)
     for cmd in cmds:
         argv = [_resolve_exe(cmd.argv[0], env), *cmd.argv[1:]]
         tee = None
@@ -1587,53 +1634,157 @@ def run_inner(args) -> int:
         else:
             ctx.env = env
 
-    for step in selected:
-        emit("")
-        emit(f"==== PREPUSH STEP {step.name} [{step.group}] ====")
-        emit(f"PREPUSH_STEP_DERIVATION({step.name}): {step.derivation}")
-        if step.status in (CIONLY, COVERED):
-            emit(f"PREPUSH_{step.status}({step.name})")
-            results.append((step.name, step.status, None))
-            continue
-        if host not in step.hosts:
-            emit(f"PREPUSH_SKIP({step.name}): host={host} -- {step.skip_reason}")
-            results.append((step.name, SKIP, None))
-            continue
-        if step.action is None:
-            emit(f"::error::PREPUSH_UNIMPLEMENTED({step.name}): this is host {host}'s own leg and the gate has no "
-                 "implementation for it")
-            emit(f"PREPUSH_STEP_RC({step.name})=3")
-            results.append((step.name, "FAIL", 3))
-            continue
-        emit(f"PREPUSH_STEP_BEGIN({step.name})")
-        started = time.monotonic()
-        try:
-            outcome = step.action(ctx)
-        except Exception as exc:  # a crash in the gate is a red step, never a pass
-            emit(f"::error::step {step.name} raised {type(exc).__name__}: {exc}")
-            outcome = 4
-        elapsed = time.monotonic() - started
-        if isinstance(outcome, tuple) and outcome[0] == SKIP:
-            emit(f"PREPUSH_SKIP({step.name}): host={host} -- {outcome[1]}")
-            results.append((step.name, SKIP, None))
-            continue
-        if isinstance(outcome, tuple) and outcome[0] in ROW_PREFIX:
-            emit(f"PREPUSH_STEP_{outcome[0]}({step.name}): {outcome[1]}")
-            results.append((f"{ROW_PREFIX[outcome[0]]}:{outcome[1]}", outcome[0], None))
-        else:
-            rc = int(outcome)
-            emit(f"PREPUSH_STEP_RC({step.name})={rc}")
-            emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
-            results.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
-        # Items a step quarantined internally (targets, plugin files, flaky
-        # tests) each get their own counted row.
-        for item, _, _, status in ctx.host_skips:
-            row = (f"{ROW_PREFIX[status]}:{item}", status, None)
-            if row not in results:
-                results.append(row)
+    results += run_selected(ctx, selected, host)
 
     emit_inventory(ctx)
     return summarize(results, host, args.head or "unknown", partial, len(ctx.inner_skips))
+
+
+def run_selected(ctx: Ctx, selected: list, host: str) -> list:
+    """Run the selected steps (concurrent lanes on macOS hosts, see
+    step_lanes) and return their result rows in roster order."""
+    lanes = step_lanes(selected, host)
+    rows: dict = {}  # index in `selected` -> result rows
+
+    def run_lane(lane: str, items: list) -> None:
+        seen: list = []  # this lane's rows so far: a quarantined item is counted once
+        for idx, step in items:
+            rows[idx] = run_step(ctx, step, host, collect_skips=lane == MAIN_LANE, seen=seen)
+            seen += rows[idx]
+
+    if len(lanes) == 1:
+        run_lane(MAIN_LANE, lanes[MAIN_LANE])
+    else:
+        run_lanes(ctx, lanes, run_lane)
+    for idx, step in enumerate(selected):
+        if idx not in rows:  # a lane died outside a step's own try: red, never silently absent
+            emit(f"::error::PREPUSH_LANE_LOST({step.name}): its lane ended without running it")
+            emit(f"PREPUSH_STEP_RC({step.name})=4")
+            rows[idx] = [(step.name, "FAIL", 4)]
+    return [row for idx in range(len(selected)) for row in rows[idx]]
+
+
+MAIN_LANE = "main"
+
+
+def step_lanes(selected: list, host: str) -> dict:
+    """lane -> [(index, step)]. Steps of an OWN_WORKSPACE row run in a lane of
+    their own (own checkout = own CI machine); everything else keeps its
+    order in the main lane, so test-* follow the arm64 row there."""
+    labels = {}
+    if host == MACOS_ARM64:
+        aliases = {key: alias for key, alias, _ in MIRRORED}
+        for key, rk in OWN_WORKSPACE:
+            labels[f"{aliases[key]}[{rk}]:" if rk else f"{aliases[key]}:"] = f"{aliases[key]}-{rk}" if rk else aliases[key]
+    lanes: dict = {MAIN_LANE: []}
+    for idx, step in enumerate(selected):
+        lane = next((ln for prefix, ln in labels.items() if step.name.startswith(prefix)), MAIN_LANE)
+        lanes.setdefault(lane, []).append((idx, step))
+    return lanes
+
+
+class _LaneOut:
+    """sys.stdout while lanes run: each thread writes to its own sink (the
+    main lane to the real stdout, live; side lanes to a file replayed whole
+    afterwards), so no step's lines interleave with another's."""
+
+    def __init__(self, real):
+        self.real = real
+        self.local = threading.local()
+
+    def _sink(self):
+        return getattr(self.local, "sink", None) or self.real
+
+    def write(self, data):
+        return self._sink().write(data)
+
+    def flush(self):
+        self._sink().flush()
+
+
+def run_lanes(ctx: Ctx, lanes: dict, run_lane: Callable) -> None:
+    out_dir = ctx.clone.parent / "prepush-lanes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    router = _LaneOut(sys.stdout)
+    side = [ln for ln in lanes if ln != MAIN_LANE]
+    emit(f"PREPUSH_LANES main={len(lanes[MAIN_LANE])} " + " ".join(f"{ln}={len(lanes[ln])}" for ln in side)
+         + f" (side-lane output replayed after the main lane; live copies in {out_dir})")
+
+    def side_lane(lane: str) -> None:
+        with (out_dir / f"{lane}.log").open("w", encoding="utf-8") as fh:
+            router.local.sink = fh
+            try:
+                run_lane(lane, lanes[lane])
+            except BaseException as exc:  # noqa: BLE001 - reported; missing rows turn red
+                emit(f"::error::lane {lane} raised {type(exc).__name__}: {exc}")
+
+    sys.stdout = router
+    try:
+        threads = [threading.Thread(target=side_lane, args=(ln,), name=f"lane-{ln}") for ln in side]
+        for t in threads:
+            t.start()
+        try:
+            run_lane(MAIN_LANE, lanes[MAIN_LANE])
+        finally:
+            for t in threads:
+                t.join()
+    finally:
+        sys.stdout = router.real
+    for lane in side:
+        emit("")
+        emit(f"==== PREPUSH LANE {lane} (replay) ====")
+        sys.stdout.write((out_dir / f"{lane}.log").read_text(encoding="utf-8"))
+        emit(f"==== END LANE {lane} ====")
+
+
+def run_step(ctx: Ctx, step, host: str, collect_skips: bool, seen: list) -> list:
+    out: list = []
+    emit("")
+    emit(f"==== PREPUSH STEP {step.name} [{step.group}] ====")
+    emit(f"PREPUSH_STEP_DERIVATION({step.name}): {step.derivation}")
+    if step.status in (CIONLY, COVERED):
+        emit(f"PREPUSH_{step.status}({step.name})")
+        out.append((step.name, step.status, None))
+        return out
+    if host not in step.hosts:
+        emit(f"PREPUSH_SKIP({step.name}): host={host} -- {step.skip_reason}")
+        out.append((step.name, SKIP, None))
+        return out
+    if step.action is None:
+        emit(f"::error::PREPUSH_UNIMPLEMENTED({step.name}): this is host {host}'s own leg and the gate has no "
+             "implementation for it")
+        emit(f"PREPUSH_STEP_RC({step.name})=3")
+        out.append((step.name, "FAIL", 3))
+        return out
+    emit(f"PREPUSH_STEP_BEGIN({step.name})")
+    started = time.monotonic()
+    try:
+        outcome = step.action(ctx)
+    except Exception as exc:  # a crash in the gate is a red step, never a pass
+        emit(f"::error::step {step.name} raised {type(exc).__name__}: {exc}")
+        outcome = 4
+    elapsed = time.monotonic() - started
+    if isinstance(outcome, tuple) and outcome[0] == SKIP:
+        emit(f"PREPUSH_SKIP({step.name}): host={host} -- {outcome[1]}")
+        out.append((step.name, SKIP, None))
+        return out
+    if isinstance(outcome, tuple) and outcome[0] in ROW_PREFIX:
+        emit(f"PREPUSH_STEP_{outcome[0]}({step.name}): {outcome[1]}")
+        out.append((f"{ROW_PREFIX[outcome[0]]}:{outcome[1]}", outcome[0], None))
+    else:
+        rc = int(outcome)
+        emit(f"PREPUSH_STEP_RC({step.name})={rc}")
+        emit(f"PREPUSH_STEP_SECONDS({step.name})={elapsed:.1f}")
+        out.append((step.name, "PASS" if rc == 0 else "FAIL", rc))
+    # Items a step quarantined internally (targets, plugin files, flaky
+    # tests) each get their own counted row (main lane only: the only lane
+    # whose steps quarantine; the others must not read a list it appends to).
+    if collect_skips:
+        for item, _, _, status in ctx.host_skips:
+            row = (f"{ROW_PREFIX[status]}:{item}", status, None)
+            if row not in seen and row not in out:
+                out.append(row)
+    return out
 
 
 def emit_inventory(ctx: Ctx) -> None:
@@ -1710,6 +1861,18 @@ def seed_tree(name: str, src: Path, dst: Path) -> int:
     for k in mismatched[:20]:
         emit(f"::error::seed {name}: {k} differs after copy")
     return 1 if mismatched or files == 0 else 0
+
+
+def seed_optional(name: str, src_root: Path, clone_root: Path) -> int:
+    """seed_tree for an OPTIONAL_SEEDS dist, then the dist dir's TRACKED files
+    (PROVENANCE.md) are put back to the clone's HEAD: the seed supplies only
+    gitignored build output, never an uncommitted edit."""
+    rel = OPTIONAL_SEEDS[name]
+    rc = seed_tree(name, src_root / rel, clone_root / rel)
+    _, tracked = capture(["git", "ls-files", "--", rel.as_posix()], cwd=clone_root)
+    if rc == 0 and tracked.strip():
+        rc = stream(["git", "checkout", "HEAD", "--", rel.as_posix()], cwd=clone_root)
+    return rc
 
 
 # Samples the test layer reads by default path, on top of the sha256-locked
@@ -1794,6 +1957,14 @@ def run_outer(args) -> int:
             rc = halide_version_ok(clone / rel)
         if name == "samples":
             rc = samples_ok(clone) or rc
+        emit(f"PREPUSH_STEP_RC(bootstrap-seed-{name})={rc}")
+        results.append((f"bootstrap-seed-{name}", "PASS" if rc == 0 else "FAIL", rc))
+    for name, rel in OPTIONAL_SEEDS.items():
+        if not (REPO_ROOT / rel / ".pins").is_file():
+            emit(f"PREPUSH_SEED_STATUS({name}): no built dist (.pins) at {rel} in the working tree -- not seeded; "
+                 "its fetch step builds it from source")
+            continue
+        rc = seed_optional(name, REPO_ROOT, clone)
         emit(f"PREPUSH_STEP_RC(bootstrap-seed-{name})={rc}")
         results.append((f"bootstrap-seed-{name}", "PASS" if rc == 0 else "FAIL", rc))
     if host == MACOS_ARM64:

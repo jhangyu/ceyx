@@ -26,6 +26,7 @@ precisely BECAUSE the symbol was found (2026-08-28).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import platform as platform_module
 import shutil
@@ -136,14 +137,21 @@ def git_submodule_status(src: Path) -> str:
     return run(argv).stdout.strip()
 
 
-def compute_want_pins(commit: str, submodule_status: str, *, arch: str) -> str:
-    """Byte-compatible with fetch_libjxl_dist.sh's ``.pins`` stamp shape
-    (``WANT_PINS="tag=... commit=... arch=...\\n${SUBMODULE_STATUS}"``)."""
-    return f"tag={JXL_TAG} commit={commit} arch={arch}\n{submodule_status}"
+def compute_want_pins(commit: str, submodule_status: str, *, arch: str, script: str) -> str:
+    """The ``.pins`` stamp: ``tag=... commit=... arch=... script=...`` then
+    the submodule status. ``script`` is the sha256 of this file -- CI's
+    libjxl cache key is ``hashFiles('native/scripts/deps/fetch_libjxl.py')``
+    (macos_build.yml / linux_build.yml), so a seeded or cached dist built by
+    a different version of this script (other cmake flags) must rebuild."""
+    return f"tag={JXL_TAG} commit={commit} arch={arch} script={script}\n{submodule_status}"
+
+
+def script_sha256() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def want_pins(src: Path, *, arch: str) -> str:
-    return compute_want_pins(git_rev_parse_head(src), git_submodule_status(src), arch=arch)
+    return compute_want_pins(git_rev_parse_head(src), git_submodule_status(src), arch=arch, script=script_sha256())
 
 
 def stamp_is_current(dist: Path, want: str) -> bool:
@@ -246,6 +254,10 @@ def build(dist: Optional[Path] = None, *, arch: Optional[str] = None, force: boo
     _log(f"pinned commit for tag {JXL_TAG}")
     _log(want)
 
+    # A stale dist (other pins / other script) is rebuilt from empty, never
+    # installed over: leftovers of the old build must not survive into it.
+    for sub in ("include", "lib", "share"):
+        shutil.rmtree(dist / sub, ignore_errors=True)
     configure_build_install(src, dist, stage / "build", arch=arch, host_os=host_os)
 
     assert_static_libs(dist)

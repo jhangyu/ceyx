@@ -63,6 +63,8 @@ from pathlib import Path
 
 from . import report, run
 
+VCPKG_REPO_URL = "https://github.com/microsoft/vcpkg.git"
+
 
 def vcpkg_baseline(vcpkg_json_path: str, github_env_path: str) -> int:
     """Replaces linux_build.yml:124-127 (identical shape wherever it
@@ -89,7 +91,7 @@ def vcpkg_bootstrap(baseline: str, runner_temp: str) -> int:
     IDENTICAL shell body on both platforms (clone, checkout the pinned
     baseline, bootstrap, print version), no per-platform branch needed."""
     vcpkg_dir = str(Path(runner_temp) / "vcpkg")
-    result = run.run(["git", "clone", "https://github.com/microsoft/vcpkg.git", vcpkg_dir])
+    result = run.run(["git", "clone", VCPKG_REPO_URL, vcpkg_dir])
     if result.stdout:
         report.plain(result.stdout.rstrip("\n"))
     if result.returncode != 0:
