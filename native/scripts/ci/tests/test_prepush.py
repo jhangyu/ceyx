@@ -313,5 +313,22 @@ class TestBareBinaryRunner(unittest.TestCase):
             self.assertIn(host, steps["test-bare-binaries"].hosts)
 
 
+class BuildTestsGeneratorTests(unittest.TestCase):
+    """t_build_tests enumeration/keep-going are generator properties (Ninja = Windows argv, Makefiles = macOS)."""
+
+    def test_help_targets_both_generators_and_ninja_argv_locked(self):
+        self.assertIn("test_decode", prepush._help_targets("test_decode: phony\nall: phony\n"))
+        self.assertIn("test_decode", prepush._help_targets(
+            "The following are some of the valid targets for this Makefile:\n"
+            "... all (the default if no target is provided)\n... test_decode\n"))
+        self.assertEqual(prepush._KEEP_GOING["Ninja"], ["-k", "0"])
+
+    def test_generator_unknown_when_cache_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(prepush._generator(Path(tmp)), "")
+            (Path(tmp) / "CMakeCache.txt").write_text("CMAKE_GENERATOR:INTERNAL=Ninja\n", encoding="utf-8")
+            self.assertEqual(prepush._generator(Path(tmp)), "Ninja")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,16 @@ cmake_minimum_required(VERSION 3.14)
 if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
+# macOS deployment floor of the decoder itself, pinned so every build (CI runner, prepush clone, dev host) stamps the
+# same LC_BUILD_VERSION minos instead of inheriting the host OS. 11.0 = user ruling 2026-10-04: aligned with the
+# dependency chain (all vcpkg triplets pin 11.0) and the Halcyon app's declared macOS 11 minimum. The SHIPPED floor is the
+# group max in native/deps/min_runtime_expected.toml (arm64 15.0 / x86_64 14.0 via vendored libomp), so the decoder at
+# 11.0 is not a floor contributor. Must precede project(). `if(NOT ...)` + FORCE overrides an EMPTY cached value left by
+# an older configure (CI restores native/build via cache restore-keys) but keeps an explicit -D value.
+# Ignored on non-Apple targets (CMake: CMAKE_OSX_* apply only to Apple SDKs).
+if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version for the decoder" FORCE)
+endif()
 project(dng_decoder_native VERSION 1.0.0 LANGUAGES CXX C)
 
 # Perf fix (2026-07-04): default to Release when the caller (script or IDE)

@@ -107,8 +107,10 @@ SEEDS = {
 # The plugin's dylib-fixture suites load the SHIPPED macOS dylib
 # (plugin/test/support/native_fixtures.dart shippedDylibPath), which `*.dylib`
 # in .gitignore keeps out of every clone. IMPLEMENTED-UNVERIFIED-ON-MAC.
-MACOS_DYLIB = Path("plugin/macos/Libraries/libdng_decoder_native.dylib")
-HOST_SEEDS = {MACOS_ARM64: {"macos-dylib": MACOS_DYLIB}}
+# It also loads the @rpath companions (@loader_path), i.e. the whole vendored directory the podspec ships
+# (`vendored_libraries = 'Libraries/*'`), so the whole directory is seeded.
+MACOS_LIBRARIES = Path("plugin/macos/Libraries")
+HOST_SEEDS = {MACOS_ARM64: {"macos-dylib": MACOS_LIBRARIES}}
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +984,7 @@ FLAKY_TESTS = {
 # Recorded as campaign input; printed on every host, never counted.
 DEFECT_INVENTORY = (
     ("gitignored-test-fixture",
-     "plugin tests depend on plugin/macos/Libraries/libdng_decoder_native.dylib, which .gitignore:36 (*.dylib) keeps "
+     "plugin tests depend on plugin/macos/Libraries/ (decoder + @rpath companions), which .gitignore:36 (*.dylib) keeps "
      "out of every fresh clone; the gate seeds it on macOS hosts only. Suites that SKIP (rather than fail) without a "
      "loadable dylib -- native_buffer_pool_alignment_test, native_rotation_bindings_test, service_pooled_arms_test, "
      "service_resize_retry_test, wp10_activation_proof_test -- lose coverage silently; each skipped test is listed per "
@@ -1063,26 +1065,47 @@ def _exe(name: str) -> str:
     return name + (".exe" if os.name == "nt" else "")
 
 
+# `cmake --build --target help` output and keep-going flags are GENERATOR properties, not host properties.
+_KEEP_GOING = {"Ninja": ["-k", "0"], "Unix Makefiles": ["-k", f"-j{os.cpu_count() or 1}"]}
+
+
+def _generator(build_dir: Path) -> str:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.is_file():
+        return ""
+    m = re.search(r"^CMAKE_GENERATOR:INTERNAL=(.*)$", cache.read_text(encoding="utf-8"), re.M)
+    return m.group(1).strip() if m else ""
+
+
+def _help_targets(out: str) -> set:
+    """Target names from `cmake --build --target help`: Ninja `name: phony`, Makefiles `... name`."""
+    return set(re.findall(r"^(?:\.\.\. )?([A-Za-z0-9_]+)(?=:| |$)", out, re.MULTILINE))
+
+
 def t_build_tests(ctx: Ctx):
     if ctx.host == LINUX_X64:
         emit("::error::PREPUSH_UNIMPLEMENTED(test-build-targets): no native build leg is implemented for a Linux host")
         return 3
     runners, _ = gate_runners(ctx.clone)
     build_dir = build_dir_for(ctx.host)
+    gen = _generator(ctx.clone / build_dir)
+    if gen not in _KEEP_GOING:
+        emit(f"::error::unsupported CMake generator {gen!r} in {build_dir}")
+        return 1
     rc, out = capture(["cmake", "--build", build_dir, "--target", "help"], ctx.clone, env=ctx.base_env())
-    available = set(re.findall(r"^([A-Za-z0-9_]+): ", out, re.MULTILINE))
+    available = _help_targets(out)
     wanted = sorted({exe for exes in runners.values() for exe in exes})
     unsupported = {t for t in wanted if f"target:{t}" in host_unsupported(ctx.host)}
     targets = [t for t in wanted if t in available and t not in unsupported]
     absent = [t for t in wanted if t not in available]
     for t in absent:
-        emit(f"PREPUSH_TEST_TARGET_NOT_CONFIGURED({t}): this host's configure defines no such target (android cross-build target)")
+        emit(f"PREPUSH_TEST_TARGET_NOT_CONFIGURED({t}): this build dir's configure (generator {gen}) defines no such target")
     emit(f"PREPUSH_TEST_TARGETS wanted={len(wanted)} building={len(targets)} host_unsupported={len(unsupported)} "
          f"not_configured={len(absent)}")
     if rc != 0 or not targets:
         emit(f"::error::cannot enumerate test targets in {build_dir} (rc={rc})")
         return rc or 1
-    rc = ctx.run(["cmake", "--build", build_dir, "--target", *targets, "--", "-k", "0"])
+    rc = ctx.run(["cmake", "--build", build_dir, "--target", *targets, "--", *_KEEP_GOING[gen]])
     bad = 0
     for t in sorted(unsupported):
         probe_rc, probe_out = capture(["cmake", "--build", build_dir, "--target", t], ctx.clone, env=ctx.base_env())
@@ -1636,7 +1659,7 @@ def tree_manifest(root: Path) -> dict:
 _SEED_HINTS = {
     "halide": "python3 native/scripts/build_deps.py fetch halide",
     "samples": "owner-supplied fixtures",
-    "macos-dylib": "build or stage the shipped macOS dylib in the working tree",
+    "macos-dylib": "build or stage the shipped macOS dylib and its companions in plugin/macos/Libraries",
 }
 
 
