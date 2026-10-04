@@ -516,6 +516,18 @@ target_include_directories(test_idle_funnel PRIVATE
 target_link_libraries(test_idle_funnel PRIVATE dng_decoder_native)
 add_dependencies(test_idle_funnel dng_decoder_native)
 
+# Halide error handler (2026-10-04): an impossible GPU allocation returns an
+# error instead of aborting the process, and the next decode still works.
+# Takes one decodable RAW/DNG as argv[1]; every leg.
+add_executable(test_gpu_alloc_failure_is_recoverable tests/test_gpu_alloc_failure_is_recoverable.cpp)
+target_include_directories(test_gpu_alloc_failure_is_recoverable PRIVATE
+    ${INC_DIR}
+    ${SRC_DIR}/ffi
+    ${SRC_DIR}/pipeline
+    ${HALIDE_DIR}/include)
+target_link_libraries(test_gpu_alloc_failure_is_recoverable PRIVATE dng_decoder_native)
+add_dependencies(test_gpu_alloc_failure_is_recoverable dng_decoder_native)
+
 # Memory-reclamation campaign M5: VirtualRegion contract V1-V5, every leg.
 add_executable(test_virtual_region tests/test_virtual_region.cpp)
 target_include_directories(test_virtual_region PRIVATE ${SRC_DIR}/pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests)

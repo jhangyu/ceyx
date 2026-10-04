@@ -56,6 +56,7 @@ GATES: dict[str, str] = {
     "test_dng_slot_decommit": "runner:native/scripts/prepush.py",
     "test_idle_funnel": "runner:native/scripts/prepush.py",
     "test_virtual_region": "runner:native/scripts/prepush.py",
+    "test_gpu_alloc_failure_is_recoverable": "manual:test_gpu_alloc_failure_is_recoverable <raw_file>  (Halide error handler; see header)",
     "test_dng_slot_decommit_real": "manual:test_dng_slot_decommit_real <dng_file>",
     "test_zero_copy_capability_paths": "manual:test_zero_copy_capability_paths [<raw_file>...]",
     "test_concurrent_raw_decode": "manual:test_concurrent_raw_decode  (multi-lane RAW concurrency; see header Usage)",

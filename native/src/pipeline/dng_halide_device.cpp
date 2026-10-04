@@ -1,5 +1,8 @@
 #include "dng_halide_device.h"
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
 
 // W5 (2026-08-21, Windows port): Vulkan is the GPU backend on Android, Windows
 // and Linux (see CMakeLists.txt AOT_TARGET), so every "Vulkan backend" guard in
@@ -46,9 +49,40 @@ GpuBackend cached_backend() {
     return b;
 }
 
+// Halide error handler (user-approved 2026-10-04; design:
+// Halcyon docs/logs/2026-10-04/halide-error-handler-recommendation.md).
+// Evidence, Halide v21.0.0 official source:
+//  - src/runtime/posix_error_handler.cpp: `WEAK halide_default_error(...)`
+//    prints "Error: <msg>" and then calls `abort()`; the file also sets
+//    `WEAK halide_error_handler_t error_handler = halide_default_error;`.
+//    So with no handler installed, any GPU allocation failure kills the app.
+//  - src/InjectHostDevBufferCopies.cpp:520-522 registers
+//    `halide_device_free_as_destructor` for each device allocation;
+//    src/CodeGen_LLVM.cpp:3688-3698 (create_assertion) branches a failed
+//    stage to the destructor block, so device buffers allocated earlier in
+//    the same pipeline run are freed when a later stage fails.
+// One global handler for every platform and backend: it neither aborts nor
+// throws. The runtime then returns its non-zero code to the existing ceyx
+// error path (per-photo decode failure). Program-bug errors (bounds checks)
+// degrade the same way; the stderr line keeps them visible.
+thread_local char g_last_halide_error[512];
+
+void dng_halide_error_handler(void* /*user_context*/, const char* msg) {
+    if (msg == nullptr) msg = "(null)";
+    std::snprintf(g_last_halide_error, sizeof(g_last_halide_error), "%s", msg);
+    std::fprintf(stderr, "[HalideError] %s%s", msg,
+                 (*msg != '\0' && msg[std::strlen(msg) - 1] == '\n') ? "" : "\n");
+}
+
+void install_halide_error_handler() {
+    static std::once_flag once;
+    std::call_once(once, [] { halide_set_error_handler(dng_halide_error_handler); });
+}
+
 } // namespace
 
 const halide_device_interface_t* dng_halide_gpu_device_interface() {
+    install_halide_error_handler();
     switch (cached_backend()) {
 #if defined(__APPLE__) && !defined(DNG_FORCE_VULKAN)
     case GpuBackend::kMetal:
