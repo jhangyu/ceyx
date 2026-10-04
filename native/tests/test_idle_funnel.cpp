@@ -87,7 +87,7 @@ void os_release_pages(void *p, size_t bytes) {
 // Spec §9.1 Windows gate collision (option 1, layer isolation): the Layer-A
 // cases F7c/F7/F9 run the funnel with step 5 skipped through the debug-only
 // CEYX_DEBUG_SKIP_COLD_HANDOFF toggle (read by the library from the OS
-// environment block). Set only around those cases; F10/G4/G5 run the real step 5.
+// environment block). Set only around those cases and G4; F10/G5 run the real step 5.
 void set_skip_cold_handoff(bool on) {
 #if defined(_WIN32)
   SetEnvironmentVariableA("CEYX_DEBUG_SKIP_COLD_HANDOFF", on ? "1" : nullptr);
@@ -241,7 +241,7 @@ int main(int argc, char** argv) {
 #endif
     for (void *b : blocks) std::free(b);
   }
-  set_skip_cold_handoff(false);  // Layer B (F10/G5) and G4 measure the real step 5
+  set_skip_cold_handoff(false);  // Layer B (F10/G5) measures the real step 5
 
   // F10 (spec §5, Layer B): step 5 hands cold LIVE pages (not given to the
   // funnel) to the OS with content preserved. Win/Linux/Android: bytes must drop
@@ -320,17 +320,19 @@ int main(int argc, char** argv) {
     }
 
     // G4: wall time of one synchronous funnel call (2 slots listed, 512 MiB
-    // live set), full production funnel incl. step 5. Threshold per spec §9.1
-    // (Windows gate collision, option 1 (b)): p95 <= 8 ms (one 120 Hz frame)
-    // where step 5 is `unavailable` (macOS), <= 100 ms where step 5 makes its
-    // OS call (Windows/Linux/Android). Chosen from the step-5 counters this
-    // very loop moved, not from a platform macro.
+    // live set) EXCLUDING step 5, p95 under the per-platform limit below, on every
+    // platform. Spec §9.1 (Windows gate collision, option 1 (b)) allows "G4
+    // measures the funnel excluding step 5": SetProcessWorkingSetSize's own
+    // duration swings 60-115 ms run to run on Windows, so a step-5-inclusive
+    // limit is flaky by construction. Step 5's real cost stays gated by F10/G5.
+    // The loop also asserts the toggle held: no step-5 counter may move.
     {
       constexpr int kN = 20;
       std::vector<unsigned char> live(512 * kMiB, 0x6C);
       void *slots[2] = {ceyx_pool_aligned_alloc(kSlot), ceyx_pool_aligned_alloc(kSlot)};
       uint64_t sizes[2] = {kSlot, kSlot};
       std::vector<double> t;
+      set_skip_cold_handoff(true);
       const FunnelCounters g0 = read_counters();
       if (slots[0] != nullptr && slots[1] != nullptr) {
         for (int i = 0; i < kN; ++i) {
@@ -342,16 +344,26 @@ int main(int argc, char** argv) {
         }
       }
       const FunnelCounters g1 = read_counters();
+      set_skip_cold_handoff(false);
       ceyx_pool_aligned_free(slots[0]);
       ceyx_pool_aligned_free(slots[1]);
       std::sort(t.begin(), t.end());
       const bool ran = t.size() == kN;
       const double p95 = ran ? t[(kN * 95 + 99) / 100 - 1] : 0;
-      const bool step5_called = (g1.cold_ran - g0.cold_ran) + (g1.cold_refused - g0.cold_refused) > 0;
-      const double limit_ms = step5_called ? 100.0 : 8.0;
-      std::snprintf(d, sizeof d, "p95_ms=%.3f max_ms=%.3f limit_ms=%.0f live_byte=%d", p95,
-                    ran ? t.back() : 0.0, limit_ms, (int)live[live.size() / 2]);
-      report("G4_reclaim_call_duration", ran && p95 <= limit_ms, d);
+      const bool step5_skipped = g1.cold_ran == g0.cold_ran &&
+                                 g1.cold_unavailable == g0.cold_unavailable &&
+                                 g1.cold_refused == g0.cold_refused;
+      // Limit per spec §9.1 "Round-3 final G4 ruling": 60 ms on Windows (real
+      // DiscardVirtualMemory + HeapOptimizeResources cost, p95 48.68 measured),
+      // 8 ms elsewhere.
+#if defined(_WIN32)
+      constexpr double kLimitMs = 60.0;
+#else
+      constexpr double kLimitMs = 8.0;
+#endif
+      std::snprintf(d, sizeof d, "p95_ms=%.3f max_ms=%.3f limit_ms=%.0f step5_skipped=%d live_byte=%d",
+                    p95, ran ? t.back() : 0.0, kLimitMs, (int)step5_skipped, (int)live[live.size() / 2]);
+      report("G4_reclaim_call_duration", ran && step5_skipped && p95 <= kLimitMs, d);
     }
 
 #if !defined(__APPLE__)
