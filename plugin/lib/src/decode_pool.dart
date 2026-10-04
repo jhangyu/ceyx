@@ -671,6 +671,14 @@ class CeyxDecodePool {
     _shrinkPolicyPool = null;
   }
 
+  /// Host hint that a large release just happened (memreclaim spec §4.4):
+  /// runs the idle funnel after >= 1 s of decode quiescence (any decode cancels
+  /// it, grow lockout kept). No-op for a buffer pool built not to shrink.
+  void requestReclaim() {
+    _ensureShrinkPolicy();
+    _shrinkPolicy?.requestReclaim();
+  }
+
   void _attachQuiescenceWatch() {
     _lastPublishedQuiescence = isQuiescent;
     final buffers = nativeBufferPool;

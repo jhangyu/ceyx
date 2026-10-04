@@ -194,8 +194,18 @@ typedef CeyxPoolAlignedFreeDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
 // the return value is the BYTE COUNT released (0 means "nothing to release",
 // which is SUCCESS, not an error -- see native/include/raw_ffi_api.h).
 // ADDITIVE and its OWN guarded lookup, same reasoning as the pair above.
-typedef CeyxNativeIdleShrinkNative = ffi.Int64 Function(ffi.Int32 floor);
-typedef CeyxNativeIdleShrinkDart = int Function(int floor);
+typedef CeyxNativeIdleShrinkNative = ffi.Int64 Function(
+  ffi.Int32 floor,
+  ffi.Pointer<ffi.Pointer<ffi.Void>> idleSlots,
+  ffi.Pointer<ffi.Uint64> idleSlotBytes,
+  ffi.Int32 idleSlotCount,
+);
+typedef CeyxNativeIdleShrinkDart = int Function(
+  int floor,
+  ffi.Pointer<ffi.Pointer<ffi.Void>> idleSlots,
+  ffi.Pointer<ffi.Uint64> idleSlotBytes,
+  int idleSlotCount,
+);
 
 /// `void ceyx_native_release_gpu(void)` (IC9): TERMINAL release of the native
 /// GPU context at process exit. Called once, at decode quiescence, as the last

@@ -36,6 +36,7 @@ export 'src/native_buffer_pool.dart'
         CeyxNativeBuffer,
         CeyxPoolShrinkPolicy,
         kPoolShrinkQuietWindow,
+        kReclaimRequestQuietWindow,
         kPoolShrinkGrowLockout;
 
 export 'src/decode_pool.dart'

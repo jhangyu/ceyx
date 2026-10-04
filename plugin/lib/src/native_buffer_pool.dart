@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
 
-import 'package:ffi/ffi.dart' show malloc;
+import 'package:ffi/ffi.dart' show calloc, malloc;
 import 'package:meta/meta.dart';
 
 import 'dng_bindings.dart';
@@ -101,7 +101,8 @@ class CeyxNativeBufferPool {
   /// null, the binding is consulted; when the binding is also absent the
   /// shrink is simply skipped and counted — see [_nativeIdleShrink].
   @visibleForTesting
-  static int Function(int floor)? debugArenaIdleShrinkOverride;
+  static int Function(int floor, List<int> idleAddresses, List<int> idleBytes)?
+  debugArenaIdleShrinkOverride;
 
   // --- R4 (gpu-copy-elimination campaign): page-aligned pooled allocations --
   //
@@ -779,11 +780,17 @@ class CeyxNativeBufferPool {
   ///
   /// Never throws: an unexpected native error must not escape into the shrink
   /// path and strand the pool mid-batch.
+  ///
+  /// Passes every buffer still idle — all of them, since the caller refused
+  /// while anything was checked out — so funnel step 4a can return their pages.
   void _nativeIdleShrink() {
-    final fn =
-        debugArenaIdleShrinkOverride ??
-        _resolveNativeBindings()?.ceyxNativeIdleShrink;
-    if (fn == null) {
+    final addresses = [for (final b in _idle) b.address];
+    final bytes = [for (final b in _idle) b.capacity];
+    final override = debugArenaIdleShrinkOverride;
+    final native = override == null
+        ? _resolveNativeBindings()?.ceyxNativeIdleShrink
+        : null;
+    if (override == null && native == null) {
       debugArenaIdleShrinkSkips++;
       assert(() {
         // ignore: avoid_print
@@ -796,14 +803,40 @@ class CeyxNativeBufferPool {
       return;
     }
     try {
-      debugLastArenaIdleShrinkBytes = fn(idleFloor);
+      debugLastArenaIdleShrinkBytes = override != null
+          ? override(idleFloor, addresses, bytes)
+          : _callNativeIdleShrink(native!, idleFloor, addresses, bytes);
       debugArenaIdleShrinkCalls++;
+      // The discarded pages are gone: the next warm must really re-touch.
+      if (addresses.isNotEmpty) _warmedBytes = null;
     } catch (error) {
       assert(() {
         // ignore: avoid_print
         print('CeyxNativeBufferPool: ceyx_native_idle_shrink threw: $error');
         return true;
       }());
+    }
+  }
+
+  static int _callNativeIdleShrink(
+    CeyxNativeIdleShrinkDart native,
+    int floor,
+    List<int> addresses,
+    List<int> bytes,
+  ) {
+    final n = addresses.length;
+    if (n == 0) return native(floor, nullptr, nullptr, 0);
+    final slots = calloc<Pointer<Void>>(n);
+    final sizes = calloc<Uint64>(n);
+    try {
+      for (var i = 0; i < n; i++) {
+        slots[i] = Pointer<Void>.fromAddress(addresses[i]);
+        sizes[i] = bytes[i];
+      }
+      return native(floor, slots, sizes, n);
+    } finally {
+      calloc.free(slots);
+      calloc.free(sizes);
     }
   }
 
@@ -863,6 +896,18 @@ class CeyxPoolShrinkPolicy {
 
   bool _quiescent = false;
   Timer? _timer;
+  bool _reclaimPending = false;
+
+  /// Host hint (memreclaim spec §4.4, frozen OQ-2 ruling): a large release just
+  /// happened, e.g. a folder switch. Never shrinks synchronously and never uses
+  /// a zero delay: the pass fires after [kReclaimRequestQuietWindow] of decode
+  /// quiescence, any decode cancels it, and the grow lockout still applies.
+  void requestReclaim() {
+    _reclaimPending = true;
+    if (_isQuiescentNow?.call() ?? _quiescent) {
+      _arm(kReclaimRequestQuietWindow);
+    }
+  }
 
   @visibleForTesting
   bool get debugArmed => _timer != null;
@@ -875,9 +920,9 @@ class CeyxPoolShrinkPolicy {
     if (quiescent == _quiescent) return;
     _quiescent = quiescent;
     if (quiescent) {
-      _arm(quietWindow);
+      _arm(_reclaimPending ? kReclaimRequestQuietWindow : quietWindow);
     } else {
-      _cancel();
+      _cancel(); // pending stays; re-armed at the next quiet edge
     }
   }
 
@@ -912,6 +957,7 @@ class CeyxPoolShrinkPolicy {
         return;
       }
     }
+    _reclaimPending = false;
     pool.shrinkToFloor();
   }
 
@@ -920,6 +966,9 @@ class CeyxPoolShrinkPolicy {
 
 /// Contract constant: 5s of continuous decode quiescence before a shrink.
 const Duration kPoolShrinkQuietWindow = Duration(seconds: 5);
+
+/// Quiet window for a host-requested reclaim pass (frozen OQ-2: >= 1 s).
+const Duration kReclaimRequestQuietWindow = Duration(seconds: 1);
 
 /// Contract constant: once shrunk, no re-shrink within 1s of a grow.
 const Duration kPoolShrinkGrowLockout = Duration(seconds: 1);

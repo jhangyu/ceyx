@@ -133,7 +133,7 @@ void main() {
 
   test('TC-1438 no native funnel call follows the release', () async {
     var funnelCalls = 0;
-    CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+    CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor, List<int> idleAddresses, List<int> idleBytes) {
       funnelCalls++;
       return 0;
     };

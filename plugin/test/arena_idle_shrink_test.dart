@@ -56,7 +56,7 @@ void main() {
     () async {
       final scheduler = _FakeTimerScheduler();
       final floors = <int>[];
-      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor, List<int> idleAddresses, List<int> idleBytes) {
         floors.add(floor);
         return 4096;
       };
@@ -128,7 +128,7 @@ void main() {
     'checkout means a decode may still be live',
     () async {
       var calls = 0;
-      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor, List<int> idleAddresses, List<int> idleBytes) {
         calls++;
         return 0;
       };
@@ -167,7 +167,7 @@ void main() {
     'the funnel; there is no separate pressure-relief call',
     () async {
       var funnelCalls = 0;
-      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (floor) {
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (floor, idleAddresses, idleBytes) {
         funnelCalls++;
         return 0;
       };
@@ -186,7 +186,7 @@ void main() {
     'exactly once',
     () async {
       final floors = <int>[];
-      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor, List<int> idleAddresses, List<int> idleBytes) {
         floors.add(floor);
         return 0;
       };
@@ -207,7 +207,7 @@ void main() {
     () async {
       final scheduler = _FakeTimerScheduler();
       var calls = 0;
-      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor) {
+      CeyxNativeBufferPool.debugArenaIdleShrinkOverride = (int floor, List<int> idleAddresses, List<int> idleBytes) {
         calls++;
         return 0;
       };
