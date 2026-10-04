@@ -419,7 +419,7 @@ class TestLanes(unittest.TestCase):
 
 class TestVcpkgMirror(unittest.TestCase):
     def test_bootstrap_clone_url_is_rewritten_to_the_run_mirror(self):
-        import subprocess
+        from ci import run as ci_run
         from ci.provision import VCPKG_REPO_URL
         with tempfile.TemporaryDirectory() as tmp:
             scratch = Path(tmp)
@@ -427,7 +427,7 @@ class TestVcpkgMirror(unittest.TestCase):
 
             def fake_stream(argv, cwd, env=None, tee=None):  # stands in for the one network clone
                 calls.append(argv)
-                return subprocess.run(["git", "init", "-q", "--bare", argv[-1]]).returncode
+                return ci_run.run(["git", "init", "-q", "--bare", argv[-1]]).returncode
 
             orig, prepush.stream = prepush.stream, fake_stream
             prepush._VCPKG_MIRROR.clear()
@@ -440,6 +440,6 @@ class TestVcpkgMirror(unittest.TestCase):
                 prepush._VCPKG_MIRROR.clear()
             self.assertEqual((rc1, rc2, len(calls)), (0, 0, 1))
             self.assertEqual(calls[0][:3], ["git", "clone", "--mirror"])
-            done = subprocess.run(["git", "ls-remote", "--get-url", VCPKG_REPO_URL], capture_output=True, text=True,
-                                  env={**__import__("os").environ, **env})
+            done = ci_run.run(["git", "ls-remote", "--get-url", VCPKG_REPO_URL],
+                              env={**__import__("os").environ, **env})
             self.assertEqual(done.stdout.strip(), str(scratch / "prepush-vcpkg-mirror.git"))
