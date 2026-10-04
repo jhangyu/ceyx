@@ -206,10 +206,6 @@ int main(int argc, char** argv) {
 #if defined(__APPLE__) || defined(_WIN32)
     constexpr size_t kBlock = 128 * 1024;
     constexpr int kCount = 512;
-#elif defined(__ANDROID__)
-    // Android shape pending on-device sweep (contract item 5); glibc shape until calibrated.
-    constexpr size_t kBlock = 64 * 1024;
-    constexpr int kCount = 1024;
 #else  // glibc
     constexpr size_t kBlock = 64 * 1024;
     constexpr int kCount = 1024;
@@ -234,13 +230,15 @@ int main(int argc, char** argv) {
     const size_t r1 = process_resident_bytes();
     char d[200];
     const bool observable = held >= 32 * kMiB;
-#if defined(_WIN32)
-    // RECORDED EXCEPTION (spec §9.1 round-3 follow-up ruling 2a): the NT heap
+#if defined(_WIN32) || defined(__ANDROID__)
+    // RECORDED EXCEPTION (Android: user ruling 2026-10-04, basis memreclaim-android-adb-fix.txt
+    // sweep: freed-retained only 3-12 MiB across 16/64 KiB shapes; allocator returns at free()).
+    // Windows: (spec §9.1 round-3 follow-up ruling 2a): the NT heap
     // returns freed blocks at free() or keeps them in partly used LFH blocks
     // HeapOptimizeResources cannot release (memreclaim-t1c-win-f9-probe.txt).
     // The basis is re-proven every run: setup must NOT reach 32 MiB held. If it
     // ever does, the exception no longer holds -> FAIL and revisit the ruling.
-    std::snprintf(d, sizeof d, "windows exception: allocator self-returns at free() base=%zu r0=%zu r1=%zu",
+    std::snprintf(d, sizeof d, "recorded exception: allocator self-returns at free() base=%zu r0=%zu r1=%zu",
                   base, r0, r1);
     report("F9_allocator_trim_returns_free_pages", !observable, d);
 #else
@@ -415,14 +413,9 @@ int main(int argc, char** argv) {
                     observable ? "" : "not observable (step 5 did not drop resident >= 0.9x256MiB) ", fresh,
                     reaccess, fresh > 0 ? reaccess / fresh : 0.0, (int)intact, g5r0, g5r1);
       // A baseline under 1 ms is not a measurement (FAIL, never a free pass).
-      // Ratio limit per spec §9.1 round-3 follow-up ruling 1a: Windows <= 5.0x
-      // (re-reading pages SetProcessWorkingSetSize pushed to the pagefile is the
-      // inherent cost; measured 3.77x); every other platform 2.0x.
-#if defined(_WIN32)
-      constexpr double kMaxRatio = 5.0;
-#else
-      constexpr double kMaxRatio = 2.0;
-#endif
+      // Ratio limit: user ruling 2026-10-04, ONE unified limit for every platform
+      // where step 5 runs (supersedes Windows 5.0 / others 2.0); macOS has no step 5.
+      constexpr double kMaxRatio = 6.0;
       report("G5_cold_page_reaccess_cost",
              observable && alloc_ok && intact && fresh >= 1.0 && reaccess <= kMaxRatio * fresh, d);
     }
